@@ -329,6 +329,8 @@ export interface InteractiveModeOptions {
 	verbose?: boolean;
 	/** TUI layout mode. */
 	tuiMode?: TuiMode;
+	/** Theme selected for this invocation, overriding settings. */
+	themeOverride?: string;
 }
 
 interface InteractiveTuiOptions {
@@ -582,12 +584,11 @@ export class InteractiveMode {
 
 		// Register themes from resource loader and initialize
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
-		this.themeController = new InteractiveThemeController(
-			this.ui,
-			this.settingsManager,
-			(message) => this.showError(message),
-			() => this.updateEditorBorderColor(),
-		);
+		this.themeController = new InteractiveThemeController(this.ui, this.settingsManager, {
+			showError: (message) => this.showError(message),
+			onChanged: () => this.updateEditorBorderColor(),
+			themeOverride: options.themeOverride,
+		});
 	}
 
 	private getAutocompleteSourceTag(sourceInfo?: SourceInfo): string | undefined {

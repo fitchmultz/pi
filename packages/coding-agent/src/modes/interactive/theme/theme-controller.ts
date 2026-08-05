@@ -15,22 +15,33 @@ import {
 
 type ThemeResult = { success: boolean; error?: string };
 
+interface InteractiveThemeControllerOptions {
+	showError: (message: string) => void;
+	onChanged: () => void;
+	themeOverride?: string;
+}
+
 export class InteractiveThemeController {
 	private readonly ui: TUI;
 	private readonly settingsManager: SettingsManager;
 	private readonly showError: (message: string) => void;
 	private readonly onChanged: () => void;
+	private readonly themeOverride: string | undefined;
 	private terminalTheme: TerminalTheme = detectTerminalBackgroundFromEnv().theme;
 	private activeThemeName: string | undefined;
 	private autoSyncEnabled = false;
 	private terminalColorSchemeUnsubscribe: (() => void) | undefined;
 
-	constructor(ui: TUI, settingsManager: SettingsManager, showError: (message: string) => void, onChanged: () => void) {
+	constructor(ui: TUI, settingsManager: SettingsManager, options: InteractiveThemeControllerOptions) {
 		this.ui = ui;
 		this.settingsManager = settingsManager;
-		this.showError = showError;
-		this.onChanged = onChanged;
-		this.activeThemeName = resolveThemeSetting(this.settingsManager.getThemeSetting(), this.terminalTheme);
+		this.showError = options.showError;
+		this.onChanged = options.onChanged;
+		this.themeOverride = options.themeOverride;
+		this.activeThemeName = resolveThemeSetting(
+			this.themeOverride ?? this.settingsManager.getThemeSetting(),
+			this.terminalTheme,
+		);
 		initTheme(this.activeThemeName, true);
 		this.bindTerminalColorSchemeListener();
 	}
@@ -42,7 +53,7 @@ export class InteractiveThemeController {
 	}
 
 	async applyFromSettings(): Promise<void> {
-		const themeSetting = this.settingsManager.getThemeSetting();
+		const themeSetting = this.themeOverride ?? this.settingsManager.getThemeSetting();
 		const autoTheme = parseAutoThemeSetting(themeSetting);
 		if (autoTheme) {
 			this.terminalTheme = await detectTerminalThemeForAuto({ ui: this.ui, timeoutMs: 100 });
@@ -126,7 +137,7 @@ export class InteractiveThemeController {
 	private applyTerminalTheme(terminalTheme: TerminalTheme): void {
 		if (!this.autoSyncEnabled) return;
 		this.terminalTheme = terminalTheme;
-		const autoTheme = parseAutoThemeSetting(this.settingsManager.getThemeSetting());
+		const autoTheme = parseAutoThemeSetting(this.themeOverride ?? this.settingsManager.getThemeSetting());
 		if (!autoTheme) {
 			this.setAutoSync(false);
 			return;
