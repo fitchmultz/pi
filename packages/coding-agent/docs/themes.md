@@ -39,6 +39,20 @@ Select a theme via `/settings` or in `settings.json`:
 
 On first run, pi detects your terminal background and defaults to `dark` or `light`.
 
+### Theme Override
+
+Override the interactive theme without persisting the selection:
+
+```bash
+pi --use-theme light
+```
+
+To override themes based on terminal appearance, provide the light and dark themes separated by `/`:
+
+```bash
+pi --use-theme light/dark
+```
+
 ## Creating a Custom Theme
 
 1. Create a theme file:
