@@ -16,7 +16,7 @@ describe("SettingsSelectorComponent", () => {
 	});
 
 	describe("theme override", () => {
-		function focusThemeSetting(currentTheme: string, themeOverride: string) {
+		function focusThemeSetting(currentTheme: string, themeOverride?: string) {
 			const onThemePreview = vi.fn();
 			const selector = new SettingsSelectorComponent(
 				{
@@ -36,7 +36,7 @@ describe("SettingsSelectorComponent", () => {
 			return { settingsList, onThemePreview };
 		}
 
-		function openThemeSettings(currentTheme: string, themeOverride: string) {
+		function openThemeSettings(currentTheme: string, themeOverride?: string) {
 			const result = focusThemeSetting(currentTheme, themeOverride);
 			result.settingsList.handleInput("\r");
 			return result;
@@ -48,6 +48,47 @@ describe("SettingsSelectorComponent", () => {
 			expect(stripAnsi(settingsList.render(120).join("\n"))).toContain(
 				"Color theme for the interface. Active override: dayowl/nightowl",
 			);
+		});
+
+		it("previews the saved theme when it differs from the override", () => {
+			const { onThemePreview } = openThemeSettings("light", "dayowl");
+
+			expect(onThemePreview).toHaveBeenCalledOnce();
+			expect(onThemePreview).toHaveBeenCalledWith("light");
+		});
+
+		it("does not reapply the saved theme without an override", () => {
+			const { onThemePreview } = openThemeSettings("light");
+
+			expect(onThemePreview).not.toHaveBeenCalled();
+		});
+
+		it("previews the saved automatic setting when its active side matches the override", () => {
+			const { onThemePreview } = openThemeSettings("light/dark", "dayowl/dark");
+
+			expect(onThemePreview).toHaveBeenCalledOnce();
+			expect(onThemePreview).toHaveBeenCalledWith("light/dark");
+		});
+
+		it("previews the saved theme when entering a nested picker", () => {
+			const { settingsList, onThemePreview } = openThemeSettings("light/dark", "dayowl/nightowl");
+
+			onThemePreview.mockClear();
+			settingsList.handleInput("\r");
+
+			expect(onThemePreview).toHaveBeenCalledOnce();
+			expect(onThemePreview).toHaveBeenCalledWith("light");
+		});
+
+		it("previews the active theme when entering a nested picker", () => {
+			const { settingsList, onThemePreview } = openThemeSettings("light/dark", "dayowl/nightowl");
+
+			onThemePreview.mockClear();
+			settingsList.handleInput("\x1b[B");
+			settingsList.handleInput("\r");
+
+			expect(onThemePreview).toHaveBeenCalledOnce();
+			expect(onThemePreview).toHaveBeenCalledWith("dark");
 		});
 
 		it("marks the light side of a paired override", () => {
@@ -67,15 +108,26 @@ describe("SettingsSelectorComponent", () => {
 			expect(stripAnsi(settingsList.render(120).join("\n"))).toMatch(/nightowl\s+Override from --use-theme/);
 		});
 
-		it("restores a paired override after canceling a nested preview", () => {
+		it("restores the automatic parent preview after canceling a nested picker", () => {
+			const { settingsList, onThemePreview } = openThemeSettings("light", "dayowl/nightowl");
+
+			settingsList.handleInput("\x1b[A");
+			settingsList.handleInput("\x1b[A");
+			settingsList.handleInput("\r");
+			settingsList.handleInput("\r");
+			onThemePreview.mockClear();
+			settingsList.handleInput("\x1b");
+
+			expect(onThemePreview.mock.calls.flat()).toEqual(["light/light"]);
+		});
+
+		it("restores a paired override after canceling the automatic preview", () => {
 			const { settingsList, onThemePreview } = openThemeSettings("light/dark", "dayowl/nightowl");
 
-			settingsList.handleInput("\r");
-			settingsList.handleInput("\x1b[B");
-			settingsList.handleInput("\x1b");
+			onThemePreview.mockClear();
 			settingsList.handleInput("\x1b");
 
-			expect(onThemePreview.mock.calls.flat()).toEqual(["solarized", "nightowl", "dayowl/nightowl"]);
+			expect(onThemePreview.mock.calls.flat()).toEqual(["dayowl/nightowl"]);
 		});
 
 		it("marks a single-theme override", () => {
@@ -86,6 +138,8 @@ describe("SettingsSelectorComponent", () => {
 
 		it("restores a single-theme override after canceling a direct preview", () => {
 			const { settingsList, onThemePreview } = openThemeSettings("light", "dayowl");
+
+			onThemePreview.mockClear();
 
 			settingsList.handleInput("\x1b[B");
 			settingsList.handleInput("\x1b");
