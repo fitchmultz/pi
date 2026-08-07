@@ -15,12 +15,6 @@ import {
 
 type ThemeResult = { success: boolean; error?: string };
 
-interface InteractiveThemeControllerOptions {
-	showError: (message: string) => void;
-	onChanged: () => void;
-	themeOverride?: string;
-}
-
 export class InteractiveThemeController {
 	private readonly ui: TUI;
 	private readonly settingsManager: SettingsManager;
@@ -32,7 +26,15 @@ export class InteractiveThemeController {
 	private autoSyncEnabled = false;
 	private terminalColorSchemeUnsubscribe: (() => void) | undefined;
 
-	constructor(ui: TUI, settingsManager: SettingsManager, options: InteractiveThemeControllerOptions) {
+	constructor(
+		ui: TUI,
+		settingsManager: SettingsManager,
+		options: {
+			showError: (message: string) => void;
+			onChanged: () => void;
+			themeOverride?: string;
+		},
+	) {
 		this.ui = ui;
 		this.settingsManager = settingsManager;
 		this.showError = options.showError;
