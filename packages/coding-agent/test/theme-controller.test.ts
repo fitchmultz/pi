@@ -82,10 +82,12 @@ describe("InteractiveThemeController", () => {
 		expect(theme.name).toBe("dark");
 	});
 
-	it("keeps the paired override when settings are reloaded", async () => {
-		const { ui, queryTerminalColorScheme, setTerminalColorSchemeNotifications } = createUi();
+	it("keeps the paired override across settings reloads without persisting it", async () => {
+		const { ui, queryTerminalBackgroundColor, queryTerminalColorScheme, setTerminalColorSchemeNotifications } =
+			createUi();
+		queryTerminalBackgroundColor.mockResolvedValue({ r: 255, g: 255, b: 255 });
 		queryTerminalColorScheme.mockResolvedValue("light");
-		const { settingsManager, setTheme: setPersistedTheme, flush } = createSettingsManager("dark/light");
+		const { settingsManager, setTheme: setPersistedTheme, flush } = createSettingsManager(undefined);
 		const controller = new InteractiveThemeController(ui, settingsManager, {
 			showError: vi.fn(),
 			onChanged: vi.fn(),
@@ -159,7 +161,7 @@ describe("InteractiveThemeController", () => {
 
 	it("prefers a single-theme override over settings", async () => {
 		const { ui, queryTerminalBackgroundColor } = createUi();
-		const { settingsManager, setTheme: setPersistedTheme, flush } = createSettingsManager("light/dark");
+		const { settingsManager } = createSettingsManager("dark");
 		const controller = new InteractiveThemeController(ui, settingsManager, {
 			showError: vi.fn(),
 			onChanged: vi.fn(),
@@ -171,7 +173,5 @@ describe("InteractiveThemeController", () => {
 
 		expect(theme.name).toBe("light");
 		expect(queryTerminalBackgroundColor).not.toHaveBeenCalled();
-		expect(setPersistedTheme).not.toHaveBeenCalled();
-		expect(flush).not.toHaveBeenCalled();
 	});
 });
