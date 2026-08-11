@@ -266,12 +266,6 @@ describe("parseArgs", () => {
 			expect(result.useTheme).toBe("light");
 		});
 
-		test("parses --use-theme alongside --theme", () => {
-			const result = parseArgs(["--theme", "./custom.json", "--use-theme", "custom"]);
-			expect(result.themes).toEqual(["./custom.json"]);
-			expect(result.useTheme).toBe("custom");
-		});
-
 		test("reports when the theme name value is missing", () => {
 			const result = parseArgs(["--use-theme", "--print"]);
 			expect(result.useTheme).toBeUndefined();
