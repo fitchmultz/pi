@@ -70,42 +70,32 @@ describe("SettingsSelectorComponent", () => {
 			expect(onThemePreview).toHaveBeenCalledWith("light/dark");
 		});
 
-		it("previews the saved theme when entering a nested picker", () => {
+		it.each([
+			["light", 0],
+			["dark", 1],
+		] as const)("previews the saved %s theme when entering its nested picker", (appearance, downPresses) => {
 			const { settingsList, onThemePreview } = openThemeSettings("light/dark", "dayowl/nightowl");
 
 			onThemePreview.mockClear();
+			for (let i = 0; i < downPresses; i++) settingsList.handleInput("\x1b[B");
 			settingsList.handleInput("\r");
 
 			expect(onThemePreview).toHaveBeenCalledOnce();
-			expect(onThemePreview).toHaveBeenCalledWith("light");
+			expect(onThemePreview).toHaveBeenCalledWith(appearance);
 		});
 
-		it("previews the active theme when entering a nested picker", () => {
-			const { settingsList, onThemePreview } = openThemeSettings("light/dark", "dayowl/nightowl");
-
-			onThemePreview.mockClear();
-			settingsList.handleInput("\x1b[B");
-			settingsList.handleInput("\r");
-
-			expect(onThemePreview).toHaveBeenCalledOnce();
-			expect(onThemePreview).toHaveBeenCalledWith("dark");
-		});
-
-		it("marks the light side of a paired override", () => {
+		it.each([
+			["light", 0, "dayowl"],
+			["dark", 1, "nightowl"],
+		] as const)("marks the %s side of a paired override", (_appearance, downPresses, overrideName) => {
 			const { settingsList } = openThemeSettings("light/dark", "dayowl/nightowl");
 
+			for (let i = 0; i < downPresses; i++) settingsList.handleInput("\x1b[B");
 			settingsList.handleInput("\r");
 
-			expect(stripAnsi(settingsList.render(120).join("\n"))).toMatch(/dayowl\s+Override from --use-theme/);
-		});
-
-		it("marks the dark side of a paired override", () => {
-			const { settingsList } = openThemeSettings("light/dark", "dayowl/nightowl");
-
-			settingsList.handleInput("\x1b[B");
-			settingsList.handleInput("\r");
-
-			expect(stripAnsi(settingsList.render(120).join("\n"))).toMatch(/nightowl\s+Override from --use-theme/);
+			expect(stripAnsi(settingsList.render(120).join("\n"))).toMatch(
+				new RegExp(`${overrideName}\\s+Override from --use-theme`),
+			);
 		});
 
 		it("restores the automatic parent preview after canceling a nested picker", () => {

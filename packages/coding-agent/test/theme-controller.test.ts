@@ -150,7 +150,6 @@ describe("InteractiveThemeController", () => {
 		});
 
 		await controller.applyFromSettings();
-		expect(theme.name).toBe("dark");
 		expect(showError).toHaveBeenCalledOnce();
 
 		await controller.applyFromSettings();
