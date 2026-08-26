@@ -443,6 +443,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		autoCompactionEnabled: session.autoCompactionEnabled,
 		messageCount: session.messages.length,
 		pendingMessageCount: session.pendingMessageCount,
+		pendingExtensionUIRequests: [
+			...Array.from(pendingExtensionRequests.values(), (pending) => pending.request),
+			...Array.from(pendingCustomRequests.values(), (pending) => pending.request),
+		],
 	});
 
 	runtimeHost.setRebindSession(async () => {
@@ -589,7 +593,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				if (!interactiveMode || !process.stdin.isTTY || !process.stdout.isTTY) {
 					return error(id, "attach_tui", "TUI handoff requires --tui-handoff and a PTY");
 				}
-				tuiHandoffToken = crypto.randomUUID();
+				if (command.token !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(command.token)) {
+					return error(id, "attach_tui", "TUI handoff token must be a UUID");
+				}
+				tuiHandoffToken = command.token ?? crypto.randomUUID();
 				activateTuiRequested = true;
 				return success(id, "attach_tui", { token: tuiHandoffToken });
 			}

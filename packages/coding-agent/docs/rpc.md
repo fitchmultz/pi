@@ -172,6 +172,12 @@ Response:
 {"id": "attach-1", "type": "response", "command": "attach_tui", "success": true, "data": {"token": "per-attach-token"}}
 ```
 
+A reconnecting client may provide its own cryptographically random UUID so it can persist the boundary before attachment begins:
+
+```json
+{"id": "attach-1", "type": "attach_tui", "token": "01234567-89ab-cdef-0123-456789abcdef"}
+```
+
 After this response, stop parsing JSONL and display all subsequent PTY output as terminal bytes. Send terminal input to the same PTY. The TUI and RPC frontend share the same live session, but only the active frontend may send commands.
 
 To return to RPC, send `SIGUSR2` to the Pi process. Pi finishes restoring the terminal, then writes this boundary:
@@ -210,12 +216,13 @@ Response:
     "sessionName": "my-feature-work",
     "autoCompactionEnabled": true,
     "messageCount": 5,
-    "pendingMessageCount": 0
+    "pendingMessageCount": 0,
+    "pendingExtensionUIRequests": []
   }
 }
 ```
 
-The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set.
+The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `pendingExtensionUIRequests` contains unresolved blocking UI requests so a reconnecting client can restore them.
 
 #### get_messages
 

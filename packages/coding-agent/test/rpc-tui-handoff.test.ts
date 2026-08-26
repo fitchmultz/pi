@@ -3,6 +3,7 @@ import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
 import type { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import type { RpcSessionState } from "../src/modes/rpc/rpc-types.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 const rpcIo = vi.hoisted(() => ({
@@ -114,9 +115,20 @@ describe("RPC TUI handoff", () => {
 			const request = parseOutput().find((record) => record.method === "input");
 			expect(request?.id).toEqual(expect.any(String));
 
-			rpcIo.lineHandler?.(JSON.stringify({ id: "attach", type: "attach_tui" }));
+			rpcIo.lineHandler?.(JSON.stringify({ id: "state", type: "get_state" }));
+			await vi.waitFor(() => expect(parseOutput().some((record) => record.id === "state")).toBe(true));
+			const state = parseOutput().find((record) => record.id === "state")?.data as RpcSessionState;
+			expect(state.pendingExtensionUIRequests).toEqual([request]);
+
+			rpcIo.lineHandler?.(JSON.stringify({ id: "invalid-attach", type: "attach_tui", token: "known" }));
+			await vi.waitFor(() => expect(parseOutput().some((record) => record.id === "invalid-attach")).toBe(true));
+			expect(parseOutput().find((record) => record.id === "invalid-attach")?.success).toBe(false);
+			expect(interactiveMode.activateHosted).not.toHaveBeenCalled();
+
+			const token = "01234567-89ab-cdef-0123-456789abcdef";
+			rpcIo.lineHandler?.(JSON.stringify({ id: "attach", type: "attach_tui", token }));
 			await vi.waitFor(() => expect(interactiveMode.activateHosted).toHaveBeenCalledOnce());
-			const token = (parseOutput().find((record) => record.id === "attach")?.data as { token: string }).token;
+			expect(parseOutput().find((record) => record.id === "attach")?.data).toEqual({ token });
 			expect(tuiInput).toHaveBeenCalledWith(
 				"Question",
 				"Answer",
