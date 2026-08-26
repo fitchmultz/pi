@@ -55,7 +55,12 @@ import {
 	getDocsPath,
 	VERSION,
 } from "../../config.ts";
-import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
+import {
+	type AgentSession,
+	type AgentSessionEvent,
+	type ExtensionBindings,
+	parseSkillBlock,
+} from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
 import {
@@ -445,6 +450,8 @@ export class InteractiveMode {
 	private keybindings: KeybindingsManager;
 	private version: string;
 	private isInitialized = false;
+	private hosted = false;
+	private hostedActive = false;
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
@@ -891,7 +898,7 @@ export class InteractiveMode {
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
 
-		this.registerSignalHandlers();
+		this.registerSignalHandlers(!this.hosted);
 
 		// Load changelog (only show new entries, skip for resumed sessions)
 		this.changelogMarkdown = this.getChangelogForDisplay();
@@ -950,6 +957,7 @@ export class InteractiveMode {
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
 		this.isInitialized = true;
+		this.hostedActive = this.hosted;
 
 		await this.themeController.applyFromSettings();
 
@@ -1034,6 +1042,7 @@ export class InteractiveMode {
 
 		// Render initial messages AFTER showing loaded resources
 		this.renderInitialMessages();
+		this.seedStreamingState();
 
 		// Set up theme file watcher
 		onThemeChange(() => {
@@ -1173,16 +1182,7 @@ export class InteractiveMode {
 			}
 		}
 
-		// Main interactive loop
-		while (true) {
-			const userInput = await this.getUserInput();
-			try {
-				await this.session.prompt(userInput);
-			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-				this.showError(errorMessage);
-			}
-		}
+		await this.promptLoop();
 	}
 
 	private async checkForPackageUpdates(): Promise<string[]> {
@@ -1902,7 +1902,7 @@ export class InteractiveMode {
 	 */
 	private async bindCurrentSessionExtensions(): Promise<void> {
 		const uiContext = this.createExtensionUIContext();
-		await this.session.bindExtensions({
+		const bindings: ExtensionBindings = {
 			uiContext,
 			mode: "tui",
 			abortHandler: () => {
@@ -1966,7 +1966,10 @@ export class InteractiveMode {
 			onError: (error) => {
 				this.showExtensionError(error.extensionPath, error.error, error.stack);
 			},
-		});
+		};
+		if (!this.hosted) {
+			await this.session.bindExtensions(bindings);
+		}
 
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 		this.setupAutocompleteProvider();
@@ -2425,6 +2428,63 @@ export class InteractiveMode {
 				notify: ui.notify,
 			},
 		};
+	}
+
+	getExtensionUIContext(): ExtensionUIContext {
+		return this.createExtensionUIContext();
+	}
+
+	host(): void {
+		this.hosted = true;
+	}
+
+	async activateHosted(): Promise<void> {
+		if (!this.hosted) throw new Error("Interactive mode is not hosted");
+		if (!this.isInitialized) {
+			await this.init();
+			return;
+		}
+		if (this.hostedActive) return;
+		this.ui.start();
+		this.themeController.rebindTui();
+		this.rebindExtensionTerminalInputListeners();
+		if (this.settingsManager.getShowTerminalProgress() && (this.session.isStreaming || this.session.isCompacting)) {
+			this.ui.terminal.setProgress(true);
+		}
+		this.ui.requestRender(true);
+		this.hostedActive = true;
+	}
+
+	async deactivateHosted(): Promise<void> {
+		if (!this.hosted || !this.isInitialized || !this.hostedActive) return;
+		if (this.settingsManager.getShowTerminalProgress()) {
+			this.ui.terminal.setProgress(false);
+		}
+		await this.ui.terminal.drainInput();
+		this.ui.stop({ preserveScreen: true });
+		this.hostedActive = false;
+	}
+
+	async runHosted(): Promise<never> {
+		if (!this.hosted) throw new Error("Interactive mode is not hosted");
+		return this.promptLoop();
+	}
+
+	private async promptLoop(): Promise<never> {
+		while (true) {
+			const userInput = await this.getUserInput();
+			try {
+				await this.session.prompt(userInput);
+			} catch (error: unknown) {
+				this.showError(error instanceof Error ? error.message : "Unknown error occurred");
+			}
+		}
+	}
+
+	async rebindHostedSession(): Promise<void> {
+		if (!this.hosted || !this.isInitialized) return;
+		await this.rebindCurrentSession({ renderBeforeBind: true });
+		await this.themeController.applyFromSettings();
 	}
 
 	private createExtensionUIContext(): ExtensionUIContext {
@@ -3838,6 +3898,57 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Text(text, 1, 0));
 	}
 
+	private seedStreamingState(): void {
+		if (!this.session.isStreaming) return;
+
+		const message = this.agent.state.streamingMessage;
+		if (message?.role === "assistant" && !this.streamingComponent) {
+			this.streamingComponent = new AssistantMessageComponent(
+				undefined,
+				this.hideThinkingBlock,
+				this.getMarkdownThemeWithSettings(),
+				this.hiddenThinkingLabel,
+				this.outputPad,
+				this.getMarkdownTransformers(),
+			);
+			this.streamingMessage = message;
+			this.chatContainer.addChild(this.streamingComponent);
+			this.streamingComponent.updateContent(message, true);
+
+			for (const content of message.content) {
+				if (content.type !== "toolCall") continue;
+				const component = new ToolExecutionComponent(
+					content.name,
+					content.id,
+					content.arguments,
+					{
+						showImages: this.settingsManager.getShowImages(),
+						imageWidthCells: this.settingsManager.getImageWidthCells(),
+					},
+					this.getRegisteredToolDefinition(content.name),
+					this.ui,
+					this.sessionManager.getCwd(),
+				);
+				component.setExpanded(this.toolOutputExpanded);
+				if (this.agent.state.pendingToolCalls.has(content.id)) component.markExecutionStarted();
+				this.chatContainer.addChild(component);
+				this.pendingTools.set(content.id, component);
+			}
+		}
+
+		if (this.settingsManager.getShowTerminalProgress()) this.ui.terminal.setProgress(true);
+		if (this.workingVisible && !this.activeStatusIndicator) {
+			this.showStatusIndicator(
+				new WorkingStatusIndicator(
+					this.ui,
+					this.workingMessage ?? this.defaultWorkingMessage,
+					this.workingIndicatorOptions,
+				),
+			);
+		}
+		this.ui.requestRender();
+	}
+
 	renderInitialMessages(): void {
 		const entries = this.sessionManager.buildContextEntries();
 		this.renderSessionEntries(entries, {
@@ -4008,25 +4119,27 @@ export class InteractiveMode {
 		await this.shutdown();
 	}
 
-	private registerSignalHandlers(): void {
+	private registerSignalHandlers(includeShutdownSignals = true): void {
 		this.unregisterSignalHandlers();
 
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
+		if (includeShutdownSignals) {
+			const signals: NodeJS.Signals[] = ["SIGTERM"];
+			if (process.platform !== "win32") {
+				signals.push("SIGHUP");
+			}
 
-		for (const signal of signals) {
-			const handler = () => {
-				// SIGHUP no longer hard-exits: graceful shutdown emits session_shutdown
-				// first, then attempts terminal restore. A genuinely dead terminal
-				// surfaces as an EIO on the restore writes, which the stdout/stderr
-				// error handler converts into emergencyTerminalExit (see #4144, #5080).
-				killTrackedDetachedChildren();
-				void this.shutdown({ fromSignal: true });
-			};
-			process.prependListener(signal, handler);
-			this.signalCleanupHandlers.push(() => process.off(signal, handler));
+			for (const signal of signals) {
+				const handler = () => {
+					// SIGHUP no longer hard-exits: graceful shutdown emits session_shutdown
+					// first, then attempts terminal restore. A genuinely dead terminal
+					// surfaces as an EIO on the restore writes, which the stdout/stderr
+					// error handler converts into emergencyTerminalExit (see #4144, #5080).
+					killTrackedDetachedChildren();
+					void this.shutdown({ fromSignal: true });
+				};
+				process.prependListener(signal, handler);
+				this.signalCleanupHandlers.push(() => process.off(signal, handler));
+			}
 		}
 
 		const terminalErrorHandler = (error: Error) => {
@@ -4056,6 +4169,10 @@ export class InteractiveMode {
 	}
 
 	private handleCtrlZ(): void {
+		if (this.hosted) {
+			this.showStatus("Suspend is not supported during TUI handoff");
+			return;
+		}
 		if (process.platform === "win32") {
 			this.showStatus("Suspend to background is not supported on Windows");
 			return;
