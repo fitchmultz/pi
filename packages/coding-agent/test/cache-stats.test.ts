@@ -79,6 +79,13 @@ describe("computeCacheWaste", () => {
 		expect(totals.missedTokens).toBe(0);
 	});
 
+	it("skips the turn after a context-window reset", () => {
+		const reset = { type: "context_window", id: "w", parentId: null, timestamp: "" } as SessionEntry;
+		const afterReset = assistant({ cacheWrite: 20_000, cost: { cacheWrite: 0.075 } });
+		const totals = computeCacheWaste([entry(turn1), reset, entry(afterReset)], models);
+		expect(totals.missedTokens).toBe(0);
+	});
+
 	it("counts misses caused by model switches", () => {
 		const otherModel = assistant({ cacheWrite: 100_000, cost: { cacheWrite: 0.375 }, model: "other-model" });
 		const totals = computeCacheWaste([entry(turn1), entry(otherModel)], models);

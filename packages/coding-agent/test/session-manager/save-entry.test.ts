@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { type CustomEntry, SessionManager } from "../../src/core/session-manager.ts";
 
@@ -5,13 +9,8 @@ describe("SessionManager.saveCustomEntry", () => {
 	it("saves custom entries and includes them in tree traversal", () => {
 		const session = SessionManager.inMemory();
 
-		// Save a message
 		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-
-		// Save a custom entry
 		const customId = session.appendCustomEntry("my_data", { foo: "bar" });
-
-		// Save another message
 		const msg2Id = session.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "hi" }],
@@ -30,26 +29,50 @@ describe("SessionManager.saveCustomEntry", () => {
 			timestamp: 2,
 		});
 
-		// Custom entry should be in entries
 		const entries = session.getEntries();
 		expect(entries).toHaveLength(3);
 
-		const customEntry = entries.find((e) => e.type === "custom") as CustomEntry;
+		const customEntry = entries.find((entry) => entry.type === "custom") as CustomEntry;
 		expect(customEntry).toBeDefined();
 		expect(customEntry.customType).toBe("my_data");
 		expect(customEntry.data).toEqual({ foo: "bar" });
 		expect(customEntry.id).toBe(customId);
 		expect(customEntry.parentId).toBe(msgId);
 
-		// Tree structure should be correct
 		const path = session.getBranch();
 		expect(path).toHaveLength(3);
 		expect(path[0].id).toBe(msgId);
 		expect(path[1].id).toBe(customId);
 		expect(path[2].id).toBe(msg2Id);
 
-		// buildSessionContext should work (custom entries skipped in messages)
-		const ctx = session.buildSessionContext();
-		expect(ctx.messages).toHaveLength(2); // only message entries
+		expect(session.buildSessionContext().messages).toHaveLength(2);
+	});
+});
+
+describe("SessionManager context windows", () => {
+	it("restores the active window without deleting earlier transcript entries", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-context-window-"));
+		try {
+			const session = SessionManager.create("/test/project", dir);
+			session.appendMessage({ role: "user", content: "old request", timestamp: 1 });
+			session.appendMessage(fauxAssistantMessage("old response"));
+			const windowId = session.appendContextWindow("continue here", 1234);
+			session.appendMessage({ role: "user", content: "new request", timestamp: 2 });
+
+			const file = session.getSessionFile();
+			expect(file).toBeDefined();
+			const restored = SessionManager.open(file!, dir);
+
+			expect(restored.getEntries()).toHaveLength(4);
+			expect(restored.getEntry(windowId)?.type).toBe("context_window");
+			expect(restored.buildSessionContext().messages.map((message) => message.role)).toEqual(["custom", "user"]);
+
+			const forkFile = restored.createBranchedSession(restored.getLeafId()!);
+			const fork = SessionManager.open(forkFile!, dir);
+			expect(fork.getEntry(windowId)?.type).toBe("context_window");
+			expect(fork.buildSessionContext().messages.map((message) => message.role)).toEqual(["custom", "user"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

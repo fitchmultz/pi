@@ -2054,6 +2054,7 @@ export class InteractiveMode {
 				this.shutdownRequested = true;
 			},
 			getContextUsage: () => this.session.getContextUsage(),
+			newContext: (options) => this.session.newContext(options),
 			compact: (options) => {
 				void (async () => {
 					try {
@@ -3406,7 +3407,7 @@ export class InteractiveMode {
 					this.autoCompactionEscapeHandler = undefined;
 				}
 				this.clearStatusIndicator("compaction");
-				if (event.aborted) {
+				if (event.aborted && !event.contextWindowStarted) {
 					if (event.reason === "manual") {
 						this.showError("Compaction cancelled");
 					} else {
