@@ -17,7 +17,7 @@ import { readdir, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
-import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
+import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	type BashExecutionMessage,
@@ -64,6 +64,14 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	type: "model_change";
 	provider: string;
 	modelId: string;
+}
+
+export interface ContextWindowEntry extends SessionEntryBase {
+	type: "context_window";
+	/** Optional continuation state supplied by the previous window. */
+	handoff?: string;
+	/** Active context size immediately before the window transition, when known. */
+	tokensBefore: number | null;
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
@@ -145,6 +153,7 @@ export type SessionEntry =
 	| SessionMessageEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
+	| ContextWindowEntry
 	| CompactionEntry
 	| BranchSummaryEntry
 	| CustomEntry
@@ -401,6 +410,18 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	if (entry.type === "branch_summary" && entry.summary) {
 		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
 	}
+	if (entry.type === "context_window") {
+		const handoff = entry.handoff ? `\n\nHandoff from the previous window:\n${entry.handoff}` : "";
+		return [
+			createCustomMessage(
+				"context-window",
+				`Context window ${entry.id} starts here. Earlier conversation is not available in this window.${handoff}`,
+				true,
+				{ windowId: entry.id, tokensBefore: entry.tokensBefore },
+				entry.timestamp,
+			),
+		];
+	}
 	if (entry.type === "compaction") {
 		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
 	}
@@ -408,19 +429,26 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 }
 
 /**
- * Build the active, compaction-aware session entry list.
+ * Build the active session entry list for the selected leaf.
  *
- * This follows the current leaf path. If the path contains compaction entries,
- * the latest compaction is represented by the compaction entry itself, followed
- * by the kept entries starting at firstKeptEntryId and all entries after the
- * compaction entry. Older summarized entries are omitted.
+ * Entries before the latest context-window boundary are omitted. Within that
+ * window, the latest compaction is represented by its summary, its kept entries,
+ * and everything appended afterward.
  */
 export function buildContextEntries(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
-	const path = buildSessionPath(entries, leafId, byId);
+	const fullPath = buildSessionPath(entries, leafId, byId);
+	let contextWindowIndex = -1;
+	for (let i = fullPath.length - 1; i >= 0; i--) {
+		if (fullPath[i].type === "context_window") {
+			contextWindowIndex = i;
+			break;
+		}
+	}
+	const path = contextWindowIndex === -1 ? fullPath : fullPath.slice(contextWindowIndex);
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -516,11 +544,11 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(resolvedFilePath)) return [];
 
 	const entries: FileEntry[] = [];
+	let pending = "";
 	const fd = openSync(resolvedFilePath, "r");
 	try {
 		const decoder = new StringDecoder("utf8");
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-		let pending = "";
 
 		while (true) {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
@@ -545,13 +573,14 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		closeSync(fd);
 	}
 
-	// Validate session header
+	// Validate session header before repairing the file.
 	if (entries.length === 0) return entries;
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
 		return [];
 	}
 
+	if (pending) appendFileSync(resolvedFilePath, "\n");
 	return entries;
 }
 
@@ -902,7 +931,7 @@ export class SessionManager {
 			if (this.fileEntries.length === 0) {
 				const explicitPath = this.sessionFile;
 				if (statSync(explicitPath).size > 0) {
-					throw new Error(`Session file is not a valid pi session: ${explicitPath}`);
+					throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
 				}
 				this.newSession();
 				this.sessionFile = explicitPath;
@@ -1088,6 +1117,20 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			provider,
 			modelId,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a fresh context-window boundary as child of current leaf, then advance leaf. Returns entry id. */
+	appendContextWindow(handoff: string | undefined, tokensBefore: number | null): string {
+		const entry: ContextWindowEntry = {
+			type: "context_window",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			handoff,
+			tokensBefore,
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1388,13 +1431,14 @@ export class SessionManager {
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
+		const fromId = this.leafId ?? "root";
 		this.leafId = branchFromId;
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),
 			parentId: branchFromId,
 			timestamp: new Date().toISOString(),
-			fromId: branchFromId ?? "root",
+			fromId,
 			summary,
 			details,
 			usage,

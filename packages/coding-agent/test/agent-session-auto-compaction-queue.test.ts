@@ -10,6 +10,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
+import { createHarness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 describe("AgentSession auto-compaction queue resume", () => {
@@ -53,6 +54,41 @@ describe("AgentSession auto-compaction queue resume", () => {
 		vi.restoreAllMocks();
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
+		}
+	});
+
+	it("lets an extension replace automatic compaction with a native context window", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) =>
+						event.reason === "manual" ? undefined : { newContext: { handoff: "automatic handoff" } },
+					);
+				},
+			],
+		});
+		try {
+			harness.sessionManager.appendMessage({ role: "user", content: "old request ".repeat(100), timestamp: 1 });
+			harness.sessionManager.appendMessage(fauxAssistantMessage("old response ".repeat(100)));
+			harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+
+			const runAutoCompaction = (
+				harness.session as unknown as {
+					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+				}
+			)._runAutoCompaction.bind(harness.session);
+
+			await expect(runAutoCompaction("overflow", true)).resolves.toBe(true);
+
+			expect(harness.sessionManager.getBranch().some((entry) => entry.type === "context_window")).toBe(true);
+			expect(harness.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
+			expect(harness.session.messages.map((message) => message.role)).toEqual(["custom"]);
+			expect(harness.eventsOfType("compaction_end")).toContainEqual(
+				expect.objectContaining({ reason: "overflow", contextWindowStarted: true, willRetry: true }),
+			);
+		} finally {
+			harness.cleanup();
 		}
 	});
 

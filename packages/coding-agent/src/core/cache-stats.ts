@@ -110,7 +110,7 @@ function scan(
 	const misses = new Map<AssistantMessage, CacheMiss>();
 
 	for (const entry of entries) {
-		if (entry.type === "compaction" || entry.type === "branch_summary") {
+		if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "context_window") {
 			// The context legitimately changed; the next turn's prompt is new content,
 			// not re-billed content. Model switches are NOT exempt: they re-bill the
 			// full prompt and should be counted.
