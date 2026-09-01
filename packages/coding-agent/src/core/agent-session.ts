@@ -1171,7 +1171,7 @@ export class AgentSession {
 		}
 
 		if (this._consumeNewContext()) {
-			return true;
+			return msg.stopReason !== "stop" || this.agent.hasQueuedMessages();
 		}
 
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
@@ -1189,9 +1189,10 @@ export class AgentSession {
 		}
 
 		const compacted = await this._checkCompaction(msg);
-		if (this._consumeNewContext() || compacted) {
-			return true;
+		if (this._consumeNewContext()) {
+			return msg.stopReason !== "stop" || this.agent.hasQueuedMessages();
 		}
+		if (compacted) return true;
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
