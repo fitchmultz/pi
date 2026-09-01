@@ -368,7 +368,7 @@ export class Agent {
 			throw new Error("No messages to continue from");
 		}
 
-		if (lastMessage.role === "assistant") {
+		if (lastMessage.role === "assistant" || lastMessage.role === "custom") {
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
 				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
@@ -380,10 +380,9 @@ export class Agent {
 				await this.runPromptMessages(queuedFollowUps);
 				return;
 			}
-
-			throw new Error("Cannot continue from message role: assistant");
 		}
 
+		if (lastMessage.role === "assistant") throw new Error("Cannot continue from message role: assistant");
 		await this.runContinuation();
 	}
 
