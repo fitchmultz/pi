@@ -3,6 +3,7 @@ import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type {
+	ContextWindowEntry,
 	ModelChangeEntry,
 	SessionEntry,
 	SessionMessageEntry,
@@ -246,6 +247,44 @@ describe("TreeSelectorComponent", () => {
 			// (since that's what we navigated to via parent traversal)
 			selector.handleInput("\x04"); // Ctrl+D
 			expect(list.getSelectedNode()?.entry.id).toBe("user-2");
+		});
+	});
+
+	describe("context windows", () => {
+		test("renders, searches, and copies the persisted handoff", () => {
+			const boundary: ContextWindowEntry = {
+				type: "context_window",
+				id: "window-2",
+				parentId: "user-1",
+				timestamp: new Date().toISOString(),
+				tokensBefore: 42_000,
+				handoff: "resume checkout investigation",
+			};
+			const tree = buildTree([
+				userMessage("user-1", null, "start"),
+				boundary,
+				assistantMessage("asst-1", "window-2", "continued"),
+			]);
+			const selector = new TreeSelectorComponent(
+				tree,
+				"asst-1",
+				24,
+				() => {},
+				() => {},
+			);
+
+			expect(selector.render(100).map(stripVTControlCharacters).join("\n")).toContain(
+				"[context window: 42k tokens] resume checkout investigation",
+			);
+			selector.handleInput("checkout");
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("window-2");
+
+			let copied: string | undefined;
+			selector.onCopy = (text) => {
+				copied = text;
+			};
+			selector.getTreeList().copySelected();
+			expect(copied).toContain("Handoff: resume checkout investigation");
 		});
 	});
 

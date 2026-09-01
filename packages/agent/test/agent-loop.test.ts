@@ -1104,6 +1104,191 @@ describe("agentLoop with AgentMessage", () => {
 		expect(convertedSecondTurnSystemPrompt).toBe("second prompt");
 	});
 
+	it("forwards a successful new-context request after the full tool batch", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const completed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "work",
+			label: "Work",
+			description: "Work tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				await new Promise((resolve) => setTimeout(resolve, params.value === "slow" ? 20 : 0));
+				completed.push(params.value);
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: { value: params.value },
+					newContext: params.value === "reset" ? { handoff: "continue here" } : undefined,
+					terminate: true,
+				};
+			},
+		};
+		let receivedHandoff: string | undefined;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareNextTurn: ({ newContext }) => {
+				expect(completed).toEqual(["reset", "slow"]);
+				receivedHandoff = newContext?.handoff;
+				return undefined;
+			},
+			shouldStopAfterTurn: () => true,
+		};
+
+		let llmCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("work")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			config,
+			undefined,
+			() => {
+				llmCalls++;
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					mockStream.push({
+						type: "done",
+						reason: llmCalls === 1 ? "toolUse" : "stop",
+						message:
+							llmCalls === 1
+								? createAssistantMessage(
+										[
+											{ type: "toolCall", id: "reset", name: "work", arguments: { value: "reset" } },
+											{ type: "toolCall", id: "slow", name: "work", arguments: { value: "slow" } },
+										],
+										"toolUse",
+									)
+								: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return mockStream;
+			},
+		);
+
+		for await (const _event of stream) {
+			// consume
+		}
+		expect(receivedHandoff).toBe("continue here");
+		expect(llmCalls).toBe(2);
+	});
+
+	it("does not forward a new-context request from an aborted partial batch", async () => {
+		const controller = new AbortController();
+		const executed: string[] = [];
+		const toolSchema = Type.Object({ value: Type.String() });
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "work",
+			label: "Work",
+			description: "Work tool",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				controller.abort();
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: {},
+					newContext: {},
+				};
+			},
+		};
+		let requestSeen = false;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			shouldStopAfterTurn: ({ newContext }) => {
+				requestSeen = newContext !== undefined;
+				return true;
+			},
+		};
+		const stream = agentLoop(
+			[createUserMessage("work")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			config,
+			controller.signal,
+			() => {
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					mockStream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{ type: "toolCall", id: "reset", name: "work", arguments: { value: "reset" } },
+								{ type: "toolCall", id: "skipped", name: "work", arguments: { value: "skipped" } },
+							],
+							"toolUse",
+						),
+					});
+				});
+				return mockStream;
+			},
+		);
+
+		for await (const _event of stream) {
+			// consume
+		}
+		expect(executed).toEqual(["reset"]);
+		expect(requestSeen).toBe(false);
+	});
+
+	it("does not forward a new-context request when another tool in the batch errors", async () => {
+		const toolSchema = Type.Object({ reset: Type.Boolean() });
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "work",
+			label: "Work",
+			description: "Work tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return {
+					content: [{ type: "text", text: params.reset ? "reset" : "failed" }],
+					details: {},
+					newContext: params.reset ? {} : undefined,
+				};
+			},
+		};
+		let requestSeen = false;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			afterToolCall: async ({ args }) => ({ isError: !(args as { reset: boolean }).reset }),
+			prepareNextTurn: ({ newContext }) => {
+				requestSeen = newContext !== undefined;
+				return undefined;
+			},
+		};
+
+		let llmCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("work")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			config,
+			undefined,
+			() => {
+				llmCalls++;
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message =
+						llmCalls === 1
+							? createAssistantMessage(
+									[
+										{ type: "toolCall", id: "reset", name: "work", arguments: { reset: true } },
+										{ type: "toolCall", id: "fail", name: "work", arguments: { reset: false } },
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]);
+					mockStream.push({ type: "done", reason: llmCalls === 1 ? "toolUse" : "stop", message });
+				});
+				return mockStream;
+			},
+		);
+
+		for await (const _event of stream) {
+			// consume
+		}
+		expect(requestSeen).toBe(false);
+	});
+
 	it("should stop after the current turn when shouldStopAfterTurn returns true", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];

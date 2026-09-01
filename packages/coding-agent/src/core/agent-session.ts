@@ -22,6 +22,7 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	NewContextRequest,
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
@@ -113,6 +114,8 @@ import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
+const MAX_CONTEXT_HANDOFF_CHARS = 20_000;
+
 // ============================================================================
 // Skill Block Parsing
 // ============================================================================
@@ -164,6 +167,7 @@ export type AgentSessionEvent =
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
+			contextWindowStarted?: boolean;
 			errorMessage?: string;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
@@ -335,6 +339,7 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	private _pendingNewContext: NewContextRequest | undefined;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -540,6 +545,38 @@ export class AgentSession {
 		};
 	}
 
+	private _consumeNewContext(request?: NewContextRequest): AgentContext | undefined {
+		const next = request ?? this._pendingNewContext;
+		if (!next) return undefined;
+		this._pendingNewContext = undefined;
+
+		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
+		const usage = this.getContextUsage();
+		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null);
+		const messages = this.sessionManager.buildSessionContext().messages;
+		this.agent.state.messages = messages;
+
+		const marker = messages[0]!;
+		this._emit({ type: "message_start", message: marker });
+		this._emit({ type: "message_end", message: marker });
+
+		return {
+			systemPrompt: this.agent.state.systemPrompt,
+			messages: messages.slice(),
+			tools: this.agent.state.tools.slice(),
+		};
+	}
+
+	/** Start a fresh model context while preserving the full session transcript. */
+	newContext(options: NewContextRequest = {}): void {
+		const request = { handoff: options.handoff?.trim() || undefined };
+		if (this.isStreaming) {
+			this._pendingNewContext = request;
+			return;
+		}
+		this._consumeNewContext(request);
+	}
+
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings();
@@ -566,7 +603,11 @@ export class AgentSession {
 				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
-			const context = await this._compactBeforeNextAssistantResponse(turn.context);
+			let context = this._consumeNewContext(turn.newContext);
+			if (!context) {
+				context = await this._compactBeforeNextAssistantResponse(turn.context);
+				context = this._consumeNewContext() ?? context;
+			}
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
 
@@ -1124,6 +1165,14 @@ export class AgentSession {
 		if (!msg) {
 			return false;
 		}
+		if (msg.stopReason === "aborted") {
+			this._pendingNewContext = undefined;
+			return false;
+		}
+
+		if (this._consumeNewContext()) {
+			return true;
+		}
 
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
 			return true;
@@ -1139,7 +1188,8 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		if (await this._checkCompaction(msg)) {
+		const compacted = await this._checkCompaction(msg);
+		if (this._consumeNewContext() || compacted) {
 			return true;
 		}
 
@@ -2275,6 +2325,19 @@ export class AgentSession {
 					signal: this._autoCompactionAbortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
 
+				if (extensionResult?.newContext) {
+					this.newContext(extensionResult.newContext);
+					this._emit({
+						type: "compaction_end",
+						reason,
+						result: undefined,
+						aborted: true,
+						willRetry,
+						contextWindowStarted: true,
+					});
+					return willRetry || this.agent.hasQueuedMessages();
+				}
+
 				if (extensionResult?.cancel) {
 					this._emit({
 						type: "compaction_end",
@@ -2630,6 +2693,7 @@ export class AgentSession {
 					this._extensionShutdownHandler?.();
 				},
 				getContextUsage: () => this.getContextUsage(),
+				newContext: (options) => this.newContext(options),
 				compact: (options) => {
 					void (async () => {
 						try {
@@ -3383,7 +3447,8 @@ export class AgentSession {
 		// We can only trust usage from an assistant that responded after the latest compaction.
 		// If no such assistant exists, context token count is unknown until the next LLM response.
 		const branchEntries = this.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
+		const firstActiveEntry = this.sessionManager.buildContextEntries()[0];
+		const latestCompaction = firstActiveEntry?.type === "compaction" ? firstActiveEntry : null;
 
 		if (latestCompaction) {
 			// Check if there's a valid assistant usage after the compaction boundary

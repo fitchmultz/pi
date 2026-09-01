@@ -19,6 +19,7 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
+	NewContextRequest,
 	PrepareNextTurnContext,
 	StreamFn,
 } from "./types.ts";
@@ -222,6 +223,7 @@ async function runLoop(
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
+			let newContext: NewContextRequest | undefined;
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
 				// A "length" stop means the output was cut off by the token limit, so
@@ -232,7 +234,8 @@ async function runLoop(
 						? await failToolCallsFromTruncatedMessage(toolCalls, emit)
 						: await executeToolCalls(currentContext, message, config, signal, emit);
 				toolResults.push(...executedToolBatch.messages);
-				hasMoreToolCalls = !executedToolBatch.terminate;
+				newContext = executedToolBatch.newContext;
+				hasMoreToolCalls = !executedToolBatch.terminate || newContext !== undefined;
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
@@ -247,9 +250,10 @@ async function runLoop(
 				toolResults,
 				context: currentContext,
 				newMessages,
+				newContext,
 			};
 
-			if (await config.shouldStopAfterTurn?.(lastCompletedTurn)) {
+			if ((await config.shouldStopAfterTurn?.(lastCompletedTurn)) && !newContext) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
@@ -426,6 +430,7 @@ async function executeToolCalls(
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
+	newContext?: NewContextRequest;
 };
 
 async function executeToolCallsSequential(
@@ -481,6 +486,7 @@ async function executeToolCallsSequential(
 	return {
 		messages,
 		terminate: shouldTerminateToolBatch(finalizedCalls),
+		newContext: getNewContextRequest(finalizedCalls, toolCalls.length, signal),
 	};
 }
 
@@ -548,6 +554,7 @@ async function executeToolCallsParallel(
 	return {
 		messages,
 		terminate: shouldTerminateToolBatch(orderedFinalizedCalls),
+		newContext: getNewContextRequest(orderedFinalizedCalls, toolCalls.length, signal),
 	};
 }
 
@@ -579,6 +586,21 @@ type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<Finalize
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+}
+
+function getNewContextRequest(
+	finalizedCalls: FinalizedToolCallOutcome[],
+	expectedCount: number,
+	signal: AbortSignal | undefined,
+): NewContextRequest | undefined {
+	if (
+		signal?.aborted ||
+		finalizedCalls.length !== expectedCount ||
+		finalizedCalls.some((finalized) => finalized.isError)
+	) {
+		return undefined;
+	}
+	return finalizedCalls.find((finalized) => finalized.result.newContext)?.result.newContext;
 }
 
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {

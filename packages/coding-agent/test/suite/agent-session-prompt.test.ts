@@ -77,6 +77,127 @@ describe("AgentSession prompt characterization", () => {
 		expect(harness.session.messages[3]?.role).toBe("assistant");
 	});
 
+	it("starts a native context window after a successful tool batch", async () => {
+		const resetTool: AgentTool = {
+			name: "reset",
+			label: "Reset",
+			description: "Reset context",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text", text: "resetting" }],
+				details: {},
+				newContext: { handoff: "continue from the handoff" },
+			}),
+		};
+		const harness = await createHarness({ tools: [resetTool] });
+		harnesses.push(harness);
+		let secondRequestTexts: string[] = [];
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("reset", {}), { stopReason: "toolUse" }),
+			(context) => {
+				secondRequestTexts = context.messages.map(getMessageText);
+				return fauxAssistantMessage("continued");
+			},
+		]);
+
+		await harness.session.prompt("start");
+
+		expect(secondRequestTexts).toEqual([
+			expect.stringContaining("Handoff from the previous window:\ncontinue from the handoff"),
+		]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom", "assistant"]);
+		expect(harness.sessionManager.getBranch().map((entry) => entry.type)).toEqual([
+			"message",
+			"message",
+			"message",
+			"context_window",
+			"message",
+		]);
+	});
+
+	it("continues in a fresh context after an extension requests rollover at turn end", async () => {
+		let requested = false;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", (_event, ctx) => {
+						if (requested) return;
+						requested = true;
+						ctx.newContext({ handoff: "policy handoff" });
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		let secondRequestTexts: string[] = [];
+		harness.setResponses([
+			fauxAssistantMessage("first response"),
+			(context) => {
+				secondRequestTexts = context.messages.map(getMessageText);
+				return fauxAssistantMessage("second response");
+			},
+		]);
+
+		await harness.session.prompt("start");
+
+		expect(secondRequestTexts).toEqual([expect.stringContaining("policy handoff")]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom", "assistant"]);
+		expect(harness.sessionManager.getBranch().some((entry) => entry.type === "context_window")).toBe(true);
+	});
+
+	it("drops a pending context rollover when the turn is aborted", async () => {
+		let requested = false;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", (_event, ctx) => {
+						if (requested) return;
+						requested = true;
+						ctx.newContext({ handoff: "do not continue" });
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("aborted", { stopReason: "aborted" }),
+			fauxAssistantMessage("must remain unused"),
+		]);
+
+		await harness.session.prompt("stop here");
+
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.sessionManager.getBranch().some((entry) => entry.type === "context_window")).toBe(false);
+		expect(harness.session.messages).toHaveLength(2);
+	});
+
+	it("bounds native context handoffs", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		harness.session.newContext({ handoff: "x".repeat(20_001) });
+
+		const boundary = harness.sessionManager.getBranch().at(-1);
+		expect(boundary?.type).toBe("context_window");
+		if (boundary?.type === "context_window") expect(boundary.handoff).toHaveLength(20_000);
+	});
+
+	it("reports fresh usage immediately after a context window supersedes compaction", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("old response")]);
+		await harness.session.prompt("old request");
+
+		const firstEntry = harness.sessionManager.getBranch()[0]!;
+		harness.sessionManager.appendCompaction("summary", firstEntry.id, 1000);
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+		expect(harness.session.getContextUsage()?.tokens).toBeNull();
+
+		harness.session.newContext({ handoff: "fresh" });
+
+		expect(harness.session.getContextUsage()?.tokens).not.toBeNull();
+	});
+
 	it("executes multiple tool calls from one response and continues with a single follow-up response", async () => {
 		const toolRuns: string[] = [];
 		const makeTool = (name: string, delayMs: number): AgentTool => ({
