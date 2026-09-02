@@ -36,6 +36,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
+	let lastAssistantMessage: AssistantMessage | undefined;
+	let contextWindowStarted = false;
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
@@ -73,6 +75,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		lastAssistantMessage = undefined;
+		contextWindowStarted = false;
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
 			commandContextActions: {
@@ -106,6 +110,14 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
+			if (event.type === "message_end") {
+				if (event.message.role === "assistant") {
+					lastAssistantMessage = event.message;
+					contextWindowStarted = false;
+				} else if (event.message.role === "custom" && event.message.customType === "context-window") {
+					contextWindowStarted = true;
+				}
+			}
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
 			}
@@ -133,15 +145,21 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 
 		for (const message of messages) {
+			lastAssistantMessage = undefined;
+			contextWindowStarted = false;
 			await session.prompt(message);
 		}
 
 		if (mode === "text") {
-			const state = session.state;
-			const lastMessage = state.messages[state.messages.length - 1];
+			const activeLastMessage = session.state.messages.at(-1);
+			const assistantMsg =
+				activeLastMessage?.role === "assistant"
+					? activeLastMessage
+					: contextWindowStarted
+						? lastAssistantMessage
+						: undefined;
 
-			if (lastMessage?.role === "assistant") {
-				const assistantMsg = lastMessage as AssistantMessage;
+			if (assistantMsg) {
 				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
 					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 					exitCode = 1;
