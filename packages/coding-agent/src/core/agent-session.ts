@@ -1158,6 +1158,26 @@ export class AgentSession {
 		}
 	}
 
+	private async _prepareAgentStart(prompt: string, images?: ImageContent[]): Promise<AgentMessage[]> {
+		const result = await this._extensionRunner.emitBeforeAgentStart(
+			prompt,
+			images,
+			this._baseSystemPrompt,
+			this._baseSystemPromptOptions,
+		);
+		const messages: AgentMessage[] = (result?.messages ?? []).map((message) => ({
+			role: "custom",
+			customType: message.customType,
+			content: message.content ?? [],
+			display: message.display,
+			details: message.details,
+			timestamp: Date.now(),
+		}));
+		this._systemPromptOverride = result?.systemPrompt;
+		this.agent.state.systemPrompt = result?.systemPrompt ?? this._baseSystemPrompt;
+		return messages;
+	}
+
 	private async _handlePostAgentRun(): Promise<boolean> {
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
@@ -1324,36 +1344,7 @@ export class AgentSession {
 			}
 			this._pendingNextTurnMessages = [];
 
-			// Emit before_agent_start extension event
-			const result = await this._extensionRunner.emitBeforeAgentStart(
-				expandedText,
-				currentImages,
-				this._baseSystemPrompt,
-				this._baseSystemPromptOptions,
-			);
-			// Add all custom messages from extensions
-			if (result?.messages) {
-				for (const msg of result.messages) {
-					messages.push({
-						role: "custom",
-						customType: msg.customType,
-						// Untyped extensions can pass null/missing content; normalize at ingestion.
-						content: msg.content ?? [],
-						display: msg.display,
-						details: msg.details,
-						timestamp: Date.now(),
-					});
-				}
-			}
-			// Apply extension-modified system prompt, or reset to base
-			if (result?.systemPrompt !== undefined) {
-				this._systemPromptOverride = result.systemPrompt;
-				this.agent.state.systemPrompt = result.systemPrompt;
-			} else {
-				// Ensure we're using the base prompt (in case previous turn had modifications)
-				this._systemPromptOverride = undefined;
-				this.agent.state.systemPrompt = this._baseSystemPrompt;
-			}
+			messages.push(...(await this._prepareAgentStart(expandedText, currentImages)));
 		} catch (error) {
 			preflightResult?.(false);
 			throw error;
@@ -1552,7 +1543,7 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this._runAgentPrompt(appMessage);
+			await this._runAgentPrompt([appMessage, ...(await this._prepareAgentStart(""))]);
 		} else if (this.isStreaming) {
 			// Appending now would put the message between an assistant tool call and its
 			// result, which providers that validate message order reject on replay. Defer
