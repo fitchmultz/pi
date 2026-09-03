@@ -494,6 +494,56 @@ describe("AgentSession model and extension characterization", () => {
 		).toBe(true);
 	});
 
+	// Regression test for https://github.com/earendil-works/pi/issues/5581
+	it("runs before_agent_start for idle custom messages that trigger a turn", async () => {
+		const prompts: string[] = [];
+		let starts = 0;
+		const noopTool: AgentTool = {
+			name: "noop",
+			label: "noop",
+			description: "noop",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
+		};
+		const harness = await createHarness({
+			tools: [noopTool],
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async (event) => {
+						starts += 1;
+						return {
+							message: { customType: "before-start", content: "injected", display: true },
+							systemPrompt: `${event.systemPrompt}\n\ncustom turn instructions`,
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			(context) => {
+				prompts.push(context.systemPrompt ?? "");
+				return fauxAssistantMessage([fauxToolCall("noop", {})], { stopReason: "toolUse" });
+			},
+			(context) => {
+				prompts.push(context.systemPrompt ?? "");
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		await harness.session.sendCustomMessage(
+			{ customType: "wake", content: "wake", display: true },
+			{ triggerTurn: true },
+		);
+
+		expect(starts).toBe(1);
+		expect(prompts).toHaveLength(2);
+		expect(prompts.every((prompt) => prompt.includes("custom turn instructions"))).toBe(true);
+		expect(
+			harness.session.messages.some((message) => message.role === "custom" && message.customType === "before-start"),
+		).toBe(true);
+	});
+
 	it("bindExtensions emits session_start and reload emits session_shutdown then session_start", async () => {
 		const lifecycleEvents: string[] = [];
 		const harness = await createHarness({
