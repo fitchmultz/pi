@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
@@ -163,6 +164,8 @@ describe("InteractiveMode compaction events", () => {
 				result: { tokensBefore: number; summary: string; usage?: Usage } | undefined;
 				aborted: boolean;
 				willRetry: boolean;
+				contextWindowStarted?: boolean;
+				pendingMessages?: AgentMessage[];
 				errorMessage?: string;
 			},
 		) => Promise<void>;
@@ -195,6 +198,47 @@ describe("InteractiveMode compaction events", () => {
 			usage,
 		});
 		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+
+		const pending: AgentMessage = { role: "user", content: "newly submitted request", timestamp: 1 };
+		vi.clearAllMocks();
+		await handleEvent.call(fakeThis, {
+			type: "compaction_end",
+			reason: "threshold",
+			result: { tokensBefore: 123, summary: "summary" },
+			aborted: false,
+			willRetry: false,
+			pendingMessages: [pending],
+		});
+		expect(fakeThis.addMessageToChat.mock.calls.map(([message]) => message)).toEqual([
+			expect.objectContaining({ role: "compactionSummary" }),
+			pending,
+		]);
+
+		const boundary: SessionEntry = {
+			type: "context_window",
+			id: "fresh",
+			parentId: "latest",
+			timestamp: "2025-01-03T00:00:00Z",
+			handoff: "fresh handoff",
+			tokensBefore: 123,
+		};
+		fakeThis.sessionManager.buildContextEntries.mockReturnValue([boundary]);
+		vi.clearAllMocks();
+		await handleEvent.call(fakeThis, {
+			type: "compaction_end",
+			reason: "threshold",
+			result: undefined,
+			aborted: true,
+			willRetry: false,
+			contextWindowStarted: true,
+			pendingMessages: [pending],
+		});
+		expect(fakeThis.chatContainer.clear).toHaveBeenCalledOnce();
+		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([boundary]);
+		expect(fakeThis.addMessageToChat).toHaveBeenCalledExactlyOnceWith(pending);
+		expect(fakeThis.renderSessionEntries.mock.invocationCallOrder[0]).toBeLessThan(
+			fakeThis.addMessageToChat.mock.invocationCallOrder[0],
+		);
 	});
 
 	test("updates the working state when the same agent run resumes after compaction", async () => {

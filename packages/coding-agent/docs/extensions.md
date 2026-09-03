@@ -452,11 +452,12 @@ Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `
 
 #### session_before_auto_compact
 
-Fired before automatic (threshold or overflow) compaction, ahead of summary preparation and summarization auth. Manual `/compact` does not fire it. Return `newContext` to start a fresh context window (a persisted `context_window` entry) instead of a summary; the trigger then never reaches `session_before_compact`. Returning nothing lets normal compaction proceed. Only one extension should own this policy: the last handler result wins.
+Fired before automatic (threshold or overflow) compaction, ahead of summary preparation and summarization auth. Manual `/compact` does not fire it. Provider-bound inputs awaiting this preflight are in `pendingMessages`, not `branchEntries`. Return `newContext` to start a fresh context window (a persisted `context_window` entry) instead of a summary; the trigger then never reaches `session_before_compact`. Returning nothing lets normal compaction proceed. Only one extension should own this policy: the last handler result wins.
 
 ```typescript
 pi.on("session_before_auto_compact", async (event, ctx) => {
-  const { branchEntries, reason, willRetry, signal } = event;
+  const { branchEntries, pendingMessages, reason, willRetry, signal } = event;
+  // pendingMessages - inputs in the pending provider request that are not yet in branchEntries
   // reason - "threshold" or "overflow"; willRetry - the aborted turn is retried after the boundary
   return { newContext: { handoff: "Concise state for the next window" } };
 });

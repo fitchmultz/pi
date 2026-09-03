@@ -168,6 +168,8 @@ export type AgentSessionEvent =
 			aborted: boolean;
 			willRetry: boolean;
 			contextWindowStarted?: boolean;
+			/** Live inputs to retain when the UI rebuilds before request preparation finishes. */
+			pendingMessages?: AgentMessage[];
 			errorMessage?: string;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
@@ -295,6 +297,13 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+interface ProviderRequestPrefix {
+	provider: string;
+	model: string;
+	systemPrompt: string;
+	tools: readonly AgentTool[];
+}
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
@@ -333,12 +342,17 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
+	/** Provider-bound inputs waiting until request preparation can no longer add a context boundary. */
+	private _pendingProviderMessages: AgentMessage[] = [];
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
 	private _pendingNewContext: NewContextRequest | undefined;
+	private _reportedUsagePrefix: ProviderRequestPrefix | null | undefined;
+	private _providerRequestPrefix: ProviderRequestPrefix | undefined;
+	private _skipNextProviderRequestPreflight = false;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -407,6 +421,8 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
+		this._installAgentRequestPreflight();
+		this._installAgentContextPersistence();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -552,6 +568,7 @@ export class AgentSession {
 		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
 		const usage = this.getContextUsage();
 		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null);
+		this._reportedUsagePrefix = null;
 		const messages = this.sessionManager.buildSessionContext().messages;
 		this.agent.state.messages = messages;
 
@@ -596,16 +613,63 @@ export class AgentSession {
 	}
 
 	/**
-	 * Best available native estimate of the active context: the active model's last reported usage
-	 * plus trailing messages, or a chars/4 estimate of the system prompt, tool definitions, and
-	 * messages until the active model reports usage. Usage from other models is never reused.
+	 * Best available native estimate of the active context. Exact-prefix usage wins; an unknown
+	 * legacy prefix uses the larger of matching-model usage and the full prompt/tool/message estimate.
 	 */
 	private _estimateContextTokens(context: AgentContext = this.agent.state) {
-		return estimateContextTokens(context.messages, {
+		const options = {
 			model: this.model,
 			systemPrompt: context.systemPrompt,
 			tools: context.tools,
-		});
+		};
+		if (this._reportedUsageApplies(context)) return estimateContextTokens(context.messages, options);
+
+		const fullEstimate = estimateContextTokens(context.messages, { ...options, useReportedUsage: false });
+		if (this._reportedUsagePrefix !== undefined || !this._hasCurrentModelUsageAfterActiveCompaction()) {
+			return fullEstimate;
+		}
+
+		const historicalEstimate = estimateContextTokens(context.messages, options);
+		return historicalEstimate.tokens > fullEstimate.tokens ? historicalEstimate : fullEstimate;
+	}
+
+	private _reportedUsageApplies(context: AgentContext): boolean {
+		const prefix = this._reportedUsagePrefix;
+		if (!prefix) return false;
+		const model = this.model;
+		const tools = context.tools ?? [];
+		return (
+			!!model &&
+			prefix.provider === model.provider &&
+			prefix.model === model.id &&
+			prefix.systemPrompt === context.systemPrompt &&
+			prefix.tools.length === tools.length &&
+			prefix.tools.every((tool, index) => tool === tools[index])
+		);
+	}
+
+	private _hasCurrentModelUsageAfterActiveCompaction(): boolean {
+		const latestCompaction = this.sessionManager.buildContextEntries()[0];
+		if (latestCompaction?.type !== "compaction") return true;
+		const model = this.model;
+		if (!model) return false;
+
+		const branch = this.sessionManager.getBranch();
+		for (let i = branch.length - 1; i > branch.lastIndexOf(latestCompaction); i--) {
+			const entry = branch[i];
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const message = entry.message;
+			if (
+				message.provider === model.provider &&
+				message.model === model.id &&
+				message.stopReason !== "aborted" &&
+				message.stopReason !== "error" &&
+				calculateContextTokens(message.usage) > 0
+			) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -615,11 +679,7 @@ export class AgentSession {
 				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
-			let context = this._consumeNewContext(turn.newContext);
-			if (!context) {
-				context = await this._compactBeforeNextAssistantResponse(turn.context);
-				context = this._consumeNewContext() ?? context;
-			}
+			const context = this._consumeNewContext(turn.newContext) ?? turn.context;
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
 
@@ -633,6 +693,63 @@ export class AgentSession {
 				model: this.agent.state.model,
 				thinkingLevel: this.agent.state.thinkingLevel,
 			};
+		};
+	}
+
+	private _restorePendingProviderMessages(context: AgentContext): AgentContext {
+		for (const message of this._pendingProviderMessages) {
+			if (!context.messages.includes(message)) context.messages.push(message);
+			if (!this.agent.state.messages.includes(message)) this.agent.state.messages.push(message);
+		}
+		return context;
+	}
+
+	private _persistMessage(message: AgentMessage): void {
+		if (message.role === "custom") {
+			this.sessionManager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+			);
+		} else if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
+			this.sessionManager.appendMessage(message);
+		}
+	}
+
+	private _flushPendingProviderMessages(): void {
+		while (this._pendingProviderMessages.length > 0) {
+			// SessionManager updates its tree before I/O; an I/O error must not append the input twice.
+			this._persistMessage(this._pendingProviderMessages.shift()!);
+		}
+	}
+
+	private _installAgentRequestPreflight(): void {
+		const previousPreparation = this.agent.prepareProviderRequest;
+		this.agent.prepareProviderRequest = async (context, signal) => {
+			let prepared = (await previousPreparation?.(context, signal)) ?? context;
+			if (!this._skipNextProviderRequestPreflight) {
+				prepared = await this._compactBeforeNextAssistantResponse(prepared);
+			}
+			prepared = this._restorePendingProviderMessages(this._consumeNewContext() ?? prepared);
+			const model = this.model;
+			this._providerRequestPrefix = model
+				? {
+						provider: model.provider,
+						model: model.id,
+						systemPrompt: prepared.systemPrompt,
+						tools: prepared.tools?.slice() ?? [],
+					}
+				: undefined;
+			return prepared;
+		};
+	}
+
+	private _installAgentContextPersistence(): void {
+		const previousTransform = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			this._flushPendingProviderMessages();
+			return previousTransform ? await previousTransform(messages, signal) : messages;
 		};
 	}
 
@@ -695,6 +812,16 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		const requestEnded = event.type === "message_end" && event.message.role === "assistant";
+		const requestPrefix = requestEnded ? this._providerRequestPrefix : undefined;
+		if (requestEnded) {
+			this._providerRequestPrefix = undefined;
+			this._skipNextProviderRequestPreflight = false;
+		}
+		if (event.type === "message_start" && event.message.role === "assistant") {
+			this._flushPendingProviderMessages();
+		}
+
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -720,27 +847,28 @@ export class AgentSession {
 		// Emit to extensions first
 		await this._emitExtensionEvent(event);
 
+		if (requestPrefix && event.type === "message_end" && event.message.role === "assistant") {
+			const message = event.message as AssistantMessage;
+			if (
+				requestPrefix.provider === message.provider &&
+				requestPrefix.model === message.model &&
+				message.stopReason !== "error" &&
+				message.stopReason !== "aborted" &&
+				calculateContextTokens(message.usage) > 0
+			) {
+				this._reportedUsagePrefix = requestPrefix;
+			}
+		}
+
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 
 		// Handle session persistence
 		if (event.type === "message_end") {
-			// Check if this is a custom message from extensions
-			if (event.message.role === "custom") {
-				// Persist as CustomMessageEntry
-				this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
-				);
-			} else if (
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
-			) {
-				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+			if (this._isAgentRunActive && (event.message.role === "user" || event.message.role === "custom")) {
+				this._pendingProviderMessages.push(event.message);
+			} else {
+				this._persistMessage(event.message);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -1158,13 +1286,16 @@ export class AgentSession {
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		this._isAgentRunActive = true;
+		this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
 		try {
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
 				await this.agent.continue();
 			}
 		} finally {
+			this._skipNextProviderRequestPreflight = false;
 			this._systemPromptOverride = undefined;
+			this._flushPendingProviderMessages();
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
 			await this._emitAgentSettled();
@@ -2084,6 +2215,7 @@ export class AgentSession {
 			}
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			this._reportedUsagePrefix = null;
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
@@ -2260,30 +2392,14 @@ export class AgentSession {
 		// For error messages or all-zero usage messages, estimate from the last valid response.
 		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
 		// responses can still compact and do not reset context accounting.
-		let contextTokens: number;
-		const directContextTokens = assistantMessage.usage ? calculateContextTokens(assistantMessage.usage) : 0;
-		if (assistantMessage.stopReason === "error" || directContextTokens === 0) {
-			const messages = this.agent.state.messages;
-			const estimate = this._estimateContextTokens();
-			// Without provider usage, estimate.tokens is the pure size estimate (prompt, tools, messages).
-			// Only usage-backed estimates need the stale pre-compaction check.
-			if (estimate.lastUsageIndex !== null) {
-				// Verify the usage source is post-compaction. Kept pre-compaction messages
-				// have stale usage reflecting the old (larger) context and would falsely
-				// trigger compaction right after one just finished.
-				const usageMsg = messages[estimate.lastUsageIndex];
-				if (
-					compactionEntry &&
-					usageMsg.role === "assistant" &&
-					(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
-				) {
-					return false;
-				}
-			}
-			contextTokens = estimate.tokens;
-		} else {
-			contextTokens = directContextTokens;
-		}
+		const directContextTokens =
+			sameModel && this._reportedUsageApplies(this.agent.state) && assistantMessage.usage
+				? calculateContextTokens(assistantMessage.usage)
+				: 0;
+		const contextTokens =
+			assistantMessage.stopReason === "error" || directContextTokens === 0
+				? this._estimateContextTokens().tokens
+				: directContextTokens;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			return await this._runAutoCompaction("threshold", false);
 		}
@@ -2320,13 +2436,16 @@ export class AgentSession {
 				const claim = await this._extensionRunner.emit({
 					type: "session_before_auto_compact",
 					branchEntries: pathEntries,
+					pendingMessages: this._pendingProviderMessages.slice(),
 					reason,
 					willRetry,
 					signal: this._autoCompactionAbortController.signal,
 				});
+				if (this._autoCompactionAbortController.signal.aborted) return false;
 				if (claim?.newContext) {
+					started = true;
 					this._emit({ type: "compaction_start", reason });
-					this.newContext(claim.newContext);
+					this._consumeNewContext(claim.newContext);
 					this._emit({
 						type: "compaction_end",
 						reason,
@@ -2334,6 +2453,7 @@ export class AgentSession {
 						aborted: true,
 						willRetry,
 						contextWindowStarted: true,
+						pendingMessages: this._pendingProviderMessages.slice(),
 					});
 					return willRetry || this.agent.hasQueuedMessages();
 				}
@@ -2362,20 +2482,7 @@ export class AgentSession {
 					signal: this._autoCompactionAbortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
 
-				if (extensionResult?.newContext) {
-					this.newContext(extensionResult.newContext);
-					this._emit({
-						type: "compaction_end",
-						reason,
-						result: undefined,
-						aborted: true,
-						willRetry,
-						contextWindowStarted: true,
-					});
-					return willRetry || this.agent.hasQueuedMessages();
-				}
-
-				if (extensionResult?.cancel) {
+				if (extensionResult?.cancel || this._autoCompactionAbortController.signal.aborted) {
 					this._emit({
 						type: "compaction_end",
 						reason,
@@ -2390,6 +2497,20 @@ export class AgentSession {
 						fromExtension: false,
 					});
 					return false;
+				}
+
+				if (extensionResult?.newContext) {
+					this._consumeNewContext(extensionResult.newContext);
+					this._emit({
+						type: "compaction_end",
+						reason,
+						result: undefined,
+						aborted: true,
+						willRetry,
+						contextWindowStarted: true,
+						pendingMessages: this._pendingProviderMessages.slice(),
+					});
+					return willRetry || this.agent.hasQueuedMessages();
 				}
 
 				if (extensionResult?.compaction) {
@@ -2448,6 +2569,7 @@ export class AgentSession {
 			}
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			this._reportedUsagePrefix = null;
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
@@ -2476,7 +2598,14 @@ export class AgentSession {
 				usage,
 				details,
 			};
-			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+			this._emit({
+				type: "compaction_end",
+				reason,
+				result,
+				aborted: false,
+				willRetry,
+				pendingMessages: this._pendingProviderMessages.slice(),
+			});
 
 			if (willRetry) {
 				const messages = this.agent.state.messages;
@@ -3380,6 +3509,7 @@ export class AgentSession {
 			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
+			this._reportedUsagePrefix = undefined;
 
 			// Emit session_tree event
 			await this._extensionRunner.emit({
@@ -3483,34 +3613,10 @@ export class AgentSession {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return undefined;
 
-		// After compaction, the last assistant usage reflects pre-compaction context size.
-		// We can only trust usage from an assistant that responded after the latest compaction.
-		// If no such assistant exists, context token count is unknown until the next LLM response.
-		const branchEntries = this.sessionManager.getBranch();
-		const firstActiveEntry = this.sessionManager.buildContextEntries()[0];
-		const latestCompaction = firstActiveEntry?.type === "compaction" ? firstActiveEntry : null;
-
-		if (latestCompaction) {
-			// Check if there's a valid assistant usage after the compaction boundary
-			const compactionIndex = branchEntries.lastIndexOf(latestCompaction);
-			let hasPostCompactionUsage = false;
-			for (let i = branchEntries.length - 1; i > compactionIndex; i--) {
-				const entry = branchEntries[i];
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					const assistant = entry.message;
-					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
-						const contextTokens = calculateContextTokens(assistant.usage);
-						if (contextTokens > 0) {
-							hasPostCompactionUsage = true;
-							break;
-						}
-					}
-				}
-			}
-
-			if (!hasPostCompactionUsage) {
-				return { tokens: null, contextWindow, percent: null };
-			}
+		// Kept assistant messages precede the active compaction even though they appear after its
+		// summary in the projected context. Their provider usage does not describe the new context.
+		if (!this._hasCurrentModelUsageAfterActiveCompaction()) {
+			return { tokens: null, contextWindow, percent: null };
 		}
 
 		const estimate = this._estimateContextTokens();

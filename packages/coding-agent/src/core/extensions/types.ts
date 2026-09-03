@@ -603,6 +603,8 @@ export interface SessionBeforeForkEvent {
 export interface SessionBeforeAutoCompactEvent {
 	type: "session_before_auto_compact";
 	branchEntries: SessionEntry[];
+	/** Inputs included in the pending provider request but not yet persisted in branchEntries. */
+	pendingMessages: AgentMessage[];
 	reason: "threshold" | "overflow";
 	/** True when the aborted turn is retried after this compaction (overflow recovery) */
 	willRetry: boolean;
@@ -1755,7 +1757,7 @@ export interface ExtensionContextActions {
 	hasPendingMessages: () => boolean;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
-	getCompactionSettings?: () => CompactionSettings;
+	getCompactionSettings: () => CompactionSettings;
 	newContext?: (options?: NewContextRequest) => void;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
