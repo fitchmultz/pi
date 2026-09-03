@@ -2731,6 +2731,7 @@ export class AgentSession {
 					this._extensionShutdownHandler?.();
 				},
 				getContextUsage: () => this.getContextUsage(),
+				getCompactionSettings: () => this.settingsManager.getCompactionSettings(),
 				newContext: (options) => this.newContext(options),
 				compact: (options) => {
 					void (async () => {

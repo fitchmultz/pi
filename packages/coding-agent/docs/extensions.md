@@ -1087,6 +1087,10 @@ if (usage && usage.tokens > 100_000) {
 }
 ```
 
+### ctx.getCompactionSettings()
+
+Returns the effective compaction settings (`enabled`, `reserveTokens`, `keepRecentTokens`) exactly as Pi resolved them, including whether project settings are trusted. Prefer this over re-reading settings files.
+
 ### ctx.compact()
 
 Trigger compaction without awaiting completion. Use `onComplete` and `onError` for follow-up actions.

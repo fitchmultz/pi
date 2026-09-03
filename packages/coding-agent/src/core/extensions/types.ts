@@ -48,7 +48,7 @@ import type {
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { BashResult } from "../bash-executor.ts";
-import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
+import type { CompactionPreparation, CompactionResult, CompactionSettings } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
@@ -343,6 +343,8 @@ export interface ExtensionContext {
 	shutdown(): void;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
+	/** Effective compaction settings as Pi resolved them, including the project-trust decision. */
+	getCompactionSettings(): CompactionSettings;
 	/** Start a fresh model context while preserving the full session transcript. */
 	newContext(options?: NewContextRequest): void;
 	/** Trigger compaction without awaiting completion. */
@@ -1753,6 +1755,7 @@ export interface ExtensionContextActions {
 	hasPendingMessages: () => boolean;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
+	getCompactionSettings?: () => CompactionSettings;
 	newContext?: (options?: NewContextRequest) => void;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
