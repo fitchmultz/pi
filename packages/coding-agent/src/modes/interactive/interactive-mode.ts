@@ -2054,6 +2054,7 @@ export class InteractiveMode {
 				this.shutdownRequested = true;
 			},
 			getContextUsage: () => this.session.getContextUsage(),
+			getCompactionSettings: () => this.settingsManager.getCompactionSettings(),
 			newContext: (options) => this.session.newContext(options),
 			compact: (options) => {
 				void (async () => {
