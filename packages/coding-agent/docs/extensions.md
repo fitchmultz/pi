@@ -329,6 +329,7 @@ user sends another prompt ◄─────────────────
   └─► session_info_changed
 
 /compact or auto-compaction
+  ├─► session_before_auto_compact (auto only; can claim with a fresh context window)
   ├─► session_before_compact (can cancel or customize)
   ├─► session_compact (success)
   └─► session_compact_failed (failure or abort)
@@ -448,6 +449,18 @@ pi.on("session_before_fork", async (event, ctx) => {
 
 After a successful fork or clone, pi emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and `previousSessionFile`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
+
+#### session_before_auto_compact
+
+Fired before automatic (threshold or overflow) compaction, ahead of summary preparation and summarization auth. Manual `/compact` does not fire it. Return `newContext` to start a fresh context window (a persisted `context_window` entry) instead of a summary; the trigger then never reaches `session_before_compact`. Returning nothing lets normal compaction proceed. Only one extension should own this policy: the last handler result wins.
+
+```typescript
+pi.on("session_before_auto_compact", async (event, ctx) => {
+  const { branchEntries, reason, willRetry, signal } = event;
+  // reason - "threshold" or "overflow"; willRetry - the aborted turn is retried after the boundary
+  return { newContext: { handoff: "Concise state for the next window" } };
+});
+```
 
 #### session_before_compact / session_compact / session_compact_failed
 
