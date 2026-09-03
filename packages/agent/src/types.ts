@@ -233,6 +233,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 		context: PrepareNextTurnContext,
 	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
 
+	/** Called after queued messages are added and before context transforms for each provider request. */
+	prepareProviderRequest?: (context: AgentContext) => AgentContext | undefined | Promise<AgentContext | undefined>;
+
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *

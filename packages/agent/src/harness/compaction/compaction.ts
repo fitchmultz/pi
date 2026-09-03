@@ -12,7 +12,7 @@ import {
 	type Usage,
 	uuidv7,
 } from "@earendil-works/pi-ai";
-import type { AgentMessage, ThinkingLevel } from "../../types.ts";
+import type { AgentMessage, AgentTool, ThinkingLevel } from "../../types.ts";
 import { type Context, getTelemetryContext } from "../context.ts";
 import { convertToLlm, createBranchSummaryMessage, createCompactionSummaryMessage } from "../messages.ts";
 import { buildContextEntries, sessionEntryToContextMessages } from "../session/context.ts";
@@ -164,14 +164,25 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 export function calculateContextTokens(usage: Usage): number {
 	return usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 }
-function getAssistantUsage(msg: AgentMessage): Usage | undefined {
+
+/** Extra active-context state that provider usage does not always cover. */
+export interface ContextEstimateOptions {
+	model?: Pick<Model<any>, "provider" | "id">;
+	systemPrompt?: string;
+	tools?: Pick<AgentTool, "name" | "description" | "parameters">[];
+	/** Set false when the active prompt or tool definitions changed after the reported usage. */
+	useReportedUsage?: boolean;
+}
+
+function getAssistantUsage(msg: AgentMessage, model?: Pick<Model<any>, "provider" | "id">): Usage | undefined {
 	if (msg.role === "assistant" && "usage" in msg) {
 		const assistantMsg = msg as AssistantMessage;
 		if (
 			assistantMsg.stopReason !== "aborted" &&
 			assistantMsg.stopReason !== "error" &&
 			assistantMsg.usage &&
-			calculateContextTokens(assistantMsg.usage) > 0
+			calculateContextTokens(assistantMsg.usage) > 0 &&
+			(!model || (assistantMsg.provider === model.provider && assistantMsg.model === model.id))
 		) {
 			return assistantMsg.usage;
 		}
@@ -180,11 +191,11 @@ function getAssistantUsage(msg: AgentMessage): Usage | undefined {
 }
 
 /** Return usage from the last valid assistant message in session entries. */
-export function getLastAssistantUsage(entries: Entry[]): Usage | undefined {
+export function getLastAssistantUsage(entries: readonly { type: string; message?: AgentMessage }[]): Usage | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (entry.type === "message") {
-			const usage = getAssistantUsage(entry.message as AgentMessage);
+		if (entry.type === "message" && entry.message) {
+			const usage = getAssistantUsage(entry.message);
 			if (usage) return usage;
 		}
 	}
@@ -203,23 +214,38 @@ export interface ContextUsageEstimate {
 	lastUsageIndex: number | null;
 }
 
-function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
+function getLastAssistantUsageInfo(
+	messages: AgentMessage[],
+	model?: Pick<Model<any>, "provider" | "id">,
+): { usage: Usage; index: number } | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
-		const usage = getAssistantUsage(messages[i]);
+		const usage = getAssistantUsage(messages[i], model);
 		if (usage) return { usage, index: i };
 	}
 	return undefined;
 }
 
-/** Estimate context tokens for messages using provider usage when available. */
-export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEstimate {
-	const usageInfo = getLastAssistantUsageInfo(messages);
+function estimateToolsTokens(tools: ContextEstimateOptions["tools"]): number {
+	let tokens = 0;
+	for (const tool of tools ?? []) {
+		tokens += Math.ceil(
+			safeJsonStringify({ name: tool.name, description: tool.description, parameters: tool.parameters }).length / 4,
+		);
+	}
+	return tokens;
+}
+
+/** Estimate active context tokens using provider usage where it still applies. */
+export function estimateContextTokens(
+	messages: AgentMessage[],
+	options: ContextEstimateOptions = {},
+): ContextUsageEstimate {
+	const usageInfo =
+		options.useReportedUsage === false ? undefined : getLastAssistantUsageInfo(messages, options.model);
 
 	if (!usageInfo) {
-		let estimated = 0;
-		for (const message of messages) {
-			estimated += estimateTokens(message);
-		}
+		let estimated = Math.ceil((options.systemPrompt?.length ?? 0) / 4) + estimateToolsTokens(options.tools);
+		for (const message of messages) estimated += estimateTokens(message);
 		return {
 			tokens: estimated,
 			usageTokens: 0,
@@ -230,9 +256,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 
 	const usageTokens = calculateContextTokens(usageInfo.usage);
 	let trailingTokens = 0;
-	for (let i = usageInfo.index + 1; i < messages.length; i++) {
-		trailingTokens += estimateTokens(messages[i]);
-	}
+	for (let i = usageInfo.index + 1; i < messages.length; i++) trailingTokens += estimateTokens(messages[i]);
 
 	return {
 		tokens: usageTokens + trailingTokens,
@@ -296,6 +320,7 @@ export function estimateTokens(message: AgentMessage): number {
 			return Math.ceil(chars / 4);
 		}
 		case "bashExecution": {
+			if (message.excludeFromContext) return 0;
 			chars = message.command.length + message.output.length;
 			return Math.ceil(chars / 4);
 		}

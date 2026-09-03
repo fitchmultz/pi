@@ -56,6 +56,8 @@ export {
 	type CompactionPreparation,
 	type CompactionSettings,
 	type CompactResult,
+	type ContextEstimateOptions,
+	type ContextUsageEstimate,
 	calculateContextTokens,
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
