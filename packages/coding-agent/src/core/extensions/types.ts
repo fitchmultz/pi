@@ -593,6 +593,20 @@ export interface SessionBeforeForkEvent {
 	position: "before" | "at";
 }
 
+/**
+ * Fired before automatic (threshold or overflow) compaction, ahead of summary preparation and
+ * summarization auth. Manual /compact does not fire it. Return `newContext` to start a fresh
+ * context window instead; `session_before_compact` is then not fired for that trigger.
+ */
+export interface SessionBeforeAutoCompactEvent {
+	type: "session_before_auto_compact";
+	branchEntries: SessionEntry[];
+	reason: "threshold" | "overflow";
+	/** True when the aborted turn is retried after this compaction (overflow recovery) */
+	willRetry: boolean;
+	signal: AbortSignal;
+}
+
 /** Fired before context compaction (can be cancelled or customized) */
 export interface SessionBeforeCompactEvent {
 	type: "session_before_compact";
@@ -676,6 +690,7 @@ export type SessionEvent =
 	| SessionInfoChangedEvent
 	| SessionBeforeSwitchEvent
 	| SessionBeforeForkEvent
+	| SessionBeforeAutoCompactEvent
 	| SessionBeforeCompactEvent
 	| SessionCompactEvent
 	| SessionCompactFailedEvent
@@ -1171,6 +1186,11 @@ export interface SessionBeforeForkResult {
 	skipConversationRestore?: boolean;
 }
 
+export interface SessionBeforeAutoCompactResult {
+	/** Start a fresh context window instead of compacting. */
+	newContext?: NewContextRequest;
+}
+
 export interface SessionBeforeCompactResult {
 	cancel?: boolean;
 	compaction?: CompactionResult;
@@ -1268,6 +1288,10 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>,
 	): void;
 	on(event: "session_before_fork", handler: ExtensionHandler<SessionBeforeForkEvent, SessionBeforeForkResult>): void;
+	on(
+		event: "session_before_auto_compact",
+		handler: ExtensionHandler<SessionBeforeAutoCompactEvent, SessionBeforeAutoCompactResult>,
+	): void;
 	on(
 		event: "session_before_compact",
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,

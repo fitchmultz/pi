@@ -2297,9 +2297,36 @@ export class AgentSession {
 				return false;
 			}
 
-			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
-
 			const pathEntries = this.sessionManager.getBranch();
+			this._autoCompactionAbortController = new AbortController();
+
+			// An extension may claim the automatic trigger with a fresh context window. This runs before
+			// summarization auth and summary preparation, which a summary-free rollover does not need.
+			// A claimed trigger never reaches session_before_compact.
+			if (this._extensionRunner.hasHandlers("session_before_auto_compact")) {
+				const claim = await this._extensionRunner.emit({
+					type: "session_before_auto_compact",
+					branchEntries: pathEntries,
+					reason,
+					willRetry,
+					signal: this._autoCompactionAbortController.signal,
+				});
+				if (claim?.newContext) {
+					this._emit({ type: "compaction_start", reason });
+					this.newContext(claim.newContext);
+					this._emit({
+						type: "compaction_end",
+						reason,
+						result: undefined,
+						aborted: true,
+						willRetry,
+						contextWindowStarted: true,
+					});
+					return willRetry || this.agent.hasQueuedMessages();
+				}
+			}
+
+			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
 
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
@@ -2307,7 +2334,6 @@ export class AgentSession {
 			}
 
 			this._emit({ type: "compaction_start", reason });
-			this._autoCompactionAbortController = new AbortController();
 			started = true;
 
 			let extensionCompaction: CompactionResult | undefined;
