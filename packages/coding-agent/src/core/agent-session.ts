@@ -583,7 +583,7 @@ export class AgentSession {
 		if (
 			!model ||
 			model.contextWindow <= 0 ||
-			!shouldCompact(estimateContextTokens(context.messages).tokens, model.contextWindow, settings)
+			!shouldCompact(this._estimateContextTokens(context).tokens, model.contextWindow, settings)
 		) {
 			return context;
 		}
@@ -593,6 +593,19 @@ export class AgentSession {
 			...context,
 			messages: this.agent.state.messages.slice(),
 		};
+	}
+
+	/**
+	 * Best available native estimate of the active context: the active model's last reported usage
+	 * plus trailing messages, or a chars/4 estimate of the system prompt, tool definitions, and
+	 * messages until the active model reports usage. Usage from other models is never reused.
+	 */
+	private _estimateContextTokens(context: AgentContext = this.agent.state) {
+		return estimateContextTokens(context.messages, {
+			model: this.model,
+			systemPrompt: context.systemPrompt,
+			tools: context.tools,
+		});
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -2251,8 +2264,8 @@ export class AgentSession {
 		const directContextTokens = assistantMessage.usage ? calculateContextTokens(assistantMessage.usage) : 0;
 		if (assistantMessage.stopReason === "error" || directContextTokens === 0) {
 			const messages = this.agent.state.messages;
-			const estimate = estimateContextTokens(messages);
-			// Without provider usage, estimate.tokens is the pure message-size estimate.
+			const estimate = this._estimateContextTokens();
+			// Without provider usage, estimate.tokens is the pure size estimate (prompt, tools, messages).
 			// Only usage-backed estimates need the stale pre-compaction check.
 			if (estimate.lastUsageIndex !== null) {
 				// Verify the usage source is post-compaction. Kept pre-compaction messages
@@ -3499,7 +3512,7 @@ export class AgentSession {
 			}
 		}
 
-		const estimate = estimateContextTokens(this.messages);
+		const estimate = this._estimateContextTokens();
 		const percent = (estimate.tokens / contextWindow) * 100;
 
 		return {

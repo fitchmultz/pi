@@ -7,7 +7,7 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { contentText, type RetryCallbacks, type RetryPolicy, retryAssistantCall, uuidv7 } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, Tool, Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
 import {
@@ -147,18 +147,23 @@ export function calculateContextTokens(usage: Usage): number {
 	return usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 }
 
+/** Provider/model identity used to accept only usage reported by the active model. */
+export type ContextModelIdentity = Pick<Model<any>, "provider" | "id">;
+
 /**
  * Get usage from an assistant message if available.
  * Skips aborted, error, and all-zero usage messages as they don't have valid usage data.
+ * With `model`, also skips usage reported by a different provider/model.
  */
-function getAssistantUsage(msg: AgentMessage): Usage | undefined {
+function getAssistantUsage(msg: AgentMessage, model?: ContextModelIdentity): Usage | undefined {
 	if (msg.role === "assistant" && "usage" in msg) {
 		const assistantMsg = msg as AssistantMessage;
 		if (
 			assistantMsg.stopReason !== "aborted" &&
 			assistantMsg.stopReason !== "error" &&
 			assistantMsg.usage &&
-			calculateContextTokens(assistantMsg.usage) > 0
+			calculateContextTokens(assistantMsg.usage) > 0 &&
+			(!model || (assistantMsg.provider === model.provider && assistantMsg.model === model.id))
 		) {
 			return assistantMsg.usage;
 		}
@@ -187,23 +192,43 @@ export interface ContextUsageEstimate {
 	lastUsageIndex: number | null;
 }
 
-function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
+function getLastAssistantUsageInfo(
+	messages: AgentMessage[],
+	model?: ContextModelIdentity,
+): { usage: Usage; index: number } | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
-		const usage = getAssistantUsage(messages[i]);
+		const usage = getAssistantUsage(messages[i], model);
 		if (usage) return { usage, index: i };
 	}
 	return undefined;
 }
 
+export interface ContextEstimateOptions {
+	/** Only usage reported by this model anchors the estimate; other models' counts are ignored. */
+	model?: ContextModelIdentity;
+	/** Counted only when no usable usage exists; reported usage already includes them. */
+	systemPrompt?: string;
+	tools?: Pick<Tool, "name" | "description" | "parameters">[];
+}
+
 /**
  * Estimate context tokens from messages, using the last assistant usage when available.
  * If there are messages after the last usage, estimate their tokens with estimateTokens.
+ * Without usable usage, the system prompt and tool definitions are estimated too.
  */
-export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEstimate {
-	const usageInfo = getLastAssistantUsageInfo(messages);
+export function estimateContextTokens(
+	messages: AgentMessage[],
+	options: ContextEstimateOptions = {},
+): ContextUsageEstimate {
+	const usageInfo = getLastAssistantUsageInfo(messages, options.model);
 
 	if (!usageInfo) {
-		let estimated = 0;
+		let estimated = Math.ceil((options.systemPrompt?.length ?? 0) / 4);
+		for (const tool of options.tools ?? []) {
+			estimated += Math.ceil(
+				JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }).length / 4,
+			);
+		}
 		for (const message of messages) {
 			estimated += estimateTokens(message);
 		}
