@@ -198,8 +198,9 @@ async function runLoop(
 				await emit({ type: "turn_start" });
 			}
 
-			// Process pending messages (inject before next assistant response)
-			if (pendingMessages.length > 0) {
+			let pollAfterRequestPreparation = pendingMessages.length === 0;
+			while (true) {
+				// Process pending messages (inject before next assistant response)
 				for (const message of pendingMessages) {
 					await emit({ type: "message_start", message });
 					await emit({ type: "message_end", message });
@@ -207,6 +208,15 @@ async function runLoop(
 					newMessages.push(message);
 				}
 				pendingMessages = [];
+
+				currentContext = (await config.prepareProviderRequest?.(currentContext)) ?? currentContext;
+				if (!config.prepareProviderRequest || !pollAfterRequestPreparation) break;
+
+				// Pick up one steering drain that arrived during long request preparation, then
+				// prepare again with those messages included.
+				pendingMessages = (await config.getSteeringMessages?.()) || [];
+				if (pendingMessages.length === 0) break;
+				pollAfterRequestPreparation = false;
 			}
 
 			// Stream assistant response

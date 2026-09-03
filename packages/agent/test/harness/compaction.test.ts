@@ -10,6 +10,7 @@ import {
 	type Models,
 	type Usage,
 } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	type CompactionPreparation,
@@ -287,6 +288,7 @@ describe("harness compaction", () => {
 		expect(estimateTokens(customString)).toBeGreaterThan(0);
 		expect(estimateTokens(toolResultWithImage)).toBeGreaterThan(1000);
 		expect(estimateTokens(bashExecution)).toBeGreaterThan(0);
+		expect(estimateTokens({ ...bashExecution, excludeFromContext: true })).toBe(0);
 		expect(estimateTokens(branchSummaryMessage)).toBeGreaterThan(0);
 		expect(estimateTokens(compactionSummaryMessage)).toBeGreaterThan(0);
 		expect(estimateTokens({ role: "unknown", timestamp: Date.now() } as unknown as AgentMessage)).toBe(0);
@@ -321,6 +323,20 @@ describe("harness compaction", () => {
 		expect(estimate.lastUsageIndex).toBe(1);
 		expect(estimate.trailingTokens).toBeGreaterThan(0);
 		expect(estimate.tokens).toBe(20 + estimate.trailingTokens);
+
+		const switched = estimateContextTokens([assistant], {
+			model: { provider: "other", id: "small" },
+			systemPrompt: "s".repeat(400),
+			tools: [{ name: "base", description: "d".repeat(400), parameters: Type.Object({}) }],
+		});
+		expect(switched.usageTokens).toBe(0);
+		expect(switched.tokens).toBeGreaterThan(200);
+		const withoutReportedUsage = estimateContextTokens([assistant], {
+			model: { provider: assistant.provider, id: assistant.model },
+			systemPrompt: "s".repeat(400),
+			useReportedUsage: false,
+		});
+		expect(withoutReportedUsage.usageTokens).toBe(0);
 	});
 
 	it("builds session context with a compaction entry", async () => {

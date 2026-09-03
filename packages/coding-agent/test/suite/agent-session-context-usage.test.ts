@@ -47,35 +47,40 @@ describe("AgentSession context usage estimate", () => {
 		expect(harness.session.getContextUsage()?.tokens).toBe(reported);
 	});
 
-	it("does not reuse usage reported by a different model after a model switch", async () => {
+	it("does not reuse usage or trigger rollover from a different model after a model switch", async () => {
+		const autoCompactionReasons: string[] = [];
 		const harness = await createHarness({
 			models: [
 				{ id: "big", contextWindow: 128_000 },
-				{ id: "small", contextWindow: 8192 },
+				{ id: "small", contextWindow: 64_000 },
+			],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_auto_compact", (event) => {
+						autoCompactionReasons.push(event.reason);
+						return { newContext: { handoff: "unexpected rollover" } };
+					});
+				},
 			],
 		});
 		harnesses.push(harness);
-		const big = harness.getModel("big")!;
-		harness.sessionManager.appendMessage({ role: "user", content: "hi", timestamp: 1 });
-		harness.sessionManager.appendMessage({
-			...fauxAssistantMessage("ok"),
-			provider: big.provider,
-			model: big.id,
-			usage: usage(7000),
-		});
-		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 7000, contextWindow: 128_000 });
+		harness.setResponses([fauxAssistantMessage("ok")]);
+		await harness.session.prompt("hi");
+		(harness.session.messages.at(-1) as AssistantMessage).usage = usage(60_000);
+		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 60_000, contextWindow: 128_000 });
 
 		await harness.session.setModel(harness.getModel("small")!);
 
 		const switched = harness.session.getContextUsage();
-		expect(switched?.contextWindow).toBe(8192);
+		expect(switched?.contextWindow).toBe(64_000);
 		expect(switched?.tokens).toBeGreaterThan(0);
-		expect(switched?.tokens).toBeLessThan(7000);
+		expect(switched?.tokens).toBeLessThan(60_000);
 
 		harness.setResponses([fauxAssistantMessage("small ok")]);
 		await harness.session.prompt("again");
 
+		expect(autoCompactionReasons).toEqual([]);
+		expect(harness.sessionManager.getBranch().some((entry) => entry.type === "context_window")).toBe(false);
 		const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
 		expect(harness.session.getContextUsage()?.tokens).toBe(reported);
 	});

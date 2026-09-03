@@ -5,9 +5,22 @@
  * and after compaction the session is reloaded.
  */
 
-import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import {
+	type AgentMessage,
+	type CompactionSettings,
+	type ContextEstimateOptions,
+	type ContextUsageEstimate,
+	calculateContextTokens,
+	DEFAULT_COMPACTION_SETTINGS,
+	estimateContextTokens,
+	estimateTokens,
+	getLastAssistantUsage,
+	type StreamFn,
+	shouldCompact,
+	type ThinkingLevel,
+} from "@earendil-works/pi-agent-core";
 import { contentText, type RetryCallbacks, type RetryPolicy, retryAssistantCall, uuidv7 } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Tool, Usage } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
 import {
@@ -123,212 +136,17 @@ function combineUsage(first: Usage, second: Usage): Usage {
 // Types
 // ============================================================================
 
-export interface CompactionSettings {
-	enabled: boolean;
-	reserveTokens: number;
-	keepRecentTokens: number;
-}
-
-export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
-	enabled: true,
-	reserveTokens: 16384,
-	keepRecentTokens: 20000,
+export {
+	calculateContextTokens,
+	DEFAULT_COMPACTION_SETTINGS,
+	estimateContextTokens,
+	estimateTokens,
+	getLastAssistantUsage,
+	shouldCompact,
+	type CompactionSettings,
+	type ContextEstimateOptions,
+	type ContextUsageEstimate,
 };
-
-// ============================================================================
-// Token calculation
-// ============================================================================
-
-/**
- * Calculate total context tokens from usage.
- * Uses the native totalTokens field when available, falls back to computing from components.
- */
-export function calculateContextTokens(usage: Usage): number {
-	return usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-}
-
-/** Provider/model identity used to accept only usage reported by the active model. */
-export type ContextModelIdentity = Pick<Model<any>, "provider" | "id">;
-
-/**
- * Get usage from an assistant message if available.
- * Skips aborted, error, and all-zero usage messages as they don't have valid usage data.
- * With `model`, also skips usage reported by a different provider/model.
- */
-function getAssistantUsage(msg: AgentMessage, model?: ContextModelIdentity): Usage | undefined {
-	if (msg.role === "assistant" && "usage" in msg) {
-		const assistantMsg = msg as AssistantMessage;
-		if (
-			assistantMsg.stopReason !== "aborted" &&
-			assistantMsg.stopReason !== "error" &&
-			assistantMsg.usage &&
-			calculateContextTokens(assistantMsg.usage) > 0 &&
-			(!model || (assistantMsg.provider === model.provider && assistantMsg.model === model.id))
-		) {
-			return assistantMsg.usage;
-		}
-	}
-	return undefined;
-}
-
-/**
- * Find the last valid assistant message usage from session entries.
- */
-export function getLastAssistantUsage(entries: SessionEntry[]): Usage | undefined {
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		if (entry.type === "message") {
-			const usage = getAssistantUsage(entry.message);
-			if (usage) return usage;
-		}
-	}
-	return undefined;
-}
-
-export interface ContextUsageEstimate {
-	tokens: number;
-	usageTokens: number;
-	trailingTokens: number;
-	lastUsageIndex: number | null;
-}
-
-function getLastAssistantUsageInfo(
-	messages: AgentMessage[],
-	model?: ContextModelIdentity,
-): { usage: Usage; index: number } | undefined {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const usage = getAssistantUsage(messages[i], model);
-		if (usage) return { usage, index: i };
-	}
-	return undefined;
-}
-
-export interface ContextEstimateOptions {
-	/** Only usage reported by this model anchors the estimate; other models' counts are ignored. */
-	model?: ContextModelIdentity;
-	/** Counted only when no usable usage exists; reported usage already includes them. */
-	systemPrompt?: string;
-	tools?: Pick<Tool, "name" | "description" | "parameters">[];
-}
-
-/**
- * Estimate context tokens from messages, using the last assistant usage when available.
- * If there are messages after the last usage, estimate their tokens with estimateTokens.
- * Without usable usage, the system prompt and tool definitions are estimated too.
- */
-export function estimateContextTokens(
-	messages: AgentMessage[],
-	options: ContextEstimateOptions = {},
-): ContextUsageEstimate {
-	const usageInfo = getLastAssistantUsageInfo(messages, options.model);
-
-	if (!usageInfo) {
-		let estimated = Math.ceil((options.systemPrompt?.length ?? 0) / 4);
-		for (const tool of options.tools ?? []) {
-			estimated += Math.ceil(
-				JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }).length / 4,
-			);
-		}
-		for (const message of messages) {
-			estimated += estimateTokens(message);
-		}
-		return {
-			tokens: estimated,
-			usageTokens: 0,
-			trailingTokens: estimated,
-			lastUsageIndex: null,
-		};
-	}
-
-	const usageTokens = calculateContextTokens(usageInfo.usage);
-	let trailingTokens = 0;
-	for (let i = usageInfo.index + 1; i < messages.length; i++) {
-		trailingTokens += estimateTokens(messages[i]);
-	}
-
-	return {
-		tokens: usageTokens + trailingTokens,
-		usageTokens,
-		trailingTokens,
-		lastUsageIndex: usageInfo.index,
-	};
-}
-
-/**
- * Check if compaction should trigger based on context usage.
- */
-export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
-	if (!settings.enabled) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
-}
-
-// ============================================================================
-// Cut point detection
-// ============================================================================
-
-const ESTIMATED_IMAGE_CHARS = 4800;
-
-function estimateTextAndImageContentChars(content: string | Array<{ type: string; text?: string }>): number {
-	if (typeof content === "string") {
-		return content.length;
-	}
-
-	let chars = 0;
-	for (const block of content) {
-		if (block.type === "text" && block.text) {
-			chars += block.text.length;
-		} else if (block.type === "image") {
-			chars += ESTIMATED_IMAGE_CHARS;
-		}
-	}
-	return chars;
-}
-
-/**
- * Estimate token count for a message using chars/4 heuristic.
- * This is conservative (overestimates tokens).
- */
-export function estimateTokens(message: AgentMessage): number {
-	let chars = 0;
-
-	switch (message.role) {
-		case "user": {
-			chars = estimateTextAndImageContentChars(
-				(message as { content: string | Array<{ type: string; text?: string }> }).content,
-			);
-			return Math.ceil(chars / 4);
-		}
-		case "assistant": {
-			const assistant = message as AssistantMessage;
-			for (const block of assistant.content) {
-				if (block.type === "text") {
-					chars += block.text.length;
-				} else if (block.type === "thinking") {
-					chars += block.thinking.length;
-				} else if (block.type === "toolCall") {
-					chars += block.name.length + JSON.stringify(block.arguments).length;
-				}
-			}
-			return Math.ceil(chars / 4);
-		}
-		case "custom":
-		case "toolResult": {
-			chars = estimateTextAndImageContentChars(message.content);
-			return Math.ceil(chars / 4);
-		}
-		case "bashExecution": {
-			chars = message.command.length + message.output.length;
-			return Math.ceil(chars / 4);
-		}
-		case "branchSummary":
-		case "compactionSummary": {
-			chars = message.summary.length;
-			return Math.ceil(chars / 4);
-		}
-	}
-
-	return 0;
-}
 
 function isCutPointMessage(message: AgentMessage): boolean {
 	switch (message.role) {

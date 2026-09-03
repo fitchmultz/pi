@@ -28,7 +28,7 @@ type JsonAgentSessionEvent =
     };
 ```
 
-`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction.
+`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction. `compaction_end` may include `pendingMessages`: live inputs not yet persisted while request preparation finishes. A UI rebuilding from session entries should render these after the new boundary or summary.
 
 Other base events come from
 [`AgentEvent`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/types.ts):

@@ -97,6 +97,7 @@ describe("ExtensionRunner", () => {
 		hasPendingMessages: () => false,
 		shutdown: () => {},
 		getContextUsage: () => undefined,
+		getCompactionSettings: () => ({ enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 }),
 		compact: () => {},
 		getSystemPrompt: () => "",
 		getScopedModels: () => [],
