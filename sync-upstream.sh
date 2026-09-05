@@ -17,4 +17,4 @@ npm run build:offline
 npm run check
 (cd packages/coding-agent && npm_config_prefix="$HOME/.local/share/npm-global" npm link --ignore-scripts)
 "$HOME/.local/share/npm-global/bin/pi" --version
-git push fork main:main
+git push --no-follow-tags fork main:main
