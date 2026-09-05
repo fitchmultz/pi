@@ -649,27 +649,27 @@ export class AgentSession {
 	}
 
 	private _hasCurrentModelUsageAfterActiveCompaction(): boolean {
-		const latestCompaction = this.sessionManager.buildContextEntries()[0];
-		if (latestCompaction?.type !== "compaction") return true;
 		const model = this.model;
-		if (!model) return false;
-
-		const branch = this.sessionManager.getBranch();
-		for (let i = branch.length - 1; i > branch.lastIndexOf(latestCompaction); i--) {
-			const entry = branch[i];
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const message = entry.message;
-			if (
-				message.provider === model.provider &&
-				message.model === model.id &&
-				message.stopReason !== "aborted" &&
-				message.stopReason !== "error" &&
-				calculateContextTokens(message.usage) > 0
-			) {
-				return true;
+		let entry = this.sessionManager.getLeafEntry();
+		while (entry) {
+			if (entry.type === "compaction") return false;
+			if (entry.type === "context_window") return true;
+			if (model && entry.type === "message" && entry.message.role === "assistant") {
+				const message = entry.message;
+				if (
+					message.provider === model.provider &&
+					message.model === model.id &&
+					message.stopReason !== "aborted" &&
+					message.stopReason !== "error" &&
+					message.usage &&
+					calculateContextTokens(message.usage) > 0
+				) {
+					return true;
+				}
 			}
+			entry = entry.parentId ? this.sessionManager.getEntry(entry.parentId) : undefined;
 		}
-		return false;
+		return true;
 	}
 
 	private _installAgentNextTurnRefresh(): void {

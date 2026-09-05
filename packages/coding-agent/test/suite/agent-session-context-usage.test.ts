@@ -1,7 +1,8 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage, type Usage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { estimateContextTokens } from "../../src/core/compaction/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function usage(totalTokens: number): Usage {
@@ -19,7 +20,86 @@ describe("AgentSession context usage estimate", () => {
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	});
+
+	it.each(["root", "window", "compaction", "response"])(
+		"avoids historical arrays when checking current usage after %s",
+		async (boundary) => {
+			const harness = await createHarness({ tools: [] });
+			harnesses.push(harness);
+			const sm = harness.sessionManager;
+			for (let i = 0; i < 100; i++) sm.appendCustomEntry("old", i);
+			const kept = sm.appendMessage({ ...fauxAssistantMessage("old"), usage: usage(60_000) });
+			if (boundary !== "root") sm.appendCompaction("summary", kept, 60_000);
+			if (boundary === "window") sm.appendContextWindow("fresh", 60_000);
+			if (boundary === "response") sm.appendMessage({ ...fauxAssistantMessage("new"), usage: usage(1234) });
+			sm.appendCustomEntry("metadata");
+			harness.session.agent.state.messages = sm.buildSessionContext().messages;
+			const scans = [vi.spyOn(sm, "getEntries"), vi.spyOn(sm, "getBranch"), vi.spyOn(sm, "buildContextEntries")];
+			const parents = vi.spyOn(sm, "getEntry");
+			const state = harness.session.agent.state;
+			const options = { model: harness.getModel(), systemPrompt: state.systemPrompt, tools: state.tools };
+			const expected =
+				boundary === "compaction"
+					? null
+					: Math.max(
+							estimateContextTokens(state.messages, options).tokens,
+							estimateContextTokens(state.messages, { ...options, useReportedUsage: false }).tokens,
+						);
+			for (let i = 0; i < 3; i++) expect(harness.session.getContextUsage()?.tokens).toBe(expected);
+			for (const scan of scans) expect(scan).not.toHaveBeenCalled();
+			expect(parents.mock.calls.length).toBeLessThanOrEqual(6);
+		},
+	);
+
+	it("keeps retained usage unknown until a valid matching-model response follows the latest active compaction", async () => {
+		const harness = await createHarness({ tools: [], models: [{ id: "faux-1" }, { id: "other" }] });
+		harnesses.push(harness);
+		const sm = harness.sessionManager;
+		const old = { ...fauxAssistantMessage("retained"), usage: usage(60_000) };
+		const kept = sm.appendMessage(old);
+		const compaction = sm.appendCompaction("summary", kept, 60_000);
+		const sync = () => {
+			harness.session.agent.state.messages = sm.buildSessionContext().messages;
+		};
+		sync();
+		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
+		expect(harness.session.messages).toContain(old);
+		expect(harness.session.getContextUsage()?.tokens).toBeNull();
+		for (const message of [
+			{ ...fauxAssistantMessage("error", { stopReason: "error" }), usage: usage(1000) },
+			{ ...fauxAssistantMessage("aborted", { stopReason: "aborted" }), usage: usage(1000) },
+			{ ...fauxAssistantMessage("zero"), usage: usage(0) },
+			{ ...fauxAssistantMessage("other model"), model: "other", usage: usage(1000) },
+			{ ...fauxAssistantMessage("other provider"), provider: "other", usage: usage(1000) },
+		]) {
+			sm.appendMessage(message);
+			sync();
+			expect(harness.session.getContextUsage()).toMatchObject({ tokens: null, percent: null });
+		}
+		const valid = sm.appendMessage({ ...fauxAssistantMessage("valid"), usage: usage(1234) });
+		sync();
+		expect(harness.session.getContextUsage()?.tokens).toBe(1234);
+		sm.appendMessage({ ...fauxAssistantMessage("zero"), usage: usage(0) });
+		sync();
+		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThanOrEqual(1234);
+		await harness.session.setModel(harness.getModel("other")!);
+		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThanOrEqual(1000);
+		sm.branch(compaction);
+		sync();
+		expect(harness.session.getContextUsage()?.tokens).toBeNull();
+		sm.branch(valid);
+		sm.appendCompaction("second summary", kept, 1234);
+		sync();
+		expect(harness.session.getContextUsage()?.tokens).toBeNull();
+		sm.appendContextWindow(undefined, 1234);
+		sync();
+		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThan(0);
+		sm.resetLeaf();
+		sync();
+		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThan(0);
 	});
 
 	it("counts the system prompt and tool definitions before the model reports usage", async () => {
