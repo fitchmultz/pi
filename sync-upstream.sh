@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Sync this fork with upstream earendil-works/pi and rebuild.
-# Global `pi` is an npm symlink into packages/coding-agent, so rebuilding updates the live install.
+# Run only in a checkout not used by running Pi sessions; see FORK.md.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-git fetch upstream --tags
-git merge upstream/main   # ponytail: plain merge, custom commits on main stay; resolve conflicts then rerun
-git push origin main
+[[ $(git branch --show-current) == main ]] || { echo "Run from main" >&2; exit 1; }
+git fetch --no-tags --no-prune --no-prune-tags origin refs/heads/main:refs/remotes/origin/main
+git fetch --no-tags --no-prune --no-prune-tags fork refs/heads/main:refs/remotes/fork/main
+git merge --no-edit fork/main
+git merge --no-edit origin/main
+git branch --set-upstream-to=fork/main main
+git config branch.main.rebase false
 
-npm install
-for p in tui telemetry ai agent protocol client coding-agent; do
-  npm run build --prefix "packages/$p"
-done
-
-pi --version
+npm ci --ignore-scripts
+npm run hydrate:model-data
+npm run build:offline
+npm run check
+(cd packages/coding-agent && npm_config_prefix="$HOME/.local/share/npm-global" npm link --ignore-scripts)
+"$HOME/.local/share/npm-global/bin/pi" --version
+git push fork main:main
