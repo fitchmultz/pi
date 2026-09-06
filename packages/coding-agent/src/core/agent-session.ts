@@ -1766,7 +1766,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Clear all queued messages and return them.
+	 * Clear queued steering/follow-up messages and return their user text.
 	 * Useful for restoring to editor when user aborts.
 	 * @returns Object with steering and followUp arrays
 	 */
@@ -1780,7 +1780,12 @@ export class AgentSession {
 		return { steering, followUp };
 	}
 
-	/** Number of pending messages (includes both steering and follow-up) */
+	/** Whether steering/follow-up messages await delivery, including custom messages but not context-only asides. */
+	get hasPendingMessages(): boolean {
+		return this.agent.hasQueuedMessages();
+	}
+
+	/** Number of pending user texts shown in the steering/follow-up UI. */
 	get pendingMessageCount(): number {
 		return this._steeringMessages.length + this._followUpMessages.length;
 	}
@@ -2855,7 +2860,7 @@ export class AgentSession {
 					}
 					void this.abort();
 				},
-				hasPendingMessages: () => this.pendingMessageCount > 0,
+				hasPendingMessages: () => this.hasPendingMessages,
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
 				},

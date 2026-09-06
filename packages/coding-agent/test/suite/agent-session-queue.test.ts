@@ -325,15 +325,74 @@ describe("AgentSession queue characterization", () => {
 		).toBe(true);
 	});
 
+	it.each(["steer", "followUp"] as const)(
+		"reports custom %s messages retained by abort until clearQueue drains them",
+		async (deliverAs) => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const ctx = harness.session.extensionRunner.createContext();
+			let queued = false;
+			harness.setResponses([
+				async () => {
+					await harness.session.sendCustomMessage(
+						{ customType: "queue-test", content: "retained", display: true },
+						{ deliverAs },
+					);
+					queued = ctx.hasPendingMessages();
+					ctx.abort();
+					return fauxAssistantMessage("cancelled");
+				},
+			]);
+			await harness.session.prompt("start");
+
+			expect(harness.session.isIdle).toBe(true);
+			expect(harness.session.pendingMessageCount).toBe(0);
+			expect(harness.session.agent.hasQueuedMessages()).toBe(true);
+			expect(queued).toBe(true);
+			expect(ctx.hasPendingMessages()).toBe(true);
+			expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: [] });
+			expect(ctx.hasPendingMessages()).toBe(false);
+		},
+	);
+
+	it("does not count context-only custom messages as pending steering/follow-up work", async () => {
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = await createWaitingHarness();
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		const ctx = harness.session.extensionRunner.createContext();
+
+		await waitForToolStart;
+		await harness.session.sendCustomMessage(
+			{ customType: "context-only", content: "aside", display: true },
+			{ triggerTurn: false },
+		);
+		const queued = ctx.hasPendingMessages();
+		releaseToolExecution();
+		await promptPromise;
+
+		expect(queued).toBe(false);
+		expect(ctx.hasPendingMessages()).toBe(false);
+		expect(harness.session.messages.some((message) => message.role === "custom")).toBe(true);
+	});
+
 	it("injects nextTurn custom messages into the next prompt", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		let sawCustomMessage = false;
+		const ctx = harness.session.extensionRunner.createContext();
+		expect(ctx.hasPendingMessages()).toBe(false);
 
 		await harness.session.sendCustomMessage(
 			{ customType: "next-turn", content: "carry this", display: true, details: {} },
 			{ deliverAs: "nextTurn" },
 		);
+		expect(ctx.hasPendingMessages()).toBe(false);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		harness.session.clearQueue();
+		expect(ctx.hasPendingMessages()).toBe(false);
 
 		harness.setResponses([
 			(context) => {
@@ -349,6 +408,7 @@ describe("AgentSession queue characterization", () => {
 
 		await harness.session.prompt("normal prompt");
 
+		expect(ctx.hasPendingMessages()).toBe(false);
 		expect(sawCustomMessage).toBe(true);
 		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
 	});
