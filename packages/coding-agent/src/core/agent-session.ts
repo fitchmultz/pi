@@ -48,6 +48,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import { APP_NAME } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
@@ -1766,7 +1767,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Clear all queued messages and return them.
+	 * Clear queued steering/follow-up messages and return their user text.
 	 * Useful for restoring to editor when user aborts.
 	 * @returns Object with steering and followUp arrays
 	 */
@@ -1780,7 +1781,12 @@ export class AgentSession {
 		return { steering, followUp };
 	}
 
-	/** Number of pending messages (includes both steering and follow-up) */
+	/** Whether steering/follow-up messages await delivery, including custom messages but not context-only asides. */
+	get hasPendingMessages(): boolean {
+		return this.agent.hasQueuedMessages();
+	}
+
+	/** Number of pending user texts shown in the steering/follow-up UI. */
 	get pendingMessageCount(): number {
 		return this._steeringMessages.length + this._followUpMessages.length;
 	}
@@ -2855,7 +2861,7 @@ export class AgentSession {
 					}
 					void this.abort();
 				},
-				hasPendingMessages: () => this.pendingMessageCount > 0,
+				hasPendingMessages: () => this.hasPendingMessages,
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
 				},
@@ -3040,6 +3046,7 @@ export class AgentSession {
 		});
 	}
 
+	/** Refresh resources and reinitialize extensions. Extension code updates require a process restart. */
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
@@ -3065,6 +3072,7 @@ export class AgentSession {
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
 			await this.extendResourcesFromExtensions("reload");
 		}
+		this._extensionUIContext?.notify(`Restart ${APP_NAME} to apply extension code changes.`, "warning");
 	}
 
 	// =========================================================================

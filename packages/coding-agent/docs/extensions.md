@@ -4,7 +4,7 @@
 
 Extensions are TypeScript modules that extend pi's behavior. They can subscribe to lifecycle events, register custom tools callable by the LLM, add commands, and more.
 
-> **Placement for /reload:** Put extensions in `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-local) for auto-discovery. Use `pi -e ./path.ts` only for quick tests. Extensions in auto-discovered locations can be hot-reloaded with `/reload`.
+> **Extension code updates require a full restart.** Put extensions in `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-local) for auto-discovery. Use `pi -e ./path.ts` for quick tests. `/reload` refreshes settings and resources and reinitializes loaded extensions; it does not apply code changes. Quit and restart pi after changing extension code or dependencies.
 
 **Key capabilities:**
 - **Custom tools** - Register tools the LLM can call via `pi.registerTool()`
@@ -1057,7 +1057,7 @@ pi.on("tool_result", async (event, ctx) => {
 
 ### ctx.isIdle() / ctx.abort() / ctx.hasPendingMessages()
 
-Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, automatic retry, auto-compaction retry, or queued continuation.
+Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, automatic retry, auto-compaction retry, or queued continuation. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
 
 ### ctx.shutdown()
 
@@ -1320,11 +1320,13 @@ pi.registerCommand("handoff", {
 
 ### ctx.reload()
 
-Run the same reload flow as `/reload`.
+Run the same resource refresh and extension reinitialization flow as `/reload`. Existing extension entrypoints keep their cached factory functions. Extension path and enable/disable settings still apply, and newly discovered entrypoints can load.
+
+**Restart the Pi process to apply extension code or dependency updates.** `/reload`, `/new`, and switching sessions are not substitutes for a full restart. For a saved session, quit pi and resume it with `pi --session <id>`.
 
 ```typescript
 pi.registerCommand("reload-runtime", {
-  description: "Reload extensions, skills, prompts, themes, and context files",
+  description: "Refresh resources and reinitialize extensions; code changes require restarting Pi",
   handler: async (_args, ctx) => {
     await ctx.reload();
     return;
@@ -1338,7 +1340,8 @@ Important behavior:
 - The currently running command handler still continues in the old call frame
 - Code after `await ctx.reload()` still runs from the pre-reload version
 - Code after `await ctx.reload()` must not assume old in-memory extension state is still valid
-- After the handler returns, future commands/events/tool calls use the new extension version
+- After the handler returns, future commands/events/tool calls use the reinitialized extension instances, not updated code
+- TUI and RPC modes notify the caller that extension code changes require restarting pi
 
 For predictable behavior, treat reload as terminal for that handler (`await ctx.reload(); return;`).
 
@@ -1352,7 +1355,7 @@ import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("reload-runtime", {
-    description: "Reload extensions, skills, prompts, themes, and context files",
+    description: "Refresh resources and reinitialize extensions; code changes require restarting Pi",
     handler: async (_args, ctx) => {
       await ctx.reload();
       return;
@@ -1362,7 +1365,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "reload_runtime",
     label: "Reload Runtime",
-    description: "Reload extensions, skills, prompts, themes, and context files",
+    description: "Refresh resources and reinitialize extensions; code changes require restarting Pi",
     parameters: Type.Object({}),
     async execute() {
       pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp" });

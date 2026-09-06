@@ -852,6 +852,12 @@ Each command has:
 
 **Note**: Built-in TUI commands (`/settings`, `/hotkeys`, etc.) are not included. They are handled only in interactive mode and would not execute if sent via `prompt`.
 
+### Reloading resources
+
+An extension command can call `ctx.reload()` to refresh settings/resources and reinitialize extensions. Existing entrypoints reuse their loaded factory functions. After a successful reload, Pi emits a fire-and-forget `extension_ui_request` with `method: "notify"`, `notifyType: "warning"`, and the message `Restart pi to apply extension code changes.`
+
+To apply extension code or dependency updates, stop and restart the Pi subprocess. For a saved session, restart with `--session <id>` to resume it. A successful reload or `new_session` response does not mean updated extension code is active.
+
 ## Events
 
 Events are streamed to stdout as JSON lines during agent operation. Events do not generally include an `id` field; `bash_execution_update` includes the `id` of its originating `bash` command when one was provided.

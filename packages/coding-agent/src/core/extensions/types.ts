@@ -337,7 +337,7 @@ export interface ExtensionContext {
 	signal: AbortSignal | undefined;
 	/** Abort the current agent operation */
 	abort(): void;
-	/** Whether there are queued messages waiting */
+	/** Whether steering/follow-up messages await delivery, including custom messages. Excludes nextTurn/context-only asides. */
 	hasPendingMessages(): boolean;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
@@ -389,7 +389,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean }>;
 
-	/** Reload extensions, skills, prompts, themes, and context files. */
+	/** Refresh resources and reinitialize extensions. Extension code updates require a full Pi restart. */
 	reload(): Promise<void>;
 }
 

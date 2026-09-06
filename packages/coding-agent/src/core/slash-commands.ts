@@ -38,6 +38,6 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "new", description: "Start a new session" },
 	{ name: "compact", description: "Manually compact the session context" },
 	{ name: "resume", description: "Resume a different session" },
-	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
+	{ name: "reload", description: "Reload settings and resources (extension code changes require a restart)" },
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];
