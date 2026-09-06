@@ -48,6 +48,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import { APP_NAME } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
@@ -3045,6 +3046,7 @@ export class AgentSession {
 		});
 	}
 
+	/** Refresh resources and reinitialize extensions. Extension code updates require a process restart. */
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
@@ -3070,6 +3072,7 @@ export class AgentSession {
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
 			await this.extendResourcesFromExtensions("reload");
 		}
+		this._extensionUIContext?.notify(`Restart ${APP_NAME} to apply extension code changes.`, "warning");
 	}
 
 	// =========================================================================

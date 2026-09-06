@@ -106,6 +106,9 @@ interface AgentSession {
   // Abort current operation
   abort(): Promise<void>;
 
+  // Refresh resources and reinitialize extensions (code updates require a process restart)
+  reload(): Promise<void>;
+
   // Cleanup
   dispose(): void;
 }
@@ -232,6 +235,8 @@ await session.followUp("After you're done, also do this");
 ```
 
 Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued).
+
+`session.hasPendingMessages` includes queued user and custom steering/follow-up messages, but excludes `nextTurn` and context-only asides. `session.pendingMessageCount` counts only pending user texts for UI display.
 
 ### Agent and AgentState
 
@@ -913,6 +918,8 @@ Project overrides global. Nested objects merge keys. Setters modify global setti
 ## ResourceLoader
 
 Use `DefaultResourceLoader` to discover extensions, skills, prompts, themes, and context files.
+
+`session.reload()` refreshes resources and reinitializes extensions. `DefaultResourceLoader.reload()` applies resource settings, including extension path and enable/disable changes, but reuses cached factories for existing entrypoints. Restart the host process after changing extension code or dependencies; creating another session or switching working directories does not reliably clear native module caches.
 
 ```typescript
 import {

@@ -40,6 +40,8 @@ pi update --extension npm:@foo/bar
 
 These commands manage pi packages and `pi update` can update the pi CLI installation. For experimental installer-managed installations, `pi update` installs the exact checked version into a staged, lockfile-backed release and activates it only after verification, leaving the current release intact if the update fails. Managed installations do not support `--force`; rerun the installer to repair one. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
 
+Restart running pi processes after updating extension code or dependencies. `/reload` refreshes settings and non-code resources and reinitializes loaded extensions; it does not apply extension code updates.
+
 By default, `install` and `remove` write to user settings (`~/.pi/agent/settings.json`). Use `-l` to write to project settings (`.pi/settings.json`) instead. Project settings can be shared with your team, and pi installs any missing packages automatically on startup after the project is trusted.
 
 To try a package without installing it, use `--extension` or `-e`. This installs to a temporary directory for the current run only:
