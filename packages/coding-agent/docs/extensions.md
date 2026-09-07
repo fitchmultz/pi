@@ -2303,6 +2303,9 @@ pi.registerTool({
 - `lastComponent` - the previously returned component for that slot, if any
 - `invalidate()` - request a rerender of this tool row
 - `toolCallId`, `cwd`, `executionStarted`, `argsComplete`, `isPartial`, `expanded`, `showImages`, `isError`
+- `compactView` - optional view-mode hint, independent of `expanded`; absent means normal view
+
+In compact view, native collapsed tool cards are capped at two actual terminal rows, including custom framing and wrapping. Render a short call/result when `context.compactView === true && !context.expanded`; keep full detail available when expanded. Native rendering enforces the cap even if a renderer ignores the hint, and hides inline images until expanded. Both renderer slots receive the hint through `ToolRenderContext`, not through `ToolRenderResultOptions`. Exports and older hosts can omit it.
 
 Use `context.state` for cross-slot shared state. Keep slot-local caches on the returned component instance when you want to reuse and mutate the same component across renders.
 
@@ -2900,6 +2903,8 @@ pi.registerMessageRenderer("my-extension", (message, options, theme) => {
   return new Text(text, outputPad, 0);
 });
 ```
+
+`MessageRenderOptions.compactView` is an optional view-mode hint. Native interactive mode supplies a boolean; an absent field means normal view. For ordinary status notices, return **one actual content row** when `options.compactView === true && !options.expanded`, using width-aware truncation where needed. Pi retains its existing one-row outer spacer, so the whole notice occupies two rows. Keep questions, needs-attention notices, and substantive human content prominent; native code does not truncate custom messages. See [TUI line width](tui.md#line-width).
 
 Messages are sent via `pi.sendMessage()`:
 

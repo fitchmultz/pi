@@ -432,6 +432,7 @@ export class InteractiveMode {
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
+	private compactView: boolean;
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
@@ -569,7 +570,8 @@ export class InteractiveMode {
 		this.footerContainer = new Container();
 		this.footerContainer.addChild(this.footer);
 
-		// Load hide thinking block setting
+		// Snapshot the future-start default once; reloads must not change this UI's view.
+		this.compactView = this.settingsManager.getCompactView();
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.outputPad = this.settingsManager.getOutputPad();
 
@@ -2969,6 +2971,16 @@ export class InteractiveMode {
 			if (!text) return;
 
 			// Handle commands
+			if (/^\/compact-view(?:\s|$)/.test(text)) {
+				const action = text.slice("/compact-view".length).trim() || "toggle";
+				this.editor.setText("");
+				if (action !== "on" && action !== "off" && action !== "toggle") {
+					this.showWarning("Usage: /compact-view [on|off|toggle]");
+					return;
+				}
+				this.setCompactView(action === "toggle" ? !this.compactView : action === "on");
+				return;
+			}
 			if (text === "/settings") {
 				this.showSettingsSelector();
 				this.editor.setText("");
@@ -3235,6 +3247,7 @@ export class InteractiveMode {
 						this.hiddenThinkingLabel,
 						this.outputPad,
 						this.getMarkdownTransformers(),
+						this.compactView,
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
@@ -3258,6 +3271,7 @@ export class InteractiveMode {
 									{
 										showImages: this.settingsManager.getShowImages(),
 										imageWidthCells: this.settingsManager.getImageWidthCells(),
+										compactView: this.compactView,
 									},
 									this.getRegisteredToolDefinition(content.name),
 									this.ui,
@@ -3333,6 +3347,7 @@ export class InteractiveMode {
 						{
 							showImages: this.settingsManager.getShowImages(),
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
+							compactView: this.compactView,
 						},
 						this.getRegisteredToolDefinition(event.toolName),
 						this.ui,
@@ -3584,7 +3599,13 @@ export class InteractiveMode {
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
-				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext);
+				const component = new BashExecutionComponent(
+					message.command,
+					this.ui,
+					message.excludeFromContext,
+					this.compactView,
+				);
+				component.setExpanded(this.toolOutputExpanded);
 				if (message.output) {
 					component.appendOutput(message.output);
 				}
@@ -3605,6 +3626,7 @@ export class InteractiveMode {
 						renderer,
 						this.getMarkdownThemeWithSettings(),
 						this.outputPad,
+						this.compactView,
 					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
@@ -3674,6 +3696,7 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					this.outputPad,
 					this.getMarkdownTransformers(),
+					this.compactView,
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
@@ -3729,6 +3752,7 @@ export class InteractiveMode {
 							{
 								showImages: this.settingsManager.getShowImages(),
 								imageWidthCells: this.settingsManager.getImageWidthCells(),
+								compactView: this.compactView,
 							},
 							this.getRegisteredToolDefinition(content.name),
 							this.ui,
@@ -4215,15 +4239,15 @@ export class InteractiveMode {
 		this.setToolsExpanded(!this.toolOutputExpanded);
 	}
 
-	private setToolsExpanded(expanded: boolean): void {
-		if (expanded === this.toolOutputExpanded) return;
+	private setToolsExpanded(expanded: boolean, force = false): void {
+		if (!force && expanded === this.toolOutputExpanded) return;
 
 		this.toolOutputExpanded = expanded;
 		const activeHeader = this.customHeader ?? this.builtInHeader;
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
 		}
-		for (const container of [this.loadedResourcesContainer, this.chatContainer]) {
+		for (const container of [this.loadedResourcesContainer, this.chatContainer, this.pendingMessagesContainer]) {
 			for (const child of container.children) {
 				if (isExpandable(child)) {
 					child.setExpanded(expanded);
@@ -4231,6 +4255,27 @@ export class InteractiveMode {
 			}
 		}
 		this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);
+	}
+
+	private setCompactView(compactView: boolean): void {
+		const enteringCompactView = compactView && !this.compactView;
+		this.compactView = compactView;
+		this.settingsManager.setCompactView(compactView);
+		// Also collapse cards opened by local clicks when global expansion is already off.
+		if (enteringCompactView) this.setToolsExpanded(false, true);
+		for (const container of [this.chatContainer, this.pendingMessagesContainer]) {
+			for (const child of container.children) {
+				if (
+					child instanceof ToolExecutionComponent ||
+					child instanceof BashExecutionComponent ||
+					child instanceof AssistantMessageComponent ||
+					child instanceof CustomMessageComponent
+				) {
+					child.setCompactView(compactView);
+				}
+			}
+		}
+		this.showStatus(`Compact view: ${compactView ? "on" : "off"} (remembered for new sessions)`);
 	}
 
 	/** Update rendered assistant messages without rebuilding live tool components. */
@@ -4373,6 +4418,9 @@ export class InteractiveMode {
 	}
 
 	private updatePendingMessagesDisplay(): void {
+		const bashComponents = this.pendingMessagesContainer.children.filter(
+			(child) => child instanceof BashExecutionComponent,
+		);
 		this.pendingMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
@@ -4389,6 +4437,7 @@ export class InteractiveMode {
 			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
 			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
+		for (const component of bashComponents) this.pendingMessagesContainer.addChild(component);
 	}
 
 	private restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
@@ -4572,6 +4621,7 @@ export class InteractiveMode {
 					availableDefaultModels: this.session.modelRuntime.getAvailableSnapshot(),
 					showImages: this.settingsManager.getShowImages(),
 					imageWidthCells: this.settingsManager.getImageWidthCells(),
+					compactView: this.compactView,
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
 					blockImages: this.settingsManager.getBlockImages(),
 					enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
@@ -4678,6 +4728,7 @@ export class InteractiveMode {
 						void this.themeController.setThemeSetting(themeSetting);
 					},
 					onThemePreview: (themeName) => this.themeController.preview(themeName),
+					onCompactViewChange: (compactView) => this.setCompactView(compactView),
 					onHideThinkingBlockChange: (hidden) => {
 						this.hideThinkingBlock = hidden;
 						this.settingsManager.setHideThinkingBlock(hidden);
@@ -6519,7 +6570,8 @@ export class InteractiveMode {
 			const result = eventResult.result;
 
 			// Create UI component for display
-			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
+			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext, this.compactView);
+			this.bashComponent.setExpanded(this.toolOutputExpanded);
 			if (this.session.isStreaming) {
 				this.pendingMessagesContainer.addChild(this.bashComponent);
 				this.pendingBashComponents.push(this.bashComponent);
@@ -6547,7 +6599,8 @@ export class InteractiveMode {
 
 		// Normal execution path (possibly with custom operations)
 		const isDeferred = this.session.isStreaming;
-		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
+		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext, this.compactView);
+		this.bashComponent.setExpanded(this.toolOutputExpanded);
 
 		if (isDeferred) {
 			// Show in pending area when agent is streaming

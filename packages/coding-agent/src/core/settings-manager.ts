@@ -105,6 +105,7 @@ export interface Settings {
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
+	compactView?: boolean; // default: false; global display default for new interactive instances
 	showCacheMissNotices?: boolean; // default: false - show cache cost and provider recovery notices
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
@@ -914,6 +915,16 @@ export class SettingsManager {
 
 	getHideThinkingBlock(): boolean {
 		return this.settings.hideThinkingBlock ?? false;
+	}
+
+	getCompactView(): boolean {
+		return this.globalSettings.compactView === true;
+	}
+
+	setCompactView(compactView: boolean): void {
+		this.globalSettings.compactView = compactView;
+		this.markModified("compactView");
+		this.save();
 	}
 
 	getShowCacheMissNotices(): boolean {
