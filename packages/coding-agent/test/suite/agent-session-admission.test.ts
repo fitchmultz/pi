@@ -21,6 +21,60 @@ describe("AgentSession prompt admission", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
+	it("counts concurrent input dispatch through handling and reload without counting commands", async () => {
+		const firstReleased = createDeferred();
+		const secondReleased = createDeferred();
+		const entered: string[] = [];
+		const commandCounts: number[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", async (event) => {
+						entered.push(event.text);
+						await (event.text === "first" ? firstReleased : secondReleased).promise;
+						return { action: "handled" };
+					});
+					pi.registerCommand("restart-check", {
+						handler: async (_args, ctx) => {
+							commandCounts.push(ctx.getPendingInputCount());
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const first = harness.session.prompt("first");
+		const second = harness.session.prompt("second");
+		try {
+			expect(entered).toEqual(["first", "second"]);
+			expect(harness.session.isIdle).toBe(true);
+			expect(harness.session.hasPendingMessages).toBe(false);
+			const oldContext = harness.session.extensionRunner.createContext();
+			expect(oldContext.getPendingInputCount()).toBe(2);
+			await harness.session.prompt("/restart-check");
+			expect(commandCounts).toEqual([2]);
+			expect(entered).toHaveLength(2);
+			await harness.session.reload();
+			const current = harness.session.extensionRunner.createContext();
+			expect(() => oldContext.getPendingInputCount()).toThrow("stale");
+			expect(current.getPendingInputCount()).toBe(2);
+			secondReleased.resolve();
+			await second;
+			expect(current.getPendingInputCount()).toBe(1);
+			firstReleased.resolve();
+			await first;
+			expect(current.getPendingInputCount()).toBe(0);
+			await harness.session.prompt("/restart-check");
+			expect(commandCounts).toEqual([2, 0]);
+			expect(harness.session.messages).toEqual([]);
+			expect(harness.faux.state.callCount).toBe(0);
+		} finally {
+			firstReleased.resolve();
+			secondReleased.resolve();
+			await Promise.allSettled([first, second]);
+		}
+	});
+
 	it.each([false, true])("owns user startup through settlement (abort: %s)", async (abort) => {
 		const inputEntered = createDeferred();
 		const inputReleased = createDeferred();
@@ -90,11 +144,13 @@ describe("AgentSession prompt admission", () => {
 		const waits: Promise<void>[] = [];
 		try {
 			await inputEntered.promise;
+			expect(harness.session.pendingInputCount).toBe(1);
 			expect(harness.session.isIdle).toBe(true);
 			owner = Promise.allSettled([
 				harness.session.prompt("original", { preflightResult: (accepted) => preflight.push(accepted) }),
 			]);
 			await startupEntered.promise;
+			expect(harness.session.pendingInputCount).toBe(2);
 			expect(startupStates).toEqual([{ prompt: "original", idle: false }]);
 			expect(harness.session.isStreaming).toBe(true);
 			expect(harness.session.agent.state.isStreaming).toBe(false);
@@ -113,6 +169,7 @@ describe("AgentSession prompt admission", () => {
 
 			startupReleased.resolve();
 			await requestEntered.promise;
+			expect(harness.session.pendingInputCount).toBe(1);
 			const signal = harness.session.agent.signal;
 			expect(signal?.aborted).toBe(false);
 			waits.push(
@@ -137,6 +194,7 @@ describe("AgentSession prompt admission", () => {
 				},
 			]);
 			expect(rejectedPreflight).toEqual([false]);
+			expect(harness.session.pendingInputCount).toBe(0);
 			expect(preflight).toEqual([true]);
 			expect(harness.session.isStreaming).toBe(true);
 			expect(harness.session.isIdle).toBe(false);
@@ -251,6 +309,7 @@ describe("AgentSession prompt admission", () => {
 		]);
 		try {
 			await authEntered.promise;
+			expect(harness.session.pendingInputCount).toBe(1);
 			expect(harness.session.isStreaming).toBe(true);
 			expect(harness.session.isIdle).toBe(false);
 			expect(harness.session.agent.state.isStreaming).toBe(false);
@@ -278,6 +337,7 @@ describe("AgentSession prompt admission", () => {
 			await harness.session.sendCustomMessage(custom("late-aside"), { deliverAs: "nextTurn" });
 			expect(preflight).toEqual([]);
 			expect(queuedPreflight).toEqual([true]);
+			expect(harness.session.pendingInputCount).toBe(1);
 			expect(rejectedPreflight).toEqual([false]);
 			expect(idleResults).toEqual([]);
 			expect(harness.faux.state.callCount).toBe(0);
@@ -291,6 +351,7 @@ describe("AgentSession prompt admission", () => {
 			await Promise.all(waits);
 			expect(idleResults).toEqual(["auth", "after-rejection"]);
 			expect(preflight).toEqual([false]);
+			expect(harness.session.pendingInputCount).toBe(0);
 			expect(harness.eventsOfType("agent_start")).toEqual([]);
 			expect(harness.eventsOfType("agent_settled")).toEqual([]);
 			expect(harness.session.isIdle).toBe(true);
@@ -398,6 +459,7 @@ describe("AgentSession prompt admission", () => {
 				}),
 			]);
 			expect(harness.session.isStreaming).toBe(true);
+			expect(harness.session.pendingInputCount).toBe(1);
 			expect(harness.session.isCompacting).toBe(true);
 			expect(harness.session.agent.state.isStreaming).toBe(false);
 			wait = harness.session.waitForIdle().then(() => {
@@ -434,6 +496,7 @@ describe("AgentSession prompt admission", () => {
 					.map((entry) => entry.details),
 			).toEqual(["compaction-aside", "compaction-wakeup"].map((id) => ({ id })));
 			expect(harness.session.hasPendingMessages).toBe(false);
+			expect(harness.session.pendingInputCount).toBe(0);
 		} finally {
 			compactionReleased.resolve();
 			await Promise.allSettled([run, wait]);

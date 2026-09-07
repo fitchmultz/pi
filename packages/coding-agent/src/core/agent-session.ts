@@ -239,6 +239,8 @@ export interface ExtensionBindings {
 	uiContext?: ExtensionUIContext;
 	mode?: ExtensionMode;
 	commandContextActions?: ExtensionCommandContextActions;
+	/** User inputs held by the mode before they reach prompt(). */
+	getQueuedInputCount?: () => number;
 	abortHandler?: () => void;
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
@@ -336,6 +338,8 @@ export class AgentSession {
 	private _pendingCustomMessages: CustomMessage[] = [];
 	/** Provider-bound inputs waiting until request preparation can no longer add a context boundary. */
 	private _pendingProviderMessages: AgentMessage[] = [];
+	/** Native prompt inputs awaiting handling, admission, or rejection. */
+	private _pendingInputCount = 0;
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -374,6 +378,7 @@ export class AgentSession {
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
+	private _extensionGetQueuedInputCount?: () => number;
 	private _extensionAbortHandler?: () => void;
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
@@ -1381,8 +1386,13 @@ export class AgentSession {
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		let preflightComplete = false;
+		let pendingInput = false;
 		const preflightResult = (success: boolean) => {
 			preflightComplete = true;
+			if (pendingInput) {
+				pendingInput = false;
+				this._pendingInputCount--;
+			}
 			options?.preflightResult?.(success);
 		};
 
@@ -1403,6 +1413,9 @@ export class AgentSession {
 					"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
 				);
 			}
+
+			this._pendingInputCount++;
+			pendingInput = true;
 
 			// Emit input event for extension interception (before skill/template expansion)
 			let currentText = text;
@@ -1780,6 +1793,16 @@ export class AgentSession {
 	/** Whether steering/follow-up messages await delivery, including custom messages but not context-only asides. */
 	get hasPendingMessages(): boolean {
 		return this.agent.hasQueuedMessages();
+	}
+
+	/** Inputs awaiting prompt preflight or held by the bound mode; excludes dispatched extension commands. */
+	get pendingInputCount(): number {
+		return this._pendingInputCount + (this._extensionGetQueuedInputCount?.() ?? 0);
+	}
+
+	/** Number of context-only asides awaiting the next user prompt; not yet persisted. */
+	get pendingNextTurnCount(): number {
+		return this._pendingNextTurnMessages.length;
 	}
 
 	/** Number of pending user texts shown in the steering/follow-up UI. */
@@ -2688,6 +2711,9 @@ export class AgentSession {
 		if (bindings.commandContextActions !== undefined) {
 			this._extensionCommandContextActions = bindings.commandContextActions;
 		}
+		if (bindings.getQueuedInputCount !== undefined) {
+			this._extensionGetQueuedInputCount = bindings.getQueuedInputCount;
+		}
 		if (bindings.abortHandler !== undefined) {
 			this._extensionAbortHandler = bindings.abortHandler;
 		}
@@ -2859,6 +2885,7 @@ export class AgentSession {
 				getModel: () => this.model,
 				getScopedModels: () => this._scopedModels,
 				isIdle: () => this.isIdle,
+				isBashRunning: () => this.isBashRunning,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 				getSignal: () => this.agent.signal,
 				abort: () => {
@@ -2869,6 +2896,8 @@ export class AgentSession {
 					void this.abort();
 				},
 				hasPendingMessages: () => this.hasPendingMessages,
+				getPendingNextTurnCount: () => this.pendingNextTurnCount,
+				getPendingInputCount: () => this.pendingInputCount,
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
 				},
@@ -3216,7 +3245,7 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Execute a bash command.
+	 * Execute a user bash command, including user_bash interception.
 	 * Adds result to agent context and session.
 	 * @param command The bash command to execute
 	 * @param onChunk Optional streaming callback for output
@@ -3232,24 +3261,37 @@ export class AgentSession {
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
-		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
-		const prefix = this.settingsManager.getShellCommandPrefix();
-		const shellPath = this.settingsManager.getShellPath();
-		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
-
 		try {
-			const result = await executeBashWithOperations(
-				resolvedCommand,
-				this._extensionRunner.resolveBashCwd(this.sessionManager.getCwd()),
-				options?.operations ?? createLocalBashOperations({ shellPath }),
-				{
-					onChunk: (delta) => {
-						onChunk?.(delta);
-						this._emit({ type: "bash_execution_update", id: options?.id, delta });
+			// Own activity before any interceptor can await or return a replacement result.
+			const intercepted = this._extensionRunner.hasHandlers("user_bash")
+				? await this._extensionRunner.emitUserBash({
+						type: "user_bash",
+						command,
+						excludeFromContext: options?.excludeFromContext ?? false,
+						cwd: this.sessionManager.getCwd(),
+					})
+				: undefined;
+			let result = intercepted?.result;
+			if (abortController.signal.aborted) {
+				result = { output: "", exitCode: undefined, cancelled: true, truncated: false };
+			} else if (result) {
+				if (result.output) onChunk?.(result.output);
+			} else {
+				const prefix = this.settingsManager.getShellCommandPrefix();
+				const shellPath = this.settingsManager.getShellPath();
+				result = await executeBashWithOperations(
+					prefix ? `${prefix}\n${command}` : command,
+					this._extensionRunner.resolveBashCwd(this.sessionManager.getCwd()),
+					intercepted?.operations ?? options?.operations ?? createLocalBashOperations({ shellPath }),
+					{
+						onChunk: (delta) => {
+							onChunk?.(delta);
+							this._emit({ type: "bash_execution_update", id: options?.id, delta });
+						},
+						signal: abortController.signal,
 					},
-					signal: abortController.signal,
-				},
-			);
+				);
+			}
 
 			this.recordBashResult(command, result, options);
 			return result;
@@ -3297,7 +3339,7 @@ export class AgentSession {
 		}
 	}
 
-	/** Whether a bash command is currently running */
+	/** Whether any user Bash dispatch or execution is unfinished, including async interceptors. */
 	get isBashRunning(): boolean {
 		return this._bashAbortControllers.size > 0;
 	}

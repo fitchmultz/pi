@@ -123,6 +123,134 @@ describe("AgentSession bash and persistence characterization", () => {
 		expect(harness.session.messages[harness.session.messages.length - 1]?.role).toBe("bashExecution");
 	});
 
+	it("tracks user Bash through async interception and concurrent custom operations", async () => {
+		let releaseInterception!: () => void;
+		const interception = new Promise<void>((resolve) => {
+			releaseInterception = resolve;
+		});
+		const invocations: ControlledBashInvocation[] = [];
+		const operations = createControlledBashOperations(invocations);
+		let intercepted = 0;
+		let laterObserver = 0;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) =>
+					pi.on("user_bash", async () => {
+						intercepted++;
+						await interception;
+						return { operations };
+					}),
+				(pi) =>
+					pi.on("user_bash", () => {
+						laterObserver++;
+					}),
+			],
+		});
+		harnesses.push(harness);
+		const ctx = harness.session.extensionRunner.createContext();
+		const first = harness.session.executeBash("first");
+		const second = harness.session.executeBash("second");
+		try {
+			expect(intercepted).toBe(2);
+			expect(ctx.isBashRunning()).toBe(true);
+			expect(ctx.isIdle()).toBe(true);
+			releaseInterception();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(invocations).toHaveLength(2);
+			expect(laterObserver).toBe(0);
+			invocations[0].finish();
+			await first;
+			expect(ctx.isBashRunning()).toBe(true);
+			invocations[1].finish();
+			await second;
+			expect(ctx.isBashRunning()).toBe(false);
+		} finally {
+			releaseInterception();
+			for (const invocation of invocations) invocation.finish();
+			await Promise.all([first, second]);
+		}
+	});
+
+	it("tracks and records a full replacement result exactly once", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const replacement = { output: "remote result", exitCode: 0, cancelled: false, truncated: false };
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) =>
+					pi.on("user_bash", async () => {
+						await gate;
+						return { result: replacement };
+					}),
+			],
+		});
+		harnesses.push(harness);
+		const ctx = harness.session.extensionRunner.createContext();
+		const chunks: string[] = [];
+		const pending = harness.session.executeBash("not a local command", (chunk) => chunks.push(chunk), {
+			excludeFromContext: true,
+		});
+		try {
+			expect(ctx.isBashRunning()).toBe(true);
+			release();
+			expect(await pending).toBe(replacement);
+			expect(chunks).toEqual(["remote result"]);
+			expect(harness.session.messages).toHaveLength(1);
+			expect(harness.session.messages[0]).toMatchObject({
+				role: "bashExecution",
+				output: "remote result",
+				excludeFromContext: true,
+			});
+			expect(ctx.isBashRunning()).toBe(false);
+		} finally {
+			release();
+			await pending;
+		}
+	});
+
+	it("keeps cancelled interception busy until completion and never starts its operations", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let executed = false;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) =>
+					pi.on("user_bash", async () => {
+						await gate;
+						return {
+							operations: {
+								exec: async () => {
+									executed = true;
+									return { exitCode: 0 };
+								},
+							},
+						};
+					}),
+			],
+		});
+		harnesses.push(harness);
+		const ctx = harness.session.extensionRunner.createContext();
+		const pending = harness.session.executeBash("not a local command");
+		try {
+			harness.session.abortBash();
+			expect(ctx.isBashRunning()).toBe(true);
+			release();
+			expect((await pending).cancelled).toBe(true);
+			expect(executed).toBe(false);
+			expect(ctx.isBashRunning()).toBe(false);
+			harness.session.dispose();
+			expect(() => ctx.isBashRunning()).toThrow("stale");
+			expect(() => ctx.getPendingNextTurnCount()).toThrow("stale");
+		} finally {
+			release();
+			await pending;
+		}
+	});
+
 	it("cancels running bash commands with abortBash", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
