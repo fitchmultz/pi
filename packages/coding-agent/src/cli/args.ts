@@ -25,6 +25,7 @@ export interface Args {
 	name?: string;
 	noSession?: boolean;
 	session?: string;
+	sessionCwd?: string;
 	sessionId?: string;
 	fork?: string;
 	sessionDir?: string;
@@ -122,6 +123,18 @@ export function parseArgs(args: string[]): Args {
 			result.noSession = true;
 		} else if (arg === "--session" && i + 1 < args.length) {
 			result.session = args[++i];
+		} else if (arg === "--session-cwd") {
+			const value = args[i + 1];
+			if (value === undefined || value.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--session-cwd requires a path" });
+			} else {
+				i++;
+				if (value.length === 0) {
+					result.diagnostics.push({ type: "error", message: "--session-cwd requires a non-empty path" });
+				} else {
+					result.sessionCwd = value;
+				}
+			}
 		} else if (arg === "--session-id" && i + 1 < args.length) {
 			result.sessionId = args[++i];
 		} else if (arg === "--fork" && i + 1 < args.length) {
@@ -285,6 +298,8 @@ ${chalk.bold("Options:")}
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
   --session <path|id>            Use specific session file or partial UUID
+  --session-cwd <path>           Override --session working directory for this run (existing directory)
+                                 Not with --fork, --continue, --resume, --session-id, or --no-session
   --session-id <id>              Use exact project session ID, creating it if missing
   --fork <path|id>               Fork specific session file or partial UUID into a new session
   --session-dir <dir>            Directory for session storage and lookup
