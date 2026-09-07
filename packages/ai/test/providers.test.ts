@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lazyApi } from "../src/api/lazy.ts";
+import { lazyApi, lazyStream } from "../src/api/lazy.ts";
 import { envApiKeyAuth } from "../src/auth/helpers.ts";
 import type { AuthContext, AuthEvent } from "../src/auth/types.ts";
 import { createModels, createProvider } from "../src/models.ts";
@@ -13,6 +13,7 @@ import { fauxAssistantMessage, fauxProvider } from "../src/providers/faux.ts";
 import { googleVertexProvider } from "../src/providers/google-vertex.ts";
 import type {
 	Api,
+	AssistantMessageEvent,
 	Context,
 	DeferredCancelOptions,
 	DeferredFetchOptions,
@@ -364,6 +365,63 @@ describe("createProvider", () => {
 		expect(api.cancelDeferred).toBeUndefined();
 		expect((await api.fetchDeferred!(model, handle).result()).stopReason).toBe("stop");
 		expect(loads).toBe(1);
+	});
+
+	it("keeps setup failures as errors without a caller signal, regardless of error name", async () => {
+		const stream = lazyStream(testModel("api-a", "model-a"), async () => {
+			throw new DOMException("not a caller cancellation", "AbortError");
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) events.push(event);
+		const result = await stream.result();
+		expect(events).toEqual([{ type: "error", reason: "error", error: result }]);
+		expect(result).toMatchObject({ stopReason: "error", errorMessage: "not a caller cancellation" });
+	});
+
+	it.each(["stream", "streamSimple", "fetchDeferred"] as const)(
+		"preserves cancellation when lazy %s loading fails",
+		async (method) => {
+			const controller = new AbortController();
+			const api = lazyApi(
+				async () => {
+					controller.abort(new Error("cancelled during loading"));
+					throw new Error("module loading failed");
+				},
+				{ fetchDeferred: true },
+			);
+			const model = testModel("api-a", "model-a");
+			const options = { signal: controller.signal };
+			const stream =
+				method === "fetchDeferred"
+					? api.fetchDeferred!(
+							model,
+							{ provider: model.provider, modelId: model.id, api: model.api, id: "r1" },
+							options,
+						)
+					: api[method](model, context, options);
+			const events: AssistantMessageEvent[] = [];
+			for await (const event of stream) events.push(event);
+			const result = await stream.result();
+			expect(events).toEqual([{ type: "error", reason: "aborted", error: result }]);
+			expect(result).toMatchObject({ stopReason: "aborted", errorMessage: "module loading failed" });
+		},
+	);
+
+	it.each(["stop", "error"] as const)("forwards provider %s events unchanged after cancellation", async (reason) => {
+		const controller = new AbortController();
+		controller.abort();
+		const message = { ...fauxAssistantMessage("provider output"), stopReason: reason };
+		const event: AssistantMessageEvent =
+			reason === "stop" ? { type: "done", reason, message } : { type: "error", reason, error: message };
+		const inner = new AssistantMessageEventStream();
+		inner.push(event);
+		inner.end(message);
+		const stream = lazyStream(testModel("api-a", "model-a"), async () => inner, controller.signal);
+		const events: AssistantMessageEvent[] = [];
+		for await (const forwarded of stream) events.push(forwarded);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toBe(event);
+		expect(await stream.result()).toBe(message);
 	});
 
 	it("dispatches on model.api for mixed-API providers", async () => {
