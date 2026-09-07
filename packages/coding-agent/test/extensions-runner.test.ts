@@ -97,6 +97,7 @@ describe("ExtensionRunner", () => {
 		abort: () => {},
 		hasPendingMessages: () => false,
 		getPendingNextTurnCount: () => 0,
+		getPendingInputCount: () => 0,
 		shutdown: () => {},
 		getContextUsage: () => undefined,
 		getCompactionSettings: () => ({ enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 }),

@@ -343,6 +343,8 @@ export interface ExtensionContext {
 	hasPendingMessages(): boolean;
 	/** Number of unpersisted custom messages queued with deliverAs: "nextTurn". */
 	getPendingNextTurnCount(): number;
+	/** Submitted inputs awaiting native preflight or held in the current mode's input queues. Excludes dispatched extension commands. */
+	getPendingInputCount(): number;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
@@ -1774,6 +1776,7 @@ export interface ExtensionContextActions {
 	abort: () => void;
 	hasPendingMessages: () => boolean;
 	getPendingNextTurnCount: () => number;
+	getPendingInputCount: () => number;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
 	getCompactionSettings: () => CompactionSettings;

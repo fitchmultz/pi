@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
 import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
 
-it("exposes async RPC Bash and nextTurn activity without dispatching twice", async () => {
+it("exposes async RPC input, Bash and nextTurn activity without dispatching twice", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-rpc-activity-"));
 	const fixture = join(root, "fixture.ts");
 	writeFileSync(
@@ -12,6 +12,12 @@ it("exposes async RPC Bash and nextTurn activity without dispatching twice", asy
 		`
 export default function (pi) {
 	let release = () => {};
+	let releaseInput = () => {};
+	pi.on("input", async (event) => {
+		if (event.text !== "held input") return;
+		await new Promise(resolve => { releaseInput = resolve; });
+		return { action: "handled" };
+	});
 	let calls = 0;
 	let later = 0;
 	pi.on("user_bash", async () => {
@@ -24,9 +30,10 @@ export default function (pi) {
 		pi.sendMessage({ customType: "aside", content: "pending context", display: false }, { deliverAs: "nextTurn" });
 	} });
 	pi.registerCommand("activity", { handler: async (_args, ctx) => {
-		pi.appendEntry("activity", { bash: ctx.isBashRunning(), nextTurn: ctx.getPendingNextTurnCount(), idle: ctx.isIdle(), pending: ctx.hasPendingMessages(), calls, later });
+		pi.appendEntry("activity", { bash: ctx.isBashRunning(), nextTurn: ctx.getPendingNextTurnCount(), input: ctx.getPendingInputCount(), idle: ctx.isIdle(), pending: ctx.hasPendingMessages(), calls, later });
 	} });
 	pi.registerCommand("release", { handler: async () => release() });
+	pi.registerCommand("release-input", { handler: async () => releaseInput() });
 }
 `,
 	);
@@ -56,28 +63,34 @@ export default function (pi) {
 		],
 	});
 	let pending: ReturnType<RpcClient["bash"]> | undefined;
+	let pendingInput: ReturnType<RpcClient["prompt"]> | undefined;
 	try {
 		await client.start();
 		await client.prompt("/aside");
 		pending = client.bash("must not execute locally");
 		void pending.catch(() => {});
+		pendingInput = client.prompt("held input");
+		void pendingInput.catch(() => {});
 		await client.prompt("/activity");
 		expect((await client.getEntries()).entries.at(-1)).toMatchObject({
 			type: "custom",
 			customType: "activity",
-			data: { bash: true, nextTurn: 1, idle: true, pending: false, calls: 1, later: 0 },
+			data: { bash: true, nextTurn: 1, input: 1, idle: true, pending: false, calls: 1, later: 0 },
 		});
+		await client.prompt("/release-input");
+		await pendingInput;
 		await client.prompt("/release");
 		expect(await pending).toMatchObject({ output: "intercepted RPC result", exitCode: 0 });
 		await client.clearQueue();
 		await client.prompt("/activity");
 		expect((await client.getEntries()).entries.at(-1)).toMatchObject({
-			data: { bash: false, nextTurn: 1, idle: true, pending: false, calls: 1, later: 0 },
+			data: { bash: false, nextTurn: 1, input: 0, idle: true, pending: false, calls: 1, later: 0 },
 		});
 		expect((await client.getMessages()).filter((message) => message.role === "bashExecution")).toHaveLength(1);
 	} finally {
 		await client.stop();
 		await pending?.catch(() => {});
+		await pendingInput?.catch(() => {});
 		rmSync(root, { recursive: true, force: true });
 	}
 });

@@ -1057,15 +1057,19 @@ pi.on("tool_result", async (event, ctx) => {
 
 ### ctx.isIdle() / ctx.abort() / ctx.hasPendingMessages()
 
-Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, compaction, branch summary, automatic retry, or queued continuation. User Bash is separate. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
+Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, compaction, branch summary, automatic retry, or queued continuation. User Bash and input awaiting native preflight are separate. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
 
 ### ctx.isBashRunning()
 
 Returns whether any `AgentSession.executeBash()` call is unfinished. This includes asynchronous `user_bash` handlers, complete replacement results, local/custom operations, and result recording. Concurrent calls remain busy until every call finishes or fails. An abort request is not completion: an interceptor that is still awaiting work keeps this true until it returns. Cancellation during interception prevents subsequent shell execution. This does not report arbitrary extension processes or model tool calls.
 
+### ctx.getPendingInputCount()
+
+Returns the number of submitted inputs awaiting native prompt preflight or held in the interactive mode's input queues. It covers asynchronous `input` handlers, preparation until admission or failure, input waiting for the prompt loop, and compaction/tree input retained after cancellation or errors. Handled inputs leave the count when their handler completes; admitted inputs leave it when queued or accepted into the agent run. Concurrent inputs are counted independently. Dispatched extension commands are excluded, so a command can inspect other pending input without counting itself. This does not change agent `isIdle()` or steering/follow-up queue semantics, and reading it never dequeues input.
+
 ### ctx.getPendingNextTurnCount()
 
-Returns the number of custom messages queued with `deliverAs: "nextTurn"`. These messages are still in memory, not yet in the session journal. They remain queued across resource reloads and `clearQueue()`, and leave this count when admitted into a successful next user prompt. This does not change `isIdle()` or steering/follow-up queue semantics. Both activity methods read current native state, so they also work when an extension is first loaded during `/reload`.
+Returns the number of custom messages queued with `deliverAs: "nextTurn"`. These messages are still in memory, not yet in the session journal. They remain queued across resource reloads and `clearQueue()`, and leave this count when admitted into a successful next user prompt. This does not change `isIdle()` or steering/follow-up queue semantics. These activity methods read current native state, so they also work when an extension is first loaded during `/reload`.
 
 ### ctx.shutdown()
 

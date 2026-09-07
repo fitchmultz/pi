@@ -19,6 +19,7 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		abort: vi.fn(),
 		hasPendingMessages: () => false,
 		getPendingNextTurnCount: () => 0,
+		getPendingInputCount: () => 0,
 		shutdown: vi.fn(),
 		getContextUsage: () => ({ tokens, contextWindow: 200_000, percent: tokens === null ? null : tokens / 2000 }),
 		getCompactionSettings: () => ({ enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 }),

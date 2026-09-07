@@ -239,6 +239,8 @@ export interface ExtensionBindings {
 	uiContext?: ExtensionUIContext;
 	mode?: ExtensionMode;
 	commandContextActions?: ExtensionCommandContextActions;
+	/** User inputs held by the mode before they reach prompt(). */
+	getQueuedInputCount?: () => number;
 	abortHandler?: () => void;
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
@@ -336,6 +338,8 @@ export class AgentSession {
 	private _pendingCustomMessages: CustomMessage[] = [];
 	/** Provider-bound inputs waiting until request preparation can no longer add a context boundary. */
 	private _pendingProviderMessages: AgentMessage[] = [];
+	/** Native prompt inputs awaiting handling, admission, or rejection. */
+	private _pendingInputCount = 0;
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -374,6 +378,7 @@ export class AgentSession {
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
+	private _extensionGetQueuedInputCount?: () => number;
 	private _extensionAbortHandler?: () => void;
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
@@ -1381,8 +1386,13 @@ export class AgentSession {
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		let preflightComplete = false;
+		let pendingInput = false;
 		const preflightResult = (success: boolean) => {
 			preflightComplete = true;
+			if (pendingInput) {
+				pendingInput = false;
+				this._pendingInputCount--;
+			}
 			options?.preflightResult?.(success);
 		};
 
@@ -1403,6 +1413,9 @@ export class AgentSession {
 					"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
 				);
 			}
+
+			this._pendingInputCount++;
+			pendingInput = true;
 
 			// Emit input event for extension interception (before skill/template expansion)
 			let currentText = text;
@@ -1780,6 +1793,11 @@ export class AgentSession {
 	/** Whether steering/follow-up messages await delivery, including custom messages but not context-only asides. */
 	get hasPendingMessages(): boolean {
 		return this.agent.hasQueuedMessages();
+	}
+
+	/** Inputs awaiting prompt preflight or held by the bound mode; excludes dispatched extension commands. */
+	get pendingInputCount(): number {
+		return this._pendingInputCount + (this._extensionGetQueuedInputCount?.() ?? 0);
 	}
 
 	/** Number of context-only asides awaiting the next user prompt; not yet persisted. */
@@ -2693,6 +2711,9 @@ export class AgentSession {
 		if (bindings.commandContextActions !== undefined) {
 			this._extensionCommandContextActions = bindings.commandContextActions;
 		}
+		if (bindings.getQueuedInputCount !== undefined) {
+			this._extensionGetQueuedInputCount = bindings.getQueuedInputCount;
+		}
 		if (bindings.abortHandler !== undefined) {
 			this._extensionAbortHandler = bindings.abortHandler;
 		}
@@ -2876,6 +2897,7 @@ export class AgentSession {
 				},
 				hasPendingMessages: () => this.hasPendingMessages,
 				getPendingNextTurnCount: () => this.pendingNextTurnCount,
+				getPendingInputCount: () => this.pendingInputCount,
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
 				},

@@ -1862,6 +1862,7 @@ export class InteractiveMode {
 		await this.session.bindExtensions({
 			uiContext,
 			mode: "tui",
+			getQueuedInputCount: () => this.pendingUserInputs.length + this.compactionQueuedMessages.length,
 			abortHandler: () => {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
@@ -2054,6 +2055,7 @@ export class InteractiveMode {
 			},
 			hasPendingMessages: () => this.session.hasPendingMessages,
 			getPendingNextTurnCount: () => this.session.pendingNextTurnCount,
+			getPendingInputCount: () => this.session.pendingInputCount,
 			shutdown: () => {
 				this.shutdownRequested = true;
 			},

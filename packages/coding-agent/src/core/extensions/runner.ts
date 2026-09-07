@@ -297,6 +297,7 @@ export class ExtensionRunner {
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
 	private getPendingNextTurnCountFn!: () => number;
+	private getPendingInputCountFn!: () => number;
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private getCompactionSettingsFn!: () => CompactionSettings;
 	private newContextFn: NonNullable<ExtensionContextActions["newContext"]> = () => {};
@@ -365,6 +366,7 @@ export class ExtensionRunner {
 		this.abortFn = contextActions.abort;
 		this.hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.getPendingNextTurnCountFn = contextActions.getPendingNextTurnCount;
+		this.getPendingInputCountFn = contextActions.getPendingInputCount;
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.getCompactionSettingsFn = contextActions.getCompactionSettings;
@@ -817,6 +819,10 @@ export class ExtensionRunner {
 			getPendingNextTurnCount: () => {
 				runner.assertActive();
 				return runner.getPendingNextTurnCountFn();
+			},
+			getPendingInputCount: () => {
+				runner.assertActive();
+				return runner.getPendingInputCountFn();
 			},
 			shutdown: () => {
 				runner.assertActive();
