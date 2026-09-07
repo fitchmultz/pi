@@ -285,12 +285,16 @@ export class ToolExecutionComponent extends Container {
 				// A wrapping call or an edit preview must not crowd out the result/error row.
 				secondRow = rows.find((y) => y > rows[0] && y >= 1 + padding + callHeight) ?? secondRow;
 			}
-			const previewRows = rows.length > 0 ? [rows[0]] : [];
-			if (secondRow !== undefined && secondRow !== rows[0]) previewRows.push(secondRow);
+			const previewRows = [rows[0], secondRow].filter((y) => y !== undefined);
 			this.compactLayout = { rows: previewRows, height: lines.length };
-			return previewRows.map((y) =>
-				truncateToWidth(isImageLine(lines[y]) ? theme.fg("muted", "[image]") : lines[y], width),
-			);
+			return previewRows.map((y) => {
+				const line = lines[y];
+				const imageStart = line.search(/\x1b(?:_G|\]1337;File=)/);
+				return truncateToWidth(
+					imageStart === -1 ? line : stripAnsi(line.slice(0, imageStart)) + theme.fg("muted", "[image]"),
+					width,
+				);
+			});
 		}
 
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {

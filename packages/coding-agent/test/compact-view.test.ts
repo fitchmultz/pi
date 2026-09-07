@@ -22,6 +22,7 @@ import type { MessageRenderer, MessageRenderOptions } from "../src/core/extensio
 import type { CustomMessage } from "../src/core/messages.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { createAllToolRenderers } from "../src/core/tools/renderers/index.ts";
+import { createChatViewport } from "../src/modes/interactive/chat-viewport.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
@@ -317,6 +318,116 @@ describe("compact tool cards", () => {
 			assertCompactRows(component, 12);
 		}
 		expect(result).toEqual(saved);
+	});
+
+	test.each([
+		["kitty", "default"],
+		["kitty", "self"],
+		["iterm2", "default"],
+		["iterm2", "self"],
+	] as const)("keeps padded %s image clicks inner-first in the %s shell", async (protocol, renderShell) => {
+		setCapabilities({ images: protocol, trueColor: true, hyperlinks: false });
+		const width = 40;
+		const terminal = new VirtualTerminal(width, 24);
+		const renderer = createInteractiveTui({
+			tuiMode: "fullscreen",
+			terminal,
+			showHardwareCursor: false,
+			logDirectory: tmpdir(),
+			fullscreenCopyOnSelect: false,
+		});
+		const events: TuiMouseEvent[] = [];
+		let consumeClick = true;
+		const body = new Box(4, 1);
+		body.addChild(
+			new MouseRegion(
+				new Image(png, "image/png", { fallbackColor: (text) => text }, { maxWidthCells: 20 }),
+				(event) => {
+					if (event.type !== "click" || event.button !== "left") return undefined;
+					events.push(event);
+					return consumeClick ? { handled: true } : undefined;
+				},
+			),
+		);
+		const component = new ToolExecutionComponent(
+			"image",
+			"id",
+			{},
+			{},
+			{ renderShell, renderCall: () => new Text("image tool", 0, 0), renderResult: () => body },
+			renderer,
+			process.cwd(),
+		);
+		component.updateResult({ content: [], isError: false });
+		const marker = protocol === "kitty" ? "\x1b_G" : "\x1b]1337;File=";
+		const normal = component.render(width);
+		const imageY = normal.findIndex((line) => line.includes(marker));
+		expect(imageY).toBeGreaterThanOrEqual(0);
+		const imageX = visibleWidth(stripAnsi(normal[imageY].slice(0, normal[imageY].indexOf(marker))));
+		expect(imageX).toBe(renderShell === "default" ? 5 : 4);
+		click(component, imageY, width, imageX + 1);
+		expect(events).toHaveLength(1);
+		const { x, y, width: innerWidth, height } = events[0];
+		expect(x).toBe(1);
+
+		component.setCompactView(true);
+		for (const columns of [1, 2, 12, 40, 120]) assertCompactRows(component, columns);
+		// Fullscreen natively disables iTerm2 graphics; test those image rows before mounting it.
+		const fullscreen = protocol === "kitty";
+		if (fullscreen) {
+			const document = new Container();
+			document.addChild(new Text("BEFORE", 0, 0));
+			document.addChild(component);
+			document.addChild(new Text("AFTER", 0, 0));
+			renderer.setLayoutRoot(
+				createChatViewport({
+					document,
+					pendingMessages: new Container(),
+					status: new Container(),
+					editor: new Text("EDITOR", 0, 0),
+					footer: new Text("FOOTER", 0, 0),
+					scrollbar: "hidden",
+				}).root,
+			);
+			renderer.start();
+		}
+		try {
+			for (const handled of [true, false]) {
+				consumeClick = handled;
+				events.length = 0;
+				if (fullscreen) {
+					await terminal.waitForRender();
+					const viewport = terminal.getViewport();
+					const before = viewport.findIndex((line) => line.includes("BEFORE"));
+					expect(before).toBeGreaterThanOrEqual(0);
+					expect(viewport.findIndex((line) => line.includes("AFTER")) - before).toBe(3);
+					const placeholderY = viewport.findIndex((line) => line.includes("[image]"));
+					expect(placeholderY).toBeGreaterThan(before);
+					const placeholderX = viewport[placeholderY].indexOf("[image]") + 1;
+					terminal.sendInput(`\x1b[<0;${placeholderX + 1};${placeholderY + 1}M`);
+					terminal.sendInput(`\x1b[<0;${placeholderX + 1};${placeholderY + 1}m`);
+					await terminal.waitForRender();
+				} else {
+					const compact = assertCompactRows(component, width).map(stripAnsi);
+					const placeholderY = compact.findIndex((line) => line.includes("[image]"));
+					expect(placeholderY).toBeGreaterThanOrEqual(0);
+					click(component, placeholderY, width, compact[placeholderY].indexOf("[image]") + 1);
+				}
+				expect(events).toHaveLength(1);
+				expect(events[0]).toMatchObject({ x, y, width: innerWidth, height });
+				if (handled) assertCompactRows(component, width);
+				else {
+					expect(component.render(width).length).toBeGreaterThan(2);
+					expect(component.render(width).join("\n")).toContain(marker);
+				}
+			}
+			component.setExpanded(false);
+			assertCompactRows(component, width);
+			component.setCompactView(false);
+			expect(component.render(width)).toEqual(normal);
+		} finally {
+			if (fullscreen) renderer.stop();
+		}
 	});
 
 	test.each(["default", "self"] as const)(
