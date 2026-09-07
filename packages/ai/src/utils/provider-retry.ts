@@ -4,6 +4,8 @@ interface ProviderRetryOptions {
 	maxRetries?: number;
 	maxRetryDelayMs?: number;
 	signal?: AbortSignal;
+	/** Streaming callers must stop retrying once output or callback side effects have escaped. */
+	shouldRetry?: (error: unknown) => boolean;
 }
 
 interface ProviderError extends Error {
@@ -115,7 +117,13 @@ export async function retryProviderRequest<T>(
 			return await request();
 		} catch (error) {
 			if (options.signal?.aborted) throw createAbortError();
-			if (retriesRemaining <= 0 || !isProviderError(error) || !isRetryableProviderError(error)) throw error;
+			if (
+				retriesRemaining <= 0 ||
+				options.shouldRetry?.(error) === false ||
+				!isProviderError(error) ||
+				!isRetryableProviderError(error)
+			)
+				throw error;
 
 			const retryIndex = maxRetries - retriesRemaining;
 			retriesRemaining--;

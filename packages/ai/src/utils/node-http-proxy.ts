@@ -34,8 +34,8 @@ function parseProxyTargetUrl(targetUrl: string | URL): URL | undefined {
 	}
 }
 
-function stripBrackets(host: string): string {
-	return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+function normalizeHostname(host: string): string {
+	return (host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host).replace(/\.$/, "");
 }
 
 function parseNoProxyEntry(entry: string): { host: string; port: number } | undefined {
@@ -80,7 +80,7 @@ function shouldProxyHostname(hostname: string, port: number, env?: ProviderEnv):
 		return false;
 	}
 
-	const normalizedTargetHost = stripBrackets(hostname.toLowerCase());
+	const normalizedTargetHost = normalizeHostname(hostname.toLowerCase());
 
 	return noProxy.split(/[,\s]/).every((entry) => {
 		const parsed = parseNoProxyEntry(entry);
@@ -92,7 +92,7 @@ function shouldProxyHostname(hostname: string, port: number, env?: ProviderEnv):
 			return true;
 		}
 
-		let domain = stripBrackets(parsed.host);
+		let domain = normalizeHostname(parsed.host);
 		if (domain.startsWith("*.")) {
 			domain = domain.slice(2);
 		} else if (domain.startsWith(".") || domain.startsWith("*")) {
@@ -122,7 +122,7 @@ function getProxyForUrl(targetUrl: string | URL, env?: ProviderEnv): string {
 	}
 
 	const protocol = parsedUrl.protocol.split(":", 1)[0]!;
-	const hostname = stripBrackets(parsedUrl.hostname || parsedUrl.host.replace(/:\d*$/, ""));
+	const hostname = normalizeHostname(parsedUrl.hostname || parsedUrl.host.replace(/:\d*$/, ""));
 	const port = Number.parseInt(parsedUrl.port, 10) || DEFAULT_PROXY_PORTS[protocol] || 0;
 	if (!shouldProxyHostname(hostname, port, env)) {
 		return "";
