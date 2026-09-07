@@ -179,21 +179,20 @@ describe.skipIf(process.platform === "win32")("AgentSession Bash cwd hooks", () 
 				return local.exec(receivedCommand, remappedCwd, options);
 			},
 		});
+		let interceptions = 0;
 		const session = await createSession([
 			(pi) => {
 				pi.registerBashCwdHook(() => selectedCwd);
-				pi.on("user_bash", () => ({ operations }));
+				pi.on("user_bash", (event) => {
+					interceptions++;
+					expect(event.cwd).toBe(originalCwd);
+					return { operations };
+				});
 			},
 		]);
 		rmdirSync(originalCwd);
-		const selected = await session.extensionRunner.emitUserBash({
-			type: "user_bash",
-			command,
-			cwd: originalCwd,
-			excludeFromContext: false,
-		});
-		expect(selected?.operations).toBe(operations);
-		const result = await session.executeBash(command, undefined, { operations: selected?.operations });
+		const result = await session.executeBash(command);
+		expect(interceptions).toBe(1);
 		expect(result.output).toBe(
 			`${remappedCwd}\nconfigured-shell\nconfigured-prefix\ninherited-env\ninherited-session\n`,
 		);

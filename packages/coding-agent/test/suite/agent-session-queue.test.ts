@@ -384,15 +384,19 @@ describe("AgentSession queue characterization", () => {
 		let sawCustomMessage = false;
 		const ctx = harness.session.extensionRunner.createContext();
 		expect(ctx.hasPendingMessages()).toBe(false);
+		expect(ctx.getPendingNextTurnCount()).toBe(0);
 
 		await harness.session.sendCustomMessage(
 			{ customType: "next-turn", content: "carry this", display: true, details: {} },
 			{ deliverAs: "nextTurn" },
 		);
+		expect(ctx.getPendingNextTurnCount()).toBe(1);
+		expect(ctx.isIdle()).toBe(true);
 		expect(ctx.hasPendingMessages()).toBe(false);
 		expect(harness.session.pendingMessageCount).toBe(0);
 		harness.session.clearQueue();
 		expect(ctx.hasPendingMessages()).toBe(false);
+		expect(ctx.getPendingNextTurnCount()).toBe(1);
 
 		harness.setResponses([
 			(context) => {
@@ -408,6 +412,7 @@ describe("AgentSession queue characterization", () => {
 
 		await harness.session.prompt("normal prompt");
 
+		expect(ctx.getPendingNextTurnCount()).toBe(0);
 		expect(ctx.hasPendingMessages()).toBe(false);
 		expect(sawCustomMessage).toBe(true);
 		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);

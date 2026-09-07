@@ -1782,6 +1782,11 @@ export class AgentSession {
 		return this.agent.hasQueuedMessages();
 	}
 
+	/** Number of context-only asides awaiting the next user prompt; not yet persisted. */
+	get pendingNextTurnCount(): number {
+		return this._pendingNextTurnMessages.length;
+	}
+
 	/** Number of pending user texts shown in the steering/follow-up UI. */
 	get pendingMessageCount(): number {
 		return this._steeringMessages.length + this._followUpMessages.length;
@@ -2859,6 +2864,7 @@ export class AgentSession {
 				getModel: () => this.model,
 				getScopedModels: () => this._scopedModels,
 				isIdle: () => this.isIdle,
+				isBashRunning: () => this.isBashRunning,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 				getSignal: () => this.agent.signal,
 				abort: () => {
@@ -2869,6 +2875,7 @@ export class AgentSession {
 					void this.abort();
 				},
 				hasPendingMessages: () => this.hasPendingMessages,
+				getPendingNextTurnCount: () => this.pendingNextTurnCount,
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
 				},
@@ -3216,7 +3223,7 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Execute a bash command.
+	 * Execute a user bash command, including user_bash interception.
 	 * Adds result to agent context and session.
 	 * @param command The bash command to execute
 	 * @param onChunk Optional streaming callback for output
@@ -3232,24 +3239,37 @@ export class AgentSession {
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
-		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
-		const prefix = this.settingsManager.getShellCommandPrefix();
-		const shellPath = this.settingsManager.getShellPath();
-		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
-
 		try {
-			const result = await executeBashWithOperations(
-				resolvedCommand,
-				this._extensionRunner.resolveBashCwd(this.sessionManager.getCwd()),
-				options?.operations ?? createLocalBashOperations({ shellPath }),
-				{
-					onChunk: (delta) => {
-						onChunk?.(delta);
-						this._emit({ type: "bash_execution_update", id: options?.id, delta });
+			// Own activity before any interceptor can await or return a replacement result.
+			const intercepted = this._extensionRunner.hasHandlers("user_bash")
+				? await this._extensionRunner.emitUserBash({
+						type: "user_bash",
+						command,
+						excludeFromContext: options?.excludeFromContext ?? false,
+						cwd: this.sessionManager.getCwd(),
+					})
+				: undefined;
+			let result = intercepted?.result;
+			if (abortController.signal.aborted) {
+				result = { output: "", exitCode: undefined, cancelled: true, truncated: false };
+			} else if (result) {
+				if (result.output) onChunk?.(result.output);
+			} else {
+				const prefix = this.settingsManager.getShellCommandPrefix();
+				const shellPath = this.settingsManager.getShellPath();
+				result = await executeBashWithOperations(
+					prefix ? `${prefix}\n${command}` : command,
+					this._extensionRunner.resolveBashCwd(this.sessionManager.getCwd()),
+					intercepted?.operations ?? options?.operations ?? createLocalBashOperations({ shellPath }),
+					{
+						onChunk: (delta) => {
+							onChunk?.(delta);
+							this._emit({ type: "bash_execution_update", id: options?.id, delta });
+						},
+						signal: abortController.signal,
 					},
-					signal: abortController.signal,
-				},
-			);
+				);
+			}
 
 			this.recordBashResult(command, result, options);
 			return result;
@@ -3297,7 +3317,7 @@ export class AgentSession {
 		}
 	}
 
-	/** Whether a bash command is currently running */
+	/** Whether any user Bash dispatch or execution is unfinished, including async interceptors. */
 	get isBashRunning(): boolean {
 		return this._bashAbortControllers.size > 0;
 	}

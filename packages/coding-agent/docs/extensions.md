@@ -892,7 +892,7 @@ pi.on("tool_result", async (event, ctx) => {
 
 #### user_bash
 
-Fired when user executes `!` or `!!` commands. **Can intercept.**
+Fired by `AgentSession.executeBash()`, including interactive `!`/`!!` and RPC `bash` commands. **Can intercept.** The first handler returning a result or operations wins. `ctx.isBashRunning()` covers the entire dispatch, including an asynchronous earlier handler, execution, and result recording; observing this event alone does not.
 
 ```typescript
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
@@ -1057,7 +1057,15 @@ pi.on("tool_result", async (event, ctx) => {
 
 ### ctx.isIdle() / ctx.abort() / ctx.hasPendingMessages()
 
-Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, automatic retry, auto-compaction retry, or queued continuation. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
+Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, compaction, branch summary, automatic retry, or queued continuation. User Bash is separate. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
+
+### ctx.isBashRunning()
+
+Returns whether any `AgentSession.executeBash()` call is unfinished. This includes asynchronous `user_bash` handlers, complete replacement results, local/custom operations, and result recording. Concurrent calls remain busy until every call finishes or fails. An abort request is not completion: an interceptor that is still awaiting work keeps this true until it returns. Cancellation during interception prevents subsequent shell execution. This does not report arbitrary extension processes or model tool calls.
+
+### ctx.getPendingNextTurnCount()
+
+Returns the number of custom messages queued with `deliverAs: "nextTurn"`. These messages are still in memory, not yet in the session journal. They remain queued across resource reloads and `clearQueue()`, and leave this count when admitted into a successful next user prompt. This does not change `isIdle()` or steering/follow-up queue semantics. Both activity methods read current native state, so they also work when an extension is first loaded during `/reload`.
 
 ### ctx.shutdown()
 

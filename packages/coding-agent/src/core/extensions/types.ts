@@ -331,6 +331,8 @@ export interface ExtensionContext {
 	thinkingLevel?: ThinkingLevel;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
+	/** Whether user Bash is unfinished, from interceptor dispatch through execution and result recording. */
+	isBashRunning(): boolean;
 	/** Whether project-local trust is active for this context. */
 	isProjectTrusted(): boolean;
 	/** The current abort signal, or undefined when the agent is not streaming. */
@@ -339,6 +341,8 @@ export interface ExtensionContext {
 	abort(): void;
 	/** Whether steering/follow-up messages await delivery, including custom messages. Excludes nextTurn/context-only asides. */
 	hasPendingMessages(): boolean;
+	/** Number of unpersisted custom messages queued with deliverAs: "nextTurn". */
+	getPendingNextTurnCount(): number;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
@@ -1764,10 +1768,12 @@ export interface ExtensionContextActions {
 	getModel: () => Model<any> | undefined;
 	getScopedModels: () => readonly ScopedModel[];
 	isIdle: () => boolean;
+	isBashRunning: () => boolean;
 	isProjectTrusted: () => boolean;
 	getSignal: () => AbortSignal | undefined;
 	abort: () => void;
 	hasPendingMessages: () => boolean;
+	getPendingNextTurnCount: () => number;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
 	getCompactionSettings: () => CompactionSettings;
