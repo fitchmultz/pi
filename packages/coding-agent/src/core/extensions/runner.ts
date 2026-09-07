@@ -513,6 +513,15 @@ export class ExtensionRunner {
 		return this.extensions.map((e) => e.path);
 	}
 
+	resolveBashCwd(cwd: string): string {
+		for (const extension of this.extensions) {
+			for (const hook of extension.bashCwdHooks ?? []) {
+				cwd = hook(cwd);
+			}
+		}
+		return cwd;
+	}
+
 	/** Get all registered tools from all extensions (first registration per name wins). */
 	getAllRegisteredTools(): RegisteredTool[] {
 		const toolsByName = new Map<string, RegisteredTool>();
