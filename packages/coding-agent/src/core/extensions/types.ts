@@ -867,6 +867,9 @@ export interface ThinkingLevelSelectEvent {
 // User Bash Events
 // ============================================================================
 
+/** Synchronously resolve the working directory for native Bash execution. */
+export type BashCwdHook = (cwd: string) => string;
+
 /** Fired when user executes a bash command via ! or !! prefix */
 export interface UserBashEvent {
 	type: "user_bash";
@@ -1342,6 +1345,12 @@ export interface ExtensionAPI {
 		tool: ToolDefinition<TParams, TDetails, TState>,
 	): void;
 
+	/**
+	 * Resolve cwd before default Bash tools and native user Bash execution.
+	 * Hooks chain in extension load/registration order. Custom tools are unaffected.
+	 */
+	registerBashCwdHook(hook: BashCwdHook): void;
+
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
 	// =========================================================================
@@ -1804,6 +1813,7 @@ export interface Extension {
 	sourceInfo: SourceInfo;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool>;
+	bashCwdHooks?: BashCwdHook[];
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;

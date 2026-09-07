@@ -1434,6 +1434,21 @@ pi.registerTool({
 });
 ```
 
+### pi.registerBashCwdHook(hook)
+
+Resolve the working directory before the default `bash` tool checks it and before native user Bash execution (`!`, `!!`, or `AgentSession.executeBash()`) invokes its selected operations. Use this instead of prepending `cd` when the original directory may no longer exist.
+
+```typescript
+let virtualCwd: string | undefined;
+pi.registerBashCwdHook((cwd) => virtualCwd ?? cwd);
+```
+
+The exported `BashCwdHook` type is `(cwd: string) => string`. Hooks are synchronous and chain in extension load order, then registration order within each extension. Each receives the cwd returned by the previous hook. Registrations belong to the loaded extension instance and are replaced on reload or session replacement. If a hook throws, execution stops; a missing final cwd still produces the normal native error.
+
+Only cwd changes. The configured shell, command prefix, environment, output/rendering, and selected user Bash operations stay intact. Custom/overridden Bash tools and their factory `spawnHook` callbacks are not changed. A complete result from `user_bash` still bypasses native execution. The hook does not change `ctx.cwd`, session headers, project discovery, or other tools.
+
+Without registrations, cwd selection is unchanged. To detect host support, check `typeof pi.registerBashCwdHook === "function"`, not a package version.
+
 ### pi.sendMessage(message, options?)
 
 Inject a custom message into the session. Custom messages participate in LLM context. For durable TUI-only content that should not be sent to the LLM, use [`pi.appendEntry()`](#piappendentrycustomtype-data) with [`pi.registerEntryRenderer()`](#piregisterentryrenderercustomtype-renderer).
@@ -2944,6 +2959,7 @@ const highlighted = highlightCode(code, lang, theme);
 
 - Extension errors are logged, agent continues
 - `tool_call` errors block the tool (fail-safe)
+- `registerBashCwdHook` callback errors stop Bash execution; Pi does not fall back to a different cwd
 - Tool `execute` errors must be signaled by throwing; the thrown error is caught, reported to the LLM with `isError: true`, and execution continues
 
 ## Mode Behavior
