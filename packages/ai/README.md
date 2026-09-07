@@ -38,6 +38,7 @@ Unified LLM API with provider collections, automatic auth resolution, token and 
   - [Aborting Requests](#aborting-requests)
   - [Continuing After Abort](#continuing-after-abort)
   - [Debugging Provider Payloads](#debugging-provider-payloads)
+- [OpenAI Responses Transport](#openai-responses-transport)
 - [Custom Providers](#custom-providers)
   - [createProvider()](#createprovider)
   - [Calling API Implementations Directly](#calling-api-implementations-directly)
@@ -1023,6 +1024,26 @@ const response = await models.complete(model, context, {
 ```
 
 The callback is supported by `stream`, `complete`, `streamSimple`, and `completeSimple`.
+
+## OpenAI Responses Transport
+
+Direct `openai` requests prefer the official SDK's persistent Responses WebSocket transport. Use the existing `transport` option:
+
+- `"auto"` (also the default when omitted) or `"websocket-cached"`: reuse a session connection and send incremental input when the previous response matches the current context.
+- `"websocket"`: reuse the connection, but send full input on every request.
+- `"sse"`: use HTTP/SSE on every request.
+
+Always pass the **full current context**, including completed tool results. Pi sends a delta with `previous_response_id` only when the current input has the exact previous input and replayable reply as its prefix, with unchanged request parameters. Edited history, fresh windows, compaction, or changed instructions/tools/model start a new chain. Changed resolved headers, credentials, endpoint, or proxy select a new connection. The saved session transcript is unchanged.
+
+Incomplete replies and server output that Pi does not persist, such as built-in web-search records, clear only the continuation. The next request sends full current input on the same socket, with its tools still enabled. A later fully replayable completed reply can establish a new incremental chain.
+
+Before output starts, a missing cached response ID or expired connection retries once with full current input on a fresh socket. Other transport failures before output starts fall back to full-input HTTP/SSE. Failures after output starts surface normally rather than replaying partial output. Pre-stream provider errors with status/retry headers use the existing `maxRetries` and `maxRetryDelayMs` policy.
+
+`onPayload` sees the full logical request before delta selection. `fetch` remains an **HTTP-only** hook; select `"sse"` if every exchange must pass through it. `onResponse` receives actual HTTP metadata, including status `101` for a new successful WebSocket handshake. Reusing a socket does not generate another HTTP response or callback. Explicit headers and their `null` suppressions apply to the handshake; proxy selection honors `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`, including provider-scoped `env` overrides.
+
+Persistent connections require a nonempty `sessionId` and cache retention other than `"none"`. Otherwise requests use one-shot connections. Idle connections close after five minutes. Call `cleanupSessionResources(sessionId)` when finished; `AgentSession.dispose()` already does this. Cancellation closes the active connection and discards its continuation. `websocketConnectTimeoutMs` controls the handshake, and `timeoutMs` controls stream idleness.
+
+Browser bundles and other providers sharing the Responses API retain HTTP/SSE. `openai-codex` keeps its separate endpoint, authentication, and transport implementation.
 
 ## Custom Providers
 

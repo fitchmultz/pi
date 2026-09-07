@@ -246,7 +246,7 @@ describe("xAI Responses provider", () => {
 		const result = await streamOpenAIResponses(
 			openaiModel,
 			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-			{ apiKey: "test-token" },
+			{ apiKey: "test-token", transport: "sse" },
 		).result();
 
 		expect(result.stopReason, result.errorMessage).toBe("stop");

@@ -221,7 +221,7 @@ describe("OpenAI Responses terminal event handling", () => {
 			messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 }],
 			tools: [],
 		};
-		const stream = streamOpenAIResponses(model, context, { apiKey: "test" });
+		const stream = streamOpenAIResponses(model, context, { apiKey: "test", transport: "sse" });
 		const events: AssistantMessageEvent[] = [];
 		let initialStopReason: AssistantMessage["stopReason"] | undefined;
 

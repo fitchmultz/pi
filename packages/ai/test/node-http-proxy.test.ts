@@ -74,6 +74,19 @@ describe("node HTTP proxy resolution", () => {
 		);
 	});
 
+	it("normalizes DNS root dots without changing wildcard or port boundaries", () => {
+		resetProxyEnv();
+		process.env.HTTPS_PROXY = "http://proxy.example:8080";
+		process.env.NO_PROXY = "*.example.com., service.test.:8443";
+
+		expect(resolveHttpProxyUrlForTarget("https://api.example.com")).toBeUndefined();
+		expect(resolveHttpProxyUrlForTarget("https://api.example.com.")).toBeUndefined();
+		expect(resolveHttpProxyUrlForTarget("https://notexample.com.")?.toString()).toBe("http://proxy.example:8080/");
+		expect(resolveHttpProxyUrlForTarget("https://service.test:8443")).toBeUndefined();
+		expect(resolveHttpProxyUrlForTarget("https://service.test.:8443")).toBeUndefined();
+		expect(resolveHttpProxyUrlForTarget("https://service.test")?.toString()).toBe("http://proxy.example:8080/");
+	});
+
 	it("handles subdomain wildcards, IPv6, and ports in NO_PROXY", () => {
 		resetProxyEnv();
 		process.env.HTTPS_PROXY = "http://proxy.example:8080";

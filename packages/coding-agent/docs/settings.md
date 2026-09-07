@@ -176,6 +176,8 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `httpIdleTimeoutMs` | number | `300000` | HTTP header/body idle timeout in milliseconds, also used by providers with explicit stream idle timeouts. Set to `0` to disable. |
 | `websocketConnectTimeoutMs` | number | `15000` | WebSocket connect/open handshake timeout in milliseconds for providers that support WebSocket transports. Set to `0` to disable. |
 
+For direct `openai`, `"auto"` prefers persistent Responses WebSockets with incremental continuation. `"websocket-cached"` requests the same continuation behavior; `"websocket"` reuses the connection but sends full current input. `"sse"` keeps every request on HTTP. Transport failures before output starts fall back to HTTP with full current input; a fresh context window never continues the previous window's response chain. Other OpenAI-compatible providers keep their existing HTTP behavior. See [OpenAI Responses Transport](../../ai/README.md#openai-responses-transport) for hooks, proxy handling, and connection lifetime.
+
 ### Terminal & Images
 
 | Setting | Type | Default | Description |
