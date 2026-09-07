@@ -3,7 +3,7 @@ import { fauxAssistantMessage, fauxToolCall, type Model, type Usage } from "@ear
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BuildSystemPromptOptions, ExtensionAPI } from "../../src/index.ts";
-import { createHarness, getAssistantTexts, type Harness } from "./harness.ts";
+import { createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.ts";
 
 describe("AgentSession model and extension characterization", () => {
 	const harnesses: Harness[] = [];
@@ -542,6 +542,77 @@ describe("AgentSession model and extension characterization", () => {
 		expect(
 			harness.session.messages.some((message) => message.role === "custom" && message.customType === "before-start"),
 		).toBe(true);
+	});
+
+	it("reserves an idle custom wakeup before awaiting startup guidance", async () => {
+		let markRequestStarted!: () => void;
+		const requestStarted = new Promise<void>((resolve) => {
+			markRequestStarted = resolve;
+		});
+		let releaseResponse!: () => void;
+		const responseReleased = new Promise<void>((resolve) => {
+			releaseResponse = resolve;
+		});
+		const startupPrompts: string[] = [];
+		const requests: string[][] = [];
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false }, retry: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async (event) => {
+						startupPrompts.push(event.prompt);
+						await Promise.resolve();
+						return { message: { customType: "guidance", content: "startup guidance", display: false } };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			async (context) => {
+				requests.push(context.messages.map(getMessageText));
+				markRequestStarted();
+				await responseReleased;
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		// No await between wakeups: the second arrives while startup guidance is still pending.
+		const first = harness.session.sendCustomMessage(
+			{ customType: "wake", content: "first", display: true, details: { order: 1 } },
+			{ triggerTurn: true },
+		);
+		const second = harness.session.sendCustomMessage(
+			{ customType: "wake", content: "second", display: true, details: { order: 2 } },
+			{ triggerTurn: true },
+		);
+		const settled = Promise.allSettled([first, second]);
+		try {
+			await requestStarted;
+			expect(await Promise.allSettled([second])).toEqual([{ status: "fulfilled", value: undefined }]);
+			expect(harness.session.isStreaming).toBe(true);
+			expect(harness.session.isIdle).toBe(false);
+			expect(harness.session.agent.state.isStreaming).toBe(true);
+			expect(harness.eventsOfType("agent_settled")).toEqual([]);
+		} finally {
+			releaseResponse();
+			await settled;
+		}
+
+		expect((await settled).map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+		expect(startupPrompts).toEqual([""]);
+		expect(requests).toEqual([["first", "startup guidance", "second"]]);
+		expect(
+			harness.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "custom_message" && entry.customType === "wake"),
+		).toMatchObject([
+			{ content: "first", display: true, details: { order: 1 } },
+			{ content: "second", display: true, details: { order: 2 } },
+		]);
+		expect(harness.session.isIdle).toBe(true);
+		expect(harness.session.agent.state.isStreaming).toBe(false);
 	});
 
 	it("bindExtensions emits session_start and reload emits session_shutdown then session_start", async () => {

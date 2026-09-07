@@ -183,6 +183,64 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
 	});
 
+	it.each(["manual", "automatic"] as const)(
+		"estimates %s compaction before extension messages, without prompt or usage tokens",
+		async (mode) => {
+			let tokensBeforeExtension = 0;
+			const harness = await createHarness({
+				tools: [],
+				models: [{ id: "small", contextWindow: 64_000, maxTokens: 2048 }],
+				settings: {
+					compaction: { enabled: false, reserveTokens: 16_000, keepRecentTokens: 20_000 },
+					retry: { enabled: false },
+				},
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_compact", () => {
+							tokensBeforeExtension = harness.session.messages.reduce(
+								(sum, message) => sum + estimateTokens(message),
+								0,
+							);
+							pi.sendMessage(
+								{ customType: "after-summary", content: "extension context", display: false },
+								{ triggerTurn: false },
+							);
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				fauxAssistantMessage("seeded"),
+				fauxAssistantMessage("done"),
+				fauxAssistantMessage("summary"),
+				fauxAssistantMessage("continued"),
+			]);
+			await harness.session.prompt("seed");
+			await harness.session.prompt("q".repeat(200_000));
+
+			if (mode === "manual") {
+				await harness.session.compact();
+			} else {
+				harness.session.setAutoCompactionEnabled(true);
+				await harness.session.prompt("next");
+			}
+
+			const completed = harness.eventsOfType("compaction_end").filter((event) => event.result);
+			expect(completed).toHaveLength(1);
+			expect(tokensBeforeExtension).toBeGreaterThan(50_000);
+			expect(completed[0]?.result?.estimatedTokensAfter).toBe(tokensBeforeExtension);
+			expect(
+				harness.session.messages.some(
+					(message) => message.role === "custom" && message.customType === "after-summary",
+				),
+			).toBe(true);
+			expect(harness.eventsOfType("compaction_end").every((event) => !event.errorMessage && !event.aborted)).toBe(
+				true,
+			);
+		},
+	);
+
 	it("allows a queued prompt to start when manual compaction ends", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
@@ -411,11 +469,15 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("x".repeat(5000));
 
 		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
-			reason: "overflow",
-			aborted: false,
-			willRetry: true,
-		});
+		expect(harness.eventsOfType("compaction_end")).toEqual([
+			expect.objectContaining({
+				reason: "overflow",
+				result: expect.objectContaining({ summary: "overflow compacted" }),
+				aborted: false,
+				willRetry: true,
+			}),
+			{ type: "compaction_end", reason: "threshold", result: undefined, aborted: false, willRetry: false },
+		]);
 		expect(harness.session.getLastAssistantText()).toBe("completed response");
 	});
 

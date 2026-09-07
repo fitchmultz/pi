@@ -582,6 +582,69 @@ describe("session_before_auto_compact", () => {
 		}
 	});
 
+	it.each([false, true])("honors a late Agent abort during the early automatic hook (abort: %s)", async (abort) => {
+		let markHookStarted!: () => void;
+		const hookStarted = new Promise<void>((resolve) => {
+			markHookStarted = resolve;
+		});
+		let releaseHook!: () => void;
+		const hookReleased = new Promise<void>((resolve) => {
+			releaseHook = resolve;
+		});
+		let hookSignal: AbortSignal | undefined;
+		const harness = await createHarness({
+			models: [{ id: "small", contextWindow: 64_000, maxTokens: 2048 }],
+			settings: { compaction: { reserveTokens: 16_000, keepRecentTokens: 20_000 }, retry: { enabled: false } },
+			tools: [
+				{
+					name: "dump",
+					label: "Dump",
+					description: "Return a large result",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "r".repeat(200_000) }], details: {} }),
+				},
+			],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_auto_compact", async (event) => {
+						hookSignal = event.signal;
+						markHookStarted();
+						await hookReleased;
+						return { newContext: { handoff: "tool batch complete" } };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("continued"),
+		]);
+
+		const run = harness.session.prompt("dump it");
+		try {
+			await hookStarted;
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.session.messages.at(-1)).toMatchObject({ role: "toolResult", isError: false });
+			expect(harness.session.isCompacting).toBe(true);
+			expect(harness.session.agent.signal).toBeDefined();
+			if (abort) harness.session.agent.abort();
+			expect(harness.session.agent.signal?.aborted).toBe(abort);
+		} finally {
+			releaseHook();
+			await run;
+		}
+
+		expect(countType(harness, "context_window")).toBe(abort ? 0 : 1);
+		expect(harness.eventsOfType("compaction_end").filter((event) => event.contextWindowStarted)).toHaveLength(
+			abort ? 0 : 1,
+		);
+		expect(hookSignal?.aborted).toBe(abort);
+		expect(countType(harness, "compaction")).toBe(0);
+		expect(harness.session.isCompacting).toBe(false);
+		expect(harness.session.isIdle).toBe(true);
+	});
+
 	it("reports a claimed rollover that cannot persist its boundary", async () => {
 		const failures: Array<string | undefined> = [];
 		const harness = await createHarness({
