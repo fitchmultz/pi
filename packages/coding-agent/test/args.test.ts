@@ -157,6 +157,34 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--session-cwd flag", () => {
+		test("parses a path without consuming other options or messages", () => {
+			const result = parseArgs(["--session", "saved.jsonl", "--session-cwd", "../work tree", "--print", "hello"]);
+			expect(result.session).toBe("saved.jsonl");
+			expect(result.sessionCwd).toBe("../work tree");
+			expect(result.print).toBe(true);
+			expect(result.messages).toEqual(["hello"]);
+			expect(result.unknownFlags.size).toBe(0);
+			expect(result.diagnostics).toEqual([]);
+			expect(parseArgs(["--session", "saved.jsonl"]).sessionCwd).toBeUndefined();
+		});
+
+		test("reports a missing path without consuming the next flag", () => {
+			for (const args of [["--session-cwd"], ["--session-cwd", "--print"]]) {
+				const result = parseArgs(args);
+				expect(result.sessionCwd).toBeUndefined();
+				expect(result.diagnostics).toEqual([{ type: "error", message: "--session-cwd requires a path" }]);
+			}
+			expect(parseArgs(["--session-cwd", "--print"]).print).toBe(true);
+		});
+
+		test("reports an empty path", () => {
+			const result = parseArgs(["--session-cwd", ""]);
+			expect(result.sessionCwd).toBeUndefined();
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--session-cwd requires a non-empty path" }]);
+		});
+	});
+
 	describe("--name flag", () => {
 		test("parses --name flag with value", () => {
 			const result = parseArgs(["--name", "my-session"]);

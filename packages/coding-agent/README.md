@@ -571,10 +571,13 @@ cat README.md | pi -p "Summarize this text"
 | `-c`, `--continue` | Continue most recent session |
 | `-r`, `--resume` | Browse and select session |
 | `--session <path\|id>` | Use specific session file or partial UUID |
+| `--session-cwd <path>` | Override the working directory for `--session` for this run; must be an existing directory |
 | `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode (don't save) |
 | `--name <name>`, `-n <name>` | Set session display name at startup |
+
+`--session-cwd` requires `--session` and cannot be combined with `--fork`, `--continue`, `--resume`, `--session-id`, or `--no-session`. Relative paths resolve from the launching directory; `~` is supported. It resumes the same session file and ID without changing saved history or the header cwd, including when an ID is found in another project (no fork prompt). Pass it again on each continuation. Without it, saved-session cwd behavior is unchanged. `--session-dir` controls storage and lookup, not the working directory. See [Sessions](docs/sessions.md#overriding-a-saved-sessions-working-directory).
 
 ### Tool Options
 

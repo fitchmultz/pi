@@ -5,6 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
+import { statSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { setCapabilityOverrides } from "@earendil-works/pi-tui";
@@ -330,9 +331,31 @@ function validateSessionIdFlags(parsed: Args): void {
 	}
 }
 
-function openSessionOrExit(path: string, sessionDir?: string): SessionManager {
+function validateSessionCwdFlags(parsed: Args): void {
+	if (parsed.sessionCwd === undefined) return;
+
+	if (!parsed.session) {
+		console.error(chalk.red("Error: --session-cwd requires --session"));
+		process.exit(1);
+	}
+
+	const conflictingFlags = [
+		parsed.fork !== undefined ? "--fork" : undefined,
+		parsed.continue ? "--continue" : undefined,
+		parsed.resume ? "--resume" : undefined,
+		parsed.sessionId !== undefined ? "--session-id" : undefined,
+		parsed.noSession ? "--no-session" : undefined,
+	].filter((flag): flag is string => flag !== undefined);
+
+	if (conflictingFlags.length > 0) {
+		console.error(chalk.red(`Error: --session-cwd cannot be combined with ${conflictingFlags.join(", ")}`));
+		process.exit(1);
+	}
+}
+
+function openSessionOrExit(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 	try {
-		return SessionManager.open(path, sessionDir);
+		return SessionManager.open(path, sessionDir, cwdOverride);
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(chalk.red(`Error: ${message}`));
@@ -356,6 +379,20 @@ export async function createSessionManager(
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
 ): Promise<SessionManager> {
+	let sessionCwd: string | undefined;
+	if (parsed.sessionCwd !== undefined) {
+		try {
+			sessionCwd = resolvePath(parsed.sessionCwd, cwd);
+			if (!statSync(sessionCwd).isDirectory()) {
+				throw new Error(`Not a directory: ${sessionCwd}`);
+			}
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			console.error(chalk.red(`Error: Invalid --session-cwd: ${message}`));
+			process.exit(1);
+		}
+	}
+
 	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
 		return SessionManager.inMemory(cwd, parsed.sessionId !== undefined ? { id: parsed.sessionId } : undefined);
 	}
@@ -389,9 +426,10 @@ export async function createSessionManager(
 		switch (resolved.type) {
 			case "path":
 			case "local":
-				return openSessionOrExit(resolved.path, sessionDir);
+				return openSessionOrExit(resolved.path, sessionDir, sessionCwd);
 
 			case "global": {
+				if (sessionCwd !== undefined) return openSessionOrExit(resolved.path, sessionDir, sessionCwd);
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
 				const shouldFork = await promptConfirm("Fork this session into current directory?");
 				if (!shouldFork) {
@@ -642,6 +680,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
+	validateSessionCwdFlags(parsed);
 	validateForkFlags(parsed);
 	validateSessionIdFlags(parsed);
 
