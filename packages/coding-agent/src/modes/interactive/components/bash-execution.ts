@@ -2,7 +2,7 @@
  * Component for displaying bash command execution with streaming output.
  */
 
-import { Container, Loader, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, Loader, Spacer, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -27,11 +27,15 @@ export class BashExecutionComponent extends Container {
 	private truncationResult?: TruncationResult;
 	private fullOutputPath?: string;
 	private expanded = false;
+	private compactView: boolean;
+	private excludeFromContext: boolean;
 	private contentContainer: Container;
 
-	constructor(command: string, ui: TUI, excludeFromContext = false) {
+	constructor(command: string, ui: TUI, excludeFromContext = false, compactView = false) {
 		super();
 		this.command = command;
+		this.compactView = compactView;
+		this.excludeFromContext = excludeFromContext;
 
 		// Use dim border for excluded-from-context commands (!! prefix)
 		const colorKey = excludeFromContext ? "dim" : "bashMode";
@@ -70,6 +74,34 @@ export class BashExecutionComponent extends Container {
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		this.updateDisplay();
+	}
+
+	setCompactView(compactView: boolean): void {
+		this.compactView = compactView;
+	}
+
+	override render(width: number): string[] {
+		if (!this.compactView || this.expanded) return super.render(width);
+
+		const colorKey = this.excludeFromContext ? "dim" : "bashMode";
+		const command = theme.fg(colorKey, theme.bold(`$ ${this.command.replace(/\s+/g, " ")}`));
+		const status =
+			this.status === "running"
+				? theme.fg("muted", "Running...")
+				: this.status === "cancelled"
+					? theme.fg("warning", "(cancelled)")
+					: this.status === "error"
+						? theme.fg("error", `(exit ${this.exitCode})`)
+						: "";
+		let output = "";
+		for (let i = this.outputLines.length - 1; i >= 0; i--) {
+			if (this.outputLines[i].trim()) {
+				output = this.outputLines[i];
+				break;
+			}
+		}
+		const detail = [status, output ? theme.fg("muted", output) : ""].filter(Boolean).join(" ");
+		return (detail ? [command, detail] : [command]).map((line) => truncateToWidth(line, width));
 	}
 
 	override invalidate(): void {

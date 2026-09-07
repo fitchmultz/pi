@@ -444,6 +444,8 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	isPartial: boolean;
 	/** Whether the result view is expanded. */
 	expanded: boolean;
+	/** Compact view mode, independent of expansion. Omitted means normal view. */
+	compactView?: boolean;
 	/** Whether inline images are currently shown in the TUI. */
 	showImages: boolean;
 	/** Whether the current result is an error. */
@@ -1226,6 +1228,8 @@ export interface SessionBeforeTreeResult {
 
 export interface MessageRenderOptions {
 	expanded: boolean;
+	/** Compact view mode, independent of expansion. Omitted means normal view. */
+	compactView?: boolean;
 	/** Horizontal padding configured by the outputPad setting. */
 	outputPad: number;
 }

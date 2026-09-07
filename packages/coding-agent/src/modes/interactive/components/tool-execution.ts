@@ -5,11 +5,13 @@ import {
 	Container,
 	getCapabilities,
 	Image,
+	isImageLine,
 	MouseRegion,
 	Spacer,
 	Text,
 	type TUI,
 	type TuiMouseEvent,
+	truncateToWidth,
 } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.ts";
 import type { Theme } from "../theme/theme.ts";
@@ -33,6 +35,7 @@ export interface ToolRenderers {
 }
 
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -40,6 +43,7 @@ import { keyHint } from "./keybinding-hints.ts";
 const FALLBACK_PREVIEW_LINES = 10;
 
 export interface ToolExecutionOptions {
+	compactView?: boolean;
 	showImages?: boolean;
 	imageWidthCells?: number;
 }
@@ -59,6 +63,8 @@ export class ToolExecutionComponent extends Container {
 	private toolCallId: string;
 	private args: any;
 	private expanded = false;
+	private compactView: boolean;
+	private compactLayout?: { rows: number[]; height: number };
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private isPartial = true;
@@ -89,6 +95,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolCallId = toolCallId;
 		this.args = args;
 		this.toolDefinition = toolDefinition;
+		this.compactView = options.compactView ?? false;
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
 		this.ui = ui;
@@ -144,6 +151,7 @@ export class ToolExecutionComponent extends Container {
 			argsComplete: this.argsComplete,
 			isPartial: this.isPartial,
 			expanded: this.expanded,
+			compactView: this.compactView,
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
 		};
@@ -236,6 +244,13 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	setCompactView(compactView: boolean): void {
+		if (this.compactView !== compactView) {
+			this.compactView = compactView;
+			this.updateDisplay();
+		}
+	}
+
 	setShowImages(show: boolean): void {
 		this.showImages = show;
 		this.updateDisplay();
@@ -254,6 +269,28 @@ export class ToolExecutionComponent extends Container {
 	override render(width: number): string[] {
 		if (this.hideComponent) {
 			return [];
+		}
+
+		if (this.compactView && !this.expanded) {
+			// Render the real children to retain their caches and native mouse layout.
+			// Image protocol rows become placeholders, never a partially clipped image.
+			const lines = super.render(width);
+			const rows = lines.flatMap((line, y) => (isImageLine(line) || stripAnsi(line).trim() ? [y] : []));
+			let secondRow = rows[1];
+			if (this.hasRendererDefinition() && this.result) {
+				const self = this.getRenderShell() === "self";
+				const container = self ? this.selfRenderContainer : this.contentBox;
+				const padding = self ? 0 : 1;
+				const callHeight = container.children[0]?.render(Math.max(1, width - padding * 2)).length ?? 0;
+				// A wrapping call or an edit preview must not crowd out the result/error row.
+				secondRow = rows.find((y) => y > rows[0] && y >= 1 + padding + callHeight) ?? secondRow;
+			}
+			const previewRows = rows.length > 0 ? [rows[0]] : [];
+			if (secondRow !== undefined && secondRow !== rows[0]) previewRows.push(secondRow);
+			this.compactLayout = { rows: previewRows, height: lines.length };
+			return previewRows.map((y) =>
+				truncateToWidth(isImageLine(lines[y]) ? theme.fg("muted", "[image]") : lines[y], width),
+			);
 		}
 
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
@@ -285,6 +322,11 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		if (this.compactView && !this.expanded) {
+			const y = this.compactLayout?.rows[event.y];
+			if (y === undefined || !this.compactLayout) return undefined;
+			return super.handleMouse({ ...event, y, height: this.compactLayout.height });
+		}
 		if (!this.hasRendererDefinition() || this.getRenderShell() !== "self") return super.handleMouse(event);
 		if (event.y <= 0 || event.y > this.selfRenderHeight) return undefined;
 		return this.selfRenderContainer.handleMouse({
@@ -371,7 +413,7 @@ export class ToolExecutionComponent extends Container {
 		}
 		this.imageSpacers = [];
 
-		if (this.result) {
+		if (this.result && (!this.compactView || this.expanded)) {
 			const imageBlocks = this.result.content.filter((c) => c.type === "image");
 			const caps = getCapabilities();
 			for (let i = 0; i < imageBlocks.length; i++) {
@@ -403,13 +445,13 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private getTextOutput(): string {
-		return getRenderedTextOutput(this.result, this.showImages);
+		return getRenderedTextOutput(this.result, this.showImages && (!this.compactView || this.expanded));
 	}
 
 	private formatToolExecution(): string {
 		let text = theme.fg("toolTitle", theme.bold(this.toolName));
 		const content = JSON.stringify(this.args, null, 2);
-		if (content) {
+		if (content && (!this.compactView || this.expanded)) {
 			text += `\n\n${content}`;
 		}
 		const output = this.getTextOutput();
