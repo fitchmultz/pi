@@ -1090,7 +1090,7 @@ export class AgentSession {
 		return this.agent.state.thinkingLevel;
 	}
 
-	/** Whether the session is currently processing an agent run or post-run continuation. */
+	/** Whether the session is preparing an admitted prompt, running the agent, or continuing it. */
 	get isStreaming(): boolean {
 		return this._isAgentRunActive;
 	}
@@ -1276,14 +1276,16 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+	private async _runAgentPrompt(prepare: () => Promise<AgentMessage[]>): Promise<void> {
+		if (this._isAgentRunActive || this.agent.state.isStreaming) {
+			throw new Error("Agent is already processing.");
+		}
 		this._isAgentRunActive = true;
-		this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
+		let started = false;
 		try {
-			// Custom wakeups prepare after reserving the run; user prompts prepare during preflight.
-			if (!Array.isArray(messages)) {
-				messages = [messages, ...(await this._prepareAgentStart(""))];
-			}
+			const messages = await prepare();
+			this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
+			started = true;
 			let run = this.agent.prompt(messages);
 			while (true) {
 				// Agent clears its signal on settlement; keep it for the post-run cancellation check.
@@ -1298,7 +1300,12 @@ export class AgentSession {
 			this._flushPendingProviderMessages();
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
-			await this._emitAgentSettled();
+			if (started) {
+				await this._emitAgentSettled();
+			} else {
+				this._isAgentRunActive = false;
+				this._resolveIdleWaitIfIdle();
+			}
 		}
 	}
 
@@ -1373,8 +1380,11 @@ export class AgentSession {
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
-		const preflightResult = options?.preflightResult;
-		let messages: AgentMessage[] | undefined;
+		let preflightComplete = false;
+		const preflightResult = (success: boolean) => {
+			preflightComplete = true;
+			options?.preflightResult?.(success);
+		};
 
 		try {
 			// Handle extension commands first (execute immediately, even during streaming)
@@ -1383,7 +1393,7 @@ export class AgentSession {
 				const handled = await this._tryExecuteExtensionCommand(text);
 				if (handled) {
 					// Extension command executed, no prompt to send
-					preflightResult?.(true);
+					preflightResult(true);
 					return;
 				}
 			}
@@ -1405,7 +1415,7 @@ export class AgentSession {
 					this.isStreaming ? options?.streamingBehavior : undefined,
 				);
 				if (inputResult.action === "handled") {
-					preflightResult?.(true);
+					preflightResult(true);
 					return;
 				}
 				if (inputResult.action === "transform") {
@@ -1433,73 +1443,60 @@ export class AgentSession {
 				} else {
 					await this._queueSteer(expandedText, currentImages);
 				}
-				preflightResult?.(true);
+				preflightResult(true);
 				return;
 			}
 
-			// Flush any pending bash and custom messages before the new prompt
-			this._flushPendingBashMessages();
-			this._flushPendingCustomMessages();
+			await this._runAgentPrompt(async () => {
+				// Reserve before auth, compaction, or startup hooks can yield and mutate shared run state.
+				this._flushPendingBashMessages();
+				this._flushPendingCustomMessages();
 
-			// Validate model
-			if (!this.model) {
-				throw new Error(formatNoModelSelectedMessage());
-			}
-
-			const hasConfiguredAuth =
-				this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
-				(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
-			if (!hasConfiguredAuth) {
-				const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
-				if (isOAuth) {
-					throw new Error(
-						`Authentication failed for "${this.model.provider}". ` +
-							`Credentials may have expired or network is unavailable. ` +
-							`Run '/login ${this.model.provider}' to re-authenticate.`,
-					);
+				// Validate model
+				if (!this.model) {
+					throw new Error(formatNoModelSelectedMessage());
 				}
-				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
-			}
 
-			// Check if we need to compact before sending (catches aborted responses).
-			// The user's new prompt is sent below, so do not call agent.continue() here.
-			const lastAssistant = this._findLastAssistantMessage();
-			if (lastAssistant) {
-				await this._checkCompaction(lastAssistant, false);
-			}
+				const hasConfiguredAuth =
+					this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
+					(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+				if (!hasConfiguredAuth) {
+					const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
+					if (isOAuth) {
+						throw new Error(
+							`Authentication failed for "${this.model.provider}". ` +
+								`Credentials may have expired or network is unavailable. ` +
+								`Run '/login ${this.model.provider}' to re-authenticate.`,
+						);
+					}
+					throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
+				}
 
-			// Build messages array (custom message if any, then user message)
-			messages = [];
+				// Check if we need to compact before sending (catches aborted responses).
+				// The user's new prompt is sent below, so do not call agent.continue() here.
+				const lastAssistant = this._findLastAssistantMessage();
+				if (lastAssistant) {
+					await this._checkCompaction(lastAssistant, false);
+				}
 
-			// Add user message
-			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-			if (currentImages) {
-				userContent.push(...currentImages);
-			}
-			messages.push({
-				role: "user",
-				content: userContent,
-				timestamp: Date.now(),
+				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+				if (currentImages) {
+					userContent.push(...currentImages);
+				}
+				const messages: AgentMessage[] = [{ role: "user", content: userContent, timestamp: Date.now() }];
+
+				// Consume only these asides after startup succeeds; asides added by the hook stay queued.
+				const nextTurnCount = this._pendingNextTurnMessages.length;
+				messages.push(...this._pendingNextTurnMessages);
+				messages.push(...(await this._prepareAgentStart(expandedText, currentImages)));
+				this._pendingNextTurnMessages.splice(0, nextTurnCount);
+				preflightResult(true);
+				return messages;
 			});
-
-			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this._pendingNextTurnMessages) {
-				messages.push(msg);
-			}
-			this._pendingNextTurnMessages = [];
-
-			messages.push(...(await this._prepareAgentStart(expandedText, currentImages)));
 		} catch (error) {
-			preflightResult?.(false);
+			if (!preflightComplete) preflightResult(false);
 			throw error;
 		}
-
-		if (!messages) {
-			return;
-		}
-
-		preflightResult?.(true);
-		await this._runAgentPrompt(messages);
 	}
 
 	/**
@@ -1687,7 +1684,7 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this._runAgentPrompt(appMessage);
+			await this._runAgentPrompt(async () => [appMessage, ...(await this._prepareAgentStart(""))]);
 		} else if (this.isStreaming) {
 			// Appending now would put the message between an assistant tool call and its
 			// result, which providers that validate message order reject on replay. Defer
