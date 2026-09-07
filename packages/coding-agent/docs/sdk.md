@@ -201,6 +201,10 @@ interface PromptOptions {
 
 It fires before `prompt()` resolves. `prompt()` still resolves only after the full accepted run finishes, including retries. Failures after acceptance are reported through the normal event and message stream, not through `preflightResult(false)`.
 
+After extension commands and input interception, an idle session reserves the prompt before auth checks, pre-prompt compaction, and `before_agent_start`. During this preparation, `session.isStreaming` is true and `session.isIdle` / `ctx.isIdle()` are false; the Agent's abort signal is not created until its run starts. Other prompts use the same busy queue/rejection rules below. Rejection cannot settle or change the active run.
+
+`session.waitForIdle()` waits through preparation and the full run. Failed preflight releases its reservation without emitting `agent_settled`; queued messages and `nextTurn` asides remain available for the next prompt. A started run emits `agent_settled` once after it finishes or aborts, including any automatic continuation.
+
 The `prompt()` method handles prompt templates, extension commands, and message sending:
 
 ```typescript
