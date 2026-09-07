@@ -735,10 +735,10 @@ export interface AfterProviderResponseEvent {
 	headers: Record<string, string>;
 }
 
-/** Fired after user submits prompt but before agent loop. */
+/** Fired before the agent loop for a user prompt or an idle custom message with triggerTurn. */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
-	/** The raw user prompt text (after expansion). */
+	/** The user prompt text (after expansion), or an empty string for an idle custom-message wakeup. */
 	prompt: string;
 	/** Images attached to the user prompt, if any. */
 	images?: ImageContent[];

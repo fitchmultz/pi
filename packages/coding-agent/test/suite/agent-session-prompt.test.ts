@@ -237,6 +237,57 @@ describe("AgentSession prompt characterization", () => {
 		expect(harness.session.messages).toHaveLength(2);
 	});
 
+	it.each([false, true])("honors a late Agent abort during turn_end (abort: %s)", async (abort) => {
+		let markHookStarted!: () => void;
+		const hookStarted = new Promise<void>((resolve) => {
+			markHookStarted = resolve;
+		});
+		let releaseHook!: () => void;
+		const hookReleased = new Promise<void>((resolve) => {
+			releaseHook = resolve;
+		});
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false }, retry: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", async (_event, ctx) => {
+						ctx.newContext({ handoff: "finished work" });
+						markHookStarted();
+						await hookReleased;
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("finished"), fauxAssistantMessage("must remain unused")]);
+
+		const run = harness.session.prompt("finish once");
+		try {
+			await hookStarted;
+			expect(harness.session.agent.signal).toBeDefined();
+			if (abort) harness.session.agent.abort();
+			expect(harness.session.agent.signal?.aborted).toBe(abort);
+		} finally {
+			releaseHook();
+			await run;
+		}
+
+		const branch = harness.sessionManager.getBranch();
+		expect(branch.filter((entry) => entry.type === "context_window")).toHaveLength(abort ? 0 : 1);
+		expect(
+			harness
+				.eventsOfType("message_end")
+				.filter((event) => event.message.role === "custom" && event.message.customType === "context-window"),
+		).toHaveLength(abort ? 0 : 1);
+		expect(branch.find((entry) => entry.type === "message" && entry.message.role === "assistant")).toMatchObject({
+			message: { stopReason: "stop" },
+		});
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.session.isIdle).toBe(true);
+	});
+
 	it("bounds native context handoffs", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

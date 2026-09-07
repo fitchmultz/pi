@@ -543,11 +543,11 @@ pi.on("session_shutdown", async (event, ctx) => {
 
 #### before_agent_start
 
-Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt.
+Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt. Also fires for an idle `pi.sendMessage(..., { triggerTurn: true })` wakeup, with `event.prompt === ""`.
 
 ```typescript
 pi.on("before_agent_start", async (event, ctx) => {
-  // event.prompt - user's prompt text
+  // event.prompt - user's prompt text, or "" for an idle custom-message wakeup
   // event.images - attached images (if any)
   // event.systemPrompt - current chained system prompt for this handler
   //   (includes changes from earlier before_agent_start handlers)
@@ -1455,7 +1455,7 @@ pi.sendMessage({
   - `"steer"` (default) - Queues the message while streaming. Delivered after the current assistant turn finishes executing its tool calls, before the next LLM call.
   - `"followUp"` - Waits for agent to finish. Delivered only when agent has no more tool calls.
   - `"nextTurn"` - Queued for next user prompt. Does not interrupt or trigger anything.
-- `triggerTurn: true` - If agent is idle, trigger an LLM response immediately. Only applies to `"steer"` and `"followUp"` modes (ignored for `"nextTurn"`).
+- `triggerTurn: true` - If agent is idle, fire `before_agent_start` with `event.prompt === ""` and trigger an LLM response. Only applies to `"steer"` and `"followUp"` modes (ignored for `"nextTurn"`).
 
 ### pi.sendUserMessage(content, options?)
 
