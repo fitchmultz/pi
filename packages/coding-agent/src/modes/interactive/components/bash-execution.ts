@@ -28,6 +28,7 @@ export class BashExecutionComponent extends Container {
 	private fullOutputPath?: string;
 	private expanded = false;
 	private compactView: boolean;
+	private compactPreview?: { width: number; lines: string[] };
 	private excludeFromContext: boolean;
 	private contentContainer: Container;
 
@@ -82,6 +83,7 @@ export class BashExecutionComponent extends Container {
 
 	override render(width: number): string[] {
 		if (!this.compactView || this.expanded) return super.render(width);
+		if (this.compactPreview?.width === width) return this.compactPreview.lines;
 
 		const colorKey = this.excludeFromContext ? "dim" : "bashMode";
 		const command = theme.fg(colorKey, theme.bold(`$ ${this.command.replace(/\s+/g, " ")}`));
@@ -101,7 +103,9 @@ export class BashExecutionComponent extends Container {
 			}
 		}
 		const detail = [status, output ? theme.fg("muted", output) : ""].filter(Boolean).join(" ");
-		return (detail ? [command, detail] : [command]).map((line) => truncateToWidth(line, width));
+		const lines = (detail ? [command, detail] : [command]).map((line) => truncateToWidth(line, width));
+		this.compactPreview = { width, lines };
+		return lines;
 	}
 
 	override invalidate(): void {
@@ -149,6 +153,7 @@ export class BashExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
+		this.compactPreview = undefined;
 		// Apply truncation for LLM context limits (same limits as bash tool)
 		const fullOutput = this.outputLines.join("\n");
 		const contextTruncation = truncateTail(fullOutput, {
