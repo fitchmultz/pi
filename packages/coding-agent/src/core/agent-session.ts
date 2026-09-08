@@ -1665,8 +1665,14 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
-		this._steeringMessages.push(text);
-		this._emitQueueUpdate();
+		const queuedTexts = this._steeringMessages;
+		queuedTexts.push(text);
+		try {
+			this._emitQueueUpdate();
+		} catch (error) {
+			queuedTexts.pop();
+			throw error;
+		}
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
@@ -1682,8 +1688,14 @@ export class AgentSession {
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
-		this._followUpMessages.push(text);
-		this._emitQueueUpdate();
+		const queuedTexts = this._followUpMessages;
+		queuedTexts.push(text);
+		try {
+			this._emitQueueUpdate();
+		} catch (error) {
+			queuedTexts.pop();
+			throw error;
+		}
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);

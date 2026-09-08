@@ -466,6 +466,7 @@ export class InteractiveMode {
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
+	private isFlushingCompactionQueue = false;
 
 	// Shutdown state
 	private shutdownRequested = false;
@@ -4479,46 +4480,37 @@ export class InteractiveMode {
 	}
 
 	private async flushCompactionQueue(): Promise<void> {
-		if (this.compactionQueuedMessages.length === 0) {
-			return;
+		if (this.isFlushingCompactionQueue || this.compactionQueuedMessages.length === 0) return;
+		this.isFlushingCompactionQueue = true;
+		try {
+			while (this.compactionQueuedMessages.length > 0) {
+				const message = this.compactionQueuedMessages.shift()!;
+				this.updatePendingMessagesDisplay();
+				const preflight = new Promise<boolean>((resolve) => {
+					let accepted = false;
+					void this.session
+						.prompt(message.text, {
+							streamingBehavior: message.mode,
+							preflightResult: (success) => {
+								if (success) {
+									accepted = true;
+									resolve(true);
+								}
+							},
+						})
+						.catch((error) => {
+							if (!accepted) this.compactionQueuedMessages.unshift(message);
+							this.updatePendingMessagesDisplay();
+							this.showError(`Queued message error: ${error instanceof Error ? error.message : String(error)}`);
+							resolve(false);
+						});
+				});
+				// Keep the undispatched tail visible and dequeuable while preflight waits.
+				if (!(await preflight)) return;
+			}
+		} finally {
+			this.isFlushingCompactionQueue = false;
 		}
-
-		const queuedMessages = [...this.compactionQueuedMessages];
-		this.compactionQueuedMessages = [];
-		this.updatePendingMessagesDisplay();
-
-		let restored = false;
-		const restoreQueue = (error: unknown) => {
-			if (restored) return;
-			restored = true;
-			this.session.clearQueue();
-			this.compactionQueuedMessages = [...queuedMessages, ...this.compactionQueuedMessages];
-			this.updatePendingMessagesDisplay();
-			this.showError(
-				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-		};
-
-		for (const message of queuedMessages) {
-			const preflight = new Promise<boolean>((resolve) => {
-				void this.session
-					.prompt(message.text, {
-						streamingBehavior: message.mode,
-						preflightResult: (success) => {
-							if (success) resolve(true);
-						},
-					})
-					.catch((error) => {
-						restoreQueue(error);
-						resolve(false);
-					});
-			});
-			// Keep input order without waiting for the provider run to finish.
-			if (!(await preflight) || restored) return;
-		}
-		this.updatePendingMessagesDisplay();
 	}
 
 	/** Move pending bash components from pending area to chat */

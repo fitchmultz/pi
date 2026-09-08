@@ -61,7 +61,6 @@ describe("streaming legacy v3 normalization", () => {
 		getOrThrow(await fileSystem.writeFile(path, content, BACKGROUND_CONTEXT));
 		return {
 			path,
-			content,
 			reader: fileSystem,
 			read: () => LegacyV3Source.read(fileSystem, path, BACKGROUND_CONTEXT),
 		};
