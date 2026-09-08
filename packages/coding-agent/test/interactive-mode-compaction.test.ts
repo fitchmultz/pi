@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
+import type { PromptOptions } from "../src/core/agent-session.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -197,7 +198,7 @@ describe("InteractiveMode compaction events", () => {
 			kind: "compaction",
 			usage,
 		});
-		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledExactlyOnceWith();
 
 		const pending: AgentMessage = { role: "user", content: "newly submitted request", timestamp: 1 };
 		vi.clearAllMocks();
@@ -277,23 +278,22 @@ describe("InteractiveMode compaction events", () => {
 			compactionQueuedMessages: [{ text: "change direction", mode: "steer" as const }],
 			session: {
 				clearQueue: vi.fn(),
-				prompt: vi.fn().mockResolvedValue(undefined),
-				steer: vi.fn().mockResolvedValue(undefined),
-				followUp: vi.fn().mockResolvedValue(undefined),
+				prompt: vi.fn(async (_text: string, options: PromptOptions) => options.preflightResult?.(true)),
 			},
-			isExtensionCommand: vi.fn().mockReturnValue(false),
 			updatePendingMessagesDisplay: vi.fn(),
 			showError: vi.fn(),
 		};
 
 		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (
 			this: typeof fakeThis,
-			options?: { willRetry?: boolean },
 		) => Promise<void>;
 
-		await flushCompactionQueue.call(fakeThis, { willRetry: false });
+		await flushCompactionQueue.call(fakeThis);
 
-		expect(fakeThis.session.prompt).toHaveBeenCalledWith("change direction", { streamingBehavior: "steer" });
+		expect(fakeThis.session.prompt).toHaveBeenCalledWith(
+			"change direction",
+			expect.objectContaining({ streamingBehavior: "steer" }),
+		);
 		expect(fakeThis.compactionQueuedMessages).toEqual([]);
 		expect(fakeThis.showError).not.toHaveBeenCalled();
 	});

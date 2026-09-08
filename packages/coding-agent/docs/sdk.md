@@ -114,6 +114,8 @@ interface AgentSession {
 }
 ```
 
+`session.navigateTree()` rejects while an agent response, manual or automatic compaction, or another tree navigation is active, even with `summarize: false`. It does not queue navigation or return `{ cancelled: true }` for these conflicts. Wait for the active operation to finish (for example, with `await session.waitForIdle()`) and retry. Rejection leaves the active branch unchanged.
+
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
 
 ### createAgentSessionRuntime() and AgentSessionRuntime
@@ -204,6 +206,8 @@ It fires before `prompt()` resolves. `prompt()` still resolves only after the fu
 After extension commands and input interception, an idle session reserves the prompt before auth checks, pre-prompt compaction, and `before_agent_start`. During this preparation, `session.isStreaming` is true and `session.isIdle` / `ctx.isIdle()` are false; the Agent's abort signal is not created until its run starts. Other prompts use the same busy queue/rejection rules below. Rejection cannot settle or change the active run.
 
 `session.waitForIdle()` waits through preparation and the full run. Failed preflight releases its reservation without emitting `agent_settled`; queued messages and `nextTurn` asides remain available for the next prompt. A started run emits `agent_settled` once after it finishes or aborts, including any automatic continuation.
+
+`session.abort()` also cancels an admitted prompt that is still preparing. It waits for preparation to finish, then rejects the prompt with `AbortError` rather than starting the agent run; unconsumed `nextTurn` asides and queued messages remain. TUI Escape and `ctx.abort()` use the same path, with TUI queued text restored to the editor.
 
 The `prompt()` method handles prompt templates, extension commands, and message sending:
 

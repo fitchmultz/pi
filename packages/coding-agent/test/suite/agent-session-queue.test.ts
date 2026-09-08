@@ -1,6 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall, type ImageContent } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, InputEvent } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
@@ -153,6 +153,79 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual(["start", "after current run"]);
 		expect(assistantSeenBeforeFollowUp).toContain("");
 		expect(getAssistantTexts(harness)).toContain("follow-up response");
+	});
+
+	// Regression test for #8718.
+	it("runs direct and prompted queues through input handlers exactly once with pending ownership and images", async () => {
+		const inputEvents: Array<Pick<InputEvent, "text" | "source" | "streamingBehavior" | "images">> = [];
+		const pendingCounts: number[] = [];
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const transformedImages: ImageContent[] = [{ type: "image", data: "bmV3", mimeType: "image/png" }];
+		const waiting = await createWaitingHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", (event, ctx) => {
+						inputEvents.push({
+							text: event.text,
+							source: event.source,
+							streamingBehavior: event.streamingBehavior,
+							images: event.images,
+						});
+						pendingCounts.push(ctx.getPendingInputCount());
+						if (event.text.startsWith("handle")) return { action: "handled" };
+						return {
+							action: "transform",
+							text: `transformed: ${event.text}`,
+							images: event.text === "follow me" ? transformedImages : undefined,
+						};
+					});
+				},
+			],
+		});
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("steered"),
+			fauxAssistantMessage("prompted steer"),
+			fauxAssistantMessage("followed up"),
+		]);
+
+		await waitForToolStart;
+		inputEvents.length = 0;
+		pendingCounts.length = 0;
+		try {
+			await harness.session.steer("steer me", images, { source: "rpc" });
+			await harness.session.steer("handle steer", undefined, { source: "rpc" });
+			await harness.session.followUp("follow me", images, { source: "rpc" });
+			await harness.session.followUp("handle follow", undefined, { source: "rpc" });
+			await harness.session.prompt("prompt me", { source: "rpc", streamingBehavior: "steer", images });
+
+			expect(inputEvents).toEqual([
+				{ text: "steer me", source: "rpc", streamingBehavior: "steer", images },
+				{ text: "handle steer", source: "rpc", streamingBehavior: "steer", images: undefined },
+				{ text: "follow me", source: "rpc", streamingBehavior: "followUp", images },
+				{ text: "handle follow", source: "rpc", streamingBehavior: "followUp", images: undefined },
+				{ text: "prompt me", source: "rpc", streamingBehavior: "steer", images },
+			]);
+			expect(pendingCounts).toEqual([1, 1, 1, 1, 1]);
+			expect(harness.session.pendingInputCount).toBe(0);
+			expect(harness.session.getSteeringMessages()).toEqual(["transformed: steer me", "transformed: prompt me"]);
+			expect(harness.session.getFollowUpMessages()).toEqual(["transformed: follow me"]);
+		} finally {
+			releaseToolExecution();
+		}
+		await promptPromise;
+		for (const [text, expectedImages] of [
+			["transformed: steer me", images],
+			["transformed: follow me", transformedImages],
+			["transformed: prompt me", images],
+		] as const) {
+			expect(harness.session.messages.find((message) => getMessageText(message) === text)).toMatchObject({
+				role: "user",
+				content: [{ type: "text", text }, ...expectedImages],
+			});
+		}
 	});
 
 	it("delivers multiple steering messages in order in one-at-a-time mode", async () => {

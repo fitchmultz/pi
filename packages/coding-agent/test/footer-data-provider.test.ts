@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { execFile, spawnSync } from "child_process";
 import { existsSync, type FSWatcher, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -208,15 +209,19 @@ describe("FooterDataProvider reftable branch detection", () => {
 		try {
 			expect(provider.getGitBranch()).toBe("main");
 			vi.mocked(execFile).mockClear();
+			resolvedBranch = "foo";
+			const branchChanged = new Promise<void>((resolve) => provider.onBranchChange(resolve));
 
 			emitReftableChange(provider);
 			emitReftableChange(provider);
 			emitReftableChange(provider);
-			await vi.advanceTimersByTimeAsync(499);
+			vi.advanceTimersByTime(499);
 			expect(vi.mocked(execFile)).not.toHaveBeenCalled();
-			await vi.advanceTimersByTimeAsync(2);
+			vi.advanceTimersByTime(2);
 			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
-			await vi.advanceTimersByTimeAsync(650);
+			// Finish the refresh without yielding to native watcher callbacks.
+			await branchChanged;
+			vi.advanceTimersByTime(650);
 			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
 		} finally {
 			provider.dispose();
@@ -235,7 +240,7 @@ describe("FooterDataProvider reftable branch detection", () => {
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
 
-			writeFileSync(join(reftableDir, "tables.list"), "1\n");
+			await writeFile(join(reftableDir, "tables.list"), "1\n");
 			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
 			await waitFor(() => provider.getGitBranch() === "foo");
 

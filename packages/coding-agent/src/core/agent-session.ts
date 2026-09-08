@@ -325,6 +325,7 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
+	private _promptAbortController: AbortController | undefined;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -338,7 +339,7 @@ export class AgentSession {
 	private _pendingCustomMessages: CustomMessage[] = [];
 	/** Provider-bound inputs waiting until request preparation can no longer add a context boundary. */
 	private _pendingProviderMessages: AgentMessage[] = [];
-	/** Native prompt inputs awaiting handling, admission, or rejection. */
+	/** Native inputs awaiting handling, admission, queueing, or rejection. */
 	private _pendingInputCount = 0;
 
 	// Compaction state
@@ -1063,6 +1064,7 @@ export class AgentSession {
 			this.abortCompaction();
 			this.abortBranchSummary();
 			this.abortBash();
+			this._promptAbortController?.abort();
 			this.agent.abort();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
@@ -1281,14 +1283,19 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(prepare: () => Promise<AgentMessage[]>): Promise<void> {
+	private async _runAgentPrompt(prepare: (signal: AbortSignal) => Promise<() => AgentMessage[]>): Promise<void> {
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
 		}
 		this._isAgentRunActive = true;
+		const controller = new AbortController();
+		this._promptAbortController = controller;
 		let started = false;
 		try {
-			const messages = await prepare();
+			const accept = await prepare(controller.signal);
+			controller.signal.throwIfAborted();
+			const messages = accept();
+			this._promptAbortController = undefined;
 			this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
 			started = true;
 			let run = this.agent.prompt(messages);
@@ -1299,7 +1306,12 @@ export class AgentSession {
 				if (!(await this._handlePostAgentRun(signal))) break;
 				run = this.agent.continue();
 			}
+		} catch (error) {
+			controller.signal.throwIfAborted();
+			throw error;
 		} finally {
+			this._promptAbortController = undefined;
+			if (controller.signal.aborted) this._pendingNewContext = undefined;
 			this._skipNextProviderRequestPreflight = false;
 			this._systemPromptOverride = undefined;
 			this._flushPendingProviderMessages();
@@ -1374,6 +1386,26 @@ export class AgentSession {
 		return this.agent.hasQueuedMessages();
 	}
 
+	private async _runInputHandlers(
+		text: string,
+		images: ImageContent[] | undefined,
+		source: InputSource,
+		streamingBehavior?: "steer" | "followUp",
+	): Promise<{ text: string; images: ImageContent[] | undefined } | undefined> {
+		if (!this._extensionRunner.hasHandlers("input")) {
+			return { text, images };
+		}
+
+		const inputResult = await this._extensionRunner.emitInput(text, images, source, streamingBehavior);
+		if (inputResult.action === "handled") {
+			return undefined;
+		}
+		if (inputResult.action === "transform") {
+			return { text: inputResult.text, images: inputResult.images ?? images };
+		}
+		return { text, images };
+	}
+
 	/**
 	 * Send a prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
@@ -1418,24 +1450,17 @@ export class AgentSession {
 			pendingInput = true;
 
 			// Emit input event for extension interception (before skill/template expansion)
-			let currentText = text;
-			let currentImages = options?.images;
-			if (this._extensionRunner.hasHandlers("input")) {
-				const inputResult = await this._extensionRunner.emitInput(
-					currentText,
-					currentImages,
-					options?.source ?? "interactive",
-					this.isStreaming ? options?.streamingBehavior : undefined,
-				);
-				if (inputResult.action === "handled") {
-					preflightResult(true);
-					return;
-				}
-				if (inputResult.action === "transform") {
-					currentText = inputResult.text;
-					currentImages = inputResult.images ?? currentImages;
-				}
+			const processedInput = await this._runInputHandlers(
+				text,
+				options?.images,
+				options?.source ?? "interactive",
+				this.isStreaming ? options?.streamingBehavior : undefined,
+			);
+			if (!processedInput) {
+				preflightResult(true);
+				return;
 			}
+			const { text: currentText, images: currentImages } = processedInput;
 
 			// Expand skill commands (/skill:name args) and prompt templates (/template args)
 			let expandedText = currentText;
@@ -1460,7 +1485,7 @@ export class AgentSession {
 				return;
 			}
 
-			await this._runAgentPrompt(async () => {
+			await this._runAgentPrompt(async (signal) => {
 				// Reserve before auth, compaction, or startup hooks can yield and mutate shared run state.
 				this._flushPendingBashMessages();
 				this._flushPendingCustomMessages();
@@ -1473,6 +1498,7 @@ export class AgentSession {
 				const hasConfiguredAuth =
 					this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
 					(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+				signal.throwIfAborted();
 				if (!hasConfiguredAuth) {
 					const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
 					if (isOAuth) {
@@ -1491,6 +1517,7 @@ export class AgentSession {
 				if (lastAssistant) {
 					await this._checkCompaction(lastAssistant, false);
 				}
+				signal.throwIfAborted();
 
 				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 				if (currentImages) {
@@ -1502,9 +1529,13 @@ export class AgentSession {
 				const nextTurnCount = this._pendingNextTurnMessages.length;
 				messages.push(...this._pendingNextTurnMessages);
 				messages.push(...(await this._prepareAgentStart(expandedText, currentImages)));
-				this._pendingNextTurnMessages.splice(0, nextTurnCount);
-				preflightResult(true);
-				return messages;
+				return () => {
+					preflightResult(true);
+					signal.throwIfAborted();
+					// No await between consuming these asides and handing them to Agent.
+					this._pendingNextTurnMessages.splice(0, nextTurnCount);
+					return messages;
+				};
 			});
 		} catch (error) {
 			if (!preflightComplete) preflightResult(false);
@@ -1572,25 +1603,50 @@ export class AgentSession {
 		}
 	}
 
+	private async _queueUserInput(
+		text: string,
+		images: ImageContent[] | undefined,
+		behavior: "steer" | "followUp",
+		source: InputSource,
+	): Promise<void> {
+		if (text.startsWith("/")) {
+			this._throwIfExtensionCommand(text);
+		}
+
+		this._pendingInputCount++;
+		try {
+			const processedInput = await this._runInputHandlers(
+				text,
+				images,
+				source,
+				this.isStreaming ? behavior : undefined,
+			);
+			if (!processedInput) return;
+
+			let expandedText = this._expandSkillCommand(processedInput.text);
+			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+
+			if (behavior === "steer") {
+				await this._queueSteer(expandedText, processedInput.images);
+			} else {
+				await this._queueFollowUp(expandedText, processedInput.images);
+			}
+		} finally {
+			this._pendingInputCount--;
+		}
+	}
+
 	/**
 	 * Queue a steering message while the agent is running.
 	 * Delivered after the current assistant turn finishes executing its tool calls,
 	 * before the next LLM call.
 	 * Expands skill commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
+	 * @param options Input source; defaults to interactive
 	 * @throws Error if text is an extension command
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
-		// Check for extension commands (cannot be queued)
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
-		}
-
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-
-		await this._queueSteer(expandedText, images);
+	async steer(text: string, images?: ImageContent[], options?: { source?: InputSource }): Promise<void> {
+		await this._queueUserInput(text, images, "steer", options?.source ?? "interactive");
 	}
 
 	/**
@@ -1598,27 +1654,25 @@ export class AgentSession {
 	 * Delivered only when agent has no more tool calls or steering messages.
 	 * Expands skill commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
+	 * @param options Input source; defaults to interactive
 	 * @throws Error if text is an extension command
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
-		// Check for extension commands (cannot be queued)
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
-		}
-
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-
-		await this._queueFollowUp(expandedText, images);
+	async followUp(text: string, images?: ImageContent[], options?: { source?: InputSource }): Promise<void> {
+		await this._queueUserInput(text, images, "followUp", options?.source ?? "interactive");
 	}
 
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
-		this._steeringMessages.push(text);
-		this._emitQueueUpdate();
+		const queuedTexts = this._steeringMessages;
+		queuedTexts.push(text);
+		try {
+			this._emitQueueUpdate();
+		} catch (error) {
+			queuedTexts.pop();
+			throw error;
+		}
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
@@ -1634,8 +1688,14 @@ export class AgentSession {
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
-		this._followUpMessages.push(text);
-		this._emitQueueUpdate();
+		const queuedTexts = this._followUpMessages;
+		queuedTexts.push(text);
+		try {
+			this._emitQueueUpdate();
+		} catch (error) {
+			queuedTexts.pop();
+			throw error;
+		}
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
@@ -1697,7 +1757,10 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this._runAgentPrompt(async () => [appMessage, ...(await this._prepareAgentStart(""))]);
+			await this._runAgentPrompt(async () => {
+				const messages = [appMessage, ...(await this._prepareAgentStart(""))];
+				return () => messages;
+			});
 		} else if (this.isStreaming) {
 			// Appending now would put the message between an assistant tool call and its
 			// result, which providers that validate message order reject on replay. Defer
@@ -1795,7 +1858,7 @@ export class AgentSession {
 		return this.agent.hasQueuedMessages();
 	}
 
-	/** Inputs awaiting prompt preflight or held by the bound mode; excludes dispatched extension commands. */
+	/** Inputs awaiting preflight or queueing, or held by the bound mode; excludes dispatched extension commands. */
 	get pendingInputCount(): number {
 		return this._pendingInputCount + (this._extensionGetQueuedInputCount?.() ?? 0);
 	}
@@ -1828,6 +1891,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		this._promptAbortController?.abort();
 		this.abortRetry();
 		this.abortCompaction();
 		this.abortBranchSummary();
@@ -3402,6 +3466,11 @@ export class AgentSession {
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish before navigating the session tree.");
+		}
+		if (this.isCompacting) {
+			throw new Error(
+				"Wait for the current compaction or tree navigation to finish before navigating the session tree.",
+			);
 		}
 
 		const oldLeafId = this.sessionManager.getLeafId();

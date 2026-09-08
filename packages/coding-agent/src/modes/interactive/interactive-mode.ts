@@ -182,7 +182,7 @@ interface Expandable {
 
 interface WorkingStatusEditor extends EditorComponent {
 	readonly embedWorkingStatus: boolean;
-	setWorkingStatusIndicator(indicator: WorkingStatusIndicator | undefined): void;
+	setWorkingStatusIndicator(indicator: StatusIndicator | undefined): void;
 }
 
 function isWorkingStatusEditor(editor: EditorComponent): editor is WorkingStatusEditor {
@@ -466,6 +466,7 @@ export class InteractiveMode {
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
+	private isFlushingCompactionQueue = false;
 
 	// Shutdown state
 	private shutdownRequested = false;
@@ -507,9 +508,6 @@ export class InteractiveMode {
 	// Convenience accessors
 	private get session(): AgentSession {
 		return this.runtimeHost.session;
-	}
-	private get agent() {
-		return this.session.agent;
 	}
 	private get sessionManager() {
 		return this.session.sessionManager;
@@ -1905,7 +1903,7 @@ export class InteractiveMode {
 						this.editor.setText(result.editorText);
 					}
 					this.showStatus("Navigated to selected point");
-					void this.flushCompactionQueue({ willRetry: false });
+					void this.flushCompactionQueue();
 					return { cancelled: false };
 				},
 				switchSession: async (sessionPath, options) => {
@@ -2100,7 +2098,7 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private setEditorWorkingStatusIndicator(indicator: WorkingStatusIndicator | undefined): boolean {
+	private setEditorWorkingStatusIndicator(indicator: StatusIndicator | undefined): boolean {
 		this.defaultEditor.setWorkingStatusIndicator(undefined);
 		if (!isWorkingStatusEditor(this.editor)) return false;
 		this.editor.setWorkingStatusIndicator(indicator);
@@ -2113,7 +2111,7 @@ export class InteractiveMode {
 		this.activeWorkingIndicatorEmbedded = false;
 		this.statusContainer.clear();
 		this.setEditorWorkingStatusIndicator(undefined);
-		if (indicator instanceof WorkingStatusIndicator && this.setEditorWorkingStatusIndicator(indicator)) {
+		if (this.setEditorWorkingStatusIndicator(indicator)) {
 			this.activeWorkingIndicatorEmbedded = true;
 			return;
 		}
@@ -2125,7 +2123,7 @@ export class InteractiveMode {
 			return;
 		}
 		const clearedIndicator = this.activeStatusIndicator;
-		const clearedIndicatorWasEmbedded = clearedIndicator?.kind === "working" && this.activeWorkingIndicatorEmbedded;
+		const clearedIndicatorWasEmbedded = this.activeWorkingIndicatorEmbedded;
 		clearedIndicator?.dispose();
 		this.activeStatusIndicator = undefined;
 		this.activeWorkingIndicatorEmbedded = false;
@@ -2725,7 +2723,7 @@ export class InteractiveMode {
 		}
 
 		this.editorContainer.addChild(this.editor as Component);
-		if (this.activeStatusIndicator instanceof WorkingStatusIndicator) {
+		if (this.activeStatusIndicator) {
 			this.statusContainer.clear();
 			this.activeWorkingIndicatorEmbedded = this.setEditorWorkingStatusIndicator(this.activeStatusIndicator);
 			if (!this.activeWorkingIndicatorEmbedded) {
@@ -3467,7 +3465,7 @@ export class InteractiveMode {
 						this.chatContainer.addChild(new Text(theme.fg("error", event.errorMessage), 1, 0));
 					}
 				}
-				void this.flushCompactionQueue({ willRetry: event.willRetry });
+				void this.flushCompactionQueue();
 				this.ui.requestRender();
 				break;
 			}
@@ -4203,9 +4201,7 @@ export class InteractiveMode {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
 		}
-		if (this.activeStatusIndicator?.kind === "working") {
-			this.activeStatusIndicator.invalidate();
-		}
+		this.activeStatusIndicator?.invalidate();
 		this.ui.requestRender();
 	}
 
@@ -4450,7 +4446,7 @@ export class InteractiveMode {
 		if (allQueued.length === 0) {
 			this.updatePendingMessagesDisplay();
 			if (options?.abort) {
-				this.agent.abort();
+				void this.session.abort();
 			}
 			return 0;
 		}
@@ -4460,7 +4456,7 @@ export class InteractiveMode {
 		this.editor.setText(combinedText);
 		this.updatePendingMessagesDisplay();
 		if (options?.abort) {
-			this.agent.abort();
+			void this.session.abort();
 		}
 		return allQueued.length;
 	}
@@ -4483,82 +4479,37 @@ export class InteractiveMode {
 		return !!extensionRunner.getCommand(commandName);
 	}
 
-	private async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		if (this.compactionQueuedMessages.length === 0) {
-			return;
-		}
-
-		const queuedMessages = [...this.compactionQueuedMessages];
-		this.compactionQueuedMessages = [];
-		this.updatePendingMessagesDisplay();
-
-		const restoreQueue = (error: unknown) => {
-			this.session.clearQueue();
-			this.compactionQueuedMessages = queuedMessages;
-			this.updatePendingMessagesDisplay();
-			this.showError(
-				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-		};
-
+	private async flushCompactionQueue(): Promise<void> {
+		if (this.isFlushingCompactionQueue || this.compactionQueuedMessages.length === 0) return;
+		this.isFlushingCompactionQueue = true;
 		try {
-			if (options?.willRetry) {
-				// When retry is pending, queue messages for the retry turn
-				for (const message of queuedMessages) {
-					if (this.isExtensionCommand(message.text)) {
-						await this.session.prompt(message.text);
-					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text);
-					} else {
-						await this.session.steer(message.text);
-					}
-				}
+			while (this.compactionQueuedMessages.length > 0) {
+				const message = this.compactionQueuedMessages.shift()!;
 				this.updatePendingMessagesDisplay();
-				return;
-			}
-
-			// Find first non-extension-command message to use as prompt
-			const firstPromptIndex = queuedMessages.findIndex((message) => !this.isExtensionCommand(message.text));
-			if (firstPromptIndex === -1) {
-				// All extension commands - execute them all
-				for (const message of queuedMessages) {
-					await this.session.prompt(message.text);
-				}
-				return;
-			}
-
-			// Execute any extension commands before the first prompt
-			const preCommands = queuedMessages.slice(0, firstPromptIndex);
-			const firstPrompt = queuedMessages[firstPromptIndex];
-			const rest = queuedMessages.slice(firstPromptIndex + 1);
-
-			for (const message of preCommands) {
-				await this.session.prompt(message.text);
-			}
-
-			// Start a prompt when idle, or queue it into a run still finishing compaction.
-			const promptPromise = this.session
-				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode })
-				.catch((error) => {
-					restoreQueue(error);
+				const preflight = new Promise<boolean>((resolve) => {
+					let accepted = false;
+					void this.session
+						.prompt(message.text, {
+							streamingBehavior: message.mode,
+							preflightResult: (success) => {
+								if (success) {
+									accepted = true;
+									resolve(true);
+								}
+							},
+						})
+						.catch((error) => {
+							if (!accepted) this.compactionQueuedMessages.unshift(message);
+							this.updatePendingMessagesDisplay();
+							this.showError(`Queued message error: ${error instanceof Error ? error.message : String(error)}`);
+							resolve(false);
+						});
 				});
-
-			// Queue remaining messages
-			for (const message of rest) {
-				if (this.isExtensionCommand(message.text)) {
-					await this.session.prompt(message.text);
-				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text);
-				} else {
-					await this.session.steer(message.text);
-				}
+				// Keep the undispatched tail visible and dequeuable while preflight waits.
+				if (!(await preflight)) return;
 			}
-			this.updatePendingMessagesDisplay();
-			void promptPromise;
-		} catch (error) {
-			restoreQueue(error);
+		} finally {
+			this.isFlushingCompactionQueue = false;
 		}
 	}
 
@@ -5330,6 +5281,14 @@ export class InteractiveMode {
 						await this.session.abort();
 					}
 
+					// Recheck after the dialogs and streaming abort, before replacing another operation's UI.
+					if (this.session.isCompacting) {
+						this.showError(
+							"Wait for the current compaction or tree navigation to finish before navigating the session tree.",
+						);
+						return;
+					}
+
 					// Set up escape handler and status indicator if summarizing
 					let showingSummaryIndicator = false;
 					const originalOnEscape = this.defaultEditor.onEscape;
@@ -5368,7 +5327,7 @@ export class InteractiveMode {
 							this.editor.setText(result.editorText);
 						}
 						this.showStatus("Navigated to selected point");
-						void this.flushCompactionQueue({ willRetry: false });
+						void this.flushCompactionQueue();
 					} catch (error) {
 						this.showError(error instanceof Error ? error.message : String(error));
 					} finally {

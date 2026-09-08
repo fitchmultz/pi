@@ -21,57 +21,102 @@ describe("AgentSession prompt admission", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
-	it("counts concurrent input dispatch through handling and reload without counting commands", async () => {
-		const firstReleased = createDeferred();
-		const secondReleased = createDeferred();
-		const entered: string[] = [];
-		const commandCounts: number[] = [];
+	it.each(["prompt", "steer", "followUp"] as const)(
+		"counts concurrent %s input through handling and reload without counting commands",
+		async (method) => {
+			const firstReleased = createDeferred();
+			const secondReleased = createDeferred();
+			const entered: string[] = [];
+			const commandCounts: number[] = [];
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("input", async (event) => {
+							entered.push(event.text);
+							await (event.text === "first" ? firstReleased : secondReleased).promise;
+							return { action: "handled" };
+						});
+						pi.registerCommand("restart-check", {
+							handler: async (_args, ctx) => {
+								commandCounts.push(ctx.getPendingInputCount());
+							},
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const first = harness.session[method]("first");
+			const second = harness.session[method]("second");
+			try {
+				expect(entered).toEqual(["first", "second"]);
+				expect(harness.session.isIdle).toBe(true);
+				expect(harness.session.hasPendingMessages).toBe(false);
+				const oldContext = harness.session.extensionRunner.createContext();
+				expect(oldContext.getPendingInputCount()).toBe(2);
+				await harness.session.prompt("/restart-check");
+				expect(commandCounts).toEqual([2]);
+				expect(entered).toHaveLength(2);
+				await harness.session.reload();
+				const current = harness.session.extensionRunner.createContext();
+				expect(() => oldContext.getPendingInputCount()).toThrow("stale");
+				expect(current.getPendingInputCount()).toBe(2);
+				secondReleased.resolve();
+				await second;
+				expect(current.getPendingInputCount()).toBe(1);
+				firstReleased.resolve();
+				await first;
+				expect(current.getPendingInputCount()).toBe(0);
+				await harness.session.prompt("/restart-check");
+				expect(commandCounts).toEqual([2, 0]);
+				expect(harness.session.messages).toEqual([]);
+				expect(harness.faux.state.callCount).toBe(0);
+			} finally {
+				firstReleased.resolve();
+				secondReleased.resolve();
+				await Promise.allSettled([first, second]);
+			}
+		},
+	);
+
+	it("releases direct input ownership if reporting a handler failure also throws", async () => {
+		const released = createDeferred();
+		const errorCounts: number[] = [];
 		const harness = await createHarness({
+			tools: [],
 			extensionFactories: [
 				(pi) => {
-					pi.on("input", async (event) => {
-						entered.push(event.text);
-						await (event.text === "first" ? firstReleased : secondReleased).promise;
-						return { action: "handled" };
-					});
-					pi.registerCommand("restart-check", {
-						handler: async (_args, ctx) => {
-							commandCounts.push(ctx.getPendingInputCount());
-						},
+					pi.on("input", async () => {
+						await released.promise;
+						throw new Error("input handler failed");
 					});
 				},
 			],
 		});
 		harnesses.push(harness);
-		const first = harness.session.prompt("first");
-		const second = harness.session.prompt("second");
+		await harness.session.bindExtensions({
+			onError: (error) => {
+				errorCounts.push(harness.session.pendingInputCount);
+				throw new Error(`observer: ${error.error}`);
+			},
+		});
+		const result = Promise.allSettled([harness.session.followUp("failed input")]);
 		try {
-			expect(entered).toEqual(["first", "second"]);
-			expect(harness.session.isIdle).toBe(true);
+			expect(harness.session.pendingInputCount).toBe(1);
+			released.resolve();
+			expect(await result).toEqual([
+				{
+					status: "rejected",
+					reason: expect.objectContaining({ message: "observer: input handler failed" }),
+				},
+			]);
+			expect(errorCounts).toEqual([1]);
+			expect(harness.session.pendingInputCount).toBe(0);
 			expect(harness.session.hasPendingMessages).toBe(false);
-			const oldContext = harness.session.extensionRunner.createContext();
-			expect(oldContext.getPendingInputCount()).toBe(2);
-			await harness.session.prompt("/restart-check");
-			expect(commandCounts).toEqual([2]);
-			expect(entered).toHaveLength(2);
-			await harness.session.reload();
-			const current = harness.session.extensionRunner.createContext();
-			expect(() => oldContext.getPendingInputCount()).toThrow("stale");
-			expect(current.getPendingInputCount()).toBe(2);
-			secondReleased.resolve();
-			await second;
-			expect(current.getPendingInputCount()).toBe(1);
-			firstReleased.resolve();
-			await first;
-			expect(current.getPendingInputCount()).toBe(0);
-			await harness.session.prompt("/restart-check");
-			expect(commandCounts).toEqual([2, 0]);
-			expect(harness.session.messages).toEqual([]);
+			expect(harness.session.isIdle).toBe(true);
 			expect(harness.faux.state.callCount).toBe(0);
 		} finally {
-			firstReleased.resolve();
-			secondReleased.resolve();
-			await Promise.allSettled([first, second]);
+			released.resolve();
+			await result;
 		}
 	});
 
@@ -267,6 +312,177 @@ describe("AgentSession prompt admission", () => {
 			await Promise.allSettled([rejected, owner, wakeup, abortWait, ...waits]);
 		}
 	});
+
+	it.each(["auth", "auth-error", "startup"] as const)(
+		"cancels admitted %s preparation before any provider call",
+		async (stage) => {
+			const entered = createDeferred();
+			const released = createDeferred();
+			let holdAuth = false;
+			let failAuth = stage === "auth-error";
+			const harness = await createHarness({
+				tools: [],
+				withConfiguredAuth: stage === "startup",
+				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_agent_start", async () => {
+							if (stage === "startup") {
+								entered.resolve();
+								await released.promise;
+							}
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			if (stage !== "startup") {
+				const faux = fauxProvider({ api: harness.faux.api });
+				harness.session.modelRuntime.registerNativeProvider({
+					...faux.provider,
+					auth: {
+						apiKey: {
+							name: "Faux preflight",
+							resolve: async () => {
+								if (!holdAuth) return undefined;
+								entered.resolve();
+								await released.promise;
+								if (failAuth) throw new Error("auth failed after cancellation");
+								return { auth: {} };
+							},
+						},
+					},
+				});
+				await harness.session.modelRuntime.refresh({ allowNetwork: false });
+				holdAuth = true;
+			}
+			harness.sessionManager.appendMessage(fauxAssistantMessage("previous answer"));
+			harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+			await harness.session.sendCustomMessage(custom("before-aside"), { deliverAs: "nextTurn" });
+			harness.setResponses([fauxAssistantMessage("must not reach provider")]);
+			const preflight: boolean[] = [];
+			const run = Promise.allSettled([
+				harness.session.prompt("cancelled prompt", {
+					preflightResult: (accepted) => preflight.push(accepted),
+				}),
+			]);
+			let abort: Promise<void> | undefined;
+			try {
+				await Promise.race([
+					entered.promise,
+					run.then(() => {
+						throw new Error("Prompt did not reach preparation");
+					}),
+				]);
+				expect(harness.session.isStreaming).toBe(true);
+				expect(harness.session.agent.signal).toBeUndefined();
+				expect(harness.session.pendingInputCount).toBe(1);
+				await harness.session.sendCustomMessage(custom("late-aside"), { deliverAs: "nextTurn" });
+				await harness.session.steer("retained steering");
+				harness.session.newContext({ handoff: "cancelled handoff" });
+				abort = harness.session.abort();
+				expect(harness.session.isIdle).toBe(false);
+				released.resolve();
+				const [result] = await Promise.all([run, abort]);
+				expect(harness.faux.state.callCount).toBe(0);
+				expect(result).toEqual([{ status: "rejected", reason: expect.objectContaining({ name: "AbortError" }) }]);
+				expect(preflight).toEqual([false]);
+				expect(harness.session.isIdle).toBe(true);
+				expect(harness.session.pendingInputCount).toBe(0);
+				expect(harness.session.pendingNextTurnCount).toBe(2);
+				expect(harness.session.getSteeringMessages()).toEqual(["retained steering"]);
+				expect(harness.eventsOfType("agent_start")).toEqual([]);
+				expect(harness.eventsOfType("agent_settled")).toEqual([]);
+				expect(harness.session.getLastAssistantText()).toBe("previous answer");
+				failAuth = false;
+				const requests: string[][] = [];
+				harness.setResponses([
+					(context) => {
+						requests.push(context.messages.map(getMessageText));
+						return fauxAssistantMessage("recovered");
+					},
+				]);
+				await harness.session.prompt("retry");
+				expect(requests).toHaveLength(1);
+				expect(requests[0]).toEqual(
+					expect.arrayContaining(["retry", "before-aside", "late-aside", "retained steering"]),
+				);
+				expect(requests[0]).not.toContain("cancelled prompt");
+				expect(harness.session.pendingNextTurnCount).toBe(0);
+				expect(harness.session.hasPendingMessages).toBe(false);
+				expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_window")).toEqual([]);
+				expect(harness.session.getLastAssistantText()).toBe("recovered");
+			} finally {
+				released.resolve();
+				await Promise.allSettled([run, abort]);
+			}
+		},
+	);
+
+	it.each(["callback", "awaited"] as const)(
+		"preserves nextTurn ownership when cancelled at %s preflight acceptance",
+		async (boundary) => {
+			const harness = await createHarness({
+				tools: [],
+				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+			});
+			harnesses.push(harness);
+			await harness.session.sendCustomMessage(custom("retained aside"), { deliverAs: "nextTurn" });
+			const accepted = createDeferred();
+			const order: string[] = [];
+			const preflight: boolean[] = [];
+			harness.session.subscribe((event) => {
+				if (event.type === "agent_start") order.push("agent_start");
+			});
+			harness.setResponses([fauxAssistantMessage("must not reach provider")]);
+			let abort: Promise<void> | undefined;
+			const run = Promise.allSettled([
+				harness.session.prompt("cancelled prompt", {
+					preflightResult(success) {
+						preflight.push(success);
+						order.push("accepted");
+						if (boundary === "callback") abort = harness.session.abort();
+						accepted.resolve();
+					},
+				}),
+			]);
+			await accepted.promise;
+			if (boundary === "awaited") abort = harness.session.abort();
+			const [result] = await Promise.all([run, abort]);
+			expect(preflight).toEqual([true]);
+			expect(harness.session.pendingInputCount).toBe(0);
+			expect(harness.session.isIdle).toBe(true);
+			const asides = () =>
+				harness.sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "custom_message" && entry.customType === "admission");
+			expect(harness.session.pendingNextTurnCount + asides().length).toBe(1);
+			if (boundary === "callback") {
+				expect(harness.faux.state.callCount).toBe(0);
+				expect(result).toEqual([{ status: "rejected", reason: expect.objectContaining({ name: "AbortError" }) }]);
+				expect(harness.session.pendingNextTurnCount).toBe(1);
+				expect(harness.session.messages).toEqual([]);
+				expect(order).toEqual(["accepted"]);
+			} else {
+				expect(result).toEqual([{ status: "fulfilled", value: undefined }]);
+				expect(harness.session.pendingNextTurnCount).toBe(0);
+				expect(order).toEqual(["accepted", "agent_start"]);
+				expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+			}
+			const requests: string[][] = [];
+			harness.setResponses([
+				(context) => {
+					requests.push(context.messages.map(getMessageText));
+					return fauxAssistantMessage("recovered");
+				},
+			]);
+			await harness.session.prompt("retry");
+			expect(requests).toHaveLength(1);
+			expect(requests[0].filter((text) => text === "retained aside")).toHaveLength(1);
+			expect(asides()).toHaveLength(1);
+			expect(harness.session.pendingNextTurnCount).toBe(0);
+		},
+	);
 
 	it("releases failed preflight without settling or losing queued inputs", async () => {
 		const authEntered = createDeferred();
