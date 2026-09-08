@@ -508,9 +508,6 @@ export class InteractiveMode {
 	private get session(): AgentSession {
 		return this.runtimeHost.session;
 	}
-	private get agent() {
-		return this.session.agent;
-	}
 	private get sessionManager() {
 		return this.session.sessionManager;
 	}
@@ -4448,7 +4445,7 @@ export class InteractiveMode {
 		if (allQueued.length === 0) {
 			this.updatePendingMessagesDisplay();
 			if (options?.abort) {
-				this.agent.abort();
+				void this.session.abort();
 			}
 			return 0;
 		}
@@ -4458,7 +4455,7 @@ export class InteractiveMode {
 		this.editor.setText(combinedText);
 		this.updatePendingMessagesDisplay();
 		if (options?.abort) {
-			this.agent.abort();
+			void this.session.abort();
 		}
 		return allQueued.length;
 	}

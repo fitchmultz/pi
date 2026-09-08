@@ -207,6 +207,8 @@ After extension commands and input interception, an idle session reserves the pr
 
 `session.waitForIdle()` waits through preparation and the full run. Failed preflight releases its reservation without emitting `agent_settled`; queued messages and `nextTurn` asides remain available for the next prompt. A started run emits `agent_settled` once after it finishes or aborts, including any automatic continuation.
 
+`session.abort()` also cancels an admitted prompt that is still preparing. It waits for preparation to finish, then rejects the prompt with `AbortError` rather than starting the agent run; unconsumed `nextTurn` asides and queued messages remain. TUI Escape and `ctx.abort()` use the same path, with TUI queued text restored to the editor.
+
 The `prompt()` method handles prompt templates, extension commands, and message sending:
 
 ```typescript

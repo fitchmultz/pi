@@ -325,6 +325,7 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
+	private _promptAbortController: AbortController | undefined;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -1063,6 +1064,7 @@ export class AgentSession {
 			this.abortCompaction();
 			this.abortBranchSummary();
 			this.abortBash();
+			this._promptAbortController?.abort();
 			this.agent.abort();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
@@ -1281,14 +1283,18 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(prepare: () => Promise<AgentMessage[]>): Promise<void> {
+	private async _runAgentPrompt(prepare: (signal: AbortSignal) => Promise<AgentMessage[]>): Promise<void> {
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
 		}
 		this._isAgentRunActive = true;
+		const controller = new AbortController();
+		this._promptAbortController = controller;
 		let started = false;
 		try {
-			const messages = await prepare();
+			const messages = await prepare(controller.signal);
+			controller.signal.throwIfAborted();
+			this._promptAbortController = undefined;
 			this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
 			started = true;
 			let run = this.agent.prompt(messages);
@@ -1299,7 +1305,12 @@ export class AgentSession {
 				if (!(await this._handlePostAgentRun(signal))) break;
 				run = this.agent.continue();
 			}
+		} catch (error) {
+			controller.signal.throwIfAborted();
+			throw error;
 		} finally {
+			this._promptAbortController = undefined;
+			if (controller.signal.aborted) this._pendingNewContext = undefined;
 			this._skipNextProviderRequestPreflight = false;
 			this._systemPromptOverride = undefined;
 			this._flushPendingProviderMessages();
@@ -1473,7 +1484,7 @@ export class AgentSession {
 				return;
 			}
 
-			await this._runAgentPrompt(async () => {
+			await this._runAgentPrompt(async (signal) => {
 				// Reserve before auth, compaction, or startup hooks can yield and mutate shared run state.
 				this._flushPendingBashMessages();
 				this._flushPendingCustomMessages();
@@ -1486,6 +1497,7 @@ export class AgentSession {
 				const hasConfiguredAuth =
 					this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
 					(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+				signal.throwIfAborted();
 				if (!hasConfiguredAuth) {
 					const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
 					if (isOAuth) {
@@ -1504,6 +1516,7 @@ export class AgentSession {
 				if (lastAssistant) {
 					await this._checkCompaction(lastAssistant, false);
 				}
+				signal.throwIfAborted();
 
 				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 				if (currentImages) {
@@ -1515,6 +1528,7 @@ export class AgentSession {
 				const nextTurnCount = this._pendingNextTurnMessages.length;
 				messages.push(...this._pendingNextTurnMessages);
 				messages.push(...(await this._prepareAgentStart(expandedText, currentImages)));
+				signal.throwIfAborted();
 				this._pendingNextTurnMessages.splice(0, nextTurnCount);
 				preflightResult(true);
 				return messages;
@@ -1858,6 +1872,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		this._promptAbortController?.abort();
 		this.abortRetry();
 		this.abortCompaction();
 		this.abortBranchSummary();

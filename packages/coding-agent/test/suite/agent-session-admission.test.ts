@@ -313,6 +313,112 @@ describe("AgentSession prompt admission", () => {
 		}
 	});
 
+	it.each(["auth", "auth-error", "startup"] as const)(
+		"cancels admitted %s preparation before any provider call",
+		async (stage) => {
+			const entered = createDeferred();
+			const released = createDeferred();
+			let holdAuth = false;
+			let failAuth = stage === "auth-error";
+			const harness = await createHarness({
+				tools: [],
+				withConfiguredAuth: stage === "startup",
+				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_agent_start", async () => {
+							if (stage === "startup") {
+								entered.resolve();
+								await released.promise;
+							}
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			if (stage !== "startup") {
+				const faux = fauxProvider({ api: harness.faux.api });
+				harness.session.modelRuntime.registerNativeProvider({
+					...faux.provider,
+					auth: {
+						apiKey: {
+							name: "Faux preflight",
+							resolve: async () => {
+								if (!holdAuth) return undefined;
+								entered.resolve();
+								await released.promise;
+								if (failAuth) throw new Error("auth failed after cancellation");
+								return { auth: {} };
+							},
+						},
+					},
+				});
+				await harness.session.modelRuntime.refresh({ allowNetwork: false });
+				holdAuth = true;
+			}
+			harness.sessionManager.appendMessage(fauxAssistantMessage("previous answer"));
+			harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+			await harness.session.sendCustomMessage(custom("before-aside"), { deliverAs: "nextTurn" });
+			harness.setResponses([fauxAssistantMessage("must not reach provider")]);
+			const preflight: boolean[] = [];
+			const run = Promise.allSettled([
+				harness.session.prompt("cancelled prompt", {
+					preflightResult: (accepted) => preflight.push(accepted),
+				}),
+			]);
+			let abort: Promise<void> | undefined;
+			try {
+				await Promise.race([
+					entered.promise,
+					run.then(() => {
+						throw new Error("Prompt did not reach preparation");
+					}),
+				]);
+				expect(harness.session.isStreaming).toBe(true);
+				expect(harness.session.agent.signal).toBeUndefined();
+				expect(harness.session.pendingInputCount).toBe(1);
+				await harness.session.sendCustomMessage(custom("late-aside"), { deliverAs: "nextTurn" });
+				await harness.session.steer("retained steering");
+				harness.session.newContext({ handoff: "cancelled handoff" });
+				abort = harness.session.abort();
+				expect(harness.session.isIdle).toBe(false);
+				released.resolve();
+				const [result] = await Promise.all([run, abort]);
+				expect(harness.faux.state.callCount).toBe(0);
+				expect(result).toEqual([{ status: "rejected", reason: expect.objectContaining({ name: "AbortError" }) }]);
+				expect(preflight).toEqual([false]);
+				expect(harness.session.isIdle).toBe(true);
+				expect(harness.session.pendingInputCount).toBe(0);
+				expect(harness.session.pendingNextTurnCount).toBe(2);
+				expect(harness.session.getSteeringMessages()).toEqual(["retained steering"]);
+				expect(harness.eventsOfType("agent_start")).toEqual([]);
+				expect(harness.eventsOfType("agent_settled")).toEqual([]);
+				expect(harness.session.getLastAssistantText()).toBe("previous answer");
+				failAuth = false;
+				const requests: string[][] = [];
+				harness.setResponses([
+					(context) => {
+						requests.push(context.messages.map(getMessageText));
+						return fauxAssistantMessage("recovered");
+					},
+				]);
+				await harness.session.prompt("retry");
+				expect(requests).toHaveLength(1);
+				expect(requests[0]).toEqual(
+					expect.arrayContaining(["retry", "before-aside", "late-aside", "retained steering"]),
+				);
+				expect(requests[0]).not.toContain("cancelled prompt");
+				expect(harness.session.pendingNextTurnCount).toBe(0);
+				expect(harness.session.hasPendingMessages).toBe(false);
+				expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_window")).toEqual([]);
+				expect(harness.session.getLastAssistantText()).toBe("recovered");
+			} finally {
+				released.resolve();
+				await Promise.allSettled([run, abort]);
+			}
+		},
+	);
+
 	it("releases failed preflight without settling or losing queued inputs", async () => {
 		const authEntered = createDeferred();
 		const authReleased = createDeferred();
