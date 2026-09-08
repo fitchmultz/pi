@@ -11,6 +11,7 @@ import {
 	stream as streamOpenAICodexResponses,
 	streamSimple as streamSimpleOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
+import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { Context, Model } from "../src/types.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -94,6 +95,40 @@ function buildSSEPayload({
 	}
 
 	return `${events.join("\n\n")}\n\n`;
+}
+
+function completeWebSocket(socket: EventTarget): void {
+	for (const frame of buildSSEPayload({ status: "completed" }).trim().split("\n\n")) {
+		socket.dispatchEvent(new MessageEvent("message", { data: frame.slice("data: ".length) }));
+	}
+}
+
+function mockWebSocketTransport(onSend: (socket: EventTarget) => void) {
+	const sockets: MockWebSocket[] = [];
+	const sentBodies: Record<string, unknown>[] = [];
+	class MockWebSocket extends EventTarget {
+		readyState = 1;
+
+		constructor() {
+			super();
+			sockets.push(this);
+			queueMicrotask(() => this.dispatchEvent(new Event("open")));
+		}
+
+		send(data: string): void {
+			const body = JSON.parse(data) as Record<string, unknown>;
+			sentBodies.push(body);
+			queueMicrotask(() => onSend(this));
+		}
+
+		close(): void {
+			this.readyState = 3;
+		}
+	}
+	const fetchMock = vi.fn(async () => new Response(buildSSEPayload({ status: "completed" })));
+	vi.stubGlobal("WebSocket", MockWebSocket);
+	vi.stubGlobal("fetch", fetchMock);
+	return { sockets, sentBodies, fetchMock };
 }
 
 describe("openai-codex streaming", () => {
@@ -1557,7 +1592,8 @@ describe("openai-codex streaming", () => {
 		expect(global.fetch).not.toHaveBeenCalled();
 	});
 
-	it("falls back to SSE when websocket connect does not open before the connect timeout", async () => {
+	// Regression for #8125: a transient timeout must not pin later requests to SSE.
+	it("falls back for a websocket connect timeout and retries websocket on the next request", async () => {
 		vi.useFakeTimers();
 		const token = mockToken();
 		const encoder = new TextEncoder();
@@ -1581,24 +1617,15 @@ describe("openai-codex streaming", () => {
 		});
 		vi.stubGlobal("fetch", fetchMock);
 
-		class MockWebSocket {
-			private listeners = new Map<string, Set<(event: unknown) => void>>();
-
-			addEventListener(type: string, listener: (event: unknown) => void): void {
-				let listeners = this.listeners.get(type);
-				if (!listeners) {
-					listeners = new Set();
-					this.listeners.set(type, listeners);
-				}
-				listeners.add(listener);
-			}
-
-			removeEventListener(type: string, listener: (event: unknown) => void): void {
-				this.listeners.get(type)?.delete(listener);
+		let connections = 0;
+		class MockWebSocket extends EventTarget {
+			constructor() {
+				super();
+				if (++connections > 1) queueMicrotask(() => this.dispatchEvent(new Event("open")));
 			}
 
 			send(): void {
-				throw new Error("send should not be called before websocket open");
+				queueMicrotask(() => completeWebSocket(this));
 			}
 
 			close(): void {}
@@ -1622,25 +1649,197 @@ describe("openai-codex streaming", () => {
 			systemPrompt: "You are a helpful assistant.",
 			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
 		};
-
-		const resultPromise = streamOpenAICodexResponses(model, context, {
+		const options = {
 			apiKey: token,
 			sessionId: "ws-connect-timeout",
-			transport: "auto",
+			transport: "auto" as const,
 			timeoutMs: 300_000,
 			websocketConnectTimeoutMs: 50,
-		}).result();
+		};
+		const resultPromise = streamOpenAICodexResponses(model, context, options).result();
 
 		await vi.advanceTimersByTimeAsync(50);
 
 		const result = await resultPromise;
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const recovered = await streamOpenAICodexResponses(model, context, options).result();
+		expect(recovered.stopReason).toBe("stop");
+		expect(connections).toBe(2);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(getOpenAICodexWebSocketDebugStats("ws-connect-timeout")).toMatchObject({
 			websocketFailures: 1,
 			sseFallbacks: 1,
-			websocketFallbackActive: true,
+			websocketFallbackActive: false,
 			lastWebSocketError: "WebSocket connect timeout after 50ms",
+		});
+	});
+
+	describe("websocket recovery (#8125)", () => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = { messages: [{ role: "user", content: "Say hello", timestamp: 1 }] };
+		const options = {
+			apiKey: mockToken(),
+			sessionId: "ws-recovery",
+			transport: "auto" as const,
+			reasoningEffort: "low" as const,
+		};
+
+		// Regression for #8125: retry the preferred transport without replaying a started response.
+		it.each(["before-start", "after-start", "close-1000"] as const)(
+			"retries a healthy websocket after a %s failure",
+			async (failure) => {
+				let sends = 0;
+				const { sockets, sentBodies, fetchMock } = mockWebSocketTransport((socket) => {
+					if (++sends > 1) {
+						completeWebSocket(socket);
+					} else if (failure === "after-start") {
+						socket.dispatchEvent(
+							new MessageEvent("message", {
+								data: JSON.stringify({ type: "response.created", response: { id: "resp_failed" } }),
+							}),
+						);
+					} else if (failure === "close-1000") {
+						socket.dispatchEvent(Object.assign(new Event("close"), { code: 1000, wasClean: true }));
+					} else {
+						socket.dispatchEvent(Object.assign(new Event("error"), { message: "WebSocket error" }));
+					}
+				});
+				const events: string[] = [];
+				const firstStream = streamOpenAICodexResponses(model, context, options);
+				for await (const event of firstStream) {
+					events.push(event.type);
+					if (failure === "after-start" && event.type === "start") {
+						sockets[0].dispatchEvent(Object.assign(new Event("error"), { message: "WebSocket error" }));
+					}
+				}
+				const first = await firstStream.result();
+				const afterStart = failure === "after-start";
+				expect(first.stopReason).toBe(afterStart ? "error" : "stop");
+				expect(events.filter((type) => type === "start")).toHaveLength(1);
+				expect(first.diagnostics).toEqual([
+					expect.objectContaining({
+						type: "provider_transport_failure",
+						details: expect.objectContaining({
+							eventsEmitted: afterStart,
+							phase: afterStart ? "after_message_stream_start" : "before_message_stream_start",
+							fallbackTransport: afterStart ? undefined : "sse",
+						}),
+					}),
+				]);
+				expect(fetchMock).toHaveBeenCalledTimes(afterStart ? 0 : 1);
+				expect(sockets[0].readyState).toBe(3);
+
+				for (let request = 0; request < 2; request++) {
+					const result = await streamOpenAICodexResponses(model, context, options).result();
+					expect(result.stopReason).toBe("stop");
+					expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
+				}
+				expect(sockets).toHaveLength(2);
+				expect(sentBodies).toHaveLength(3);
+				expect(sentBodies.every((body) => (body.reasoning as { effort: string }).effort === "low")).toBe(true);
+				expect(fetchMock).toHaveBeenCalledTimes(afterStart ? 0 : 1);
+				expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toMatchObject({
+					connectionsCreated: 2,
+					connectionsReused: 1,
+					websocketFailures: 1,
+					sseFallbacks: afterStart ? 0 : 1,
+					websocketFallbackActive: false,
+				});
+			},
+		);
+
+		it("keeps oversized websocket frames on SSE, including after a debug close", async () => {
+			const { sockets, sentBodies, fetchMock } = mockWebSocketTransport((socket) => {
+				socket.dispatchEvent(Object.assign(new Event("close"), { code: 1009, wasClean: true }));
+			});
+			for (let request = 0; request < 2; request++) {
+				expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
+			}
+			closeOpenAICodexWebSocketSessions(options.sessionId);
+			expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
+			expect(sockets).toHaveLength(1);
+			expect(sentBodies).toHaveLength(1);
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toMatchObject({
+				websocketFailures: 1,
+				sseFallbacks: 3,
+				websocketFallbackActive: true,
+				lastWebSocketError: "WebSocket closed 1009 message too big",
+			});
+		});
+
+		it("cleans only the requested session's sockets and fallback state", async () => {
+			let oversized = false;
+			const { sockets, fetchMock } = mockWebSocketTransport((socket) => {
+				if (oversized) socket.dispatchEvent(Object.assign(new Event("close"), { code: 1009 }));
+				else completeWebSocket(socket);
+			});
+			await streamOpenAICodexResponses(model, context, options).result();
+			const otherOptions = { ...options, sessionId: "other-session" };
+			await streamOpenAICodexResponses(model, context, otherOptions).result();
+			// A second account can fail while the target session still has a cached socket for its first account.
+			oversized = true;
+			const rotatedOptions = { ...options, apiKey: mockToken("another-account") };
+			await streamOpenAICodexResponses(model, context, rotatedOptions).result();
+			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)?.websocketFallbackActive).toBe(true);
+			const otherStats = getOpenAICodexWebSocketDebugStats(otherOptions.sessionId);
+
+			cleanupSessionResources(options.sessionId);
+			expect(sockets[0].readyState).toBe(3);
+			expect(sockets[1].readyState).toBe(1);
+			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toBeUndefined();
+			expect(getOpenAICodexWebSocketDebugStats(otherOptions.sessionId)).toEqual(otherStats);
+			oversized = false;
+			expect((await streamOpenAICodexResponses(model, context, rotatedOptions).result()).stopReason).toBe("stop");
+			expect((await streamOpenAICodexResponses(model, context, otherOptions).result()).stopReason).toBe("stop");
+			expect(sockets).toHaveLength(4);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(getOpenAICodexWebSocketDebugStats(otherOptions.sessionId)?.connectionsReused).toBe(1);
+
+			cleanupSessionResources();
+			expect(sockets.every((socket) => socket.readyState === 3)).toBe(true);
+			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toBeUndefined();
+			expect(getOpenAICodexWebSocketDebugStats(otherOptions.sessionId)).toBeUndefined();
+		});
+
+		it("does not fall back or record a transport failure when a websocket request is aborted", async () => {
+			let sends = 0;
+			const { sockets, fetchMock } = mockWebSocketTransport((socket) => {
+				if (++sends > 1) completeWebSocket(socket);
+				else
+					socket.dispatchEvent(
+						new MessageEvent("message", {
+							data: JSON.stringify({ type: "response.created", response: { id: "resp_aborted" } }),
+						}),
+					);
+			});
+			const controller = new AbortController();
+			const resultStream = streamOpenAICodexResponses(model, context, { ...options, signal: controller.signal });
+			for await (const event of resultStream) {
+				if (event.type === "start") controller.abort();
+			}
+			const aborted = await resultStream.result();
+			expect(aborted.stopReason).toBe("aborted");
+			expect(aborted.diagnostics).toBeUndefined();
+			expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
+			expect(sockets).toHaveLength(2);
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toMatchObject({
+				websocketFailures: 0,
+				sseFallbacks: 0,
+			});
 		});
 	});
 
@@ -1804,7 +2003,7 @@ describe("openai-codex streaming", () => {
 		expect(getOpenAICodexWebSocketDebugStats("ws-idle-before-start")).toMatchObject({
 			websocketFailures: 1,
 			sseFallbacks: 1,
-			websocketFallbackActive: true,
+			websocketFallbackActive: false,
 		});
 	});
 

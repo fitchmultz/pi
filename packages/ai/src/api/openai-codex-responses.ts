@@ -928,7 +928,10 @@ export function closeOpenAICodexWebSocketSessions(sessionId?: string): void {
 	websocketSessionCache.clear();
 }
 
-registerSessionResourceCleanup(closeOpenAICodexWebSocketSessions);
+registerSessionResourceCleanup((sessionId) => {
+	closeOpenAICodexWebSocketSessions(sessionId);
+	resetOpenAICodexWebSocketDebugStats(sessionId);
+});
 
 function isWebSocketSseFallbackActive(sessionId: string | undefined): boolean {
 	return sessionId ? websocketSseFallbackSessions.has(sessionId) : false;
@@ -943,12 +946,14 @@ function recordWebSocketSseFallback(sessionId: string | undefined): void {
 
 function recordWebSocketFailure(sessionId: string | undefined, error: unknown): void {
 	if (!sessionId) return;
-	websocketSseFallbackSessions.add(sessionId);
+	if (error instanceof WebSocketCloseError && error.code === WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE) {
+		websocketSseFallbackSessions.add(sessionId);
+	}
 
 	const stats = getOrCreateWebSocketDebugStats(sessionId);
 	stats.websocketFailures++;
 	stats.lastWebSocketError = formatThrownValue(error);
-	stats.websocketFallbackActive = true;
+	stats.websocketFallbackActive = isWebSocketSseFallbackActive(sessionId);
 }
 
 type WebSocketConstructor = new (
