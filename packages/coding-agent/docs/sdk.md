@@ -1147,6 +1147,8 @@ const runtime = await createAgentSessionRuntime(createRuntime, {
 await runRpcMode(runtime);
 ```
 
+For supervised subprocesses, `await runRpcMode(runtime, { ignoreSigterm: true })` ignores SIGTERM until process exit, including during EOF disposal and stdout draining. The default is `false`. The caller must close stdin for graceful shutdown and keep reading stdout. On POSIX, SIGHUP retains native signal cleanup; SIGKILL forces termination without cleanup. See [RPC shutdown](rpc.md#shutdown) for the supervisor's responsibilities.
+
 See [RPC documentation](rpc.md) for the JSON protocol.
 
 ## RPC Mode Alternative

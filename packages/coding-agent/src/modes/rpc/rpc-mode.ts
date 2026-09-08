@@ -51,7 +51,10 @@ export type {
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
-export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<never> {
+export async function runRpcMode(
+	runtimeHost: AgentSessionRuntime,
+	options: { ignoreSigterm?: boolean } = {},
+): Promise<never> {
 	takeOverStdout();
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
@@ -370,6 +373,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 
 		for (const signal of signals) {
+			if (signal === "SIGTERM" && options.ignoreSigterm) {
+				// Keep SIGTERM ignored through EOF disposal and stdout drain, until process exit.
+				process.on(signal, () => {});
+				continue;
+			}
 			const handler = () => {
 				killTrackedDetachedChildren();
 				void shutdown(signal === "SIGHUP" ? 129 : 143, signal);

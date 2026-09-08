@@ -545,6 +545,7 @@ pi config                    # Enable/disable package resources
 | `-p`, `--print` | Print response and exit |
 | `--mode json` | Output all events as JSON lines (see [docs/json.md](docs/json.md)) |
 | `--mode rpc` | RPC mode for process integration (see [docs/rpc.md](docs/rpc.md)) |
+| `--rpc-ignore-sigterm` | Ignore SIGTERM in RPC mode; the supervisor closes stdin to shut down (see [shutdown](docs/rpc.md#shutdown)) |
 | `--export <in> [out]` | Export session to HTML |
 
 In print mode, pi also reads piped stdin and merges it into the initial prompt:

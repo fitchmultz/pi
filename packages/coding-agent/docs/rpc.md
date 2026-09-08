@@ -16,6 +16,21 @@ Common options:
 - `--name <name>` / `-n <name>`: Set the session display name at startup
 - `--no-session`: Disable session persistence
 - `--session-dir <path>`: Custom session storage directory
+- `--rpc-ignore-sigterm`: Ignore SIGTERM in RPC mode so the supervisor can finish RPC calls before closing stdin
+
+## Shutdown
+
+Closing stdin starts normal shutdown: Pi emits `session_shutdown`, disposes the runtime, drains stdout, and exits with code `0`. By default, SIGTERM stops tracked tool processes and shuts down with code `143`. On POSIX, SIGHUP uses the same native cleanup with code `129`.
+
+A supervisor that needs RPC access after SIGTERM can opt in:
+
+```bash
+pi --mode rpc --rpc-ignore-sigterm
+```
+
+With this option, SIGTERM does not cancel tools, dispose the runtime, or close RPC. It remains ignored during EOF disposal and stdout draining, including repeated signals. This option is off by default and has no effect outside RPC mode. Other shutdown paths, including extension-requested shutdown, are unchanged.
+
+The supervisor owns graceful shutdown: finish the needed RPC calls, close stdin, and continue reading stdout until Pi exits. **All SIGTERM signals are ignored**, including those sent directly by the supervisor; the Node signal callback cannot distinguish the sender. On POSIX, use SIGHUP to request native signal cleanup instead. Use SIGKILL if a forced stop is needed, for example when cleanup exceeds the supervisor's deadline; SIGKILL bypasses cleanup.
 
 ## Protocol Overview
 
