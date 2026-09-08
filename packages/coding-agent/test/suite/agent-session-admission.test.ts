@@ -21,57 +21,102 @@ describe("AgentSession prompt admission", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
-	it("counts concurrent input dispatch through handling and reload without counting commands", async () => {
-		const firstReleased = createDeferred();
-		const secondReleased = createDeferred();
-		const entered: string[] = [];
-		const commandCounts: number[] = [];
+	it.each(["prompt", "steer", "followUp"] as const)(
+		"counts concurrent %s input through handling and reload without counting commands",
+		async (method) => {
+			const firstReleased = createDeferred();
+			const secondReleased = createDeferred();
+			const entered: string[] = [];
+			const commandCounts: number[] = [];
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("input", async (event) => {
+							entered.push(event.text);
+							await (event.text === "first" ? firstReleased : secondReleased).promise;
+							return { action: "handled" };
+						});
+						pi.registerCommand("restart-check", {
+							handler: async (_args, ctx) => {
+								commandCounts.push(ctx.getPendingInputCount());
+							},
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const first = harness.session[method]("first");
+			const second = harness.session[method]("second");
+			try {
+				expect(entered).toEqual(["first", "second"]);
+				expect(harness.session.isIdle).toBe(true);
+				expect(harness.session.hasPendingMessages).toBe(false);
+				const oldContext = harness.session.extensionRunner.createContext();
+				expect(oldContext.getPendingInputCount()).toBe(2);
+				await harness.session.prompt("/restart-check");
+				expect(commandCounts).toEqual([2]);
+				expect(entered).toHaveLength(2);
+				await harness.session.reload();
+				const current = harness.session.extensionRunner.createContext();
+				expect(() => oldContext.getPendingInputCount()).toThrow("stale");
+				expect(current.getPendingInputCount()).toBe(2);
+				secondReleased.resolve();
+				await second;
+				expect(current.getPendingInputCount()).toBe(1);
+				firstReleased.resolve();
+				await first;
+				expect(current.getPendingInputCount()).toBe(0);
+				await harness.session.prompt("/restart-check");
+				expect(commandCounts).toEqual([2, 0]);
+				expect(harness.session.messages).toEqual([]);
+				expect(harness.faux.state.callCount).toBe(0);
+			} finally {
+				firstReleased.resolve();
+				secondReleased.resolve();
+				await Promise.allSettled([first, second]);
+			}
+		},
+	);
+
+	it("releases direct input ownership if reporting a handler failure also throws", async () => {
+		const released = createDeferred();
+		const errorCounts: number[] = [];
 		const harness = await createHarness({
+			tools: [],
 			extensionFactories: [
 				(pi) => {
-					pi.on("input", async (event) => {
-						entered.push(event.text);
-						await (event.text === "first" ? firstReleased : secondReleased).promise;
-						return { action: "handled" };
-					});
-					pi.registerCommand("restart-check", {
-						handler: async (_args, ctx) => {
-							commandCounts.push(ctx.getPendingInputCount());
-						},
+					pi.on("input", async () => {
+						await released.promise;
+						throw new Error("input handler failed");
 					});
 				},
 			],
 		});
 		harnesses.push(harness);
-		const first = harness.session.prompt("first");
-		const second = harness.session.prompt("second");
+		await harness.session.bindExtensions({
+			onError: (error) => {
+				errorCounts.push(harness.session.pendingInputCount);
+				throw new Error(`observer: ${error.error}`);
+			},
+		});
+		const result = Promise.allSettled([harness.session.followUp("failed input")]);
 		try {
-			expect(entered).toEqual(["first", "second"]);
-			expect(harness.session.isIdle).toBe(true);
+			expect(harness.session.pendingInputCount).toBe(1);
+			released.resolve();
+			expect(await result).toEqual([
+				{
+					status: "rejected",
+					reason: expect.objectContaining({ message: "observer: input handler failed" }),
+				},
+			]);
+			expect(errorCounts).toEqual([1]);
+			expect(harness.session.pendingInputCount).toBe(0);
 			expect(harness.session.hasPendingMessages).toBe(false);
-			const oldContext = harness.session.extensionRunner.createContext();
-			expect(oldContext.getPendingInputCount()).toBe(2);
-			await harness.session.prompt("/restart-check");
-			expect(commandCounts).toEqual([2]);
-			expect(entered).toHaveLength(2);
-			await harness.session.reload();
-			const current = harness.session.extensionRunner.createContext();
-			expect(() => oldContext.getPendingInputCount()).toThrow("stale");
-			expect(current.getPendingInputCount()).toBe(2);
-			secondReleased.resolve();
-			await second;
-			expect(current.getPendingInputCount()).toBe(1);
-			firstReleased.resolve();
-			await first;
-			expect(current.getPendingInputCount()).toBe(0);
-			await harness.session.prompt("/restart-check");
-			expect(commandCounts).toEqual([2, 0]);
-			expect(harness.session.messages).toEqual([]);
+			expect(harness.session.isIdle).toBe(true);
 			expect(harness.faux.state.callCount).toBe(0);
 		} finally {
-			firstReleased.resolve();
-			secondReleased.resolve();
-			await Promise.allSettled([first, second]);
+			released.resolve();
+			await result;
 		}
 	});
 

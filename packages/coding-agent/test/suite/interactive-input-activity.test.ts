@@ -15,6 +15,8 @@ type InputView = {
 	setupEditorSubmitHandler(): void;
 	bindCurrentSessionExtensions(): Promise<void>;
 	handleDequeue(): void;
+	queueCompactionMessage(text: string, mode: "steer" | "followUp"): void;
+	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 };
 
 async function createInputView(harness: Harness) {
@@ -52,6 +54,71 @@ describe("native pending input visibility", () => {
 		expect(await mode.getUserInput()).toBe("submitted before the prompt loop waits");
 		expect(ctx.getPendingInputCount()).toBe(0);
 	});
+
+	it.each([true, false])(
+		"counts the compaction-queue handler and restores failed input (retry: %s)",
+		async (willRetry) => {
+			let release!: () => void;
+			const released = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			let markEntered!: () => void;
+			const entered = new Promise<void>((resolve) => {
+				markEntered = resolve;
+			});
+			const inputs: string[] = [];
+			const harness = await createHarness({
+				tools: [],
+				extensionFactories: [
+					(pi) => {
+						pi.on("input", async (event) => {
+							inputs.push(event.text);
+							if (event.text !== "held input") return;
+							markEntered();
+							await released;
+							return { action: "transform", text: "transformed input" };
+						});
+					},
+				],
+			});
+			onTestFinished(() => harness.cleanup());
+			harness.setResponses([fauxAssistantMessage("done")]);
+			const settled = new Promise<void>((resolve) => {
+				harness.session.subscribe((event) => {
+					if (event.type === "agent_settled") resolve();
+				});
+			});
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (event.type === "queue_update" && event.followUp.includes("transformed input")) {
+					unsubscribe();
+					throw new Error("queue observer failed");
+				}
+			});
+			const { view, ctx } = await createInputView(harness);
+			if (!willRetry) view.queueCompactionMessage("first prompt", "steer");
+			view.queueCompactionMessage("held input", "followUp");
+			const flush = view.flushCompactionQueue({ willRetry });
+			try {
+				await entered;
+				if (!willRetry) await settled;
+				expect(ctx.isIdle()).toBe(true);
+				expect(ctx.hasPendingMessages()).toBe(false);
+				expect(ctx.getPendingInputCount()).toBe(1);
+				release();
+				await flush;
+				expect(ctx.hasPendingMessages()).toBe(false);
+				expect(ctx.getPendingInputCount()).toBe(willRetry ? 1 : 2);
+				expect(inputs).toEqual(willRetry ? ["held input"] : ["first prompt", "held input"]);
+				view.handleDequeue();
+				expect(ctx.ui.getEditorText()).toBe(willRetry ? "held input" : "first prompt\n\nheld input");
+				expect(ctx.getPendingInputCount()).toBe(0);
+			} finally {
+				release();
+				await flush;
+				unsubscribe();
+			}
+		},
+	);
 
 	it.each(["cancel", "error"] as const)("retains visible queued input after branch summary %s", async (outcome) => {
 		let markStarted!: () => void;
