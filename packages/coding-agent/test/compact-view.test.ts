@@ -121,6 +121,115 @@ describe("compact tool cards", () => {
 		}
 	});
 
+	test("reuses unchanged compact previews while refreshing args, results, width and theme", () => {
+		const component = new ToolExecutionComponent(
+			"read",
+			"id",
+			{ path: "directory/界-file.txt" },
+			{ compactView: true },
+			createAllToolRenderers().read,
+			ui,
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "full detail" }], isError: false });
+		const segment = vi.spyOn(Intl.Segmenter.prototype, "segment");
+		const redraw = (width: number) => {
+			const expected = component.render(width);
+			segment.mockClear();
+			expect(component.render(width)).toEqual(expected);
+			expect(segment).not.toHaveBeenCalled();
+			return expected;
+		};
+		try {
+			redraw(40);
+			component.updateArgs({ path: "changed-界.txt" });
+			expect(stripAnsi(redraw(40).join("\n"))).toContain("changed-界.txt");
+			component.updateResult({ content: [{ type: "text", text: "Partial error" }], isError: true }, true);
+			expect(stripAnsi(redraw(40).join("\n"))).toContain("Partial error");
+			component.updateResult({ content: [{ type: "text", text: "Final error\nfull detail" }], isError: true });
+			const dark = redraw(40);
+			expect(stripAnsi(dark.join("\n"))).toContain("Final error");
+			for (const line of redraw(12)) expect(visibleWidth(line)).toBeLessThanOrEqual(12);
+			expect(redraw(40)).toEqual(dark);
+			initTheme("light", false);
+			component.invalidate();
+			const light = redraw(40);
+			expect(light).not.toEqual(dark);
+			expect(light.map(stripAnsi)).toEqual(dark.map(stripAnsi));
+			click(component, 1);
+			expect(stripAnsi(component.render(40).join("\n"))).toContain("full detail");
+			component.setExpanded(false);
+			expect(redraw(40)).toEqual(light);
+		} finally {
+			segment.mockRestore();
+			initTheme("dark", false);
+		}
+	});
+
+	test.each(["default", "self"] as const)(
+		"keeps mutable %s children and mouse layout live between redraws",
+		(renderShell) => {
+			let title = "call";
+			let invalidate!: () => void;
+			const call = new Text(title, 0, 0);
+			const leading = new Text("", 0, 0);
+			const detail = new Text("result\nfull detail", 0, 0);
+			const events: TuiMouseEvent[] = [];
+			const body = new Container();
+			body.addChild(leading);
+			body.addChild(
+				new MouseRegion(detail, (event) => {
+					events.push(event);
+					return { handled: true };
+				}),
+			);
+			const component = new ToolExecutionComponent(
+				"custom",
+				"id",
+				{},
+				{ compactView: true },
+				{
+					renderShell,
+					renderCall: (_args, _theme, context) => {
+						invalidate = context.invalidate;
+						call.setText(title);
+						return call;
+					},
+					renderResult: () => body,
+				} satisfies ToolRenderers,
+				ui,
+				process.cwd(),
+			);
+			component.updateResult({ content: [], isError: false });
+			const initial = component.render(40);
+			expect(component.render(40)).toEqual(initial);
+
+			// Same flattened lines, but the call now owns the old result row.
+			call.setText("call\nresult");
+			detail.setText("full detail");
+			expect(component.render(40).map((line) => stripAnsi(line).trim())).toEqual(["call", "full detail"]);
+
+			call.setText("call");
+			detail.setText("result\nfull detail");
+			expect(component.render(40)).toEqual(initial);
+			click(component, 1);
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({ y: 0, height: 2 });
+
+			// Identical output, but the visible result row is no longer inside the inner mouse region.
+			leading.setText("result");
+			detail.setText("full detail");
+			expect(component.render(40)).toEqual(initial);
+			click(component, 1);
+			expect(events).toHaveLength(1);
+			expect(component.render(40).length).toBeGreaterThan(2);
+			component.setExpanded(false);
+			title = "invalidated call";
+			invalidate();
+			expect(stripAnsi(component.render(40)[0])).toContain(title);
+		},
+	);
+
 	test("keeps the result row visible below a wrapping custom call", () => {
 		const component = new ToolExecutionComponent(
 			"custom",
@@ -511,6 +620,42 @@ describe("compact tool cards", () => {
 });
 
 describe("compact user shell cards", () => {
+	test.each([false, true])("reuses unchanged shell previews without losing updates (excluded=%s)", (excluded) => {
+		const component = new BashExecutionComponent("echo 界", ui, excluded, true);
+		const segment = vi.spyOn(Intl.Segmenter.prototype, "segment");
+		try {
+			component.appendOutput("first\nlast 界");
+			const running = component.render(40);
+			segment.mockClear();
+			expect(component.render(40)).toEqual(running);
+			expect(segment).not.toHaveBeenCalled();
+			component.appendOutput("\nnext 界");
+			expect(stripAnsi(component.render(40)[1])).toContain("Running... next 界");
+			component.setComplete(2, false);
+			const complete = component.render(40);
+			expect(stripAnsi(complete[1])).toContain("(exit 2) next 界");
+			segment.mockClear();
+			expect(component.render(40)).toEqual(complete);
+			expect(segment).not.toHaveBeenCalled();
+			for (const line of component.render(12)) expect(visibleWidth(line)).toBeLessThanOrEqual(12);
+			expect(component.render(40)).toEqual(complete);
+			initTheme("light", false);
+			component.invalidate();
+			const light = component.render(40);
+			expect(light).not.toEqual(complete);
+			expect(light.map(stripAnsi)).toEqual(complete.map(stripAnsi));
+			component.setExpanded(true);
+			expect(stripAnsi(component.render(40).join("\n"))).toContain("first");
+			expect(component.getOutput()).toBe("first\nlast 界\nnext 界");
+			component.setExpanded(false);
+			expect(component.render(40)).toEqual(light);
+		} finally {
+			segment.mockRestore();
+			component.setComplete(2, false);
+			initTheme("dark", false);
+		}
+	});
+
 	test.each([false, true])("caps !/!! pending output and all final states (excluded=%s)", (excluded) => {
 		for (const width of [1, 12, 80]) {
 			for (const [exitCode, cancelled, status] of [

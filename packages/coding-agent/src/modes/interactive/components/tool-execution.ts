@@ -65,6 +65,7 @@ export class ToolExecutionComponent extends Container {
 	private expanded = false;
 	private compactView: boolean;
 	private compactLayout?: { rows: number[]; height: number };
+	private compactPreview?: { width: number; sourceLines: string[]; resultStart: number | undefined; lines: string[] };
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private isPartial = true;
@@ -275,19 +276,31 @@ export class ToolExecutionComponent extends Container {
 			// Render the real children to retain their caches and native mouse layout.
 			// Image protocol rows become placeholders, never a partially clipped image.
 			const lines = super.render(width);
-			const rows = lines.flatMap((line, y) => (isImageLine(line) || stripAnsi(line).trim() ? [y] : []));
-			let secondRow = rows[1];
+			let resultStart: number | undefined;
 			if (this.hasRendererDefinition() && this.result) {
 				const self = this.getRenderShell() === "self";
 				const container = self ? this.selfRenderContainer : this.contentBox;
 				const padding = self ? 0 : 1;
 				const callHeight = container.children[0]?.render(Math.max(1, width - padding * 2)).length ?? 0;
-				// A wrapping call or an edit preview must not crowd out the result/error row.
-				secondRow = rows.find((y) => y > rows[0] && y >= 1 + padding + callHeight) ?? secondRow;
+				resultStart = 1 + padding + callHeight;
 			}
+			const cached = this.compactPreview;
+			if (
+				cached &&
+				cached.width === width &&
+				cached.resultStart === resultStart &&
+				cached.sourceLines.length === lines.length &&
+				cached.sourceLines.every((line, i) => line === lines[i])
+			) {
+				return cached.lines;
+			}
+			const rows = lines.flatMap((line, y) => (isImageLine(line) || stripAnsi(line).trim() ? [y] : []));
+			// A wrapping call or an edit preview must not crowd out the result/error row.
+			const secondRow =
+				resultStart === undefined ? rows[1] : (rows.find((y) => y > rows[0] && y >= resultStart) ?? rows[1]);
 			const previewRows = [rows[0], secondRow].filter((y) => y !== undefined);
 			this.compactLayout = { rows: previewRows, height: lines.length };
-			return previewRows.map((y) => {
+			const preview = previewRows.map((y) => {
 				const line = lines[y];
 				const imageStart = line.search(/\x1b(?:_G|\]1337;File=)/);
 				return truncateToWidth(
@@ -295,6 +308,8 @@ export class ToolExecutionComponent extends Container {
 					width,
 				);
 			});
+			this.compactPreview = { width, sourceLines: lines, resultStart, lines: preview };
+			return preview;
 		}
 
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
@@ -341,6 +356,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
+		this.compactPreview = undefined;
 		const bgFn = this.isPartial
 			? (text: string) => theme.bg("toolPendingBg", text)
 			: this.result?.isError
