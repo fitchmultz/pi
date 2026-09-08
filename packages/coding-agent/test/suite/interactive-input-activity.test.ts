@@ -1,12 +1,13 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
+import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
 import { createInteractiveTui, InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { assistantMsg, userMsg } from "../utilities.ts";
-import { createHarness, type Harness } from "./harness.ts";
+import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
 type InputView = {
 	renderer: ReturnType<typeof createInteractiveTui>;
@@ -17,8 +18,17 @@ type InputView = {
 	bindCurrentSessionExtensions(): Promise<void>;
 	handleDequeue(): void;
 	queueCompactionMessage(text: string, mode: "steer" | "followUp"): void;
-	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
+	flushCompactionQueue(): Promise<void>;
+	handleEvent(event: AgentSessionEvent): Promise<void>;
 };
+
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((promiseResolve) => {
+		resolve = promiseResolve;
+	});
+	return { promise, resolve };
+}
 
 async function createInputView(harness: Harness) {
 	initTheme("dark");
@@ -118,17 +128,97 @@ describe("native pending input visibility", () => {
 		}
 	});
 
-	it.each([true, false])(
-		"counts the compaction-queue handler and restores failed input (retry: %s)",
-		async (willRetry) => {
-			let release!: () => void;
-			const released = new Promise<void>((resolve) => {
-				release = resolve;
+	it.each(["first", "later", "retry"] as const)(
+		"delivers compaction-queue input once when the %s handler waits",
+		async (held) => {
+			const entered = createDeferred();
+			const released = createDeferred();
+			const laterEntered = createDeferred();
+			const providerReleased = createDeferred();
+			const settled = createDeferred();
+			const retryScheduled = createDeferred();
+			const inputs: string[] = [];
+			const harness = await createHarness({
+				tools: [],
+				settings: { compaction: { enabled: false }, retry: { enabled: held === "retry", baseDelayMs: 1 } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("input", async (event) => {
+							inputs.push(event.text);
+							if (event.text === "later") laterEntered.resolve();
+							if (event.text === (held === "first" ? "first" : "later")) {
+								entered.resolve();
+								await released.promise;
+							}
+							return { action: "transform", text: `transformed ${event.text}` };
+						});
+					},
+				],
 			});
-			let markEntered!: () => void;
-			const entered = new Promise<void>((resolve) => {
-				markEntered = resolve;
+			onTestFinished(() => harness.cleanup());
+			harness.session.subscribe((event) => {
+				if (event.type === "agent_settled") settled.resolve();
+				if (event.type === "auto_retry_start") retryScheduled.resolve();
 			});
+			harness.setResponses([
+				...(held === "retry"
+					? [fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" })]
+					: []),
+				async () => {
+					if (held === "first") await providerReleased.promise;
+					return fauxAssistantMessage("first done");
+				},
+				fauxAssistantMessage("later done"),
+			]);
+			const { view, ctx } = await createInputView(harness);
+			const retryRun = held === "retry" ? harness.session.prompt("first") : undefined;
+			if (retryRun) await retryScheduled.promise;
+			else view.queueCompactionMessage("first", "steer");
+			view.queueCompactionMessage("later", "followUp");
+			const flush = view.handleEvent({
+				type: "compaction_end",
+				reason: "threshold",
+				result: undefined,
+				aborted: true,
+				willRetry: held === "retry",
+			});
+			try {
+				await entered.promise;
+				if (held === "first") {
+					expect(inputs).toEqual(["first"]);
+					released.resolve();
+					await laterEntered.promise;
+					providerReleased.resolve();
+				} else {
+					await settled.promise;
+					expect(ctx.isIdle()).toBe(true);
+					expect(ctx.getPendingInputCount()).toBe(1);
+					released.resolve();
+				}
+				await flush;
+				await expect.poll(() => getUserTexts(harness)).toEqual(["transformed first", "transformed later"]);
+				await harness.session.waitForIdle();
+				expect(harness.faux.state.callCount).toBe(held === "retry" ? 3 : 2);
+				expect(inputs).toEqual(["first", "later"]);
+				expect(ctx.getPendingInputCount()).toBe(0);
+				expect(ctx.hasPendingMessages()).toBe(false);
+			} finally {
+				released.resolve();
+				providerReleased.resolve();
+				await flush;
+				await retryRun;
+				await harness.session.waitForIdle();
+			}
+		},
+	);
+
+	it.each(["queue", "settlement"] as const)(
+		"counts the compaction-queue handler and restores input after %s failure",
+		async (failure) => {
+			const released = createDeferred();
+			const entered = createDeferred();
+			const providerReleased = createDeferred();
+			const settled = createDeferred();
 			const inputs: string[] = [];
 			const harness = await createHarness({
 				tools: [],
@@ -137,47 +227,58 @@ describe("native pending input visibility", () => {
 						pi.on("input", async (event) => {
 							inputs.push(event.text);
 							if (event.text !== "held input") return;
-							markEntered();
-							await released;
+							entered.resolve();
+							await released.promise;
 							return { action: "transform", text: "transformed input" };
 						});
 					},
 				],
 			});
 			onTestFinished(() => harness.cleanup());
-			harness.setResponses([fauxAssistantMessage("done")]);
-			const settled = new Promise<void>((resolve) => {
-				harness.session.subscribe((event) => {
-					if (event.type === "agent_settled") resolve();
-				});
-			});
+			harness.setResponses([
+				async () => {
+					if (failure === "queue") await providerReleased.promise;
+					return fauxAssistantMessage("first done");
+				},
+				fauxAssistantMessage("later done"),
+			]);
 			const unsubscribe = harness.session.subscribe((event) => {
-				if (event.type === "queue_update" && event.followUp.includes("transformed input")) {
+				if (event.type === "agent_settled") settled.resolve();
+				if (
+					(failure === "queue" && event.type === "queue_update" && event.followUp.includes("transformed input")) ||
+					(failure === "settlement" &&
+						event.type === "agent_settled" &&
+						getUserTexts(harness).includes("transformed input"))
+				) {
 					unsubscribe();
-					throw new Error("queue observer failed");
+					throw new Error(`${failure} observer failed`);
 				}
 			});
 			const { view, ctx } = await createInputView(harness);
-			if (!willRetry) view.queueCompactionMessage("first prompt", "steer");
+			view.queueCompactionMessage("first prompt", "steer");
 			view.queueCompactionMessage("held input", "followUp");
-			const flush = view.flushCompactionQueue({ willRetry });
+			const flush = view.flushCompactionQueue();
 			try {
-				await entered;
-				if (!willRetry) await settled;
-				expect(ctx.isIdle()).toBe(true);
+				await entered.promise;
+				if (failure === "settlement") await settled.promise;
+				expect(ctx.isIdle()).toBe(failure === "settlement");
 				expect(ctx.hasPendingMessages()).toBe(false);
 				expect(ctx.getPendingInputCount()).toBe(1);
-				release();
+				view.queueCompactionMessage("newer input", "followUp");
+				expect(ctx.getPendingInputCount()).toBe(2);
+				released.resolve();
 				await flush;
+				await expect.poll(() => ctx.getPendingInputCount()).toBe(3);
 				expect(ctx.hasPendingMessages()).toBe(false);
-				expect(ctx.getPendingInputCount()).toBe(willRetry ? 1 : 2);
-				expect(inputs).toEqual(willRetry ? ["held input"] : ["first prompt", "held input"]);
+				expect(inputs).toEqual(["first prompt", "held input"]);
 				view.handleDequeue();
-				expect(ctx.ui.getEditorText()).toBe(willRetry ? "held input" : "first prompt\n\nheld input");
+				expect(ctx.ui.getEditorText()).toBe("first prompt\n\nheld input\n\nnewer input");
 				expect(ctx.getPendingInputCount()).toBe(0);
 			} finally {
-				release();
+				released.resolve();
+				providerReleased.resolve();
 				await flush;
+				await harness.session.waitForIdle();
 				unsubscribe();
 			}
 		},

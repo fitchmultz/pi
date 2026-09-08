@@ -649,8 +649,12 @@ export function createSessionRepoForkBehaviorConformance<TMetadata extends Sessi
 				BACKGROUND_CONTEXT,
 			);
 
+			await source.setLabel(ROOT_ID, "copied root", BACKGROUND_CONTEXT);
+			await source.setLabel(UNKNOWN_ID, "orphan label", BACKGROUND_CONTEXT);
 			const fork = await repo.fork(source.metadata, { id: "fork", scope: "tree" }, BACKGROUND_CONTEXT);
 
+			strictEqual(await fork.getLabel(ROOT_ID, BACKGROUND_CONTEXT), "copied root");
+			strictEqual(await fork.getLabel(UNKNOWN_ID, BACKGROUND_CONTEXT), undefined);
 			deepStrictEqual(
 				(await fork.findEntries({ order: "asc" }, BACKGROUND_CONTEXT)).map(({ id }) => id),
 				[ROOT_ID, CHILD_ID, SIBLING_ID],

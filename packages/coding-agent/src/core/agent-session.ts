@@ -1283,7 +1283,7 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(prepare: (signal: AbortSignal) => Promise<AgentMessage[]>): Promise<void> {
+	private async _runAgentPrompt(prepare: (signal: AbortSignal) => Promise<() => AgentMessage[]>): Promise<void> {
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
 		}
@@ -1292,8 +1292,9 @@ export class AgentSession {
 		this._promptAbortController = controller;
 		let started = false;
 		try {
-			const messages = await prepare(controller.signal);
+			const accept = await prepare(controller.signal);
 			controller.signal.throwIfAborted();
+			const messages = accept();
 			this._promptAbortController = undefined;
 			this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
 			started = true;
@@ -1528,10 +1529,13 @@ export class AgentSession {
 				const nextTurnCount = this._pendingNextTurnMessages.length;
 				messages.push(...this._pendingNextTurnMessages);
 				messages.push(...(await this._prepareAgentStart(expandedText, currentImages)));
-				signal.throwIfAborted();
-				this._pendingNextTurnMessages.splice(0, nextTurnCount);
-				preflightResult(true);
-				return messages;
+				return () => {
+					preflightResult(true);
+					signal.throwIfAborted();
+					// No await between consuming these asides and handing them to Agent.
+					this._pendingNextTurnMessages.splice(0, nextTurnCount);
+					return messages;
+				};
 			});
 		} catch (error) {
 			if (!preflightComplete) preflightResult(false);
@@ -1741,7 +1745,10 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this._runAgentPrompt(async () => [appMessage, ...(await this._prepareAgentStart(""))]);
+			await this._runAgentPrompt(async () => {
+				const messages = [appMessage, ...(await this._prepareAgentStart(""))];
+				return () => messages;
+			});
 		} else if (this.isStreaming) {
 			// Appending now would put the message between an assistant tool call and its
 			// result, which providers that validate message order reject on replay. Defer

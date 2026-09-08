@@ -1902,7 +1902,7 @@ export class InteractiveMode {
 						this.editor.setText(result.editorText);
 					}
 					this.showStatus("Navigated to selected point");
-					void this.flushCompactionQueue({ willRetry: false });
+					void this.flushCompactionQueue();
 					return { cancelled: false };
 				},
 				switchSession: async (sessionPath, options) => {
@@ -3464,7 +3464,7 @@ export class InteractiveMode {
 						this.chatContainer.addChild(new Text(theme.fg("error", event.errorMessage), 1, 0));
 					}
 				}
-				void this.flushCompactionQueue({ willRetry: event.willRetry });
+				void this.flushCompactionQueue();
 				this.ui.requestRender();
 				break;
 			}
@@ -4478,7 +4478,7 @@ export class InteractiveMode {
 		return !!extensionRunner.getCommand(commandName);
 	}
 
-	private async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
+	private async flushCompactionQueue(): Promise<void> {
 		if (this.compactionQueuedMessages.length === 0) {
 			return;
 		}
@@ -4487,9 +4487,12 @@ export class InteractiveMode {
 		this.compactionQueuedMessages = [];
 		this.updatePendingMessagesDisplay();
 
+		let restored = false;
 		const restoreQueue = (error: unknown) => {
+			if (restored) return;
+			restored = true;
 			this.session.clearQueue();
-			this.compactionQueuedMessages = queuedMessages;
+			this.compactionQueuedMessages = [...queuedMessages, ...this.compactionQueuedMessages];
 			this.updatePendingMessagesDisplay();
 			this.showError(
 				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
@@ -4498,63 +4501,24 @@ export class InteractiveMode {
 			);
 		};
 
-		try {
-			if (options?.willRetry) {
-				// When retry is pending, queue messages for the retry turn
-				for (const message of queuedMessages) {
-					if (this.isExtensionCommand(message.text)) {
-						await this.session.prompt(message.text);
-					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text);
-					} else {
-						await this.session.steer(message.text);
-					}
-				}
-				this.updatePendingMessagesDisplay();
-				return;
-			}
-
-			// Find first non-extension-command message to use as prompt
-			const firstPromptIndex = queuedMessages.findIndex((message) => !this.isExtensionCommand(message.text));
-			if (firstPromptIndex === -1) {
-				// All extension commands - execute them all
-				for (const message of queuedMessages) {
-					await this.session.prompt(message.text);
-				}
-				return;
-			}
-
-			// Execute any extension commands before the first prompt
-			const preCommands = queuedMessages.slice(0, firstPromptIndex);
-			const firstPrompt = queuedMessages[firstPromptIndex];
-			const rest = queuedMessages.slice(firstPromptIndex + 1);
-
-			for (const message of preCommands) {
-				await this.session.prompt(message.text);
-			}
-
-			// Start a prompt when idle, or queue it into a run still finishing compaction.
-			const promptPromise = this.session
-				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode })
-				.catch((error) => {
-					restoreQueue(error);
-				});
-
-			// Queue remaining messages
-			for (const message of rest) {
-				if (this.isExtensionCommand(message.text)) {
-					await this.session.prompt(message.text);
-				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text);
-				} else {
-					await this.session.steer(message.text);
-				}
-			}
-			this.updatePendingMessagesDisplay();
-			void promptPromise;
-		} catch (error) {
-			restoreQueue(error);
+		for (const message of queuedMessages) {
+			const preflight = new Promise<boolean>((resolve) => {
+				void this.session
+					.prompt(message.text, {
+						streamingBehavior: message.mode,
+						preflightResult: (success) => {
+							if (success) resolve(true);
+						},
+					})
+					.catch((error) => {
+						restoreQueue(error);
+						resolve(false);
+					});
+			});
+			// Keep input order without waiting for the provider run to finish.
+			if (!(await preflight) || restored) return;
 		}
+		this.updatePendingMessagesDisplay();
 	}
 
 	/** Move pending bash components from pending area to chat */
@@ -5371,7 +5335,7 @@ export class InteractiveMode {
 							this.editor.setText(result.editorText);
 						}
 						this.showStatus("Navigated to selected point");
-						void this.flushCompactionQueue({ willRetry: false });
+						void this.flushCompactionQueue();
 					} catch (error) {
 						this.showError(error instanceof Error ? error.message : String(error));
 					} finally {

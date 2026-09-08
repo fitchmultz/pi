@@ -309,7 +309,7 @@ export async function runJsonlFork(
 	}
 	const plan = selectJsonlFork(index, fork);
 	const isEntryCopied = (entryId: string): boolean => {
-		if (plan.scope === "tree") return true;
+		if (plan.scope === "tree") return index.getParent(entryId) !== undefined;
 		return index.isEntrySelected(entryId);
 	};
 	await publishJsonl(

@@ -142,7 +142,7 @@ export class InMemoryStorageState {
 		const plan = this.selectForkPlan(options);
 
 		const isEntryCopied = (entryId: string): boolean => {
-			if (plan.scope === "tree") return true;
+			if (plan.scope === "tree") return this.entries.has(entryId);
 			return plan.entryIds.has(entryId);
 		};
 		const destination = new InMemoryStorageState();
