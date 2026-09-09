@@ -95,6 +95,13 @@ describe("retryDelayMs", () => {
 		expect(retryDelayMs({ baseDelayMs: 2000 }, 6)).toBe(60000);
 		expect(retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 5000 }, 5)).toBe(5000);
 		expect(retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 0 }, 5)).toBe(0);
+		expect(retryDelayMs({ baseDelayMs: 2000 }, 5)).toBe(32000);
+		expect(retryDelayMs({ baseDelayMs: 100.5 }, 1)).toBe(100.5);
+		expect(retryDelayMs({ baseDelayMs: 0 }, 5)).toBe(0);
+		expect(retryDelayMs({ baseDelayMs: Number.MAX_SAFE_INTEGER }, 1025)).toBe(60000);
+		expect(retryDelayMs({ baseDelayMs: Number.MAX_SAFE_INTEGER, maxAgentDelayMs: Number.MAX_VALUE }, 2)).toBe(
+			Number.MAX_SAFE_INTEGER,
+		);
 	});
 });
 
@@ -142,10 +149,10 @@ describe("retryAssistantCall", () => {
 		expect(onRetryFinished).toHaveBeenCalledWith(false, 3, "terminated");
 	});
 
-	it("reports capped retry delays", async () => {
+	it("reports fractional retry delays with the configured cap", async () => {
 		// Regression for #8826.
 		let n = 0;
-		const policy: RetryPolicy = { enabled: true, maxRetries: 4, baseDelayMs: 10, maxAgentDelayMs: 15 };
+		const policy: RetryPolicy = { enabled: true, maxRetries: 4, baseDelayMs: 10.5, maxAgentDelayMs: 15.5 };
 		const produce = vi.fn(async () => {
 			n++;
 			return n < 5
@@ -156,7 +163,7 @@ describe("retryAssistantCall", () => {
 
 		await retryAssistantCall(produce, policy, undefined, { onRetryScheduled });
 
-		expect(onRetryScheduled.mock.calls.map((call) => call[2])).toEqual([10, 15, 15, 15]);
+		expect(onRetryScheduled.mock.calls.map((call) => call[2])).toEqual([10.5, 15.5, 15.5, 15.5]);
 	});
 
 	it("stops retrying once a call succeeds", async () => {
