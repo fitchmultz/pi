@@ -669,7 +669,7 @@ describe("experimental durable server composition", () => {
 		await client.dispose();
 		clients.delete(client);
 		await expect.poll(() => runtime.workerPids.has("demo-1")).toBe(false);
-		expect(processExists(pid!)).toBe(false);
+		await expect.poll(() => processExists(pid!)).toBe(false);
 	});
 
 	test("starts one process per attached session and stops them during shutdown", async () => {
@@ -751,7 +751,7 @@ describe("experimental durable server composition", () => {
 		expect(replacement.workerPids.get("demo-1")).toBe(workerPid);
 
 		await expect.poll(() => replacement.workerPids.has("demo-1"), { timeout: 5_000 }).toBe(false);
-		expect(processExists(workerPid!)).toBe(false);
+		await expect.poll(() => processExists(workerPid!), { timeout: 5_000 }).toBe(false);
 	});
 
 	test("restores tracked sessions that are outside the replacement catalog", async () => {
