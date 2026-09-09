@@ -98,6 +98,7 @@ describe("retryDelayMs", () => {
 		expect(retryDelayMs({ baseDelayMs: 2000 }, 5)).toBe(32000);
 		expect(retryDelayMs({ baseDelayMs: 100.5 }, 1)).toBe(100.5);
 		expect(retryDelayMs({ baseDelayMs: 0 }, 5)).toBe(0);
+		expect(retryDelayMs({ baseDelayMs: 0 }, 1025)).toBe(0);
 		expect(retryDelayMs({ baseDelayMs: Number.MAX_SAFE_INTEGER }, 1025)).toBe(60000);
 		expect(retryDelayMs({ baseDelayMs: Number.MAX_SAFE_INTEGER, maxAgentDelayMs: Number.MAX_VALUE }, 2)).toBe(
 			Number.MAX_SAFE_INTEGER,
