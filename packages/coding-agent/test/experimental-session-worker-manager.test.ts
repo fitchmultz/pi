@@ -1,4 +1,5 @@
-import type { ServiceCall } from "@earendil-works/chord";
+import { setImmediate } from "node:timers/promises";
+import { createServiceSubscribeCall, type ServiceCall } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT, type JsonlSessionMetadata } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { CoordinatorConnectionEvent } from "../src/experimental/coordinator.ts";
@@ -195,6 +196,83 @@ describe("Session worker lifecycle failures", () => {
 
 describe("Session worker operations", () => {
 	const serviceCall = { serviceId: "test.session", member: "run", args: ["Hello"] } satisfies ServiceCall;
+
+	test.each(["same", "other"] as const)("preserves reply order for %s-attachment updates", async (target) => {
+		const { coordinator, workers, handle, attachment, release } = await createAttachedWorker();
+		const other = await handle.attachClient!(BACKGROUND_CONTEXT);
+		let entered!: () => void;
+		const entering = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		let releasePrior!: () => void;
+		const prior = new Promise<void>((resolve) => {
+			releasePrior = resolve;
+		});
+		let releaseFuture!: () => void;
+		const future = new Promise<void>((resolve) => {
+			releaseFuture = resolve;
+		});
+		let scope: unknown;
+		const emit = (payload: unknown) => coordinator.emit({ type: "message", from: "worker-1", payload });
+		const update = (sequence: number) =>
+			emit({
+				type: "service_update",
+				token: "worker-token",
+				sessionKey: metadata.path,
+				scope,
+				subscriptionId: "events",
+				update: { type: "state", member: "state", sequence, ops: [] },
+			});
+		coordinator.onSend = (_peerId, payload) => {
+			if (payload.type !== "operation") return;
+			queueMicrotask(() => {
+				if (asObject(payload.call).member === serviceCall.member) update(1);
+				else scope = payload.scope;
+				emit({
+					type: "operation_response",
+					token: "worker-token",
+					sessionKey: metadata.path,
+					response: {
+						type: "operation_result",
+						requestId: payload.requestId,
+						scope: payload.scope,
+						result: { accepted: true },
+					},
+				});
+			});
+		};
+		try {
+			await (target === "same" ? attachment : other).invokeService(
+				createServiceSubscribeCall("events", serviceCall.serviceId, "singleton"),
+				async (_id, event) => {
+					if (event.type !== "state") throw new Error("Expected state update");
+					entered();
+					await (event.sequence === 1 ? prior : future);
+				},
+				BACKGROUND_CONTEXT,
+			);
+			let returned = false;
+			const calling = attachment
+				.invokeService(serviceCall, () => {}, BACKGROUND_CONTEXT)
+				.then(() => {
+					returned = true;
+				});
+			await entering;
+			// Let the response arrive while publication is blocked, without a timed sleep.
+			await setImmediate();
+			expect(returned).toBe(target === "other");
+			update(2);
+			releasePrior();
+			await calling;
+			expect(returned).toBe(true); // Future publication is still blocked.
+		} finally {
+			releasePrior();
+			releaseFuture();
+			workers.detach();
+			await release();
+			await other.release(BACKGROUND_CONTEXT);
+		}
+	});
 
 	test("correlates service results to the worker generation and attachment", async () => {
 		const { coordinator, workers, attachment, release } = await createAttachedWorker();
