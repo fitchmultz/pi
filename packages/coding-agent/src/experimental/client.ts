@@ -83,7 +83,6 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 		const completedText = new Map<string, string>();
 		const finishedRuns = new Set<string>();
 		let waiting: { operationId: string; resolve(): void } | undefined;
-		let removeConnectionListener: (() => void) | undefined;
 		let removeAttachmentListener: (() => void) | undefined;
 		let deliveryTail = Promise.resolve();
 		const unsubscribe = match.transcript.state.subscribe((value, _context, delivery) => {
@@ -114,10 +113,6 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 				const operationId = response.operationId;
 				await new Promise<void>((resolve, reject) => {
 					waiting = { operationId, resolve };
-					removeConnectionListener = match.client.onConnectionStateChange(({ state, error }) => {
-						if (state === "disconnected")
-							reject(error ?? new Error("Client disconnected before prompt events arrived"));
-					});
 					removeAttachmentListener = match.client.onAttachmentChange((attachment) => {
 						if (attachment?.sessionId !== sessionId)
 							reject(new Error("Session detached before prompt events arrived"));
@@ -128,7 +123,6 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 				});
 			}
 		} finally {
-			removeConnectionListener?.();
 			removeAttachmentListener?.();
 			unsubscribe();
 			await deliveryTail;
