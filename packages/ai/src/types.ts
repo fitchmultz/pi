@@ -677,14 +677,14 @@ export interface AnthropicMessagesCompat {
 	/** Whether the provider supports Anthropic long cache retention (`cache_control.ttl: "1h"`). Default: true. */
 	supportsLongCacheRetention?: boolean;
 	/**
-	 * Whether to send the `x-session-affinity` header from `options.sessionId`
-	 * when caching is enabled. Required for providers like Fireworks that use
-	 * session affinity for prompt cache routing (requests to the same replica
-	 * maximize cache hits).
-	 * Default: false.
+	 * Whether to send session-affinity headers from `options.sessionId` when
+	 * caching is enabled. Required for providers like Fireworks that use session
+	 * affinity for prompt cache routing (requests to the same replica maximize cache hits).
+	 * Default: true for the OpenRouter provider or an openrouter.ai base URL, false otherwise.
+	 * Set false to opt out.
 	 */
 	sendSessionAffinityHeaders?: boolean;
-	/** Session-affinity format. `"openrouter"` sends `x-session-id`; when unset, sends `x-session-affinity`. */
+	/** Session-affinity format. `"openrouter"` sends `x-session-id` and is the default for the OpenRouter provider or an openrouter.ai base URL. Otherwise, sends `x-session-affinity`. */
 	sessionAffinityFormat?: "openrouter";
 	/**
 	 * Whether the provider supports Anthropic-style `cache_control` markers on
