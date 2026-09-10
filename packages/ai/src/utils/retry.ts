@@ -211,6 +211,8 @@ export async function retryAssistantCall(
 		// provider stream aborts, so callers do not need to care when cancellation happened.
 		try {
 			await sleep(delayMs, signal);
+			await callbacks?.onRetryAttemptStart?.();
+			if (signal?.aborted) throw new RetrySleepAbortError();
 		} catch (error) {
 			await callbacks?.onRetryFinished?.(false, attempt, lastRetry.errorMessage);
 			if (error instanceof RetrySleepAbortError) {
@@ -219,7 +221,6 @@ export async function retryAssistantCall(
 			}
 			throw error;
 		}
-		await callbacks?.onRetryAttemptStart?.();
 	}
 }
 

@@ -1,6 +1,6 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, createAssistantMessageEventStream, fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "../harness.ts";
 
 /**
@@ -110,6 +110,114 @@ describe("#6647 compaction retries transient summarization failures", () => {
 		// model.* referenced to keep imports honest
 		expect(model.id).toBeTruthy();
 	});
+
+	it.each(["compaction", "branchSummary"] as const)(
+		"awaits %s retry extension handlers before requests and completion",
+		async (source) => {
+			const order: string[] = [];
+			const harness = await createHarness({
+				settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("summarization_retry_scheduled", async (event) => {
+							await new Promise((resolve) => setTimeout(resolve, 5));
+							order.push(`scheduled:${event.attempt}/${event.maxAttempts}`);
+						});
+						pi.on("summarization_retry_attempt_start", async (event) => {
+							await new Promise((resolve) => setTimeout(resolve, 5));
+							order.push(`start:${event.source}`);
+						});
+						pi.on("summarization_retry_finished", async () => {
+							await new Promise((resolve) => setTimeout(resolve, 5));
+							order.push("finished");
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			seedCompactableSession(harness);
+			harness.setResponses(
+				[1, 2, 3].map((request) => () => {
+					order.push(`request:${request}`);
+					return request === 1
+						? fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })
+						: fauxAssistantMessage("recovered summary");
+				}),
+			);
+
+			if (source === "compaction") {
+				await harness.session.compact();
+			} else {
+				await harness.session.navigateTree(harness.sessionManager.getBranch()[0]!.id, { summarize: true });
+			}
+			order.push("completed");
+			await harness.session.prompt("next prompt");
+
+			expect(order).toEqual([
+				"request:1",
+				"scheduled:1/1",
+				`start:${source}`,
+				"request:2",
+				"finished",
+				"completed",
+				"request:3",
+			]);
+			expect(harness.eventsOfType("summarization_retry_attempt_start")).toEqual([
+				source === "compaction"
+					? { type: "summarization_retry_attempt_start", source, reason: "manual" }
+					: { type: "summarization_retry_attempt_start", source },
+			]);
+		},
+	);
+
+	it.each(["scheduled", "attempt_start"] as const)(
+		"cancels during the awaited summary retry %s handler",
+		async (phase) => {
+			let release!: () => void;
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			let entered = false;
+			let finished = 0;
+			const harness = await createHarness({
+				settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
+				extensionFactories: [
+					(pi) => {
+						const handler = async () => {
+							entered = true;
+							await gate;
+						};
+						if (phase === "scheduled") pi.on("summarization_retry_scheduled", handler);
+						else pi.on("summarization_retry_attempt_start", handler);
+						pi.on("summarization_retry_finished", async () => {
+							await new Promise((resolve) => setTimeout(resolve, 5));
+							finished++;
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			seedCompactableSession(harness);
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }),
+				fauxAssistantMessage("must not run"),
+			]);
+			const compact = harness.session.compact().catch((error: unknown) => error);
+			try {
+				await vi.waitFor(() => expect(entered).toBe(true));
+				expect(harness.faux.state.callCount).toBe(1);
+				harness.session.abortCompaction();
+				release();
+				expect(await compact).toBeInstanceOf(Error);
+				expect(harness.faux.state.callCount).toBe(1);
+				expect(finished).toBe(1);
+				expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({ aborted: true });
+			} finally {
+				release();
+				await compact;
+			}
+		},
+	);
 
 	it("does not retry a non-retryable error (insufficient_quota)", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });

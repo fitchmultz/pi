@@ -47,6 +47,7 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { AgentSessionEvent } from "../agent-session.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionPreparation, CompactionResult, CompactionSettings } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
@@ -772,6 +773,16 @@ export interface AgentSettledEvent {
 	type: "agent_settled";
 }
 
+/** Native retry notifications; handlers are awaited before the retry proceeds. */
+export type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
+export type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
+export type SummarizationRetryScheduledEvent = Extract<AgentSessionEvent, { type: "summarization_retry_scheduled" }>;
+export type SummarizationRetryAttemptStartEvent = Extract<
+	AgentSessionEvent,
+	{ type: "summarization_retry_attempt_start" }
+>;
+export type SummarizationRetryFinishedEvent = Extract<AgentSessionEvent, { type: "summarization_retry_finished" }>;
+
 export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
 
 /** Fired when Pi starts waiting on a blocking user-facing extension UI prompt. */
@@ -1128,6 +1139,11 @@ export type ExtensionEvent =
 	| AgentStartEvent
 	| AgentEndEvent
 	| AgentSettledEvent
+	| AutoRetryStartEvent
+	| AutoRetryEndEvent
+	| SummarizationRetryScheduledEvent
+	| SummarizationRetryAttemptStartEvent
+	| SummarizationRetryFinishedEvent
 	| UIPromptStartEvent
 	| UIPromptEndEvent
 	| TurnStartEvent
@@ -1329,6 +1345,11 @@ export interface ExtensionAPI {
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): void;
+	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>): void;
+	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): void;
+	on(event: "summarization_retry_scheduled", handler: ExtensionHandler<SummarizationRetryScheduledEvent>): void;
+	on(event: "summarization_retry_attempt_start", handler: ExtensionHandler<SummarizationRetryAttemptStartEvent>): void;
+	on(event: "summarization_retry_finished", handler: ExtensionHandler<SummarizationRetryFinishedEvent>): void;
 	on(event: "ui_prompt_start", handler: ExtensionHandler<UIPromptStartEvent>): void;
 	on(event: "ui_prompt_end", handler: ExtensionHandler<UIPromptEndEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
