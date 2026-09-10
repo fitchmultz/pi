@@ -17,7 +17,7 @@ export type ClientResult =
 export interface RunClientOptions {
 	/** Directory searched when --connect is omitted. Defaults to PI_SERVER_DIR or ~/.pi/server. */
 	readonly directory?: string;
-	/** Receives snapshot-ordered main-lane events while a prompt is active. */
+	/** Receives snapshot-ordered main-lane events, awaited through prompt completion or suspension. */
 	readonly onEvent?: (event: LaneWatchEvent) => void | Promise<void>;
 }
 
@@ -81,16 +81,26 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 
 		const agent = match.agent;
 		const completedText = new Map<string, string>();
+		const finishedRuns = new Set<string>();
+		let waiting: { operationId: string; resolve(): void } | undefined;
+		let removeConnectionListener: (() => void) | undefined;
+		let removeAttachmentListener: (() => void) | undefined;
 		let deliveryTail = Promise.resolve();
 		const unsubscribe = match.transcript.state.subscribe((value, _context, delivery) => {
 			if (delivery.kind !== "update" || value.event === null) return;
 			const event = value.event;
+			if (event.type === "run_end" || event.type === "run_suspend") {
+				finishedRuns.add(event.runId);
+				if (waiting?.operationId === event.runId) waiting.resolve();
+			}
 			deliveryTail = deliveryTail.then(async () => {
 				if (event.type === "message_end" && event.runId !== undefined && event.message.role === "assistant") {
 					completedText.set(event.runId, messageText(event.message));
 				}
 				await options.onEvent?.(event);
 			});
+			// Report callback failures after the prompt settles, without an unhandled rejection meanwhile.
+			void deliveryTail.catch(() => {});
 		});
 		if (match.transcript.state.value?.snapshot === null || match.transcript.state.value?.snapshot === undefined) {
 			unsubscribe();
@@ -99,7 +109,27 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 		let response: AgentOperationResponse;
 		try {
 			response = await agent.prompt({ message: command.prompt, images: null }, BACKGROUND_CONTEXT);
+			// The operation reply and passive transcript delivery settle independently.
+			if (response.accepted && !finishedRuns.has(response.operationId)) {
+				const operationId = response.operationId;
+				await new Promise<void>((resolve, reject) => {
+					waiting = { operationId, resolve };
+					removeConnectionListener = match.client.onConnectionStateChange(({ state, error }) => {
+						if (state === "disconnected")
+							reject(error ?? new Error("Client disconnected before prompt events arrived"));
+					});
+					removeAttachmentListener = match.client.onAttachmentChange((attachment) => {
+						if (attachment?.sessionId !== sessionId)
+							reject(new Error("Session detached before prompt events arrived"));
+					});
+					if (!match.client.connected) reject(new Error("Client disconnected before prompt events arrived"));
+					else if (match.client.attachment?.sessionId !== sessionId)
+						reject(new Error("Session detached before prompt events arrived"));
+				});
+			}
 		} finally {
+			removeConnectionListener?.();
+			removeAttachmentListener?.();
 			unsubscribe();
 			await deliveryTail;
 		}

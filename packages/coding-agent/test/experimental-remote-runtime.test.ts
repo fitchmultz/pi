@@ -1,10 +1,11 @@
 import { lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type Context, createFacetHost, defineFacet, defineService } from "@earendil-works/chord";
+import { type Context, createFacetHost, defineFacet, defineService, parseServiceCall } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Client, ServerError as ClientServerError } from "@earendil-works/pi-client";
 import { createUnixTransportFactory } from "@earendil-works/pi-client/unix";
+import { ClientMessageDecoder, ServerMessageDecoder } from "@earendil-works/pi-protocol";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ExampleFacetService } from "../examples/plugins/pi-example-plugin/src/contract.ts";
 import { runClient } from "../src/experimental/client.ts";
@@ -31,6 +32,7 @@ const clients = new Set<Client>();
 const directories = new Set<string>();
 const fauxWorkerEntryUrl = new URL("fixtures/faux-session-worker.ts", import.meta.url);
 const realSpawnInternalProcess = processRuntime.spawnInternalProcess;
+const realConnectClient = Client.connect.bind(Client);
 const sessionWorkerModel = { provider: "anthropic", model: "claude-sonnet-4-5" } as const;
 const SecondPluginService = defineService<{ read(context: Context): Promise<string> }>("test.second-plugin");
 let agentDir: string;
@@ -589,42 +591,115 @@ describe("experimental durable server composition", () => {
 		await expect(services.dispose(BACKGROUND_CONTEXT)).resolves.toBeUndefined();
 	});
 
-	test("streams prompt events through the worker-owned service provider", async ({ onTestFinished }) => {
-		const spawn = vi
-			.spyOn(processRuntime, "spawnInternalProcess")
-			.mockImplementation((role, args, options) =>
-				realSpawnInternalProcess(
-					role,
-					args,
-					role === "session-worker" ? { ...options, entryUrl: fauxWorkerEntryUrl } : options,
-				),
-			);
-		onTestFinished(() => spawn.mockRestore());
-		const { directory } = await makeServer();
-		const eventTypes: string[] = [];
+	test.for(["question", "defer", "fail", "abort", "", "callback-error", "disconnect"])(
+		"streams prompt events through the worker-owned service provider (%s)",
+		async (prompt, { onTestFinished }) => {
+			const spawn = vi
+				.spyOn(processRuntime, "spawnInternalProcess")
+				.mockImplementation((role, args, options) =>
+					realSpawnInternalProcess(
+						role,
+						args,
+						role === "session-worker" ? { ...options, entryUrl: fauxWorkerEntryUrl } : options,
+					),
+				);
+			onTestFinished(() => spawn.mockRestore());
+			let connectedClient: Client;
+			const connecting = vi.spyOn(Client, "connect").mockImplementation(async (options) => {
+				connectedClient = await realConnectClient({
+					...options,
+					transportFactory: async (handlers) => {
+						const requests = new ClientMessageDecoder();
+						const responses = new ServerMessageDecoder();
+						let promptId: string | undefined;
+						const pending: Uint8Array[] = [];
+						const transport = await options.transportFactory({
+							...handlers,
+							onData(chunk) {
+								const messages = responses.push(chunk);
+								if (promptId === undefined || prompt === "abort") return handlers.onData(chunk);
+								pending.push(chunk);
+								if (messages.some((message) => message.type === "response" && message.id === promptId)) {
+									promptId = undefined;
+									// A socket may deliver every prompt update and its reply in one read.
+									handlers.onData(Buffer.concat(pending));
+									pending.length = 0;
+								}
+							},
+						});
+						return {
+							close: () => transport.close(),
+							send(chunk) {
+								for (const message of requests.push(chunk)) {
+									if (message.type !== "request") continue;
+									const call = parseServiceCall(message.call);
+									if (call.serviceId === AgentController.id && call.member === "prompt") promptId = message.id;
+								}
+								return transport.send(chunk);
+							},
+						};
+					},
+				});
+				return connectedClient;
+			});
+			onTestFinished(() => connecting.mockRestore());
+			const { directory, runtime } = await makeServer();
+			const eventTypes: string[] = [];
 
-		const result = await runClient(
-			{ command: "client", sessionId: "demo-1", prompt: "question" },
-			{
-				directory,
-				onEvent(event) {
-					eventTypes.push(event.type);
+			const result = runClient(
+				{ command: "client", sessionId: "demo-1", prompt },
+				{
+					directory,
+					async onEvent(event) {
+						if (prompt === "callback-error") throw new Error("callback failure");
+						if (prompt === "disconnect") connectedClient.disconnect("test disconnect");
+						if (prompt === "abort" && event.type === "run_start") {
+							const client = await attachClient(runtime, "demo-1");
+							const services = createSessionServiceBinding(client, { services: [AgentController] });
+							try {
+								await services.ready(BACKGROUND_CONTEXT);
+								await services.use(AgentController).requestAbort(event.runId, BACKGROUND_CONTEXT);
+							} finally {
+								await services.dispose(BACKGROUND_CONTEXT);
+							}
+						}
+						await Promise.resolve();
+						eventTypes.push(event.type);
+					},
 				},
-			},
-		);
+			);
 
-		expect(result).toMatchObject({ kind: "prompted", text: "deterministic remote answer" });
-		expect(eventTypes).toEqual(
-			expect.arrayContaining([
-				"run_start",
-				"message_start",
-				"message_update",
-				"message_end",
-				"entry_added",
-				"run_end",
-			]),
-		);
-	});
+			if (prompt === "callback-error" || prompt === "disconnect" || prompt === "fail" || prompt === "") {
+				await expect(result).rejects.toThrow(
+					prompt === "callback-error"
+						? "callback failure"
+						: prompt === "disconnect"
+							? /disconnect|detached/i
+							: prompt === "fail"
+								? "faux failure"
+								: /empty|message/i,
+				);
+				if (prompt === "fail") expect(eventTypes).toContain("run_end");
+			} else {
+				await expect(result).resolves.toMatchObject({
+					kind: "prompted",
+					text: prompt === "question" ? "deterministic remote answer" : "",
+				});
+				expect(eventTypes).toContain(prompt === "defer" ? "run_suspend" : "run_end");
+				if (prompt === "question") {
+					expect(eventTypes).toEqual(
+						expect.arrayContaining([
+							"run_start",
+							"message_start",
+							"message_update",
+							"message_end",
+							"entry_added",
+						]),
+					);
+				}
+			}
+		},
+	);
 
 	test("replicates terminal operation state after consecutive prompts", async ({ onTestFinished }) => {
 		const spawn = vi

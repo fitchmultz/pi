@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createStaticFacetLoader, defineFacet } from "@earendil-works/chord";
 import { AgentHarness, BACKGROUND_CONTEXT } from "@earendil-works/pi-agent-core";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { contentText, createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { consumeInternalProcessRole } from "../../src/experimental/process.ts";
 import { runSessionWorkerWithHarness } from "../../src/experimental/session-worker.ts";
 import { KeyedProbe } from "./keyed-service.ts";
@@ -15,7 +15,31 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
 			throw new Error(`Unexpected faux worker model: ${options.provider}/${options.model}`);
 		}
 		const faux = fauxProvider();
-		faux.setResponses([fauxAssistantMessage("deterministic remote answer", { timestamp: 20 })]);
+		faux.setResponses([
+			async ({ messages }, streamOptions, _state, model) => {
+				const message = messages.at(-1);
+				const prompt = message?.role === "user" ? contentText(message.content) : "";
+				if (prompt === "defer") {
+					return fauxAssistantMessage([], {
+						stopReason: "deferred",
+						deferred: { provider: model.provider, modelId: model.id, api: model.api, id: "deferred-answer" },
+					});
+				}
+				if (prompt === "fail") {
+					return fauxAssistantMessage([], { stopReason: "error", errorMessage: "faux failure" });
+				}
+				if (prompt === "abort") {
+					const signal = streamOptions?.signal;
+					if (!signal) throw new Error("Abort probe requires a signal");
+					await new Promise<void>((resolve) => {
+						if (signal.aborted) resolve();
+						else signal.addEventListener("abort", () => resolve(), { once: true });
+					});
+					return fauxAssistantMessage([], { stopReason: "aborted" });
+				}
+				return fauxAssistantMessage("deterministic remote answer", { timestamp: 20 });
+			},
+		]);
 		const models = createModels();
 		models.setProvider(faux.provider);
 		const harness = (
