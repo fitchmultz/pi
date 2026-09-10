@@ -625,7 +625,7 @@ export interface OpenAICompletionsCompat {
 	supportsStrictMode?: boolean;
 	/** Cache control convention for prompt caching. "anthropic" applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user, assistant, or tool-result text content. */
 	cacheControlFormat?: "anthropic";
-	/** Whether to send session-affinity data from `options.sessionId`. Default: false. */
+	/** Whether to send session-affinity data from `options.sessionId`. Default: true for OpenRouter endpoints, false otherwise. */
 	sendSessionAffinityHeaders?: boolean;
 	/** Provider-specific deferred tool serialization mode. */
 	deferredToolsMode?: "kimi";
@@ -677,13 +677,15 @@ export interface AnthropicMessagesCompat {
 	/** Whether the provider supports Anthropic long cache retention (`cache_control.ttl: "1h"`). Default: true. */
 	supportsLongCacheRetention?: boolean;
 	/**
-	 * Whether to send the `x-session-affinity` header from `options.sessionId`
-	 * when caching is enabled. Required for providers like Fireworks that use
-	 * session affinity for prompt cache routing (requests to the same replica
-	 * maximize cache hits).
-	 * Default: false.
+	 * Whether to send session-affinity headers from `options.sessionId` when
+	 * caching is enabled. Required for providers like Fireworks that use session
+	 * affinity for prompt cache routing (requests to the same replica maximize cache hits).
+	 * Default: true for the OpenRouter provider or an openrouter.ai base URL, false otherwise.
+	 * Set false to opt out.
 	 */
 	sendSessionAffinityHeaders?: boolean;
+	/** Session-affinity format. `"openrouter"` sends `x-session-id` and is the default for the OpenRouter provider or an openrouter.ai base URL. Otherwise, sends `x-session-affinity`. */
+	sessionAffinityFormat?: "openrouter";
 	/**
 	 * Whether the provider supports Anthropic-style `cache_control` markers on
 	 * tool definitions. When false, `cache_control` is omitted from tool params.

@@ -1147,7 +1147,7 @@ if (usage && usage.tokens > 100_000) {
 
 ### ctx.getCompactionSettings()
 
-Returns the effective compaction settings (`enabled`, `reserveTokens`, `keepRecentTokens`) exactly as Pi resolved them, including whether project settings are trusted. Prefer this over re-reading settings files.
+Returns the effective compaction settings (`enabled`, `reserveTokens`, `keepRecentTokens`) for the active session model, including per-model overrides and whether project settings are trusted. Each call uses the current model, including after a model switch. Prefer this over re-reading settings files.
 
 ### ctx.compact()
 
