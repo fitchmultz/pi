@@ -239,6 +239,38 @@ describe("retryAssistantCall", () => {
 		]);
 	});
 
+	it("does not call produce after cancellation during an awaited attempt-start callback", async () => {
+		const controller = new AbortController();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let entered = false;
+		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));
+		const onRetryFinished = vi.fn();
+		const result = retryAssistantCall(produce, enabled, controller.signal, {
+			onRetryAttemptStart: async () => {
+				entered = true;
+				await gate;
+			},
+			onRetryFinished,
+		});
+		try {
+			await vi.waitFor(() => expect(entered).toBe(true));
+			expect(produce).toHaveBeenCalledTimes(1);
+			controller.abort();
+			release();
+			const response = await result;
+			expect(response.stopReason).toBe("aborted");
+			expect(response.errorMessage).toBeUndefined();
+			expect(produce).toHaveBeenCalledTimes(1);
+			expect(onRetryFinished).toHaveBeenCalledExactlyOnceWith(false, 1, "terminated");
+		} finally {
+			release();
+			await result;
+		}
+	});
+
 	it("aborts backoff sleep via signal, returns an aborted message, and emits onRetryFinished(false)", async () => {
 		const controller = new AbortController();
 		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));

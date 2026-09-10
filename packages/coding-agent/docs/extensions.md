@@ -594,6 +594,45 @@ pi.on("agent_settled", async (_event, ctx) => {
 });
 ```
 
+#### auto_retry_start / auto_retry_end
+
+These are Pi's native agent retry notifications, not provider SDK retries. `auto_retry_start` fires before each retry's backoff; `attempt` is 1-based and `maxAttempts` is the configured number of retries, excluding the initial request. No start event fires when retries are disabled or the error is not retryable.
+
+```typescript
+pi.on("auto_retry_start", async (event, ctx) => {
+  // event.attempt, maxAttempts, delayMs, errorMessage
+});
+
+pi.on("auto_retry_end", async (event, ctx) => {
+  // event.success, attempt, finalError (optional)
+  // Clear any retry state here, including after cancellation or exhaustion.
+});
+```
+
+Handlers run in extension load order and are awaited before session subscribers are notified. The retried provider request cannot begin until start handlers finish and the backoff completes. End handlers finish before subsequent model calls or session settlement. `ctx.abort()` cancels a pending retry, including while a start handler is awaiting work. Handler return values do not change retry policy; handler errors follow normal extension error handling.
+
+#### summarization_retry_scheduled / summarization_retry_attempt_start / summarization_retry_finished
+
+Native compaction and branch-summary calls use the same retry settings, but emit separate events:
+
+```typescript
+pi.on("summarization_retry_scheduled", async (event) => {
+  // event.attempt, maxAttempts, delayMs, errorMessage; before backoff
+});
+
+pi.on("summarization_retry_attempt_start", async (event) => {
+  // After backoff, before the retried provider request
+  // event.source: "compaction" | "branchSummary"
+  // event.reason: "manual" | "threshold" | "overflow" (compaction only)
+});
+
+pi.on("summarization_retry_finished", async () => {
+  // Clear retry state. This notification alone does not report success.
+});
+```
+
+All three handlers are awaited. Cancellation during a scheduled or attempt-start handler prevents the next retry request. `finished` runs once after a call that scheduled retries succeeds, fails, or is cancelled, before that summarization call returns. A split-turn compaction can make separate history and turn-prefix calls, each with its own retry sequence. These events do not report custom summaries implemented by extensions.
+
 #### ui_prompt_start / ui_prompt_end
 
 Notification-only lifecycle events for blocking user-facing extension UI prompts. They fire around `ctx.ui.select()`, `ctx.ui.confirm()`, `ctx.ui.input()`, `ctx.ui.editor()`, and `ctx.ui.custom()` so host/status integrations can report "waiting for user" instead of just "running".

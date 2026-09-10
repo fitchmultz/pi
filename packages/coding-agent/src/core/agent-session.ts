@@ -70,6 +70,8 @@ import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
+	type AutoRetryEndEvent,
+	type AutoRetryStartEvent,
 	type ContextUsage,
 	type ExtensionCommandContextActions,
 	type ExtensionErrorListener,
@@ -86,6 +88,9 @@ import {
 	type SessionCompactFailedEvent,
 	type SessionStartEvent,
 	type ShutdownHandler,
+	type SummarizationRetryAttemptStartEvent,
+	type SummarizationRetryFinishedEvent,
+	type SummarizationRetryScheduledEvent,
 	type ToolDefinition,
 	type ToolExecutionEndEvent,
 	type ToolExecutionStartEvent,
@@ -758,6 +763,18 @@ export class AgentSession {
 		}
 	}
 
+	private async _emitRetryEvent(
+		event:
+			| AutoRetryStartEvent
+			| AutoRetryEndEvent
+			| SummarizationRetryScheduledEvent
+			| SummarizationRetryAttemptStartEvent
+			| SummarizationRetryFinishedEvent,
+	): Promise<void> {
+		await this._extensionRunner.emit(event);
+		this._emit(event);
+	}
+
 	private _emitQueueUpdate(): void {
 		this._emit({
 			type: "queue_update",
@@ -878,7 +895,7 @@ export class AgentSession {
 				// Reset retry counter immediately on successful assistant response
 				// This prevents accumulation across multiple LLM calls within a turn
 				if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
-					this._emit({
+					await this._emitRetryEvent({
 						type: "auto_retry_end",
 						success: true,
 						attempt: this._retryAttempt,
@@ -1362,7 +1379,7 @@ export class AgentSession {
 		}
 
 		if (msg.stopReason === "error" && this._retryAttempt > 0) {
-			this._emit({
+			await this._emitRetryEvent({
 				type: "auto_retry_end",
 				success: false,
 				attempt: this._retryAttempt,
@@ -3199,8 +3216,8 @@ export class AgentSession {
 		source: { source: "branchSummary" } | { source: "compaction"; reason: "manual" | "threshold" | "overflow" },
 	): RetryCallbacks {
 		return {
-			onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage) => {
-				this._emit({
+			onRetryScheduled: async (attempt, maxAttempts, delayMs, errorMessage) => {
+				await this._emitRetryEvent({
 					type: "summarization_retry_scheduled",
 					attempt,
 					maxAttempts,
@@ -3208,14 +3225,14 @@ export class AgentSession {
 					errorMessage,
 				});
 			},
-			onRetryAttemptStart: () => {
-				this._emit({
+			onRetryAttemptStart: async () => {
+				await this._emitRetryEvent({
 					type: "summarization_retry_attempt_start",
 					...source,
 				});
 			},
-			onRetryFinished: () => {
-				this._emit({ type: "summarization_retry_finished" });
+			onRetryFinished: async () => {
+				await this._emitRetryEvent({ type: "summarization_retry_finished" });
 			},
 		};
 	}
@@ -3240,29 +3257,31 @@ export class AgentSession {
 
 		const delayMs = retryDelayMs(settings, this._retryAttempt);
 
-		this._emit({
-			type: "auto_retry_start",
-			attempt: this._retryAttempt,
-			maxAttempts: settings.maxRetries,
-			delayMs,
-			errorMessage: message.errorMessage || "Unknown error",
-		});
-
-		// Remove error message from agent state (keep in session for history)
-		const messages = this.agent.state.messages;
-		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.state.messages = messages.slice(0, -1);
-		}
-
-		// Wait with exponential backoff (abortable)
+		// Install cancellation before extension handlers can yield or abort the retry.
 		this._retryAbortController = new AbortController();
 		try {
+			await this._emitRetryEvent({
+				type: "auto_retry_start",
+				attempt: this._retryAttempt,
+				maxAttempts: settings.maxRetries,
+				delayMs,
+				errorMessage: message.errorMessage || "Unknown error",
+			});
+
+			// Remove error message from agent state (keep in session for history)
+			const messages = this.agent.state.messages;
+			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+				this.agent.state.messages = messages.slice(0, -1);
+			}
+
 			await sleep(delayMs, this._retryAbortController.signal);
-		} catch {
-			// Aborted during sleep - emit end event so UI can clean up
+			this._retryAbortController.signal.throwIfAborted();
+		} catch (error) {
+			if (!this._retryAbortController.signal.aborted) throw error;
+			// Aborted during dispatch or sleep - notify extensions and listeners.
 			const attempt = this._retryAttempt;
 			this._retryAttempt = 0;
-			this._emit({
+			await this._emitRetryEvent({
 				type: "auto_retry_end",
 				success: false,
 				attempt,
