@@ -197,6 +197,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/import <file>` | Import and resume a session from a JSONL file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload settings and resources; extension code changes require a full restart |
+| `/restart [text]` | Restart the Node CLI worker and resume this session; optional text continues the agent |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
@@ -253,6 +254,8 @@ pi --fork <path|id>    # Fork specific session file or ID into a new session
 ```
 
 Use `/session` in interactive mode to see the current session ID before reusing it with `--session <id>` or `--fork <id>`.
+
+The Node CLI also supports [managed restarts](docs/restart.md): use `/restart`, or let a shell tool run `pi restart --message "Continue the task"`. Staged runtime and extension updates can restart and resume automatically, with one startup rollback attempt.
 
 ### Branching
 
@@ -398,7 +401,7 @@ The default export can also be `async`. pi waits for async extension factories b
 - Games while waiting (yes, Doom runs)
 - ...anything you can dream up
 
-Place in `~/.pi/agent/extensions/`, `.pi/extensions/`, or a [pi package](#pi-packages) to share with others. Restart pi after changing extension code or dependencies; `/reload` reinitializes already-loaded code. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
+Place in `~/.pi/agent/extensions/`, `.pi/extensions/`, or a [pi package](#pi-packages) to share with others. Restart pi after changing extension code or dependencies; `/reload` reinitializes already-loaded code. The Node CLI's [managed restart](docs/restart.md) can activate staged updates without a user-managed restart. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
 
 ### Themes
 

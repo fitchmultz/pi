@@ -144,6 +144,7 @@ function outputBytes(metafiles) {
 
 for (const entry of [
 	join(codingAgentDistDir, "cli.js"),
+	join(codingAgentDistDir, "cli-launcher.js"),
 	join(codingAgentDistDir, "index.js"),
 	join(codingAgentDistDir, "rpc-entry.js"),
 	join(codingAgentDistDir, "utils", "image-resize-worker.js"),
@@ -162,7 +163,8 @@ const mainResult = await build({
 	...commonBuildOptions(),
 	entryNames: "[name]",
 	entryPoints: {
-		cli: join(codingAgentDistDir, "cli.js"),
+		cli: join(codingAgentDistDir, "cli-launcher.js"),
+		"cli-worker": join(codingAgentDistDir, "cli.js"),
 		index: join(codingAgentDistDir, "index.js"),
 		"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
 	},

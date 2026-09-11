@@ -32,6 +32,7 @@ import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
+import { createManagedRestart, restoreRestartSession } from "./cli/restart-worker.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
@@ -599,7 +600,14 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
-	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
+	const restart = createManagedRestart(args);
+	const managedInteractive =
+		restart && resolveAppMode(parseArgs(args), process.stdin.isTTY, process.stdout.isTTY) === "interactive";
+	const extensionFactories = [
+		...builtInExtensions,
+		...(options?.extensionFactories ?? []),
+		...(managedInteractive ? [restart.extension] : []),
+	];
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
@@ -713,6 +721,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
+	if (restart?.handoff) restoreRestartSession(sessionManager, restart.handoff);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
 		if (appMode === "interactive") {
@@ -746,6 +755,7 @@ export async function main(args: string[], options?: MainOptions) {
 	const projectTrustByCwd = new Map<string, boolean>();
 
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
+	restart?.setExtensions(resolvedExtensionPaths ?? []);
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
@@ -884,6 +894,7 @@ export async function main(args: string[], options?: MainOptions) {
 	});
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
+	restart?.setInitialProvider(session.model?.provider);
 	const { settingsManager, modelRuntime, resourceLoader } = services;
 	setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides());
 	applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
@@ -975,12 +986,15 @@ export async function main(args: string[], options?: MainOptions) {
 			startupDiagnostics,
 			modelFallbackMessage,
 			autoTrustOnReloadCwd,
-			initialMessage,
+			initialMessage: restart?.handoff?.message
+				? `[Pi restart continuation]${restart.handoff.failure ? `\n${restart.handoff.failure}` : ""}\n${restart.handoff.message}`
+				: initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
+			onShutdownRequested: restart?.shutdownRequested,
 		});
 		if (startupBenchmark) {
 			await interactiveMode.init();
@@ -1000,6 +1014,10 @@ export async function main(args: string[], options?: MainOptions) {
 			return;
 		}
 
+		if (restart) {
+			await interactiveMode.init();
+			if (!(await restart.ready())) return;
+		}
 		printTimings();
 		await interactiveMode.run();
 	} else {

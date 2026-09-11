@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { APP_NAME } from "../../../src/config.ts";
 import type { SessionManager } from "../../../src/core/session-manager.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { InteractiveMode, type InteractiveModeOptions } from "../../../src/modes/interactive/interactive-mode.ts";
 
 // Regression for https://github.com/earendil-works/pi/issues/5080
 //
@@ -17,6 +17,7 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 // the final TUI frame.
 
 type ShutdownThis = {
+	options: Pick<InteractiveModeOptions, "onShutdownRequested">;
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
 	runtimeHost: { dispose: () => Promise<void> };
@@ -27,7 +28,7 @@ type ShutdownThis = {
 };
 
 type InteractiveModePrototypeWithShutdown = {
-	shutdown(this: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void>;
+	shutdown(this: ShutdownThis, options?: { fromSignal?: boolean; fromExtension?: boolean }): Promise<void>;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown;
@@ -68,6 +69,7 @@ function restoreStdoutIsTTY(): void {
 
 function createContext(order: string[], sessionManager = createSessionManager()): ShutdownThis {
 	return {
+		options: {},
 		isShuttingDown: false,
 		unregisterSignalHandlers: vi.fn(),
 		runtimeHost: {
@@ -90,7 +92,10 @@ function createContext(order: string[], sessionManager = createSessionManager())
 	};
 }
 
-async function callShutdown(context: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void> {
+async function callShutdown(
+	context: ShutdownThis,
+	options?: { fromSignal?: boolean; fromExtension?: boolean },
+): Promise<void> {
 	try {
 		await (interactiveModePrototype as InteractiveModePrototypeWithShutdown).shutdown.call(context, options);
 	} catch (error) {
@@ -169,7 +174,27 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 		}
 	});
 
-	test("re-entrant shutdown is a no-op", async () => {
+	test("notifies the host before yielding and lets a re-entrant user quit cancel an extension restart", async () => {
+		vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new ProcessExitError();
+		}) as typeof process.exit);
+		const context = createContext([]);
+		const requested = vi.fn();
+		context.options.onShutdownRequested = requested;
+		let release = () => {};
+		context.ui.terminal.drainInput = () =>
+			new Promise<void>((resolve) => {
+				release = resolve;
+			});
+		const shutdown = callShutdown(context, { fromExtension: true });
+		expect(requested).toHaveBeenLastCalledWith("extension");
+		await callShutdown(context);
+		expect(requested).toHaveBeenLastCalledWith("user");
+		release();
+		await shutdown;
+	});
+
+	test("re-entrant shutdown does not repeat cleanup", async () => {
 		vi.spyOn(process, "exit").mockImplementation((() => {
 			throw new ProcessExitError();
 		}) as typeof process.exit);

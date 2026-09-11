@@ -1111,7 +1111,7 @@ Returns whether any `AgentSession.executeBash()` call is unfinished. This includ
 
 ### ctx.getPendingInputCount()
 
-Returns the number of submitted inputs awaiting native prompt preflight or held in the interactive mode's input queues. It covers asynchronous `input` handlers, preparation until admission or failure, input waiting for the prompt loop, and compaction/tree input retained after cancellation or errors. Handled inputs leave the count when their handler completes; admitted inputs leave it when queued or accepted into the agent run. Concurrent inputs are counted independently. Dispatched extension commands are excluded, so a command can inspect other pending input without counting itself. This does not change agent `isIdle()` or steering/follow-up queue semantics, and reading it never dequeues input.
+Returns the number of submitted inputs awaiting native prompt preflight or held in the interactive mode's input queues. It covers remaining CLI startup prompts, asynchronous `input` handlers, preparation until admission or failure, input waiting for the prompt loop, and compaction/tree input retained after cancellation or errors. Handled inputs leave the count when their handler completes; admitted inputs leave it when queued or accepted into the agent run. Concurrent inputs are counted independently. Dispatched extension commands are excluded, so a command can inspect other pending input without counting itself. This does not change agent `isIdle()` or steering/follow-up queue semantics, and reading it never dequeues input.
 
 ### ctx.getPendingNextTurnCount()
 
