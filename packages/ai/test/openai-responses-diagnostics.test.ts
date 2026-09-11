@@ -35,6 +35,39 @@ function request(provider: (typeof providers)[number], options: StreamOptions & 
 afterEach(() => vi.restoreAllMocks());
 
 describe("Responses request diagnostics", () => {
+	it.each(providers)("preserves the post-hook and raw fast tier verbatim for %s", async (provider) => {
+		const result = await request(provider, {
+			apiKey,
+			transport: "sse",
+			serviceTier: "priority",
+			onPayload: (payload) => ({ ...(payload as object), service_tier: "fast" }),
+			fetch: async (_input, init) => {
+				const body = init!.body!;
+				const sent = JSON.parse(
+					typeof body === "string" ? body : zstdDecompressSync(body as Uint8Array).toString("utf8"),
+				);
+				expect(sent.service_tier).toBe("fast");
+				return new Response(
+					`data: ${JSON.stringify({
+						type: "response.completed",
+						response: {
+							status: "completed",
+							service_tier: "fast",
+							usage: { input_tokens: 1000000, output_tokens: 1000000, total_tokens: 2000000 },
+						},
+					})}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			},
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
+			requestedServiceTier: "fast",
+			returnedServiceTier: "fast",
+		});
+		expect(result.usage.cost.total).toBe(3);
+	});
+
 	it.each(["openai", "azure-openai-responses"] as const)("records the native SDK timeout for %s", async (provider) => {
 		const result = await request(provider, {
 			apiKey,

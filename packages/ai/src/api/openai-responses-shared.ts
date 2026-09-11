@@ -148,8 +148,15 @@ export type ResponsesDiagnostics = {
 	};
 };
 
-export function diagnosticServiceTier(value: unknown): "auto" | "default" | "flex" | "scale" | "priority" | "unknown" {
-	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority"
+export function diagnosticServiceTier(
+	value: unknown,
+): "auto" | "default" | "flex" | "scale" | "priority" | "fast" | "unknown" {
+	return value === "auto" ||
+		value === "default" ||
+		value === "flex" ||
+		value === "scale" ||
+		value === "priority" ||
+		value === "fast"
 		? value
 		: "unknown";
 }
