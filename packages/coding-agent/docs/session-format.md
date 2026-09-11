@@ -453,6 +453,7 @@ Key methods for working with sessions programmatically.
 - `buildContextEntries()` - Get active branch entries with compaction applied
 - `buildSessionContext()` - Get messages, thinkingLevel, and model for LLM
 - `getEntries()` - All entries (excluding header)
+- `getEntriesRevision()` - Revision of this manager's file-wide entries; changes on append or replacement, not on leaf-only navigation. Available through the read-only extension context for caching derived entry data.
 - `getHeader()` - Session header metadata
 - `getSessionName()` - Get display name from latest session_info entry
 - `getCwd()` - Working directory

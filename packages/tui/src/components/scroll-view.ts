@@ -213,12 +213,20 @@ export class ScrollView extends Container {
 	}
 
 	override render(width: number): string[] {
-		const contentWidth = this.getContentWidth(width);
-		const lines = this.child.render(contentWidth);
-		return contentWidth === width ? lines : lines.map((line) => `${line} `);
+		return renderScrollView(this[LAYOUT_NODE](), width);
 	}
 
 	[LAYOUT_NODE](): ScrollLayoutNode {
 		return { type: "scroll", component: this.child, state: this };
 	}
+}
+
+export function renderScrollView(
+	node: ScrollLayoutNode,
+	width: number,
+	renderChild = (component: Component, childWidth: number): string[] => component.render(childWidth),
+): string[] {
+	const contentWidth = node.state.getContentWidth(width);
+	const lines = renderChild(node.component, contentWidth);
+	return contentWidth === width ? lines : lines.map((line) => `${line} `);
 }
