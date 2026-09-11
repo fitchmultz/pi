@@ -1,5 +1,6 @@
 import { LAYOUT_NODE, type LayoutViewport, type StackLayoutEntry, type StackLayoutNode } from "../layout-node.ts";
-import { type Component, Container } from "../tui.ts";
+import { type Component, Container, compositeTuiLine } from "../tui.ts";
+import { visibleWidth } from "../utils.ts";
 
 export interface StackEntryOptions {
 	basis?: number | "auto";
@@ -69,6 +70,10 @@ export abstract class Stack extends Container {
 		this.entries.length = 0;
 	}
 
+	override render(width: number): string[] {
+		return renderStack(this[LAYOUT_NODE](), width);
+	}
+
 	[LAYOUT_NODE](): StackLayoutNode {
 		return {
 			type: this.layoutType,
@@ -77,6 +82,62 @@ export abstract class Stack extends Container {
 			align: this.align,
 		};
 	}
+}
+
+export function renderStack(
+	node: StackLayoutNode,
+	width: number,
+	renderChild = (component: Component, childWidth: number): string[] => component.render(childWidth),
+): string[] {
+	const safeWidth = Math.max(1, width);
+	const entries = visibleStackEntries(node.entries, { width: safeWidth, height: Number.MAX_SAFE_INTEGER });
+	if (node.type === "vstack") {
+		const rendered = entries.map((entry) => renderChild(entry.component, safeWidth));
+		const sizes = allocateStackSizes(
+			entries,
+			rendered.map((lines) => lines.length),
+			undefined,
+			node.gap,
+		);
+		const lines: string[] = [];
+		for (let index = 0; index < entries.length; index++) {
+			if (index > 0) {
+				for (let gap = 0; gap < node.gap; gap++) lines.push("");
+			}
+			const childLines = rendered[index]!.slice(0, sizes[index]);
+			lines.push(...childLines);
+			for (let padding = childLines.length; padding < sizes[index]!; padding++) lines.push("");
+		}
+		return lines;
+	}
+
+	if (entries.length === 0) return [];
+	const intrinsicWidths = entries.map((entry) => {
+		if (typeof entry.basis === "number") return entry.basis;
+		const lines = renderChild(entry.component, safeWidth);
+		return lines.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+	});
+	const widths = allocateStackSizes(entries, intrinsicWidths, safeWidth, node.gap);
+	const rendered = entries.map((entry, index) =>
+		widths[index] === 0 ? [] : renderChild(entry.component, widths[index]!),
+	);
+	const height = rendered.reduce((max, lines) => Math.max(max, lines.length), 0);
+	const result = Array.from({ length: height }, () => "");
+	let x = 0;
+	for (let index = 0; index < rendered.length; index++) {
+		const lines = rendered[index]!;
+		const childWidth = widths[index]!;
+		let offset = 0;
+		if (node.align === "center") offset = Math.floor((height - lines.length) / 2);
+		else if (node.align === "end") offset = height - lines.length;
+		for (let row = 0; row < lines.length; row++) {
+			const target = row + offset;
+			if (target < 0 || target >= result.length) continue;
+			result[target] = compositeTuiLine(result[target]!, lines[row]!, x, childWidth, safeWidth);
+		}
+		x += childWidth + node.gap;
+	}
+	return result;
 }
 
 export function visibleStackEntries(

@@ -1058,6 +1058,7 @@ For `tool_call`, this state is synchronized through the current assistant messag
 
 ```typescript
 ctx.sessionManager.getEntries()             // All entries
+ctx.sessionManager.getEntriesRevision()     // File-wide revision for derived-data caches
 ctx.sessionManager.getBranch()              // Current branch
 ctx.sessionManager.buildContextEntries()    // Active branch entries with compaction applied
 ctx.sessionManager.getLeafId()              // Current leaf entry ID
