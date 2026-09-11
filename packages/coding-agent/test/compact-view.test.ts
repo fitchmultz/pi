@@ -166,6 +166,55 @@ describe("compact tool cards", () => {
 		}
 	});
 
+	test.each(["bash", "powershell"] as const)("reuses unchanged %s previews including omitted-line hints", (name) => {
+		const component = new ToolExecutionComponent(
+			name,
+			"id",
+			{ command: "echo output" },
+			{ compactView: true },
+			createAllToolRenderers()[name],
+			ui,
+			process.cwd(),
+		);
+		const result = { content: [{ type: "text", text: "one\ntwo\nthree\nfour\nfive\nsix" }], isError: false };
+		component.updateResult(result);
+		const segment = vi.spyOn(Intl.Segmenter.prototype, "segment");
+		const redraw = (width: number) => {
+			const expected = component.render(width);
+			segment.mockClear();
+			expect(component.render(width)).toEqual(expected);
+			expect(segment).not.toHaveBeenCalled();
+			return expected;
+		};
+		try {
+			const initial = redraw(80);
+			expect(stripAnsi(initial.join("\n"))).toContain("1 earlier lines");
+			for (const line of redraw(20)) expect(visibleWidth(line)).toBeLessThanOrEqual(20);
+			expect(redraw(80)).toEqual(initial);
+			component.updateResult({ content: [{ type: "text", text: "partial" }], isError: false }, true);
+			expect(stripAnsi(redraw(80).join("\n"))).toContain("partial");
+			component.updateResult({ content: [{ type: "text", text: "failed" }], isError: true });
+			expect(stripAnsi(redraw(80).join("\n"))).toContain("failed");
+			component.updateResult(result);
+			expect(redraw(80)).toEqual(initial);
+			initTheme("light", false);
+			component.invalidate();
+			const light = redraw(80);
+			expect(light).not.toEqual(initial);
+			expect(light.map(stripAnsi)).toEqual(initial.map(stripAnsi));
+			component.setExpanded(true);
+			const expanded = stripAnsi(component.render(80).join("\n"));
+			expect(expanded).toContain("one");
+			expect(expanded).toContain("six");
+			expect(expanded).not.toContain("earlier lines");
+			component.setExpanded(false);
+			expect(redraw(80)).toEqual(light);
+		} finally {
+			segment.mockRestore();
+			initTheme("dark", false);
+		}
+	});
+
 	test.each(["default", "self"] as const)(
 		"keeps mutable %s children and mouse layout live between redraws",
 		(renderShell) => {
