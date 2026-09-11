@@ -13,6 +13,7 @@ type ShutdownThis = {
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
 	runtimeHost: { dispose: () => Promise<void> };
+	session: { beginShutdown: () => void };
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	themeController: { disableAutoSync: () => void };
 	stop: () => void;
@@ -60,6 +61,7 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 		const context: ShutdownThis = {
 			options: {},
 			isShuttingDown: false,
+			session: { beginShutdown: vi.fn() },
 			unregisterSignalHandlers: vi.fn(() => {
 				order.push("unregister");
 			}),
