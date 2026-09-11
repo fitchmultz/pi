@@ -435,7 +435,7 @@ export interface AssistantMessage {
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
 	providerThinkingLevel?: string;
-	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
+	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime request measurements, failures, and recoveries.
 	usage: Usage;
 	stopReason: StopReason;
 	deferred?: DeferredHandle;

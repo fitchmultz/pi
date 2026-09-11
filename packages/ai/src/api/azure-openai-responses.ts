@@ -1,4 +1,5 @@
 import { AzureOpenAI } from "openai";
+import { APIConnectionTimeoutError } from "openai/core/error";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
 import type {
@@ -18,7 +19,14 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	createResponsesDiagnostics,
+	diagnosticServiceTier,
+	finishResponsesDiagnostics,
+	processResponsesStream,
+} from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 const DEFAULT_AZURE_API_VERSION = "v1";
@@ -96,6 +104,9 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 			timestamp: Date.now(),
 		};
 
+		const diagnostics = createResponsesDiagnostics(output);
+		const details = diagnostics.details;
+
 		try {
 			// Create Azure OpenAI client
 			const apiKey = options?.apiKey;
@@ -108,27 +119,49 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 				model.compat?.supportsOpenAIGrammarTools ?? false,
 			);
 			let params = buildParams(model, context, options, deploymentName, grammarToolInputProperties);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as ResponseCreateParamsStreaming;
+			details.prepareMs = performance.now() - diagnostics.startedAt;
+			const hookStartedAt = performance.now();
+			try {
+				const nextParams = await options?.onPayload?.(params, model);
+				if (nextParams !== undefined) {
+					params = nextParams as ResponseCreateParamsStreaming;
+				}
+			} finally {
+				details.onPayloadMs = performance.now() - hookStartedAt;
 			}
+			details.requestedServiceTier = diagnosticServiceTier(params.service_tier);
+			details.requestReadyMs = performance.now() - diagnostics.startedAt;
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: 0,
 			};
 			const { data: openaiStream, response } = await retryProviderRequest(
-				() => client.responses.create(params, requestOptions).withResponse(),
+				async () => {
+					details.transport = "sse";
+					details.sseAttempts++;
+					details.lastAttemptStartMs = performance.now() - diagnostics.startedAt;
+					try {
+						return await client.responses.create(params, requestOptions).withResponse();
+					} catch (error) {
+						if (error instanceof APIConnectionTimeoutError) {
+							details.localTimeout = "sdk_request";
+							if (options?.timeoutMs !== undefined) details.localTimeoutMs = options.timeoutMs;
+						}
+						throw error;
+					}
+				},
 				{
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					signal: options?.signal,
 				},
 			);
+			details.headersMs = performance.now() - diagnostics.startedAt;
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model, { grammarToolInputProperties });
+			await processResponsesStream(openaiStream, output, stream, model, { diagnostics, grammarToolInputProperties });
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -141,6 +174,7 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
 
+			finishResponsesDiagnostics(diagnostics);
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
@@ -152,6 +186,7 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatAzureOpenAIError(error);
+			finishResponsesDiagnostics(diagnostics);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
