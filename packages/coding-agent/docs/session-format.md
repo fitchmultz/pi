@@ -134,6 +134,18 @@ interface Usage {
 
 `"pending"` is reserved for partial messages in streaming events. Terminal events replace it with a completion reason before Pi persists the assistant message, so `"pending"` should never appear in session JSONL. `"deferred"` is a terminal reason for a provider response that will complete later; its `deferred` handle contains the provider data needed to retrieve that response.
 
+### Provider Request Diagnostics
+
+Codex, OpenAI Responses, and Azure Responses save a `provider_request` diagnostic on successful and failed assistant messages. Its `details` contain only allowlisted scalar values: transport, byte counts, socket/recovery facts, service tiers, and timings. These measurements are not model input and do not produce normal transcript notices.
+
+- `timingOrigin: "adapter_start"` means timing starts inside the provider adapter, after earlier model/runtime preparation. Timings use a monotonic clock, not the diagnostic's wall-clock `timestamp`.
+- `prepareMs`, `requestReadyMs`, `lastAttemptStartMs`, `headersMs`, `connectStartMs`, `websocketSendMs`, event timings, and `finishedMs` are offsets from that start. `onPayloadMs` and `connectMs` are durations; `socketAgeMs` and `lastApplicationEventAgeMs` are ages. `onPayloadMs` includes the adapter's payload hook, including chained `before_provider_request` handlers, not every extension hook.
+- `headersMs` records when fetch or the SDK supplies an HTTP response, before `onResponse`. First-application-event and first-content-delta times record adapter-consumed events, including reasoning and tool-input deltas, not packet arrival or pure provider time to first token. `terminalEventMs` records a provider terminal event; `finishedMs` records the adapter's final success/error boundary, before later agent hooks or session persistence.
+- Attempt counters cover only this adapter invocation. SSE counts fetch/SDK calls, not redirects or individual network operations. Recovery keeps the first event timings and the latest observed connect, close, send, and attempt fields; these fields can refer to different attempts. Separate agent retries create separate assistant messages. Missing fields mean that boundary was not observed.
+- Codex `fullBodyBytes` counts the post-hook full JSON body. `websocketSendBytes` counts the UTF-8 string passed to `send`, after full/delta selection, including `response.create`; it is not WebSocket framing or proof of network delivery. `sseSendBytes` counts the fetch body after optional compression. The transport-failure diagnostic also uses `fullBodyBytes`, replacing the misleading `requestBytes` name.
+- `requestedServiceTier` comes from the post-hook request. `returnedServiceTier` preserves a recognized raw terminal-response tier before pricing rules run. The recognized `fast` and `priority` values stay distinct. Missing, null, or unrecognized tiers are `unknown`; requested priority does not prove delivered priority. Pricing is unchanged.
+- Close code/cleanliness and local timeout facts are independent of error classification. They include a synchronous close after a generic error, but do not wait for a late close or change retry, fallback, or timeout policy.
+
 ### Extended Message Types (from pi-coding-agent)
 
 ```typescript

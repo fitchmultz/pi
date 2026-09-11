@@ -450,6 +450,12 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("Codex SSE response headers timed out after 10ms");
+		expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
+			transport: "sse",
+			sseAttempts: 1,
+			localTimeout: "sse_headers",
+			localTimeoutMs: 10,
+		});
 	});
 
 	it("aborts SSE body reads after response headers arrive", async () => {
@@ -1667,6 +1673,20 @@ describe("openai-codex streaming", () => {
 		expect(recovered.stopReason).toBe("stop");
 		expect(connections).toBe(2);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
+			transport: "sse",
+			websocketAttempts: 1,
+			sseAttempts: 1,
+			localTimeout: "websocket_connect",
+			localTimeoutMs: 50,
+			fallbackReason: "before_stream_start",
+			connectMs: expect.any(Number),
+		});
+		expect(recovered.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
+			transport: "websocket",
+			websocketAttempts: 1,
+			sseAttempts: 0,
+		});
 		expect(getOpenAICodexWebSocketDebugStats("ws-connect-timeout")).toMatchObject({
 			websocketFailures: 1,
 			sseFallbacks: 1,
@@ -1728,7 +1748,7 @@ describe("openai-codex streaming", () => {
 				const afterStart = failure === "after-start";
 				expect(first.stopReason).toBe(afterStart ? "error" : "stop");
 				expect(events.filter((type) => type === "start")).toHaveLength(1);
-				expect(first.diagnostics).toEqual([
+				expect(first.diagnostics?.filter((entry) => entry.type === "provider_transport_failure")).toEqual([
 					expect.objectContaining({
 						type: "provider_transport_failure",
 						details: expect.objectContaining({
@@ -1759,6 +1779,83 @@ describe("openai-codex streaming", () => {
 				});
 			},
 		);
+
+		it.each([1006, 1009, undefined])(
+			"observes synchronous close %s after a generic error without changing failure policy or waiting",
+			async (closeCode) => {
+				let sends = 0;
+				const { sockets, fetchMock } = mockWebSocketTransport((socket) => {
+					if (++sends > 1) completeWebSocket(socket);
+					else
+						socket.dispatchEvent(
+							new MessageEvent("message", {
+								data: JSON.stringify({ type: "response.created", response: { id: "resp_failed" } }),
+							}),
+						);
+				});
+				const resultStream = streamOpenAICodexResponses(model, context, options);
+				for await (const event of resultStream) {
+					if (event.type === "start") {
+						sockets[0].dispatchEvent(Object.assign(new Event("error"), { error: new TypeError("") }));
+						if (closeCode !== undefined)
+							sockets[0].dispatchEvent(
+								Object.assign(new Event("close"), {
+									code: closeCode,
+									wasClean: false,
+									reason: "private-close-reason",
+								}),
+							);
+					}
+				}
+				const result = await resultStream.result();
+				expect(result.stopReason).toBe("error");
+				expect(result.errorMessage).toBe("WebSocket error");
+				const details = result.diagnostics?.find((entry) => entry.type === "provider_request")?.details;
+				expect(details).toMatchObject({ transport: "websocket", websocketAttempts: 1, sseAttempts: 0 });
+				expect(details?.closeCode).toBe(closeCode);
+				expect(details?.closeWasClean).toBe(closeCode === undefined ? undefined : false);
+				expect(JSON.stringify(details)).not.toContain("private-close-reason");
+				if (closeCode === undefined) {
+					sockets[0].dispatchEvent(Object.assign(new Event("close"), { code: 1009, wasClean: false }));
+					expect(details?.closeCode).toBeUndefined();
+				}
+				expect(fetchMock).not.toHaveBeenCalled();
+				expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
+				expect(sockets).toHaveLength(2);
+				expect(getOpenAICodexWebSocketDebugStats(options.sessionId)?.websocketFallbackActive).toBe(false);
+			},
+		);
+
+		it("observes a synchronous close after a connection error before SSE fallback", async () => {
+			class FailedWebSocket extends EventTarget {
+				constructor() {
+					super();
+					queueMicrotask(() => {
+						this.dispatchEvent(Object.assign(new Event("error"), { error: new TypeError("") }));
+						this.dispatchEvent(Object.assign(new Event("close"), { code: 1006, wasClean: false }));
+					});
+				}
+				send(): void {
+					throw new Error("must not send on a failed connection");
+				}
+				close(): void {}
+			}
+			vi.stubGlobal("WebSocket", FailedWebSocket);
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response(buildSSEPayload({ status: "completed" }))),
+			);
+			const result = await streamOpenAICodexResponses(model, context, options).result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
+				transport: "sse",
+				websocketAttempts: 1,
+				sseAttempts: 1,
+				closeCode: 1006,
+				closeWasClean: false,
+				fallbackReason: "before_stream_start",
+			});
+		});
 
 		it("keeps oversized websocket frames on SSE, including after a debug close", async () => {
 			const { sockets, sentBodies, fetchMock } = mockWebSocketTransport((socket) => {
@@ -1832,7 +1929,7 @@ describe("openai-codex streaming", () => {
 			}
 			const aborted = await resultStream.result();
 			expect(aborted.stopReason).toBe("aborted");
-			expect(aborted.diagnostics).toBeUndefined();
+			expect(aborted.diagnostics?.some((entry) => entry.type === "provider_transport_failure")).not.toBe(true);
 			expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
 			expect(sockets).toHaveLength(2);
 			expect(fetchMock).not.toHaveBeenCalled();
@@ -2089,6 +2186,14 @@ describe("openai-codex streaming", () => {
 		const result = await resultPromise;
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("WebSocket idle timeout after 50ms");
+		const details = result.diagnostics?.find((entry) => entry.type === "provider_request")?.details;
+		expect(details).toMatchObject({
+			transport: "websocket",
+			localTimeout: "websocket_idle",
+			localTimeoutMs: 50,
+			applicationEvents: 1,
+		});
+		expect(details?.lastApplicationEventAgeMs).toBeGreaterThanOrEqual(50);
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
@@ -2200,6 +2305,11 @@ describe("openai-codex streaming", () => {
 	it("sends only response input deltas in websocket-cached mode", async () => {
 		const token = mockToken();
 		const sentBodies: unknown[] = [];
+		const sentBytes: number[] = [];
+		const fullBodyBytes: number[] = [];
+		const onPayload = (payload: unknown) => {
+			fullBodyBytes.push(Buffer.byteLength(JSON.stringify(payload)));
+		};
 
 		class MockWebSocket {
 			static OPEN = 1;
@@ -2225,6 +2335,7 @@ describe("openai-codex streaming", () => {
 
 			send(data: string): void {
 				sentBodies.push(JSON.parse(data));
+				sentBytes.push(Buffer.byteLength(data));
 				const responseId = `resp_${sentBodies.length}`;
 				const outputEvents =
 					sentBodies.length === 1
@@ -2305,7 +2416,7 @@ describe("openai-codex streaming", () => {
 		};
 		const firstContext: Context = {
 			systemPrompt: "You are a helpful assistant.",
-			messages: [{ role: "user", content: "Use the tool", timestamp: 1 }],
+			messages: [{ role: "user", content: "Use the tool 雪", timestamp: 1 }],
 			tools: [
 				{
 					name: "sample_tool",
@@ -2320,6 +2431,7 @@ describe("openai-codex streaming", () => {
 			apiKey: token,
 			sessionId: "session-1",
 			transport: "websocket-cached",
+			onPayload,
 		}).result();
 
 		const secondContext: Context = {
@@ -2338,18 +2450,42 @@ describe("openai-codex streaming", () => {
 				{ role: "user", content: "Now finish", timestamp: 3 },
 			],
 		};
-		await streamOpenAICodexResponses(model, secondContext, {
+		const second = await streamOpenAICodexResponses(model, secondContext, {
 			apiKey: token,
 			sessionId: "session-1",
 			transport: "websocket-cached",
+			onPayload,
 		}).result();
+
+		expect(first.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
+			transport: "websocket",
+			websocketSendBytes: sentBytes[0],
+			fullBodyBytes: fullBodyBytes[0],
+			websocketRequestMode: "full",
+			socketReused: false,
+			socketAgeMs: 0,
+			websocketAttempts: 1,
+			sseAttempts: 0,
+		});
+		const details = second.diagnostics?.find((entry) => entry.type === "provider_request")?.details;
+		expect(details).toMatchObject({
+			transport: "websocket",
+			websocketSendBytes: sentBytes[1],
+			fullBodyBytes: fullBodyBytes[1],
+			websocketRequestMode: "delta",
+			socketReused: true,
+			websocketAttempts: 1,
+			sseAttempts: 0,
+		});
+		expect(details?.socketAgeMs).toBeGreaterThanOrEqual(0);
+		expect(sentBytes[1]).toBeLessThan(fullBodyBytes[1]);
 
 		expect(sentBodies).toHaveLength(2);
 		const firstBody = sentBodies[0] as { input: unknown[]; previous_response_id?: string; store?: boolean };
 		const secondBody = sentBodies[1] as { input: unknown[]; previous_response_id?: string; store?: boolean };
 		expect(firstBody.store).toBe(false);
 		expect(firstBody.previous_response_id).toBeUndefined();
-		expect(firstBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Use the tool" }] }]);
+		expect(firstBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Use the tool 雪" }] }]);
 		expect(secondBody.store).toBe(false);
 		expect(secondBody.previous_response_id).toBe("resp_1");
 		expect(secondBody.input).toEqual([

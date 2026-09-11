@@ -40,6 +40,7 @@ import {
 	resolveGrammarConstrainedSampling,
 	resolveJsonSchemaStrictSampling,
 } from "./constrained-sampling.ts";
+import { type ResponsesDiagnostics, recordResponsesEvent } from "./openai-responses-diagnostics.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
@@ -104,6 +105,7 @@ function convertToolResultOutput<TApi extends Api>(
 }
 
 export interface OpenAIResponsesStreamOptions {
+	diagnostics?: ResponsesDiagnostics;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	resolveServiceTier?: (
@@ -596,6 +598,7 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 
 	for await (const event of openaiStream) {
+		if (options?.diagnostics) recordResponsesEvent(options.diagnostics, event);
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
