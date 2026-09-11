@@ -27,13 +27,11 @@ import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
-	convertResponsesMessages,
-	convertResponsesTools,
 	createResponsesDiagnostics,
 	diagnosticServiceTier,
 	finishResponsesDiagnostics,
-	processResponsesStream,
-} from "./openai-responses-shared.ts";
+} from "./openai-responses-diagnostics.ts";
+import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);

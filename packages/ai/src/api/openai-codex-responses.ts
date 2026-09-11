@@ -36,15 +36,13 @@ import { uuidv7 } from "../utils/uuid.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
-	convertResponsesMessages,
-	convertResponsesTools,
 	createResponsesDiagnostics,
 	diagnosticServiceTier,
 	finishResponsesDiagnostics,
-	processResponsesStream,
 	type ResponsesDiagnostics,
 	recordResponsesEvent,
-} from "./openai-responses-shared.ts";
+} from "./openai-responses-diagnostics.ts";
+import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 // ============================================================================

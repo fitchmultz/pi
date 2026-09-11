@@ -20,13 +20,11 @@ import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
-	convertResponsesMessages,
-	convertResponsesTools,
 	createResponsesDiagnostics,
 	diagnosticServiceTier,
 	finishResponsesDiagnostics,
-	processResponsesStream,
-} from "./openai-responses-shared.ts";
+} from "./openai-responses-diagnostics.ts";
+import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 const DEFAULT_AZURE_API_VERSION = "v1";
