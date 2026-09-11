@@ -115,7 +115,14 @@ export async function superviseCli(
 					checkpoint.cwd,
 					"--thinking",
 					checkpoint.thinkingLevel,
-					...(checkpoint.model ? ["--model", `${checkpoint.model.provider}/${checkpoint.model.id}`] : []),
+					...(checkpoint.model
+						? [
+								"--provider",
+								checkpoint.model.provider,
+								"--model",
+								`${checkpoint.model.provider}/${checkpoint.model.id}`,
+							]
+						: []),
 				];
 				const previous: Launch = {
 					worker: launch.worker,

@@ -4,9 +4,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseArgs } from "../src/cli/args.ts";
 import { getCliWorkerPath, superviseCli } from "../src/cli/launcher.ts";
 import { parseRestartCommand, parseRestartRequest, type RestartCheckpoint } from "../src/cli/restart-protocol.ts";
 import { getRestartArgs } from "../src/cli/restart-worker.ts";
+import { AuthStorage } from "../src/core/auth-storage.ts";
+import { resolveCliModel } from "../src/core/model-resolver.ts";
+import { ModelRuntime } from "../src/core/model-runtime.ts";
 
 const directories: string[] = [];
 const children: ChildProcess[] = [];
@@ -22,7 +26,11 @@ afterEach(() => {
 	for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-function fixture(candidateBody: string, fallbackBody = "process.send({ type: 'pi:ready' }, () => process.exit(0));") {
+function fixture(
+	candidateBody: string,
+	fallbackBody = "process.send({ type: 'pi:ready' }, () => process.exit(0));",
+	options: { model?: RestartCheckpoint["model"]; args?: string[] } = {},
+) {
 	const root = mkdtempSync(join(tmpdir(), "pi-supervisor-test-"));
 	directories.push(root);
 	const trace = join(root, "trace.jsonl");
@@ -33,7 +41,7 @@ function fixture(candidateBody: string, fallbackBody = "process.send({ type: 'pi
 		sessionId: "same-session",
 		cwd: root,
 		leafId: "saved-leaf",
-		model: { provider: "faux", id: "faux-1" },
+		model: options.model ?? { provider: "faux", id: "faux-1" },
 		thinkingLevel: "off",
 		activeTools: ["bash"],
 		knownTools: ["bash", "read"],
@@ -48,7 +56,7 @@ appendFileSync(${JSON.stringify(trace)}, JSON.stringify({name:${JSON.stringify(n
 		type: "pi:restart",
 		request: { runtime, extensions: [join(root, "v2.ts")], message: "Check the new capability" },
 		checkpoint,
-		args: ["-ne", "--custom-flag", "keep this value"],
+		args: options.args ?? ["-ne", "--custom-flag", "keep this value"],
 		extensions: [join(root, "v1.ts")],
 	};
 	writeFileSync(
@@ -248,6 +256,57 @@ setInterval(() => {}, 1000);
 		expect(trace[1].args.at(-1)).toMatch(/v2\.ts$/);
 		expect(trace.every((entry) => entry.socket === undefined)).toBe(true);
 	});
+
+	// PR #29: an authenticated raw ID must not redirect a retained CLI key to another provider.
+	it.each([false, true])(
+		"preserves the checkpoint provider despite a raw-ID collision (rollback: %s)",
+		async (rollback) => {
+			vi.stubEnv("XIAOMI_API_KEY", undefined);
+			const modelRuntime = await ModelRuntime.create({
+				credentials: AuthStorage.inMemory({ commandcode: { type: "api_key", key: "commandcode-key" } }),
+				modelsPath: null,
+				allowModelNetwork: false,
+			});
+			const xiaomi = modelRuntime.getModel("xiaomi", "mimo-v2.5-pro")!;
+			modelRuntime.registerProvider("commandcode", {
+				api: xiaomi.api,
+				baseUrl: "https://example.invalid",
+				models: [{ ...xiaomi, id: "xiaomi/mimo-v2.5-pro", baseUrl: "https://example.invalid" }],
+			});
+			await modelRuntime.refresh({ allowNetwork: false });
+			expect(modelRuntime.hasConfiguredAuth("xiaomi")).toBe(false);
+			expect(resolveCliModel({ cliModel: "xiaomi/mimo-v2.5-pro", modelRuntime }).model?.provider).toBe(
+				"commandcode",
+			);
+			const original = ["--provider", "xiaomi", "--model", "mimo-v2.5-pro", "--api-key", "test-only-key", "-ne"];
+			const initial = parseArgs(original);
+			expect(
+				resolveCliModel({ cliProvider: initial.provider, cliModel: initial.model, modelRuntime }).model,
+			).toEqual(xiaomi);
+			const f = fixture(
+				rollback ? "process.exit(17);" : "process.send({ type: 'pi:ready' }, () => process.exit(0));",
+				undefined,
+				{
+					model: { provider: xiaomi.provider, id: xiaomi.id },
+					args: getRestartArgs(original, true),
+				},
+			);
+			expect(await superviseCli(f.worker, original, { env: cleanEnv, execArgv: [] })).toBe(0);
+			const resumed = parseArgs(f.read().at(-1)!.args);
+			const resolved = resolveCliModel({
+				cliProvider: resumed.provider,
+				cliModel: resumed.model,
+				cliThinking: resumed.thinking,
+				modelRuntime,
+			});
+			expect(resumed.apiKey).toBe("test-only-key");
+			expect(resolved.error).toBeUndefined();
+			expect(resolved.model).toEqual(xiaomi);
+			await modelRuntime.setRuntimeApiKey(resolved.model!.provider, resumed.apiKey!);
+			expect((await modelRuntime.getAuth("xiaomi"))?.auth.apiKey).toBe("test-only-key");
+			expect((await modelRuntime.getAuth("commandcode"))?.auth.apiKey).toBe("commandcode-key");
+		},
+	);
 
 	it("rolls back failed startup to the prior runtime and extension list, with no lost continuation", async () => {
 		const f = fixture("process.exit(17);");

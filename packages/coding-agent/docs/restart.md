@@ -16,6 +16,8 @@ The command acknowledges **queueing**, not successful activation. Pi waits for f
 
 Without `--message`, the replacement opens the session and waits for input. In the TUI, `/restart` does the same; `/restart <text>` also supplies a continuation.
 
+If an external editor is open, Pi waits for it to return before restarting. Returned draft text stays in the editor and cancels the queued restart; an empty result allows it to continue.
+
 Restarts require a saved session. Requests reject ephemeral sessions, stale session IDs, missing candidate files, and unhandled editor drafts or next-turn messages. If new draft text arrives before the restart boundary, Pi cancels rather than discarding it. Interrupting the agent run, cancelling retry backoff, or exhausting retries cancels a pending restart. Normal quit and termination signals do not restart Pi, including when shutdown preparation is already in progress.
 
 ## Stage Changes Without Overwriting the Working Version
@@ -57,7 +59,7 @@ The control endpoint is local and session-scoped. On Unix it lives inside a priv
 
 ## Scope and First Startup
 
-Managed restart is provided by the bundled Node CLI. Print, JSON and RPC modes do not expose the interactive restart endpoint; SDK hosts and standalone binaries retain their existing lifecycle behavior.
+Managed restart is provided by the bundled Node CLI. Print, JSON and RPC modes and one-shot startup benchmarks do not expose the interactive restart endpoint; SDK hosts and standalone binaries retain their existing lifecycle behavior.
 
 The launcher itself remains loaded across worker replacements. Changes to launcher code take effect on the next full CLI launch. It intentionally stays small and outside ordinary agent/runtime updates.
 

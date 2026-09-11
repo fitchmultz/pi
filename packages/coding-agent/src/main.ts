@@ -600,9 +600,12 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
+	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	const restart = createManagedRestart(args);
 	const managedInteractive =
-		restart && resolveAppMode(parseArgs(args), process.stdin.isTTY, process.stdout.isTTY) === "interactive";
+		restart &&
+		!startupBenchmark &&
+		resolveAppMode(parseArgs(args), process.stdin.isTTY, process.stdout.isTTY) === "interactive";
 	const extensionFactories = [
 		...builtInExtensions,
 		...(options?.extensionFactories ?? []),
@@ -961,7 +964,6 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);

@@ -94,7 +94,14 @@ export function createRestartControl(options: {
 			const tryRestart = () => {
 				const ctx = currentContext;
 				if (!pending || !ctx || committed || closing) return;
-				if (!startupComplete || !ctx.isIdle() || ctx.isBashRunning() || ctx.getPendingInputCount() > 0) {
+				// The external editor owns input while the TUI has paused stdin.
+				if (
+					!startupComplete ||
+					(process.stdin.isTTY && process.stdin.isPaused()) ||
+					!ctx.isIdle() ||
+					ctx.isBashRunning() ||
+					ctx.getPendingInputCount() > 0
+				) {
 					clearTimeout(timer);
 					timer = setTimeout(tryRestart, 100);
 					return;
