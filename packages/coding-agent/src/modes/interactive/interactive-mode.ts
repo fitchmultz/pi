@@ -370,6 +370,8 @@ export interface InteractiveModeOptions {
 	tuiMode?: TuiMode;
 	/** Initial interactive theme setting for this invocation. */
 	initialThemeSetting?: string;
+	/** Synchronous host notification before shutdown can yield or re-enter. */
+	onShutdownRequested?: (source: "user" | "extension" | "signal") => void;
 }
 
 export class InteractiveMode {
@@ -402,6 +404,7 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
+	private pendingInitialMessages: number;
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
 	private activeWorkingIndicatorEmbedded = false;
 	private readonly idleStatus = new IdleStatus();
@@ -521,6 +524,7 @@ export class InteractiveMode {
 		setCapabilityOverrides(this.settingsManager.getTerminalCapabilityOverrides());
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
 		this.options = { ...options, tuiMode };
+		this.pendingInitialMessages = (options.initialMessage ? 1 : 0) + (options.initialMessages?.length ?? 0);
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
@@ -1109,6 +1113,7 @@ export class InteractiveMode {
 
 		// Process initial messages
 		if (initialMessage) {
+			this.pendingInitialMessages--;
 			try {
 				await this.session.prompt(initialMessage, { images: initialImages });
 			} catch (error: unknown) {
@@ -1119,6 +1124,7 @@ export class InteractiveMode {
 
 		if (initialMessages) {
 			for (const message of initialMessages) {
+				this.pendingInitialMessages--;
 				try {
 					await this.session.prompt(message);
 				} catch (error: unknown) {
@@ -1860,7 +1866,8 @@ export class InteractiveMode {
 		await this.session.bindExtensions({
 			uiContext,
 			mode: "tui",
-			getQueuedInputCount: () => this.pendingUserInputs.length + this.compactionQueuedMessages.length,
+			getQueuedInputCount: () =>
+				this.pendingInitialMessages + this.pendingUserInputs.length + this.compactionQueuedMessages.length,
 			abortHandler: () => {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
@@ -1916,7 +1923,7 @@ export class InteractiveMode {
 			shutdownHandler: () => {
 				this.shutdownRequested = true;
 				if (this.session.isIdle) {
-					void this.shutdown();
+					void this.shutdown({ fromExtension: true });
 				}
 			},
 			onError: (error) => {
@@ -3981,7 +3988,10 @@ export class InteractiveMode {
 	 */
 	private isShuttingDown = false;
 
-	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+	private async shutdown(options?: { fromSignal?: boolean; fromExtension?: boolean }): Promise<void> {
+		this.options.onShutdownRequested?.(
+			options?.fromSignal ? "signal" : options?.fromExtension ? "extension" : "user",
+		);
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
 		// Keep signal handlers registered until terminal cleanup has completed.
@@ -4066,7 +4076,7 @@ export class InteractiveMode {
 	 */
 	private async checkShutdownRequested(): Promise<void> {
 		if (!this.shutdownRequested) return;
-		await this.shutdown();
+		await this.shutdown({ fromExtension: true });
 	}
 
 	private registerSignalHandlers(): void {
