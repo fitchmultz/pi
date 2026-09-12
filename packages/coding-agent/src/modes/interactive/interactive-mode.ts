@@ -3409,6 +3409,12 @@ export class InteractiveMode {
 				await this.checkShutdownRequested();
 				break;
 
+			case "context_window_started":
+				this.rebuildChatFromMessages();
+				for (const message of event.pendingMessages) this.addMessageToChat(message);
+				this.ui.requestRender();
+				break;
+
 			case "compaction_start": {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
@@ -3438,29 +3444,27 @@ export class InteractiveMode {
 					} else {
 						this.showStatus("Auto-compaction cancelled");
 					}
-				} else if (event.result || event.contextWindowStarted) {
+				} else if (event.result) {
 					const entries = this.sessionManager.buildContextEntries();
-					if (event.result && entries[0]?.type !== "compaction") {
+					if (entries[0]?.type !== "compaction") {
 						throw new Error("Completed compaction is missing from the session context");
 					}
 					this.chatContainer.clear();
 					// The latest compaction is prepended for model context; append it below at its chronological position.
-					this.renderSessionEntries(event.result ? entries.slice(1) : entries);
-					if (event.result) {
-						this.addMessageToChat(
-							createCompactionSummaryMessage(
-								event.result.summary,
-								event.result.tokensBefore,
-								new Date().toISOString(),
-							),
-						);
-						if (event.result.usage) {
-							this.addCompactionCostNotice({
-								type: "compaction_cost",
-								kind: "compaction",
-								usage: event.result.usage,
-							});
-						}
+					this.renderSessionEntries(entries.slice(1));
+					this.addMessageToChat(
+						createCompactionSummaryMessage(
+							event.result.summary,
+							event.result.tokensBefore,
+							new Date().toISOString(),
+						),
+					);
+					if (event.result.usage) {
+						this.addCompactionCostNotice({
+							type: "compaction_cost",
+							kind: "compaction",
+							usage: event.result.usage,
+						});
 					}
 					for (const message of event.pendingMessages ?? []) this.addMessageToChat(message);
 					this.footer.invalidate();

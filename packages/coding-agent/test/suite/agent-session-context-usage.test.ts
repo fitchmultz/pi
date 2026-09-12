@@ -3,6 +3,7 @@ import { type AssistantMessage, fauxAssistantMessage, type Usage } from "@earend
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { estimateContextTokens } from "../../src/core/compaction/index.ts";
+import type { ToolDefinition } from "../../src/core/extensions/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function usage(totalTokens: number): Usage {
@@ -125,6 +126,79 @@ describe("AgentSession context usage estimate", () => {
 		const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
 		expect(reported).toBeGreaterThan(0);
 		expect(harness.session.getContextUsage()?.tokens).toBe(reported);
+	});
+
+	it.each([
+		"identical",
+		"handler",
+		"label",
+		"sampling disabled",
+		"description",
+		"schema",
+		"mutated schema",
+		"sampling",
+	])("compares model-facing tool definitions after a %s refresh", async (change) => {
+		let refresh!: (changes: Partial<ToolDefinition>) => void;
+		const parameters = Type.Object({ query: Type.String() });
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					const definition: ToolDefinition = {
+						name: "lookup",
+						label: "Lookup",
+						description: "Lookup a record",
+						parameters,
+						async execute() {
+							return { content: [{ type: "text", text: "done" }], details: {} };
+						},
+					};
+					refresh = (changes) => pi.registerTool({ ...definition, ...changes });
+					refresh({});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("ok")]);
+		await harness.session.prompt("hello");
+		const before = harness.session.getContextUsage()?.tokens;
+		const stateBefore = JSON.stringify(harness.session.agent.state);
+		if (change === "mutated schema")
+			Object.assign(parameters.properties.query, { description: "Changed field description" });
+		refresh(
+			change === "handler"
+				? { execute: async () => ({ content: [], details: {} }) }
+				: change === "label"
+					? { label: "New label" }
+					: change === "description"
+						? { description: "Different description" }
+						: change === "schema"
+							? { parameters: Type.Object({ query: Type.Number() }) }
+							: change === "sampling"
+								? { constrainedSampling: { type: "json_schema", strict: "require" } }
+								: change === "sampling disabled"
+									? { constrainedSampling: false }
+									: {},
+		);
+		if (change === "identical") expect(JSON.stringify(harness.session.agent.state)).toBe(stateBefore);
+		if (["identical", "handler", "label", "sampling disabled"].includes(change)) {
+			expect(harness.session.getContextUsage()?.tokens).toBe(before);
+			const serialize = vi.spyOn(JSON, "stringify");
+			for (let i = 0; i < 10; i++) expect(harness.session.getContextUsage()?.tokens).toBe(before);
+			expect(serialize).not.toHaveBeenCalled();
+		} else {
+			const state = harness.session.agent.state;
+			expect(harness.session.getContextUsage()?.tokens).toBe(
+				estimateContextTokens(state.messages, {
+					model: harness.getModel(),
+					systemPrompt: state.systemPrompt,
+					tools: state.tools,
+					useReportedUsage: false,
+				}).tokens,
+			);
+			expect(harness.session.getContextUsage()?.tokens).not.toBe(before);
+		}
 	});
 
 	it("does not reuse usage or trigger rollover from a different model after a model switch", async () => {

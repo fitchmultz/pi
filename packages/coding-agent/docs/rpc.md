@@ -879,6 +879,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do no
 | `tool_execution_update` | Tool execution progress (streaming output) |
 | `tool_execution_end` | Tool completes |
 | `queue_update` | Pending steering/follow-up queue changed |
+| `context_window_started` | Fresh model context replaces the active window; saved history is retained |
 | `compaction_start` | Compaction begins |
 | `compaction_end` | Compaction completes |
 | `auto_retry_start` | Auto-retry begins (after transient error) |
@@ -1071,6 +1072,16 @@ Emitted whenever the pending steering or follow-up queue changes.
   "followUp": ["After that, summarize the result"]
 }
 ```
+
+### context_window_started
+
+Emitted after the `context-window` marker's `message_start` and `message_end` events, for both manual and automatic fresh windows. The saved transcript is unchanged; active-context UIs should rebuild from the new window rather than retain prior-window components. `pendingMessages` contains inputs already shown but not yet persisted while provider request preparation is in progress; retain these after the marker without adding them to saved history again.
+
+```json
+{"type": "context_window_started", "pendingMessages": []}
+```
+
+An automatic compaction trigger claimed by a fresh window also emits `compaction_end` with `contextWindowStarted: true`. That event ends the compaction indicator, not another context transition.
 
 ### compaction_start / compaction_end
 

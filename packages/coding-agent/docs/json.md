@@ -28,6 +28,8 @@ type JsonAgentSessionEvent =
     };
 ```
 
+`context_window_started` follows the context-window marker's `message_start` and `message_end`, for both manual and automatic fresh windows. It tells active-context UIs to rebuild from the new window while keeping saved history. Its `pendingMessages` contains already-shown inputs not yet persisted; render these after the marker. An automatic trigger also ends with `compaction_end.contextWindowStarted: true`, which closes the compaction indicator without rebuilding again.
+
 `queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction. `compaction_end` may include `pendingMessages`: live inputs not yet persisted while request preparation finishes. A UI rebuilding from session entries should render these after the new boundary or summary.
 
 Other base events come from

@@ -215,15 +215,6 @@ describe("InteractiveMode compaction events", () => {
 			pending,
 		]);
 
-		const boundary: SessionEntry = {
-			type: "context_window",
-			id: "fresh",
-			parentId: "latest",
-			timestamp: "2025-01-03T00:00:00Z",
-			handoff: "fresh handoff",
-			tokensBefore: 123,
-		};
-		fakeThis.sessionManager.buildContextEntries.mockReturnValue([boundary]);
 		vi.clearAllMocks();
 		await handleEvent.call(fakeThis, {
 			type: "compaction_end",
@@ -234,12 +225,11 @@ describe("InteractiveMode compaction events", () => {
 			contextWindowStarted: true,
 			pendingMessages: [pending],
 		});
-		expect(fakeThis.chatContainer.clear).toHaveBeenCalledOnce();
-		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([boundary]);
-		expect(fakeThis.addMessageToChat).toHaveBeenCalledExactlyOnceWith(pending);
-		expect(fakeThis.renderSessionEntries.mock.invocationCallOrder[0]).toBeLessThan(
-			fakeThis.addMessageToChat.mock.invocationCallOrder[0],
-		);
+		// The native context_window_started event already rebuilt this view.
+		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
+		expect(fakeThis.addMessageToChat).not.toHaveBeenCalled();
+		expect(fakeThis.showStatus).not.toHaveBeenCalled();
+		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledExactlyOnceWith();
 	});
 
 	test("updates the working state when the same agent run resumes after compaction", async () => {
