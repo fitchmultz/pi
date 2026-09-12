@@ -590,7 +590,7 @@ pi.on("agent_end", async (event, ctx) => {
 });
 
 pi.on("agent_settled", async (_event, ctx) => {
-  // ctx.isIdle() is true here unless another extension started a new run.
+  // ctx.isIdle() is true here unless another extension started a new run or shutdown began.
 });
 ```
 
@@ -1103,7 +1103,7 @@ pi.on("tool_result", async (event, ctx) => {
 
 ### ctx.isIdle() / ctx.abort() / ctx.hasPendingMessages()
 
-Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, compaction, branch summary, automatic retry, or queued continuation. User Bash and input awaiting native preflight are separate. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
+Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, compaction, branch summary, automatic retry, or queued continuation. It also stays false once host shutdown begins, before `session_shutdown` handlers run. New native model runs are rejected during shutdown; extension state remains available for cleanup. User Bash and input awaiting native preflight are separate. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
 
 ### ctx.isBashRunning()
 
@@ -1201,7 +1201,7 @@ This reports the current base prompt inputs. It does not include per-turn `befor
 
 ### ctx.waitForIdle()
 
-Wait for the agent to fully settle, including automatic retries, auto-compaction retries, and queued continuations:
+Wait for the agent to fully settle, including automatic retries, auto-compaction retries, and queued continuations. This waits for run completion, not permission to start another run: during shutdown it can resolve while `ctx.isIdle()` remains false.
 
 ```typescript
 pi.registerCommand("my-cmd", {

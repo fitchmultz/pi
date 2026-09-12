@@ -327,6 +327,7 @@ export class AgentSession {
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
 	private _promptAbortController: AbortController | undefined;
+	private readonly _shutdownAbortController = new AbortController();
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -422,6 +423,9 @@ export class AgentSession {
 		this._installAgentNextTurnRefresh();
 		this._installAgentRequestPreflight();
 		this._installAgentContextPersistence();
+		const shouldStopAfterTurn = this.agent.shouldStopAfterTurn;
+		this.agent.shouldStopAfterTurn = (context, signal) =>
+			this._shutdownAbortController.signal.aborted || shouldStopAfterTurn?.(context, signal) || false;
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -476,6 +480,7 @@ export class AgentSession {
 		headers?: Record<string, string>;
 		env?: Record<string, string>;
 	}> {
+		this._shutdownAbortController.signal.throwIfAborted();
 		if (this.agent.streamFunction === streamSimple) {
 			return this._getRequiredRequestAuth(model);
 		}
@@ -726,6 +731,7 @@ export class AgentSession {
 	private _installAgentRequestPreflight(): void {
 		const previousPreparation = this.agent.prepareProviderRequest;
 		this.agent.prepareProviderRequest = async (context, signal) => {
+			this._shutdownAbortController.signal.throwIfAborted();
 			let prepared = (await previousPreparation?.(context, signal)) ?? context;
 			if (!this._skipNextProviderRequestPreflight) {
 				prepared = await this._compactBeforeNextAssistantResponse(prepared);
@@ -1067,11 +1073,18 @@ export class AgentSession {
 		}
 	}
 
+	/** Close admission before host cleanup yields. Active responses are aborted only at final disposal. */
+	beginShutdown(): void {
+		this._shutdownAbortController.abort();
+		this._promptAbortController?.abort();
+	}
+
 	/**
 	 * Remove all listeners and disconnect from agent.
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._shutdownAbortController.abort();
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -1297,6 +1310,7 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(prepare: (signal: AbortSignal) => Promise<() => AgentMessage[]>): Promise<void> {
+		this._shutdownAbortController.signal.throwIfAborted();
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
 		}
@@ -1316,7 +1330,7 @@ export class AgentSession {
 				// Agent clears its signal on settlement; keep it for the post-run cancellation check.
 				const signal = this.agent.signal;
 				await run;
-				if (!(await this._handlePostAgentRun(signal))) break;
+				if (!(await this._handlePostAgentRun(signal)) || this._shutdownAbortController.signal.aborted) break;
 				run = this.agent.continue();
 			}
 		} catch (error) {
@@ -1362,7 +1376,7 @@ export class AgentSession {
 	private async _handlePostAgentRun(signal: AbortSignal | undefined): Promise<boolean> {
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
-		if (signal?.aborted || msg?.stopReason === "aborted") {
+		if (this._shutdownAbortController.signal.aborted || signal?.aborted || msg?.stopReason === "aborted") {
 			this._pendingNewContext = undefined;
 			return false;
 		}
@@ -2232,6 +2246,7 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		this._shutdownAbortController.signal.throwIfAborted();
 		await this.abort();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
@@ -2963,7 +2978,7 @@ export class AgentSession {
 			{
 				getModel: () => this.model,
 				getScopedModels: () => this._scopedModels,
-				isIdle: () => this.isIdle,
+				isIdle: () => !this._shutdownAbortController.signal.aborted && this.isIdle,
 				isBashRunning: () => this.isBashRunning,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 				getSignal: () => this.agent.signal,

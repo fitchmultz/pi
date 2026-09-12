@@ -2051,7 +2051,7 @@ export class InteractiveMode {
 			model: this.session.model,
 			scopedModels: this.session.scopedModels,
 			thinkingLevel: this.session.thinkingLevel,
-			isIdle: () => this.session.isIdle,
+			isIdle: () => !this.isShuttingDown && this.session.isIdle,
 			isBashRunning: () => this.session.isBashRunning,
 			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 			signal: this.session.agent.signal,
@@ -3994,6 +3994,7 @@ export class InteractiveMode {
 		);
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
+		this.session.beginShutdown();
 		// Keep signal handlers registered until terminal cleanup has completed.
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
 		// dispatch and re-sends the signal if only its own listeners remain.
