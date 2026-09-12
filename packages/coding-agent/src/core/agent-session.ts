@@ -34,6 +34,7 @@ import type {
 	Model,
 	ProviderHeaders,
 	TextContent,
+	Tool,
 	Usage,
 } from "@earendil-works/pi-ai/compat";
 import {
@@ -162,6 +163,7 @@ export type AgentSessionEvent =
 			steering: readonly string[];
 			followUp: readonly string[];
 	  }
+	| { type: "context_window_started"; pendingMessages: AgentMessage[] }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "entry_appended"; entry: SessionEntry }
 	| { type: "session_info_changed"; name: string | undefined }
@@ -308,7 +310,7 @@ interface ProviderRequestPrefix {
 	provider: string;
 	model: string;
 	systemPrompt: string;
-	tools: readonly AgentTool[];
+	toolKeys: readonly string[];
 }
 
 // ============================================================================
@@ -351,6 +353,7 @@ export class AgentSession {
 	private _pendingNewContext: NewContextRequest | undefined;
 	private _reportedUsagePrefix: ProviderRequestPrefix | null | undefined;
 	private _providerRequestPrefix: ProviderRequestPrefix | undefined;
+	private _toolPrefixKeys = new WeakMap<AgentTool, string>();
 	private _skipNextProviderRequestPreflight = false;
 
 	// Branch summarization state
@@ -580,6 +583,7 @@ export class AgentSession {
 		const marker = messages[0]!;
 		this._emit({ type: "message_start", message: marker });
 		this._emit({ type: "message_end", message: marker });
+		this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
 
 		return {
 			systemPrompt: this.agent.state.systemPrompt,
@@ -638,6 +642,18 @@ export class AgentSession {
 		return historicalEstimate.tokens > fullEstimate.tokens ? historicalEstimate : fullEstimate;
 	}
 
+	private _captureToolPrefix(tool: AgentTool): string {
+		const { name, description, parameters, constrainedSampling } = tool;
+		const key = JSON.stringify({
+			name,
+			description,
+			parameters,
+			constrainedSampling: constrainedSampling || undefined,
+		} satisfies Tool);
+		this._toolPrefixKeys.set(tool, key);
+		return key;
+	}
+
 	private _reportedUsageApplies(context: AgentContext): boolean {
 		const prefix = this._reportedUsagePrefix;
 		if (!prefix) return false;
@@ -648,8 +664,11 @@ export class AgentSession {
 			prefix.provider === model.provider &&
 			prefix.model === model.id &&
 			prefix.systemPrompt === context.systemPrompt &&
-			prefix.tools.length === tools.length &&
-			prefix.tools.every((tool, index) => tool === tools[index])
+			prefix.toolKeys.length === tools.length &&
+			tools.every(
+				(tool, index) =>
+					prefix.toolKeys[index] === (this._toolPrefixKeys.get(tool) ?? this._captureToolPrefix(tool)),
+			)
 		);
 	}
 
@@ -744,7 +763,7 @@ export class AgentSession {
 						provider: model.provider,
 						model: model.id,
 						systemPrompt: prepared.systemPrompt,
-						tools: prepared.tools?.slice() ?? [],
+						toolKeys: prepared.tools?.map((tool) => this._captureToolPrefix(tool)) ?? [],
 					}
 				: undefined;
 			return prepared;
