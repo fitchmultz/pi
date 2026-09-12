@@ -131,6 +131,129 @@ describe("native shutdown prompt admission", () => {
 		);
 	});
 
+	// PR #30: request preparation can still be awaiting work after prompt admission has completed.
+	it.each(["context", "message conversion", "request auth"] as const)(
+		"stops pending %s without an assistant failure during shutdown",
+		async (stage) => {
+			const entered = deferred();
+			const released = deferred();
+			const drainReleased = deferred();
+			const hold = async () => {
+				entered.resolve();
+				await released.promise;
+			};
+			const harness = await createHarness({
+				tools: [],
+				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						if (stage === "context") pi.on("context", hold);
+					},
+				],
+			});
+			cleanups.push(() => harness.cleanup());
+			const view = await createShutdownView(harness);
+			vi.spyOn(view.renderer.terminal, "drainInput").mockReturnValue(drainReleased.promise);
+			if (stage === "message conversion") {
+				const convert = harness.session.agent.convertToLlm;
+				harness.session.agent.convertToLlm = async (messages) => {
+					await hold();
+					return convert(messages);
+				};
+			} else if (stage === "request auth") {
+				harness.session.agent.getApiKey = async () => {
+					await hold();
+					return "faux-key";
+				};
+			}
+			// Public stream replacements must not bypass the session's shutdown boundary.
+			const stream = vi.fn(harness.session.agent.streamFunction);
+			harness.session.agent.streamFunction = stream;
+			harness.setResponses([fauxAssistantMessage("Must not reach provider")]);
+			const run = harness.session.prompt("Pending request");
+			await entered.promise;
+			const closing = shutdown(view, false);
+			try {
+				released.resolve();
+				await run;
+				await harness.session.waitForIdle();
+				expect(stream).not.toHaveBeenCalled();
+				expect(harness.session.messages.filter((message) => message.role === "assistant")).toEqual([]);
+				expect(harness.eventsOfType("turn_end")).toEqual([]);
+				expect(harness.eventsOfType("agent_end")).toHaveLength(1);
+				expect(harness.session.isIdle).toBe(true);
+			} finally {
+				released.resolve();
+				await run;
+				drainReleased.resolve();
+				await closing;
+			}
+		},
+	);
+
+	// PR #30: summary preparation and retry hooks run after the initial auth/admission check.
+	it.each(["compaction hook", "compaction retry", "branch retry"] as const)(
+		"stops a pending %s during shutdown",
+		async (stage) => {
+			const entered = deferred();
+			const released = deferred();
+			const drainReleased = deferred();
+			const retry = stage !== "compaction hook";
+			const harness = await createHarness({
+				tools: [],
+				settings: {
+					compaction: { enabled: false, keepRecentTokens: 1 },
+					retry: { enabled: retry, maxRetries: 1, baseDelayMs: 0 },
+				},
+				extensionFactories: [
+					(pi) => {
+						const hold = async () => {
+							entered.resolve();
+							await released.promise;
+						};
+						if (retry) pi.on("summarization_retry_attempt_start", hold);
+						else pi.on("session_before_compact", hold);
+					},
+				],
+			});
+			cleanups.push(() => harness.cleanup());
+			const view = await createShutdownView(harness);
+			vi.spyOn(view.renderer.terminal, "drainInput").mockReturnValue(drainReleased.promise);
+			harness.setResponses([
+				fauxAssistantMessage("Saved response"),
+				...(retry ? [fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })] : []),
+				fauxAssistantMessage("Must not generate a summary"),
+			]);
+			await harness.session.prompt("Saved input");
+			const leaf = harness.sessionManager.getLeafId();
+			const run = Promise.allSettled([
+				stage === "branch retry"
+					? harness.session.navigateTree(harness.session.getUserMessagesForForking()[0]!.entryId, {
+							summarize: true,
+						})
+					: harness.session.compact(),
+			]);
+			await entered.promise;
+			const calls = retry ? 2 : 1;
+			expect(harness.faux.state.callCount).toBe(calls);
+			const closing = shutdown(view, false);
+			try {
+				released.resolve();
+				const result = await run;
+				expect(harness.faux.state.callCount).toBe(calls);
+				expect(result).toEqual([{ status: "rejected", reason: expect.objectContaining({ name: "AbortError" }) }]);
+				expect(harness.sessionManager.getLeafId()).toBe(leaf);
+				expect(harness.session.getLastAssistantText()).toBe("Saved response");
+				if (retry) expect(harness.eventsOfType("summarization_retry_finished")).toHaveLength(1);
+			} finally {
+				released.resolve();
+				await run;
+				drainReleased.resolve();
+				await closing;
+			}
+		},
+	);
+
 	it.each(["input", "custom startup"] as const)("rejects pending %s after shutdown starts", async (stage) => {
 		const entered = deferred();
 		const released = deferred();
