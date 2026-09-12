@@ -572,6 +572,30 @@ const { session } = await createAgentSession({
 });
 ```
 
+#### JSON Selection with `read`
+
+`read` accepts `json?: { path?: string; fields?: string[] }` to extract JSON before paging and truncation:
+
+```typescript
+import { createReadTool } from "@earendil-works/pi-coding-agent";
+
+const read = createReadTool(process.cwd());
+const result = await read.execute("report-summary", {
+  path: "report.json",
+  json: { path: "/rows", fields: ["name", "status"] },
+});
+```
+
+- `json.path` is a JSON Pointer, defaulting to `""` (the root). `/rows/0` selects the first array item. Escape `~` as `~0` and `/` as `~1` in object keys.
+- `json.fields` keeps literal immediate keys on the selected object or every object in a selected array. Keys such as `"a.b"` and `"a/b"` are not paths. Missing fields are omitted; present `null`, `false`, and `0` values are preserved. Array order and row count stay unchanged; a row with no matching keys becomes `{}`.
+- Omit `fields` to return the whole selected value, including scalars and arrays. `json: {}` pretty-prints the root. Omit `json` to keep ordinary text and image reads.
+
+Invalid JSON, invalid JSON Pointers, nonexistent selected paths, and JSON selection on images produce tool errors. With `fields`, the selected value must be an object or an array containing only objects.
+
+`offset` and `limit` count lines of the pretty-printed selection, not source lines or array items. The usual 2000-line/50KB caps still apply. Continue with the returned offset and the **same `json` options**. Paged or truncated output can be a JSON fragment followed by a continuation notice, not a complete JSON document.
+
+The entire source is still loaded and parsed. Standard JavaScript `JSON.parse` number semantics apply (large numbers can lose precision), and the last duplicate key wins. Selection does not support jq-style filters, calculations, or other query transforms.
+
 #### Tools with Custom cwd
 
 When you pass a custom `cwd`, `createAgentSession()` builds selected built-in tools for that cwd.

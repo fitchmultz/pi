@@ -960,6 +960,7 @@ class TreeList implements Component {
 				const offset = args.offset as number | undefined;
 				const limit = args.limit as number | undefined;
 				let display = path;
+				if (args.json !== undefined) display += ` json=${JSON.stringify(args.json)}`;
 				if (offset !== undefined || limit !== undefined) {
 					const start = offset ?? 1;
 					const end = limit !== undefined ? start + limit - 1 : "";

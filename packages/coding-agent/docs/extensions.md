@@ -864,7 +864,7 @@ pi.on("tool_call", async (event, ctx) => {
   }
 
   if (isToolCallEventType("read", event)) {
-    // event.input is { path: string; offset?: number; limit?: number }
+    // event.input is { path: string; offset?: number; limit?: number; json?: { path?: string; fields?: string[] } }
     console.log(`Reading: ${event.input.path}`);
   }
 });

@@ -90,6 +90,7 @@ function formatToolCall(
 			const offset = args.offset as number | undefined;
 			const limit = args.limit as number | undefined;
 			let text = themeFg("accent", filePath);
+			if (args.json !== undefined) text += themeFg("dim", ` json=${JSON.stringify(args.json)}`);
 			if (offset !== undefined || limit !== undefined) {
 				const startLine = offset ?? 1;
 				const endLine = limit !== undefined ? startLine + limit - 1 : "";
