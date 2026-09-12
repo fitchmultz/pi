@@ -60,7 +60,11 @@ function assistantMessage(id: string, parentId: string | null, text: string): Se
 }
 
 // Helper to create a tool-call-only assistant message (filtered out in default mode)
-function toolCallOnlyAssistant(id: string, parentId: string | null): SessionMessageEntry {
+function toolCallOnlyAssistant(
+	id: string,
+	parentId: string | null,
+	args: Record<string, unknown> = { path: "test.ts" },
+): SessionMessageEntry {
 	return {
 		type: "message",
 		id,
@@ -68,7 +72,7 @@ function toolCallOnlyAssistant(id: string, parentId: string | null): SessionMess
 		timestamp: new Date().toISOString(),
 		message: {
 			role: "assistant",
-			content: [{ type: "toolCall", id: `tc-${id}`, name: "read", arguments: { path: "test.ts" } }],
+			content: [{ type: "toolCall", id: `tc-${id}`, name: "read", arguments: args }],
 			api: "anthropic-messages",
 			provider: "anthropic",
 			model: "claude-sonnet-4",
@@ -127,6 +131,47 @@ function buildTree(entries: Array<SessionEntry>): SessionTreeNode[] {
 }
 
 describe("TreeSelectorComponent", () => {
+	for (const scenario of [
+		{
+			json: { path: "/rows", fields: ["name", "status"] },
+			expected: '[read: report.txt json={"path":"/rows","fields":["name","status"]}:2-4]',
+		},
+		{ json: undefined, expected: "[read: report.txt:2-4]" },
+	]) {
+		test(`renders the selected read label as ${scenario.expected}`, () => {
+			const call = toolCallOnlyAssistant("read-call", null, {
+				path: "report.txt",
+				json: scenario.json,
+				offset: 2,
+				limit: 3,
+			});
+			const result: SessionMessageEntry = {
+				type: "message",
+				id: "read-result",
+				parentId: call.id,
+				timestamp: new Date().toISOString(),
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-read-call",
+					toolName: "read",
+					content: [],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			};
+			const selector = new TreeSelectorComponent(
+				buildTree([call, result]),
+				result.id,
+				24,
+				() => {},
+				() => {},
+			);
+
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(result.id);
+			expect(selector.render(160).map(stripVTControlCharacters).join("\n")).toContain(scenario.expected);
+		});
+	}
+
 	describe("initial selection with metadata entries", () => {
 		test("focuses nearest visible ancestor when currentLeafId is a model_change with sibling branch", () => {
 			// Tree structure:
