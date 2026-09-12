@@ -182,7 +182,13 @@ export async function retryAssistantCall(
 	let attempt = 0;
 	let lastRetry: { attempt: number; errorMessage: string } | undefined;
 	for (;;) {
-		const response = await produce();
+		let response: AssistantMessage;
+		try {
+			response = await produce();
+		} catch (error) {
+			if (lastRetry) await callbacks?.onRetryFinished?.(false, lastRetry.attempt, lastRetry.errorMessage);
+			throw error;
+		}
 
 		// Abort: terminal but not successful. Never retry an aborted message.
 		if (response.stopReason === "aborted") {

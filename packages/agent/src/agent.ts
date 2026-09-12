@@ -183,6 +183,14 @@ export class Agent {
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	public streamFunction: StreamFn;
+	/** Host signal that closes new requests without aborting responses already in flight. */
+	public requestAdmissionSignal?: AbortSignal;
+	/** Shared invocation boundary for agent turns and host-owned requests such as summaries. */
+	public readonly streamResponse: StreamFn = (model, context, options) => {
+		this.requestAdmissionSignal?.throwIfAborted();
+		const streamFunction = this.streamFunction;
+		return streamFunction(model, context, options);
+	};
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
@@ -425,7 +433,7 @@ export class Agent {
 				this.createLoopConfig(options),
 				(event) => this.processEvents(event),
 				signal,
-				this.streamFunction,
+				this.streamResponse,
 			);
 		});
 	}
@@ -437,7 +445,7 @@ export class Agent {
 				this.createLoopConfig(),
 				(event) => this.processEvents(event),
 				signal,
-				this.streamFunction,
+				this.streamResponse,
 			);
 		});
 	}
@@ -513,7 +521,12 @@ export class Agent {
 		try {
 			await executor(abortController.signal);
 		} catch (error) {
-			await this.handleRunFailure(error, abortController.signal.aborted);
+			if (this.requestAdmissionSignal?.aborted && error === this.requestAdmissionSignal.reason) {
+				// A request that never started is not an assistant failure.
+				await this.processEvents({ type: "agent_end", messages: [] });
+			} else {
+				await this.handleRunFailure(error, abortController.signal.aborted);
+			}
 		} finally {
 			this.finishRun();
 		}
