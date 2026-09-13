@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -25,6 +25,7 @@ afterEach(async () => {
 		harness.cleanup();
 	}
 	for (const path of directories.splice(0)) rmSync(path, { force: true, recursive: true });
+	vi.unstubAllEnvs();
 });
 
 async function setup(
@@ -63,6 +64,42 @@ async function setup(
 }
 
 describe("native restart control at session boundaries", () => {
+	it.skipIf(process.platform === "win32").each([
+		{ name: "short", component: "tmp", keepTemporary: true },
+		{ name: "long ASCII", component: "x".repeat(96), keepTemporary: false },
+		// Fewer than 104 characters, but too many UTF-8 bytes for a Unix socket.
+		{ name: "multibyte", component: "é".repeat(40), keepTemporary: false },
+	])("starts, accepts restart and cleans up with a $name TMPDIR", async ({ component, keepTemporary }) => {
+		const root = mkdtempSync("/tmp/pi-socket-test-");
+		directories.push(root);
+		const temporary = join(root, component);
+		mkdirSync(temporary);
+		vi.stubEnv("TMPDIR", temporary);
+
+		const f = await setup();
+		expect(f.socket.startsWith(`${temporary}/`)).toBe(keepTemporary);
+		expect(existsSync(f.socket)).toBe(true);
+		await requestRestart(f.socket, { sessionId: f.sessionManager.getSessionId(), message: "Resume work" });
+		await vi.waitFor(() => expect(f.shutdown).toHaveBeenCalledTimes(1));
+		await f.harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		expect(f.sent).toMatchObject([
+			{ type: "pi:ready" },
+			{
+				type: "pi:restart",
+				request: { message: "Resume work" },
+				checkpoint: {
+					sessionId: f.sessionManager.getSessionId(),
+					sessionFile: f.sessionManager.getSessionFile(),
+					leafId: f.sessionManager.getLeafId(),
+				},
+			},
+		]);
+		expect(existsSync(f.socket)).toBe(false);
+		expect(existsSync(dirname(f.socket))).toBe(false);
+		expect(existsSync(temporary)).toBe(true);
+		expect(process.env[RESTART_SOCKET_ENV]).toBeUndefined();
+	});
+
 	it("waits for every sibling tool, retry and follow-up; saves a complete journal before restart", async () => {
 		let release = () => {};
 		const held = new Promise<void>((resolve) => {

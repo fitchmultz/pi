@@ -160,6 +160,12 @@ export function createRestartControl(options: {
 					if (options.handoff.failure) ctx.ui.notify(options.handoff.failure, "warning");
 				}
 				directory = mkdtempSync(join(tmpdir(), "pi-restart-"));
+				// Leave room for the terminating NUL in sockaddr_un.sun_path.
+				const maxSocketBytes = process.platform === "linux" ? 107 : 103;
+				if (process.platform !== "win32" && Buffer.byteLength(join(directory, "s")) > maxSocketBytes) {
+					rmSync(directory, { recursive: true, force: true });
+					directory = mkdtempSync("/tmp/pi-restart-");
+				}
 				socketPath =
 					process.platform === "win32" ? `\\\\.\\pipe\\pi-restart-${randomUUID()}` : join(directory, "s");
 				server = createServer((socket) => {
