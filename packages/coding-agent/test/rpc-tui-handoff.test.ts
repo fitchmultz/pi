@@ -1,5 +1,5 @@
 import type { Container } from "@earendil-works/pi-tui";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { EditorFactory, ExtensionUIContext } from "../src/core/extensions/index.ts";
@@ -77,6 +77,45 @@ function createRuntimeHost(harness: Harness): AgentSessionRuntime {
 	} as unknown as AgentSessionRuntime;
 }
 
+async function startNativeRpc(harness: Harness) {
+	const listeners = takeListenerSnapshot();
+	const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+	const stdoutDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+	Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+	initTheme("dark");
+	const runtime = createRuntimeHost(harness);
+	const interactiveMode = new InteractiveMode(runtime);
+	const view = interactiveMode as unknown as {
+		renderer: ReturnType<typeof createInteractiveTui>;
+		chatContainer: Container;
+		editorContainer: Container;
+	};
+	const terminal = new VirtualTerminal(100, 30);
+	view.renderer = createInteractiveTui({
+		tuiMode: "regular",
+		terminal,
+		showHardwareCursor: false,
+		logDirectory: harness.tempDir,
+	});
+	onTestFinished(() => {
+		interactiveMode.stop();
+		harness.cleanup();
+		restoreListeners(listeners);
+		if (stdinDescriptor) Object.defineProperty(process.stdin, "isTTY", stdinDescriptor);
+		else delete (process.stdin as { isTTY?: boolean }).isTTY;
+		if (stdoutDescriptor) Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
+		else delete (process.stdout as { isTTY?: boolean }).isTTY;
+	});
+	void runRpcMode(runtime, { interactiveMode });
+	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+	const detach = (process.listeners("SIGUSR2") as NodeListener[]).find(
+		(listener) => !(listeners.signals.get("SIGUSR2") ?? []).includes(listener),
+	);
+	expect(detach).toBeDefined();
+	return { interactiveMode, view, terminal, detach };
+}
+
 describe("RPC TUI handoff", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
@@ -146,76 +185,99 @@ describe("RPC TUI handoff", () => {
 		}
 	});
 
+	it("renders extension command errors in the active frontend", async () => {
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("broken", {
+						handler: async () => {
+							throw new Error("VISIBLE-EXTENSION-ERROR");
+						},
+					});
+				},
+			],
+		});
+		const { interactiveMode, view, detach } = await startNativeRpc(harness);
+		await harness.session.prompt("/broken");
+		expect(parseOutput().filter((record) => record.type === "extension_error")).toMatchObject([
+			{ extensionPath: "command:broken", event: "command", error: "VISIBLE-EXTENSION-ERROR" },
+		]);
+		rpcIo.lineHandler?.(JSON.stringify({ type: "attach_tui" }));
+		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeUndefined());
+		await interactiveMode.init();
+		await harness.session.prompt("/broken");
+		expect(view.chatContainer.render(100).join("\n")).toContain("VISIBLE-EXTENSION-ERROR");
+		expect(parseOutput().filter((record) => record.type === "extension_error")).toHaveLength(1);
+		detach?.("SIGUSR2");
+		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+		await harness.session.prompt("/broken");
+		expect(parseOutput().filter((record) => record.type === "extension_error")).toHaveLength(2);
+	});
+
+	it("preserves frontend mode across reload without starting extensions on handoff", async () => {
+		const starts: string[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_event, ctx) => {
+						starts.push(ctx.mode);
+					});
+				},
+			],
+		});
+		const { interactiveMode, detach } = await startNativeRpc(harness);
+		expect(starts).toEqual(["rpc"]);
+		rpcIo.lineHandler?.(JSON.stringify({ type: "attach_tui" }));
+		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeUndefined());
+		await interactiveMode.init();
+		expect(harness.session.extensionRunner.createContext().mode).toBe("tui");
+		expect(starts).toEqual(["rpc"]);
+		await harness.session.reload();
+		expect(harness.session.extensionRunner.createContext().mode).toBe("tui");
+		expect(starts).toEqual(["rpc", "tui"]);
+		detach?.("SIGUSR2");
+		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+		await harness.session.reload();
+		expect(harness.session.extensionRunner.createContext().mode).toBe("rpc");
+		expect(starts).toEqual(["rpc", "tui", "rpc"]);
+	});
+
 	// PR #1: RPC answers must dismiss the actual native multiline editor, not just its pending request.
 	it("keeps unanswered native editors across detach and dismisses an RPC-answered editor", async () => {
-		const listeners = takeListenerSnapshot();
-		const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-		const stdoutDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-		Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
-		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 		const harness = await createHarness({ settings: { quietStartup: true, theme: "dark" } });
-		initTheme("dark");
-		const runtime = createRuntimeHost(harness);
-		const interactiveMode = new InteractiveMode(runtime);
-		const view = interactiveMode as unknown as {
-			renderer: ReturnType<typeof createInteractiveTui>;
-			editorContainer: Container;
-		};
-		const terminal = new VirtualTerminal(100, 30);
-		view.renderer = createInteractiveTui({
-			tuiMode: "regular",
-			terminal,
-			showHardwareCursor: false,
-			logDirectory: harness.tempDir,
-		});
+		const { interactiveMode, view, terminal, detach } = await startNativeRpc(harness);
 		const renderedEditor = () => view.editorContainer.render(100).join("\n");
-		try {
-			void runRpcMode(runtime, { interactiveMode });
-			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
-			const settled = vi.fn();
-			const answer = harness.session.extensionRunner.getUIContext().editor("NATIVE-EDITOR", "draft");
-			void answer.then(settled);
-			const request = parseOutput().find((record) => record.method === "editor");
-			expect(request?.id).toEqual(expect.any(String));
-			rpcIo.lineHandler?.(JSON.stringify({ type: "attach_tui" }));
-			await vi.waitFor(() => expect(renderedEditor()).toContain("NATIVE-EDITOR"));
-			const detach = (process.listeners("SIGUSR2") as NodeListener[]).find(
-				(listener) => !(listeners.signals.get("SIGUSR2") ?? []).includes(listener),
-			);
-			expect(detach).toBeDefined();
-			detach?.("SIGUSR2");
-			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
-			expect(settled).not.toHaveBeenCalled();
-			expect(renderedEditor()).toContain("NATIVE-EDITOR");
-			rpcIo.lineHandler?.(JSON.stringify({ type: "extension_ui_response", id: request?.id, value: "rpc answer" }));
-			await expect(answer).resolves.toBe("rpc answer");
-			expect(renderedEditor()).not.toContain("NATIVE-EDITOR");
-			rpcIo.lineHandler?.(JSON.stringify({ type: "extension_ui_response", id: request?.id, value: "duplicate" }));
-			expect(settled).toHaveBeenCalledExactlyOnceWith("rpc answer");
-			rpcIo.lineHandler?.(JSON.stringify({ type: "attach_tui" }));
-			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeUndefined());
-			expect(renderedEditor()).not.toContain("NATIVE-EDITOR");
-			const directAnswer = interactiveMode.getExtensionUIContext().editor("DIRECT-EDITOR", "local answer");
-			terminal.sendInput("\r");
-			await expect(directAnswer).resolves.toBe("local answer");
-			expect(renderedEditor()).not.toContain("DIRECT-EDITOR");
-			const controller = new AbortController();
-			const cancelled = harness.session.extensionRunner.getUIContext().editor("CANCELLED-EDITOR", "", {
-				signal: controller.signal,
-			});
-			expect(renderedEditor()).toContain("CANCELLED-EDITOR");
-			controller.abort();
-			await vi.waitFor(() => expect(renderedEditor()).not.toContain("CANCELLED-EDITOR"));
-			await expect(cancelled).resolves.toBeUndefined();
-		} finally {
-			interactiveMode.stop();
-			harness.cleanup();
-			restoreListeners(listeners);
-			if (stdinDescriptor) Object.defineProperty(process.stdin, "isTTY", stdinDescriptor);
-			else delete (process.stdin as { isTTY?: boolean }).isTTY;
-			if (stdoutDescriptor) Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
-			else delete (process.stdout as { isTTY?: boolean }).isTTY;
-		}
+		const settled = vi.fn();
+		const answer = harness.session.extensionRunner.getUIContext().editor("NATIVE-EDITOR", "draft");
+		void answer.then(settled);
+		const request = parseOutput().find((record) => record.method === "editor");
+		expect(request?.id).toEqual(expect.any(String));
+		rpcIo.lineHandler?.(JSON.stringify({ type: "attach_tui" }));
+		await vi.waitFor(() => expect(renderedEditor()).toContain("NATIVE-EDITOR"));
+		detach?.("SIGUSR2");
+		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+		expect(settled).not.toHaveBeenCalled();
+		expect(renderedEditor()).toContain("NATIVE-EDITOR");
+		rpcIo.lineHandler?.(JSON.stringify({ type: "extension_ui_response", id: request?.id, value: "rpc answer" }));
+		await expect(answer).resolves.toBe("rpc answer");
+		expect(renderedEditor()).not.toContain("NATIVE-EDITOR");
+		rpcIo.lineHandler?.(JSON.stringify({ type: "extension_ui_response", id: request?.id, value: "duplicate" }));
+		expect(settled).toHaveBeenCalledExactlyOnceWith("rpc answer");
+		rpcIo.lineHandler?.(JSON.stringify({ type: "attach_tui" }));
+		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeUndefined());
+		expect(renderedEditor()).not.toContain("NATIVE-EDITOR");
+		const directAnswer = interactiveMode.getExtensionUIContext().editor("DIRECT-EDITOR", "local answer");
+		terminal.sendInput("\r");
+		await expect(directAnswer).resolves.toBe("local answer");
+		expect(renderedEditor()).not.toContain("DIRECT-EDITOR");
+		const controller = new AbortController();
+		const cancelled = harness.session.extensionRunner.getUIContext().editor("CANCELLED-EDITOR", "", {
+			signal: controller.signal,
+		});
+		expect(renderedEditor()).toContain("CANCELLED-EDITOR");
+		controller.abort();
+		await vi.waitFor(() => expect(renderedEditor()).not.toContain("CANCELLED-EDITOR"));
+		await expect(cancelled).resolves.toBeUndefined();
 	});
 
 	it("moves dialogs both ways and serializes a return during attach", async () => {

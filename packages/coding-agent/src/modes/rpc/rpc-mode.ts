@@ -487,7 +487,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				shutdownRequested = true;
 			},
 			onError: (err) => {
-				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
+				if (frontend === "tui" && interactiveMode) {
+					interactiveMode.showExtensionError(err.extensionPath, err.error, err.stack);
+				} else {
+					output({
+						type: "extension_error",
+						extensionPath: err.extensionPath,
+						event: err.event,
+						error: err.error,
+					});
+				}
 			},
 		});
 
@@ -891,7 +900,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			await flushRawStdout();
 			detachInput();
 			frontend = "tui";
-			session.extensionRunner.setUIContext(extensionUIContext, "tui");
+			session.setExtensionMode("tui");
 			restoreStdout();
 			await interactiveMode.activateHosted();
 			if (extensionTitle) interactiveUI?.setTitle(extensionTitle);
@@ -917,7 +926,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			await interactiveMode.deactivateHosted();
 			takeOverStdout();
 			frontend = "rpc";
-			session.extensionRunner.setUIContext(extensionUIContext, "rpc");
+			session.setExtensionMode("rpc");
 			attachInput();
 			writeRawStdout(
 				`\x1e${tuiHandoffToken}\x1e${serializeJsonLine({ type: "tui_detached", state: getRpcState() })}`,
