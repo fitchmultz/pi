@@ -222,8 +222,8 @@ export interface ExtensionUIContext {
 	/** Get the current text from the core input editor. */
 	getEditorText(): string;
 
-	/** Show a multi-line editor for text editing. */
-	editor(title: string, prefill?: string): Promise<string | undefined>;
+	/** Show a multi-line editor. An optional signal dismisses it with undefined. */
+	editor(title: string, prefill?: string, opts?: { signal?: AbortSignal }): Promise<string | undefined>;
 
 	/** Stack additional autocomplete behavior on top of the built-in provider. */
 	addAutocompleteProvider(factory: AutocompleteProviderFactory): void;

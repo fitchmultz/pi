@@ -369,15 +369,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			return interactiveUI?.getEditorText() ?? "";
 		},
 
-		editor(title: string, prefill?: string): Promise<string | undefined> {
+		editor(title: string, prefill?: string, opts?: { signal?: AbortSignal }): Promise<string | undefined> {
 			return createDialogPromise(
-				undefined,
+				opts,
 				undefined,
 				{ method: "editor", title, prefill },
 				(response) => ("value" in response ? response.value : undefined),
 				interactiveUI
-					? async () => {
-							const value = await interactiveUI.editor(title, prefill);
+					? async (tuiOpts) => {
+							const value = await interactiveUI.editor(title, prefill, tuiOpts);
 							return value === undefined
 								? { type: "extension_ui_response", id: "", cancelled: true }
 								: { type: "extension_ui_response", id: "", value };

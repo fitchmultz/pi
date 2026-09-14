@@ -2521,7 +2521,7 @@ export class InteractiveMode {
 			pasteToEditor: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
 			setEditorText: (text) => this.editor.setText(text),
 			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
-			editor: (title, prefill) => this.showExtensionEditor(title, prefill),
+			editor: (title, prefill, opts) => this.showExtensionEditor(title, prefill, opts),
 			addAutocompleteProvider: (factory) => {
 				this.autocompleteProviderWrappers.push(factory);
 				this.setupAutocompleteProvider();
@@ -2685,18 +2685,34 @@ export class InteractiveMode {
 	/**
 	 * Show a multi-line editor for extensions (with Ctrl+G support).
 	 */
-	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
+	private showExtensionEditor(
+		title: string,
+		prefill?: string,
+		opts?: { signal?: AbortSignal },
+	): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			if (opts?.signal?.aborted) {
+				resolve(undefined);
+				return;
+			}
+			const onAbort = () => {
+				this.hideExtensionEditor();
+				resolve(undefined);
+			};
+			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
 			this.extensionEditor = new ExtensionEditorComponent(
 				this.ui,
 				this.keybindings,
 				title,
 				prefill,
 				(value) => {
+					opts?.signal?.removeEventListener("abort", onAbort);
 					this.hideExtensionEditor();
 					resolve(value);
 				},
 				() => {
+					opts?.signal?.removeEventListener("abort", onAbort);
 					this.hideExtensionEditor();
 					resolve(undefined);
 				},

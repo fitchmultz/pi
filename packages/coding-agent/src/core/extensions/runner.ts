@@ -467,7 +467,7 @@ export class ExtensionRunner {
 			confirm: (title, message, opts) => this.withUIPrompt("confirm", title, () => ui.confirm(title, message, opts)),
 			input: (title, placeholder, opts) =>
 				this.withUIPrompt("input", title, () => ui.input(title, placeholder, opts)),
-			editor: (title, prefill) => this.withUIPrompt("editor", title, () => ui.editor(title, prefill)),
+			editor: (title, prefill, opts) => this.withUIPrompt("editor", title, () => ui.editor(title, prefill, opts)),
 			custom: (factory, options) => this.withUIPrompt("custom", undefined, () => ui.custom(factory, options)),
 		};
 	}
