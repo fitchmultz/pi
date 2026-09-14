@@ -148,6 +148,10 @@ export interface AgentLoopTurnUpdate {
 
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
+/**
+ * Unexpected callback failures terminate agentLoop/agentLoopContinue with an assistant
+ * error message and agent_end. Direct runAgentLoop/runAgentLoopContinue callers receive a rejection.
+ */
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
@@ -157,9 +161,6 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Each AgentMessage must be converted to a UserMessage, AssistantMessage, or ToolResultMessage
 	 * that the LLM can understand. AgentMessages that cannot be converted (e.g., UI-only notifications,
 	 * status messages) should be filtered out.
-	 *
-	 * Contract: must not throw or reject. Return a safe fallback value instead.
-	 * Throwing interrupts the low-level agent loop without producing a normal event sequence.
 	 *
 	 * @example
 	 * ```typescript
@@ -186,9 +187,6 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * - Context window management (pruning old messages)
 	 * - Injecting context from external sources
 	 *
-	 * Contract: must not throw or reject. Return the original messages or another
-	 * safe fallback value instead.
-	 *
 	 * @example
 	 * ```typescript
 	 * transformContext: async (messages) => {
@@ -207,7 +205,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Useful for short-lived OAuth tokens (e.g., GitHub Copilot) that may expire
 	 * during long-running tool execution phases.
 	 *
-	 * Contract: must not throw or reject. Return undefined when no key is available.
+	 * Return undefined when no key is available.
 	 */
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 
@@ -219,8 +217,6 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * This callback sees the completed-turn context and runs before `prepareNextTurn`.
 	 *
 	 * Use this to request a graceful stop after the current turn, e.g. before context gets too full.
-	 *
-	 * Contract: must not throw or reject. Throwing interrupts the low-level agent loop without producing a normal event sequence.
 	 */
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
 
@@ -245,7 +241,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Use this for "steering" the agent while it's working.
 	 *
-	 * Contract: must not throw or reject. Return [] when no steering messages are available.
+	 * Return [] when no steering messages are available.
 	 */
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
 
@@ -258,7 +254,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Use this for follow-up messages that should wait until the agent finishes.
 	 *
-	 * Contract: must not throw or reject. Return [] when no follow-up messages are available.
+	 * Return [] when no follow-up messages are available.
 	 */
 	getFollowUpMessages?: () => Promise<AgentMessage[]>;
 

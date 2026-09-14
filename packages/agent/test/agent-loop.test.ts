@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
+import { agentLoop, agentLoopContinue, runAgentLoop, runAgentLoopContinue } from "../src/agent-loop.ts";
 import { setDefaultStreamFn } from "../src/index.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 
@@ -112,6 +112,167 @@ describe("default stream function compatibility", () => {
 		} finally {
 			setDefaultStreamFn(undefined);
 		}
+	});
+});
+
+describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (mode) => {
+	it.each(["transformContext", "getApiKey", "streamFn"] as const)(
+		"settles iteration and result when %s throws",
+		async (callback) => {
+			const prompt = createUserMessage("Hello");
+			const context: AgentContext = { systemPrompt: "", messages: mode === "continue" ? [prompt] : [] };
+			const failure = new Error(`${callback} failed`);
+			const fail = () => {
+				throw failure;
+			};
+			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+			if (callback === "transformContext") config.transformContext = async () => fail();
+			if (callback === "getApiKey") config.getApiKey = async () => fail();
+			const streamFn = () => {
+				if (callback === "streamFn") fail();
+				throw new Error("Provider must not be reached");
+			};
+			const stream =
+				mode === "prompt"
+					? agentLoop([prompt], context, config, undefined, streamFn)
+					: agentLoopContinue(context, config, undefined, streamFn);
+			const events: AgentEvent[] = [];
+			for await (const event of stream) events.push(event);
+			const messages = await stream.result();
+			const errorMessage = messages.at(-1);
+			expect(errorMessage).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "mock",
+				usage: createUsage(),
+				stopReason: "error",
+				errorMessage: failure.message,
+			});
+			expect(messages).toEqual(mode === "prompt" ? [prompt, errorMessage] : [errorMessage]);
+			expect(events.map((event) => event.type)).toEqual([
+				"agent_start",
+				"turn_start",
+				...(mode === "prompt" ? ["message_start", "message_end"] : []),
+				"message_start",
+				"message_end",
+				"turn_end",
+				"agent_end",
+			]);
+			expect(events.at(-1)).toEqual({ type: "agent_end", messages });
+			expect(events.at(-2)).toEqual({ type: "turn_end", message: errorMessage, toolResults: [] });
+		},
+	);
+
+	it("leaves direct runner rejection catchable", async () => {
+		const prompt = createUserMessage("Hello");
+		const context: AgentContext = { systemPrompt: "", messages: mode === "continue" ? [prompt] : [] };
+		const failure = new Error("key resolution failed");
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			getApiKey: () => {
+				throw failure;
+			},
+		};
+		const streamFn = () => {
+			throw new Error("Provider must not be reached");
+		};
+		const events: AgentEvent[] = [];
+		const emit = (event: AgentEvent) => {
+			events.push(event);
+		};
+		const result =
+			mode === "prompt"
+				? runAgentLoop([prompt], context, config, emit, undefined, streamFn)
+				: runAgentLoopContinue(context, config, emit, undefined, streamFn);
+		await expect(result).rejects.toBe(failure);
+		expect(events.some((event) => event.type === "agent_end")).toBe(false);
+	});
+});
+
+describe("stream failure lifecycle", () => {
+	it("classifies callback failure after cancellation as aborted", async () => {
+		const controller = new AbortController();
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			getApiKey: () => {
+				controller.abort();
+				throw new Error("cancelled key lookup");
+			},
+		};
+		const stream = agentLoop(
+			[createUserMessage("Hello")],
+			{ systemPrompt: "", messages: [] },
+			config,
+			controller.signal,
+			() => {
+				throw new Error("Provider must not be reached");
+			},
+		);
+		for await (const _event of stream) {
+			/* consume */
+		}
+		expect((await stream.result()).at(-1)).toMatchObject({
+			stopReason: "aborted",
+			errorMessage: "cancelled key lookup",
+		});
+	});
+
+	it("retains earlier completed messages and balances turns when a later callback fails", async () => {
+		const prompt = createUserMessage("Hello");
+		const reply = createAssistantMessage([{ type: "text", text: "Done" }]);
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			getFollowUpMessages: async () => {
+				throw new Error("follow-up failed");
+			},
+		};
+		const stream = agentLoop([prompt], { systemPrompt: "", messages: [] }, config, undefined, () => {
+			const response = new MockAssistantStream();
+			response.push({ type: "done", reason: "stop", message: reply });
+			return response;
+		});
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+		const messages = await stream.result();
+		expect(messages.slice(0, 2)).toEqual([prompt, reply]);
+		expect(messages).toHaveLength(3);
+		expect(messages[2]).toMatchObject({ stopReason: "error", errorMessage: "follow-up failed" });
+		expect(
+			events
+				.filter((event) => ["turn_start", "turn_end", "agent_end"].includes(event.type))
+				.map((event) => event.type),
+		).toEqual(["turn_start", "turn_end", "turn_start", "turn_end", "agent_end"]);
+		expect(events.at(-1)).toEqual({ type: "agent_end", messages });
+	});
+
+	it("does not duplicate terminal events for a provider protocol error", async () => {
+		const failure = { ...createAssistantMessage([], "error"), errorMessage: "provider failed" };
+		const stream = agentLoopContinue(
+			{ systemPrompt: "", messages: [createUserMessage("Hello")] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			() => {
+				const response = new MockAssistantStream();
+				response.push({ type: "error", reason: "error", error: failure });
+				return response;
+			},
+		);
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+		expect(await stream.result()).toEqual([failure]);
+		expect(events.map((event) => event.type)).toEqual([
+			"agent_start",
+			"turn_start",
+			"message_start",
+			"message_end",
+			"turn_end",
+			"agent_end",
+		]);
 	});
 });
 

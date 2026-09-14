@@ -111,6 +111,98 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("applyOverrides", () => {
+		it("preserves overrides across unrelated global and project writes without persisting them", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.applyOverrides({ theme: "light", compaction: { enabled: false }, retry: { maxRetries: 7 } });
+			manager.setDefaultThinkingLevel("low");
+			expect(manager.getTheme()).toBe("light");
+			manager.setProjectExtensionPaths(["./extension.ts"]);
+			for (const flushed of [false, true]) {
+				if (flushed) await manager.flush();
+				expect(manager.getTheme()).toBe("light");
+				expect(manager.getCompactionEnabled()).toBe(false);
+				expect(manager.getRetrySettings().maxRetries).toBe(7);
+				expect(manager.getExtensionPaths()).toEqual(["./extension.ts"]);
+			}
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
+				defaultThinkingLevel: "low",
+			});
+			expect(JSON.parse(readFileSync(join(projectDir, ".pi", "settings.json"), "utf8"))).toEqual({
+				extensions: ["./extension.ts"],
+			});
+		});
+
+		it("does not let an earlier queued setter cancel a newer override", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setTheme("dark");
+			manager.applyOverrides({ theme: "light" });
+			manager.setDefaultThinkingLevel("low");
+			expect(manager.getTheme()).toBe("light");
+			await manager.flush();
+			expect(manager.getTheme()).toBe("light");
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
+				theme: "dark",
+				defaultThinkingLevel: "low",
+			});
+		});
+
+		it("lets explicit setters replace their value while preserving nested sibling overrides", async () => {
+			const manager = SettingsManager.inMemory();
+			manager.applyOverrides({
+				theme: "light",
+				compaction: { enabled: false, reserveTokens: 1234 },
+				retry: { enabled: false, maxRetries: 7 },
+				shellPath: "/bin/zsh",
+			});
+			manager.setCompactionEnabled(true);
+			manager.setRetryEnabled(true);
+			manager.setTheme("dark");
+			manager.setShellPath(undefined);
+			await manager.flush();
+			expect(manager.getCompactionEnabled()).toBe(true);
+			expect(manager.getCompactionReserveTokens()).toBe(1234);
+			expect(manager.getRetrySettings()).toMatchObject({ enabled: true, maxRetries: 7 });
+			expect(manager.getTheme()).toBe("dark");
+			expect(manager.getShellPath()).toBeUndefined();
+			expect(manager.getGlobalSettings()).toEqual({
+				theme: "dark",
+				compaction: { enabled: true },
+				retry: { enabled: true },
+				shellPath: undefined,
+			});
+		});
+
+		it("restores project precedence for explicit setters and resets overrides on reload and trust changes", async () => {
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ theme: "project", compaction: { enabled: false } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.applyOverrides({ theme: "temporary", compaction: { enabled: true, reserveTokens: 1234 } });
+			manager.setTheme("global");
+			manager.setCompactionEnabled(true);
+			expect(manager.getTheme()).toBe("project");
+			expect(manager.getCompactionEnabled()).toBe(false);
+			expect(manager.getCompactionReserveTokens()).toBe(1234);
+			manager.applyOverrides({ theme: "temporary" });
+			manager.setDefaultThinkingLevel("low");
+			expect(manager.getTheme()).toBe("temporary");
+			await manager.reload();
+			expect(manager.getTheme()).toBe("project");
+			expect(manager.getCompactionReserveTokens()).toBe(16384);
+			manager.applyOverrides({ theme: "temporary" });
+			manager.setProjectTrusted(true);
+			expect(manager.getTheme()).toBe("temporary");
+			manager.setProjectTrusted(false);
+			expect(manager.getTheme()).toBe("global");
+			manager.applyOverrides({ theme: "temporary" });
+			manager.setProjectTrusted(true);
+			expect(manager.getTheme()).toBe("project");
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).theme).toBe("global");
+		});
+	});
+
 	describe("packages migration", () => {
 		it("should keep local-only extensions in extensions array", () => {
 			const settingsPath = join(agentDir, "settings.json");

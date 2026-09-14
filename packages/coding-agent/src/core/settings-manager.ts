@@ -560,13 +560,24 @@ export class SettingsManager {
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 	}
 
-	/** Apply additional overrides on top of current settings */
+	/** Apply temporary overrides. Unrelated setters preserve them; reload/trust changes reset them. */
 	applyOverrides(overrides: Partial<Settings>): void {
 		this.settings = deepMergeSettings(this.settings, overrides);
 	}
 
+	private refreshSetting(field: keyof Settings, nestedKey?: string): void {
+		const value = deepMergeSettings(this.globalSettings, this.projectSettings)[field];
+		(this.settings as Record<string, unknown>)[field] = nestedKey
+			? {
+					...(this.settings[field] as Record<string, unknown>),
+					[nestedKey]: (value as Record<string, unknown>)?.[nestedKey],
+				}
+			: value;
+	}
+
 	/** Mark a global field as modified during this session */
 	private markModified(field: keyof Settings, nestedKey?: string): void {
+		this.refreshSetting(field, nestedKey);
 		this.modifiedFields.add(field);
 		if (nestedKey) {
 			if (!this.modifiedNestedFields.has(field)) {
@@ -662,8 +673,6 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
-
 		if (this.globalSettingsLoadError) {
 			return;
 		}
@@ -680,7 +689,6 @@ export class SettingsManager {
 	private saveProjectSettings(settings: Settings): void {
 		this.assertProjectTrustedForWrite();
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 
 		if (this.projectSettingsLoadError) {
 			return;
@@ -700,6 +708,7 @@ export class SettingsManager {
 		update(projectSettings);
 		this.markProjectModified(field);
 		this.saveProjectSettings(projectSettings);
+		this.refreshSetting(field);
 	}
 
 	async flush(): Promise<void> {

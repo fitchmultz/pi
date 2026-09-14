@@ -512,6 +512,8 @@ for await (const event of agentLoopContinue(context, config, undefined, streamFn
 
 These low-level streams are observational. They preserve event order, but they do not wait for your async event handling to settle before later producer phases continue. If you need message processing to act as a barrier before tool preflight, use the `Agent` class instead of raw `agentLoop()` or `agentLoopContinue()`.
 
+Unexpected callback failures (including a thrown or rejected `streamFn` call) end `agentLoop()` and `agentLoopContinue()` with an assistant error message, `turn_end`, and `agent_end`. Iteration finishes and `result()` resolves with the completed messages, including the failure. An aborted signal sets the failure's stop reason to `aborted`; otherwise it is `error`. Ordinary provider failures should still use the `StreamFn` error-event protocol. The direct promise runners, `runAgentLoop()` and `runAgentLoopContinue()`, reject on unexpected callback failures instead.
+
 ## License
 
 MIT

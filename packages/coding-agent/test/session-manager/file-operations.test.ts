@@ -3,7 +3,12 @@ import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, w
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { findMostRecentSession, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
+import {
+	CURRENT_SESSION_VERSION,
+	findMostRecentSession,
+	loadEntriesFromFile,
+	SessionManager,
+} from "../../src/core/session-manager.ts";
 
 const HEADER_SCAN_LIMIT_BYTES = 1024 * 1024;
 
@@ -174,6 +179,77 @@ describe("loadEntriesFromFile", () => {
 		expect(sessionManager.getSessionId()).toBe("abc");
 		expect(sessionManager.getEntries()).toHaveLength(1);
 		expect(sessionManager.buildSessionContext().messages).toEqual([{ role: "user", content: "hi", timestamp: 1 }]);
+	});
+});
+
+describe("SessionManager.forkFrom legacy sessions", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `session-fork-test-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("migrates v1 entries before writing a current-version fork", () => {
+		const source = join(tempDir, "v1.jsonl");
+		const targetCwd = join(tempDir, "target");
+		const messages = [
+			{ role: "user", content: "first", timestamp: 1 },
+			{ role: "user", content: "second", timestamp: 2 },
+		];
+		const raw = `${[
+			{ type: "session", id: "legacy", cwd: tempDir, timestamp: "2025-01-01T00:00:00Z" },
+			...messages.map((message) => ({ type: "message", timestamp: "2025-01-01T00:00:01Z", message })),
+		]
+			.map((entry) => JSON.stringify(entry))
+			.join("\n")}\n`;
+		writeFileSync(source, raw);
+
+		const fork = SessionManager.forkFrom(source, targetCwd, tempDir);
+		const entries = fork.getEntries();
+		expect(entries).toHaveLength(2);
+		expect(entries[0].id).toEqual(expect.any(String));
+		expect(entries[0].id).not.toBe("");
+		expect(entries[1].id).toEqual(expect.any(String));
+		expect(entries[1].id).not.toBe(entries[0].id);
+		expect(entries.map((entry) => entry.parentId)).toEqual([null, entries[0].id]);
+		expect(fork.getBranch()).toEqual(entries);
+		expect(fork.buildSessionContext().messages).toEqual(messages);
+		expect(fork.getHeader()).toMatchObject({
+			version: CURRENT_SESSION_VERSION,
+			cwd: targetCwd,
+			parentSession: source,
+		});
+		expect(fork.getSessionId()).not.toBe("legacy");
+		const reopened = SessionManager.open(fork.getSessionFile()!);
+		expect(reopened.getEntries()).toEqual(entries);
+		expect(reopened.buildSessionContext()).toEqual(fork.buildSessionContext());
+		expect(readFileSync(source, "utf8")).toBe(raw);
+	});
+
+	it("migrates v2 hook messages when forking without changing the source", () => {
+		const source = join(tempDir, "v2.jsonl");
+		const message = { role: "hookMessage", customType: "note", content: "legacy note", display: true, timestamp: 1 };
+		const raw = `${[
+			{ type: "session", version: 2, id: "legacy", cwd: tempDir, timestamp: "2025-01-01T00:00:00Z" },
+			{ type: "message", id: "kept-id", parentId: null, timestamp: "2025-01-01T00:00:01Z", message },
+		]
+			.map((entry) => JSON.stringify(entry))
+			.join("\n")}\n`;
+		writeFileSync(source, raw);
+
+		const fork = SessionManager.forkFrom(source, tempDir, tempDir);
+		expect(fork.getEntries()[0].id).toBe("kept-id");
+		expect(fork.buildSessionContext().messages).toEqual([{ ...message, role: "custom" }]);
+		const reopened = SessionManager.open(fork.getSessionFile()!);
+		expect(reopened.getHeader()?.version).toBe(CURRENT_SESSION_VERSION);
+		expect(reopened.getEntries()).toEqual(fork.getEntries());
+		expect(reopened.buildSessionContext()).toEqual(fork.buildSessionContext());
+		expect(readFileSync(source, "utf8")).toBe(raw);
 	});
 });
 
