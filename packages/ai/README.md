@@ -1612,7 +1612,7 @@ Built-in login and refresh flows are private provider implementations. Use provi
 
 Provider notes:
 
-**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options unless `cacheRetention` is `"none"`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity.
+**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options unless `cacheRetention` is `"none"`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity. Call `cleanupSessionResources(sessionId)` when finished so the pooled connection does not keep the process alive.
 
 A transient Codex WebSocket transport failure falls back to SSE only if streaming has not started; otherwise the request fails without replay. The next request tries WebSocket again. Oversized frames (close code `1009`) keep using SSE for that session. Call `cleanupSessionResources(sessionId)` when disposing a session to close its sockets and clear its fallback/debug state.
 
