@@ -287,7 +287,7 @@ async function runLoop(
 				newContext,
 			};
 
-			if ((await config.shouldStopAfterTurn?.(lastCompletedTurn)) && !newContext) {
+			if (((await config.shouldStopAfterTurn?.(lastCompletedTurn)) && !newContext) || signal?.aborted) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}

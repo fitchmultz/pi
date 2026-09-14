@@ -170,6 +170,48 @@ describe("harness compaction", () => {
 		expect(shouldCompact(95000, 100000, { ...settings, enabled: false })).toBe(false);
 	});
 
+	it("compacts older history while retaining an oversized final tool result with its call", async () => {
+		const olderUser = createMessageEntry(createUserMessage("Earlier request ".repeat(100)));
+		const olderAssistant = createMessageEntry(createAssistantMessage("Earlier work ".repeat(100)), olderUser.id);
+		const user = createMessageEntry(createUserMessage("Read the file"), olderAssistant.id);
+		const call = createMessageEntry(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "file.ts" } }],
+				stopReason: "toolUse",
+			},
+			user.id,
+		);
+		const toolResult = createMessageEntry(
+			{
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: "x".repeat(2000) }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+			call.id,
+		);
+		const entries = [olderUser, olderAssistant, user, call, toolResult];
+		const preparation = getOrThrow(
+			prepareCompaction(entries, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 100 }),
+		);
+		expect(preparation!.retainedTail).toEqual([call.message, toolResult.message]);
+		expect(preparation!.messagesToSummarize).toEqual([olderUser.message, olderAssistant.message]);
+		const { faux, model } = createFauxModel(false);
+		faux.setResponses([fauxAssistantMessage("History summary"), fauxAssistantMessage("Prefix summary")]);
+		const result = getOrThrow(
+			await compact(preparation!, models, model, undefined, undefined, undefined, undefined, BACKGROUND_CONTEXT),
+		);
+		const reloaded = await buildSessionContext(
+			[...entries, createCompactionEntry(result.summary, toolResult.id, result.retainedTail)],
+			undefined,
+			BACKGROUND_CONTEXT,
+		);
+		expect(reloaded.slice(1)).toEqual([call.message, toolResult.message]);
+	});
+
 	it("finds a cut point based on token differences", () => {
 		const entries: Entry[] = [];
 		let parentId: string | null = null;
@@ -378,6 +420,43 @@ describe("harness compaction", () => {
 		expect(preparation?.tokensBefore).toBe(
 			estimateContextTokens(await buildSessionContext(pathEntries, undefined, BACKGROUND_CONTEXT)).tokens,
 		);
+	});
+
+	it("preserves previous history when splitting the first retained turn again", async () => {
+		const previousSummary = "Never deploy without approval.";
+		const previousCompaction = createCompactionEntry(previousSummary, null, [
+			createUserMessage("Continue implementation"),
+			createAssistantMessage("Initial progress"),
+		]);
+		const newest = createMessageEntry(createAssistantMessage("Newest work ".repeat(80)), previousCompaction.id);
+		const entries = [previousCompaction, newest];
+		const preparation = getOrThrow(
+			prepareCompaction(entries, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 20 }),
+		);
+		expect(preparation).toMatchObject({ previousSummary, isSplitTurn: true, messagesToSummarize: [] });
+		const { faux, model } = createFauxModel(false);
+		let requests = 0;
+		faux.setResponses([
+			() => {
+				requests++;
+				return fauxAssistantMessage("Prefix progress summary");
+			},
+		]);
+		const result = getOrThrow(
+			await compact(preparation!, models, model, undefined, undefined, undefined, undefined, BACKGROUND_CONTEXT),
+		);
+		const reloaded = await buildSessionContext(
+			[...entries, createCompactionEntry(result.summary, newest.id, result.retainedTail)],
+			undefined,
+			BACKGROUND_CONTEXT,
+		);
+		expect(reloaded[0]).toMatchObject({
+			role: "compactionSummary",
+			summary: expect.stringContaining(previousSummary),
+		});
+		expect(result.summary).toContain("Prefix progress summary");
+		expect(reloaded.slice(1)).toEqual([newest.message]);
+		expect(requests).toBe(1);
 	});
 
 	it("carries a previous compaction's retained tail into the next preparation", () => {
