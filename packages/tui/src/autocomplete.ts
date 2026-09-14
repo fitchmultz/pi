@@ -199,7 +199,7 @@ async function walkDirectoryWithFd(
 				return;
 			}
 
-			const lines = stdout.split(/\r?\n/).filter(Boolean);
+			const lines = stdout.split("\n").filter(Boolean);
 			const results: Array<{ path: string; isDirectory: boolean }> = [];
 
 			for (const line of lines) {

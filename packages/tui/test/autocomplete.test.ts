@@ -211,6 +211,24 @@ describe("CombinedAutocompleteProvider", () => {
 			},
 		);
 
+		test("preserves carriage returns in fd filenames", { skip: process.platform === "win32" }, async () => {
+			setupFolder(baseDir, { files: { "reportA\r": "content", "reportZ.txt": "control" } });
+			const fd = requireFdPath();
+			const output = spawnSync(fd, ["--base-directory", baseDir, "report"], { encoding: "utf-8" });
+			assert.strictEqual(output.status, 0);
+			assert.strictEqual(output.stdout, "reportA\r\nreportZ.txt\n");
+			const provider = new CombinedAutocompleteProvider([], baseDir, fd);
+			const line = "@report";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+			assert.ok(result);
+			const item = result.items.find((entry) => entry.value === "@reportA\r");
+			assert.ok(item);
+			assert.strictEqual(item.description, "reportA\r");
+			assert.ok(existsSync(join(baseDir, item.description)));
+			const applied = provider.applyCompletion([line], 0, line.length, item, result.prefix);
+			assert.strictEqual(applied.lines[0], "@reportA\r ");
+		});
+
 		test("filters are case insensitive", async () => {
 			setupFolder(baseDir, {
 				dirs: ["src"],
