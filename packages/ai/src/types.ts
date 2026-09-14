@@ -1,4 +1,5 @@
 import type { TelemetryContext } from "@earendil-works/pi-telemetry";
+import type { ResponseFunctionWebSearch, ResponseOutputText } from "openai/resources/responses/responses.js";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.ts";
 import type { BedrockOptions } from "./api/bedrock-converse-stream.ts";
@@ -425,6 +426,17 @@ export interface UserMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+/** Provider-reported Responses web actions and URL citations, not fetched page contents. */
+export interface ResponsesWebSearchMetadata {
+	calls?: ResponseFunctionWebSearch[];
+	citations?: {
+		itemId: string;
+		/** Index in the original Responses message's content, not AssistantMessage.content. */
+		contentIndex: number;
+		annotation: ResponseOutputText.URLCitation;
+	}[];
+}
+
 export interface AssistantMessage {
 	role: "assistant";
 	content: (TextContent | ThinkingContent | ToolCall)[];
@@ -436,6 +448,8 @@ export interface AssistantMessage {
 	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
 	providerThinkingLevel?: string;
 	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime request measurements, failures, and recoveries.
+	/** Observational metadata from completed Responses items; does not enable search or replay hosted calls. */
+	webSearch?: ResponsesWebSearchMetadata;
 	usage: Usage;
 	stopReason: StopReason;
 	deferred?: DeferredHandle;
