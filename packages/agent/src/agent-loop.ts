@@ -10,6 +10,7 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
+import { emptyUsage } from "./harness/utils/usage.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AgentContext,
@@ -37,7 +38,11 @@ export function agentLoop(
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
-	return createAgentStream((emit) => runAgentLoop(prompts, context, config, emit, signal, streamFn), config, signal);
+	return createAgentStream(
+		(emit, runConfig) => runAgentLoop(prompts, context, runConfig, emit, signal, streamFn),
+		config,
+		signal,
+	);
 }
 
 /**
@@ -62,7 +67,11 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
-	return createAgentStream((emit) => runAgentLoopContinue(context, config, emit, signal, streamFn), config, signal);
+	return createAgentStream(
+		(emit, runConfig) => runAgentLoopContinue(context, runConfig, emit, signal, streamFn),
+		config,
+		signal,
+	);
 }
 
 export async function runAgentLoop(
@@ -116,7 +125,7 @@ export async function runAgentLoopContinue(
 }
 
 function createAgentStream(
-	run: (emit: AgentEventSink) => Promise<AgentMessage[]>,
+	run: (emit: AgentEventSink, config: AgentLoopConfig) => Promise<AgentMessage[]>,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): EventStream<AgentEvent, AgentMessage[]> {
@@ -133,23 +142,24 @@ function createAgentStream(
 		stream.push(event);
 	};
 
-	void run(emit).then(
+	let model = config.model;
+	void run(emit, {
+		...config,
+		prepareNextTurn: async (context) => {
+			const update = await config.prepareNextTurn?.(context);
+			model = update?.model ?? model;
+			return update;
+		},
+	}).then(
 		(messages) => stream.end(messages),
 		(error: unknown) => {
 			const message: AssistantMessage = {
 				role: "assistant",
 				content: [{ type: "text", text: "" }],
-				api: config.model.api,
-				provider: config.model.provider,
-				model: config.model.id,
-				usage: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: emptyUsage(),
 				stopReason: signal?.aborted ? "aborted" : "error",
 				errorMessage: error instanceof Error ? error.message : String(error),
 				timestamp: Date.now(),

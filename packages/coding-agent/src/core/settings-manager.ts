@@ -566,13 +566,15 @@ export class SettingsManager {
 	}
 
 	private refreshSetting(field: keyof Settings, nestedKey?: string): void {
-		const value = deepMergeSettings(this.globalSettings, this.projectSettings)[field];
-		(this.settings as Record<string, unknown>)[field] = nestedKey
-			? {
-					...(this.settings[field] as Record<string, unknown>),
-					[nestedKey]: (value as Record<string, unknown>)?.[nestedKey],
-				}
-			: value;
+		let value: unknown = deepMergeSettings(this.globalSettings, this.projectSettings)[field];
+		if (nestedKey) {
+			const nested = { ...(this.settings[field] as Record<string, unknown>) };
+			const replacement = (value as Record<string, unknown>)?.[nestedKey];
+			if (replacement === undefined) delete nested[nestedKey];
+			else nested[nestedKey] = replacement;
+			value = nested;
+		}
+		(this.settings as Record<string, unknown>)[field] = value;
 	}
 
 	/** Mark a global field as modified during this session */
@@ -654,15 +656,21 @@ export class SettingsManager {
 			const mergedSettings: Settings = { ...currentFileSettings };
 			for (const field of modifiedFields) {
 				const value = snapshotSettings[field];
-				if (modifiedNestedFields.has(field) && typeof value === "object" && value !== null) {
+				if (
+					modifiedNestedFields.has(field) &&
+					(value === undefined || (typeof value === "object" && value !== null))
+				) {
 					const nestedModified = modifiedNestedFields.get(field)!;
 					const baseNested = (currentFileSettings[field] as Record<string, unknown>) ?? {};
-					const inMemoryNested = value as Record<string, unknown>;
+					const inMemoryNested = (value ?? {}) as Record<string, unknown>;
 					const mergedNested = { ...baseNested };
 					for (const nestedKey of nestedModified) {
 						mergedNested[nestedKey] = inMemoryNested[nestedKey];
 					}
-					(mergedSettings as Record<string, unknown>)[field] = mergedNested;
+					(mergedSettings as Record<string, unknown>)[field] =
+						value === undefined && Object.values(mergedNested).every((nestedValue) => nestedValue === undefined)
+							? undefined
+							: mergedNested;
 				} else {
 					(mergedSettings as Record<string, unknown>)[field] = value;
 				}
@@ -824,17 +832,19 @@ export class SettingsManager {
 			this.globalSettings.modelThinkingLevels = {};
 		}
 		this.globalSettings.modelThinkingLevels[`${provider}/${modelId}`] = level;
-		this.markModified("modelThinkingLevels");
+		this.markModified("modelThinkingLevels", `${provider}/${modelId}`);
 		this.save();
 	}
 
 	removeModelThinkingLevel(provider: string, modelId: string): void {
-		if (!this.globalSettings.modelThinkingLevels) return;
-		delete this.globalSettings.modelThinkingLevels[`${provider}/${modelId}`];
-		if (Object.keys(this.globalSettings.modelThinkingLevels).length === 0) {
+		delete this.globalSettings.modelThinkingLevels?.[`${provider}/${modelId}`];
+		if (
+			this.globalSettings.modelThinkingLevels &&
+			Object.keys(this.globalSettings.modelThinkingLevels).length === 0
+		) {
 			delete this.globalSettings.modelThinkingLevels;
 		}
-		this.markModified("modelThinkingLevels");
+		this.markModified("modelThinkingLevels", `${provider}/${modelId}`);
 		this.save();
 	}
 

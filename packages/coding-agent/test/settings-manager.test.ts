@@ -173,6 +173,57 @@ describe("SettingsManager", () => {
 			});
 		});
 
+		it("preserves sibling model overrides when setting a model default, with project precedence", async () => {
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ modelThinkingLevels: { "openai/model-b": "medium" } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.applyOverrides({ modelThinkingLevels: { "openai/model-a": "high", "openai/model-b": "high" } });
+			manager.setModelThinkingLevel("openai", "model-b", "low");
+			expect(manager.getAllModelThinkingLevels()).toEqual({ "openai/model-a": "high", "openai/model-b": "medium" });
+			await manager.flush();
+			expect(manager.getAllModelThinkingLevels()).toEqual({ "openai/model-a": "high", "openai/model-b": "medium" });
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
+				modelThinkingLevels: { "openai/model-b": "low" },
+			});
+		});
+
+		it("removes only the selected model override without undefined own keys, including runtime-only values", async () => {
+			const manager = SettingsManager.inMemory({ modelThinkingLevels: { "openai/model-b": "low" } });
+			manager.applyOverrides({ modelThinkingLevels: { "openai/model-a": "high", "openai/model-b": "high" } });
+			manager.removeModelThinkingLevel("openai", "model-b");
+			expect(manager.getAllModelThinkingLevels()).toStrictEqual({ "openai/model-a": "high" });
+			await manager.flush();
+			expect(manager.getAllModelThinkingLevels()).toStrictEqual({ "openai/model-a": "high" });
+			manager.removeModelThinkingLevel("openai", "model-a");
+			expect(manager.getAllModelThinkingLevels()).toStrictEqual({});
+			await manager.reload();
+			expect(manager.getGlobalSettings()).toEqual({});
+		});
+
+		it("preserves project model defaults and external siblings when removing the last global model key", async () => {
+			const path = join(agentDir, "settings.json");
+			writeFileSync(path, JSON.stringify({ modelThinkingLevels: { "openai/model-b": "low" } }));
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ modelThinkingLevels: { "openai/model-b": "medium" } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			writeFileSync(
+				path,
+				JSON.stringify({ modelThinkingLevels: { "openai/model-b": "low", "openai/external": "high" } }),
+			);
+			manager.applyOverrides({ modelThinkingLevels: { "openai/model-a": "high", "openai/model-b": "high" } });
+			manager.removeModelThinkingLevel("openai", "model-b");
+			expect(manager.getAllModelThinkingLevels()).toStrictEqual({
+				"openai/model-a": "high",
+				"openai/model-b": "medium",
+			});
+			await manager.flush();
+			expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ modelThinkingLevels: { "openai/external": "high" } });
+		});
+
 		it("restores project precedence for explicit setters and resets overrides on reload and trust changes", async () => {
 			writeFileSync(
 				join(projectDir, ".pi", "settings.json"),

@@ -165,6 +165,52 @@ describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (
 		},
 	);
 
+	it("reports the active model after a turn switches providers without changing caller config", async () => {
+		const prompt = createUserMessage("Hello");
+		const reply = createAssistantMessage([{ type: "text", text: "First reply" }]);
+		const followUp = createUserMessage("Continue");
+		const model = createModel();
+		const nextModel = { ...model, api: "anthropic-messages" as const, provider: "anthropic", id: "other-model" };
+		const providers: string[] = [];
+		const prepareNextTurn = () => ({ model: nextModel });
+		const config: AgentLoopConfig = Object.freeze({
+			model,
+			convertToLlm: identityConverter,
+			prepareNextTurn,
+			getFollowUpMessages: async () => [followUp],
+			getApiKey: (provider: string) => {
+				providers.push(provider);
+				if (provider === nextModel.provider) throw new Error("new provider key failed");
+				return undefined;
+			},
+		});
+		const context: AgentContext = { systemPrompt: "", messages: mode === "continue" ? [prompt] : [] };
+		const streamFn = () => {
+			const response = new MockAssistantStream();
+			response.push({ type: "done", reason: "stop", message: reply });
+			return response;
+		};
+		const stream =
+			mode === "prompt"
+				? agentLoop([prompt], context, config, undefined, streamFn)
+				: agentLoopContinue(context, config, undefined, streamFn);
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+		const messages = await stream.result();
+		expect(providers).toEqual([model.provider, nextModel.provider]);
+		expect(messages.at(-1)).toMatchObject({
+			api: nextModel.api,
+			provider: nextModel.provider,
+			model: nextModel.id,
+			stopReason: "error",
+			errorMessage: "new provider key failed",
+		});
+		expect(messages.slice(0, -1)).toEqual(mode === "prompt" ? [prompt, reply, followUp] : [reply, followUp]);
+		expect(events.filter((event) => event.type === "agent_end")).toEqual([{ type: "agent_end", messages }]);
+		expect(config.model).toBe(model);
+		expect(config.prepareNextTurn).toBe(prepareNextTurn);
+	});
+
 	it("leaves direct runner rejection catchable", async () => {
 		const prompt = createUserMessage("Hello");
 		const context: AgentContext = { systemPrompt: "", messages: mode === "continue" ? [prompt] : [] };
