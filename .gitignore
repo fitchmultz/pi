@@ -12,6 +12,10 @@ packages/ai/src/providers/data/
 packages/ai/src/providers/.model-generation-*/
 *.cpuprofile
 
+# Synthetic localhost TLS fixtures for offline transport tests.
+!packages/ai/test/fixtures/responses-localhost-cert.pem
+!packages/ai/test/fixtures/responses-localhost-key.pem
+
 # Environment
 .env
 

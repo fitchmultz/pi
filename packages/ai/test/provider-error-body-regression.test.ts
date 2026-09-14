@@ -169,7 +169,7 @@ describe("provider error body passthrough (per-tier regression)", () => {
 		["openrouter", "openrouter API error (403)"],
 	])("openai-responses identifies %s and surfaces the body", async (provider, prefix) => {
 		const output = await drainResult(
-			streamOpenAIResponses({ ...responsesModel, provider }, context, { apiKey: "test" }),
+			streamOpenAIResponses({ ...responsesModel, provider }, context, { apiKey: "test", transport: "sse" }),
 		);
 
 		expect(output.stopReason).toBe("error");

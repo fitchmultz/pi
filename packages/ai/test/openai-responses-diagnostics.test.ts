@@ -71,6 +71,7 @@ describe("Responses request diagnostics", () => {
 	it.each(["openai", "azure-openai-responses"] as const)("records the native SDK timeout for %s", async (provider) => {
 		const result = await request(provider, {
 			apiKey,
+			transport: "sse",
 			timeoutMs: 5,
 			maxRetries: 0,
 			fetch: async (_input, init) =>
