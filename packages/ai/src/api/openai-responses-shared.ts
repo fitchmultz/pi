@@ -439,6 +439,32 @@ export async function processResponsesStream<TApi extends Api>(
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
 	let sawTerminalResponseEvent = false;
+	// Keep hosted results outside content: they are not calls for the local agent to execute.
+	const recordWebSearchItem = (item: ResponseOutputItem): void => {
+		if (item.type === "web_search_call") {
+			output.webSearch ??= {};
+			output.webSearch.calls ??= [];
+			const calls = output.webSearch.calls;
+			const index = calls.findIndex((call) => call.id === item.id);
+			if (index < 0) calls.push(item);
+			else calls[index] = item;
+		} else if (item.type === "message") {
+			const citations = (item.content ?? []).flatMap((part, contentIndex) =>
+				part.type === "output_text"
+					? (part.annotations ?? [])
+							.filter((annotation) => annotation.type === "url_citation")
+							.map((annotation) => ({ itemId: item.id, contentIndex, annotation }))
+					: [],
+			);
+			if (citations.length === 0) return;
+			output.webSearch ??= {};
+			const metadata = output.webSearch;
+			metadata.citations = [
+				...(metadata.citations ?? []).filter((citation) => citation.itemId !== item.id),
+				...citations,
+			];
+		}
+	};
 	const outputSlots = new Map<number, ResponsesOutputSlot>();
 	const reasoningBlocksById = new Map<string, ThinkingContent>();
 	const applyMessagePhaseStopReason = (item: ResponseOutputItem): void => {
@@ -555,6 +581,7 @@ export async function processResponsesStream<TApi extends Api>(
 	): void => {
 		sawTerminalResponseEvent = true;
 		backfillReasoningSignatures(response.output ?? []);
+		for (const item of response.output ?? []) recordWebSearchItem(item);
 		if (response?.id) {
 			output.responseId = response.id;
 		}
@@ -683,6 +710,7 @@ export async function processResponsesStream<TApi extends Api>(
 			pushToolCallDelta(slot, appendCustomToolCallInput(slot.block, event.input, true));
 		} else if (event.type === "response.output_item.done") {
 			const item = event.item;
+			recordWebSearchItem(item);
 			applyMessagePhaseStopReason(item);
 			const slot = getOrCreateSlot(event.output_index, item);
 
