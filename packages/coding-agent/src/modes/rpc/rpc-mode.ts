@@ -79,7 +79,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
-	let extensionUIContext: ExtensionUIContext | undefined;
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		if (frontend === "rpc") {
@@ -455,9 +454,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
-		extensionUIContext = createExtensionUIContext();
 		await session.bindExtensions({
-			uiContext: extensionUIContext,
+			uiContext: createExtensionUIContext(),
 			mode: frontend,
 			getQueuedInputCount: () => interactiveMode?.getQueuedInputCount() ?? 0,
 			commandContextActions: {
