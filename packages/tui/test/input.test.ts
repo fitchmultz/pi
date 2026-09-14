@@ -4,6 +4,14 @@ import { Input } from "../src/components/input.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 
 describe("Input component", () => {
+	it("inserts xterm modifyOtherKeys printable text without inserting shortcuts", () => {
+		const input = new Input();
+		for (const key of ["\x1b[27;2;69~", "\x1b[27;2;196~", "\x1b[27;2;32~", "\x1b[27;6;69~"]) {
+			input.handleInput(key);
+		}
+		assert.strictEqual(input.getValue(), "EÄ ");
+	});
+
 	it("submits value including backslash on Enter", () => {
 		const input = new Input();
 		let submitted: string | undefined;

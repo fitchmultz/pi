@@ -59,7 +59,17 @@ export interface GrepOperations {
 
 const defaultGrepOperations: GrepOperations = {
 	isDirectory: async (p) => (await fsStat(p)).isDirectory(),
-	readFile: (p) => fsReadFile(p, "utf-8"),
+	readFile: async (p) => {
+		const bytes = await fsReadFile(p);
+		// Match ripgrep's automatic decoding of BOM-marked UTF-16 text.
+		const encoding =
+			bytes[0] === 0xff && bytes[1] === 0xfe
+				? "utf-16le"
+				: bytes[0] === 0xfe && bytes[1] === 0xff
+					? "utf-16be"
+					: "utf-8";
+		return new TextDecoder(encoding).decode(bytes);
+	},
 };
 
 export interface GrepToolOptions {

@@ -39,6 +39,15 @@ function withEnvVars(vars: Record<string, string | undefined>, fn: () => void): 
 }
 
 describe("matchesKey", () => {
+	it("matches literal plus keys without confusing modifier separators", () => {
+		assert.strictEqual(matchesKey("+", Key.plus), true);
+		assert.strictEqual(matchesKey("\x1b[43;5u", Key.ctrl("+")), true);
+		assert.strictEqual(matchesKey("\x1b[27;5;43~", Key.ctrl("+")), true);
+		assert.strictEqual(matchesKey("\x1b[43;6u", Key.ctrlShift("+")), true);
+		assert.strictEqual(matchesKey("\x1b[43;5u", Key.plus), false);
+		assert.strictEqual(matchesKey("\x1b[43;5u", Key.ctrlShift("+")), false);
+	});
+
 	describe("Kitty protocol with alternate keys (non-Latin layouts)", () => {
 		// Kitty protocol flag 4 (Report alternate keys) sends:
 		// CSI codepoint:shifted:base ; modifier:event u
