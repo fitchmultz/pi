@@ -981,7 +981,18 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (appMode === "rpc") {
 		printTimings();
-		await runRpcMode(runtime);
+		const interactiveMode =
+			process.stdin.isTTY && process.stdout.isTTY
+				? new InteractiveMode(runtime, {
+						migratedProviders,
+						modelFallbackMessage,
+						autoTrustOnReloadCwd,
+						verbose: parsed.verbose,
+						tuiMode: parsed.tuiMode,
+						initialThemeSetting: parsed.useTheme,
+					})
+				: undefined;
+		await runRpcMode(runtime, { interactiveMode });
 	} else if (appMode === "interactive") {
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,

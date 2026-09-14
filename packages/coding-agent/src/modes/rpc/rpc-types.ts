@@ -25,6 +25,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "clear_queue" }
 	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "attach_tui"; token?: string }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -106,6 +107,12 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
+	pendingExtensionUIRequests: RpcExtensionUIRequest[];
+}
+
+export interface RpcTuiDetachedEvent {
+	type: "tui_detached";
+	state: RpcSessionState;
 }
 
 // ============================================================================
@@ -127,6 +134,13 @@ export type RpcResponse =
 			data: { steering: string[]; followUp: string[] };
 	  }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "attach_tui";
+			success: true;
+			data: { token: string };
+	  }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
@@ -255,6 +269,7 @@ export type RpcExtensionUIRequest =
 			timeout?: number;
 	  }
 	| { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string }
+	| { type: "extension_ui_request"; id: string; method: "custom" }
 	| {
 			type: "extension_ui_request";
 			id: string;
