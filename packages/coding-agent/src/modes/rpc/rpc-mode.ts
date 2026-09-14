@@ -597,7 +597,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 			case "attach_tui": {
 				if (!interactiveMode || !process.stdin.isTTY || !process.stdout.isTTY) {
-					return error(id, "attach_tui", "TUI handoff requires --tui-handoff and a PTY");
+					return error(id, "attach_tui", "TUI handoff requires a PTY");
 				}
 				if (command.token !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(command.token)) {
 					return error(id, "attach_tui", "TUI handoff token must be a UUID");

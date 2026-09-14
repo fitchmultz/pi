@@ -16,7 +16,6 @@ Common options:
 - `--name <name>` / `-n <name>`: Set the session display name at startup
 - `--no-session`: Disable session persistence
 - `--session-dir <path>`: Custom session storage directory
-- `--tui-handoff`: Allow the RPC client to transfer this PTY to the exact live interactive TUI
 
 ## Protocol Overview
 
@@ -183,7 +182,7 @@ If an extension cancelled:
 
 #### attach_tui
 
-Transfer the process's controlling PTY from RPC JSONL to the interactive TUI. This command is available only when Pi starts with `--mode rpc --tui-handoff` and stdin/stdout are the same PTY.
+Transfer the process's controlling PTY from RPC JSONL to the interactive TUI. Start Pi with `--mode rpc` and stdin/stdout connected to the same PTY; no additional startup flag is needed. Pi remains in RPC mode until `attach_tui` is sent. Pipe-based RPC cannot attach a TUI.
 
 ```json
 {"id": "attach-1", "type": "attach_tui"}
@@ -1241,7 +1240,7 @@ There are two categories of extension UI methods:
 
 If a dialog method includes a `timeout` field, the agent-side will auto-resolve with a default value when the timeout expires. The client does not need to track timeouts.
 
-Some `ExtensionUIContext` methods are not supported or degraded in RPC mode because they require direct TUI access:
+In pipe-based RPC, some `ExtensionUIContext` methods are not supported or degraded because they require direct TUI access:
 - `custom()` returns `undefined`
 - `setWorkingMessage()`, `setWorkingIndicator()`, `setFooter()`, `setHeader()`, `setEditorComponent()`, `setToolsExpanded()` are no-ops
 - `getEditorText()` returns `""`
@@ -1253,7 +1252,7 @@ Some `ExtensionUIContext` methods are not supported or degraded in RPC mode beca
 
 Note: `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget methods are functional via the extension UI sub-protocol. Use `ctx.mode === "tui"` to guard TUI-specific features like `custom()` that require a real terminal.
 
-With `--tui-handoff`, Pi preserves these TUI-specific methods and changes `ctx.mode` with frontend ownership. Standard dialogs move between RPC and TUI without resolving. A pending `custom()` request can only continue in the TUI.
+On a PTY, Pi preserves these TUI-specific methods before attachment and changes `ctx.mode` with frontend ownership. Standard dialogs move between RPC and TUI without resolving. A pending `custom()` request can only continue in the TUI.
 
 ### Extension UI Requests (stdout)
 
@@ -1327,7 +1326,7 @@ Expected response: `extension_ui_response` with `value` (the edited text) or `ca
 
 #### custom
 
-Signals that a TUI-only custom component is still pending after returning to RPC. This request is emitted only with `--tui-handoff` and has no RPC response; call `attach_tui` to continue the same interaction.
+Signals that a TUI-only custom component is pending. This request is emitted only for PTY-backed RPC and has no RPC response; call `attach_tui` to continue the same interaction.
 
 ```json
 {

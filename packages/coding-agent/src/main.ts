@@ -690,14 +690,6 @@ export async function main(args: string[], options?: MainOptions) {
 		console.error(chalk.red("Error: @file arguments are not supported in RPC mode"));
 		process.exit(1);
 	}
-	if (parsed.tuiHandoff && parsed.mode !== "rpc") {
-		console.error(chalk.red("Error: --tui-handoff requires --mode rpc"));
-		process.exit(1);
-	}
-	if (parsed.tuiHandoff && (!process.stdin.isTTY || !process.stdout.isTTY)) {
-		console.error(chalk.red("Error: --tui-handoff requires a PTY"));
-		process.exit(1);
-	}
 
 	validateSessionCwdFlags(parsed);
 	validateForkFlags(parsed);
@@ -989,16 +981,17 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (appMode === "rpc") {
 		printTimings();
-		const interactiveMode = parsed.tuiHandoff
-			? new InteractiveMode(runtime, {
-					migratedProviders,
-					modelFallbackMessage,
-					autoTrustOnReloadCwd,
-					verbose: parsed.verbose,
-					tuiMode: parsed.tuiMode,
-					initialThemeSetting: parsed.useTheme,
-				})
-			: undefined;
+		const interactiveMode =
+			process.stdin.isTTY && process.stdout.isTTY
+				? new InteractiveMode(runtime, {
+						migratedProviders,
+						modelFallbackMessage,
+						autoTrustOnReloadCwd,
+						verbose: parsed.verbose,
+						tuiMode: parsed.tuiMode,
+						initialThemeSetting: parsed.useTheme,
+					})
+				: undefined;
 		await runRpcMode(runtime, { interactiveMode });
 	} else if (appMode === "interactive") {
 		const interactiveMode = new InteractiveMode(runtime, {

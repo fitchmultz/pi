@@ -115,6 +115,35 @@ describe("RPC TUI handoff", () => {
 		}
 	});
 
+	it("keeps pipe RPC usable after rejecting attachment", async () => {
+		const listeners = takeListenerSnapshot();
+		const harness = await createHarness();
+		try {
+			void runRpcMode(createRuntimeHost(harness));
+			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+			rpcIo.lineHandler?.(JSON.stringify({ id: "pipe-attach", type: "attach_tui" }));
+			await vi.waitFor(() =>
+				expect(parseOutput().find((record) => record.id === "pipe-attach")).toMatchObject({
+					success: false,
+					error: "TUI handoff requires a PTY",
+				}),
+			);
+			rpcIo.lineHandler?.(JSON.stringify({ id: "pipe-state", type: "get_state" }));
+			await vi.waitFor(() =>
+				expect(parseOutput().find((record) => record.id === "pipe-state")).toMatchObject({ success: true }),
+			);
+			expect(harness.session.extensionRunner.createContext().mode).toBe("rpc");
+			await expect(
+				harness.session.extensionRunner.getUIContext().custom(() => {
+					throw new Error("Pipe RPC must not create terminal components");
+				}),
+			).resolves.toBeUndefined();
+		} finally {
+			harness.cleanup();
+			restoreListeners(listeners);
+		}
+	});
+
 	it("moves dialogs both ways and serializes a return during attach", async () => {
 		const listeners = takeListenerSnapshot();
 		const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
@@ -165,6 +194,20 @@ describe("RPC TUI handoff", () => {
 			await vi.waitFor(() => expect(parseOutput().some((record) => record.id === "invalid-attach")).toBe(true));
 			expect(parseOutput().find((record) => record.id === "invalid-attach")?.success).toBe(false);
 			expect(interactiveMode.activateHosted).not.toHaveBeenCalled();
+
+			for (const stream of [process.stdin, process.stdout]) {
+				Object.defineProperty(stream, "isTTY", { configurable: true, value: false });
+				const id = `non-pty-${stream.fd}`;
+				rpcIo.lineHandler?.(JSON.stringify({ id, type: "attach_tui" }));
+				await vi.waitFor(() =>
+					expect(parseOutput().find((record) => record.id === id)).toMatchObject({
+						success: false,
+						error: "TUI handoff requires a PTY",
+					}),
+				);
+				expect(interactiveMode.activateHosted).not.toHaveBeenCalled();
+				Object.defineProperty(stream, "isTTY", { configurable: true, value: true });
+			}
 
 			const token = "01234567-89ab-cdef-0123-456789abcdef";
 			rpcIo.lineHandler?.(JSON.stringify({ id: "attach", type: "attach_tui", token }));

@@ -121,9 +121,8 @@ describe("parseArgs", () => {
 		});
 
 		test("parses --mode rpc", () => {
-			const result = parseArgs(["--mode", "rpc", "--tui-handoff"]);
+			const result = parseArgs(["--mode", "rpc"]);
 			expect(result.mode).toBe("rpc");
-			expect(result.tuiHandoff).toBe(true);
 		});
 
 		test("parses --session", () => {
