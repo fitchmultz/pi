@@ -6,6 +6,7 @@ import { SelectList, type SelectListTheme } from "../src/components/select-list.
 import { SettingsList, type SettingsListTheme } from "../src/components/settings-list.ts";
 import { Container, type TuiMouseEvent, type TuiMouseEventType } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
+import { stripTerminalSequences } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 function mouse(type: TuiMouseEventType, x: number, y: number, width = 80, height = 10): TuiMouseEvent {
@@ -60,15 +61,54 @@ class InputOverlay extends Container {
 }
 
 describe("mouse-aware components", () => {
-	it("positions a single-line input cursor on press", () => {
-		const input = new Input();
-		input.setValue("hello");
-		input.render(20);
+	for (const { name, prompt, x, expected } of [
+		{ name: "default", prompt: undefined, x: 4, expected: "heXllo" },
+		{ name: "empty", prompt: "", x: 2, expected: "heXllo" },
+		{ name: "long", prompt: "Search: ", x: 8, expected: "Xhello" },
+		{ name: "styled wide", prompt: "\x1b[36m查找: \x1b[0m", x: 8, expected: "heXllo" },
+	]) {
+		it(`positions a single-line input cursor with the ${name} prompt`, () => {
+			const input = new Input({ prompt });
+			const container = new Container();
+			container.addChild(input);
+			input.handleInput("hello");
+			assert.strictEqual(
+				stripTerminalSequences(container.render(20)[0]).trimEnd(),
+				`${stripTerminalSequences(prompt ?? "> ")}hello`,
+			);
 
-		assert.strictEqual(input.handleMouse(mouse("press", 4, 0, 20, 1))?.handled, true);
-		input.handleInput("X");
-		assert.strictEqual(input.getValue(), "heXllo");
-	});
+			assert.strictEqual(container.handleMouse(mouse("press", x, 0, 20, 1))?.handled, true);
+			input.handleInput("X");
+			assert.strictEqual(input.getValue(), expected);
+		});
+	}
+
+	for (const { width, value, visible, hidden, endX, padding } of [
+		{ width: 8, value: "你好吗世界再见", visible: "再见", hidden: "你好吗世界", endX: 6, padding: " " },
+		{ width: 9, value: "你好吗世界再见", visible: "界再见", hidden: "你好吗世", endX: 8, padding: "" },
+		{
+			width: 80,
+			value: `${"甲".repeat(40)}世界再见`,
+			visible: `${"甲".repeat(34)}世界再见`,
+			hidden: "甲".repeat(6),
+			endX: 78,
+			padding: " ",
+		},
+	]) {
+		for (const atEnd of [false, true]) {
+			it(`positions a scrolled wide input cursor at the visible ${atEnd ? "end" : "start"} at width ${width}`, () => {
+				const input = new Input();
+				const container = new Container();
+				container.addChild(input);
+				input.handleInput(value);
+				assert.deepStrictEqual(container.render(width), [`> ${visible}\x1b[7m \x1b[27m${padding}`]);
+
+				assert.strictEqual(container.handleMouse(mouse("press", atEnd ? endX : 2, 0, width, 1))?.handled, true);
+				input.handleInput("X");
+				assert.strictEqual(input.getValue(), atEnd ? `${value}X` : `${hidden}X${visible}`);
+			});
+		}
+	}
 
 	it("selects and activates list rows", () => {
 		const list = new SelectList(
