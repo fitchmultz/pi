@@ -97,7 +97,11 @@ describe("AgentSession concurrent prompt guard", () => {
 					stream.push({ type: "start", partial: createAssistantMessage("") });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+							stream.push({
+								type: "error",
+								reason: "aborted",
+								error: { ...createAssistantMessage("Aborted"), stopReason: "aborted" },
+							});
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -222,7 +226,11 @@ describe("AgentSession concurrent prompt guard", () => {
 					stream.push({ type: "start", partial: createAssistantMessage("") });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+							stream.push({
+								type: "error",
+								reason: "aborted",
+								error: { ...createAssistantMessage("Aborted"), stopReason: "aborted" },
+							});
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -288,7 +296,13 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.abort();
 		await firstPrompt.catch(() => {});
 
+		expect(sawSteeringMessage).toBe(false);
+		expect(session.getSteeringMessages()).toEqual(["Steer from extension"]);
+		expect(session.pendingMessageCount).toBe(1);
+
+		await session.agent.continue();
 		expect(sawSteeringMessage).toBe(true);
+		await expect.poll(() => session.pendingMessageCount).toBe(0);
 	});
 
 	it("should allow prompt() after previous completes", async () => {
