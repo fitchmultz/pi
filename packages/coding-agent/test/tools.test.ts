@@ -510,6 +510,14 @@ describe("Coding Agent Tools", () => {
 			);
 		});
 
+		it.skipIf(process.platform === "win32")("should fail with captured output when the shell is killed", async () => {
+			await expect(
+				bashTool.execute("test-shell-signal", {
+					command: "printf 'before signal\\n'; kill -TERM $$; printf 'unreachable\\n'",
+				}),
+			).rejects.toThrow("before signal\n\n\nCommand terminated by signal");
+		});
+
 		it("should respect timeout", async () => {
 			const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`;
 			await expect(bashTool.execute("test-call-10", { command, timeout: 0.05 })).rejects.toThrow(/timed out/i);
@@ -854,6 +862,17 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result)).toBe(
 				"progress.log-2- ready\nprogress.log:3: ERROR failure\nprogress.log-4- after",
 			);
+		});
+
+		it.each(["utf16le", "utf16be"])("should decode %s context consistently with matches", async (encoding) => {
+			const file = join(testDir, "utf16.txt");
+			const bytes = Buffer.from("\uFEFFbefore\nneedle\nafter\n", "utf16le");
+			if (encoding === "utf16be") bytes.swap16();
+			writeFileSync(file, bytes);
+			const match = await grepTool.execute("utf16-match", { pattern: "needle", path: file });
+			expect(getTextOutput(match)).toBe("utf16.txt:2: needle");
+			const context = await grepTool.execute("utf16-context", { pattern: "needle", path: file, context: 1 });
+			expect(getTextOutput(context)).toBe("utf16.txt-1- before\nutf16.txt:2: needle\nutf16.txt-3- after");
 		});
 
 		it("should respect global limit and include context lines", async () => {

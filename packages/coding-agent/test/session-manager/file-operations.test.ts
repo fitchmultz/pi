@@ -2,10 +2,11 @@ import { constants as bufferConstants } from "buffer";
 import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	CURRENT_SESSION_VERSION,
 	findMostRecentSession,
+	getDefaultSessionDir,
 	loadEntriesFromFile,
 	SessionManager,
 } from "../../src/core/session-manager.ts";
@@ -403,6 +404,59 @@ describe("SessionManager custom flat session directory", () => {
 	});
 });
 
+describe("SessionManager default session directory", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `session-collision-test-${Date.now()}`);
+		vi.stubEnv("PI_CODING_AGENT_DIR", tempDir);
+	});
+
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("isolates projects whose default directory names collide", async () => {
+		const projectA = join(tempDir, "project-a");
+		const projectB = join(tempDir, "project", "a");
+		mkdirSync(projectA, { recursive: true });
+		mkdirSync(projectB, { recursive: true });
+		const dir = getDefaultSessionDir(projectA);
+		expect(getDefaultSessionDir(projectB)).toBe(dir);
+		const file = join(dir, "a.jsonl");
+		writeFileSync(
+			file,
+			`${JSON.stringify({ type: "session", version: 3, id: "a", cwd: projectA, timestamp: "2025-01-01T00:00:00Z" })}\n`,
+		);
+
+		for (const sessionDir of [undefined, dir]) {
+			expect.soft(await SessionManager.list(projectB, sessionDir)).toEqual([]);
+			expect.soft(SessionManager.continueRecent(projectB, sessionDir).getSessionFile()).not.toBe(file);
+			expect((await SessionManager.list(projectA, sessionDir)).map((info) => info.path)).toEqual([file]);
+			expect(SessionManager.continueRecent(projectA, sessionDir).getSessionFile()).toBe(file);
+		}
+	});
+
+	it.each([undefined, ""])("keeps legacy cwd %j discoverable only in default directories", async (cwd) => {
+		const project = join(tempDir, "project");
+		const dir = getDefaultSessionDir(project);
+		const file = join(dir, "legacy.jsonl");
+		const header = `${JSON.stringify({ type: "session", version: 3, id: "legacy", cwd, timestamp: "2025-01-01T00:00:00Z" })}\n`;
+		writeFileSync(file, header);
+		for (const sessionDir of [undefined, dir]) {
+			expect((await SessionManager.list(project, sessionDir)).map((info) => info.path)).toEqual([file]);
+			expect(SessionManager.continueRecent(project, sessionDir).getSessionFile()).toBe(file);
+		}
+		const customDir = join(tempDir, "custom");
+		mkdirSync(customDir);
+		const customFile = join(customDir, "legacy.jsonl");
+		writeFileSync(customFile, header);
+		expect(await SessionManager.list(project, customDir)).toEqual([]);
+		expect(SessionManager.continueRecent(project, customDir).getSessionFile()).not.toBe(customFile);
+	});
+});
+
 describe("SessionManager.setSessionFile with corrupted files", () => {
 	let tempDir: string;
 
@@ -445,6 +499,24 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 			`Session file is not a valid pi session: ${noHeaderFile}`,
 		);
 		expect(readFileSync(noHeaderFile, "utf-8")).toBe(originalContent);
+	});
+
+	it("keeps appending to the active file after a rejected switch", () => {
+		const originalFile = join(tempDir, "original.jsonl");
+		writeFileSync(originalFile, "");
+		const sm = SessionManager.open(originalFile, tempDir);
+		const originalId = sm.getSessionId();
+		const invalidFile = join(tempDir, "invalid.jsonl");
+		const invalidContent = '{"type":"event","data":"unrelated"}\n';
+		writeFileSync(invalidFile, invalidContent);
+
+		expect(() => sm.setSessionFile(invalidFile)).toThrow("not a valid pi session");
+		expect.soft(sm.getSessionFile()).toBe(originalFile);
+		expect(sm.getSessionId()).toBe(originalId);
+		const message = { role: "user" as const, content: "after rejected switch", timestamp: 1 };
+		sm.appendMessage(message);
+		expect.soft(readFileSync(invalidFile, "utf8")).toBe(invalidContent);
+		expect(SessionManager.open(originalFile).buildSessionContext().messages).toEqual([message]);
 	});
 
 	it("throws and preserves non-session JSONL files", () => {

@@ -360,7 +360,10 @@ export function createShellToolDefinition(
 
 				const snapshot = await finishOutput();
 				const { text: outputText, details } = formatOutput(snapshot);
-				if (exitCode !== 0 && exitCode !== null) {
+				if (exitCode === null) {
+					throw new Error(appendStatus(outputText, "Command terminated by signal"));
+				}
+				if (exitCode !== 0) {
 					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
 				}
 				return { content: [{ type: "text", text: outputText }], details };
