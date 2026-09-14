@@ -10,6 +10,7 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
+import { emptyUsage } from "./harness/utils/usage.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AgentContext,
@@ -37,22 +38,11 @@ export function agentLoop(
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
-	const stream = createAgentStream();
-
-	void runAgentLoop(
-		prompts,
-		context,
+	return createAgentStream(
+		(emit, runConfig) => runAgentLoop(prompts, context, runConfig, emit, signal, streamFn),
 		config,
-		async (event) => {
-			stream.push(event);
-		},
 		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
-
-	return stream;
+	);
 }
 
 /**
@@ -77,21 +67,11 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
-	const stream = createAgentStream();
-
-	void runAgentLoopContinue(
-		context,
+	return createAgentStream(
+		(emit, runConfig) => runAgentLoopContinue(context, runConfig, emit, signal, streamFn),
 		config,
-		async (event) => {
-			stream.push(event);
-		},
 		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
-
-	return stream;
+	);
 }
 
 export async function runAgentLoop(
@@ -144,11 +124,55 @@ export async function runAgentLoopContinue(
 	return newMessages;
 }
 
-function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
-	return new EventStream<AgentEvent, AgentMessage[]>(
+function createAgentStream(
+	run: (emit: AgentEventSink, config: AgentLoopConfig) => Promise<AgentMessage[]>,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+): EventStream<AgentEvent, AgentMessage[]> {
+	const stream = new EventStream<AgentEvent, AgentMessage[]>(
 		(event: AgentEvent) => event.type === "agent_end",
 		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
 	);
+	const completedMessages: AgentMessage[] = [];
+	let turnOpen = false;
+	const emit = (event: AgentEvent): void => {
+		if (event.type === "message_end") completedMessages.push(event.message);
+		if (event.type === "turn_start") turnOpen = true;
+		if (event.type === "turn_end") turnOpen = false;
+		stream.push(event);
+	};
+
+	let model = config.model;
+	void run(emit, {
+		...config,
+		prepareNextTurn: async (context) => {
+			const update = await config.prepareNextTurn?.(context);
+			model = update?.model ?? model;
+			return update;
+		},
+	}).then(
+		(messages) => stream.end(messages),
+		(error: unknown) => {
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: emptyUsage(),
+				stopReason: signal?.aborted ? "aborted" : "error",
+				errorMessage: error instanceof Error ? error.message : String(error),
+				timestamp: Date.now(),
+			};
+			if (!turnOpen) emit({ type: "turn_start" });
+			emit({ type: "message_start", message });
+			emit({ type: "message_end", message });
+			emit({ type: "turn_end", message, toolResults: [] });
+			emit({ type: "agent_end", messages: completedMessages });
+			stream.end(completedMessages);
+		},
+	);
+	return stream;
 }
 
 /**

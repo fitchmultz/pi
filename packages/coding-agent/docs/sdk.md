@@ -907,20 +907,24 @@ sm.createBranchedSession(leafId);       // Extract path to new file
 ### Settings Management
 
 ```typescript
-import { createAgentSession, SettingsManager, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, SettingsManager, SessionManager } from "@earendil-works/pi-coding-agent";
+
+const cwd = process.cwd();
 
 // Default: loads from files (global + project merged)
 const { session } = await createAgentSession({
-  settingsManager: SettingsManager.create(),
+  settingsManager: SettingsManager.create(cwd),
 });
 
-// With overrides
-const settingsManager = SettingsManager.create();
+// Load resources before applying temporary overrides: reload resets them.
+const settingsManager = SettingsManager.create(cwd);
+const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), settingsManager });
+await resourceLoader.reload();
 settingsManager.applyOverrides({
   compaction: { enabled: false },
   retry: { enabled: true, maxRetries: 5 },
 });
-const { session } = await createAgentSession({ settingsManager });
+const { session } = await createAgentSession({ settingsManager, resourceLoader });
 
 // In-memory (no file I/O, for testing)
 const { session } = await createAgentSession({
@@ -935,7 +939,7 @@ const { session } = await createAgentSession({
 ```
 
 **Static factories:**
-- `SettingsManager.create(cwd?, agentDir?)` - Load from files
+- `SettingsManager.create(cwd, agentDir?)` - Load from files
 - `SettingsManager.inMemory(settings?)` - No file I/O
 
 **Project-specific settings:**
@@ -945,6 +949,10 @@ Settings load from two locations and merge:
 2. Project: `<cwd>/.pi/settings.json`
 
 Project overrides global. Nested objects merge keys. Setters modify global settings by default.
+
+`applyOverrides()` changes only effective settings, not stored settings. Unrelated setters preserve these temporary overrides; an explicit setter replaces its own field or nested key, still subject to project precedence. Reloading settings or changing project trust discards temporary overrides. Initial values passed to `inMemory()` survive reload.
+
+`DefaultResourceLoader.reload()` also reloads settings. Apply temporary overrides after loading resources and pass that loader to `createAgentSession()` to avoid its implicit reload.
 
 **Persistence and error handling semantics:**
 
