@@ -6,7 +6,7 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
-import { resolveToCwd } from "./path-utils.ts";
+import { isInsideGitRepo, resolveToCwd } from "./path-utils.ts";
 import { grepRenderers } from "./renderers/grep.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import {
@@ -170,6 +170,7 @@ export function createGrepToolDefinition(
 						};
 
 						const args: string[] = ["--json", "--line-number", "--color=never", "--hidden"];
+						if (!(await isInsideGitRepo(searchPath))) args.push("--no-require-git");
 						if (ignoreCase) args.push("--ignore-case");
 						if (literal) args.push("--fixed-strings");
 						if (glob) args.push("--glob", glob);
