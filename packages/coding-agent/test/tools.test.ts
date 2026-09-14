@@ -331,6 +331,20 @@ describe("Coding Agent Tools", () => {
 			).rejects.toThrow(/Found 3 occurrences/);
 		});
 
+		it.each(["ababa", "ａｂａｂａ"])("should reject overlapping anchor occurrences in %s", async (content) => {
+			const testFile = join(testDir, "overlapping-anchor.txt");
+			writeFileSync(testFile, content);
+			const edits = [{ oldText: "aba", newText: "X" }];
+
+			expect.soft(await computeEditsDiff(testFile, edits, testDir)).toEqual({
+				error: expect.stringContaining("Found 2 occurrences"),
+			});
+			await expect(editTool.execute("test-overlapping-anchor", { path: testFile, edits })).rejects.toThrow(
+				/Found 2 occurrences/,
+			);
+			expect(readFileSync(testFile, "utf-8")).toBe(content);
+		});
+
 		it("should replace multiple disjoint regions in one call", async () => {
 			const testFile = join(testDir, "edit-multi.txt");
 			writeFileSync(testFile, "alpha\nbeta\ngamma\ndelta\n");
@@ -824,6 +838,24 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("example.txt:2: match line");
 		});
 
+		it.each(["\n", "\r\n"])("should keep ripgrep line numbers with bare CR and %j endings", async (ending) => {
+			const testFile = join(testDir, "progress.log");
+			writeFileSync(
+				testFile,
+				["progress 0%\rprogress 50%\rprogress 100%", "ready", "ERROR failure", "after", ""].join(ending),
+			);
+
+			const result = await grepTool.execute("test-grep-bare-cr", {
+				pattern: "ERROR",
+				path: testFile,
+				context: 1,
+			});
+
+			expect(getTextOutput(result)).toBe(
+				"progress.log-2- ready\nprogress.log:3: ERROR failure\nprogress.log-4- after",
+			);
+		});
+
 		it("should respect global limit and include context lines", async () => {
 			const testFile = join(testDir, "context.txt");
 			const content = ["before", "match one", "after", "middle", "match two", "after two"].join("\n");
@@ -882,6 +914,15 @@ describe("Coding Agent Tools", () => {
 
 			expect(outputLines).toContain("visible.txt");
 			expect(outputLines).toContain(".secret/hidden.txt");
+		});
+
+		it.skipIf(process.platform === "win32")("should preserve trailing spaces in filenames", async () => {
+			writeFileSync(join(testDir, "report.txt "), "trailing space filename");
+
+			const result = await findTool.execute("test-find-trailing-space", { pattern: "report*", path: testDir });
+
+			expect(getTextOutput(result)).toBe("report.txt ");
+			expect(existsSync(join(testDir, getTextOutput(result)))).toBe(true);
 		});
 
 		it("should respect .gitignore", async () => {
@@ -1068,6 +1109,48 @@ describe("edit tool fuzzy matching", () => {
 		expect(getTextOutput(result)).toContain("Successfully replaced");
 		const content = readFileSync(testFile, "utf-8");
 		expect(content).toBe("replaced\nline three\n");
+	});
+
+	it.each([
+		{ content: "a ", expected: "aX" },
+		{ content: "hello world", expected: "helloXworld" },
+	])("should replace a unique whitespace-only anchor in $content", async ({ content, expected }) => {
+		const testFile = join(testDir, "whitespace-anchor.txt");
+		writeFileSync(testFile, content);
+
+		await editTool.execute("test-whitespace-anchor", {
+			path: testFile,
+			edits: [{ oldText: " ", newText: "X" }],
+		});
+
+		expect(readFileSync(testFile, "utf-8")).toBe(expected);
+	});
+
+	it("should reject a missing whitespace-only anchor without changing the file", async () => {
+		const testFile = join(testDir, "missing-whitespace-anchor.txt");
+		writeFileSync(testFile, "ab");
+		const edits = [{ oldText: " ", newText: "X" }];
+
+		expect.soft(await computeEditsDiff(testFile, edits, testDir)).toEqual({
+			error: expect.stringContaining("Could not find"),
+		});
+		await expect(editTool.execute("test-missing-whitespace-anchor", { path: testFile, edits })).rejects.toThrow(
+			/Could not find/,
+		);
+		expect(readFileSync(testFile, "utf-8")).toBe("ab");
+	});
+
+	it("should count overlapping whitespace-only anchors in the original text", async () => {
+		const testFile = join(testDir, "duplicate-whitespace-anchor.txt");
+		writeFileSync(testFile, "a   b");
+
+		await expect(
+			editTool.execute("test-duplicate-whitespace-anchor", {
+				path: testFile,
+				edits: [{ oldText: "  ", newText: "X" }],
+			}),
+		).rejects.toThrow(/Found 2 occurrences/);
+		expect(readFileSync(testFile, "utf-8")).toBe("a   b");
 	});
 
 	it("should match fullwidth punctuation in Chinese text", async () => {

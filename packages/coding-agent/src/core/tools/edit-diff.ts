@@ -222,7 +222,7 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
 	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
 
-	if (fuzzyIndex === -1) {
+	if (fuzzyOldText.length === 0 || fuzzyIndex === -1) {
 		return {
 			found: false,
 			index: -1,
@@ -245,9 +245,19 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 }
 
 function countOccurrences(content: string, oldText: string): number {
-	const fuzzyContent = normalizeForFuzzyMatch(content);
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	return fuzzyContent.split(fuzzyOldText).length - 1;
+	// Whitespace-only anchors must match and be counted in the original text.
+	const searchContent = fuzzyOldText ? normalizeForFuzzyMatch(content) : content;
+	const searchText = fuzzyOldText || oldText;
+	let count = 0;
+	for (
+		let index = searchContent.indexOf(searchText);
+		index !== -1;
+		index = searchContent.indexOf(searchText, index + 1)
+	) {
+		count++;
+	}
+	return count;
 }
 
 function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
