@@ -189,7 +189,8 @@ describe("AgentSessionRuntime characterization", () => {
 		await runtime.newSession();
 		await runtime.session.bindExtensions({});
 
-		faux.setResponses([fauxAssistantMessage(fauxToolCall("block", {}), { stopReason: "toolUse" })]);
+		const toolCall = fauxToolCall("block", {});
+		faux.setResponses([fauxAssistantMessage(toolCall, { stopReason: "toolUse" })]);
 		const outgoingSession = runtime.session;
 		const promptPromise = outgoingSession.prompt("start blocking tool");
 		await toolStartedPromise;
@@ -204,12 +205,13 @@ describe("AgentSessionRuntime characterization", () => {
 		const outgoingEntries = SessionManager.open(outgoingSession.sessionFile!)
 			.getEntries()
 			.filter((entry) => entry.type === "message");
-		expect(outgoingEntries.map((entry) => entry.message.role)).toEqual([
-			"user",
-			"assistant",
-			"toolResult",
-			"assistant",
-		]);
+		expect(outgoingEntries.map((entry) => entry.message.role)).toEqual(["user", "assistant", "toolResult"]);
+		expect(outgoingEntries[2].message).toMatchObject({
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: "block",
+			content: [{ type: "text", text: "tool aborted" }],
+		});
 	});
 
 	it("preserves an existing session when importing a file with the same name", async () => {

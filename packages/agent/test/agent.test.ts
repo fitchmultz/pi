@@ -498,6 +498,121 @@ describe("Agent", () => {
 		expect(agent.state.messages).not.toContainEqual(message);
 	});
 
+	it.each(["tool abort", "provider abort", "normal completion"])(
+		"preserves queued work through %s",
+		async (scenario) => {
+			const started = createDeferred();
+			const releaseTool = createDeferred();
+			const events: AgentEvent[] = [];
+			const requests: string[] = [];
+			let abortedRequests = 0;
+			let toolObservedAbort = false;
+			const schema = Type.Object({});
+			const tool: AgentTool<typeof schema> = {
+				name: "wait",
+				label: "Wait",
+				description: "Wait for release or cancellation",
+				parameters: schema,
+				async execute(_id, _args, signal) {
+					await new Promise<void>((resolve, reject) => {
+						signal?.addEventListener(
+							"abort",
+							() => {
+								toolObservedAbort = true;
+								reject(new Error("Tool cancelled"));
+							},
+							{ once: true },
+						);
+						releaseTool.promise.then(resolve);
+						started.resolve();
+					});
+					return { content: [{ type: "text", text: "Tool done" }], details: {}, terminate: true };
+				},
+			};
+			const agent = new Agent({
+				initialState: { tools: [tool] },
+				streamFn: (_model, context, options) => {
+					requests.push(JSON.stringify(context.messages));
+					const stream = new MockAssistantStream();
+					const abort = () =>
+						stream.push({
+							type: "error",
+							reason: "aborted",
+							error: {
+								...createAssistantMessage(""),
+								stopReason: "aborted",
+								errorMessage: "Provider cancelled",
+							},
+						});
+					if (options?.signal?.aborted) {
+						abortedRequests++;
+						abort();
+					} else if (requests.length === 1 && scenario === "provider abort") {
+						options?.signal?.addEventListener("abort", abort, { once: true });
+						started.resolve();
+					} else if (requests.length === 1) {
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantToolUseMessage([
+								{ type: "toolCall", id: "wait-1", name: "wait", arguments: {} },
+							]),
+						});
+					} else {
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage("Queued work answered"),
+						});
+					}
+					return stream;
+				},
+			});
+			agent.subscribe((event) => {
+				events.push(event);
+			});
+			const steering = { role: "user" as const, content: "Next task", timestamp: Date.now() };
+			const followUp = { role: "user" as const, content: "Follow-up task", timestamp: Date.now() };
+			const prompt = agent.prompt("First task");
+			await started.promise;
+			agent.steer(steering);
+			agent.followUp(followUp);
+			if (scenario === "normal completion") releaseTool.resolve();
+			else agent.abort();
+			await prompt;
+
+			expect(abortedRequests).toBe(0);
+			expect(toolObservedAbort).toBe(scenario === "tool abort");
+			expect(events.at(-1)?.type).toBe("agent_end");
+			expect(agent.state.isStreaming).toBe(false);
+			if (scenario !== "normal completion") {
+				expect(requests).toHaveLength(1);
+				expect(agent.hasQueuedMessages()).toBe(true);
+				expect(agent.state.messages).not.toContainEqual(steering);
+				expect(agent.state.messages).not.toContainEqual(followUp);
+				if (scenario === "tool abort") {
+					expect(agent.state.messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+					expect(events.filter((event) => event.type === "tool_execution_end")).toMatchObject([
+						{ toolCallId: "wait-1", isError: true },
+					]);
+					expect(events.filter((event) => event.type === "turn_end")).toMatchObject([
+						{ toolResults: [{ toolCallId: "wait-1", isError: true }] },
+					]);
+				}
+				await expect(agent.continue()).resolves.toBeUndefined();
+			}
+			expect(requests).toHaveLength(3);
+			expect(requests[1]).toContain("Next task");
+			expect(requests[1]).not.toContain("Follow-up task");
+			expect(requests[2]).toContain("Follow-up task");
+			expect(agent.hasQueuedMessages()).toBe(false);
+			expect(agent.state.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "Queued work answered" }],
+			});
+		},
+	);
+
 	it("should handle abort controller", () => {
 		const agent = new Agent({ streamFn: unusedStreamFunction });
 

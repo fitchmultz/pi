@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai/compat";
 import { getModel } from "@earendil-works/pi-ai/compat";
+import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -310,6 +311,49 @@ describe("shouldCompact", () => {
 });
 
 describe("findCutPoint", () => {
+	it("compacts older history while retaining an oversized final tool result with its call", async () => {
+		const olderUser = createMessageEntry(createUserMessage("Earlier request ".repeat(100)));
+		const olderAssistant = createMessageEntry(createAssistantMessage("Earlier work ".repeat(100)));
+		const user = createMessageEntry(createUserMessage("Read the file"));
+		const call = createMessageEntry({
+			...createAssistantMessage(""),
+			content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "file.ts" } }],
+			stopReason: "toolUse",
+		});
+		const toolResult = createMessageEntry({
+			role: "toolResult",
+			toolCallId: "read-1",
+			toolName: "read",
+			content: [{ type: "text", text: "x".repeat(2000) }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		const entries = [olderUser, olderAssistant, user, call, toolResult];
+		const preparation = prepareCompaction(entries, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 100 });
+		expect(preparation).toBeDefined();
+		expect(preparation!.firstKeptEntryId).toBe(call.id);
+		expect(preparation!.messagesToSummarize).toEqual([olderUser.message, olderAssistant.message]);
+		const result = await compact(
+			preparation!,
+			getModel("anthropic", "claude-sonnet-4-5")!,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			() => {
+				const stream = new AssistantMessageEventStream();
+				stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Summary") });
+				return stream;
+			},
+		);
+		const reloaded = buildSessionContext([
+			...entries,
+			createCompactionEntry(result.summary, result.firstKeptEntryId),
+		]);
+		expect(reloaded.messages.slice(1)).toEqual([call.message, toolResult.message]);
+	});
+
 	it("should find cut point based on actual token differences", () => {
 		// Create entries with cumulative token counts
 		const entries: SessionEntry[] = [];
@@ -500,6 +544,44 @@ describe("prepareCompaction with context windows", () => {
 });
 
 describe("prepareCompaction with previous compaction", () => {
+	it("preserves previous history when splitting the first retained turn again", async () => {
+		const previousSummary = "Never deploy without approval.";
+		const entries = [
+			createMessageEntry(createUserMessage("Earlier request")),
+			createMessageEntry(createAssistantMessage("Earlier work")),
+			createMessageEntry(createUserMessage("Continue implementation")),
+			createMessageEntry(createAssistantMessage("Initial progress")),
+		];
+		const previousCompaction = createCompactionEntry(previousSummary, entries[2].id);
+		const newest = createMessageEntry(createAssistantMessage("Newest work ".repeat(80)));
+		const pathEntries = [...entries, previousCompaction, newest];
+		const preparation = prepareCompaction(pathEntries, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 20 });
+		expect(preparation).toMatchObject({ previousSummary, isSplitTurn: true, messagesToSummarize: [] });
+		let requests = 0;
+		const result = await compact(
+			preparation!,
+			getModel("anthropic", "claude-sonnet-4-5")!,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			() => {
+				requests++;
+				const stream = new AssistantMessageEventStream();
+				stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Prefix progress summary") });
+				return stream;
+			},
+		);
+		const reloaded = buildSessionContext([
+			...pathEntries,
+			createCompactionEntry(result.summary, result.firstKeptEntryId),
+		]);
+		expect(extractText(reloaded.messages)).toContain(previousSummary);
+		expect(extractText(reloaded.messages)).toContain("Prefix progress summary");
+		expect(reloaded.messages.slice(1)).toEqual([newest.message]);
+		expect(requests).toBe(1);
+	});
 	it("should skip repeated compactions when kept messages still fit", () => {
 		const u1 = createMessageEntry(createUserMessage("user msg 1 (summarized by compaction1)"));
 		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1"));
