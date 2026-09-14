@@ -17,7 +17,7 @@ function escapeRegex(value: string): string {
 function buildFdPathQuery(query: string): string {
 	const normalized = toDisplayPath(query);
 	if (!normalized.includes("/")) {
-		return normalized;
+		return escapeRegex(normalized);
 	}
 
 	const hasTrailingSeparator = normalized.endsWith("/");
@@ -199,7 +199,7 @@ async function walkDirectoryWithFd(
 				return;
 			}
 
-			const lines = stdout.trim().split("\n").filter(Boolean);
+			const lines = stdout.split(/\r?\n/).filter(Boolean);
 			const results: Array<{ path: string; isDirectory: boolean }> = [];
 
 			for (const line of lines) {

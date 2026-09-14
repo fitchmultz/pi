@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { applyPatch } from "diff";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -75,6 +76,52 @@ describe("Coding Agent Tools", () => {
 		vi.restoreAllMocks();
 		// Clean up test directory
 		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	describe("literal Unicode-space paths", () => {
+		it.each(["\u00a0", "\u2009", "\u202f"])("reads, writes and edits the exact %j filename", async (space) => {
+			const exact = join(testDir, `report${space}final.txt`);
+			const other = join(testDir, "report final.txt");
+			writeFileSync(exact, "intended");
+			writeFileSync(other, "unrelated");
+
+			expect.soft(getTextOutput(await readTool.execute("read-exact", { path: exact }))).toBe("intended");
+			await writeTool.execute("write-exact", { path: exact, content: "replacement" });
+			expect.soft(readFileSync(exact, "utf-8")).toBe("replacement");
+			expect.soft(readFileSync(other, "utf-8")).toBe("unrelated");
+
+			const edits = [{ oldText: "replacement", newText: "edited" }];
+			expect.soft(await computeEditsDiff(exact, edits, testDir)).toMatchObject({
+				diff: expect.stringContaining("+1 edited"),
+			});
+			await editTool.execute("edit-exact", { path: exact, edits });
+			expect.soft(readFileSync(exact, "utf-8")).toBe("edited");
+			expect.soft(readFileSync(other, "utf-8")).toBe("unrelated");
+		});
+
+		it("creates a new Unicode-space filename without overwriting its ASCII neighbor", async () => {
+			const exact = join(testDir, "new\u00a0file.txt");
+			const other = join(testDir, "new file.txt");
+			writeFileSync(other, "unrelated");
+			await writeTool.execute("create-exact", { path: exact, content: "created" });
+			expect.soft(readFileSync(other, "utf-8")).toBe("unrelated");
+			expect(readFileSync(exact, "utf-8")).toBe("created");
+		});
+
+		it("does not edit an ASCII neighbor when the Unicode-space filename is missing", async () => {
+			const exact = join(testDir, "missing\u00a0file.txt");
+			const other = join(testDir, "missing file.txt");
+			writeFileSync(other, "unrelated");
+			await expect
+				.soft(
+					editTool.execute("missing-exact", {
+						path: exact,
+						edits: [{ oldText: "unrelated", newText: "changed" }],
+					}),
+				)
+				.rejects.toThrow(/ENOENT/);
+			expect(readFileSync(other, "utf-8")).toBe("unrelated");
+		});
 	});
 
 	describe("read tool", () => {
@@ -833,6 +880,42 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("grep tool", () => {
+		it("respects .gitignore outside Git, including nested overrides and explicit files", async () => {
+			mkdirSync(join(testDir, "nested"));
+			writeFileSync(join(testDir, ".gitignore"), "ignored.txt\n");
+			writeFileSync(join(testDir, "nested", ".gitignore"), "!ignored.txt\n");
+			for (const file of ["ignored.txt", "kept.txt", "nested/ignored.txt"]) {
+				writeFileSync(join(testDir, file), "needle");
+			}
+			const result = await createGrepTool(testDir).execute("ignore-outside-git", { pattern: "needle" });
+			expect(getTextOutput(result).split("\n").sort()).toEqual([
+				"kept.txt:1: needle",
+				"nested/ignored.txt:1: needle",
+			]);
+			const explicit = await createGrepTool(testDir).execute("explicit-ignored-file", {
+				pattern: "needle",
+				path: "ignored.txt",
+			});
+			expect(getTextOutput(explicit)).toBe("ignored.txt:1: needle");
+		});
+
+		it("keeps parent .gitignore rules outside nested Git repositories", async () => {
+			// Native fd/rg defaults must retain the nested-repo boundary (upstream #5960).
+			execFileSync("git", ["init", "--quiet", testDir]);
+			const nested = join(testDir, "nested");
+			execFileSync("git", ["init", "--quiet", nested]);
+			writeFileSync(join(testDir, ".gitignore"), "ignored.txt\n");
+			writeFileSync(join(testDir, "ignored.txt"), "needle");
+			writeFileSync(join(nested, "ignored.txt"), "needle");
+			for (const searchPath of [testDir, nested]) {
+				const prefix = searchPath === testDir ? "nested/" : "";
+				const grep = await createGrepTool(searchPath).execute("nested-git-grep", { pattern: "needle" });
+				expect(getTextOutput(grep)).toBe(`${prefix}ignored.txt:1: needle`);
+				const find = await createFindTool(searchPath).execute("nested-git-find", { pattern: "*.txt" });
+				expect(getTextOutput(find)).toBe(`${prefix}ignored.txt`);
+			}
+		});
+
 		it("should include filename when searching a single file", async () => {
 			const testFile = join(testDir, "example.txt");
 			writeFileSync(testFile, "first line\nmatch line\nlast line");

@@ -1,5 +1,6 @@
 import { accessSync, constants } from "node:fs";
 import { access } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 
 const NARROW_NO_BREAK_SPACE = "\u202F";
@@ -37,20 +38,35 @@ export async function pathExists(filePath: string): Promise<boolean> {
 	}
 }
 
+// fd/rg's --no-require-git also removes nested repository boundaries (#5960).
+// Use it only outside Git; leave ignore-file parsing to the native tools.
+export async function isInsideGitRepo(searchPath: string): Promise<boolean> {
+	for (let current = searchPath; ; ) {
+		if (await pathExists(join(current, ".git"))) return true;
+		const parent = dirname(current);
+		if (parent === current) return false;
+		current = parent;
+	}
+}
+
 export function expandPath(filePath: string): string {
 	return normalizePath(filePath, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
 }
 
 /**
  * Resolve a path relative to the given cwd.
- * Handles ~ expansion and absolute paths.
+ * Handles ~ expansion and absolute paths without changing literal filename characters.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
-	return resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
+	return resolvePath(filePath, cwd, { stripAtPrefix: true });
 }
 
 export function resolveReadPath(filePath: string, cwd: string): string {
-	const resolved = resolveToCwd(filePath, cwd);
+	const exact = resolveToCwd(filePath, cwd);
+	if (fileExists(exact)) return exact;
+
+	// Filename conveniences are read-only fallbacks, never preferred over an exact path.
+	const resolved = resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
 
 	if (fileExists(resolved)) {
 		return resolved;
@@ -80,11 +96,15 @@ export function resolveReadPath(filePath: string, cwd: string): string {
 		return nfdCurlyVariant;
 	}
 
-	return resolved;
+	return exact;
 }
 
 export async function resolveReadPathAsync(filePath: string, cwd: string): Promise<string> {
-	const resolved = resolveToCwd(filePath, cwd);
+	const exact = resolveToCwd(filePath, cwd);
+	if (await pathExists(exact)) return exact;
+
+	// Keep the same fallback order as resolveReadPath.
+	const resolved = resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
 
 	if (await pathExists(resolved)) {
 		return resolved;
@@ -114,5 +134,5 @@ export async function resolveReadPathAsync(filePath: string, cwd: string): Promi
 		return nfdCurlyVariant;
 	}
 
-	return resolved;
+	return exact;
 }
