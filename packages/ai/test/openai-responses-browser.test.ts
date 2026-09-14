@@ -39,6 +39,7 @@ it("bundles and runs direct Responses over HTTP without Node socket dependencies
 		clearTimeout,
 		fetch: globalThis.fetch,
 		console,
+		performance,
 	}) as { streamSimple: typeof streamSimple };
 	const server = await createResponsesServer((request) =>
 		replyWithOutput(request, "browser", [textOutput("browser")]),

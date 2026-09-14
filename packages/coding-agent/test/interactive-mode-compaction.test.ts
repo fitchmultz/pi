@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
+import type { PromptOptions } from "../src/core/agent-session.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -197,7 +198,7 @@ describe("InteractiveMode compaction events", () => {
 			kind: "compaction",
 			usage,
 		});
-		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledExactlyOnceWith();
 
 		const pending: AgentMessage = { role: "user", content: "newly submitted request", timestamp: 1 };
 		vi.clearAllMocks();
@@ -214,15 +215,6 @@ describe("InteractiveMode compaction events", () => {
 			pending,
 		]);
 
-		const boundary: SessionEntry = {
-			type: "context_window",
-			id: "fresh",
-			parentId: "latest",
-			timestamp: "2025-01-03T00:00:00Z",
-			handoff: "fresh handoff",
-			tokensBefore: 123,
-		};
-		fakeThis.sessionManager.buildContextEntries.mockReturnValue([boundary]);
 		vi.clearAllMocks();
 		await handleEvent.call(fakeThis, {
 			type: "compaction_end",
@@ -233,12 +225,11 @@ describe("InteractiveMode compaction events", () => {
 			contextWindowStarted: true,
 			pendingMessages: [pending],
 		});
-		expect(fakeThis.chatContainer.clear).toHaveBeenCalledOnce();
-		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([boundary]);
-		expect(fakeThis.addMessageToChat).toHaveBeenCalledExactlyOnceWith(pending);
-		expect(fakeThis.renderSessionEntries.mock.invocationCallOrder[0]).toBeLessThan(
-			fakeThis.addMessageToChat.mock.invocationCallOrder[0],
-		);
+		// The native context_window_started event already rebuilt this view.
+		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
+		expect(fakeThis.addMessageToChat).not.toHaveBeenCalled();
+		expect(fakeThis.showStatus).not.toHaveBeenCalled();
+		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledExactlyOnceWith();
 	});
 
 	test("updates the working state when the same agent run resumes after compaction", async () => {
@@ -277,23 +268,22 @@ describe("InteractiveMode compaction events", () => {
 			compactionQueuedMessages: [{ text: "change direction", mode: "steer" as const }],
 			session: {
 				clearQueue: vi.fn(),
-				prompt: vi.fn().mockResolvedValue(undefined),
-				steer: vi.fn().mockResolvedValue(undefined),
-				followUp: vi.fn().mockResolvedValue(undefined),
+				prompt: vi.fn(async (_text: string, options: PromptOptions) => options.preflightResult?.(true)),
 			},
-			isExtensionCommand: vi.fn().mockReturnValue(false),
 			updatePendingMessagesDisplay: vi.fn(),
 			showError: vi.fn(),
 		};
 
 		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (
 			this: typeof fakeThis,
-			options?: { willRetry?: boolean },
 		) => Promise<void>;
 
-		await flushCompactionQueue.call(fakeThis, { willRetry: false });
+		await flushCompactionQueue.call(fakeThis);
 
-		expect(fakeThis.session.prompt).toHaveBeenCalledWith("change direction", { streamingBehavior: "steer" });
+		expect(fakeThis.session.prompt).toHaveBeenCalledWith(
+			"change direction",
+			expect.objectContaining({ streamingBehavior: "steer" }),
+		);
 		expect(fakeThis.compactionQueuedMessages).toEqual([]);
 		expect(fakeThis.showError).not.toHaveBeenCalled();
 	});

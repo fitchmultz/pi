@@ -2,7 +2,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { CompactionSettings } from "../../src/core/compaction/index.ts";
+import type { ExtensionContext, ExtensionRunner } from "../../src/core/extensions/index.ts";
+import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { createHarness } from "./harness.ts";
 
 async function observeSettings(options: Parameters<typeof createHarness>[0]) {
@@ -26,6 +29,72 @@ async function observeSettings(options: Parameters<typeof createHarness>[0]) {
 }
 
 describe("ctx.getCompactionSettings", () => {
+	it.each(["event", "shortcut"] as const)("tracks active-model budgets through the %s context", async (path) => {
+		let context: ExtensionContext | undefined;
+		const harness = await createHarness({
+			models: [{ id: "first" }, { id: "second" }, { id: "ordinary" }],
+			settings: {
+				compaction: {
+					enabled: false,
+					reserveTokens: 5000,
+					keepRecentTokens: 10000,
+					modelOverrides: {
+						"faux/first": { reserveTokens: 2000, keepRecentTokens: 1000 },
+						"faux/second": { keepRecentTokens: 3000 },
+					},
+				},
+			},
+			extensionFactories: [
+				(pi) => {
+					const observe = (ctx: ExtensionContext) => {
+						context = ctx;
+					};
+					pi.on("session_start", (_event, ctx) => observe(ctx));
+					pi.registerShortcut("ctrl+shift+y", { handler: observe });
+				},
+			],
+		});
+		try {
+			// Exercise native shortcut dispatch and context construction without starting a terminal.
+			const view = Object.assign(Object.create(InteractiveMode.prototype), {
+				runtimeHost: { session: harness.session },
+				keybindings: new KeybindingsManager(),
+				defaultEditor: {},
+			}) as {
+				setupExtensionShortcuts(runner: ExtensionRunner): void;
+				defaultEditor: { onExtensionShortcut(data: string): boolean };
+			};
+			if (path === "event") await harness.session.bindExtensions({});
+			else {
+				view.setupExtensionShortcuts(harness.session.extensionRunner);
+				expect(view.defaultEditor.onExtensionShortcut("\u001b[121;6u")).toBe(true);
+			}
+			expect(context?.getCompactionSettings()).toEqual({
+				enabled: false,
+				reserveTokens: 2000,
+				keepRecentTokens: 1000,
+			});
+			await harness.session.setModel(harness.getModel("second")!);
+			expect(context?.getCompactionSettings()).toEqual({
+				enabled: false,
+				reserveTokens: 5000,
+				keepRecentTokens: 3000,
+			});
+			await harness.session.setModel(harness.getModel("ordinary")!);
+			expect(context?.getCompactionSettings()).toEqual({
+				enabled: false,
+				reserveTokens: 5000,
+				keepRecentTokens: 10000,
+			});
+			expect(harness.settingsManager.getCompactionSettings()).toEqual({
+				enabled: false,
+				reserveTokens: 5000,
+				keepRecentTokens: 10000,
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
 	it("returns the session's effective compaction settings", async () => {
 		const { seen, effective } = await observeSettings({
 			settings: { compaction: { enabled: false, reserveTokens: 5000 } },

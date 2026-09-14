@@ -105,6 +105,16 @@ describe("native direct Responses WebSockets", () => {
 		const second = await streamSimple(server.model, context, options).result();
 		expect(second.stopReason).toBe("stop");
 		expect(second.responseId).toBe("resp_second");
+		expect(second.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
+			transport: "websocket",
+			websocketAttempts: 1,
+			sseAttempts: 0,
+			socketReused: true,
+			websocketRequestMode: "delta",
+			applicationEvents: 4,
+			returnedServiceTier: "priority",
+			finishedMs: expect.any(Number),
+		});
 		expect(server.connections).toHaveLength(1);
 		expect(server.requests.map((request) => request.transport)).toEqual(["websocket", "websocket"]);
 		expect(server.requests[0].body).toMatchObject({
@@ -586,6 +596,16 @@ describe("native direct Responses WebSockets", () => {
 		expect(JSON.stringify(server.requests[0].body.input)).toContain("full input");
 		expect(result.diagnostics).toEqual([
 			expect.objectContaining({
+				type: "provider_request",
+				details: expect.objectContaining({
+					transport: "sse",
+					websocketAttempts: 1,
+					sseAttempts: 1,
+					fallbackReason: "before_stream_start",
+					finishedMs: expect.any(Number),
+				}),
+			}),
+			expect.objectContaining({
 				type: "provider_transport_failure",
 				details: { configuredTransport: "auto", fallbackTransport: "sse", eventsEmitted: false },
 			}),
@@ -643,6 +663,13 @@ describe("native direct Responses WebSockets", () => {
 	});
 
 	it("sends current full input when server output includes items Pi cannot replay", async () => {
+		const citation = {
+			type: "url_citation",
+			url: "https://example.com",
+			title: "Fixture",
+			start_index: 0,
+			end_index: 6,
+		};
 		const server = await createResponsesServer((request) => {
 			const output =
 				server.requests.length === 1
@@ -653,7 +680,10 @@ describe("native direct Responses WebSockets", () => {
 								status: "completed",
 								action: { type: "search", query: "fixture" },
 							},
-							textOutput("first", "search result summary"),
+							{
+								...textOutput("first"),
+								content: [{ type: "output_text", text: "search result summary", annotations: [citation] }],
+							},
 						]
 					: [textOutput("second")];
 			replyWithOutput(request, `resp_${server.requests.length}`, output);
@@ -665,11 +695,19 @@ describe("native direct Responses WebSockets", () => {
 			sessionId: "server-tool-session",
 			samplingParams: { tools: [{ type: "web_search" }] },
 		};
-		context.messages.push(await streamSimple(server.model, context, options).result(), {
-			role: "user",
-			content: "next input",
-			timestamp: 1,
+		const first = await streamSimple(server.model, context, options).result();
+		expect(first.webSearch).toEqual({
+			calls: [
+				{
+					type: "web_search_call",
+					id: "ws_search",
+					status: "completed",
+					action: { type: "search", query: "fixture" },
+				},
+			],
+			citations: [{ itemId: "msg_first", contentIndex: 0, annotation: citation }],
 		});
+		context.messages.push(first, { role: "user", content: "next input", timestamp: 1 });
 		const second = await streamSimple(server.model, context, options).result();
 		expect(second.stopReason).toBe("stop");
 		expect(server.connections).toHaveLength(1);
@@ -684,6 +722,40 @@ describe("native direct Responses WebSockets", () => {
 			input: [{ role: "user", content: [{ type: "input_text", text: "resume deltas" }] }],
 		});
 		expect(server.requests[2].body.tools).toEqual([{ type: "web_search" }]);
+		expect(server.connections).toHaveLength(1);
+	});
+
+	// PR #15: refusals are persisted as text, not replayed as refusal content.
+	it("keeps the socket but resets continuation after a refusal", async () => {
+		const server = await createResponsesServer((request) => {
+			const first = server.requests.length === 1;
+			replyWithOutput(request, `resp_${server.requests.length}`, [
+				first
+					? { ...textOutput("refusal"), content: [{ type: "refusal", refusal: "Cannot help with that." }] }
+					: textOutput("second"),
+			]);
+		});
+		servers.push(server);
+		const context: Context = { messages: [{ role: "user", content: "first input", timestamp: 0 }] };
+		const options = { apiKey: "local-key", sessionId: "refusal-session" };
+		const first = await streamSimple(server.model, context, options).result();
+		expect(first.stopReason).toBe("stop");
+		expect(first.content).toEqual([expect.objectContaining({ type: "text", text: "Cannot help with that." })]);
+		context.messages.push(first, { role: "user", content: "safe follow-up", timestamp: 1 });
+		const second = await streamSimple(server.model, context, options).result();
+		expect(second.stopReason).toBe("stop");
+		expect(server.requests[1].body.previous_response_id).toBeUndefined();
+		expect(server.requests[1].body.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "first input" }] },
+			textOutput("refusal", "Cannot help with that."),
+			{ role: "user", content: [{ type: "input_text", text: "safe follow-up" }] },
+		]);
+		context.messages.push(second, { role: "user", content: "resume deltas", timestamp: 2 });
+		expect((await streamSimple(server.model, context, options).result()).stopReason).toBe("stop");
+		expect(server.requests[2].body).toMatchObject({
+			previous_response_id: "resp_2",
+			input: [{ role: "user", content: [{ type: "input_text", text: "resume deltas" }] }],
+		});
 		expect(server.connections).toHaveLength(1);
 	});
 

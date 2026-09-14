@@ -15,7 +15,7 @@ import { getLanguageFromPath, highlightCode, type Theme } from "../../../modes/i
 import { formatPathRelativeToCwdOrAbsolute } from "../../../utils/paths.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
 import { resolveToCwd } from "../path-utils.ts";
-import type { ReadToolDetails } from "../read.ts";
+import type { ReadToolDetails, ReadToolInput } from "../read.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "../render-utils.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "../truncate.ts";
 
@@ -24,7 +24,7 @@ interface CompactReadClassification {
 	label: string;
 }
 const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
-type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
+type ReadRenderArgs = Partial<ReadToolInput> & { file_path?: string };
 function formatReadLineRange(args: ReadRenderArgs | undefined, theme: Theme): string {
 	if (args?.offset === undefined && args?.limit === undefined) return "";
 	const startLine = args.offset ?? 1;
@@ -33,7 +33,8 @@ function formatReadLineRange(args: ReadRenderArgs | undefined, theme: Theme): st
 }
 function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme, cwd: string): string {
 	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
-	return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
+	const jsonDisplay = args?.json === undefined ? "" : theme.fg("dim", ` json=${JSON.stringify(args.json)}`);
+	return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${jsonDisplay}${formatReadLineRange(args, theme)}`;
 }
 function trimTrailingEmptyLines(lines: string[]): string[] {
 	let end = lines.length;
@@ -123,7 +124,7 @@ function formatReadResult(
 
 	const rawPath = str(args?.file_path ?? args?.path);
 	const output = getTextOutput(result, showImages);
-	const lang = !isError && rawPath ? getLanguageFromPath(rawPath) : undefined;
+	const lang = isError ? undefined : args?.json !== undefined ? "json" : getLanguageFromPath(rawPath ?? "");
 	const renderedLines = lang ? highlightCode(replaceTabs(output), lang) : output.split("\n");
 	const lines = trimTrailingEmptyLines(renderedLines);
 	const maxLines = options.expanded ? lines.length : 10;
@@ -151,7 +152,8 @@ export const readRenderers: Pick<ToolDefinition<any, ReadToolDetails | undefined
 	renderCall(rawArgs, theme, context) {
 		const args = rawArgs as ReadRenderArgs | undefined;
 		const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-		const classification = !context.expanded ? getCompactReadClassification(args, context.cwd) : undefined;
+		const classification =
+			!context.expanded && args?.json === undefined ? getCompactReadClassification(args, context.cwd) : undefined;
 		text.setText(
 			classification ? formatCompactReadCall(classification, args, theme) : formatReadCall(args, theme, context.cwd),
 		);

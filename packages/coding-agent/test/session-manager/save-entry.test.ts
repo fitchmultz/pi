@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type CustomEntry, SessionManager } from "../../src/core/session-manager.ts";
 
 describe("SessionManager.saveCustomEntry", () => {
@@ -46,6 +46,23 @@ describe("SessionManager.saveCustomEntry", () => {
 		expect(path[2].id).toBe(msg2Id);
 
 		expect(session.buildSessionContext().messages).toHaveLength(2);
+	});
+});
+
+describe("SessionManager session names", () => {
+	it("reads the latest file-wide name without copying the entry list", () => {
+		const session = SessionManager.inMemory();
+		const entries = vi.spyOn(session, "getEntries");
+		expect(session.getSessionName()).toBeUndefined();
+		const first = session.appendSessionInfo(" Original ");
+		session.appendCustomEntry("later", {});
+		expect(session.getSessionName()).toBe("Original");
+		session.appendSessionInfo("Renamed\nbranch");
+		session.branch(first);
+		expect(session.getSessionName()).toBe("Renamed branch");
+		session.appendSessionInfo(" \n ");
+		expect(session.getSessionName()).toBeUndefined();
+		expect(entries).not.toHaveBeenCalled();
 	});
 });
 

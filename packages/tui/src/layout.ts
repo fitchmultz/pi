@@ -1,5 +1,5 @@
-import type { ScrollView } from "./components/scroll-view.ts";
-import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
+import { renderScrollView, type ScrollView } from "./components/scroll-view.ts";
+import { allocateStackSizes, renderStack, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
 import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
@@ -74,7 +74,16 @@ function renderCached(context: LayoutContext, component: Component, width: numbe
 	}
 	let lines = widths.get(safeWidth);
 	if (!lines) {
-		lines = component.render(safeWidth);
+		const node = getLayoutNode(component);
+		if (node) {
+			const renderChild = (child: Component, childWidth: number) => renderCached(context, child, childWidth);
+			lines =
+				node.type === "scroll"
+					? renderScrollView(node, safeWidth, renderChild)
+					: renderStack(node, safeWidth, renderChild);
+		} else {
+			lines = component.render(safeWidth);
+		}
 		widths.set(safeWidth, lines);
 	}
 	return lines;

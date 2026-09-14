@@ -4,7 +4,7 @@ import { HStack } from "../src/components/h-stack.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
-import { renderLayoutFrame } from "../src/layout.ts";
+import { getLayoutBoxesAt, renderLayoutFrame } from "../src/layout.ts";
 import { encodeKitty, registerKittyImageMetadata } from "../src/terminal-image.ts";
 import { stripTerminalSequences } from "../src/utils.ts";
 
@@ -46,6 +46,64 @@ describe("viewport layout", () => {
 		]);
 		renderLayoutFrame(root, 10, 3, () => {});
 		assert.strictEqual(renderCount, 1);
+	});
+
+	it("renders nested auto-height children once per width in each frame", (t) => {
+		const footer = new Text("footer", 0, 0);
+		const footerRender = t.mock.method(footer, "render");
+		const transcript = new ScrollView(new Text("1\n2\n3\n4\n5", 0, 0), { follow: "end" });
+		const dock = new VStack([{ component: new Text("editor", 0, 0), minSize: 3 }, footer]);
+		const root = new VStack([
+			{ component: transcript, basis: 0, grow: 1 },
+			{ component: dock, basis: "auto" },
+		]);
+
+		const frame = renderLayoutFrame(root, 10, 7, () => {});
+		assert.deepStrictEqual(visibleLines(frame.lines), ["3", "4", "5", "editor", "", "", "footer"]);
+		assert.strictEqual(transcript.scrollTop, 2);
+		assert.strictEqual(transcript.viewportHeight, 3);
+		assert.deepStrictEqual(frame.root.children[1]!.children[1]!.rect, { x: 0, y: 6, width: 10, height: 1 });
+		assert.strictEqual(getLayoutBoxesAt(frame, 0, 6)[0]!.component, footer);
+		assert.strictEqual(footerRender.mock.callCount(), 1);
+
+		footer.setText("changed");
+		assert.strictEqual(visibleLines(renderLayoutFrame(root, 12, 7, () => {}).lines)[6], "changed");
+		assert.strictEqual(footerRender.mock.callCount(), 2);
+	});
+
+	it("reuses child renders while measuring nested horizontal and scroll heights", (t) => {
+		const text = new Text("wrapped text", 0, 0);
+		const textRender = t.mock.method(text, "render");
+		const scroll = new ScrollView(text, { scrollbar: "always" });
+		const row = new HStack([
+			{ component: scroll, basis: 6, shrink: 0 },
+			{ component: new Text("right", 0, 0), basis: 5, shrink: 0 },
+		]);
+		const frame = renderLayoutFrame(new VStack([row]), 11, 3, () => {});
+
+		assert.deepStrictEqual(visibleLines(frame.lines), ["wrapp┃right", "ed   ┃", "text ┃"]);
+		assert.strictEqual(scroll.viewportHeight, 3);
+		assert.strictEqual(frame.root.children[0]!.children[0]!.children[0]!.rect.width, 5);
+		assert.strictEqual(textRender.mock.callCount(), 1);
+	});
+
+	it("reuses native child renders between auto-width and height measurement", (t) => {
+		const footer = new Text("footer", 0, 0);
+		const render = t.mock.method(footer, "render");
+		const root = new HStack([{ component: new VStack([footer]), grow: 1 }]);
+		const frame = renderLayoutFrame(root, 12, 1, () => {});
+		assert.deepStrictEqual(visibleLines(frame.lines), ["footer"]);
+		assert.strictEqual(frame.root.children[0]!.rect.width, 12);
+		assert.strictEqual(render.mock.callCount(), 1);
+	});
+
+	it("reuses native child renders when collecting scroll content lines", (t) => {
+		const footer = new Text("footer", 0, 0);
+		const render = t.mock.method(footer, "render");
+		const frame = renderLayoutFrame(new ScrollView(new VStack([footer])), 12, 1, () => {});
+		assert.deepStrictEqual(visibleLines(frame.lines), ["footer"]);
+		assert.deepStrictEqual(visibleLines([...frame.root.scrollContentLines!]), ["footer"]);
+		assert.strictEqual(render.mock.callCount(), 1);
 	});
 
 	it("paints only clipped rows from very large scroll content", () => {

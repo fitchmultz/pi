@@ -13,7 +13,8 @@ type FakeExtensionRunner = {
 
 type FakeSession = {
 	sessionManager: { getHeader: () => object | undefined };
-	agent: { waitForIdle: () => Promise<void>; subscribe: ReturnType<typeof vi.fn> };
+	agent: { subscribe: ReturnType<typeof vi.fn> };
+	waitForIdle: () => Promise<void>;
 	state: { messages: AgentMessage[] };
 	extensionRunner: FakeExtensionRunner;
 	bindExtensions: ReturnType<typeof vi.fn>;
@@ -84,7 +85,8 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 
 	const session: FakeSession = {
 		sessionManager: { getHeader: () => undefined },
-		agent: { waitForIdle: async () => {}, subscribe: vi.fn(() => () => {}) },
+		agent: { subscribe: vi.fn(() => () => {}) },
+		waitForIdle: async () => {},
 		state,
 		extensionRunner,
 		bindExtensions: vi.fn(async () => {}),

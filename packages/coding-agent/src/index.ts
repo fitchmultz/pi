@@ -58,6 +58,8 @@ export type {
 	AgentToolUpdateCallback,
 	AppKeybinding,
 	AutocompleteProviderFactory,
+	AutoRetryEndEvent,
+	AutoRetryStartEvent,
 	BashCwdHook,
 	BashToolCallEvent,
 	BeforeAgentStartEvent,
@@ -134,6 +136,9 @@ export type {
 	SlashCommandInfo,
 	SlashCommandSource,
 	SourceInfo,
+	SummarizationRetryAttemptStartEvent,
+	SummarizationRetryFinishedEvent,
+	SummarizationRetryScheduledEvent,
 	TerminalInputHandler,
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -260,6 +265,7 @@ export {
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
 export {
+	type CompactionModelOverride,
 	type CompactionSettings,
 	type DefaultProjectTrust,
 	type FullscreenExitOutput,

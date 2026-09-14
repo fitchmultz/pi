@@ -11,6 +11,7 @@ import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import { loadAllHighlightLanguages } from "../src/utils/syntax-highlight.ts";
 
 function createBaseToolDefinition(name = "custom_tool"): ToolDefinition {
 	return {
@@ -412,6 +413,26 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).not.toContain("two\n\n");
 	});
 
+	test("highlights selected JSON from a text file but not selection errors", async () => {
+		await loadAllHighlightLanguages();
+		const component = new ToolExecutionComponent(
+			"read",
+			"tool-read-json-highlighting",
+			{ path: "report.txt", json: { path: "/summary" } },
+			{},
+			createReadToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: '{\n  "status": "ready"\n}' }], isError: false }, false);
+		component.setExpanded(true);
+		expect(component.render(120).join("\n")).toContain(theme.fg("syntaxString", '"ready"'));
+
+		const error = 'JSON selection: json.path "/summary" does not exist.';
+		component.updateResult({ content: [{ type: "text", text: error }], isError: true }, false);
+		expect(component.render(120).join("\n")).toContain(theme.fg("toolOutput", error));
+	});
+
 	test("does not syntax-highlight read errors based on the requested file path", () => {
 		const component = new ToolExecutionComponent(
 			"read",
@@ -490,6 +511,35 @@ describe("ToolExecutionComponent parity", () => {
 		const expanded = stripAnsi(component.render(120).join("\n"));
 		expect(expanded).toContain("hidden content");
 	});
+
+	for (const scenario of [
+		{
+			path: "report.txt",
+			json: { path: "/rows", fields: ["name", "status"] },
+			expected: 'read report.txt json={"path":"/rows","fields":["name","status"]}:2-4',
+		},
+		{
+			path: ".pi/AGENTS.md",
+			json: {},
+			expected: "read .pi/AGENTS.md json={}:2-4",
+		},
+	]) {
+		test(`shows JSON selection before the read line range for ${scenario.path}`, () => {
+			const component = new ToolExecutionComponent(
+				"read",
+				"tool-read-json-header",
+				{ path: scenario.path, json: scenario.json, offset: 2, limit: 3 },
+				{},
+				createReadToolDefinition(process.cwd()),
+				createFakeTui(),
+				process.cwd(),
+			);
+
+			expect(stripAnsi(component.render(160).join("\n"))).toContain(scenario.expected);
+			component.setExpanded(true);
+			expect(stripAnsi(component.render(160).join("\n"))).toContain(scenario.expected);
+		});
+	}
 
 	for (const scenario of [
 		{

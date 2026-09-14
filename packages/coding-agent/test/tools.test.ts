@@ -1,5 +1,5 @@
 import { applyPatch } from "diff";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -760,17 +760,48 @@ describe("Coding Agent Tools", () => {
 			expect(fullOutput).toContain("2998\n2999\n3000");
 		});
 
+		it.each(["success", "abort", "error"] as const)(
+			"executeBash flushes full output before returning after %s",
+			async (outcome) => {
+				const outputDir = mkdtempSync(join(tmpdir(), "pi-bash-flush-"));
+				vi.stubEnv(process.platform === "win32" ? "TEMP" : "TMPDIR", outputDir);
+				const controller = new AbortController();
+				const failure = new Error("execution failed");
+				const output = "retained output\n".repeat(10000);
+				try {
+					const execution = executeBashWithOperations(
+						"chatty",
+						testDir,
+						{
+							exec: async (_command, _cwd, { onData }) => {
+								onData(Buffer.from(output));
+								if (outcome === "abort") controller.abort();
+								if (outcome !== "success") throw failure;
+								return { exitCode: 0 };
+							},
+						},
+						{ signal: controller.signal },
+					);
+					if (outcome === "error") {
+						await expect(execution).rejects.toBe(failure);
+					} else {
+						expect(await execution).toMatchObject({ truncated: true, cancelled: outcome === "abort" });
+					}
+					const files = readdirSync(outputDir);
+					expect(files).toHaveLength(1);
+					expect(readFileSync(join(outputDir, files[0]), "utf-8")).toBe(output);
+					rmSync(outputDir, { recursive: true, force: true });
+				} finally {
+					vi.unstubAllEnvs();
+				}
+			},
+		);
+
 		it("executeBash should persist full output when truncation happens by line count only", async () => {
 			const result = await executeBashWithOperations("seq 3000", process.cwd(), createLocalBashOperations());
 			const fullOutputPath = result.fullOutputPath;
 
 			expect(result.truncated).toBe(true);
-			expect(fullOutputPath).toBeDefined();
-
-			for (let i = 0; i < 20 && (!fullOutputPath || !existsSync(fullOutputPath)); i++) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
-
 			expect(fullOutputPath).toBeDefined();
 			expect(existsSync(fullOutputPath!)).toBe(true);
 			const fullOutput = readFileSync(fullOutputPath!, "utf-8");

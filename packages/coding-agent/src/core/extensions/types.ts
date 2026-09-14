@@ -47,6 +47,7 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { AgentSessionEvent } from "../agent-session.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionPreparation, CompactionResult, CompactionSettings } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
@@ -331,6 +332,8 @@ export interface ExtensionContext {
 	thinkingLevel?: ThinkingLevel;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
+	/** Whether user Bash is unfinished, from interceptor dispatch through execution and result recording. */
+	isBashRunning(): boolean;
 	/** Whether project-local trust is active for this context. */
 	isProjectTrusted(): boolean;
 	/** The current abort signal, or undefined when the agent is not streaming. */
@@ -339,6 +342,10 @@ export interface ExtensionContext {
 	abort(): void;
 	/** Whether steering/follow-up messages await delivery, including custom messages. Excludes nextTurn/context-only asides. */
 	hasPendingMessages(): boolean;
+	/** Number of unpersisted custom messages queued with deliverAs: "nextTurn". */
+	getPendingNextTurnCount(): number;
+	/** Submitted inputs awaiting native preflight or held in the current mode's input queues. Excludes dispatched extension commands. */
+	getPendingInputCount(): number;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
@@ -444,6 +451,8 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	isPartial: boolean;
 	/** Whether the result view is expanded. */
 	expanded: boolean;
+	/** Compact view mode, independent of expansion. Omitted means normal view. */
+	compactView?: boolean;
 	/** Whether inline images are currently shown in the TUI. */
 	showImages: boolean;
 	/** Whether the current result is an error. */
@@ -763,6 +772,16 @@ export interface AgentEndEvent {
 export interface AgentSettledEvent {
 	type: "agent_settled";
 }
+
+/** Native retry notifications; handlers are awaited before the retry proceeds. */
+export type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
+export type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
+export type SummarizationRetryScheduledEvent = Extract<AgentSessionEvent, { type: "summarization_retry_scheduled" }>;
+export type SummarizationRetryAttemptStartEvent = Extract<
+	AgentSessionEvent,
+	{ type: "summarization_retry_attempt_start" }
+>;
+export type SummarizationRetryFinishedEvent = Extract<AgentSessionEvent, { type: "summarization_retry_finished" }>;
 
 export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
 
@@ -1120,6 +1139,11 @@ export type ExtensionEvent =
 	| AgentStartEvent
 	| AgentEndEvent
 	| AgentSettledEvent
+	| AutoRetryStartEvent
+	| AutoRetryEndEvent
+	| SummarizationRetryScheduledEvent
+	| SummarizationRetryAttemptStartEvent
+	| SummarizationRetryFinishedEvent
 	| UIPromptStartEvent
 	| UIPromptEndEvent
 	| TurnStartEvent
@@ -1226,6 +1250,8 @@ export interface SessionBeforeTreeResult {
 
 export interface MessageRenderOptions {
 	expanded: boolean;
+	/** Compact view mode, independent of expansion. Omitted means normal view. */
+	compactView?: boolean;
 	/** Horizontal padding configured by the outputPad setting. */
 	outputPad: number;
 }
@@ -1319,6 +1345,11 @@ export interface ExtensionAPI {
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): void;
+	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>): void;
+	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): void;
+	on(event: "summarization_retry_scheduled", handler: ExtensionHandler<SummarizationRetryScheduledEvent>): void;
+	on(event: "summarization_retry_attempt_start", handler: ExtensionHandler<SummarizationRetryAttemptStartEvent>): void;
+	on(event: "summarization_retry_finished", handler: ExtensionHandler<SummarizationRetryFinishedEvent>): void;
 	on(event: "ui_prompt_start", handler: ExtensionHandler<UIPromptStartEvent>): void;
 	on(event: "ui_prompt_end", handler: ExtensionHandler<UIPromptEndEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
@@ -1760,10 +1791,13 @@ export interface ExtensionContextActions {
 	getModel: () => Model<any> | undefined;
 	getScopedModels: () => readonly ScopedModel[];
 	isIdle: () => boolean;
+	isBashRunning: () => boolean;
 	isProjectTrusted: () => boolean;
 	getSignal: () => AbortSignal | undefined;
 	abort: () => void;
 	hasPendingMessages: () => boolean;
+	getPendingNextTurnCount: () => number;
+	getPendingInputCount: () => number;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
 	getCompactionSettings: () => CompactionSettings;

@@ -191,11 +191,13 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
+| `/compact-view [on\|off\|toggle]` | Toggle compact tool cards in this UI and remember the default for future starts |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML or JSONL file |
 | `/import <file>` | Import and resume a session from a JSONL file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload settings and resources; extension code changes require a full restart |
+| `/restart [text]` | Restart the Node CLI worker and resume this session; optional text continues the agent |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
@@ -253,9 +255,11 @@ pi --fork <path|id>    # Fork specific session file or ID into a new session
 
 Use `/session` in interactive mode to see the current session ID before reusing it with `--session <id>` or `--fork <id>`.
 
+The Node CLI also supports [managed restarts](docs/restart.md): use `/restart`, or let a shell tool run `pi restart --message "Continue the task"`. Staged runtime and extension updates can restart and resume automatically, with one startup rollback attempt.
+
 ### Branching
 
-**`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history preserved in a single file.
+**`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history preserved in a single file. Selecting a point while the model is responding cancels that response. Navigation cannot proceed while compaction or another tree navigation is still running; wait for it to finish and retry.
 
 <p align="center"><img src="docs/images/tree-view.png" alt="Tree View" width="600"></p>
 
@@ -397,7 +401,7 @@ The default export can also be `async`. pi waits for async extension factories b
 - Games while waiting (yes, Doom runs)
 - ...anything you can dream up
 
-Place in `~/.pi/agent/extensions/`, `.pi/extensions/`, or a [pi package](#pi-packages) to share with others. Restart pi after changing extension code or dependencies; `/reload` reinitializes already-loaded code. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
+Place in `~/.pi/agent/extensions/`, `.pi/extensions/`, or a [pi package](#pi-packages) to share with others. Restart pi after changing extension code or dependencies; `/reload` reinitializes already-loaded code. The Node CLI's [managed restart](docs/restart.md) can activate staged updates without a user-managed restart. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
 
 ### Themes
 

@@ -273,6 +273,12 @@ export class SessionWorkerManager {
 			}
 			throw error;
 		}
+		// A reply must not overtake updates already queued for this attachment.
+		await Promise.all(
+			[...this.#serviceSubscriptions.values()]
+				.filter((entry) => entry.worker === worker && sameScope(entry.scope, scope))
+				.map((entry) => entry.deliveryTail),
+		);
 		if (control?.type === "unsubscribe") {
 			this.#serviceSubscriptions.delete(scopedServiceSubscriptionKey(scope, control.subscriptionId));
 		}

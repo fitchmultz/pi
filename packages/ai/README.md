@@ -1035,7 +1035,7 @@ Direct `openai` requests prefer the official SDK's persistent Responses WebSocke
 
 Always pass the **full current context**, including completed tool results. Pi sends a delta with `previous_response_id` only when the current input has the exact previous input and replayable reply as its prefix, with unchanged request parameters. Edited history, fresh windows, compaction, or changed instructions/tools/model start a new chain. Changed resolved headers, credentials, endpoint, or proxy select a new connection. The saved session transcript is unchanged.
 
-Incomplete replies and server output that Pi does not persist, such as built-in web-search records, clear only the continuation. The next request sends full current input on the same socket, with its tools still enabled. A later fully replayable completed reply can establish a new incremental chain.
+Incomplete replies, refusals, and server output that Pi cannot replay, such as built-in web-search calls, clear only the continuation. Web-search calls and citations remain saved as message metadata; they are not replayed as model input. The next request sends full current input on the same socket, with its tools still enabled. A later fully replayable completed reply can establish a new incremental chain.
 
 Before output starts, a missing cached response ID or expired connection retries once with full current input on a fresh socket. Other transport failures before output starts fall back to full-input HTTP/SSE. Failures after output starts surface normally rather than replaying partial output. Pre-stream provider errors with status/retry headers use the existing `maxRetries` and `maxRetryDelayMs` policy.
 
@@ -1229,7 +1229,7 @@ interface OpenAICompletionsCompat {
   supportsUsageInStreaming?: boolean; // Whether provider supports `stream_options: { include_usage: true }` (default: true)
   supportsStrictMode?: boolean;      // Whether provider supports `strict` in tool definitions (default: true)
   supportsOpenAIGrammarTools?: boolean; // Whether to emit OpenAI custom Lark/regex grammar tools; false falls back to normal function tools (default: false; the generated catalog enables it for capable models)
-  sendSessionAffinityHeaders?: boolean; // Send session-affinity data from `sessionId` (default: false)
+  sendSessionAffinityHeaders?: boolean; // Send session-affinity data from `sessionId` (default: true for OpenRouter, false otherwise)
   sessionAffinityFormat?: 'openai' | 'openai-nosession' | 'openrouter'; // Format for session affinity: 'openai' uses `prompt_cache_key`, `session_id`, `x-client-request-id`, and `x-session-affinity`; 'openai-nosession' uses `prompt_cache_key`, `x-client-request-id`, and `x-session-affinity`; 'openrouter' uses `x-session-id` (default: auto-detected)
   maxTokensField?: 'max_completion_tokens' | 'max_tokens';  // Which field name to use (default: max_completion_tokens)
   requiresToolResultName?: boolean;  // Whether tool results require the `name` field (default: false)
@@ -1254,6 +1254,8 @@ interface OpenAIResponsesCompat {
   supportsOpenAIGrammarTools?: boolean; // Whether to emit OpenAI custom Lark/regex grammar tools; false falls back to normal function tools (default: false; the generated catalog enables it for capable models)
 }
 ```
+
+OpenRouter requests send `x-session-id` from `sessionId` when prompt caching is enabled. Chat Completions and Anthropic Messages both auto-detect the OpenRouter provider or an `openrouter.ai` base URL unless `sendSessionAffinityHeaders` is explicitly false. On Anthropic-compatible models, `sessionAffinityFormat: "openrouter"` selects `x-session-id` and is the default for OpenRouter; other endpoints default to `x-session-affinity`. Explicit request headers take precedence over generated headers.
 
 If `compat` is not set, the library falls back to URL-based detection. If `compat` is partially set, unspecified fields use the detected defaults. This is useful for:
 
@@ -1611,6 +1613,8 @@ Built-in login and refresh flows are private provider implementations. Use provi
 Provider notes:
 
 **OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options unless `cacheRetention` is `"none"`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity.
+
+A transient Codex WebSocket transport failure falls back to SSE only if streaming has not started; otherwise the request fails without replay. The next request tries WebSocket again. Oversized frames (close code `1009`) keep using SSE for that session. Call `cleanupSessionResources(sessionId)` when disposing a session to close its sockets and clear its fallback/debug state.
 
 **Azure OpenAI (Responses)**: Uses the Responses API only. Set `AZURE_OPENAI_API_KEY` and either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` supports both `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1` automatically. Use `AZURE_OPENAI_API_VERSION` (defaults to `v1`) to override the API version if needed. Deployment names are treated as model IDs by default, override with `azureDeploymentName` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` using comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are intentionally unsupported.
 

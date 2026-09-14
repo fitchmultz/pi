@@ -1,4 +1,5 @@
 import type { TelemetryContext } from "@earendil-works/pi-telemetry";
+import type { ResponseFunctionWebSearch, ResponseOutputText } from "openai/resources/responses/responses.js";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.ts";
 import type { BedrockOptions } from "./api/bedrock-converse-stream.ts";
@@ -425,6 +426,17 @@ export interface UserMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+/** Provider-reported Responses web actions and URL citations, not fetched page contents. */
+export interface ResponsesWebSearchMetadata {
+	calls?: ResponseFunctionWebSearch[];
+	citations?: {
+		itemId: string;
+		/** Index in the original Responses message's content, not AssistantMessage.content. */
+		contentIndex: number;
+		annotation: ResponseOutputText.URLCitation;
+	}[];
+}
+
 export interface AssistantMessage {
 	role: "assistant";
 	content: (TextContent | ThinkingContent | ToolCall)[];
@@ -435,7 +447,9 @@ export interface AssistantMessage {
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
 	providerThinkingLevel?: string;
-	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
+	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime request measurements, failures, and recoveries.
+	/** Observational metadata from completed Responses items; does not enable search or replay hosted calls. */
+	webSearch?: ResponsesWebSearchMetadata;
 	usage: Usage;
 	stopReason: StopReason;
 	deferred?: DeferredHandle;
@@ -625,7 +639,7 @@ export interface OpenAICompletionsCompat {
 	supportsStrictMode?: boolean;
 	/** Cache control convention for prompt caching. "anthropic" applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user, assistant, or tool-result text content. */
 	cacheControlFormat?: "anthropic";
-	/** Whether to send session-affinity data from `options.sessionId`. Default: false. */
+	/** Whether to send session-affinity data from `options.sessionId`. Default: true for OpenRouter endpoints, false otherwise. */
 	sendSessionAffinityHeaders?: boolean;
 	/** Provider-specific deferred tool serialization mode. */
 	deferredToolsMode?: "kimi";
@@ -677,13 +691,15 @@ export interface AnthropicMessagesCompat {
 	/** Whether the provider supports Anthropic long cache retention (`cache_control.ttl: "1h"`). Default: true. */
 	supportsLongCacheRetention?: boolean;
 	/**
-	 * Whether to send the `x-session-affinity` header from `options.sessionId`
-	 * when caching is enabled. Required for providers like Fireworks that use
-	 * session affinity for prompt cache routing (requests to the same replica
-	 * maximize cache hits).
-	 * Default: false.
+	 * Whether to send session-affinity headers from `options.sessionId` when
+	 * caching is enabled. Required for providers like Fireworks that use session
+	 * affinity for prompt cache routing (requests to the same replica maximize cache hits).
+	 * Default: true for the OpenRouter provider or an openrouter.ai base URL, false otherwise.
+	 * Set false to opt out.
 	 */
 	sendSessionAffinityHeaders?: boolean;
+	/** Session-affinity format. `"openrouter"` sends `x-session-id` and is the default for the OpenRouter provider or an openrouter.ai base URL. Otherwise, sends `x-session-affinity`. */
+	sessionAffinityFormat?: "openrouter";
 	/**
 	 * Whether the provider supports Anthropic-style `cache_control` markers on
 	 * tool definitions. When false, `cache_control` is omitted from tool params.

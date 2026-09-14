@@ -26,6 +26,8 @@ const allowedExternalPackages = new Set([
 	// Optional native accelerators. Their callers fall back to JavaScript when absent.
 	"bufferutil",
 	"utf-8-validate",
+	// Optional native proxy authentication. Its caller reports an install hint when absent.
+	"kerberos",
 	// Optional debug output coloring.
 	"supports-color",
 ]);
@@ -142,6 +144,7 @@ function outputBytes(metafiles) {
 
 for (const entry of [
 	join(codingAgentDistDir, "cli.js"),
+	join(codingAgentDistDir, "cli-launcher.js"),
 	join(codingAgentDistDir, "index.js"),
 	join(codingAgentDistDir, "rpc-entry.js"),
 	join(codingAgentDistDir, "utils", "image-resize-worker.js"),
@@ -160,7 +163,8 @@ const mainResult = await build({
 	...commonBuildOptions(),
 	entryNames: "[name]",
 	entryPoints: {
-		cli: join(codingAgentDistDir, "cli.js"),
+		cli: join(codingAgentDistDir, "cli-launcher.js"),
+		"cli-worker": join(codingAgentDistDir, "cli.js"),
 		index: join(codingAgentDistDir, "index.js"),
 		"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
 	},

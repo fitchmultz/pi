@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { APIConnectionError, APIError, APIUserAbortError } from "openai/error";
+import { APIConnectionError, APIConnectionTimeoutError, APIError, APIUserAbortError } from "openai/error";
 import { WebSocketError } from "openai/resources/responses/internal-base";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
@@ -28,6 +28,11 @@ import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import {
+	createResponsesDiagnostics,
+	diagnosticServiceTier,
+	finishResponsesDiagnostics,
+} from "./openai-responses-diagnostics.ts";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { streamResponsesWebSocket } from "./openai-responses-websocket.ts";
 import { buildBaseOptions } from "./simple-options.ts";
@@ -102,10 +107,6 @@ function getPromptCacheOptions(
 	return undefined;
 }
 
-function formatOpenAIResponsesError(error: unknown): string {
-	return formatProviderError(normalizeProviderError(error), "OpenAI API error");
-}
-
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -144,6 +145,9 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			timestamp: Date.now(),
 		};
 
+		const diagnostics = createResponsesDiagnostics(output);
+		const details = diagnostics.details;
+
 		try {
 			// Create OpenAI client
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
@@ -156,11 +160,20 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			);
 			const client = createClient(model, context, apiKey, options?.headers, options?.fetch, cacheSessionId);
 			let params = buildParams(model, context, options, compat, grammarToolInputProperties);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as ResponseCreateParamsStreaming;
+			details.prepareMs = performance.now() - diagnostics.startedAt;
+			const hookStartedAt = performance.now();
+			try {
+				const nextParams = await options?.onPayload?.(params, model);
+				if (nextParams !== undefined) {
+					params = nextParams as ResponseCreateParamsStreaming;
+				}
+			} finally {
+				details.onPayloadMs = performance.now() - hookStartedAt;
 			}
+			details.requestedServiceTier = diagnosticServiceTier(params.service_tier);
+			details.requestReadyMs = performance.now() - diagnostics.startedAt;
 			const streamOptions = {
+				diagnostics,
 				serviceTier: options?.serviceTier,
 				grammarToolInputProperties,
 				applyServiceTierPricing: (usage: Usage, serviceTier: OpenAIResponsesOptions["serviceTier"]) =>
@@ -175,6 +188,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 					...options,
 					cacheRetention,
 					onResponse: async (response, responseModel) => {
+						details.headersMs = performance.now() - diagnostics.startedAt;
 						try {
 							await options?.onResponse?.(response, responseModel);
 						} catch (error) {
@@ -198,6 +212,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 										started = true;
 										stream.push({ type: "start", partial: output });
 									},
+									diagnostics,
 								);
 								if (!websocketStream) return false;
 								try {
@@ -240,6 +255,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 					const transportError =
 						error instanceof APIConnectionError || (error instanceof WebSocketError && !error.error);
 					if (started || options?.signal?.aborted || callbackFailed || !transportError) throw error;
+					details.fallbackReason = "before_stream_start";
 					appendAssistantMessageDiagnostic(
 						output,
 						createAssistantMessageDiagnostic("provider_transport_failure", error, {
@@ -257,13 +273,27 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 					maxRetries: 0,
 				};
 				const { data: openaiStream, response } = await retryProviderRequest(
-					() => client.responses.create(params, requestOptions).withResponse(),
+					async () => {
+						details.transport = "sse";
+						details.sseAttempts++;
+						details.lastAttemptStartMs = performance.now() - diagnostics.startedAt;
+						try {
+							return await client.responses.create(params, requestOptions).withResponse();
+						} catch (error) {
+							if (error instanceof APIConnectionTimeoutError) {
+								details.localTimeout = "sdk_request";
+								if (options?.timeoutMs !== undefined) details.localTimeoutMs = options.timeoutMs;
+							}
+							throw error;
+						}
+					},
 					{
 						maxRetries: options?.maxRetries,
 						maxRetryDelayMs: options?.maxRetryDelayMs,
 						signal: options?.signal,
 					},
 				);
+				details.headersMs = performance.now() - diagnostics.startedAt;
 				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 				stream.push({ type: "start", partial: output });
 				await processResponsesStream(openaiStream, output, stream, model, streamOptions);
@@ -280,6 +310,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
 
+			finishResponsesDiagnostics(diagnostics);
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
@@ -290,7 +321,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				delete (block as { customInput?: unknown }).customInput;
 			}
 			output.stopReason = options?.signal?.aborted || error instanceof APIUserAbortError ? "aborted" : "error";
-			output.errorMessage = formatOpenAIResponsesError(error);
+			output.errorMessage = formatProviderError(
+				normalizeProviderError(error),
+				`${model.provider === "openai" ? "OpenAI" : model.provider} API error`,
+			);
+			finishResponsesDiagnostics(diagnostics);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}

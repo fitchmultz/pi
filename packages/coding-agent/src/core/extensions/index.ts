@@ -31,6 +31,8 @@ export type {
 	// App keybindings (for custom editors)
 	AppKeybinding,
 	AutocompleteProviderFactory,
+	AutoRetryEndEvent,
+	AutoRetryStartEvent,
 	BashCwdHook,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
@@ -151,6 +153,9 @@ export type {
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,
+	SummarizationRetryAttemptStartEvent,
+	SummarizationRetryFinishedEvent,
+	SummarizationRetryScheduledEvent,
 	TerminalInputHandler,
 	// Events - Tool
 	ToolCallEvent,

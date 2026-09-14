@@ -578,6 +578,7 @@
             const offset = args.offset;
             const limit = args.limit;
             let display = path;
+            if (args.json !== undefined) display += ` json=${JSON.stringify(args.json)}`;
             if (offset !== undefined || limit !== undefined) {
               const start = offset ?? 1;
               const end = limit !== undefined ? start + limit - 1 : '';
@@ -957,6 +958,7 @@
             const limit = args.limit;
 
             let pathHtml = filePath === null ? invalidArg : escapeHtml(shortenPath(filePath || ''));
+            if (args.json !== undefined) pathHtml += ` json=${escapeHtml(JSON.stringify(args.json))}`;
             if (filePath !== null && (offset !== undefined || limit !== undefined)) {
               const startLine = offset ?? 1;
               const endLine = limit !== undefined ? startLine + limit - 1 : '';
@@ -967,7 +969,7 @@
             if (result) {
               html += renderResultImages();
               const output = getResultText();
-              const lang = filePath ? getLanguageFromPath(filePath) : null;
+              const lang = isError ? null : args.json !== undefined ? 'json' : filePath ? getLanguageFromPath(filePath) : null;
               if (output) html += formatExpandableOutput(output, 10, lang);
             }
             break;

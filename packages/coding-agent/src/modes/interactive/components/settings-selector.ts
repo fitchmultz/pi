@@ -67,6 +67,7 @@ export interface SettingsConfig {
 	terminalTheme: TerminalTheme;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
+	compactView: boolean;
 	mermaidRenderingMode: MermaidRenderingMode;
 	showCacheMissNotices: boolean;
 	collapseChangelog: boolean;
@@ -104,6 +105,7 @@ export interface SettingsCallbacks {
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
+	onCompactViewChange: (compactView: boolean) => void;
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onShowCacheMissNoticesChange: (shown: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
@@ -496,6 +498,13 @@ export class SettingsSelectorComponent extends Container {
 				values: HTTP_IDLE_TIMEOUT_CHOICES.map((choice) => choice.label),
 			},
 			{
+				id: "compact-view",
+				label: "Compact view",
+				description: "Use one or two rows for collapsed tool cards in this session; remember for new sessions",
+				currentValue: config.compactView ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
 				id: "hide-thinking",
 				label: "Hide thinking",
 				description: "Hide thinking blocks in assistant responses",
@@ -863,6 +872,9 @@ export class SettingsSelectorComponent extends Container {
 						}
 						break;
 					}
+					case "compact-view":
+						callbacks.onCompactViewChange(newValue === "true");
+						break;
 					case "hide-thinking":
 						callbacks.onHideThinkingBlockChange(newValue === "true");
 						break;

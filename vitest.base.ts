@@ -39,12 +39,12 @@ export default defineConfig({
 			{ find: /^@earendil-works\/pi-ai\/compat$/, replacement: workspaceSourcePaths.aiCompat },
 			{ find: /^@earendil-works\/pi-ai\/oauth$/, replacement: workspaceSourcePaths.aiOAuth },
 			{
-				find: /^@earendil-works\/pi-ai\/providers\/(.+)$/,
-				replacement: `${workspaceSourcePaths.aiProviders}/$1.ts`,
-			},
-			{
 				find: /^@earendil-works\/pi-ai\/utils\/(.+)$/,
 				replacement: `${workspaceSourcePaths.aiUtils}/$1.ts`,
+			},
+			{
+				find: /^@earendil-works\/pi-ai\/providers\/(.+)$/,
+				replacement: `${workspaceSourcePaths.aiProviders}/$1.ts`,
 			},
 			{ find: /^@earendil-works\/pi-agent-core$/, replacement: workspaceSourcePaths.agentIndex },
 			{ find: /^@earendil-works\/pi-agent-core\/node$/, replacement: workspaceSourcePaths.agentNode },

@@ -20,13 +20,11 @@ export const BASH_UPDATE_THROTTLE_MS = 100;
 type BashResultRenderState = {
 	cachedWidth: number | undefined;
 	cachedLines: string[] | undefined;
-	cachedSkipped: number | undefined;
 };
 class BashResultRenderComponent extends Container {
 	state: BashResultRenderState = {
 		cachedWidth: undefined,
 		cachedLines: undefined,
-		cachedSkipped: undefined,
 	};
 }
 function formatDuration(ms: number): string {
@@ -76,22 +74,20 @@ function rebuildBashResultRenderComponent(
 				render: (width: number) => {
 					if (state.cachedLines === undefined || state.cachedWidth !== width) {
 						const preview = truncateToVisualLines(styledOutput, BASH_PREVIEW_LINES, width);
-						state.cachedLines = preview.visualLines;
-						state.cachedSkipped = preview.skippedCount;
+						state.cachedLines = ["", ...preview.visualLines];
+						if (preview.skippedCount > 0) {
+							const hint =
+								theme.fg("muted", `... (${preview.skippedCount} earlier lines,`) +
+								` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+							state.cachedLines.splice(1, 0, truncateToWidth(hint, width, "..."));
+						}
 						state.cachedWidth = width;
 					}
-					if (state.cachedSkipped && state.cachedSkipped > 0) {
-						const hint =
-							theme.fg("muted", `... (${state.cachedSkipped} earlier lines,`) +
-							` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
-						return ["", truncateToWidth(hint, width, "..."), ...(state.cachedLines ?? [])];
-					}
-					return ["", ...(state.cachedLines ?? [])];
+					return state.cachedLines;
 				},
 				invalidate: () => {
 					state.cachedWidth = undefined;
 					state.cachedLines = undefined;
-					state.cachedSkipped = undefined;
 				},
 			});
 		}

@@ -69,7 +69,7 @@ export function normalizeSessionName(value: string): string | undefined {
 	return name.length > 0 ? name : undefined;
 }
 
-export function parseArgs(args: string[]): Args {
+export function parseArgs(args: string[], onOption?: (option: string, tokens: string[]) => void): Args {
 	const result: Args = {
 		messages: [],
 		fileArgs: [],
@@ -78,6 +78,7 @@ export function parseArgs(args: string[]): Args {
 	};
 
 	for (let i = 0; i < args.length; i++) {
+		const start = i;
 		const arg = args[i];
 
 		if (arg === "--") {
@@ -256,6 +257,7 @@ export function parseArgs(args: string[]): Args {
 		} else if (!arg.startsWith("-")) {
 			result.messages.push(arg);
 		}
+		if (arg.startsWith("-")) onOption?.(arg, args.slice(start, i + 1));
 	}
 
 	return result;
@@ -285,6 +287,7 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} list                      List installed extensions from settings
   ${APP_NAME} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
   ${APP_NAME} auth <command>            Print credentials or check provider readiness
+  ${APP_NAME} restart [options]         Queue a managed restart from a Pi shell tool (Node CLI)
   ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list/config/auth
 
 ${chalk.bold("Options:")}

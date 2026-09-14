@@ -290,11 +290,14 @@ export class ExtensionRunner {
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
+	private isBashRunningFn!: () => boolean;
 	private isProjectTrustedFn: () => boolean = () => true;
 	private getSignalFn: () => AbortSignal | undefined = () => undefined;
 	private waitForIdleFn: () => Promise<void> = async () => {};
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
+	private getPendingNextTurnCountFn!: () => number;
+	private getPendingInputCountFn!: () => number;
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private getCompactionSettingsFn!: () => CompactionSettings;
 	private newContextFn: NonNullable<ExtensionContextActions["newContext"]> = () => {};
@@ -357,10 +360,13 @@ export class ExtensionRunner {
 		this.getModel = contextActions.getModel;
 		this.getScopedModels = contextActions.getScopedModels;
 		this.isIdleFn = contextActions.isIdle;
+		this.isBashRunningFn = contextActions.isBashRunning;
 		this.isProjectTrustedFn = contextActions.isProjectTrusted;
 		this.getSignalFn = contextActions.getSignal;
 		this.abortFn = contextActions.abort;
 		this.hasPendingMessagesFn = contextActions.hasPendingMessages;
+		this.getPendingNextTurnCountFn = contextActions.getPendingNextTurnCount;
+		this.getPendingInputCountFn = contextActions.getPendingInputCount;
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.getCompactionSettingsFn = contextActions.getCompactionSettings;
@@ -790,6 +796,10 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.isIdleFn();
 			},
+			isBashRunning: () => {
+				runner.assertActive();
+				return runner.isBashRunningFn();
+			},
 			isProjectTrusted: () => {
 				runner.assertActive();
 				return runner.isProjectTrustedFn();
@@ -805,6 +815,14 @@ export class ExtensionRunner {
 			hasPendingMessages: () => {
 				runner.assertActive();
 				return runner.hasPendingMessagesFn();
+			},
+			getPendingNextTurnCount: () => {
+				runner.assertActive();
+				return runner.getPendingNextTurnCountFn();
+			},
+			getPendingInputCount: () => {
+				runner.assertActive();
+				return runner.getPendingInputCountFn();
 			},
 			shutdown: () => {
 				runner.assertActive();

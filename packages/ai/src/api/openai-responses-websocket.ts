@@ -12,6 +12,7 @@ import type { AssistantMessage, Model, ProviderResponse } from "../types.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import type { OpenAIResponsesOptions } from "./openai-responses.ts";
+import type { ResponsesDiagnostics } from "./openai-responses-diagnostics.ts";
 import { convertResponsesMessages } from "./openai-responses-shared.ts";
 
 const TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
@@ -58,7 +59,12 @@ export async function* streamResponsesWebSocket(
 	options: OpenAIResponsesOptions,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	onStart: () => void,
+	diagnostics: ResponsesDiagnostics,
 ): AsyncGenerator<ResponsesServerEvent> {
+	const details = diagnostics.details;
+	details.transport = "websocket";
+	details.websocketAttempts++;
+	details.lastAttemptStartMs = performance.now() - diagnostics.startedAt;
 	if (options.signal?.aborted) throw new OpenAI.APIUserAbortError();
 	// Resolve auth, custom/env headers and null suppressions through the same SDK as HTTP.
 	const { req, url } = await client.buildRequest({
@@ -78,6 +84,7 @@ export async function* streamResponsesWebSocket(
 		connection = undefined;
 	}
 	const reused = connection !== undefined && !connection.busy;
+	details.socketReused = reused;
 	const cacheConnection = sessionId !== undefined && !connection?.busy;
 	if (!reused) {
 		const socket = new ResponsesWS(client, {
@@ -135,10 +142,13 @@ export async function* streamResponsesWebSocket(
 					: undefined;
 			const event = await events.next().finally(() => clearTimeout(timeout));
 			if (options.signal?.aborted || active.cancelled) throw new OpenAI.APIUserAbortError();
-			if (timedOut)
+			if (timedOut) {
+				details.localTimeout = "websocket_idle";
+				details.localTimeoutMs = idleTimeoutMs;
 				throw new OpenAI.APIConnectionTimeoutError({
 					message: `Responses WebSocket idle timeout after ${idleTimeoutMs}ms`,
 				});
+			}
 			if (event.done)
 				throw new OpenAI.APIConnectionError({ message: "Responses WebSocket ended before completion" });
 			if (event.value.type === "error") throw event.value.error;
@@ -174,6 +184,7 @@ export async function* streamResponsesWebSocket(
 			event.input = input.slice(previous.input.length);
 		}
 		active.continuation = undefined;
+		details.websocketRequestMode = event.previous_response_id ? "delta" : "full";
 		active.socket.send(event);
 		let started = false;
 		let replayable = false;
@@ -192,7 +203,9 @@ export async function* streamResponsesWebSocket(
 					event.message.type === "response.completed" &&
 					Array.isArray(event.message.response.output) &&
 					event.message.response.output.every((item) =>
-						["reasoning", "message", "function_call", "custom_tool_call"].includes(item.type),
+						item.type === "message"
+							? item.content.every((part) => part.type === "output_text")
+							: ["reasoning", "function_call", "custom_tool_call"].includes(item.type),
 					);
 				break;
 			}

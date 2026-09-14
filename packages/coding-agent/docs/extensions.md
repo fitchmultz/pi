@@ -590,9 +590,48 @@ pi.on("agent_end", async (event, ctx) => {
 });
 
 pi.on("agent_settled", async (_event, ctx) => {
-  // ctx.isIdle() is true here unless another extension started a new run.
+  // ctx.isIdle() is true here unless another extension started a new run or shutdown began.
 });
 ```
+
+#### auto_retry_start / auto_retry_end
+
+These are Pi's native agent retry notifications, not provider SDK retries. `auto_retry_start` fires before each retry's backoff; `attempt` is 1-based and `maxAttempts` is the configured number of retries, excluding the initial request. No start event fires when retries are disabled or the error is not retryable.
+
+```typescript
+pi.on("auto_retry_start", async (event, ctx) => {
+  // event.attempt, maxAttempts, delayMs, errorMessage
+});
+
+pi.on("auto_retry_end", async (event, ctx) => {
+  // event.success, attempt, finalError (optional)
+  // Clear any retry state here, including after cancellation or exhaustion.
+});
+```
+
+Handlers run in extension load order and are awaited before session subscribers are notified. The retried provider request cannot begin until start handlers finish and the backoff completes. End handlers finish before subsequent model calls or session settlement. `ctx.abort()` cancels a pending retry, including while a start handler is awaiting work. Handler return values do not change retry policy; handler errors follow normal extension error handling.
+
+#### summarization_retry_scheduled / summarization_retry_attempt_start / summarization_retry_finished
+
+Native compaction and branch-summary calls use the same retry settings, but emit separate events:
+
+```typescript
+pi.on("summarization_retry_scheduled", async (event) => {
+  // event.attempt, maxAttempts, delayMs, errorMessage; before backoff
+});
+
+pi.on("summarization_retry_attempt_start", async (event) => {
+  // After backoff, before the retried provider request
+  // event.source: "compaction" | "branchSummary"
+  // event.reason: "manual" | "threshold" | "overflow" (compaction only)
+});
+
+pi.on("summarization_retry_finished", async () => {
+  // Clear retry state. This notification alone does not report success.
+});
+```
+
+All three handlers are awaited. Cancellation during a scheduled or attempt-start handler prevents the next retry request. `finished` runs once after a call that scheduled retries succeeds, fails, or is cancelled, before that summarization call returns. A split-turn compaction can make separate history and turn-prefix calls, each with its own retry sequence. These events do not report custom summaries implemented by extensions.
 
 #### ui_prompt_start / ui_prompt_end
 
@@ -825,7 +864,7 @@ pi.on("tool_call", async (event, ctx) => {
   }
 
   if (isToolCallEventType("read", event)) {
-    // event.input is { path: string; offset?: number; limit?: number }
+    // event.input is { path: string; offset?: number; limit?: number; json?: { path?: string; fields?: string[] } }
     console.log(`Reading: ${event.input.path}`);
   }
 });
@@ -892,7 +931,7 @@ pi.on("tool_result", async (event, ctx) => {
 
 #### user_bash
 
-Fired when user executes `!` or `!!` commands. **Can intercept.**
+Fired by `AgentSession.executeBash()`, including interactive `!`/`!!` and RPC `bash` commands. **Can intercept.** The first handler returning a result or operations wins. `ctx.isBashRunning()` covers the entire dispatch, including an asynchronous earlier handler, execution, and result recording; observing this event alone does not.
 
 ```typescript
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
@@ -1019,6 +1058,7 @@ For `tool_call`, this state is synchronized through the current assistant messag
 
 ```typescript
 ctx.sessionManager.getEntries()             // All entries
+ctx.sessionManager.getEntriesRevision()     // File-wide revision for derived-data caches
 ctx.sessionManager.getBranch()              // Current branch
 ctx.sessionManager.buildContextEntries()    // Active branch entries with compaction applied
 ctx.sessionManager.getLeafId()              // Current leaf entry ID
@@ -1029,6 +1069,12 @@ ctx.sessionManager.getLeafId()              // Current leaf entry ID
 Access to models, providers, and resolved authentication. `ctx.modelRegistry.getProvider(id)` returns the effective pi-ai provider, while `getProviderAuth(id)` resolves its current API key, headers, base URL, and provider-scoped environment without requiring a loaded model. `ctx.model` is the active model, and `ctx.thinkingLevel` is its current effective thinking level.
 
 `ctx.scopedModels` is the read-only list of models scoped to the current session — the same set the `/scoped-models` command shows. It is resolved at session start from the `--models` CLI flag and the `enabledModels` setting (matched against the available catalogue with minimatch on `provider/modelId` or a bare `modelId`). It is empty when no scoping is configured, meaning every available model is usable. Each entry is `{ model, thinkingLevel? }`, where `thinkingLevel` is set only when a pattern pinned it (e.g. `anthropic/*:high`). Use it to populate a model picker that mirrors the built-in one instead of enumerating the whole catalogue via `ctx.modelRegistry.getAvailable()`.
+
+#### Streaming model calls
+
+Use `ctx.modelRegistry.streamSimple(model, context, options)` for provider-neutral options such as `reasoning`, or `stream()` for API-specific options. Both use configured providers and resolve authentication, including for providers registered with `pi.registerProvider()`. Use these instead of `pi-ai/compat` streaming functions, which cannot see extension provider registrations.
+
+Both return an `AssistantMessageEventStream`. Iterate it for response events and await `.result()` for the final message. Setup failures produce error events and error results.
 
 ### ctx.signal
 
@@ -1057,7 +1103,19 @@ pi.on("tool_result", async (event, ctx) => {
 
 ### ctx.isIdle() / ctx.abort() / ctx.hasPendingMessages()
 
-Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, automatic retry, auto-compaction retry, or queued continuation. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
+Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, compaction, branch summary, automatic retry, or queued continuation. It also stays false once host shutdown begins, before `session_shutdown` handlers run. New native model runs are rejected during shutdown; extension state remains available for cleanup. User Bash and input awaiting native preflight are separate. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
+
+### ctx.isBashRunning()
+
+Returns whether any `AgentSession.executeBash()` call is unfinished. This includes asynchronous `user_bash` handlers, complete replacement results, local/custom operations, and result recording. Concurrent calls remain busy until every call finishes or fails. An abort request is not completion: an interceptor that is still awaiting work keeps this true until it returns. Cancellation during interception prevents subsequent shell execution. This does not report arbitrary extension processes or model tool calls.
+
+### ctx.getPendingInputCount()
+
+Returns the number of submitted inputs awaiting native prompt preflight or held in the interactive mode's input queues. It covers remaining CLI startup prompts, asynchronous `input` handlers, preparation until admission or failure, input waiting for the prompt loop, and compaction/tree input retained after cancellation or errors. Handled inputs leave the count when their handler completes; admitted inputs leave it when queued or accepted into the agent run. Concurrent inputs are counted independently. Dispatched extension commands are excluded, so a command can inspect other pending input without counting itself. This does not change agent `isIdle()` or steering/follow-up queue semantics, and reading it never dequeues input.
+
+### ctx.getPendingNextTurnCount()
+
+Returns the number of custom messages queued with `deliverAs: "nextTurn"`. These messages are still in memory, not yet in the session journal. They remain queued across resource reloads and `clearQueue()`, and leave this count when admitted into a successful next user prompt. This does not change `isIdle()` or steering/follow-up queue semantics. These activity methods read current native state, so they also work when an extension is first loaded during `/reload`.
 
 ### ctx.shutdown()
 
@@ -1090,7 +1148,7 @@ if (usage && usage.tokens > 100_000) {
 
 ### ctx.getCompactionSettings()
 
-Returns the effective compaction settings (`enabled`, `reserveTokens`, `keepRecentTokens`) exactly as Pi resolved them, including whether project settings are trusted. Prefer this over re-reading settings files.
+Returns the effective compaction settings (`enabled`, `reserveTokens`, `keepRecentTokens`) for the active session model, including per-model overrides and whether project settings are trusted. Each call uses the current model, including after a model switch. Prefer this over re-reading settings files.
 
 ### ctx.compact()
 
@@ -1143,7 +1201,7 @@ This reports the current base prompt inputs. It does not include per-turn `befor
 
 ### ctx.waitForIdle()
 
-Wait for the agent to fully settle, including automatic retries, auto-compaction retries, and queued continuations:
+Wait for the agent to fully settle, including automatic retries, auto-compaction retries, and queued continuations. This waits for run completion, not permission to start another run: during shutdown it can resolve while `ctx.isIdle()` remains false.
 
 ```typescript
 pi.registerCommand("my-cmd", {
@@ -1215,7 +1273,7 @@ Options:
 
 ### ctx.navigateTree(targetId, options?)
 
-Navigate to a different point in the session tree:
+Navigate to a different point in the session tree. Rejects while an agent response, manual or automatic compaction, or another tree navigation is active, even with `summarize: false`. These conflicts leave the active branch unchanged and reject the promise rather than returning `{ cancelled: true }`. Wait for the active operation to finish (for example, with `await ctx.waitForIdle()` in a command handler) and retry:
 
 ```typescript
 const result = await ctx.navigateTree("entry-id-456", {
@@ -2137,14 +2195,14 @@ See [examples/extensions/tool-override.ts](../examples/extensions/tool-override.
 **Your implementation must match the exact result shape**, including the `details` type. The UI and session logic depend on these shapes for rendering and state tracking.
 
 Built-in tool implementations:
-- [read.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/read.ts) - `ReadToolDetails`
-- [bash.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/bash.ts) - `BashToolDetails`
-- [powershell.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/powershell.ts) - `PowerShellToolDetails`
-- [edit.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/edit.ts)
-- [write.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/write.ts)
-- [grep.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/grep.ts) - `GrepToolDetails`
-- [find.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/find.ts) - `FindToolDetails`
-- [ls.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/ls.ts) - `LsToolDetails`
+- [read.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/read.ts) - `ReadToolDetails`
+- [bash.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/bash.ts) - `BashToolDetails`
+- [powershell.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/powershell.ts) - `PowerShellToolDetails`
+- [edit.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/edit.ts)
+- [write.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/write.ts)
+- [grep.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/grep.ts) - `GrepToolDetails`
+- [find.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/find.ts) - `FindToolDetails`
+- [ls.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/ls.ts) - `LsToolDetails`
 
 ### Remote Execution
 
@@ -2275,7 +2333,7 @@ export default function (pi: ExtensionAPI) {
 
 ### Custom Rendering
 
-Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
+Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
 
 By default, tool output is wrapped in a `Box` that handles padding and background. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
 
@@ -2303,6 +2361,9 @@ pi.registerTool({
 - `lastComponent` - the previously returned component for that slot, if any
 - `invalidate()` - request a rerender of this tool row
 - `toolCallId`, `cwd`, `executionStarted`, `argsComplete`, `isPartial`, `expanded`, `showImages`, `isError`
+- `compactView` - optional view-mode hint, independent of `expanded`; absent means normal view
+
+In compact view, native collapsed tool cards are capped at two actual terminal rows, including custom framing and wrapping. Render a short call/result when `context.compactView === true && !context.expanded`; keep full detail available when expanded. Native rendering enforces the cap even if a renderer ignores the hint, and hides inline images until expanded. Both renderer slots receive the hint through `ToolRenderContext`, not through `ToolRenderResultOptions`. Exports and older hosts can omit it.
 
 Use `context.state` for cross-slot shared state. Keep slot-local caches on the returned component instance when you want to reuse and mutate the same component across renders.
 
@@ -2419,6 +2480,10 @@ You do not need to return provider-specific tool references or mark the loader a
 - **Anthropic**
   - **Models:** Sonnet, Opus, Fable version 4.5 or newer (without Haiku)
   - **Native representation:** Deferred definitions use `defer_loading`; the load point uses `tool_reference` content.
+- **Fireworks Messages API**
+  - **Native representation:** Deferred definitions use `defer_loading`; the load point uses `tool_reference` content.
+  - **Loader names:** Use `ToolSearch` or `tool_search` for prefix deferral. Other loader names still work, but Fireworks includes the loaded schemas in the initial tool prefix, losing the cache benefit.
+  - This does not change API routing: Fireworks GLM models and Kimi K3 use Chat Completions, not Messages.
 - **OpenAI**
   - **Models:** `gpt-5.4` and newer family
   - **Native representation:** Pi adds completed client `tool_search_call` and `tool_search_output` items at the load point.
@@ -2900,6 +2965,8 @@ pi.registerMessageRenderer("my-extension", (message, options, theme) => {
   return new Text(text, outputPad, 0);
 });
 ```
+
+`MessageRenderOptions.compactView` is an optional view-mode hint. Native interactive mode supplies a boolean; an absent field means normal view. For ordinary status notices, return **one actual content row** when `options.compactView === true && !options.expanded`, using width-aware truncation where needed. Pi retains its existing one-row outer spacer, so the whole notice occupies two rows. Keep questions, needs-attention notices, and substantive human content prominent; native code does not truncate custom messages. See [TUI line width](tui.md#line-width).
 
 Messages are sent via `pi.sendMessage()`:
 

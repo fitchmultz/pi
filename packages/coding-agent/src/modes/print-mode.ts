@@ -38,6 +38,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let unsubscribeBackpressure: (() => void) | undefined;
 	let lastAssistantMessage: AssistantMessage | undefined;
 	let contextWindowStarted = false;
+	let queuedInputCount = messages.length + (initialMessage ? 1 : 0);
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
@@ -79,6 +80,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		contextWindowStarted = false;
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
+			getQueuedInputCount: () => queuedInputCount,
 			commandContextActions: {
 				waitForIdle: () => session.waitForIdle(),
 				newSession: async (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
@@ -141,14 +143,21 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		await rebindSession();
 
 		if (initialMessage) {
+			await session.waitForIdle();
+			queuedInputCount--;
 			await session.prompt(initialMessage, { images: initialImages });
 		}
 
 		for (const message of messages) {
+			await session.waitForIdle();
+			queuedInputCount--;
 			lastAssistantMessage = undefined;
 			contextWindowStarted = false;
 			await session.prompt(message);
 		}
+
+		// Settlement handlers can start another turn after the prompt's own run ends.
+		await session.waitForIdle();
 
 		if (mode === "text") {
 			const activeLastMessage = session.state.messages.at(-1);

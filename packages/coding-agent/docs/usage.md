@@ -51,11 +51,13 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
+| `/compact-view [on\|off\|toggle]` | Toggle compact tool cards in this UI and remember the default for future starts |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML or JSONL |
 | `/import <file>` | Import and resume a session from a JSONL file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
-| `/reload` | Reload keybindings, extensions, skills, prompts, themes, and context files |
+| `/reload` | Refresh settings/resources and reinitialize cached extension code |
+| `/restart [text]` | Restart the Node CLI worker and resume this session; optional text continues the agent |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
@@ -94,7 +96,7 @@ Useful session commands:
 - `/clone` duplicates the current active branch into a new session file.
 - `/compact` summarizes older messages to free context.
 
-See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
+See [Sessions](sessions.md) and [Compaction](compaction.md) for details. For agent-operated runtime or extension updates, see [Managed Restarts](restart.md).
 
 ## Context Files
 

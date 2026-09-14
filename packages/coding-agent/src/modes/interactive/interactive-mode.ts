@@ -182,7 +182,7 @@ interface Expandable {
 
 interface WorkingStatusEditor extends EditorComponent {
 	readonly embedWorkingStatus: boolean;
-	setWorkingStatusIndicator(indicator: WorkingStatusIndicator | undefined): void;
+	setWorkingStatusIndicator(indicator: StatusIndicator | undefined): void;
 }
 
 function isWorkingStatusEditor(editor: EditorComponent): editor is WorkingStatusEditor {
@@ -370,6 +370,8 @@ export interface InteractiveModeOptions {
 	tuiMode?: TuiMode;
 	/** Initial interactive theme setting for this invocation. */
 	initialThemeSetting?: string;
+	/** Synchronous host notification before shutdown can yield or re-enter. */
+	onShutdownRequested?: (source: "user" | "extension" | "signal") => void;
 }
 
 export class InteractiveMode {
@@ -402,6 +404,7 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
+	private pendingInitialMessages: number;
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
 	private activeWorkingIndicatorEmbedded = false;
 	private readonly idleStatus = new IdleStatus();
@@ -432,6 +435,7 @@ export class InteractiveMode {
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
+	private compactView: boolean;
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
@@ -465,6 +469,7 @@ export class InteractiveMode {
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
+	private isFlushingCompactionQueue = false;
 
 	// Shutdown state
 	private shutdownRequested = false;
@@ -507,9 +512,6 @@ export class InteractiveMode {
 	private get session(): AgentSession {
 		return this.runtimeHost.session;
 	}
-	private get agent() {
-		return this.session.agent;
-	}
 	private get sessionManager() {
 		return this.session.sessionManager;
 	}
@@ -522,6 +524,7 @@ export class InteractiveMode {
 		setCapabilityOverrides(this.settingsManager.getTerminalCapabilityOverrides());
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
 		this.options = { ...options, tuiMode };
+		this.pendingInitialMessages = (options.initialMessage ? 1 : 0) + (options.initialMessages?.length ?? 0);
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
@@ -569,7 +572,8 @@ export class InteractiveMode {
 		this.footerContainer = new Container();
 		this.footerContainer.addChild(this.footer);
 
-		// Load hide thinking block setting
+		// Snapshot the future-start default once; reloads must not change this UI's view.
+		this.compactView = this.settingsManager.getCompactView();
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.outputPad = this.settingsManager.getOutputPad();
 
@@ -1109,6 +1113,7 @@ export class InteractiveMode {
 
 		// Process initial messages
 		if (initialMessage) {
+			this.pendingInitialMessages--;
 			try {
 				await this.session.prompt(initialMessage, { images: initialImages });
 			} catch (error: unknown) {
@@ -1119,6 +1124,7 @@ export class InteractiveMode {
 
 		if (initialMessages) {
 			for (const message of initialMessages) {
+				this.pendingInitialMessages--;
 				try {
 					await this.session.prompt(message);
 				} catch (error: unknown) {
@@ -1860,6 +1866,8 @@ export class InteractiveMode {
 		await this.session.bindExtensions({
 			uiContext,
 			mode: "tui",
+			getQueuedInputCount: () =>
+				this.pendingInitialMessages + this.pendingUserInputs.length + this.compactionQueuedMessages.length,
 			abortHandler: () => {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
@@ -1902,7 +1910,7 @@ export class InteractiveMode {
 						this.editor.setText(result.editorText);
 					}
 					this.showStatus("Navigated to selected point");
-					void this.flushCompactionQueue({ willRetry: false });
+					void this.flushCompactionQueue();
 					return { cancelled: false };
 				},
 				switchSession: async (sessionPath, options) => {
@@ -1915,7 +1923,7 @@ export class InteractiveMode {
 			shutdownHandler: () => {
 				this.shutdownRequested = true;
 				if (this.session.isIdle) {
-					void this.shutdown();
+					void this.shutdown({ fromExtension: true });
 				}
 			},
 			onError: (error) => {
@@ -2043,18 +2051,21 @@ export class InteractiveMode {
 			model: this.session.model,
 			scopedModels: this.session.scopedModels,
 			thinkingLevel: this.session.thinkingLevel,
-			isIdle: () => this.session.isIdle,
+			isIdle: () => !this.isShuttingDown && this.session.isIdle,
+			isBashRunning: () => this.session.isBashRunning,
 			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 			signal: this.session.agent.signal,
 			abort: () => {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
 			hasPendingMessages: () => this.session.hasPendingMessages,
+			getPendingNextTurnCount: () => this.session.pendingNextTurnCount,
+			getPendingInputCount: () => this.session.pendingInputCount,
 			shutdown: () => {
 				this.shutdownRequested = true;
 			},
 			getContextUsage: () => this.session.getContextUsage(),
-			getCompactionSettings: () => this.settingsManager.getCompactionSettings(),
+			getCompactionSettings: () => this.settingsManager.getCompactionSettings(this.session.model),
 			newContext: (options) => this.session.newContext(options),
 			compact: (options) => {
 				void (async () => {
@@ -2094,7 +2105,7 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private setEditorWorkingStatusIndicator(indicator: WorkingStatusIndicator | undefined): boolean {
+	private setEditorWorkingStatusIndicator(indicator: StatusIndicator | undefined): boolean {
 		this.defaultEditor.setWorkingStatusIndicator(undefined);
 		if (!isWorkingStatusEditor(this.editor)) return false;
 		this.editor.setWorkingStatusIndicator(indicator);
@@ -2107,7 +2118,7 @@ export class InteractiveMode {
 		this.activeWorkingIndicatorEmbedded = false;
 		this.statusContainer.clear();
 		this.setEditorWorkingStatusIndicator(undefined);
-		if (indicator instanceof WorkingStatusIndicator && this.setEditorWorkingStatusIndicator(indicator)) {
+		if (this.setEditorWorkingStatusIndicator(indicator)) {
 			this.activeWorkingIndicatorEmbedded = true;
 			return;
 		}
@@ -2119,7 +2130,7 @@ export class InteractiveMode {
 			return;
 		}
 		const clearedIndicator = this.activeStatusIndicator;
-		const clearedIndicatorWasEmbedded = clearedIndicator?.kind === "working" && this.activeWorkingIndicatorEmbedded;
+		const clearedIndicatorWasEmbedded = this.activeWorkingIndicatorEmbedded;
 		clearedIndicator?.dispose();
 		this.activeStatusIndicator = undefined;
 		this.activeWorkingIndicatorEmbedded = false;
@@ -2719,7 +2730,7 @@ export class InteractiveMode {
 		}
 
 		this.editorContainer.addChild(this.editor as Component);
-		if (this.activeStatusIndicator instanceof WorkingStatusIndicator) {
+		if (this.activeStatusIndicator) {
 			this.statusContainer.clear();
 			this.activeWorkingIndicatorEmbedded = this.setEditorWorkingStatusIndicator(this.activeStatusIndicator);
 			if (!this.activeWorkingIndicatorEmbedded) {
@@ -2969,6 +2980,16 @@ export class InteractiveMode {
 			if (!text) return;
 
 			// Handle commands
+			if (/^\/compact-view(?:\s|$)/.test(text)) {
+				const action = text.slice("/compact-view".length).trim() || "toggle";
+				this.editor.setText("");
+				if (action !== "on" && action !== "off" && action !== "toggle") {
+					this.showWarning("Usage: /compact-view [on|off|toggle]");
+					return;
+				}
+				this.setCompactView(action === "toggle" ? !this.compactView : action === "on");
+				return;
+			}
 			if (text === "/settings") {
 				this.showSettingsSelector();
 				this.editor.setText("");
@@ -3235,6 +3256,7 @@ export class InteractiveMode {
 						this.hiddenThinkingLabel,
 						this.outputPad,
 						this.getMarkdownTransformers(),
+						this.compactView,
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
@@ -3258,6 +3280,7 @@ export class InteractiveMode {
 									{
 										showImages: this.settingsManager.getShowImages(),
 										imageWidthCells: this.settingsManager.getImageWidthCells(),
+										compactView: this.compactView,
 									},
 									this.getRegisteredToolDefinition(content.name),
 									this.ui,
@@ -3333,6 +3356,7 @@ export class InteractiveMode {
 						{
 							showImages: this.settingsManager.getShowImages(),
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
+							compactView: this.compactView,
 						},
 						this.getRegisteredToolDefinition(event.toolName),
 						this.ui,
@@ -3385,6 +3409,12 @@ export class InteractiveMode {
 				await this.checkShutdownRequested();
 				break;
 
+			case "context_window_started":
+				this.rebuildChatFromMessages();
+				for (const message of event.pendingMessages) this.addMessageToChat(message);
+				this.ui.requestRender();
+				break;
+
 			case "compaction_start": {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
@@ -3414,29 +3444,27 @@ export class InteractiveMode {
 					} else {
 						this.showStatus("Auto-compaction cancelled");
 					}
-				} else if (event.result || event.contextWindowStarted) {
+				} else if (event.result) {
 					const entries = this.sessionManager.buildContextEntries();
-					if (event.result && entries[0]?.type !== "compaction") {
+					if (entries[0]?.type !== "compaction") {
 						throw new Error("Completed compaction is missing from the session context");
 					}
 					this.chatContainer.clear();
 					// The latest compaction is prepended for model context; append it below at its chronological position.
-					this.renderSessionEntries(event.result ? entries.slice(1) : entries);
-					if (event.result) {
-						this.addMessageToChat(
-							createCompactionSummaryMessage(
-								event.result.summary,
-								event.result.tokensBefore,
-								new Date().toISOString(),
-							),
-						);
-						if (event.result.usage) {
-							this.addCompactionCostNotice({
-								type: "compaction_cost",
-								kind: "compaction",
-								usage: event.result.usage,
-							});
-						}
+					this.renderSessionEntries(entries.slice(1));
+					this.addMessageToChat(
+						createCompactionSummaryMessage(
+							event.result.summary,
+							event.result.tokensBefore,
+							new Date().toISOString(),
+						),
+					);
+					if (event.result.usage) {
+						this.addCompactionCostNotice({
+							type: "compaction_cost",
+							kind: "compaction",
+							usage: event.result.usage,
+						});
 					}
 					for (const message of event.pendingMessages ?? []) this.addMessageToChat(message);
 					this.footer.invalidate();
@@ -3448,7 +3476,7 @@ export class InteractiveMode {
 						this.chatContainer.addChild(new Text(theme.fg("error", event.errorMessage), 1, 0));
 					}
 				}
-				void this.flushCompactionQueue({ willRetry: event.willRetry });
+				void this.flushCompactionQueue();
 				this.ui.requestRender();
 				break;
 			}
@@ -3584,7 +3612,13 @@ export class InteractiveMode {
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
-				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext);
+				const component = new BashExecutionComponent(
+					message.command,
+					this.ui,
+					message.excludeFromContext,
+					this.compactView,
+				);
+				component.setExpanded(this.toolOutputExpanded);
 				if (message.output) {
 					component.appendOutput(message.output);
 				}
@@ -3605,6 +3639,7 @@ export class InteractiveMode {
 						renderer,
 						this.getMarkdownThemeWithSettings(),
 						this.outputPad,
+						this.compactView,
 					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
@@ -3674,6 +3709,7 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					this.outputPad,
 					this.getMarkdownTransformers(),
+					this.compactView,
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
@@ -3729,6 +3765,7 @@ export class InteractiveMode {
 							{
 								showImages: this.settingsManager.getShowImages(),
 								imageWidthCells: this.settingsManager.getImageWidthCells(),
+								compactView: this.compactView,
 							},
 							this.getRegisteredToolDefinition(content.name),
 							this.ui,
@@ -3955,9 +3992,13 @@ export class InteractiveMode {
 	 */
 	private isShuttingDown = false;
 
-	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+	private async shutdown(options?: { fromSignal?: boolean; fromExtension?: boolean }): Promise<void> {
+		this.options.onShutdownRequested?.(
+			options?.fromSignal ? "signal" : options?.fromExtension ? "extension" : "user",
+		);
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
+		this.session.beginShutdown();
 		// Keep signal handlers registered until terminal cleanup has completed.
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
 		// dispatch and re-sends the signal if only its own listeners remain.
@@ -4040,7 +4081,7 @@ export class InteractiveMode {
 	 */
 	private async checkShutdownRequested(): Promise<void> {
 		if (!this.shutdownRequested) return;
-		await this.shutdown();
+		await this.shutdown({ fromExtension: true });
 	}
 
 	private registerSignalHandlers(): void {
@@ -4175,9 +4216,7 @@ export class InteractiveMode {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
 		}
-		if (this.activeStatusIndicator?.kind === "working") {
-			this.activeStatusIndicator.invalidate();
-		}
+		this.activeStatusIndicator?.invalidate();
 		this.ui.requestRender();
 	}
 
@@ -4215,15 +4254,15 @@ export class InteractiveMode {
 		this.setToolsExpanded(!this.toolOutputExpanded);
 	}
 
-	private setToolsExpanded(expanded: boolean): void {
-		if (expanded === this.toolOutputExpanded) return;
+	private setToolsExpanded(expanded: boolean, force = false): void {
+		if (!force && expanded === this.toolOutputExpanded) return;
 
 		this.toolOutputExpanded = expanded;
 		const activeHeader = this.customHeader ?? this.builtInHeader;
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
 		}
-		for (const container of [this.loadedResourcesContainer, this.chatContainer]) {
+		for (const container of [this.loadedResourcesContainer, this.chatContainer, this.pendingMessagesContainer]) {
 			for (const child of container.children) {
 				if (isExpandable(child)) {
 					child.setExpanded(expanded);
@@ -4231,6 +4270,27 @@ export class InteractiveMode {
 			}
 		}
 		this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);
+	}
+
+	private setCompactView(compactView: boolean): void {
+		const enteringCompactView = compactView && !this.compactView;
+		this.compactView = compactView;
+		this.settingsManager.setCompactView(compactView);
+		// Also collapse cards opened by local clicks when global expansion is already off.
+		if (enteringCompactView) this.setToolsExpanded(false, true);
+		for (const container of [this.chatContainer, this.pendingMessagesContainer]) {
+			for (const child of container.children) {
+				if (
+					child instanceof ToolExecutionComponent ||
+					child instanceof BashExecutionComponent ||
+					child instanceof AssistantMessageComponent ||
+					child instanceof CustomMessageComponent
+				) {
+					child.setCompactView(compactView);
+				}
+			}
+		}
+		this.showStatus(`Compact view: ${compactView ? "on" : "off"} (remembered for new sessions)`);
 	}
 
 	/** Update rendered assistant messages without rebuilding live tool components. */
@@ -4373,6 +4433,9 @@ export class InteractiveMode {
 	}
 
 	private updatePendingMessagesDisplay(): void {
+		const bashComponents = this.pendingMessagesContainer.children.filter(
+			(child) => child instanceof BashExecutionComponent,
+		);
 		this.pendingMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
@@ -4389,6 +4452,7 @@ export class InteractiveMode {
 			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
 			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
+		for (const component of bashComponents) this.pendingMessagesContainer.addChild(component);
 	}
 
 	private restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
@@ -4397,7 +4461,7 @@ export class InteractiveMode {
 		if (allQueued.length === 0) {
 			this.updatePendingMessagesDisplay();
 			if (options?.abort) {
-				this.agent.abort();
+				void this.session.abort();
 			}
 			return 0;
 		}
@@ -4407,7 +4471,7 @@ export class InteractiveMode {
 		this.editor.setText(combinedText);
 		this.updatePendingMessagesDisplay();
 		if (options?.abort) {
-			this.agent.abort();
+			void this.session.abort();
 		}
 		return allQueued.length;
 	}
@@ -4430,82 +4494,37 @@ export class InteractiveMode {
 		return !!extensionRunner.getCommand(commandName);
 	}
 
-	private async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		if (this.compactionQueuedMessages.length === 0) {
-			return;
-		}
-
-		const queuedMessages = [...this.compactionQueuedMessages];
-		this.compactionQueuedMessages = [];
-		this.updatePendingMessagesDisplay();
-
-		const restoreQueue = (error: unknown) => {
-			this.session.clearQueue();
-			this.compactionQueuedMessages = queuedMessages;
-			this.updatePendingMessagesDisplay();
-			this.showError(
-				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-		};
-
+	private async flushCompactionQueue(): Promise<void> {
+		if (this.isFlushingCompactionQueue || this.compactionQueuedMessages.length === 0) return;
+		this.isFlushingCompactionQueue = true;
 		try {
-			if (options?.willRetry) {
-				// When retry is pending, queue messages for the retry turn
-				for (const message of queuedMessages) {
-					if (this.isExtensionCommand(message.text)) {
-						await this.session.prompt(message.text);
-					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text);
-					} else {
-						await this.session.steer(message.text);
-					}
-				}
+			while (this.compactionQueuedMessages.length > 0) {
+				const message = this.compactionQueuedMessages.shift()!;
 				this.updatePendingMessagesDisplay();
-				return;
-			}
-
-			// Find first non-extension-command message to use as prompt
-			const firstPromptIndex = queuedMessages.findIndex((message) => !this.isExtensionCommand(message.text));
-			if (firstPromptIndex === -1) {
-				// All extension commands - execute them all
-				for (const message of queuedMessages) {
-					await this.session.prompt(message.text);
-				}
-				return;
-			}
-
-			// Execute any extension commands before the first prompt
-			const preCommands = queuedMessages.slice(0, firstPromptIndex);
-			const firstPrompt = queuedMessages[firstPromptIndex];
-			const rest = queuedMessages.slice(firstPromptIndex + 1);
-
-			for (const message of preCommands) {
-				await this.session.prompt(message.text);
-			}
-
-			// Start a prompt when idle, or queue it into a run still finishing compaction.
-			const promptPromise = this.session
-				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode })
-				.catch((error) => {
-					restoreQueue(error);
+				const preflight = new Promise<boolean>((resolve) => {
+					let accepted = false;
+					void this.session
+						.prompt(message.text, {
+							streamingBehavior: message.mode,
+							preflightResult: (success) => {
+								if (success) {
+									accepted = true;
+									resolve(true);
+								}
+							},
+						})
+						.catch((error) => {
+							if (!accepted) this.compactionQueuedMessages.unshift(message);
+							this.updatePendingMessagesDisplay();
+							this.showError(`Queued message error: ${error instanceof Error ? error.message : String(error)}`);
+							resolve(false);
+						});
 				});
-
-			// Queue remaining messages
-			for (const message of rest) {
-				if (this.isExtensionCommand(message.text)) {
-					await this.session.prompt(message.text);
-				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text);
-				} else {
-					await this.session.steer(message.text);
-				}
+				// Keep the undispatched tail visible and dequeuable while preflight waits.
+				if (!(await preflight)) return;
 			}
-			this.updatePendingMessagesDisplay();
-			void promptPromise;
-		} catch (error) {
-			restoreQueue(error);
+		} finally {
+			this.isFlushingCompactionQueue = false;
 		}
 	}
 
@@ -4572,6 +4591,7 @@ export class InteractiveMode {
 					availableDefaultModels: this.session.modelRuntime.getAvailableSnapshot(),
 					showImages: this.settingsManager.getShowImages(),
 					imageWidthCells: this.settingsManager.getImageWidthCells(),
+					compactView: this.compactView,
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
 					blockImages: this.settingsManager.getBlockImages(),
 					enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
@@ -4678,6 +4698,7 @@ export class InteractiveMode {
 						void this.themeController.setThemeSetting(themeSetting);
 					},
 					onThemePreview: (themeName) => this.themeController.preview(themeName),
+					onCompactViewChange: (compactView) => this.setCompactView(compactView),
 					onHideThinkingBlockChange: (hidden) => {
 						this.hideThinkingBlock = hidden;
 						this.settingsManager.setHideThinkingBlock(hidden);
@@ -5275,6 +5296,14 @@ export class InteractiveMode {
 						await this.session.abort();
 					}
 
+					// Recheck after the dialogs and streaming abort, before replacing another operation's UI.
+					if (this.session.isCompacting) {
+						this.showError(
+							"Wait for the current compaction or tree navigation to finish before navigating the session tree.",
+						);
+						return;
+					}
+
 					// Set up escape handler and status indicator if summarizing
 					let showingSummaryIndicator = false;
 					const originalOnEscape = this.defaultEditor.onEscape;
@@ -5313,7 +5342,7 @@ export class InteractiveMode {
 							this.editor.setText(result.editorText);
 						}
 						this.showStatus("Navigated to selected point");
-						void this.flushCompactionQueue({ willRetry: false });
+						void this.flushCompactionQueue();
 					} catch (error) {
 						this.showError(error instanceof Error ? error.message : String(error));
 					} finally {
@@ -6504,50 +6533,9 @@ export class InteractiveMode {
 	}
 
 	private async handleBashCommand(command: string, excludeFromContext = false): Promise<void> {
-		const extensionRunner = this.session.extensionRunner;
-
-		// Emit user_bash event to let extensions intercept
-		const eventResult = await extensionRunner.emitUserBash({
-			type: "user_bash",
-			command,
-			excludeFromContext,
-			cwd: this.sessionManager.getCwd(),
-		});
-
-		// If extension returned a full result, use it directly
-		if (eventResult?.result) {
-			const result = eventResult.result;
-
-			// Create UI component for display
-			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
-			if (this.session.isStreaming) {
-				this.pendingMessagesContainer.addChild(this.bashComponent);
-				this.pendingBashComponents.push(this.bashComponent);
-			} else {
-				this.chatContainer.addChild(this.bashComponent);
-			}
-
-			// Show output and complete
-			if (result.output) {
-				this.bashComponent.appendOutput(result.output);
-			}
-			this.bashComponent.setComplete(
-				result.exitCode,
-				result.cancelled,
-				result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
-				result.fullOutputPath,
-			);
-
-			// Record the result in session
-			this.session.recordBashResult(command, result, { excludeFromContext });
-			this.bashComponent = undefined;
-			this.ui.requestRender();
-			return;
-		}
-
-		// Normal execution path (possibly with custom operations)
 		const isDeferred = this.session.isStreaming;
-		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
+		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext, this.compactView);
+		this.bashComponent.setExpanded(this.toolOutputExpanded);
 
 		if (isDeferred) {
 			// Show in pending area when agent is streaming
@@ -6568,7 +6556,7 @@ export class InteractiveMode {
 						this.ui.requestRender();
 					}
 				},
-				{ excludeFromContext, operations: eventResult?.operations },
+				{ excludeFromContext },
 			);
 
 			if (this.bashComponent) {
