@@ -2,7 +2,8 @@
  * Reload Runtime Extension
  *
  * Demonstrates ctx.reload() from ExtensionCommandContext and an LLM-callable
- * tool that queues a follow-up command to trigger reload.
+ * tool that queues a follow-up command to refresh resources and reinitialize
+ * extensions. Extension code changes require a full Pi restart.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -12,7 +13,7 @@ export default function (pi: ExtensionAPI) {
 	// Command entrypoint for reload.
 	// Treat reload as terminal for this handler.
 	pi.registerCommand("reload-runtime", {
-		description: "Reload extensions, skills, prompts, themes, and context files",
+		description: "Refresh resources and reinitialize extensions; code changes require restarting Pi",
 		handler: async (_args, ctx) => {
 			await ctx.reload();
 			return;
@@ -24,7 +25,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "reload_runtime",
 		label: "Reload Runtime",
-		description: "Reload extensions, skills, prompts, themes, and context files",
+		description: "Refresh resources and reinitialize extensions; code changes require restarting Pi",
 		parameters: Type.Object({}),
 		async execute() {
 			pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp" });

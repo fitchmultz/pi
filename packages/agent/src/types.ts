@@ -132,6 +132,8 @@ export interface ShouldStopAfterTurnContext {
 	context: AgentContext;
 	/** Messages that this loop invocation will return if it exits at this point. Prompt runs include the initial prompt messages; continuation runs do not include pre-existing context messages. */
 	newMessages: AgentMessage[];
+	/** A successful tool request to start the next turn with a fresh context window. */
+	newContext?: NewContextRequest;
 }
 
 /** Replacement runtime state used by the agent loop before starting another provider request. */
@@ -214,6 +216,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * If it returns true, the loop emits `agent_end` and exits before polling steering or follow-up queues,
 	 * without starting another LLM call. The current assistant response and any tool executions finish normally.
+	 * This callback sees the completed-turn context and runs before `prepareNextTurn`.
 	 *
 	 * Use this to request a graceful stop after the current turn, e.g. before context gets too full.
 	 *
@@ -222,13 +225,16 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
 
 	/**
-	 * Called after `turn_end` and before the loop decides whether another provider request should start.
-	 * Return replacement context/model/thinking state to affect the next turn in this run.
+	 * Called after `turn_end` when the loop will continue, immediately before the next turn starts.
+	 * Return replacement context/model/thinking state to affect that turn.
 	 * Return undefined to keep using the current context/config.
 	 */
 	prepareNextTurn?: (
 		context: PrepareNextTurnContext,
 	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
+
+	/** Called after queued messages are added and before context transforms for each provider request. */
+	prepareProviderRequest?: (context: AgentContext) => AgentContext | undefined | Promise<AgentContext | undefined>;
 
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.
@@ -357,6 +363,12 @@ export interface AgentState {
 	readonly errorMessage?: string;
 }
 
+/** Request carried by a successful tool result to start a fresh context window. */
+export interface NewContextRequest {
+	/** Optional continuation state injected into the new window. */
+	handoff?: string;
+}
+
 /** Final or partial result produced by a tool. */
 export interface AgentToolResult<T> {
 	/** Text or image content returned to the model. */
@@ -367,6 +379,8 @@ export interface AgentToolResult<T> {
 	usage?: Usage;
 	/** Names of tools introduced by this result and available from this transcript point onward. */
 	addedToolNames?: string[];
+	/** Start the next turn in a fresh context window after the full tool batch succeeds. */
+	newContext?: NewContextRequest;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
@@ -398,6 +412,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
 	) => Promise<AgentToolResult<TDetails>>;
+	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
+	replay?: "never" | "safe";
 	/**
 	 * Per-tool execution mode override.
 	 * - "sequential": this tool must execute one at a time with other tool calls.

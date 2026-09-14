@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
-import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
+import type { EditorFactory, ExtensionUIContext } from "../src/core/extensions/index.ts";
 import type { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import type { RpcSessionState } from "../src/modes/rpc/rpc-types.ts";
@@ -81,6 +81,40 @@ describe("RPC TUI handoff", () => {
 		rpcIo.lineHandler = undefined;
 	});
 
+	// https://github.com/fitchmultz/pi/pull/1: RPC-owned editor factories must compose before attachment.
+	it("returns the configured editor factory while RPC owns the frontend", async () => {
+		const listeners = takeListenerSnapshot();
+		const harness = await createHarness();
+		const previousFactory: EditorFactory = () => {
+			throw new Error("The hidden TUI must not instantiate editors");
+		};
+		const interactiveMode = {
+			host: vi.fn(),
+			getQueuedInputCount: () => 0,
+			getExtensionUIContext: () => ({ getEditorComponent: () => previousFactory }),
+			rebindHostedSession: vi.fn(async () => {}),
+		} as unknown as InteractiveMode;
+		try {
+			void runRpcMode(createRuntimeHost(harness), { interactiveMode });
+			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+			const ui = harness.session.extensionRunner.getUIContext();
+			ui.setEditorComponent(previousFactory);
+			const parent = ui.getEditorComponent();
+			expect(parent).toBe(previousFactory);
+			const composed: EditorFactory = (...args) => {
+				if (!parent) throw new Error("Missing parent editor");
+				return parent(...args);
+			};
+			ui.setEditorComponent(composed);
+			expect(ui.getEditorComponent()).toBe(composed);
+			ui.setEditorComponent(undefined);
+			expect(ui.getEditorComponent()).toBeUndefined();
+		} finally {
+			harness.cleanup();
+			restoreListeners(listeners);
+		}
+	});
+
 	it("moves dialogs both ways and serializes a return during attach", async () => {
 		const listeners = takeListenerSnapshot();
 		const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
@@ -97,8 +131,10 @@ describe("RPC TUI handoff", () => {
 		});
 		const interactiveUI = { input: tuiInput } as unknown as ExtensionUIContext;
 		const activateHosted = vi.fn(async () => {});
+		let queuedInputCount = 1;
 		const interactiveMode = {
 			host: vi.fn(),
+			getQueuedInputCount: () => queuedInputCount,
 			getExtensionUIContext: vi.fn(() => interactiveUI),
 			rebindHostedSession: vi.fn(async () => {}),
 			activateHosted,
@@ -109,6 +145,11 @@ describe("RPC TUI handoff", () => {
 		try {
 			void runRpcMode(createRuntimeHost(harness), { interactiveMode });
 			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+
+			// Hosted TUI input stays visible to extensions even while RPC owns the frontend.
+			expect(harness.session.extensionRunner.createContext().getPendingInputCount()).toBe(1);
+			queuedInputCount = 0;
+			expect(harness.session.extensionRunner.createContext().getPendingInputCount()).toBe(0);
 
 			const inputPromise = harness.session.extensionRunner.getUIContext().input("Question", "Answer");
 			await vi.waitFor(() => expect(parseOutput().some((record) => record.method === "input")).toBe(true));
@@ -169,6 +210,17 @@ describe("RPC TUI handoff", () => {
 			await expect(tuiOriginPromise).resolves.toBe("second answer");
 			expect(interactiveMode.deactivateHosted).toHaveBeenCalledTimes(2);
 
+			// https://github.com/fitchmultz/pi/pull/1: a duplicate detach must not poison the next attach.
+			usr2?.("SIGUSR2");
+			rpcIo.lineHandler?.(JSON.stringify({ id: "attach-after-duplicate", type: "attach_tui" }));
+			await vi.waitFor(() => expect(activateHosted).toHaveBeenCalledTimes(3));
+			expect(harness.session.extensionRunner.createContext().mode).toBe("tui");
+			expect(interactiveMode.deactivateHosted).toHaveBeenCalledTimes(2);
+			usr2?.("SIGUSR2");
+			await vi.waitFor(() =>
+				expect(parseOutput().filter((record) => record.type === "tui_detached")).toHaveLength(3),
+			);
+
 			let finishActivation: (() => void) | undefined;
 			activateHosted.mockImplementationOnce(
 				() =>
@@ -177,13 +229,13 @@ describe("RPC TUI handoff", () => {
 					}),
 			);
 			rpcIo.lineHandler?.(JSON.stringify({ id: "attach-race", type: "attach_tui" }));
-			await vi.waitFor(() => expect(activateHosted).toHaveBeenCalledTimes(3));
+			await vi.waitFor(() => expect(activateHosted).toHaveBeenCalledTimes(4));
 			usr2?.("SIGUSR2");
-			expect(interactiveMode.deactivateHosted).toHaveBeenCalledTimes(2);
+			expect(interactiveMode.deactivateHosted).toHaveBeenCalledTimes(3);
 			finishActivation?.();
-			await vi.waitFor(() => expect(interactiveMode.deactivateHosted).toHaveBeenCalledTimes(3));
+			await vi.waitFor(() => expect(interactiveMode.deactivateHosted).toHaveBeenCalledTimes(4));
 			await vi.waitFor(() =>
-				expect(parseOutput().filter((record) => record.type === "tui_detached")).toHaveLength(3),
+				expect(parseOutput().filter((record) => record.type === "tui_detached")).toHaveLength(4),
 			);
 		} finally {
 			harness.cleanup();

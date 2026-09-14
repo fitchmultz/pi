@@ -36,6 +36,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
+	let lastAssistantMessage: AssistantMessage | undefined;
+	let contextWindowStarted = false;
+	let queuedInputCount = messages.length + (initialMessage ? 1 : 0);
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
@@ -73,8 +76,11 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		lastAssistantMessage = undefined;
+		contextWindowStarted = false;
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
+			getQueuedInputCount: () => queuedInputCount,
 			commandContextActions: {
 				waitForIdle: () => session.waitForIdle(),
 				newSession: async (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
@@ -106,6 +112,14 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
+			if (event.type === "message_end") {
+				if (event.message.role === "assistant") {
+					lastAssistantMessage = event.message;
+					contextWindowStarted = false;
+				} else if (event.message.role === "custom" && event.message.customType === "context-window") {
+					contextWindowStarted = true;
+				}
+			}
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
 			}
@@ -129,19 +143,32 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		await rebindSession();
 
 		if (initialMessage) {
+			await session.waitForIdle();
+			queuedInputCount--;
 			await session.prompt(initialMessage, { images: initialImages });
 		}
 
 		for (const message of messages) {
+			await session.waitForIdle();
+			queuedInputCount--;
+			lastAssistantMessage = undefined;
+			contextWindowStarted = false;
 			await session.prompt(message);
 		}
 
-		if (mode === "text") {
-			const state = session.state;
-			const lastMessage = state.messages[state.messages.length - 1];
+		// Settlement handlers can start another turn after the prompt's own run ends.
+		await session.waitForIdle();
 
-			if (lastMessage?.role === "assistant") {
-				const assistantMsg = lastMessage as AssistantMessage;
+		if (mode === "text") {
+			const activeLastMessage = session.state.messages.at(-1);
+			const assistantMsg =
+				activeLastMessage?.role === "assistant"
+					? activeLastMessage
+					: contextWindowStarted
+						? lastAssistantMessage
+						: undefined;
+
+			if (assistantMsg) {
 				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
 					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 					exitCode = 1;

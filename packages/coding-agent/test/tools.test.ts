@@ -1,11 +1,23 @@
 import { applyPatch } from "diff";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
-import { type BashOperations, createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
+import type { ExtensionContext } from "../src/core/extensions/types.ts";
+import {
+	type BashOperations,
+	createBashTool,
+	createBashToolDefinition,
+	createLocalBashOperations,
+} from "../src/core/tools/bash.ts";
+import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { computeEditsDiff } from "../src/core/tools/edit-diff.ts";
+import { createFindToolDefinition } from "../src/core/tools/find.ts";
+import { createGrepToolDefinition } from "../src/core/tools/grep.ts";
+import { createLsToolDefinition } from "../src/core/tools/ls.ts";
+import { createReadToolDefinition } from "../src/core/tools/read.ts";
+import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import {
 	createEditTool,
 	createFindTool,
@@ -244,8 +256,7 @@ describe("Coding Agent Tools", () => {
 
 			const result = await writeTool.execute("test-call-3", { path: testFile, content });
 
-			expect(getTextOutput(result)).toContain("Successfully wrote");
-			expect(getTextOutput(result)).toContain(testFile);
+			expect(getTextOutput(result)).toBe(`Successfully wrote to ${testFile}`);
 			expect(result.details).toBeUndefined();
 		});
 
@@ -749,17 +760,48 @@ describe("Coding Agent Tools", () => {
 			expect(fullOutput).toContain("2998\n2999\n3000");
 		});
 
+		it.each(["success", "abort", "error"] as const)(
+			"executeBash flushes full output before returning after %s",
+			async (outcome) => {
+				const outputDir = mkdtempSync(join(tmpdir(), "pi-bash-flush-"));
+				vi.stubEnv(process.platform === "win32" ? "TEMP" : "TMPDIR", outputDir);
+				const controller = new AbortController();
+				const failure = new Error("execution failed");
+				const output = "retained output\n".repeat(10000);
+				try {
+					const execution = executeBashWithOperations(
+						"chatty",
+						testDir,
+						{
+							exec: async (_command, _cwd, { onData }) => {
+								onData(Buffer.from(output));
+								if (outcome === "abort") controller.abort();
+								if (outcome !== "success") throw failure;
+								return { exitCode: 0 };
+							},
+						},
+						{ signal: controller.signal },
+					);
+					if (outcome === "error") {
+						await expect(execution).rejects.toBe(failure);
+					} else {
+						expect(await execution).toMatchObject({ truncated: true, cancelled: outcome === "abort" });
+					}
+					const files = readdirSync(outputDir);
+					expect(files).toHaveLength(1);
+					expect(readFileSync(join(outputDir, files[0]), "utf-8")).toBe(output);
+					rmSync(outputDir, { recursive: true, force: true });
+				} finally {
+					vi.unstubAllEnvs();
+				}
+			},
+		);
+
 		it("executeBash should persist full output when truncation happens by line count only", async () => {
 			const result = await executeBashWithOperations("seq 3000", process.cwd(), createLocalBashOperations());
 			const fullOutputPath = result.fullOutputPath;
 
 			expect(result.truncated).toBe(true);
-			expect(fullOutputPath).toBeDefined();
-
-			for (let i = 0; i < 20 && (!fullOutputPath || !existsSync(fullOutputPath)); i++) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
-
 			expect(fullOutputPath).toBeDefined();
 			expect(existsSync(fullOutputPath!)).toBe(true);
 			const fullOutput = readFileSync(fullOutputPath!, "utf-8");
@@ -887,6 +929,116 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain(".hidden-file");
 			expect(output).toContain(".hidden-dir/");
 		});
+	});
+});
+
+function fakeCtx(cwd: string): ExtensionContext {
+	return { cwd } as ExtensionContext;
+}
+
+describe("tool cwd resolution", () => {
+	let testDir: string;
+
+	beforeEach(() => {
+		testDir = join(tmpdir(), `coding-agent-cwd-test-${Date.now()}`);
+		mkdirSync(testDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	it("read uses ctx.cwd when provided", async () => {
+		const testFile = join(testDir, "ctx-cwd-read.txt");
+		writeFileSync(testFile, "hello from ctx.cwd");
+		const tool = createReadToolDefinition("/");
+		const result = await tool.execute(
+			"test-read-ctx-cwd",
+			{ path: "ctx-cwd-read.txt" },
+			undefined,
+			undefined,
+			fakeCtx(testDir),
+		);
+		const output = getTextOutput(result);
+		expect(output).toContain("hello from ctx.cwd");
+	});
+
+	it("write uses ctx.cwd when provided", async () => {
+		const tool = createWriteToolDefinition("/");
+		await tool.execute(
+			"test-write-ctx-cwd",
+			{ path: "ctx-cwd-write.txt", content: "written via ctx.cwd" },
+			undefined,
+			undefined,
+			fakeCtx(testDir),
+		);
+		const content = readFileSync(join(testDir, "ctx-cwd-write.txt"), "utf-8");
+		expect(content).toBe("written via ctx.cwd");
+	});
+
+	it("edit uses ctx.cwd when provided", async () => {
+		const testFile = join(testDir, "ctx-cwd-edit.txt");
+		writeFileSync(testFile, "old text");
+		const tool = createEditToolDefinition("/");
+		await tool.execute(
+			"test-edit-ctx-cwd",
+			{ path: "ctx-cwd-edit.txt", edits: [{ oldText: "old text", newText: "new text" }] },
+			undefined,
+			undefined,
+			fakeCtx(testDir),
+		);
+		const content = readFileSync(testFile, "utf-8");
+		expect(content).toBe("new text");
+	});
+
+	it("grep uses ctx.cwd when provided", async () => {
+		const testFile = join(testDir, "ctx-cwd-grep.txt");
+		writeFileSync(testFile, "match in ctx.cwd");
+		const tool = createGrepToolDefinition("/");
+		const result = await tool.execute(
+			"test-grep-ctx-cwd",
+			{ pattern: "match" },
+			undefined,
+			undefined,
+			fakeCtx(testDir),
+		);
+		const output = getTextOutput(result);
+		expect(output).toContain("ctx-cwd-grep.txt");
+	});
+
+	it("find uses ctx.cwd when provided", async () => {
+		writeFileSync(join(testDir, "ctx-cwd-find.txt"), "find me");
+		const tool = createFindToolDefinition("/");
+		const result = await tool.execute(
+			"test-find-ctx-cwd",
+			{ pattern: "ctx-cwd-find.txt" },
+			undefined,
+			undefined,
+			fakeCtx(testDir),
+		);
+		const output = getTextOutput(result);
+		expect(output).toContain("ctx-cwd-find.txt");
+	});
+
+	it("ls uses ctx.cwd when provided", async () => {
+		writeFileSync(join(testDir, "ctx-cwd-ls.txt"), "list me");
+		const tool = createLsToolDefinition("/");
+		const result = await tool.execute("test-ls-ctx-cwd", {}, undefined, undefined, fakeCtx(testDir));
+		const output = getTextOutput(result);
+		expect(output).toContain("ctx-cwd-ls.txt");
+	});
+
+	it("bash uses ctx.cwd when provided", async () => {
+		const tool = createBashToolDefinition("/", { exposeSessionEnvironment: false });
+		const result = await tool.execute(
+			"test-bash-ctx-cwd",
+			{ command: "pwd" },
+			undefined,
+			undefined,
+			fakeCtx(testDir),
+		);
+		const output = getTextOutput(result);
+		expect(output).toContain(testDir);
 	});
 });
 

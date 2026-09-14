@@ -98,7 +98,7 @@ function syncAgentMessages(session: AgentSession, sessionManager: SessionManager
 }
 
 describe("AgentSession.getSessionStats", () => {
-	it("exposes the current context usage alongside token totals", async () => {
+	it("exposes a conservative current context estimate alongside token totals", async () => {
 		const { session, sessionManager } = await createSession();
 
 		try {
@@ -107,10 +107,11 @@ describe("AgentSession.getSessionStats", () => {
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
+			expect(stats.tokens.total).toBe(200);
 			expect(stats.contextUsage).toEqual(session.getContextUsage());
-			expect(stats.contextUsage?.tokens).toBe(200);
+			expect(stats.contextUsage?.tokens).toBeGreaterThan(200);
 			expect(stats.contextUsage?.contextWindow).toBe(model.contextWindow);
-			expect(stats.contextUsage?.percent).toBe((200 / model.contextWindow) * 100);
+			expect(stats.contextUsage?.percent).toBe(((stats.contextUsage?.tokens ?? 0) / model.contextWindow) * 100);
 		} finally {
 			session.dispose();
 		}

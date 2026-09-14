@@ -5,8 +5,10 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
+import { statSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
+import { setCapabilityOverrides } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp } from "./cli/args.ts";
 import {
@@ -30,6 +32,7 @@ import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
+import { createManagedRestart, restoreRestartSession } from "./cli/restart-worker.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
@@ -63,7 +66,8 @@ import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/tru
 import { builtInExtensions } from "./extensions/index.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
-import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
+import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
+import { validateThemeJson } from "./modes/interactive/theme/theme-json.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
@@ -328,9 +332,31 @@ function validateSessionIdFlags(parsed: Args): void {
 	}
 }
 
-function openSessionOrExit(path: string, sessionDir?: string): SessionManager {
+function validateSessionCwdFlags(parsed: Args): void {
+	if (parsed.sessionCwd === undefined) return;
+
+	if (!parsed.session) {
+		console.error(chalk.red("Error: --session-cwd requires --session"));
+		process.exit(1);
+	}
+
+	const conflictingFlags = [
+		parsed.fork !== undefined ? "--fork" : undefined,
+		parsed.continue ? "--continue" : undefined,
+		parsed.resume ? "--resume" : undefined,
+		parsed.sessionId !== undefined ? "--session-id" : undefined,
+		parsed.noSession ? "--no-session" : undefined,
+	].filter((flag): flag is string => flag !== undefined);
+
+	if (conflictingFlags.length > 0) {
+		console.error(chalk.red(`Error: --session-cwd cannot be combined with ${conflictingFlags.join(", ")}`));
+		process.exit(1);
+	}
+}
+
+function openSessionOrExit(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 	try {
-		return SessionManager.open(path, sessionDir);
+		return SessionManager.open(path, sessionDir, cwdOverride);
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(chalk.red(`Error: ${message}`));
@@ -354,6 +380,20 @@ export async function createSessionManager(
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
 ): Promise<SessionManager> {
+	let sessionCwd: string | undefined;
+	if (parsed.sessionCwd !== undefined) {
+		try {
+			sessionCwd = resolvePath(parsed.sessionCwd, cwd);
+			if (!statSync(sessionCwd).isDirectory()) {
+				throw new Error(`Not a directory: ${sessionCwd}`);
+			}
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			console.error(chalk.red(`Error: Invalid --session-cwd: ${message}`));
+			process.exit(1);
+		}
+	}
+
 	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
 		return SessionManager.inMemory(cwd, parsed.sessionId !== undefined ? { id: parsed.sessionId } : undefined);
 	}
@@ -387,9 +427,10 @@ export async function createSessionManager(
 		switch (resolved.type) {
 			case "path":
 			case "local":
-				return openSessionOrExit(resolved.path, sessionDir);
+				return openSessionOrExit(resolved.path, sessionDir, sessionCwd);
 
 			case "global": {
+				if (sessionCwd !== undefined) return openSessionOrExit(resolved.path, sessionDir, sessionCwd);
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
 				const shouldFork = await promptConfirm("Fork this session into current directory?");
 				if (!shouldFork) {
@@ -559,7 +600,17 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
-	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
+	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
+	const restart = createManagedRestart(args);
+	const managedInteractive =
+		restart &&
+		!startupBenchmark &&
+		resolveAppMode(parseArgs(args), process.stdin.isTTY, process.stdout.isTTY) === "interactive";
+	const extensionFactories = [
+		...builtInExtensions,
+		...(options?.extensionFactories ?? []),
+		...(managedInteractive ? [restart.extension] : []),
+	];
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
@@ -648,6 +699,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
+	validateSessionCwdFlags(parsed);
 	validateForkFlags(parsed);
 	validateSessionIdFlags(parsed);
 
@@ -680,6 +732,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
+	if (restart?.handoff) restoreRestartSession(sessionManager, restart.handoff);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
 		if (appMode === "interactive") {
@@ -713,6 +766,7 @@ export async function main(args: string[], options?: MainOptions) {
 	const projectTrustByCwd = new Map<string, boolean>();
 
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
+	restart?.setExtensions(resolvedExtensionPaths ?? []);
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
@@ -851,7 +905,9 @@ export async function main(args: string[], options?: MainOptions) {
 	});
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
+	restart?.setInitialProvider(session.model?.provider);
 	const { settingsManager, modelRuntime, resourceLoader } = services;
+	setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides());
 	applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 
@@ -887,6 +943,8 @@ export async function main(args: string[], options?: MainOptions) {
 		stdinContent,
 	);
 	time("prepareInitialMessage");
+	// pi reads user-authored themes, so it opts into full validation before any theme loads.
+	setThemeJsonValidator(validateThemeJson);
 	initTheme(settingsManager.getTheme(), appMode === "interactive");
 	time("initTheme");
 
@@ -914,7 +972,6 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);
@@ -949,12 +1006,15 @@ export async function main(args: string[], options?: MainOptions) {
 			startupDiagnostics,
 			modelFallbackMessage,
 			autoTrustOnReloadCwd,
-			initialMessage,
+			initialMessage: restart?.handoff?.message
+				? `[Pi restart continuation]${restart.handoff.failure ? `\n${restart.handoff.failure}` : ""}\n${restart.handoff.message}`
+				: initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
+			onShutdownRequested: restart?.shutdownRequested,
 		});
 		if (startupBenchmark) {
 			await interactiveMode.init();
@@ -974,6 +1034,10 @@ export async function main(args: string[], options?: MainOptions) {
 			return;
 		}
 
+		if (restart) {
+			await interactiveMode.init();
+			if (!(await restart.ready())) return;
+		}
 		printTimings();
 		await interactiveMode.run();
 	} else {

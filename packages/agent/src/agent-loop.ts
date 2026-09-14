@@ -19,6 +19,8 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
+	NewContextRequest,
+	PrepareNextTurnContext,
 	StreamFn,
 } from "./types.ts";
 
@@ -162,7 +164,7 @@ async function runLoop(
 ): Promise<void> {
 	let currentContext = initialContext;
 	let config = initialConfig;
-	let firstTurn = true;
+	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -172,14 +174,33 @@ async function runLoop(
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
-			if (!firstTurn) {
+			if (lastCompletedTurn) {
+				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
+				if (nextTurnSnapshot) {
+					currentContext = nextTurnSnapshot.context ?? currentContext;
+					config = {
+						...config,
+						model: nextTurnSnapshot.model ?? config.model,
+						reasoning:
+							nextTurnSnapshot.thinkingLevel === undefined
+								? config.reasoning
+								: nextTurnSnapshot.thinkingLevel === "off"
+									? undefined
+									: nextTurnSnapshot.thinkingLevel,
+					};
+				}
+				// Preparation can be long-running (for example, compaction). Pick up steering
+				// queued while it ran. Only poll again if the earlier poll returned nothing;
+				// otherwise one-at-a-time mode would deliver two messages in this turn.
+				if (pendingMessages.length === 0) {
+					pendingMessages = (await config.getSteeringMessages?.()) || [];
+				}
 				await emit({ type: "turn_start" });
-			} else {
-				firstTurn = false;
 			}
 
-			// Process pending messages (inject before next assistant response)
-			if (pendingMessages.length > 0) {
+			let pollAfterRequestPreparation = pendingMessages.length === 0;
+			while (true) {
+				// Process pending messages (inject before next assistant response)
 				for (const message of pendingMessages) {
 					await emit({ type: "message_start", message });
 					await emit({ type: "message_end", message });
@@ -187,6 +208,15 @@ async function runLoop(
 					newMessages.push(message);
 				}
 				pendingMessages = [];
+
+				currentContext = (await config.prepareProviderRequest?.(currentContext)) ?? currentContext;
+				if (!config.prepareProviderRequest || !pollAfterRequestPreparation) break;
+
+				// Pick up one steering drain that arrived during long request preparation, then
+				// prepare again with those messages included.
+				pendingMessages = (await config.getSteeringMessages?.()) || [];
+				if (pendingMessages.length === 0) break;
+				pollAfterRequestPreparation = false;
 			}
 
 			// Stream assistant response
@@ -203,6 +233,7 @@ async function runLoop(
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
+			let newContext: NewContextRequest | undefined;
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
 				// A "length" stop means the output was cut off by the token limit, so
@@ -213,7 +244,8 @@ async function runLoop(
 						? await failToolCallsFromTruncatedMessage(toolCalls, emit)
 						: await executeToolCalls(currentContext, message, config, signal, emit);
 				toolResults.push(...executedToolBatch.messages);
-				hasMoreToolCalls = !executedToolBatch.terminate;
+				newContext = executedToolBatch.newContext;
+				hasMoreToolCalls = !executedToolBatch.terminate || newContext !== undefined;
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
@@ -223,35 +255,15 @@ async function runLoop(
 
 			await emit({ type: "turn_end", message, toolResults });
 
-			const nextTurnContext = {
+			lastCompletedTurn = {
 				message,
 				toolResults,
 				context: currentContext,
 				newMessages,
+				newContext,
 			};
-			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
-			if (nextTurnSnapshot) {
-				currentContext = nextTurnSnapshot.context ?? currentContext;
-				config = {
-					...config,
-					model: nextTurnSnapshot.model ?? config.model,
-					reasoning:
-						nextTurnSnapshot.thinkingLevel === undefined
-							? config.reasoning
-							: nextTurnSnapshot.thinkingLevel === "off"
-								? undefined
-								: nextTurnSnapshot.thinkingLevel,
-				};
-			}
 
-			if (
-				await config.shouldStopAfterTurn?.({
-					message,
-					toolResults,
-					context: currentContext,
-					newMessages,
-				})
-			) {
+			if ((await config.shouldStopAfterTurn?.(lastCompletedTurn)) && !newContext) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
@@ -428,6 +440,7 @@ async function executeToolCalls(
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
+	newContext?: NewContextRequest;
 };
 
 async function executeToolCallsSequential(
@@ -483,6 +496,7 @@ async function executeToolCallsSequential(
 	return {
 		messages,
 		terminate: shouldTerminateToolBatch(finalizedCalls),
+		newContext: getNewContextRequest(finalizedCalls, toolCalls.length, signal),
 	};
 }
 
@@ -520,6 +534,15 @@ async function executeToolCallsParallel(
 		}
 
 		finalizedCalls.push(async () => {
+			if (signal?.aborted) {
+				const finalized = {
+					toolCall,
+					result: createErrorToolResult("Operation aborted"),
+					isError: true,
+				} satisfies FinalizedToolCallOutcome;
+				await emitToolExecutionEnd(finalized, emit);
+				return finalized;
+			}
 			const executed = await executePreparedToolCall(preparation, signal, emit);
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
@@ -550,6 +573,7 @@ async function executeToolCallsParallel(
 	return {
 		messages,
 		terminate: shouldTerminateToolBatch(orderedFinalizedCalls),
+		newContext: getNewContextRequest(orderedFinalizedCalls, toolCalls.length, signal),
 	};
 }
 
@@ -581,6 +605,21 @@ type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<Finalize
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+}
+
+function getNewContextRequest(
+	finalizedCalls: FinalizedToolCallOutcome[],
+	expectedCount: number,
+	signal: AbortSignal | undefined,
+): NewContextRequest | undefined {
+	if (
+		signal?.aborted ||
+		finalizedCalls.length !== expectedCount ||
+		finalizedCalls.some((finalized) => finalized.isError)
+	) {
+		return undefined;
+	}
+	return finalizedCalls.find((finalized) => finalized.result.newContext)?.result.newContext;
 }
 
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {

@@ -58,6 +58,9 @@ export type {
 	AgentToolUpdateCallback,
 	AppKeybinding,
 	AutocompleteProviderFactory,
+	AutoRetryEndEvent,
+	AutoRetryStartEvent,
+	BashCwdHook,
 	BashToolCallEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -107,6 +110,7 @@ export type {
 	MessageRenderOptions,
 	MessageStartEvent,
 	MessageUpdateEvent,
+	NewContextRequest,
 	PowerShellToolCallEvent,
 	ProjectTrustContext,
 	ProjectTrustEvent,
@@ -119,6 +123,7 @@ export type {
 	RegisteredCommand,
 	RegisteredTool,
 	ResolvedCommand,
+	SessionBeforeAutoCompactEvent,
 	SessionBeforeCompactEvent,
 	SessionBeforeForkEvent,
 	SessionBeforeSwitchEvent,
@@ -131,6 +136,9 @@ export type {
 	SlashCommandInfo,
 	SlashCommandSource,
 	SourceInfo,
+	SummarizationRetryAttemptStartEvent,
+	SummarizationRetryFinishedEvent,
+	SummarizationRetryScheduledEvent,
 	TerminalInputHandler,
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -144,6 +152,9 @@ export type {
 	ToolResultEvent,
 	TurnEndEvent,
 	TurnStartEvent,
+	UIPromptEndEvent,
+	UIPromptKind,
+	UIPromptStartEvent,
 	UserBashEvent,
 	UserBashEventResult,
 	WidgetPlacement,
@@ -231,6 +242,7 @@ export {
 	buildContextEntries,
 	buildSessionContext,
 	type CompactionEntry,
+	type ContextWindowEntry,
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,
@@ -253,6 +265,7 @@ export {
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
 export {
+	type CompactionModelOverride,
 	type CompactionSettings,
 	type DefaultProjectTrust,
 	type FullscreenExitOutput,
@@ -369,6 +382,7 @@ export {
 	BranchSummaryMessageComponent,
 	CompactionSummaryMessageComponent,
 	CustomEditor,
+	type CustomEditorOptions,
 	CustomMessageComponent,
 	DynamicBorder,
 	ExtensionEditorComponent,
@@ -415,5 +429,6 @@ export { copyToClipboard } from "./utils/clipboard.ts";
 export { parseFrontmatter, stripFrontmatter } from "./utils/frontmatter.ts";
 export { convertToPng } from "./utils/image-convert.ts";
 export { formatDimensionNote, type ResizedImage, resizeImage } from "./utils/image-resize.ts";
+export { detectSupportedImageMimeTypeFromFile } from "./utils/mime.ts";
 // Shell utilities
 export { getPowerShellConfig, getShellConfig } from "./utils/shell.ts";

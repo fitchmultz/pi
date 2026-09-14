@@ -66,6 +66,14 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	modelId: string;
 }
 
+export interface ContextWindowEntry extends SessionEntryBase {
+	type: "context_window";
+	/** Optional continuation state supplied by the previous window. */
+	handoff?: string;
+	/** Active context size immediately before the window transition, when known. */
+	tokensBefore: number | null;
+}
+
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	type: "compaction";
 	summary: string;
@@ -145,6 +153,7 @@ export type SessionEntry =
 	| SessionMessageEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
+	| ContextWindowEntry
 	| CompactionEntry
 	| BranchSummaryEntry
 	| CustomEntry
@@ -201,6 +210,7 @@ export type ReadonlySessionManager = Pick<
 	| "buildContextEntries"
 	| "getHeader"
 	| "getEntries"
+	| "getEntriesRevision"
 	| "getTree"
 	| "getSessionName"
 >;
@@ -401,6 +411,18 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	if (entry.type === "branch_summary" && entry.summary) {
 		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
 	}
+	if (entry.type === "context_window") {
+		const handoff = entry.handoff ? `\n\nHandoff from the previous window:\n${entry.handoff}` : "";
+		return [
+			createCustomMessage(
+				"context-window",
+				`Context window ${entry.id} starts here. Earlier conversation is not available in this window.${handoff}`,
+				true,
+				{ windowId: entry.id, tokensBefore: entry.tokensBefore },
+				entry.timestamp,
+			),
+		];
+	}
 	if (entry.type === "compaction") {
 		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
 	}
@@ -408,19 +430,26 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 }
 
 /**
- * Build the active, compaction-aware session entry list.
+ * Build the active session entry list for the selected leaf.
  *
- * This follows the current leaf path. If the path contains compaction entries,
- * the latest compaction is represented by the compaction entry itself, followed
- * by the kept entries starting at firstKeptEntryId and all entries after the
- * compaction entry. Older summarized entries are omitted.
+ * Entries before the latest context-window boundary are omitted. Within that
+ * window, the latest compaction is represented by its summary, its kept entries,
+ * and everything appended afterward.
  */
 export function buildContextEntries(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
-	const path = buildSessionPath(entries, leafId, byId);
+	const fullPath = buildSessionPath(entries, leafId, byId);
+	let contextWindowIndex = -1;
+	for (let i = fullPath.length - 1; i >= 0; i--) {
+		if (fullPath[i].type === "context_window") {
+			contextWindowIndex = i;
+			break;
+		}
+	}
+	const path = contextWindowIndex === -1 ? fullPath : fullPath.slice(contextWindowIndex);
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -516,11 +545,11 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(resolvedFilePath)) return [];
 
 	const entries: FileEntry[] = [];
+	let pending = "";
 	const fd = openSync(resolvedFilePath, "r");
 	try {
 		const decoder = new StringDecoder("utf8");
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-		let pending = "";
 
 		while (true) {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
@@ -545,13 +574,14 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		closeSync(fd);
 	}
 
-	// Validate session header
+	// Validate session header before repairing the file.
 	if (entries.length === 0) return entries;
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
 		return [];
 	}
 
+	if (pending) appendFileSync(resolvedFilePath, "\n");
 	return entries;
 }
 
@@ -860,6 +890,7 @@ export class SessionManager {
 	private persist: boolean;
 	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
+	private entriesRevision = 0;
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
@@ -882,6 +913,8 @@ export class SessionManager {
 
 		if (sessionFile) {
 			this._setSessionFile(sessionFile, preloadedFileEntries);
+		} else if (preloadedFileEntries?.length) {
+			this._loadEntries(preloadedFileEntries, newSessionOptions);
 		} else {
 			this.newSession(newSessionOptions);
 		}
@@ -895,11 +928,11 @@ export class SessionManager {
 	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
-			this.fileEntries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
+			const entries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
 
 			// If file was empty, initialize it with a valid session header. If it was
 			// non-empty but did not parse as a pi session, fail without modifying it.
-			if (this.fileEntries.length === 0) {
+			if (entries.length === 0) {
 				const explicitPath = this.sessionFile;
 				if (statSync(explicitPath).size > 0) {
 					throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
@@ -911,14 +944,7 @@ export class SessionManager {
 				return;
 			}
 
-			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
-			this.sessionId = header?.id ?? createSessionId();
-
-			if (migrateToCurrentVersion(this.fileEntries)) {
-				this._rewriteFile();
-			}
-
-			this._buildIndex();
+			this._loadEntries(entries);
 			this.flushed = true;
 		} else {
 			const explicitPath = this.sessionFile;
@@ -942,6 +968,7 @@ export class SessionManager {
 			parentSession: options?.parentSession,
 		};
 		this.fileEntries = [header];
+		this.entriesRevision++;
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
@@ -955,7 +982,26 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
+	private _loadEntries(entries: FileEntry[], options?: NewSessionOptions): void {
+		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
+
+		if (header) {
+			this.fileEntries = entries;
+			this.sessionId = header.id;
+
+			if (migrateToCurrentVersion(this.fileEntries)) {
+				this._rewriteFile();
+			}
+		} else {
+			this.newSession(options);
+			this.fileEntries = this.fileEntries.concat(entries);
+		}
+
+		this._buildIndex();
+	}
+
 	private _buildIndex(): void {
+		this.entriesRevision++;
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
@@ -1043,6 +1089,7 @@ export class SessionManager {
 
 	private _appendEntry(entry: SessionEntry): void {
 		this.fileEntries.push(entry);
+		this.entriesRevision++;
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		this._persist(entry);
@@ -1088,6 +1135,20 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			provider,
 			modelId,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a fresh context-window boundary as child of current leaf, then advance leaf. Returns entry id. */
+	appendContextWindow(handoff: string | undefined, tokensBefore: number | null): string {
+		const entry: ContextWindowEntry = {
+			type: "context_window",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			handoff,
+			tokensBefore,
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1150,9 +1211,8 @@ export class SessionManager {
 	getSessionName(): string | undefined {
 		// Walk entries in reverse to find the latest session_info entry.
 		// Empty names explicitly clear the session title.
-		const entries = this.getEntries();
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i];
+		for (let i = this.fileEntries.length - 1; i >= 0; i--) {
+			const entry = this.fileEntries[i];
 			if (entry.type === "session_info") {
 				return entry.name?.trim() || undefined;
 			}
@@ -1302,6 +1362,11 @@ export class SessionManager {
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
 	}
 
+	/** Changes when file entries are appended or replaced, not when only the active leaf moves. */
+	getEntriesRevision(): number {
+		return this.entriesRevision;
+	}
+
 	/**
 	 * Get the session as a tree structure. Returns a shallow defensive copy of all entries.
 	 * A well-formed session has exactly one root (first entry with parentId === null).
@@ -1421,10 +1486,27 @@ export class SessionManager {
 		// Because labels are real tree entries, later entries can be children of labels;
 		// removing labels requires re-chaining the retained path to avoid orphaned subtrees.
 		const pathWithoutLabels: SessionEntry[] = [];
+		const replacementByLabelId = new Map<string, string>();
+		const pendingLabelIds: string[] = [];
 		let pathParentId: string | null = null;
 		for (const entry of path) {
-			if (entry.type === "label") continue;
-			pathWithoutLabels.push({ ...entry, parentId: pathParentId });
+			if (entry.type === "label") {
+				pendingLabelIds.push(entry.id);
+				continue;
+			}
+			for (const labelId of pendingLabelIds) {
+				replacementByLabelId.set(labelId, entry.id);
+			}
+			pendingLabelIds.length = 0;
+			pathWithoutLabels.push(
+				entry.type === "compaction"
+					? {
+							...entry,
+							parentId: pathParentId,
+							firstKeptEntryId: replacementByLabelId.get(entry.firstKeptEntryId) ?? entry.firstKeptEntryId,
+						}
+					: { ...entry, parentId: pathParentId },
+			);
 			pathParentId = entry.id;
 		}
 
@@ -1565,9 +1647,9 @@ export class SessionManager {
 		return new SessionManager(cwd, dir, undefined, true);
 	}
 
-	/** Create an in-memory session (no file persistence) */
-	static inMemory(cwd: string = process.cwd(), options?: NewSessionOptions): SessionManager {
-		return new SessionManager(cwd, "", undefined, false, options);
+	/** Create an in-memory session (no file persistence), optionally from entries held outside the filesystem. */
+	static inMemory(cwd: string = process.cwd(), options?: NewSessionOptions, entries?: FileEntry[]): SessionManager {
+		return new SessionManager(cwd, "", undefined, false, options, entries);
 	}
 
 	/**

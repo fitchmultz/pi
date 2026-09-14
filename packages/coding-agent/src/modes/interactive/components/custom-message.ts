@@ -17,18 +17,21 @@ export class CustomMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
 	private outputPad: number;
+	private compactView: boolean;
 
 	constructor(
 		message: CustomMessage<unknown>,
 		customRenderer?: MessageRenderer,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
+		compactView = false,
 	) {
 		super();
 		this.message = message;
 		this.customRenderer = customRenderer;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
+		this.compactView = compactView;
 
 		this.addChild(new Spacer(1));
 
@@ -41,6 +44,13 @@ export class CustomMessageComponent extends Container {
 	setExpanded(expanded: boolean): void {
 		if (this._expanded !== expanded) {
 			this._expanded = expanded;
+			this.rebuild();
+		}
+	}
+
+	setCompactView(compactView: boolean): void {
+		if (this.compactView !== compactView) {
+			this.compactView = compactView;
 			this.rebuild();
 		}
 	}
@@ -70,7 +80,7 @@ export class CustomMessageComponent extends Container {
 			try {
 				const component = this.customRenderer(
 					this.message,
-					{ expanded: this._expanded, outputPad: this.outputPad },
+					{ expanded: this._expanded, outputPad: this.outputPad, compactView: this.compactView },
 					theme,
 				);
 				if (component) {

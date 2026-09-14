@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
@@ -17,10 +17,12 @@ export class AssistantMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private hiddenThinkingLabel: string;
 	private outputPad: number;
+	private compactView: boolean;
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private isStreaming = false;
+	private thinkingVisibilityOverrides = new Map<number, boolean>();
 
 	constructor(
 		message?: AssistantMessage,
@@ -29,6 +31,7 @@ export class AssistantMessageComponent extends Container {
 		hiddenThinkingLabel = "Thinking...",
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		compactView = false,
 	) {
 		super();
 
@@ -36,6 +39,7 @@ export class AssistantMessageComponent extends Container {
 		this.markdownTheme = markdownTheme;
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.outputPad = outputPad;
+		this.compactView = compactView;
 		this.markdownTransformers = markdownTransformers;
 
 		// Container for text/thinking content
@@ -56,8 +60,16 @@ export class AssistantMessageComponent extends Container {
 
 	setHideThinkingBlock(hide: boolean): void {
 		this.hideThinkingBlock = hide;
+		this.thinkingVisibilityOverrides.clear();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
+		}
+	}
+
+	setCompactView(compactView: boolean): void {
+		if (this.compactView !== compactView) {
+			this.compactView = compactView;
+			if (this.lastMessage) this.updateContent(this.lastMessage);
 		}
 	}
 
@@ -93,18 +105,15 @@ export class AssistantMessageComponent extends Container {
 		// Clear content container
 		this.contentContainer.clear();
 
-		const hasVisibleContent = message.content.some(
-			(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
-		);
-
-		if (hasVisibleContent) {
-			this.contentContainer.addChild(new Spacer(1));
-		}
+		let needsSpacer = true;
 
 		// Render content in order
+		let thinkingRunIndex = 0;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && content.text.trim()) {
+				if (needsSpacer) this.contentContainer.addChild(new Spacer(1));
+				needsSpacer = false;
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.contentContainer.addChild(
@@ -130,21 +139,15 @@ export class AssistantMessageComponent extends Container {
 					continue;
 				}
 
-				// Add spacing only when another visible assistant content block follows.
-				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
+				const runIndex = thinkingRunIndex++;
+				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
+				if (hidden && this.compactView) continue;
 
-				if (this.hideThinkingBlock) {
-					// Show one static label for each run of thinking blocks when hidden.
-					this.contentContainer.addChild(
-						new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0),
-					);
-				} else {
-					// Render each run of thinking blocks as one Markdown section.
-					this.contentContainer.addChild(
-						new Markdown(
+				if (needsSpacer) this.contentContainer.addChild(new Spacer(1));
+				needsSpacer = true;
+				const thinkingComponent = hidden
+					? new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0)
+					: new Markdown(
 							thinkingBlocks.join("\n\n"),
 							this.outputPad,
 							0,
@@ -160,12 +163,15 @@ export class AssistantMessageComponent extends Container {
 									this.markdownTransformers,
 								),
 							},
-						),
-					);
-				}
-				if (hasVisibleContentAfter) {
-					this.contentContainer.addChild(new Spacer(1));
-				}
+						);
+				this.contentContainer.addChild(
+					new MouseRegion(thinkingComponent, (event) => {
+						if (event.type !== "click" || event.button !== "left") return undefined;
+						this.thinkingVisibilityOverrides.set(runIndex, !hidden);
+						if (this.lastMessage) this.updateContent(this.lastMessage);
+						return { handled: true };
+					}),
+				);
 			}
 		}
 

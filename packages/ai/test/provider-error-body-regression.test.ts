@@ -163,11 +163,17 @@ describe("provider error body passthrough (per-tier regression)", () => {
 		expect(occurrences).toHaveLength(1);
 	});
 
-	it("openai-responses (status-only) keeps the prefix and surfaces the body", async () => {
-		const output = await drainResult(streamOpenAIResponses(responsesModel, context, { apiKey: "test" }));
+	// Regression for #9298: compatible providers must not be mislabeled as OpenAI.
+	it.each([
+		["openai", "OpenAI API error (403)"],
+		["openrouter", "openrouter API error (403)"],
+	])("openai-responses identifies %s and surfaces the body", async (provider, prefix) => {
+		const output = await drainResult(
+			streamOpenAIResponses({ ...responsesModel, provider }, context, { apiKey: "test", transport: "sse" }),
+		);
 
 		expect(output.stopReason).toBe("error");
-		expect(output.errorMessage).toContain("OpenAI API error (403)");
+		expect(output.errorMessage).toContain(prefix);
 		expect(output.errorMessage).toContain("blocked by gateway WAF");
 	});
 

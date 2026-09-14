@@ -590,6 +590,9 @@ class TreeList implements Component {
 			case "compaction":
 				parts.push("compaction");
 				break;
+			case "context_window":
+				parts.push("context window", entry.handoff ?? "");
+				break;
 			case "branch_summary":
 				parts.push("branch summary", entry.summary);
 				break;
@@ -824,6 +827,12 @@ class TreeList implements Component {
 				result = theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
 				break;
 			}
+			case "context_window": {
+				const tokens = entry.tokensBefore == null ? "" : `: ${Math.round(entry.tokensBefore / 1000)}k tokens`;
+				result = theme.fg("borderAccent", `[context window${tokens}]`);
+				if (entry.handoff) result += ` ${normalize(entry.handoff)}`;
+				break;
+			}
 			case "branch_summary":
 				result = theme.fg("warning", `[branch summary]: `) + normalize(entry.summary);
 				break;
@@ -914,6 +923,9 @@ class TreeList implements Component {
 			case "compaction":
 				text = entry.summary;
 				break;
+			case "context_window":
+				text = entry.handoff ? `Context window\n\nHandoff: ${entry.handoff}` : "Context window";
+				break;
 			case "branch_summary":
 				text = entry.summary;
 				break;
@@ -948,6 +960,7 @@ class TreeList implements Component {
 				const offset = args.offset as number | undefined;
 				const limit = args.limit as number | undefined;
 				let display = path;
+				if (args.json !== undefined) display += ` json=${JSON.stringify(args.json)}`;
 				if (offset !== undefined || limit !== undefined) {
 					const start = offset ?? 1;
 					const end = limit !== undefined ? start + limit - 1 : "";

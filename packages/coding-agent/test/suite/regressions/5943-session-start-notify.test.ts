@@ -415,7 +415,7 @@ describe("regression #5943: session_start transient UI", () => {
 		}
 	});
 
-	it("runs the reload render hook before reload session_start handlers can notify", async () => {
+	it.each(["tui", "rpc"] as const)("notifies %s after reload and requires a code restart", async (mode) => {
 		const events: string[] = [];
 		const beforeSessionStart = vi.fn(() => {
 			events.push("render");
@@ -434,7 +434,7 @@ describe("regression #5943: session_start transient UI", () => {
 		try {
 			await harness.session.bindExtensions({
 				uiContext: createUiContext((message) => events.push(message)),
-				mode: "tui",
+				mode,
 			});
 			expect(events).toEqual(["start:startup", "notify:startup"]);
 
@@ -442,7 +442,12 @@ describe("regression #5943: session_start transient UI", () => {
 			await harness.session.reload({ beforeSessionStart });
 
 			expect(beforeSessionStart).toHaveBeenCalledTimes(1);
-			expect(events).toEqual(["render", "start:reload", "notify:reload"]);
+			expect(events).toEqual([
+				"render",
+				"start:reload",
+				"notify:reload",
+				"Restart pi to apply extension code changes.",
+			]);
 		} finally {
 			harness.cleanup();
 		}

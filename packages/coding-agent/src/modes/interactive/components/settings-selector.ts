@@ -67,6 +67,7 @@ export interface SettingsConfig {
 	terminalTheme: TerminalTheme;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
+	compactView: boolean;
 	mermaidRenderingMode: MermaidRenderingMode;
 	showCacheMissNotices: boolean;
 	collapseChangelog: boolean;
@@ -84,6 +85,7 @@ export interface SettingsConfig {
 	tuiMode: TuiMode;
 	fullscreenExitOutput: FullscreenExitOutput;
 	fullscreenScrollbar: ScrollViewScrollbar;
+	fullscreenCopyOnSelect: boolean;
 	warnings: WarningSettings;
 }
 
@@ -103,6 +105,7 @@ export interface SettingsCallbacks {
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
+	onCompactViewChange: (compactView: boolean) => void;
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onShowCacheMissNoticesChange: (shown: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
@@ -120,6 +123,7 @@ export interface SettingsCallbacks {
 	onTuiModeChange: (mode: TuiMode) => void;
 	onFullscreenExitOutputChange: (output: FullscreenExitOutput) => void;
 	onFullscreenScrollbarChange: (mode: ScrollViewScrollbar) => void;
+	onFullscreenCopyOnSelectChange: (enabled: boolean) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onCancel: () => void;
 }
@@ -189,20 +193,23 @@ function modelItemLabel(model: Model<any>): string {
 	return `${model.id} ${theme.fg("muted", `[${model.provider}]`)}`;
 }
 
-function themeItems(availableThemes: string[]): SelectItem[] {
-	return availableThemes.map((name) => ({ value: name, label: name }));
+function themeItems(availableThemes: string[], currentTheme: string): SelectItem[] {
+	return availableThemes.map((name) => ({
+		value: name,
+		label: `${name === currentTheme ? "✓ " : "  "}${name}`,
+	}));
 }
 
 const AUTOMATIC_THEME_VALUE = "/";
 
-function singleModeThemeItems(availableThemes: string[]): SelectItem[] {
+function singleModeThemeItems(availableThemes: string[], currentTheme: string): SelectItem[] {
 	return [
 		{
 			value: AUTOMATIC_THEME_VALUE,
-			label: "Automatic",
+			label: "  Automatic",
 			description: "Use separate themes for light and dark terminal appearance",
 		},
-		...themeItems(availableThemes),
+		...themeItems(availableThemes, currentTheme),
 	];
 }
 
@@ -283,7 +290,7 @@ class ThemeSubmenu extends Container {
 		const menu = new SelectSubmenu(
 			"Theme",
 			"Select a theme, or choose Automatic to follow terminal appearance.",
-			singleModeThemeItems(this.availableThemes),
+			singleModeThemeItems(this.availableThemes, this.singleTheme),
 			this.singleTheme,
 			(value) => {
 				if (value === AUTOMATIC_THEME_VALUE) {
@@ -399,7 +406,7 @@ class ThemeSubmenu extends Container {
 		return new SelectSubmenu(
 			title,
 			description,
-			themeItems(this.availableThemes),
+			themeItems(this.availableThemes, currentValue),
 			currentValue,
 			onSelect,
 			() => {
@@ -491,6 +498,13 @@ export class SettingsSelectorComponent extends Container {
 				values: HTTP_IDLE_TIMEOUT_CHOICES.map((choice) => choice.label),
 			},
 			{
+				id: "compact-view",
+				label: "Compact view",
+				description: "Use one or two rows for collapsed tool cards in this session; remember for new sessions",
+				currentValue: config.compactView ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
 				id: "hide-thinking",
 				label: "Hide thinking",
 				description: "Hide thinking blocks in assistant responses",
@@ -507,7 +521,7 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "cache-miss-notices",
 				label: "Cache miss notices",
-				description: "Show transcript notices for significant prompt-cache misses and compaction costs",
+				description: "Show transcript notices for cache costs and provider recovery diagnostics",
 				currentValue: config.showCacheMissNotices ? "true" : "false",
 				values: ["true", "false"],
 			},
@@ -624,15 +638,16 @@ export class SettingsSelectorComponent extends Container {
 								const levels = (
 									model.reasoning ? getSupportedThinkingLevels(model) : ["off"]
 								) as ThinkingLevel[];
+								const activeLevel = currentModelThinkingLevels[ctx.model];
 								const items: SelectItem[] = levels.map((level) => ({
 									value: level,
-									label: level,
+									label: `${level === activeLevel ? "✓ " : "  "}${level}`,
 									description: THINKING_DESCRIPTIONS[level],
 								}));
 								if (currentModelThinkingLevels[ctx.model] !== undefined) {
 									items.push({
 										value: CLEAR_OVERRIDE_VALUE,
-										label: "(clear override)",
+										label: "  (clear override)",
 										description: `Revert to global default (${config.thinkingLevel})`,
 									});
 								}
@@ -688,6 +703,13 @@ export class SettingsSelectorComponent extends Container {
 				description: "Scrollbar behavior in fullscreen mode; has no effect in regular mode",
 				currentValue: config.fullscreenScrollbar,
 				values: ["auto", "always", "hidden"],
+			},
+			{
+				id: "fullscreen-copy-on-select",
+				label: "Fullscreen copy on select",
+				description: "Automatically copy selected text in fullscreen mode; disable to copy selections with Ctrl+X",
+				currentValue: config.fullscreenCopyOnSelect ? "true" : "false",
+				values: ["true", "false"],
 			},
 			{
 				id: "theme",
@@ -850,6 +872,9 @@ export class SettingsSelectorComponent extends Container {
 						}
 						break;
 					}
+					case "compact-view":
+						callbacks.onCompactViewChange(newValue === "true");
+						break;
 					case "hide-thinking":
 						callbacks.onHideThinkingBlockChange(newValue === "true");
 						break;
@@ -909,6 +934,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "fullscreen-scrollbar":
 						callbacks.onFullscreenScrollbarChange(newValue as ScrollViewScrollbar);
+						break;
+					case "fullscreen-copy-on-select":
+						callbacks.onFullscreenCopyOnSelectChange(newValue === "true");
 						break;
 					case "theme":
 						callbacks.onThemeChange(newValue);

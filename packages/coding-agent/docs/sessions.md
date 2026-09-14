@@ -49,6 +49,21 @@ In the picker you can:
 
 When available, pi uses the `trash` CLI for deletion instead of permanently removing files.
 
+## Overriding a Saved Session's Working Directory
+
+By default, `--session` opens a saved session in its header's working directory. Use `--session-cwd` to run the same session elsewhere, for example after removing its original worktree:
+
+```bash
+pi --session /path/to/session.jsonl --session-cwd /path/to/project
+pi --session <id> --session-cwd ../project
+```
+
+The override must name an existing directory. Relative paths resolve from the directory where you launch pi, and `~` is supported. Pi uses this directory for runtime project settings and resource discovery, before extensions start. `--session-dir` still controls session storage and lookup; it does not set the working directory.
+
+The session keeps its file, ID, history, and saved header cwd. Pass `--session-cwd` again on each continuation; it is not saved as a new default. An ID found in another project resumes that same file without a fork prompt when this override is supplied. Without the flag, existing saved-cwd and cross-project fork behavior is unchanged.
+
+`--session-cwd` requires an explicit `--session <path|id>`. It cannot be combined with `--fork`, `--continue`, `--resume`, `--session-id`, or `--no-session`.
+
 ## Naming Sessions
 
 Use `/name <name>` to set a human-readable session name:

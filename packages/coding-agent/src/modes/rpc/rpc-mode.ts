@@ -397,7 +397,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		},
 
 		getEditorComponent() {
-			return interactiveUI?.getEditorComponent();
+			return frontend === "tui" ? interactiveUI?.getEditorComponent() : editorComponentFactory;
 		},
 
 		get theme() {
@@ -459,6 +459,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		await session.bindExtensions({
 			uiContext: extensionUIContext,
 			mode: frontend,
+			getQueuedInputCount: () => interactiveMode?.getQueuedInputCount() ?? 0,
 			commandContextActions: {
 				waitForIdle: () => session.waitForIdle(),
 				newSession: async (options) => runtimeHost.newSession(options),
@@ -521,6 +522,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 		if (interactiveMode && process.platform !== "win32") {
 			const returnToRpc = () => {
+				if (frontend === "rpc" && !frontendTransitioning) return;
 				returnToRpcRequested = true;
 				void activateRpcFrontend();
 			};
@@ -566,18 +568,22 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}
 
 			case "steer": {
-				await session.steer(command.message, command.images);
+				await session.steer(command.message, command.images, { source: "rpc" });
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
+				await session.followUp(command.message, command.images, { source: "rpc" });
 				return success(id, "follow_up");
 			}
 
 			case "abort": {
 				await session.abort();
 				return success(id, "abort");
+			}
+
+			case "clear_queue": {
+				return success(id, "clear_queue", session.clearQueue());
 			}
 
 			case "new_session": {
@@ -704,24 +710,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			// =================================================================
 
 			case "bash": {
-				const eventResult = await session.extensionRunner.emitUserBash({
-					type: "user_bash",
-					command: command.command,
-					excludeFromContext: command.excludeFromContext ?? false,
-					cwd: session.sessionManager.getCwd(),
-				});
-
-				if (eventResult?.result) {
-					session.recordBashResult(command.command, eventResult.result, {
-						excludeFromContext: command.excludeFromContext,
-					});
-					return success(id, "bash", eventResult.result);
-				}
-
 				const result = await session.executeBash(command.command, undefined, {
 					excludeFromContext: command.excludeFromContext,
 					id,
-					operations: eventResult?.operations,
 				});
 				return success(id, "bash", result);
 			}

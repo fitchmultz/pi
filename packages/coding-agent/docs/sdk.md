@@ -106,10 +106,15 @@ interface AgentSession {
   // Abort current operation
   abort(): Promise<void>;
 
+  // Refresh resources and reinitialize extensions (code updates require a process restart)
+  reload(): Promise<void>;
+
   // Cleanup
   dispose(): void;
 }
 ```
+
+`session.navigateTree()` rejects while an agent response, manual or automatic compaction, or another tree navigation is active, even with `summarize: false`. It does not queue navigation or return `{ cancelled: true }` for these conflicts. Wait for the active operation to finish (for example, with `await session.waitForIdle()`) and retry. Rejection leaves the active branch unchanged.
 
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
 
@@ -198,6 +203,12 @@ interface PromptOptions {
 
 It fires before `prompt()` resolves. `prompt()` still resolves only after the full accepted run finishes, including retries. Failures after acceptance are reported through the normal event and message stream, not through `preflightResult(false)`.
 
+After extension commands and input interception, an idle session reserves the prompt before auth checks, pre-prompt compaction, and `before_agent_start`. During this preparation, `session.isStreaming` is true and `session.isIdle` / `ctx.isIdle()` are false; the Agent's abort signal is not created until its run starts. Other prompts use the same busy queue/rejection rules below. Rejection cannot settle or change the active run.
+
+`session.waitForIdle()` waits through preparation and the full run. Failed preflight releases its reservation without emitting `agent_settled`; queued messages and `nextTurn` asides remain available for the next prompt. A started run emits `agent_settled` once after it finishes or aborts, including any automatic continuation.
+
+`session.abort()` also cancels an admitted prompt that is still preparing. It waits for preparation to finish, then rejects the prompt with `AbortError` rather than starting the agent run; unconsumed `nextTurn` asides and queued messages remain. TUI Escape and `ctx.abort()` use the same path, with TUI queued text restored to the editor.
+
 The `prompt()` method handles prompt templates, extension commands, and message sending:
 
 ```typescript
@@ -232,6 +243,16 @@ await session.followUp("After you're done, also do this");
 ```
 
 Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued).
+
+`session.hasPendingMessages` includes queued user and custom steering/follow-up messages, but excludes `nextTurn` and context-only asides. `session.pendingMessageCount` counts only pending user texts for UI display. `session.pendingNextTurnCount` separately reports unpersisted asides awaiting the next user prompt; `clearQueue()` does not remove them.
+
+`session.pendingInputCount` reports submitted inputs still in native prompt preflight, plus input held by the bound mode. It covers asynchronous input handlers until handling, admission or failure; extension commands run first and do not count themselves. Native interactive bindings include both pending prompt-loop input and retained compaction/tree input. SDK hosts with their own input queue can supply its read-only count through `session.bindExtensions({ getQueuedInputCount })`. This does not change `isIdle` or steering/follow-up semantics. Extensions read the same fact with `ctx.getPendingInputCount()`.
+
+### User Bash
+
+`session.executeBash(command, onChunk?, options?)` owns the whole user-Bash operation: `user_bash` interception, selected local/custom operations, and result recording. Interactive `!`/`!!`, RPC `bash`, and direct SDK calls share this path. A replacement result is recorded once and its output is sent to `onChunk`; normal execution also emits `bash_execution_update` events. The first intercepting handler remains authoritative.
+
+`session.isBashRunning` stays true through asynchronous interception and until every concurrent call finishes or fails. `abortBash()` signals all active calls; a pending interceptor remains active until it returns, and cancellation prevents subsequent shell execution. Agent `isIdle` is unchanged and does not include user Bash. Extensions can read the same state through `ctx.isBashRunning()` and `ctx.getPendingNextTurnCount()`.
 
 ### Agent and AgentState
 
@@ -551,6 +572,30 @@ const { session } = await createAgentSession({
 });
 ```
 
+#### JSON Selection with `read`
+
+`read` accepts `json?: { path?: string; fields?: string[] }` to extract JSON before paging and truncation:
+
+```typescript
+import { createReadTool } from "@earendil-works/pi-coding-agent";
+
+const read = createReadTool(process.cwd());
+const result = await read.execute("report-summary", {
+  path: "report.json",
+  json: { path: "/rows", fields: ["name", "status"] },
+});
+```
+
+- `json.path` is a JSON Pointer, defaulting to `""` (the root). `/rows/0` selects the first array item. Escape `~` as `~0` and `/` as `~1` in object keys.
+- `json.fields` keeps literal immediate keys on the selected object or every object in a selected array. Keys such as `"a.b"` and `"a/b"` are not paths. Missing fields are omitted; present `null`, `false`, and `0` values are preserved. Array order and row count stay unchanged; a row with no matching keys becomes `{}`.
+- Omit `fields` to return the whole selected value, including scalars and arrays. `json: {}` pretty-prints the root. Omit `json` to keep ordinary text and image reads.
+
+Invalid JSON, invalid JSON Pointers, nonexistent selected paths, and JSON selection on images produce tool errors. With `fields`, the selected value must be an object or an array containing only objects.
+
+`offset` and `limit` count lines of the pretty-printed selection, not source lines or array items. The usual 2000-line/50KB caps still apply. Continue with the returned offset and the **same `json` options**. Paged or truncated output can be a JSON fragment followed by a continuation notice, not a complete JSON document.
+
+The entire source is still loaded and parsed. Standard JavaScript `JSON.parse` number semantics apply (large numbers can lose precision), and the last duplicate key wins. Selection does not support jq-style filters, calculations, or other query transforms.
+
 #### Tools with Custom cwd
 
 When you pass a custom `cwd`, `createAgentSession()` builds selected built-in tools for that cwd.
@@ -788,6 +833,11 @@ const { session: opened } = await createAgentSession({
   sessionManager: SessionManager.open("/path/to/session.jsonl"),
 });
 
+// Resume a session kept outside the filesystem, e.g. in a database
+const { session: restored } = await createAgentSession({
+  sessionManager: SessionManager.inMemory(process.cwd(), { id: sessionId }, entries),
+});
+
 // List sessions
 const currentProjectSessions = await SessionManager.list(process.cwd());
 const allSessions = await SessionManager.listAll(process.cwd());
@@ -908,6 +958,8 @@ Project overrides global. Nested objects merge keys. Setters modify global setti
 ## ResourceLoader
 
 Use `DefaultResourceLoader` to discover extensions, skills, prompts, themes, and context files.
+
+`session.reload()` refreshes resources and reinitializes extensions. `DefaultResourceLoader.reload()` applies resource settings, including extension path and enable/disable changes, but reuses cached factories for existing entrypoints. Restart the host process after changing extension code or dependencies; creating another session or switching working directories does not reliably clear native module caches.
 
 ```typescript
 import {

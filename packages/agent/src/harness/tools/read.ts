@@ -1,7 +1,9 @@
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
+import type { Context } from "../context.ts";
 import type { AgentHarnessTool } from "../types.ts";
 import { getOrThrow } from "../types.ts";
+import { extractReadJson, readJsonSchema } from "../utils/read-json.ts";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -17,6 +19,7 @@ const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+	json: Type.Optional(readJsonSchema),
 });
 
 export type ReadToolInput = Static<typeof readSchema>;
@@ -33,6 +36,7 @@ export type ReadImageProcessor = (
 	bytes: Uint8Array,
 	mimeType: string,
 	options: { autoResizeImages: boolean },
+	context: Context,
 ) => Promise<ReadImageProcessorResult>;
 
 export interface ReadToolOptions {
@@ -48,17 +52,23 @@ export function createReadTool<TContext extends ExecutionToolContext = Execution
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.`,
+		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Use json.path/json.fields to select a JSON subtree or object fields before truncation; offset/limit then page the formatted selection.`,
 		parameters: readSchema,
-		async execute(_toolCallId, { path, offset, limit }, signal, _onUpdate, { env }) {
-			const absolutePath = await resolveReadToolPath(env, path, signal);
-			const bytes = getOrThrow(await env.readBinaryFile(absolutePath, signal));
+		async execute(_toolCallId, { path, offset, limit, json }, _onUpdate, { env }, _invocation, context) {
+			const absolutePath = await resolveReadToolPath(env, path, context);
+			const bytes = getOrThrow(await env.readBinaryFile(absolutePath, context));
 			const mimeType = detectSupportedImageMimeType(bytes);
 			if (mimeType) {
+				if (json !== undefined) {
+					throw new Error("JSON selection is not supported for images. Omit json to read this image.");
+				}
 				if (options?.imageProcessor) {
-					const processed = await options.imageProcessor(bytes, mimeType, {
-						autoResizeImages: options.autoResizeImages ?? true,
-					});
+					const processed = await options.imageProcessor(
+						bytes,
+						mimeType,
+						{ autoResizeImages: options.autoResizeImages ?? true },
+						context,
+					);
 					if (!processed.ok) {
 						return {
 							content: [{ type: "text", text: `Read image file [${mimeType}]\n${processed.message}` }],
@@ -94,13 +104,15 @@ export function createReadTool<TContext extends ExecutionToolContext = Execution
 				};
 			}
 
-			const textContent = new TextDecoder().decode(bytes);
-			const allLines = textContent.split("\n");
+			const textContent = new TextDecoder("utf-8", { ignoreBOM: json !== undefined }).decode(bytes);
+			const allLines = (json === undefined ? textContent : extractReadJson(textContent, json)).split("\n");
+			const source = json === undefined ? "file" : "JSON selection";
+			const continuation = json === undefined ? "" : ` with the same json=${JSON.stringify(json)}`;
 			const totalFileLines = allLines.length;
 			const startLine = offset ? Math.max(0, offset - 1) : 0;
 			const startLineDisplay = startLine + 1;
 			if (startLine >= allLines.length) {
-				throw new Error(`Offset ${offset} is beyond end of file (${allLines.length} lines total)`);
+				throw new Error(`Offset ${offset} is beyond end of ${source} (${allLines.length} lines total)`);
 			}
 
 			let selectedContent: string;
@@ -118,22 +130,25 @@ export function createReadTool<TContext extends ExecutionToolContext = Execution
 			let details: ReadToolDetails | undefined;
 			if (truncation.firstLineExceedsLimit) {
 				const firstLineSize = formatSize(new TextEncoder().encode(allLines[startLine]).byteLength);
-				outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
+				outputText =
+					json === undefined
+						? `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`
+						: `[JSON selection line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Narrow json.path/json.fields or use bash for JSON extraction.]`;
 				details = { truncation };
 			} else if (truncation.truncated) {
 				const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
 				const nextOffset = endLineDisplay + 1;
 				outputText = truncation.content;
 				if (truncation.truncatedBy === "lines") {
-					outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset} to continue.]`;
+					outputText += `\n\n[Showing ${json === undefined ? "" : "JSON selection "}lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset}${continuation} to continue.]`;
 				} else {
-					outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
+					outputText += `\n\n[Showing ${json === undefined ? "" : "JSON selection "}lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset}${continuation} to continue.]`;
 				}
 				details = { truncation };
 			} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {
 				const remaining = allLines.length - (startLine + userLimitedLines);
 				const nextOffset = startLine + userLimitedLines + 1;
-				outputText = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${nextOffset} to continue.]`;
+				outputText = `${truncation.content}\n\n[${remaining} more lines in ${source}. Use offset=${nextOffset}${continuation} to continue.]`;
 			} else {
 				outputText = truncation.content;
 			}

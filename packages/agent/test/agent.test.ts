@@ -656,6 +656,7 @@ describe("Agent", () => {
 	it("continue() should keep one-at-a-time steering semantics from assistant tail", async () => {
 		let responseCount = 0;
 		const agent = new Agent({
+			prepareProviderRequest: async (context) => context,
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				responseCount++;

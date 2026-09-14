@@ -71,8 +71,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "read",
 		label: "read",
-		description:
-			"Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files.",
+		description: getBuiltInTools(process.cwd()).read.description,
 		parameters: getBuiltInTools(process.cwd()).read.parameters,
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -83,6 +82,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, _context) {
 			const path = shortenPath(args.path || "");
 			let pathDisplay = path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
+			if (args.json !== undefined) pathDisplay += theme.fg("dim", ` json=${JSON.stringify(args.json)}`);
 
 			// Show line range if specified
 			if (args.offset !== undefined || args.limit !== undefined) {

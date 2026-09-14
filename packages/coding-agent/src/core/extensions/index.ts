@@ -31,6 +31,9 @@ export type {
 	// App keybindings (for custom editors)
 	AppKeybinding,
 	AutocompleteProviderFactory,
+	AutoRetryEndEvent,
+	AutoRetryStartEvent,
+	BashCwdHook,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
 	BashToolResultEvent,
@@ -105,6 +108,7 @@ export type {
 	MessageUpdateEvent,
 	ModelSelectEvent,
 	ModelSelectSource,
+	NewContextRequest,
 	PowerShellToolCallEvent,
 	PowerShellToolResultEvent,
 	ProjectTrustContext,
@@ -127,6 +131,8 @@ export type {
 	ResourcesDiscoverResult,
 	SendMessageHandler,
 	SendUserMessageHandler,
+	SessionBeforeAutoCompactEvent,
+	SessionBeforeAutoCompactResult,
 	SessionBeforeCompactEvent,
 	SessionBeforeCompactResult,
 	SessionBeforeForkEvent,
@@ -147,6 +153,9 @@ export type {
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,
+	SummarizationRetryAttemptStartEvent,
+	SummarizationRetryFinishedEvent,
+	SummarizationRetryScheduledEvent,
 	TerminalInputHandler,
 	// Events - Tool
 	ToolCallEvent,
@@ -166,6 +175,9 @@ export type {
 	TreePreparation,
 	TurnEndEvent,
 	TurnStartEvent,
+	UIPromptEndEvent,
+	UIPromptKind,
+	UIPromptStartEvent,
 	// Events - User Bash
 	UserBashEvent,
 	UserBashEventResult,

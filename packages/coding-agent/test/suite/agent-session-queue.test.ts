@@ -1,6 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall, type ImageContent } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, InputEvent } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
@@ -153,6 +153,79 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual(["start", "after current run"]);
 		expect(assistantSeenBeforeFollowUp).toContain("");
 		expect(getAssistantTexts(harness)).toContain("follow-up response");
+	});
+
+	// Regression test for #8718.
+	it("runs direct and prompted queues through input handlers exactly once with pending ownership and images", async () => {
+		const inputEvents: Array<Pick<InputEvent, "text" | "source" | "streamingBehavior" | "images">> = [];
+		const pendingCounts: number[] = [];
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const transformedImages: ImageContent[] = [{ type: "image", data: "bmV3", mimeType: "image/png" }];
+		const waiting = await createWaitingHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", (event, ctx) => {
+						inputEvents.push({
+							text: event.text,
+							source: event.source,
+							streamingBehavior: event.streamingBehavior,
+							images: event.images,
+						});
+						pendingCounts.push(ctx.getPendingInputCount());
+						if (event.text.startsWith("handle")) return { action: "handled" };
+						return {
+							action: "transform",
+							text: `transformed: ${event.text}`,
+							images: event.text === "follow me" ? transformedImages : undefined,
+						};
+					});
+				},
+			],
+		});
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("steered"),
+			fauxAssistantMessage("prompted steer"),
+			fauxAssistantMessage("followed up"),
+		]);
+
+		await waitForToolStart;
+		inputEvents.length = 0;
+		pendingCounts.length = 0;
+		try {
+			await harness.session.steer("steer me", images, { source: "rpc" });
+			await harness.session.steer("handle steer", undefined, { source: "rpc" });
+			await harness.session.followUp("follow me", images, { source: "rpc" });
+			await harness.session.followUp("handle follow", undefined, { source: "rpc" });
+			await harness.session.prompt("prompt me", { source: "rpc", streamingBehavior: "steer", images });
+
+			expect(inputEvents).toEqual([
+				{ text: "steer me", source: "rpc", streamingBehavior: "steer", images },
+				{ text: "handle steer", source: "rpc", streamingBehavior: "steer", images: undefined },
+				{ text: "follow me", source: "rpc", streamingBehavior: "followUp", images },
+				{ text: "handle follow", source: "rpc", streamingBehavior: "followUp", images: undefined },
+				{ text: "prompt me", source: "rpc", streamingBehavior: "steer", images },
+			]);
+			expect(pendingCounts).toEqual([1, 1, 1, 1, 1]);
+			expect(harness.session.pendingInputCount).toBe(0);
+			expect(harness.session.getSteeringMessages()).toEqual(["transformed: steer me", "transformed: prompt me"]);
+			expect(harness.session.getFollowUpMessages()).toEqual(["transformed: follow me"]);
+		} finally {
+			releaseToolExecution();
+		}
+		await promptPromise;
+		for (const [text, expectedImages] of [
+			["transformed: steer me", images],
+			["transformed: follow me", transformedImages],
+			["transformed: prompt me", images],
+		] as const) {
+			expect(harness.session.messages.find((message) => getMessageText(message) === text)).toMatchObject({
+				role: "user",
+				content: [{ type: "text", text }, ...expectedImages],
+			});
+		}
 	});
 
 	it("delivers multiple steering messages in order in one-at-a-time mode", async () => {
@@ -325,15 +398,78 @@ describe("AgentSession queue characterization", () => {
 		).toBe(true);
 	});
 
+	it.each(["steer", "followUp"] as const)(
+		"reports custom %s messages retained by abort until clearQueue drains them",
+		async (deliverAs) => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const ctx = harness.session.extensionRunner.createContext();
+			let queued = false;
+			harness.setResponses([
+				async () => {
+					await harness.session.sendCustomMessage(
+						{ customType: "queue-test", content: "retained", display: true },
+						{ deliverAs },
+					);
+					queued = ctx.hasPendingMessages();
+					ctx.abort();
+					return fauxAssistantMessage("cancelled");
+				},
+			]);
+			await harness.session.prompt("start");
+
+			expect(harness.session.isIdle).toBe(true);
+			expect(harness.session.pendingMessageCount).toBe(0);
+			expect(harness.session.agent.hasQueuedMessages()).toBe(true);
+			expect(queued).toBe(true);
+			expect(ctx.hasPendingMessages()).toBe(true);
+			expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: [] });
+			expect(ctx.hasPendingMessages()).toBe(false);
+		},
+	);
+
+	it("does not count context-only custom messages as pending steering/follow-up work", async () => {
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = await createWaitingHarness();
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		const ctx = harness.session.extensionRunner.createContext();
+
+		await waitForToolStart;
+		await harness.session.sendCustomMessage(
+			{ customType: "context-only", content: "aside", display: true },
+			{ triggerTurn: false },
+		);
+		const queued = ctx.hasPendingMessages();
+		releaseToolExecution();
+		await promptPromise;
+
+		expect(queued).toBe(false);
+		expect(ctx.hasPendingMessages()).toBe(false);
+		expect(harness.session.messages.some((message) => message.role === "custom")).toBe(true);
+	});
+
 	it("injects nextTurn custom messages into the next prompt", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		let sawCustomMessage = false;
+		const ctx = harness.session.extensionRunner.createContext();
+		expect(ctx.hasPendingMessages()).toBe(false);
+		expect(ctx.getPendingNextTurnCount()).toBe(0);
 
 		await harness.session.sendCustomMessage(
 			{ customType: "next-turn", content: "carry this", display: true, details: {} },
 			{ deliverAs: "nextTurn" },
 		);
+		expect(ctx.getPendingNextTurnCount()).toBe(1);
+		expect(ctx.isIdle()).toBe(true);
+		expect(ctx.hasPendingMessages()).toBe(false);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		harness.session.clearQueue();
+		expect(ctx.hasPendingMessages()).toBe(false);
+		expect(ctx.getPendingNextTurnCount()).toBe(1);
 
 		harness.setResponses([
 			(context) => {
@@ -349,6 +485,8 @@ describe("AgentSession queue characterization", () => {
 
 		await harness.session.prompt("normal prompt");
 
+		expect(ctx.getPendingNextTurnCount()).toBe(0);
+		expect(ctx.hasPendingMessages()).toBe(false);
 		expect(sawCustomMessage).toBe(true);
 		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
 	});

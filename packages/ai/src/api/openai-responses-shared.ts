@@ -11,6 +11,7 @@ import type {
 	ResponseOutputMessage,
 	ResponseReasoningItem,
 	ResponseStreamEvent,
+	ResponsesServerEvent,
 	ResponseToolSearchOutputItemParam,
 } from "openai/resources/responses/responses.js";
 import { calculateCost } from "../models.ts";
@@ -40,6 +41,7 @@ import {
 	resolveGrammarConstrainedSampling,
 	resolveJsonSchemaStrictSampling,
 } from "./constrained-sampling.ts";
+import { type ResponsesDiagnostics, recordResponsesEvent } from "./openai-responses-diagnostics.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
@@ -104,6 +106,7 @@ function convertToolResultOutput<TApi extends Api>(
 }
 
 export interface OpenAIResponsesStreamOptions {
+	diagnostics?: ResponsesDiagnostics;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	resolveServiceTier?: (
@@ -430,13 +433,39 @@ type ResponsesOutputSlot =
 type ToolCallOutputSlot = Extract<ResponsesOutputSlot, { type: "toolCall" }>;
 
 export async function processResponsesStream<TApi extends Api>(
-	openaiStream: AsyncIterable<ResponseStreamEvent>,
+	openaiStream: AsyncIterable<ResponseStreamEvent | ResponsesServerEvent>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	model: Model<TApi>,
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
 	let sawTerminalResponseEvent = false;
+	// Keep hosted results outside content: they are not calls for the local agent to execute.
+	const recordWebSearchItem = (item: ResponseOutputItem): void => {
+		if (item.type === "web_search_call") {
+			output.webSearch ??= {};
+			output.webSearch.calls ??= [];
+			const calls = output.webSearch.calls;
+			const index = calls.findIndex((call) => call.id === item.id);
+			if (index < 0) calls.push(item);
+			else calls[index] = item;
+		} else if (item.type === "message") {
+			const citations = (item.content ?? []).flatMap((part, contentIndex) =>
+				part.type === "output_text"
+					? (part.annotations ?? [])
+							.filter((annotation) => annotation.type === "url_citation")
+							.map((annotation) => ({ itemId: item.id, contentIndex, annotation }))
+					: [],
+			);
+			if (citations.length === 0) return;
+			output.webSearch ??= {};
+			const metadata = output.webSearch;
+			metadata.citations = [
+				...(metadata.citations ?? []).filter((citation) => citation.itemId !== item.id),
+				...citations,
+			];
+		}
+	};
 	const outputSlots = new Map<number, ResponsesOutputSlot>();
 	const reasoningBlocksById = new Map<string, ThinkingContent>();
 	const applyMessagePhaseStopReason = (item: ResponseOutputItem): void => {
@@ -553,6 +582,7 @@ export async function processResponsesStream<TApi extends Api>(
 	): void => {
 		sawTerminalResponseEvent = true;
 		backfillReasoningSignatures(response.output ?? []);
+		for (const item of response.output ?? []) recordWebSearchItem(item);
 		if (response?.id) {
 			output.responseId = response.id;
 		}
@@ -588,13 +618,15 @@ export async function processResponsesStream<TApi extends Api>(
 		output.rawStopReason = incompleteReason ? `${status}.${incompleteReason}` : status;
 		const mappedStop = mapStopReason(status, incompleteReason);
 		output.stopReason = mappedStop.stopReason;
-		output.errorMessage = mappedStop.errorMessage;
+		if (mappedStop.errorMessage === undefined) delete output.errorMessage;
+		else output.errorMessage = mappedStop.errorMessage;
 		if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
 			output.stopReason = "toolUse";
 		}
 	};
 
 	for await (const event of openaiStream) {
+		if (options?.diagnostics) recordResponsesEvent(options.diagnostics, event);
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
@@ -679,6 +711,7 @@ export async function processResponsesStream<TApi extends Api>(
 			pushToolCallDelta(slot, appendCustomToolCallInput(slot.block, event.input, true));
 		} else if (event.type === "response.output_item.done") {
 			const item = event.item;
+			recordWebSearchItem(item);
 			applyMessagePhaseStopReason(item);
 			const slot = getOrCreateSlot(event.output_index, item);
 
@@ -740,7 +773,8 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
 			finalizeResponse(event.response);
 		} else if (event.type === "error") {
-			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
+			const error = "error" in event ? event.error : event;
+			throw new Error(`Error Code ${error.code}: ${error.message}` || "Unknown error");
 		} else if (event.type === "response.failed") {
 			sawTerminalResponseEvent = true;
 			output.rawStopReason = event.response?.status;

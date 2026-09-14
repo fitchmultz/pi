@@ -11,7 +11,6 @@ import * as _bundledPiAgentCore from "@earendil-works/pi-agent-core";
 import type { Provider } from "@earendil-works/pi-ai";
 import * as _bundledPiAiCompat from "@earendil-works/pi-ai/compat";
 import * as _bundledPiAiOauth from "@earendil-works/pi-ai/oauth";
-import * as _bundledPiAiProviders from "@earendil-works/pi-ai/providers/all";
 import type { KeyId } from "@earendil-works/pi-tui";
 import * as _bundledPiTui from "@earendil-works/pi-tui";
 import { createJiti } from "jiti/static";
@@ -21,7 +20,7 @@ import { createJiti } from "jiti/static";
 import * as _bundledTypebox from "typebox";
 import * as _bundledTypeboxCompile from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
-import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
+import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.ts";
 // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
 // avoiding a circular dependency. Extensions can import from @earendil-works/pi-coding-agent.
 import * as _bundledPiCodingAgent from "../../index.ts";
@@ -32,7 +31,9 @@ import { execCommand } from "../exec.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import { time } from "../timings.ts";
+import { providerModules } from "./provider-modules.generated.ts";
 import type {
+	BashCwdHook,
 	EntryRenderer,
 	Extension,
 	ExtensionAPI,
@@ -62,15 +63,19 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@earendil-works/pi-ai": _bundledPiAiCompat,
 	"@earendil-works/pi-ai/compat": _bundledPiAiCompat,
 	"@earendil-works/pi-ai/oauth": _bundledPiAiOauth,
-	"@earendil-works/pi-ai/providers/all": _bundledPiAiProviders,
 	"@earendil-works/pi-coding-agent": _bundledPiCodingAgent,
 	"@mariozechner/pi-agent-core": _bundledPiAgentCore,
 	"@mariozechner/pi-tui": _bundledPiTui,
 	"@mariozechner/pi-ai": _bundledPiAiCompat,
 	"@mariozechner/pi-ai/compat": _bundledPiAiCompat,
 	"@mariozechner/pi-ai/oauth": _bundledPiAiOauth,
-	"@mariozechner/pi-ai/providers/all": _bundledPiAiProviders,
 	"@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
+	...Object.fromEntries(
+		Object.entries(providerModules).flatMap(([subpath, module]) => [
+			[`@earendil-works/pi-ai/providers/${subpath}`, module],
+			[`@mariozechner/pi-ai/providers/${subpath}`, module],
+		]),
+	),
 };
 
 const require = createRequire(import.meta.url);
@@ -78,8 +83,6 @@ const require = createRequire(import.meta.url);
 const isNodeSeaBinary =
 	("sea" in process.features && process.features.sea === true) ||
 	process.getBuiltinModule("node:sea")?.isSea() === true;
-declare const PI_BUNDLED_NODE: boolean;
-const isBundledNode = typeof PI_BUNDLED_NODE !== "undefined" && PI_BUNDLED_NODE;
 const isTypeScriptSourceRuntime = !isBunBinary && path.extname(fileURLToPath(import.meta.url)) === ".ts";
 
 /**
@@ -125,6 +128,7 @@ function getAliases(): Record<string, string> {
 		"@earendil-works/pi-agent-core": piAgentCoreEntry,
 		"@earendil-works/pi-tui": piTuiEntry,
 		"@earendil-works/pi-ai/providers/all": piAiProvidersEntry,
+		"@earendil-works/pi-ai/providers": path.dirname(piAiProvidersEntry),
 		"@earendil-works/pi-ai/compat": piAiCompatEntry,
 		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
 		"@earendil-works/pi-ai": piAiCompatEntry,
@@ -132,6 +136,7 @@ function getAliases(): Record<string, string> {
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
 		"@mariozechner/pi-tui": piTuiEntry,
 		"@mariozechner/pi-ai/providers/all": piAiProvidersEntry,
+		"@mariozechner/pi-ai/providers": path.dirname(piAiProvidersEntry),
 		"@mariozechner/pi-ai/compat": piAiCompatEntry,
 		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
 		"@mariozechner/pi-ai": piAiCompatEntry,
@@ -288,11 +293,22 @@ function createExtensionAPI(
 
 		registerTool(tool: ToolDefinition): void {
 			assertActive();
+			if (typeof tool.parameters !== "object" || tool.parameters === null || Array.isArray(tool.parameters)) {
+				throw new Error(
+					`Tool "${tool.name}" registered by extension "${extension.path}" must define an object parameter schema.`,
+				);
+			}
 			extension.tools.set(tool.name, {
 				definition: tool,
 				sourceInfo: extension.sourceInfo,
 			});
 			runtime.refreshTools();
+		},
+
+		registerBashCwdHook(hook: BashCwdHook): void {
+			assertActive();
+			extension.bashCwdHooks ??= [];
+			extension.bashCwdHooks.push(hook);
 		},
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {

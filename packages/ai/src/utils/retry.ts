@@ -91,7 +91,8 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 
 /**
  * Retry policy: bounded attempts with exponential backoff (`baseDelayMs * 2^(attempt-1)`).
- * Matches `settings.retry` (`enabled`, `maxRetries`, `baseDelayMs`) in coding-agent; kept
+ * `maxAgentDelayMs` caps each computed delay and defaults to 60 seconds.
+ * Matches `settings.retry` (`enabled`, `maxRetries`, `baseDelayMs`, `maxAgentDelayMs`) in coding-agent; kept
  * here so the classifier and the policy-driven retry loop live together and stay reusable
  * by the SDK and other callers.
  */
@@ -101,6 +102,16 @@ export interface RetryPolicy {
 	maxRetries: number;
 	/** Base delay in ms. Per-attempt delay is `baseDelayMs * 2^(attempt-1)` before jitter. */
 	baseDelayMs: number;
+	/** Optional cap for agent-level retry delays in ms. Defaults to 60 seconds. */
+	maxAgentDelayMs?: number;
+}
+
+export const DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000;
+
+export function retryDelayMs(policy: Pick<RetryPolicy, "baseDelayMs" | "maxAgentDelayMs">, attempt: number): number {
+	const delay = policy.baseDelayMs === 0 ? 0 : policy.baseDelayMs * 2 ** Math.max(0, attempt - 1);
+	const safeDelay = Number.isFinite(delay) ? Math.min(delay, Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+	return Math.min(safeDelay, policy.maxAgentDelayMs ?? DEFAULT_MAX_AGENT_RETRY_DELAY_MS);
 }
 
 /** Optional callbacks emitted by {@link retryAssistantCall} around each retry. */
@@ -171,7 +182,13 @@ export async function retryAssistantCall(
 	let attempt = 0;
 	let lastRetry: { attempt: number; errorMessage: string } | undefined;
 	for (;;) {
-		const response = await produce();
+		let response: AssistantMessage;
+		try {
+			response = await produce();
+		} catch (error) {
+			if (lastRetry) await callbacks?.onRetryFinished?.(false, lastRetry.attempt, lastRetry.errorMessage);
+			throw error;
+		}
 
 		// Abort: terminal but not successful. Never retry an aborted message.
 		if (response.stopReason === "aborted") {
@@ -193,21 +210,23 @@ export async function retryAssistantCall(
 
 		attempt++;
 		lastRetry = { attempt, errorMessage: response.errorMessage || "Unknown error" };
-		const delayMs = policy!.baseDelayMs * 2 ** (attempt - 1);
+		const delayMs = retryDelayMs(policy!, attempt);
 		await callbacks?.onRetryScheduled?.(attempt, maxAttempts, delayMs, lastRetry.errorMessage);
 
 		// Normalize aborts during retry backoff to the same AssistantMessage shape as
 		// provider stream aborts, so callers do not need to care when cancellation happened.
 		try {
 			await sleep(delayMs, signal);
+			await callbacks?.onRetryAttemptStart?.();
+			if (signal?.aborted) throw new RetrySleepAbortError();
 		} catch (error) {
 			await callbacks?.onRetryFinished?.(false, attempt, lastRetry.errorMessage);
 			if (error instanceof RetrySleepAbortError) {
-				return { ...response, stopReason: "aborted", errorMessage: undefined };
+				const { errorMessage: _errorMessage, ...rest } = response;
+				return { ...rest, stopReason: "aborted" };
 			}
 			throw error;
 		}
-		await callbacks?.onRetryAttemptStart?.();
 	}
 }
 

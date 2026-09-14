@@ -348,6 +348,9 @@
           case 'compaction':
             parts.push('compaction');
             break;
+          case 'context_window':
+            parts.push('context window', entry.handoff || '');
+            break;
           case 'branch_summary':
             parts.push('branch summary', entry.summary);
             break;
@@ -575,6 +578,7 @@
             const offset = args.offset;
             const limit = args.limit;
             let display = path;
+            if (args.json !== undefined) display += ` json=${JSON.stringify(args.json)}`;
             if (offset !== undefined || limit !== undefined) {
               const start = offset ?? 1;
               const end = limit !== undefined ? start + limit - 1 : '';
@@ -684,6 +688,11 @@
           }
           case 'compaction':
             return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
+          case 'context_window': {
+            const tokens = entry.tokensBefore == null ? '' : `: ${Math.round(entry.tokensBefore/1000)}k tokens`;
+            const handoff = entry.handoff ? ` ${truncate(normalize(entry.handoff))}` : '';
+            return labelHtml + `<span class="tree-compaction">[context window${tokens}]</span>${escapeHtml(handoff)}`;
+          }
           case 'branch_summary': {
             const summary = truncate(normalize(entry.summary || ''));
             return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
@@ -949,6 +958,7 @@
             const limit = args.limit;
 
             let pathHtml = filePath === null ? invalidArg : escapeHtml(shortenPath(filePath || ''));
+            if (args.json !== undefined) pathHtml += ` json=${escapeHtml(JSON.stringify(args.json))}`;
             if (filePath !== null && (offset !== undefined || limit !== undefined)) {
               const startLine = offset ?? 1;
               const endLine = limit !== undefined ? startLine + limit - 1 : '';
@@ -959,7 +969,7 @@
             if (result) {
               html += renderResultImages();
               const output = getResultText();
-              const lang = filePath ? getLanguageFromPath(filePath) : null;
+              const lang = isError ? null : args.json !== undefined ? 'json' : filePath ? getLanguageFromPath(filePath) : null;
               if (output) html += formatExpandableOutput(output, 10, lang);
             }
             break;
@@ -1296,6 +1306,14 @@
             <div class="compaction-label">[compaction]</div>
             <div class="compaction-collapsed">Compacted from ${entry.tokensBefore.toLocaleString()} tokens</div>
             <div class="compaction-content"><strong>Compacted from ${entry.tokensBefore.toLocaleString()} tokens</strong>\n\n${escapeHtml(entry.summary)}</div>
+          </div>`;
+        }
+
+        if (entry.type === 'context_window') {
+          const handoff = entry.handoff ? `**Handoff from the previous window:**\n\n${entry.handoff}` : 'Fresh context window started.';
+          return `<div class="hook-message" id="${entryDomId}">${tsHtml}
+            <div class="hook-type">[context window]</div>
+            <div class="markdown-content">${safeMarkedParse(handoff)}</div>
           </div>`;
         }
 

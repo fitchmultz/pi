@@ -1,6 +1,8 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
+import type { PromptOptions } from "../src/core/agent-session.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -163,6 +165,8 @@ describe("InteractiveMode compaction events", () => {
 				result: { tokensBefore: number; summary: string; usage?: Usage } | undefined;
 				aborted: boolean;
 				willRetry: boolean;
+				contextWindowStarted?: boolean;
+				pendingMessages?: AgentMessage[];
 				errorMessage?: string;
 			},
 		) => Promise<void>;
@@ -194,7 +198,69 @@ describe("InteractiveMode compaction events", () => {
 			kind: "compaction",
 			usage,
 		});
-		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledExactlyOnceWith();
+
+		const pending: AgentMessage = { role: "user", content: "newly submitted request", timestamp: 1 };
+		vi.clearAllMocks();
+		await handleEvent.call(fakeThis, {
+			type: "compaction_end",
+			reason: "threshold",
+			result: { tokensBefore: 123, summary: "summary" },
+			aborted: false,
+			willRetry: false,
+			pendingMessages: [pending],
+		});
+		expect(fakeThis.addMessageToChat.mock.calls.map(([message]) => message)).toEqual([
+			expect.objectContaining({ role: "compactionSummary" }),
+			pending,
+		]);
+
+		vi.clearAllMocks();
+		await handleEvent.call(fakeThis, {
+			type: "compaction_end",
+			reason: "threshold",
+			result: undefined,
+			aborted: true,
+			willRetry: false,
+			contextWindowStarted: true,
+			pendingMessages: [pending],
+		});
+		// The native context_window_started event already rebuilt this view.
+		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
+		expect(fakeThis.addMessageToChat).not.toHaveBeenCalled();
+		expect(fakeThis.showStatus).not.toHaveBeenCalled();
+		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledExactlyOnceWith();
+	});
+
+	test("updates the working state when the same agent run resumes after compaction", async () => {
+		const fakeThis = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			activeStatusIndicator: undefined,
+			workingVisible: true,
+			showWorkingStatusIndicator: vi.fn(),
+			clearStatusIndicator: vi.fn(),
+			settingsManager: { getShowTerminalProgress: () => true },
+			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
+		};
+		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+			this: typeof fakeThis,
+			event: { type: "turn_start" },
+		) => Promise<void>;
+
+		await handleEvent.call(fakeThis, { type: "turn_start" });
+
+		expect(fakeThis.ui.terminal.setProgress).toHaveBeenCalledWith(true);
+		expect(fakeThis.showWorkingStatusIndicator).toHaveBeenCalledTimes(1);
+		expect(fakeThis.clearStatusIndicator).not.toHaveBeenCalled();
+		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+
+		fakeThis.workingVisible = false;
+		await handleEvent.call(fakeThis, { type: "turn_start" });
+
+		expect(fakeThis.showWorkingStatusIndicator).toHaveBeenCalledTimes(1);
+		expect(fakeThis.clearStatusIndicator).toHaveBeenCalledTimes(1);
+		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(2);
 	});
 
 	test("preserves steering behavior when flushing into an active agent run", async () => {
@@ -202,23 +268,22 @@ describe("InteractiveMode compaction events", () => {
 			compactionQueuedMessages: [{ text: "change direction", mode: "steer" as const }],
 			session: {
 				clearQueue: vi.fn(),
-				prompt: vi.fn().mockResolvedValue(undefined),
-				steer: vi.fn().mockResolvedValue(undefined),
-				followUp: vi.fn().mockResolvedValue(undefined),
+				prompt: vi.fn(async (_text: string, options: PromptOptions) => options.preflightResult?.(true)),
 			},
-			isExtensionCommand: vi.fn().mockReturnValue(false),
 			updatePendingMessagesDisplay: vi.fn(),
 			showError: vi.fn(),
 		};
 
 		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (
 			this: typeof fakeThis,
-			options?: { willRetry?: boolean },
 		) => Promise<void>;
 
-		await flushCompactionQueue.call(fakeThis, { willRetry: false });
+		await flushCompactionQueue.call(fakeThis);
 
-		expect(fakeThis.session.prompt).toHaveBeenCalledWith("change direction", { streamingBehavior: "steer" });
+		expect(fakeThis.session.prompt).toHaveBeenCalledWith(
+			"change direction",
+			expect.objectContaining({ streamingBehavior: "steer" }),
+		);
 		expect(fakeThis.compactionQueuedMessages).toEqual([]);
 		expect(fakeThis.showError).not.toHaveBeenCalled();
 	});

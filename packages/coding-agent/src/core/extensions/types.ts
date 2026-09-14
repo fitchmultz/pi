@@ -12,6 +12,7 @@ import type {
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	NewContextRequest,
 	ThinkingLevel,
 	ToolExecutionMode,
 } from "@earendil-works/pi-agent-core";
@@ -46,8 +47,9 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { AgentSessionEvent } from "../agent-session.ts";
 import type { BashResult } from "../bash-executor.ts";
-import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
+import type { CompactionPreparation, CompactionResult, CompactionSettings } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
@@ -87,7 +89,7 @@ import type {
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions } from "../system-prompt.ts";
-export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
+export type { AgentToolResult, AgentToolUpdateCallback, NewContextRequest, ToolExecutionMode };
 export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
 
 // ============================================================================
@@ -330,18 +332,28 @@ export interface ExtensionContext {
 	thinkingLevel?: ThinkingLevel;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
+	/** Whether user Bash is unfinished, from interceptor dispatch through execution and result recording. */
+	isBashRunning(): boolean;
 	/** Whether project-local trust is active for this context. */
 	isProjectTrusted(): boolean;
 	/** The current abort signal, or undefined when the agent is not streaming. */
 	signal: AbortSignal | undefined;
 	/** Abort the current agent operation */
 	abort(): void;
-	/** Whether there are queued messages waiting */
+	/** Whether steering/follow-up messages await delivery, including custom messages. Excludes nextTurn/context-only asides. */
 	hasPendingMessages(): boolean;
+	/** Number of unpersisted custom messages queued with deliverAs: "nextTurn". */
+	getPendingNextTurnCount(): number;
+	/** Submitted inputs awaiting native preflight or held in the current mode's input queues. Excludes dispatched extension commands. */
+	getPendingInputCount(): number;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
+	/** Effective compaction settings as Pi resolved them, including the project-trust decision. */
+	getCompactionSettings(): CompactionSettings;
+	/** Start a fresh model context while preserving the full session transcript. */
+	newContext(options?: NewContextRequest): void;
 	/** Trigger compaction without awaiting completion. */
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
@@ -384,7 +396,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean }>;
 
-	/** Reload extensions, skills, prompts, themes, and context files. */
+	/** Refresh resources and reinitialize extensions. Extension code updates require a full Pi restart. */
 	reload(): Promise<void>;
 }
 
@@ -439,6 +451,8 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	isPartial: boolean;
 	/** Whether the result view is expanded. */
 	expanded: boolean;
+	/** Compact view mode, independent of expansion. Omitted means normal view. */
+	compactView?: boolean;
 	/** Whether inline images are currently shown in the TUI. */
 	showImages: boolean;
 	/** Whether the current result is an error. */
@@ -590,6 +604,22 @@ export interface SessionBeforeForkEvent {
 	position: "before" | "at";
 }
 
+/**
+ * Fired before automatic (threshold or overflow) compaction, ahead of summary preparation and
+ * summarization auth. Manual /compact does not fire it. Return `newContext` to start a fresh
+ * context window instead; `session_before_compact` is then not fired for that trigger.
+ */
+export interface SessionBeforeAutoCompactEvent {
+	type: "session_before_auto_compact";
+	branchEntries: SessionEntry[];
+	/** Inputs included in the pending provider request but not yet persisted in branchEntries. */
+	pendingMessages: AgentMessage[];
+	reason: "threshold" | "overflow";
+	/** True when the aborted turn is retried after this compaction (overflow recovery) */
+	willRetry: boolean;
+	signal: AbortSignal;
+}
+
 /** Fired before context compaction (can be cancelled or customized) */
 export interface SessionBeforeCompactEvent {
 	type: "session_before_compact";
@@ -673,6 +703,7 @@ export type SessionEvent =
 	| SessionInfoChangedEvent
 	| SessionBeforeSwitchEvent
 	| SessionBeforeForkEvent
+	| SessionBeforeAutoCompactEvent
 	| SessionBeforeCompactEvent
 	| SessionCompactEvent
 	| SessionCompactFailedEvent
@@ -713,10 +744,10 @@ export interface AfterProviderResponseEvent {
 	headers: Record<string, string>;
 }
 
-/** Fired after user submits prompt but before agent loop. */
+/** Fired before the agent loop for a user prompt or an idle custom message with triggerTurn. */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
-	/** The raw user prompt text (after expansion). */
+	/** The user prompt text (after expansion), or an empty string for an idle custom-message wakeup. */
 	prompt: string;
 	/** Images attached to the user prompt, if any. */
 	images?: ImageContent[];
@@ -740,6 +771,34 @@ export interface AgentEndEvent {
 /** Fired after an agent run has fully settled and no automatic retry, compaction, or queued continuation will run. */
 export interface AgentSettledEvent {
 	type: "agent_settled";
+}
+
+/** Native retry notifications; handlers are awaited before the retry proceeds. */
+export type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
+export type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
+export type SummarizationRetryScheduledEvent = Extract<AgentSessionEvent, { type: "summarization_retry_scheduled" }>;
+export type SummarizationRetryAttemptStartEvent = Extract<
+	AgentSessionEvent,
+	{ type: "summarization_retry_attempt_start" }
+>;
+export type SummarizationRetryFinishedEvent = Extract<AgentSessionEvent, { type: "summarization_retry_finished" }>;
+
+export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
+
+/** Fired when Pi starts waiting on a blocking user-facing extension UI prompt. */
+export interface UIPromptStartEvent {
+	type: "ui_prompt_start";
+	reason: "ui_prompt";
+	kind: UIPromptKind;
+	title?: string;
+}
+
+/** Fired when Pi is no longer waiting on a blocking user-facing extension UI prompt. */
+export interface UIPromptEndEvent {
+	type: "ui_prompt_end";
+	reason: "ui_prompt";
+	kind: UIPromptKind;
+	title?: string;
 }
 
 /** Fired at the start of each turn */
@@ -826,6 +885,9 @@ export interface ThinkingLevelSelectEvent {
 // ============================================================================
 // User Bash Events
 // ============================================================================
+
+/** Synchronously resolve the working directory for native Bash execution. */
+export type BashCwdHook = (cwd: string) => string;
 
 /** Fired when user executes a bash command via ! or !! prefix */
 export interface UserBashEvent {
@@ -1077,6 +1139,13 @@ export type ExtensionEvent =
 	| AgentStartEvent
 	| AgentEndEvent
 	| AgentSettledEvent
+	| AutoRetryStartEvent
+	| AutoRetryEndEvent
+	| SummarizationRetryScheduledEvent
+	| SummarizationRetryAttemptStartEvent
+	| SummarizationRetryFinishedEvent
+	| UIPromptStartEvent
+	| UIPromptEndEvent
 	| TurnStartEvent
 	| TurnEndEvent
 	| MessageStartEvent
@@ -1148,9 +1217,16 @@ export interface SessionBeforeForkResult {
 	skipConversationRestore?: boolean;
 }
 
+export interface SessionBeforeAutoCompactResult {
+	/** Start a fresh context window instead of compacting. */
+	newContext?: NewContextRequest;
+}
+
 export interface SessionBeforeCompactResult {
 	cancel?: boolean;
 	compaction?: CompactionResult;
+	/** Replace automatic summary compaction with a fresh context window. */
+	newContext?: NewContextRequest;
 }
 
 export interface SessionBeforeTreeResult {
@@ -1174,6 +1250,8 @@ export interface SessionBeforeTreeResult {
 
 export interface MessageRenderOptions {
 	expanded: boolean;
+	/** Compact view mode, independent of expansion. Omitted means normal view. */
+	compactView?: boolean;
 	/** Horizontal padding configured by the outputPad setting. */
 	outputPad: number;
 }
@@ -1244,6 +1322,10 @@ export interface ExtensionAPI {
 	): void;
 	on(event: "session_before_fork", handler: ExtensionHandler<SessionBeforeForkEvent, SessionBeforeForkResult>): void;
 	on(
+		event: "session_before_auto_compact",
+		handler: ExtensionHandler<SessionBeforeAutoCompactEvent, SessionBeforeAutoCompactResult>,
+	): void;
+	on(
 		event: "session_before_compact",
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): void;
@@ -1263,6 +1345,13 @@ export interface ExtensionAPI {
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): void;
+	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>): void;
+	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): void;
+	on(event: "summarization_retry_scheduled", handler: ExtensionHandler<SummarizationRetryScheduledEvent>): void;
+	on(event: "summarization_retry_attempt_start", handler: ExtensionHandler<SummarizationRetryAttemptStartEvent>): void;
+	on(event: "summarization_retry_finished", handler: ExtensionHandler<SummarizationRetryFinishedEvent>): void;
+	on(event: "ui_prompt_start", handler: ExtensionHandler<UIPromptStartEvent>): void;
+	on(event: "ui_prompt_end", handler: ExtensionHandler<UIPromptEndEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
@@ -1286,6 +1375,12 @@ export interface ExtensionAPI {
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown, TState = any>(
 		tool: ToolDefinition<TParams, TDetails, TState>,
 	): void;
+
+	/**
+	 * Resolve cwd before default Bash tools and native user Bash execution.
+	 * Hooks chain in extension load/registration order. Custom tools are unaffected.
+	 */
+	registerBashCwdHook(hook: BashCwdHook): void;
 
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
@@ -1390,13 +1485,19 @@ export interface ExtensionAPI {
 	// Model and Thinking Level
 	// =========================================================================
 
-	/** Set the current model. Returns false if no API key available. */
+	/**
+	 * Set the model for the current session without changing the configured default for new sessions.
+	 * Returns false if authentication is not configured for the model's provider.
+	 */
 	setModel(model: Model<any>): Promise<boolean>;
 
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel;
 
-	/** Set thinking level (clamped to model capabilities). */
+	/**
+	 * Set the thinking level (clamped to model capabilities) for the current session without changing the configured default
+	 * for new sessions.
+	 */
 	setThinkingLevel(level: ThinkingLevel): void;
 
 	// =========================================================================
@@ -1690,12 +1791,17 @@ export interface ExtensionContextActions {
 	getModel: () => Model<any> | undefined;
 	getScopedModels: () => readonly ScopedModel[];
 	isIdle: () => boolean;
+	isBashRunning: () => boolean;
 	isProjectTrusted: () => boolean;
 	getSignal: () => AbortSignal | undefined;
 	abort: () => void;
 	hasPendingMessages: () => boolean;
+	getPendingNextTurnCount: () => number;
+	getPendingInputCount: () => number;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
+	getCompactionSettings: () => CompactionSettings;
+	newContext?: (options?: NewContextRequest) => void;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;
@@ -1741,6 +1847,7 @@ export interface Extension {
 	sourceInfo: SourceInfo;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool>;
+	bashCwdHooks?: BashCwdHook[];
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;

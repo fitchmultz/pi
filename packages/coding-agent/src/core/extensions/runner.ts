@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import type { CompactionSettings } from "../compaction/index.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -53,6 +54,7 @@ import type {
 	ResolvedCommand,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
+	SessionBeforeAutoCompactResult,
 	SessionBeforeCompactResult,
 	SessionBeforeForkResult,
 	SessionBeforeSwitchResult,
@@ -62,6 +64,7 @@ import type {
 	ToolCallEventResult,
 	ToolResultEvent,
 	ToolResultEventResult,
+	UIPromptKind,
 	UserBashEvent,
 	UserBashEventResult,
 } from "./types.ts";
@@ -139,12 +142,20 @@ type RunnerEmitEvent = Exclude<
 
 type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
-	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
+	{
+		type:
+			| "session_before_switch"
+			| "session_before_fork"
+			| "session_before_auto_compact"
+			| "session_before_compact"
+			| "session_before_tree";
+	}
 >;
 
 type SessionBeforeEventResult =
 	| SessionBeforeSwitchResult
 	| SessionBeforeForkResult
+	| SessionBeforeAutoCompactResult
 	| SessionBeforeCompactResult
 	| SessionBeforeTreeResult;
 
@@ -152,11 +163,13 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 	? SessionBeforeSwitchResult | undefined
 	: TEvent extends { type: "session_before_fork" }
 		? SessionBeforeForkResult | undefined
-		: TEvent extends { type: "session_before_compact" }
-			? SessionBeforeCompactResult | undefined
-			: TEvent extends { type: "session_before_tree" }
-				? SessionBeforeTreeResult | undefined
-				: undefined;
+		: TEvent extends { type: "session_before_auto_compact" }
+			? SessionBeforeAutoCompactResult | undefined
+			: TEvent extends { type: "session_before_compact" }
+				? SessionBeforeCompactResult | undefined
+				: TEvent extends { type: "session_before_tree" }
+					? SessionBeforeTreeResult | undefined
+					: undefined;
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
@@ -277,12 +290,17 @@ export class ExtensionRunner {
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
+	private isBashRunningFn!: () => boolean;
 	private isProjectTrustedFn: () => boolean = () => true;
 	private getSignalFn: () => AbortSignal | undefined = () => undefined;
 	private waitForIdleFn: () => Promise<void> = async () => {};
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
+	private getPendingNextTurnCountFn!: () => number;
+	private getPendingInputCountFn!: () => number;
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
+	private getCompactionSettingsFn!: () => CompactionSettings;
+	private newContextFn: NonNullable<ExtensionContextActions["newContext"]> = () => {};
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () => ({ cwd: this.cwd });
@@ -295,6 +313,8 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
+	private uiPromptDepth = 0;
+	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
 
 	constructor(
 		extensions: Extension[],
@@ -340,12 +360,17 @@ export class ExtensionRunner {
 		this.getModel = contextActions.getModel;
 		this.getScopedModels = contextActions.getScopedModels;
 		this.isIdleFn = contextActions.isIdle;
+		this.isBashRunningFn = contextActions.isBashRunning;
 		this.isProjectTrustedFn = contextActions.isProjectTrusted;
 		this.getSignalFn = contextActions.getSignal;
 		this.abortFn = contextActions.abort;
 		this.hasPendingMessagesFn = contextActions.hasPendingMessages;
+		this.getPendingNextTurnCountFn = contextActions.getPendingNextTurnCount;
+		this.getPendingInputCountFn = contextActions.getPendingInputCount;
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
+		this.getCompactionSettingsFn = contextActions.getCompactionSettings;
+		this.newContextFn = contextActions.newContext ?? (() => {});
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 		this.getSystemPromptOptionsFn = contextActions.getSystemPromptOptions ?? (() => ({ cwd: this.cwd }));
@@ -431,8 +456,55 @@ export class ExtensionRunner {
 	}
 
 	setUIContext(uiContext?: ExtensionUIContext, mode: ExtensionMode = "print"): void {
-		this.uiContext = uiContext ?? noOpUIContext;
+		this.uiContext = uiContext ? this.wrapUIPromptContext(uiContext) : noOpUIContext;
 		this.mode = mode;
+	}
+
+	private wrapUIPromptContext(ui: ExtensionUIContext): ExtensionUIContext {
+		return {
+			...ui,
+			select: (title, options, opts) => this.withUIPrompt("select", title, () => ui.select(title, options, opts)),
+			confirm: (title, message, opts) => this.withUIPrompt("confirm", title, () => ui.confirm(title, message, opts)),
+			input: (title, placeholder, opts) =>
+				this.withUIPrompt("input", title, () => ui.input(title, placeholder, opts)),
+			editor: (title, prefill) => this.withUIPrompt("editor", title, () => ui.editor(title, prefill)),
+			custom: (factory, options) => this.withUIPrompt("custom", undefined, () => ui.custom(factory, options)),
+		};
+	}
+
+	private withUIPrompt<T>(kind: UIPromptKind, title: string | undefined, run: () => Promise<T>): Promise<T> {
+		const outerPrompt = this.uiPromptDepth++ === 0;
+		if (outerPrompt) {
+			this.activeUIPrompt = { kind, title };
+			this.emitUIPromptEvent({ type: "ui_prompt_start", reason: "ui_prompt", kind, ...(title ? { title } : {}) });
+		}
+
+		const finish = () => {
+			if (--this.uiPromptDepth > 0) return;
+			this.uiPromptDepth = 0;
+
+			const prompt = this.activeUIPrompt ?? { kind, title };
+			this.activeUIPrompt = undefined;
+			this.emitUIPromptEvent({
+				type: "ui_prompt_end",
+				reason: "ui_prompt",
+				kind: prompt.kind,
+				...(prompt.title ? { title: prompt.title } : {}),
+			});
+		};
+
+		try {
+			return run().finally(finish);
+		} catch (err) {
+			finish();
+			throw err;
+		}
+	}
+
+	private emitUIPromptEvent(event: Extract<RunnerEmitEvent, { type: "ui_prompt_start" | "ui_prompt_end" }>): void {
+		queueMicrotask(() => {
+			void this.emit(event);
+		});
 	}
 
 	getUIContext(): ExtensionUIContext {
@@ -445,6 +517,15 @@ export class ExtensionRunner {
 
 	getExtensionPaths(): string[] {
 		return this.extensions.map((e) => e.path);
+	}
+
+	resolveBashCwd(cwd: string): string {
+		for (const extension of this.extensions) {
+			for (const hook of extension.bashCwdHooks ?? []) {
+				cwd = hook(cwd);
+			}
+		}
+		return cwd;
 	}
 
 	/** Get all registered tools from all extensions (first registration per name wins). */
@@ -715,6 +796,10 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.isIdleFn();
 			},
+			isBashRunning: () => {
+				runner.assertActive();
+				return runner.isBashRunningFn();
+			},
 			isProjectTrusted: () => {
 				runner.assertActive();
 				return runner.isProjectTrustedFn();
@@ -731,6 +816,14 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.hasPendingMessagesFn();
 			},
+			getPendingNextTurnCount: () => {
+				runner.assertActive();
+				return runner.getPendingNextTurnCountFn();
+			},
+			getPendingInputCount: () => {
+				runner.assertActive();
+				return runner.getPendingInputCountFn();
+			},
 			shutdown: () => {
 				runner.assertActive();
 				runner.shutdownHandler();
@@ -738,6 +831,14 @@ export class ExtensionRunner {
 			getContextUsage: () => {
 				runner.assertActive();
 				return runner.getContextUsageFn();
+			},
+			getCompactionSettings: () => {
+				runner.assertActive();
+				return runner.getCompactionSettingsFn();
+			},
+			newContext: (options) => {
+				runner.assertActive();
+				runner.newContextFn(options);
 			},
 			compact: (options) => {
 				runner.assertActive();
@@ -793,6 +894,7 @@ export class ExtensionRunner {
 		return (
 			event.type === "session_before_switch" ||
 			event.type === "session_before_fork" ||
+			event.type === "session_before_auto_compact" ||
 			event.type === "session_before_compact" ||
 			event.type === "session_before_tree"
 		);
@@ -812,7 +914,7 @@ export class ExtensionRunner {
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
-						if (result.cancel) {
+						if ("cancel" in result && result.cancel) {
 							return result as RunnerEmitResult<TEvent>;
 						}
 					}

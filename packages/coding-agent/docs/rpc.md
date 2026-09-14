@@ -124,7 +124,7 @@ See [set_follow_up_mode](#set_follow_up_mode) for controlling how follow-up mess
 
 #### abort
 
-Abort the current agent operation.
+Abort the current operation and wait for the session to become idle before responding.
 
 ```json
 {"type": "abort"}
@@ -134,6 +134,29 @@ Response:
 ```json
 {"type": "response", "command": "abort", "success": true}
 ```
+
+#### clear_queue
+
+Remove queued steering and follow-up messages and return their text.
+
+```json
+{"type": "clear_queue"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "clear_queue",
+  "success": true,
+  "data": {
+    "steering": ["Change direction"],
+    "followUp": ["Summarize when finished"]
+  }
+}
+```
+
+To implement interactive Esc behavior, send `clear_queue` before `abort`, then restore the returned text in the client editor. `abort` continues queued messages when they remain in the session.
 
 #### new_session
 
@@ -861,6 +884,12 @@ Each command has:
 
 **Note**: Built-in TUI commands (`/settings`, `/hotkeys`, etc.) are not included. They are handled only in interactive mode and would not execute if sent via `prompt`.
 
+### Reloading resources
+
+An extension command can call `ctx.reload()` to refresh settings/resources and reinitialize extensions. Existing entrypoints reuse their loaded factory functions. After a successful reload, Pi emits a fire-and-forget `extension_ui_request` with `method: "notify"`, `notifyType: "warning"`, and the message `Restart pi to apply extension code changes.`
+
+To apply extension code or dependency updates, stop and restart the Pi subprocess. For a saved session, restart with `--session <id>` to resume it. A successful reload or `new_session` response does not mean updated extension code is active.
+
 ## Events
 
 Events are streamed to stdout as JSON lines during agent operation. Events do not generally include an `id` field; `bash_execution_update` includes the `id` of its originating `bash` command when one was provided.
@@ -882,6 +911,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do no
 | `tool_execution_update` | Tool execution progress (streaming output) |
 | `tool_execution_end` | Tool completes |
 | `queue_update` | Pending steering/follow-up queue changed |
+| `context_window_started` | Fresh model context replaces the active window; saved history is retained |
 | `compaction_start` | Compaction begins |
 | `compaction_end` | Compaction completes |
 | `auto_retry_start` | Auto-retry begins (after transient error) |
@@ -1074,6 +1104,16 @@ Emitted whenever the pending steering or follow-up queue changes.
   "followUp": ["After that, summarize the result"]
 }
 ```
+
+### context_window_started
+
+Emitted after the `context-window` marker's `message_start` and `message_end` events, for both manual and automatic fresh windows. The saved transcript is unchanged; active-context UIs should rebuild from the new window rather than retain prior-window components. `pendingMessages` contains inputs already shown but not yet persisted while provider request preparation is in progress; retain these after the marker without adding them to saved history again.
+
+```json
+{"type": "context_window_started", "pendingMessages": []}
+```
+
+An automatic compaction trigger claimed by a fresh window also emits `compaction_end` with `contextWindowStarted: true`. That event ends the compaction indicator, not another context transition.
 
 ### compaction_start / compaction_end
 

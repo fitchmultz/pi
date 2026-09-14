@@ -63,6 +63,10 @@ export function getAssistantTexts(harness: Harness): string[] {
 export interface HarnessOptions {
 	models?: FauxModelDefinition[];
 	settings?: Partial<Settings>;
+	/** Replaces the in-memory manager built from `settings`, e.g. a file-backed one with project trust. */
+	settingsManager?: SettingsManager;
+	/** Replaces the in-memory session manager, e.g. a file-backed one to test resume. */
+	sessionManager?: SessionManager;
 	systemPrompt?: string;
 	tools?: AgentTool[];
 	initialActiveToolNames?: string[];
@@ -109,8 +113,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = SessionManager.inMemory();
-	const settingsManager = SettingsManager.inMemory(options.settings);
+	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
+	const settingsManager = options.settingsManager ?? SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
 	if (withConfiguredAuth) {

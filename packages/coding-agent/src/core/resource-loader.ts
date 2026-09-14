@@ -10,12 +10,7 @@ export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
-import {
-	clearExtensionCache,
-	createExtensionRuntime,
-	loadExtensionFromFactory,
-	loadExtensionsCached,
-} from "./extensions/loader.ts";
+import { createExtensionRuntime, loadExtensionFromFactory, loadExtensionsCached } from "./extensions/loader.ts";
 import type { Extension, ExtensionRuntime, InlineExtension, LoadExtensionsResult } from "./extensions/types.ts";
 import { findGitPaths } from "./footer-data-provider.ts";
 import { DefaultPackageManager, type PathMetadata, type ResolvedResource } from "./package-manager.ts";
@@ -249,7 +244,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private resourceMetadataByPath: Map<string, PathMetadata>;
 	private lastPromptPaths: string[];
 	private lastThemePaths: string[];
-	private loaded: boolean;
 
 	constructor(options: DefaultResourceLoaderOptions) {
 		this.cwd = resolvePath(options.cwd);
@@ -298,7 +292,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.resourceMetadataByPath = new Map();
 		this.lastPromptPaths = [];
 		this.lastThemePaths = [];
-		this.loaded = false;
 	}
 
 	getExtensions(): LoadExtensionsResult {
@@ -388,10 +381,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
 		resetTimings("extensions");
 
-		if (this.loaded) {
-			clearExtensionCache();
-		}
-
+		// Reinitialize cached extension factories; code updates require a process restart.
 		let preTrustExtensions: LoadExtensionsResult | undefined;
 		if (options?.resolveProjectTrust) {
 			preTrustExtensions = await this.loadProjectTrustExtensions();
@@ -543,7 +533,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.appendSystemPromptSourcePaths = appendSources
 			.filter((source) => existsSync(source))
 			.map((source) => resolvePath(source));
-		this.loaded = true;
 	}
 
 	private async loadCurrentExtensionSet(options: { includeInlineFactories: boolean }): Promise<LoadExtensionsResult> {

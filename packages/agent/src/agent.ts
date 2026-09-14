@@ -113,6 +113,10 @@ export interface AgentOptions {
 		context: PrepareNextTurnContext,
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	prepareProviderRequest?: (
+		context: AgentContext,
+		signal?: AbortSignal,
+	) => Promise<AgentContext | undefined> | AgentContext | undefined;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;
@@ -179,6 +183,14 @@ export class Agent {
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	public streamFunction: StreamFn;
+	/** Host signal that closes new requests without aborting responses already in flight. */
+	public requestAdmissionSignal?: AbortSignal;
+	/** Shared invocation boundary for agent turns and host-owned requests such as summaries. */
+	public readonly streamResponse: StreamFn = (model, context, options) => {
+		this.requestAdmissionSignal?.throwIfAborted();
+		const streamFunction = this.streamFunction;
+		return streamFunction(model, context, options);
+	};
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
@@ -201,6 +213,10 @@ export class Agent {
 		context: PrepareNextTurnContext,
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	public prepareProviderRequest?: (
+		context: AgentContext,
+		signal?: AbortSignal,
+	) => Promise<AgentContext | undefined> | AgentContext | undefined;
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
@@ -228,6 +244,7 @@ export class Agent {
 		this.shouldStopAfterTurn = runtimeOptions.shouldStopAfterTurn;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
+		this.prepareProviderRequest = runtimeOptions.prepareProviderRequest;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(runtimeOptions.followUpMode ?? "one-at-a-time");
 		this.sessionId = runtimeOptions.sessionId;
@@ -368,7 +385,7 @@ export class Agent {
 			throw new Error("No messages to continue from");
 		}
 
-		if (lastMessage.role === "assistant") {
+		if (lastMessage.role === "assistant" || lastMessage.role === "custom") {
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
 				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
@@ -380,10 +397,9 @@ export class Agent {
 				await this.runPromptMessages(queuedFollowUps);
 				return;
 			}
-
-			throw new Error("Cannot continue from message role: assistant");
 		}
 
+		if (lastMessage.role === "assistant") throw new Error("Cannot continue from message role: assistant");
 		await this.runContinuation();
 	}
 
@@ -417,7 +433,7 @@ export class Agent {
 				this.createLoopConfig(options),
 				(event) => this.processEvents(event),
 				signal,
-				this.streamFunction,
+				this.streamResponse,
 			);
 		});
 	}
@@ -429,7 +445,7 @@ export class Agent {
 				this.createLoopConfig(),
 				(event) => this.processEvents(event),
 				signal,
-				this.streamFunction,
+				this.streamResponse,
 			);
 		});
 	}
@@ -443,7 +459,7 @@ export class Agent {
 	}
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
-		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+		let steeringPollsToSkip = options.skipInitialSteeringPoll ? (this.prepareProviderRequest ? 2 : 1) : 0;
 		const shouldStopAfterTurn = this.shouldStopAfterTurn;
 		return {
 			model: this._state.model,
@@ -469,12 +485,15 @@ export class Agent {
 							return await this.prepareNextTurn?.(this.signal);
 						}
 					: undefined,
+			prepareProviderRequest: this.prepareProviderRequest
+				? async (context) => await this.prepareProviderRequest?.(context, this.signal)
+				: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
-				if (skipInitialSteeringPoll) {
-					skipInitialSteeringPoll = false;
+				if (steeringPollsToSkip > 0) {
+					steeringPollsToSkip--;
 					return [];
 				}
 				return this.steeringQueue.drain();
@@ -502,7 +521,12 @@ export class Agent {
 		try {
 			await executor(abortController.signal);
 		} catch (error) {
-			await this.handleRunFailure(error, abortController.signal.aborted);
+			if (this.requestAdmissionSignal?.aborted && error === this.requestAdmissionSignal.reason) {
+				// A request that never started is not an assistant failure.
+				await this.processEvents({ type: "agent_end", messages: [] });
+			} else {
+				await this.handleRunFailure(error, abortController.signal.aborted);
+			}
 		} finally {
 			this.finishRun();
 		}
