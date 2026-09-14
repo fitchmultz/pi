@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it, test } from "node:test";
@@ -160,6 +160,73 @@ describe("CombinedAutocompleteProvider", () => {
 
 			const values = result?.items.map((item) => item.value);
 			assert.ok(values?.includes("@file.txt"));
+		});
+
+		for (const [query, expected] of [
+			["@[", "@pages/[id].tsx"],
+			["@[id].tsx", "@pages/[id].tsx"],
+			["@pages/[id].tsx", "@pages/[id].tsx"],
+			["@report(", "@report(1).md"],
+			["@report(1)", "@report(1).md"],
+			["@(group)/[id]", "@src/(group)/[id].tsx"],
+		]) {
+			test(`matches literal filename punctuation in ${query}`, async () => {
+				setupFolder(baseDir, {
+					files: {
+						"pages/[id].tsx": "page",
+						"report(1).md": "report",
+						"src/(group)/[id].tsx": "nested",
+						"pages/id.tsx": "decoy",
+					},
+				});
+				const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+				const result = await getSuggestions(provider, [query], 0, query.length);
+				assert.ok(result);
+				assert.ok(result.items.some((item) => item.value === expected));
+				assert.ok(!result.items.some((item) => item.value === "@pages/id.tsx"));
+				if (query.startsWith("@pages/")) {
+					assert.ok(result.items.every((item) => item.value.startsWith("@pages/")));
+				}
+			});
+		}
+
+		test(
+			"preserves and applies trailing-space filenames from fd",
+			{ skip: process.platform === "win32" },
+			async () => {
+				setupFolder(baseDir, { files: { "report.md ": "content" } });
+				const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+				for (const line of ["@report", '@"report.md ']) {
+					const result = await getSuggestions(provider, [line], 0, line.length);
+					assert.ok(result);
+					assert.strictEqual(result.items.length, 1);
+					const item = result.items[0]!;
+					assert.strictEqual(item.value, '@"report.md "');
+					assert.strictEqual(item.description, "report.md ");
+					assert.ok(existsSync(join(baseDir, item.description)));
+					const applied = provider.applyCompletion([line], 0, line.length, item, result.prefix);
+					assert.strictEqual(applied.lines[0], '@"report.md " ');
+					assert.strictEqual(applied.cursorCol, applied.lines[0].length);
+				}
+			},
+		);
+
+		test("preserves carriage returns in fd filenames", { skip: process.platform === "win32" }, async () => {
+			setupFolder(baseDir, { files: { "reportA\r": "content", "reportZ.txt": "control" } });
+			const fd = requireFdPath();
+			const output = spawnSync(fd, ["--base-directory", baseDir, "report"], { encoding: "utf-8" });
+			assert.strictEqual(output.status, 0);
+			assert.strictEqual(output.stdout, "reportA\r\nreportZ.txt\n");
+			const provider = new CombinedAutocompleteProvider([], baseDir, fd);
+			const line = "@report";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+			assert.ok(result);
+			const item = result.items.find((entry) => entry.value === "@reportA\r");
+			assert.ok(item);
+			assert.strictEqual(item.description, "reportA\r");
+			assert.ok(existsSync(join(baseDir, item.description)));
+			const applied = provider.applyCompletion([line], 0, line.length, item, result.prefix);
+			assert.strictEqual(applied.lines[0], "@reportA\r ");
 		});
 
 		test("filters are case insensitive", async () => {

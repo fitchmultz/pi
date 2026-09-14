@@ -5,7 +5,7 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
-import { pathExists, resolveToCwd } from "./path-utils.ts";
+import { isInsideGitRepo, pathExists, resolveToCwd } from "./path-utils.ts";
 import { findRenderers } from "./renderers/find.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
@@ -181,21 +181,7 @@ export function createFindToolDefinition(
 
 						const args: string[] = ["--glob", "--color=never", "--hidden"];
 
-						// fd normally ignores .gitignore outside git repos, so keep --no-require-git
-						// there. Inside repos, use fd's default git-aware behavior so parent
-						// .gitignore rules stop at nested repo boundaries:
-						// https://github.com/earendil-works/pi/issues/5960
-						let insideGitRepo = false;
-						for (let current = searchPath; ; ) {
-							if (await pathExists(path.join(current, ".git"))) {
-								insideGitRepo = true;
-								break;
-							}
-							const parent = path.dirname(current);
-							if (parent === current) break;
-							current = parent;
-						}
-						if (!insideGitRepo) args.push("--no-require-git");
+						if (!(await isInsideGitRepo(searchPath))) args.push("--no-require-git");
 						args.push("--max-results", String(effectiveLimit));
 
 						// fd --glob matches against the basename unless --full-path is set; in --full-path

@@ -1,8 +1,8 @@
-import { mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.ts";
+import { expandPath, resolveReadPath, resolveReadPathAsync, resolveToCwd } from "../src/core/tools/path-utils.ts";
 
 describe("path-utils", () => {
 	describe("expandPath", () => {
@@ -48,7 +48,10 @@ describe("path-utils", () => {
 		});
 	});
 
-	describe("resolveReadPath", () => {
+	describe.each([
+		{ name: "resolveReadPath", resolveRead: resolveReadPath },
+		{ name: "resolveReadPathAsync", resolveRead: resolveReadPathAsync },
+	])("$name", ({ resolveRead }) => {
 		let tempDir: string;
 
 		beforeEach(() => {
@@ -68,15 +71,41 @@ describe("path-utils", () => {
 			}
 		});
 
-		it("should resolve existing file path", () => {
+		it("prefers exact Unicode-space paths before read-only normalization fallbacks", async () => {
+			const exact = "report\u00a0final.txt";
+			const other = "report final.txt";
+			writeFileSync(join(tempDir, exact), "intended");
+			writeFileSync(join(tempDir, other), "unrelated");
+			expect(await resolveRead(`@${exact}`, tempDir)).toBe(join(tempDir, exact));
+			unlinkSync(join(tempDir, exact));
+			expect(await resolveRead(`@${exact}`, tempDir)).toBe(join(tempDir, other));
+		});
+
+		it("keeps typography fallbacks after Unicode-space normalization", async () => {
+			// Exercise the existing combined NFD + curly quote fallback separately from AM/PM.
+			const curlyName = "Capture d\u2019e\u0301cran.txt";
+			writeFileSync(join(tempDir, curlyName), "curly content");
+			expect(readFileSync(await resolveRead("Capture\u00a0d'écran.txt", tempDir), "utf-8")).toBe("curly content");
+			const screenshot = "Screenshot 10.00\u202fAM.png";
+			writeFileSync(join(tempDir, screenshot), "screenshot");
+			expect(await resolveRead("Screenshot\u00a010.00 AM.png", tempDir)).toBe(join(tempDir, screenshot));
+		});
+
+		it("expands tilde and @ while retaining missing literal paths", async () => {
+			expect(await resolveRead("@~/pi-missing\u00a0file.txt", tempDir)).toBe(
+				join(homedir(), "pi-missing\u00a0file.txt"),
+			);
+		});
+
+		it("should resolve existing file path", async () => {
 			const fileName = "test-file.txt";
 			writeFileSync(join(tempDir, fileName), "content");
 
-			const result = resolveReadPath(fileName, tempDir);
+			const result = await resolveRead(fileName, tempDir);
 			expect(result).toBe(join(tempDir, fileName));
 		});
 
-		it("should handle NFC vs NFD Unicode normalization (macOS filenames with accents)", () => {
+		it("should handle NFC vs NFD Unicode normalization (macOS filenames with accents)", async () => {
 			// macOS stores filenames in NFD (decomposed) form:
 			//   é = e + combining acute accent (U+0301)
 			// Users typically type in NFC (composed) form:
@@ -98,13 +127,13 @@ describe("path-utils", () => {
 			writeFileSync(join(tempDir, nfdFileName), "content");
 
 			// User provides NFC path - should find the file (via filesystem normalization or our fallback)
-			const result = resolveReadPath(nfcFileName, tempDir);
+			const result = await resolveRead(nfcFileName, tempDir);
 			// Result should contain the accented character (either NFC or NFD form)
 			expect(result).toContain(tempDir);
 			expect(result).toMatch(/file.+\.txt$/);
 		});
 
-		it("should handle curly quotes vs straight quotes (macOS filenames)", () => {
+		it("should handle curly quotes vs straight quotes (macOS filenames)", async () => {
 			// macOS uses curly apostrophe (U+2019) in screenshot filenames:
 			//   Capture d'écran (U+2019)
 			// Users typically type straight apostrophe (U+0027):
@@ -120,11 +149,11 @@ describe("path-utils", () => {
 			writeFileSync(join(tempDir, curlyQuoteName), "content");
 
 			// User provides straight quote path - should find the curly quote file
-			const result = resolveReadPath(straightQuoteName, tempDir);
+			const result = await resolveRead(straightQuoteName, tempDir);
 			expect(result).toBe(join(tempDir, curlyQuoteName));
 		});
 
-		it("should handle combined NFC + curly quote (French macOS screenshots)", () => {
+		it("should handle combined NFC + curly quote (French macOS screenshots)", async () => {
 			// Full macOS screenshot filename: "Capture d'écran" with NFD é and curly quote
 			// Note: macOS APFS normalizes NFD to NFC, so the actual file on disk uses NFC
 			const nfcCurlyName = "Capture d\u2019\u00e9cran.txt"; // NFC + curly quote (how APFS stores it)
@@ -137,11 +166,11 @@ describe("path-utils", () => {
 			writeFileSync(join(tempDir, nfcCurlyName), "content");
 
 			// User provides straight quote path - should find the curly quote file
-			const result = resolveReadPath(nfcStraightName, tempDir);
+			const result = await resolveRead(nfcStraightName, tempDir);
 			expect(result).toBe(join(tempDir, nfcCurlyName));
 		});
 
-		it("should handle macOS screenshot AM/PM variant with narrow no-break space", () => {
+		it("should handle macOS screenshot AM/PM variant with narrow no-break space", async () => {
 			// macOS uses narrow no-break space (U+202F) before AM/PM in screenshot names
 			const macosName = "Screenshot 2024-01-01 at 10.00.00\u202FAM.png"; // U+202F
 			const userName = "Screenshot 2024-01-01 at 10.00.00 AM.png"; // regular space
@@ -150,13 +179,13 @@ describe("path-utils", () => {
 			writeFileSync(join(tempDir, macosName), "content");
 
 			// User provides regular space path
-			const result = resolveReadPath(userName, tempDir);
+			const result = await resolveRead(userName, tempDir);
 
 			// This works because tryMacOSScreenshotPath() handles this case
 			expect(result).toBe(join(tempDir, macosName));
 		});
 
-		it("should handle macOS screenshot lowercase am/pm variant (en_AU locale)", () => {
+		it("should handle macOS screenshot lowercase am/pm variant (en_AU locale)", async () => {
 			// Some locales like en_AU use lowercase am/pm in screenshot names
 			const macosName = "Screenshot 2024-01-01 at 10.00.00\u202Fam.png"; // U+202F + lowercase
 			const userName = "Screenshot 2024-01-01 at 10.00.00 am.png"; // regular space + lowercase
@@ -165,7 +194,7 @@ describe("path-utils", () => {
 			writeFileSync(join(tempDir, macosName), "content");
 
 			// User provides regular space path
-			const result = resolveReadPath(userName, tempDir);
+			const result = await resolveRead(userName, tempDir);
 
 			// This works because tryMacOSScreenshotPath() uses case-insensitive matching
 			expect(result).toBe(join(tempDir, macosName));
