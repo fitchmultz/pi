@@ -341,6 +341,8 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
+	/** Opted-in streamed customs owned here until message_end, including drained but undelivered messages. */
+	private _cancelPersistentCustomMessages = new Set<CustomMessage>();
 	/** Provider-bound inputs waiting until request preparation can no longer add a context boundary. */
 	private _pendingProviderMessages: AgentMessage[] = [];
 	/** Native inputs awaiting handling, admission, queueing, or rejection. */
@@ -904,6 +906,7 @@ export class AgentSession {
 		if (event.type === "message_end") {
 			if (this._isAgentRunActive && (event.message.role === "user" || event.message.role === "custom")) {
 				this._pendingProviderMessages.push(event.message);
+				if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
 			} else {
 				this._persistMessage(event.message);
 			}
@@ -1361,6 +1364,9 @@ export class AgentSession {
 			if (controller.signal.aborted) this._pendingNewContext = undefined;
 			this._skipNextProviderRequestPreflight = false;
 			this._systemPromptOverride = undefined;
+			// No further retry or continuation can deliver these messages. Recover both queued
+			// and drained-but-undelivered customs without starting another turn.
+			this._preserveUndeliveredCustomMessages(true);
 			this._flushPendingProviderMessages();
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
@@ -1781,10 +1787,15 @@ export class AgentSession {
 	 * @param message Custom message with customType, content, display, details
 	 * @param options.triggerTurn If true and not streaming, triggers a new LLM turn
 	 * @param options.deliverAs Delivery mode: "steer", "followUp", or "nextTurn"
+	 * @param options.persistOnCancel Preserve undelivered streamed messages without waking on cancellation, final stop, or clearQueue. Ignored for nextTurn.
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: {
+			triggerTurn?: boolean;
+			deliverAs?: "steer" | "followUp" | "nextTurn";
+			persistOnCancel?: boolean;
+		},
 	): Promise<void> {
 		const appMessage = {
 			role: "custom" as const,
@@ -1798,6 +1809,7 @@ export class AgentSession {
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
 		} else if (this.isStreaming && options?.triggerTurn !== false) {
+			if (options?.persistOnCancel) this._cancelPersistentCustomMessages.add(appMessage);
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {
@@ -1816,6 +1828,20 @@ export class AgentSession {
 			this._pendingCustomMessages.push(appMessage);
 		} else {
 			this._appendCustomMessage(appMessage);
+		}
+	}
+
+	private _preserveUndeliveredCustomMessages(includeInFlight = false): void {
+		if (this._cancelPersistentCustomMessages.size === 0) return;
+		const queued = this.agent.takeQueuedMessages(
+			(message) => message.role === "custom" && this._cancelPersistentCustomMessages.has(message),
+		);
+		// clearQueue may only take actual queue entries; an in-flight message can still
+		// reach message_end. Final run cleanup also recovers messages lost after a drain.
+		for (const message of includeInFlight ? this._cancelPersistentCustomMessages : queued) {
+			if (message.role !== "custom") continue;
+			this._cancelPersistentCustomMessages.delete(message);
+			this._pendingCustomMessages.push(message);
 		}
 	}
 
@@ -1891,12 +1917,17 @@ export class AgentSession {
 	 * @returns Object with steering and followUp arrays
 	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
+		this._preserveUndeliveredCustomMessages();
 		const steering = [...this._steeringMessages];
 		const followUp = [...this._followUpMessages];
 		this._steeringMessages = [];
 		this._followUpMessages = [];
 		this.agent.clearAllQueues();
 		this._emitQueueUpdate();
+		if (!this.isStreaming) {
+			this._flushPendingProviderMessages();
+			this._flushPendingCustomMessages();
+		}
 		return { steering, followUp };
 	}
 

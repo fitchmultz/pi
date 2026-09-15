@@ -1529,6 +1529,7 @@ pi.sendMessage({
   - `"followUp"` - Waits for agent to finish. Delivered only when agent has no more tool calls.
   - `"nextTurn"` - Queued for next user prompt. Does not interrupt or trigger anything.
 - `triggerTurn: true` - If agent is idle, fire `before_agent_start` with `event.prompt === ""` and trigger an LLM response. Only applies to `"steer"` and `"followUp"` modes (ignored for `"nextTurn"`).
+- `persistOnCancel: true` - Opt in to preserving streamed steering/follow-up messages that never reach normal delivery. On cancellation or final run cleanup, Pi removes undelivered copies from the queues and appends them once to session history and the normal display event stream before `agent_settled`, without starting or continuing a turn. `clearQueue()` also preserves opted-in messages still in the queues; while streaming, their append waits for the safe turn/final flush after tool results. Normal early delivery is unchanged. Ignored for `"nextTurn"`, which remains deferred until a user prompt. Defaults to `false`: ordinary custom queue retention/discard behavior is unchanged. The message's `display` flag still controls visibility.
 
 ### pi.sendUserMessage(content, options?)
 

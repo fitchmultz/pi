@@ -246,6 +246,8 @@ Both `steer()` and `followUp()` expand file-based prompt templates but error on 
 
 `session.hasPendingMessages` includes queued user and custom steering/follow-up messages, but excludes `nextTurn` and context-only asides. `session.pendingMessageCount` counts only pending user texts for UI display. `session.pendingNextTurnCount` separately reports unpersisted asides awaiting the next user prompt; `clearQueue()` does not remove them.
 
+`session.sendCustomMessage(message, { deliverAs: "steer", persistOnCancel: true })` opts a streamed custom message into cancellation-safe persistence. Normal delivery is unchanged. If cancellation or final run cleanup prevents delivery, Pi removes queued copies and appends the message once before `agent_settled`, without requesting another model response. `clearQueue()` preserves opted-in messages still queued, deferring their append to the safe turn/final flush while streaming; it still returns only queued user texts. This option defaults to `false` and does not affect `nextTurn` asides. See [`pi.sendMessage()`](extensions.md#pisendmessagemessage-options) for all custom-message options.
+
 `session.pendingInputCount` reports submitted inputs still in native prompt preflight, plus input held by the bound mode. It covers asynchronous input handlers until handling, admission or failure; extension commands run first and do not count themselves. Native interactive bindings include both pending prompt-loop input and retained compaction/tree input. SDK hosts with their own input queue can supply its read-only count through `session.bindExtensions({ getQueuedInputCount })`. This does not change `isIdle` or steering/follow-up semantics. Extensions read the same fact with `ctx.getPendingInputCount()`.
 
 ### User Bash

@@ -57,6 +57,32 @@ async function createWaitingHarness(
 	};
 }
 
+function expectRetainedNotice(harness: Harness): void {
+	const notices = harness.session.messages.filter((message) => message.role === "custom");
+	expect(notices).toHaveLength(1);
+	expect(notices[0]).toMatchObject({
+		customType: "retained-notice",
+		content: "finished",
+		display: true,
+		details: { value: 1 },
+	});
+	const entries = harness.sessionManager.getEntries().filter((entry) => entry.type === "custom_message");
+	expect(entries).toHaveLength(1);
+	expect(entries[0]).toMatchObject({
+		customType: "retained-notice",
+		content: "finished",
+		display: true,
+		details: { value: 1 },
+	});
+	for (const type of ["message_start", "message_end"] as const) {
+		const events = harness.eventsOfType(type).filter((event) => event.message.role === "custom");
+		expect(events).toHaveLength(1);
+		expect(harness.events.indexOf(events[0])).toBeLessThan(
+			harness.events.findIndex((event) => event.type === "agent_settled"),
+		);
+	}
+}
+
 describe("AgentSession queue characterization", () => {
 	const harnesses: Harness[] = [];
 
@@ -331,72 +357,90 @@ describe("AgentSession queue characterization", () => {
 		expect(getAssistantTexts(harness)).toEqual(["", "original turn complete", "batched follow-up response"]);
 	});
 
-	it("queues custom messages with deliverAs steer while streaming", async () => {
-		const waiting = await createWaitingHarness();
-		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
-		harnesses.push(harness);
-		let sawCustomMessage = false;
+	it.each([undefined, true])(
+		"queues custom steer messages normally with persistOnCancel=%s",
+		async (persistOnCancel) => {
+			const waiting = await createWaitingHarness();
+			const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+			harnesses.push(harness);
+			let sawCustomMessage = false;
 
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
-			(context) => {
-				sawCustomMessage = context.messages.some(
-					(message) =>
-						message.role === "user" &&
-						typeof message.content !== "string" &&
-						message.content.some((part) => part.type === "text" && part.text === "steer custom"),
-				);
-				return fauxAssistantMessage("done");
-			},
-		]);
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+				(context) => {
+					sawCustomMessage = context.messages.some(
+						(message) =>
+							message.role === "user" &&
+							typeof message.content !== "string" &&
+							message.content.some((part) => part.type === "text" && part.text === "steer custom"),
+					);
+					return fauxAssistantMessage("done");
+				},
+			]);
 
-		await waitForToolStart;
-		await harness.session.sendCustomMessage(
-			{ customType: "queue-test", content: "steer custom", display: true, details: { value: 1 } },
-			{ deliverAs: "steer" },
-		);
-		releaseToolExecution();
-		await promptPromise;
+			await waitForToolStart;
+			await harness.session.sendCustomMessage(
+				{ customType: "queue-test", content: "steer custom", display: true, details: { value: 1 } },
+				{ deliverAs: "steer", persistOnCancel },
+			);
+			releaseToolExecution();
+			await promptPromise;
 
-		expect(sawCustomMessage).toBe(true);
-		expect(
-			harness.session.messages.some((message) => message.role === "custom" && message.customType === "queue-test"),
-		).toBe(true);
-	});
+			expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "custom_message")).toHaveLength(1);
+			expect(harness.eventsOfType("message_end").filter((event) => event.message.role === "custom")).toHaveLength(1);
+			expect(harness.session.hasPendingMessages).toBe(false);
+			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(sawCustomMessage).toBe(true);
+			expect(
+				harness.session.messages.some(
+					(message) => message.role === "custom" && message.customType === "queue-test",
+				),
+			).toBe(true);
+		},
+	);
 
-	it("queues custom messages with deliverAs followUp while streaming", async () => {
-		const waiting = await createWaitingHarness();
-		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
-		harnesses.push(harness);
-		let sawCustomMessage = false;
+	it.each([undefined, true])(
+		"queues custom followUp messages normally with persistOnCancel=%s",
+		async (persistOnCancel) => {
+			const waiting = await createWaitingHarness();
+			const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+			harnesses.push(harness);
+			let sawCustomMessage = false;
 
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("original turn complete"),
-			(context) => {
-				sawCustomMessage = context.messages.some(
-					(message) =>
-						message.role === "user" &&
-						typeof message.content !== "string" &&
-						message.content.some((part) => part.type === "text" && part.text === "follow-up custom"),
-				);
-				return fauxAssistantMessage("done");
-			},
-		]);
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage("original turn complete"),
+				(context) => {
+					sawCustomMessage = context.messages.some(
+						(message) =>
+							message.role === "user" &&
+							typeof message.content !== "string" &&
+							message.content.some((part) => part.type === "text" && part.text === "follow-up custom"),
+					);
+					return fauxAssistantMessage("done");
+				},
+			]);
 
-		await waitForToolStart;
-		await harness.session.sendCustomMessage(
-			{ customType: "queue-test", content: "follow-up custom", display: true, details: { value: 1 } },
-			{ deliverAs: "followUp" },
-		);
-		releaseToolExecution();
-		await promptPromise;
+			await waitForToolStart;
+			await harness.session.sendCustomMessage(
+				{ customType: "queue-test", content: "follow-up custom", display: true, details: { value: 1 } },
+				{ deliverAs: "followUp", persistOnCancel },
+			);
+			releaseToolExecution();
+			await promptPromise;
 
-		expect(sawCustomMessage).toBe(true);
-		expect(
-			harness.session.messages.some((message) => message.role === "custom" && message.customType === "queue-test"),
-		).toBe(true);
-	});
+			expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "custom_message")).toHaveLength(1);
+			expect(harness.eventsOfType("message_end").filter((event) => event.message.role === "custom")).toHaveLength(1);
+			expect(harness.session.hasPendingMessages).toBe(false);
+			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(sawCustomMessage).toBe(true);
+			expect(
+				harness.session.messages.some(
+					(message) => message.role === "custom" && message.customType === "queue-test",
+				),
+			).toBe(true);
+		},
+	);
 
 	it.each(["steer", "followUp"] as const)(
 		"reports custom %s messages retained by abort until clearQueue drains them",
@@ -428,6 +472,258 @@ describe("AgentSession queue characterization", () => {
 		},
 	);
 
+	it.each(["steer", "followUp"] as const)(
+		"persists opted-in %s notices before settlement when cancelled before queue drain",
+		async (deliverAs) => {
+			let queued = false;
+			const settledNotices: number[] = [];
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("turn_end", (_event, ctx) => {
+							if (queued) return;
+							queued = true;
+							pi.sendMessage(
+								{ customType: "retained-notice", content: "finished", display: true, details: { value: 1 } },
+								{ deliverAs, triggerTurn: true, persistOnCancel: true },
+							);
+							ctx.abort();
+						});
+						pi.on("agent_settled", (_event, ctx) => {
+							settledNotices.push(
+								ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom_message").length,
+							);
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("resumed")]);
+			// Queue unrelated user inputs behind the first request, not before its initial steering poll.
+			harness.session.subscribe((event) => {
+				if (event.type === "message_start" && event.message.role === "assistant" && !queued) {
+					void harness.session.steer("user steer");
+					void harness.session.followUp("user follow-up");
+				}
+			});
+			await harness.session.prompt("start");
+
+			expect(harness.session.isIdle).toBe(true);
+			expect(settledNotices).toEqual([1]);
+			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(harness.session.getSteeringMessages()).toEqual(["user steer"]);
+			expect(harness.session.getFollowUpMessages()).toEqual(["user follow-up"]);
+			expect(harness.session.clearQueue()).toEqual({ steering: ["user steer"], followUp: ["user follow-up"] });
+			expect(harness.session.hasPendingMessages).toBe(false);
+			expectRetainedNotice(harness);
+			await harness.session.prompt("resume");
+			expectRetainedNotice(harness);
+			expect(harness.getPendingResponseCount()).toBe(0);
+		},
+	);
+
+	it.each(["steer", "followUp"] as const)(
+		"recovers opted-in %s notices drained before cancellation in next-turn preparation",
+		async (deliverAs) => {
+			let sent = false;
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("turn_end", () => {
+							if (sent) return;
+							sent = true;
+							pi.sendMessage(
+								{ customType: "retained-notice", content: "finished", display: true, details: { value: 1 } },
+								{ deliverAs, persistOnCancel: true },
+							);
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const prepare = harness.session.agent.prepareNextTurnWithContext;
+			let prepared = false;
+			harness.session.agent.prepareNextTurnWithContext = async (turn, signal) => {
+				prepared = true;
+				expect(harness.session.hasPendingMessages).toBe(false);
+				expect(harness.eventsOfType("message_end").filter((event) => event.message.role === "custom")).toHaveLength(
+					0,
+				);
+				harness.session.agent.abort();
+				await prepare?.(turn, signal);
+				// Real abort-aware preparation fails before the loop can emit message_end.
+				signal?.throwIfAborted();
+				return undefined;
+			};
+			harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("must not run")]);
+			await harness.session.prompt("start");
+
+			expect(prepared).toBe(true);
+			expectRetainedNotice(harness);
+			expect(harness.session.hasPendingMessages).toBe(false);
+			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: [] });
+			expectRetainedNotice(harness);
+		},
+	);
+
+	it("clearQueue preserves only queued opted-in notices after all tool results, without waking", async () => {
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = await createWaitingHarness();
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("must not run"),
+		]);
+		await waitForToolStart;
+		try {
+			await harness.session.steer("user steer");
+			await harness.session.followUp("user follow-up");
+			await harness.session.sendCustomMessage(
+				{ customType: "retained-notice", content: "finished", display: true, details: { value: 1 } },
+				{ deliverAs: "followUp", persistOnCancel: true },
+			);
+			await harness.session.sendCustomMessage({ customType: "discarded", content: "ordinary", display: true });
+			await harness.session.sendCustomMessage(
+				{ customType: "deferred", content: "next prompt", display: true },
+				{ deliverAs: "nextTurn", persistOnCancel: true },
+			);
+			expect(harness.session.clearQueue()).toEqual({ steering: ["user steer"], followUp: ["user follow-up"] });
+			expect(harness.session.hasPendingMessages).toBe(false);
+			expect(harness.session.messages.some((message) => message.role === "custom")).toBe(false);
+			expect(harness.sessionManager.getEntries().some((entry) => entry.type === "custom_message")).toBe(false);
+			harness.session.agent.abort();
+		} finally {
+			releaseToolExecution();
+		}
+		await promptPromise;
+		expectRetainedNotice(harness);
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"custom",
+		]);
+		expect(harness.session.pendingNextTurnCount).toBe(1);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		harness.session.clearQueue();
+		expectRetainedNotice(harness);
+	});
+
+	it("preserves opted-in notices at final shutdown stop without a cancelled agent signal", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.agent.subscribe(async (event, signal) => {
+			if (event.type !== "turn_end") return;
+			await harness.session.sendCustomMessage(
+				{ customType: "retained-notice", content: "finished", display: true, details: { value: 1 } },
+				{ persistOnCancel: true },
+			);
+			harness.session.beginShutdown();
+			expect(signal.aborted).toBe(false);
+		});
+		harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("must not run")]);
+		await harness.session.prompt("start");
+		expectRetainedNotice(harness);
+		expect(harness.session.hasPendingMessages).toBe(false);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
+	});
+
+	it("flushes delivered provider messages before undelivered opted-in notices at final cleanup", async () => {
+		let sent = false;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", () => {
+						if (sent) return;
+						sent = true;
+						for (const content of ["delivered", "undelivered"]) {
+							pi.sendMessage({ customType: "notice", content, display: true }, { persistOnCancel: true });
+						}
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const prepare = harness.session.agent.prepareProviderRequest;
+		let cancelled = false;
+		harness.session.agent.prepareProviderRequest = async (context, signal) => {
+			if (context.messages.some((message) => getMessageText(message) === "delivered")) {
+				cancelled = true;
+				expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "custom_message")).toHaveLength(
+					0,
+				);
+				harness.session.agent.abort();
+				signal?.throwIfAborted();
+			}
+			return prepare?.(context, signal);
+		};
+		harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("must not run")]);
+		await harness.session.prompt("start");
+		expect(cancelled).toBe(true);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "custom_message")
+				.map((entry) => entry.content),
+		).toEqual(["delivered", "undelivered"]);
+		expect(harness.session.messages.filter((message) => message.role === "custom").map(getMessageText)).toEqual([
+			"delivered",
+			"undelivered",
+		]);
+		expect(
+			harness
+				.eventsOfType("message_end")
+				.filter((event) => event.message.role === "custom")
+				.map((event) => getMessageText(event.message)),
+		).toEqual(["delivered", "undelivered"]);
+		expect(harness.session.hasPendingMessages).toBe(false);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		harness.session.clearQueue();
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "custom_message")).toHaveLength(2);
+	});
+
+	it("clearQueue does not take a drained opted-in notice that can still deliver normally", async () => {
+		let sent = false;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", () => {
+						if (sent) return;
+						sent = true;
+						pi.sendMessage(
+							{ customType: "retained-notice", content: "finished", display: true, details: { value: 1 } },
+							{ persistOnCancel: true },
+						);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const prepare = harness.session.agent.prepareNextTurnWithContext;
+		let prepared = false;
+		harness.session.agent.prepareNextTurnWithContext = async (turn, signal) => {
+			prepared = true;
+			expect(harness.session.hasPendingMessages).toBe(false);
+			expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: [] });
+			return prepare?.(turn, signal);
+		};
+		harness.setResponses([
+			fauxAssistantMessage("done"),
+			(context) => {
+				expect(context.messages.filter((message) => getMessageText(message) === "finished")).toHaveLength(1);
+				return fauxAssistantMessage("saw notice");
+			},
+		]);
+		await harness.session.prompt("start");
+		expect(prepared).toBe(true);
+		expectRetainedNotice(harness);
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(harness.eventsOfType("agent_start")).toHaveLength(1);
+		harness.session.clearQueue();
+		expectRetainedNotice(harness);
+	});
+
 	it("does not count context-only custom messages as pending steering/follow-up work", async () => {
 		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = await createWaitingHarness();
 		harnesses.push(harness);
@@ -451,7 +747,7 @@ describe("AgentSession queue characterization", () => {
 		expect(harness.session.messages.some((message) => message.role === "custom")).toBe(true);
 	});
 
-	it("injects nextTurn custom messages into the next prompt", async () => {
+	it.each([undefined, true])("keeps nextTurn deferred with persistOnCancel=%s", async (persistOnCancel) => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		let sawCustomMessage = false;
@@ -461,7 +757,7 @@ describe("AgentSession queue characterization", () => {
 
 		await harness.session.sendCustomMessage(
 			{ customType: "next-turn", content: "carry this", display: true, details: {} },
-			{ deliverAs: "nextTurn" },
+			{ deliverAs: "nextTurn", persistOnCancel },
 		);
 		expect(ctx.getPendingNextTurnCount()).toBe(1);
 		expect(ctx.isIdle()).toBe(true);

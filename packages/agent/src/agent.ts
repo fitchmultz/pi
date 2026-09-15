@@ -157,6 +157,16 @@ class PendingMessageQueue {
 		return [first];
 	}
 
+	take(predicate: (message: AgentMessage) => boolean): AgentMessage[] {
+		const taken: AgentMessage[] = [];
+		this.messages = this.messages.filter((message) => {
+			if (!predicate(message)) return true;
+			taken.push(message);
+			return false;
+		});
+		return taken;
+	}
+
 	clear(): void {
 		this.messages = [];
 	}
@@ -320,6 +330,11 @@ export class Agent {
 	clearAllQueues(): void {
 		this.clearSteeringQueue();
 		this.clearFollowUpQueue();
+	}
+
+	/** Remove matching queued messages, steering first, preserving unmatched order and queue modes. */
+	takeQueuedMessages(predicate: (message: AgentMessage) => boolean): AgentMessage[] {
+		return [...this.steeringQueue.take(predicate), ...this.followUpQueue.take(predicate)];
 	}
 
 	/** Returns true when either queue still contains pending messages. */

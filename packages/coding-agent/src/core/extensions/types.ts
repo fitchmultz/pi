@@ -408,7 +408,12 @@ export interface ExtensionCommandContext extends ExtensionContext {
 export interface ReplacedSessionContext extends ExtensionCommandContext {
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: {
+			triggerTurn?: boolean;
+			deliverAs?: "steer" | "followUp" | "nextTurn";
+			/** Preserve undelivered streamed messages without waking on cancellation, final stop, or clearQueue. Ignored for nextTurn. */
+			persistOnCancel?: boolean;
+		},
 	): Promise<void>;
 
 	sendUserMessage(
@@ -1437,7 +1442,12 @@ export interface ExtensionAPI {
 	/** Send a custom message to the session. */
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: {
+			triggerTurn?: boolean;
+			deliverAs?: "steer" | "followUp" | "nextTurn";
+			/** Preserve undelivered streamed messages without waking on cancellation, final stop, or clearQueue. Ignored for nextTurn. */
+			persistOnCancel?: boolean;
+		},
 	): void;
 
 	/**
@@ -1696,10 +1706,7 @@ export interface ExtensionShortcut {
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
-export type SendMessageHandler = <T = unknown>(
-	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
-) => void;
+export type SendMessageHandler = ExtensionAPI["sendMessage"];
 
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
