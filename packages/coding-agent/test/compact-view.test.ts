@@ -23,6 +23,7 @@ import type { CustomMessage } from "../src/core/messages.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { createAllToolRenderers } from "../src/core/tools/renderers/index.ts";
 import { createChatViewport } from "../src/modes/interactive/chat-viewport.ts";
+import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
@@ -533,7 +534,8 @@ describe("compact tool cards", () => {
 		// Fullscreen natively disables iTerm2 graphics; test those image rows before mounting it.
 		const fullscreen = protocol === "kitty";
 		if (fullscreen) {
-			const document = new Container();
+			const document = new ChatContainer();
+			document.setCompactView(true);
 			document.addChild(new Text("BEFORE", 0, 0));
 			document.addChild(component);
 			document.addChild(new Text("AFTER", 0, 0));
@@ -550,6 +552,15 @@ describe("compact tool cards", () => {
 			renderer.start();
 		}
 		try {
+			if (fullscreen) {
+				await terminal.waitForRender();
+				const viewport = terminal.getViewport();
+				const activityY = viewport.findIndex((line) => line.includes("Activity"));
+				expect(activityY).toBeGreaterThanOrEqual(0);
+				expect(viewport.join("\n")).not.toContain("[image]");
+				terminal.sendInput(`\x1b[<0;3;${activityY + 1}M`);
+				terminal.sendInput(`\x1b[<0;3;${activityY + 1}m`);
+			}
 			for (const handled of [true, false]) {
 				consumeClick = handled;
 				events.length = 0;
@@ -558,7 +569,7 @@ describe("compact tool cards", () => {
 					const viewport = terminal.getViewport();
 					const before = viewport.findIndex((line) => line.includes("BEFORE"));
 					expect(before).toBeGreaterThanOrEqual(0);
-					expect(viewport.findIndex((line) => line.includes("AFTER")) - before).toBe(3);
+					expect(viewport.findIndex((line) => line.includes("AFTER")) - before).toBe(4);
 					const placeholderY = viewport.findIndex((line) => line.includes("[image]"));
 					expect(placeholderY).toBeGreaterThan(before);
 					const placeholderX = viewport[placeholderY].indexOf("[image]") + 1;
@@ -666,6 +677,104 @@ describe("compact tool cards", () => {
 			}
 		},
 	);
+});
+
+describe("compact Activity", () => {
+	test("keeps live counts collapsed and restores existing output, card clicks and normal layout", () => {
+		const chat = new ChatContainer();
+		chat.setCompactView(true);
+		const tool = new ToolExecutionComponent(
+			"read",
+			"id",
+			{ path: "file" },
+			{ compactView: true },
+			undefined,
+			ui,
+			process.cwd(),
+		);
+		const shell = new BashExecutionComponent("echo shell", ui, false, true);
+		try {
+			chat.addChild(tool);
+			chat.addChild(shell);
+			expect(chat.render(80).map((line) => stripAnsi(line).trimEnd())).toEqual(["▸ Activity · 2 calls · 2 running"]);
+			tool.updateResult({ content: [{ type: "text", text: "error detail" }], isError: true });
+			shell.appendOutput("shell output\nlast line");
+			shell.setComplete(undefined, true);
+			expect(chat.render(80).map((line) => stripAnsi(line).trimEnd())).toEqual([
+				"▸ Activity · 2 calls · 1 failed · 1 cancelled",
+			]);
+			for (const width of [1, 2, 12]) {
+				expect(chat.render(width)).toHaveLength(1);
+				expect(visibleWidth(chat.render(width)[0])).toBeLessThanOrEqual(width);
+			}
+			click(chat, 0, 80);
+			const lines = chat.render(80).map(stripAnsi);
+			expect(lines[0]).toContain("▾ Activity");
+			expect(lines).toContainEqual(expect.stringContaining("error detail"));
+			expect(lines.join("\n")).not.toContain("shell output");
+			click(
+				chat,
+				lines.findIndex((line) => line.includes("echo shell")),
+				80,
+			);
+			expect(stripAnsi(chat.render(80).join("\n"))).toContain("shell output");
+			click(chat, 0, 80);
+			shell.appendOutput("\nlate output");
+			expect(chat.render(80)).toHaveLength(1);
+			click(chat, 0, 80);
+			expect(stripAnsi(chat.render(80).join("\n"))).toContain("late output");
+			chat.setCompactView(false);
+			const ordinary = new Container();
+			ordinary.children = [tool, shell];
+			expect(chat.render(80)).toEqual(ordinary.render(80));
+			chat.clear();
+			chat.setCompactView(true);
+			chat.addChild(tool);
+			expect(chat.render(80).map((line) => stripAnsi(line).trimEnd())).toEqual(["▸ Activity · 1 call · 1 failed"]);
+		} finally {
+			shell.setComplete(undefined, true);
+		}
+	});
+
+	test("streaming text splits a run only when it becomes visible, without losing components", () => {
+		const chat = new ChatContainer();
+		chat.setCompactView(true);
+		const first = new ToolExecutionComponent("first", "one", {}, { compactView: true }, undefined, ui, process.cwd());
+		const second = new ToolExecutionComponent(
+			"second",
+			"two",
+			{},
+			{ compactView: true },
+			undefined,
+			ui,
+			process.cwd(),
+		);
+		const assistant = new AssistantMessageComponent(undefined, true, undefined, undefined, 0, [], true);
+		chat.children = [first, assistant, second];
+		expect(chat.render(80).map((line) => stripAnsi(line).trimEnd())).toEqual(["▸ Activity · 2 calls · 2 running"]);
+		assistant.updateContent(fauxAssistantMessage([{ type: "thinking", thinking: "hidden" }]), true);
+		expect(chat.render(80)).toHaveLength(1);
+		assistant.updateContent(fauxAssistantMessage("visible streaming text"), true);
+		const text = stripAnsi(chat.render(80).join("\n"));
+		expect(text.match(/Activity/g)).toHaveLength(2);
+		expect(text.indexOf("visible streaming text")).toBeGreaterThan(text.indexOf("Activity"));
+		expect(text.indexOf("visible streaming text")).toBeLessThan(text.lastIndexOf("Activity"));
+		expect(chat.children).toEqual([first, assistant, second]);
+	});
+
+	test("opens pending tool arguments before a result exists", () => {
+		const tool = new ToolExecutionComponent(
+			"pending",
+			"id",
+			{ secretDetail: "arguments" },
+			{ compactView: true },
+			undefined,
+			ui,
+			process.cwd(),
+		);
+		click(tool, 0);
+		expect(stripAnsi(tool.render(80).join("\n"))).toContain("secretDetail");
+	});
 });
 
 describe("compact user shell cards", () => {

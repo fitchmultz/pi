@@ -1,4 +1,4 @@
-import type { Component } from "@earendil-works/pi-tui";
+import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import type { EntryRenderer } from "../../../core/extensions/types.ts";
 import type { CustomEntry } from "../../../core/session-manager.ts";
@@ -13,10 +13,12 @@ export class CustomEntryComponent extends Container {
 	private renderer: EntryRenderer;
 	private customComponent?: Component;
 	private _expanded = false;
+	private compactView: boolean;
 
-	constructor(entry: CustomEntry<unknown>, renderer: EntryRenderer) {
+	constructor(entry: CustomEntry<unknown>, renderer: EntryRenderer, compactView = false) {
 		super();
 		this.entry = entry;
+		this.compactView = compactView;
 		this.renderer = renderer;
 		this.rebuild();
 	}
@@ -30,6 +32,26 @@ export class CustomEntryComponent extends Container {
 			this._expanded = expanded;
 			this.rebuild();
 		}
+	}
+
+	setCompactView(compactView: boolean): void {
+		this.compactView = compactView;
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		const result = super.handleMouse(event);
+		if (result || !this.compactView || event.type !== "click" || event.button !== "left") return result;
+		this.setExpanded(!this._expanded);
+		return {
+			handled: true,
+			target: {
+				component: this,
+				originX: event.screenX - event.x,
+				originY: event.screenY - event.y,
+				width: event.width,
+				height: event.height,
+			},
+		};
 	}
 
 	override invalidate(): void {

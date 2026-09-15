@@ -2,7 +2,7 @@
  * Component for displaying bash command execution with streaming output.
  */
 
-import { Container, Loader, Spacer, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, Loader, Spacer, Text, type TUI, type TuiMouseEvent, truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -75,6 +75,26 @@ export class BashExecutionComponent extends Container {
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		this.updateDisplay();
+	}
+
+	getActivityStatus(): "running" | "complete" | "cancelled" | "error" {
+		return this.status;
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		if (!this.compactView) return super.handleMouse(event);
+		if (event.type !== "click" || event.button !== "left") return undefined;
+		this.setExpanded(!this.expanded);
+		return {
+			handled: true,
+			target: {
+				component: this,
+				originX: event.screenX - event.x,
+				originY: event.screenY - event.y,
+				width: event.width,
+				height: event.height,
+			},
+		};
 	}
 
 	setCompactView(compactView: boolean): void {

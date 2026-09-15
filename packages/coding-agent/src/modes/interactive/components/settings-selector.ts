@@ -500,7 +500,7 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "compact-view",
 				label: "Compact view",
-				description: "Use one or two rows for collapsed tool cards in this session; remember for new sessions",
+				description: "Group tools and updates behind Activity rows in this session; remember for new sessions",
 				currentValue: config.compactView ? "true" : "false",
 				values: ["true", "false"],
 			},

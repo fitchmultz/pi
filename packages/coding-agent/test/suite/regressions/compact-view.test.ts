@@ -15,6 +15,7 @@ import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { convertToLlm } from "../../../src/core/messages.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
+import { createChatViewport } from "../../../src/modes/interactive/chat-viewport.ts";
 import type { BashExecutionComponent } from "../../../src/modes/interactive/components/bash-execution.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import type { SettingsSelectorComponent } from "../../../src/modes/interactive/components/settings-selector.ts";
@@ -33,6 +34,7 @@ type CompactView = {
 	chatContainer: Container;
 	pendingMessagesContainer: Container;
 	editorContainer: Container;
+	statusContainer: Container;
 	defaultEditor: CustomEditor;
 	pendingTools: Map<string, ToolExecutionComponent>;
 	pendingUserInputs: string[];
@@ -140,6 +142,182 @@ function clickTool(component: ToolExecutionComponent): void {
 }
 
 describe("native compact-view settings and live rendering", () => {
+	test.each(["error", "aborted"] as const)(
+		"keeps %s tool attempts collapsed in live and restored views",
+		async (stopReason) => {
+			const harness = await createHarness({
+				tools: [],
+				settings: { compactView: true, hideThinkingBlock: true, retry: { enabled: false } },
+			});
+			onTestFinished(() => harness.cleanup());
+			const { view, rebind } = await createView(harness);
+			harness.setResponses([
+				fauxAssistantMessage(
+					[
+						{ type: "text", text: "Visible partial answer" },
+						fauxToolCall("read", { path: "file" }, { id: "interrupted" }),
+					],
+					{ stopReason, errorMessage: "fixture failure" },
+				),
+			]);
+			await harness.session.prompt("test interrupted response");
+			for (const restore of [false, true]) {
+				if (restore) await rebind();
+				const text = stripAnsi(view.chatContainer.render(80).join("\n"));
+				expect(text).toContain("Visible partial answer");
+				expect(text).toContain("▸ Activity · 1 call · 1 failed");
+				expect(text).not.toContain("running");
+				expect(text).not.toContain(stopReason === "error" ? "fixture failure" : "Operation aborted");
+				view.setToolsExpanded(true);
+				expect(stripAnsi(view.chatContainer.render(80).join("\n"))).toContain(
+					stopReason === "error" ? "fixture failure" : "Operation aborted",
+				);
+				view.setToolsExpanded(false);
+			}
+		},
+	);
+
+	test("groups live operations across hidden thinking, preserves input UI, and replays custom updates", async () => {
+		let finish!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		let update: ((text: string) => void) | undefined;
+		const harness = await createHarness({
+			tools: [],
+			settings: { compactView: true, hideThinkingBlock: true, compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.registerMessageRenderer(
+						"subagent",
+						(_message, options) =>
+							new Text(options.expanded ? "Agent update\nagent full detail" : "Agent update", 0, 0),
+					);
+					pi.registerEntryRenderer(
+						"progress",
+						(_entry, options) =>
+							new Text(options.expanded ? "Entry update\nentry full detail" : "Entry update", 0, 0),
+					);
+					pi.registerTool({
+						name: "step",
+						label: "Step",
+						description: "Offline activity fixture",
+						parameters: Type.Object({ n: Type.Number() }),
+						async execute(_id, { n }, _signal, onUpdate, ctx) {
+							if (n === 1) {
+								ctx.ui.notify("routine status", "info");
+								pi.appendEntry("progress", {});
+								pi.sendMessage({ customType: "subagent", content: "agent content", display: true });
+							} else {
+								await ctx.ui.input("Your choice");
+								update = (text) => onUpdate?.({ content: [{ type: "text", text }], details: undefined });
+								update("partial output\nhidden detail");
+								await gate;
+							}
+							return { content: [{ type: "text", text: "final output\nfull tool detail" }], details: undefined };
+						},
+						renderCall: ({ n }) => new Text(`step ${n}`, 0, 0),
+						renderResult: (result) =>
+							new Text(result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n"), 0, 0),
+					});
+				},
+			],
+		});
+		onTestFinished(() => harness.cleanup());
+		const { view, terminal, rebind } = await createView(harness);
+		if (!("setLayoutRoot" in view.renderer)) throw new Error("Expected fullscreen renderer");
+		view.renderer.setLayoutRoot(
+			createChatViewport({
+				document: view.chatContainer,
+				pendingMessages: view.pendingMessagesContainer,
+				status: view.statusContainer,
+				editor: view.editorContainer,
+				footer: new Text("FOOTER", 0, 0),
+				scrollbar: "hidden",
+			}).root,
+		);
+		harness.setResponses([
+			fauxAssistantMessage(
+				[{ type: "text", text: "First assistant" }, fauxToolCall("step", { n: 1 }, { id: "first" })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(
+				[{ type: "thinking", thinking: "hidden reasoning" }, fauxToolCall("step", { n: 2 }, { id: "second" })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("Final assistant"),
+		]);
+		const text = () => stripAnsi(view.chatContainer.render(80).join("\n"));
+		const clickLabel = async (label: string) => {
+			await terminal.waitForRender();
+			const y = terminal.getViewport().findIndex((line) => line.includes(label));
+			expect(y, label).toBeGreaterThanOrEqual(0);
+			terminal.sendInput(`\x1b[<0;3;${y + 1}M`);
+			terminal.sendInput(`\x1b[<0;3;${y + 1}m`);
+			await terminal.waitForRender();
+		};
+		const run = harness.session.prompt("Visible user input");
+		try {
+			await vi.waitFor(() => expect(stripAnsi(view.editorContainer.render(80).join("\n"))).toContain("Your choice"));
+			expect(text()).toContain("Visible user input");
+			expect(text()).toContain("First assistant");
+			expect(text().match(/Activity/g)).toHaveLength(1);
+			expect(text()).toContain("2 calls");
+			expect(text()).not.toMatch(/Agent update|Entry update|routine status|hidden reasoning|final output/);
+			terminal.sendInput("answer");
+			terminal.sendInput("\r");
+			await vi.waitFor(() => expect(update).toBeTypeOf("function"));
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).toContain("Working");
+			expect(text()).not.toContain("Working");
+			update!("live output\nlive full detail");
+			await terminal.waitForRender();
+			expect(text()).toContain("▸ Activity");
+			expect(text()).toContain("1 running");
+			expect(text()).not.toContain("live output");
+			await clickLabel("Activity");
+			expect(text()).toContain("routine status");
+			expect(text()).toContain("Agent update");
+			expect(text()).toContain("Entry update");
+			expect(text()).toContain("live output");
+			expect(text()).not.toContain("live full detail");
+			await clickLabel("step 2");
+			expect(text()).toContain("live full detail");
+			await clickLabel("Agent update");
+			expect(text()).toContain("agent full detail");
+			await clickLabel("Entry update");
+			expect(text()).toContain("entry full detail");
+			await clickLabel("Activity");
+			expect(text()).not.toContain("live output");
+			terminal.sendInput("\x14");
+			await terminal.waitForRender();
+			expect(text()).toContain("hidden reasoning");
+			expect(text().match(/Activity/g)).toHaveLength(2);
+			terminal.sendInput("\x14");
+			await terminal.waitForRender();
+			expect(text()).not.toContain("hidden reasoning");
+			expect(text().match(/Activity/g)).toHaveLength(1);
+		} finally {
+			finish();
+			// Also dismiss the fixture input if an earlier assertion failed.
+			if (stripAnsi(view.editorContainer.render(80).join("\n")).includes("Your choice")) terminal.sendInput("\x1b");
+			await run;
+		}
+		expect(text()).toContain("Final assistant");
+		expect(text()).toContain("▸ Activity");
+		expect(text()).not.toContain("running");
+		const saved = structuredClone(harness.session.messages);
+		await rebind();
+		expect(text().match(/Activity/g)).toHaveLength(1);
+		expect(text()).not.toContain("Agent update");
+		terminal.sendInput("\x0f");
+		await terminal.waitForRender();
+		expect(text()).toContain("agent full detail");
+		expect(text()).toContain("entry full detail");
+		expect(text()).toContain("full tool detail");
+		expect(harness.session.messages).toEqual(saved);
+	});
+
 	test("defaults off, ignores project overrides and remembers only future starts across reload/rebind", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-compact-settings-"));
 		onTestFinished(() => rmSync(root, { recursive: true, force: true }));

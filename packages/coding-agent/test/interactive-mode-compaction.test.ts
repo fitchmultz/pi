@@ -1,9 +1,10 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
-import { Container } from "@earendil-works/pi-tui";
+import type { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import type { PromptOptions } from "../src/core/agent-session.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
+import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -29,7 +30,7 @@ describe("InteractiveMode compaction events", () => {
 
 		initTheme("dark");
 		const enabled = {
-			chatContainer: new Container(),
+			chatContainer: new ChatContainer(),
 			settingsManager: { getShowCacheMissNotices: () => true },
 		};
 		addCompactionCostNotice.call(enabled, { type: "compaction_cost", kind: "compaction", usage });
@@ -43,7 +44,7 @@ describe("InteractiveMode compaction events", () => {
 		expect(output).toContain("Branch summary: 100 tokens billed (~$0.13)");
 
 		const disabled = {
-			chatContainer: new Container(),
+			chatContainer: new ChatContainer(),
 			settingsManager: { getShowCacheMissNotices: () => false },
 		};
 		addCompactionCostNotice.call(disabled, { type: "compaction_cost", kind: "compaction", usage });

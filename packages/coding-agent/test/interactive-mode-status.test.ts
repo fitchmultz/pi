@@ -7,6 +7,7 @@ import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
+import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -79,7 +80,7 @@ describe("InteractiveMode.showStatus", () => {
 
 	test("coalesces immediately-sequential status messages", () => {
 		const fakeThis: any = {
-			chatContainer: new Container(),
+			chatContainer: new ChatContainer(),
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
@@ -98,7 +99,7 @@ describe("InteractiveMode.showStatus", () => {
 
 	test("appends a new status line if something else was added in between", () => {
 		const fakeThis: any = {
-			chatContainer: new Container(),
+			chatContainer: new ChatContainer(),
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
@@ -123,7 +124,7 @@ describe("InteractiveMode.showManagedToolStatus", () => {
 
 	test("renders tool updates as one contiguous group", () => {
 		const fakeThis: any = {
-			chatContainer: new Container(),
+			chatContainer: new ChatContainer(),
 			ui: { requestRender: vi.fn() },
 			managedToolStatusStarted: false,
 			lastStatusSpacer: undefined,
@@ -153,7 +154,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 			customHeader: undefined,
 			builtInHeader: header,
 			loadedResourcesContainer: { children: [loadedResourcesChild] },
-			chatContainer: { children: [chatChild] },
+			chatContainer: { children: [chatChild], setExpanded: vi.fn() },
 			pendingMessagesContainer: { children: [pendingChild] },
 			ui: { requestRender: vi.fn() },
 			showStatus: vi.fn(),
@@ -532,7 +533,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			options: { verbose: options.verbose ?? false },
 			toolOutputExpanded: options.toolOutputExpanded ?? false,
 			loadedResourcesContainer: new Container(),
-			chatContainer: new Container(),
+			chatContainer: new ChatContainer(),
 			settingsManager: {
 				getQuietStartup: () => options.quietStartup,
 			},
