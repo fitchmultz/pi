@@ -170,6 +170,23 @@ Content`,
 			expect(result.extensions.some((r) => r.path === extPath && r.enabled)).toBe(true);
 		});
 
+		it.each([
+			["prompts", ".md"],
+			["themes", ".json"],
+		] as const)("should auto-discover only visible, non-ignored top-level %s files", async (kind, suffix) => {
+			const dir = join(agentDir, kind);
+			mkdirSync(join(dir, "nested"), { recursive: true });
+			writeFileSync(join(dir, `keep${suffix}`), "content");
+			writeFileSync(join(dir, `ignored${suffix}`), "content");
+			writeFileSync(join(dir, `.hidden${suffix}`), "content");
+			writeFileSync(join(dir, "wrong.txt"), "content");
+			writeFileSync(join(dir, "nested", `child${suffix}`), "content");
+			writeFileSync(join(dir, ".ignore"), `ignored${suffix}\n`);
+
+			const result = await packageManager.resolve();
+			expect(result[kind].map((resource) => resource.path)).toEqual([join(dir, `keep${suffix}`)]);
+		});
+
 		it("should auto-discover user prompts with overrides", async () => {
 			const promptsDir = join(agentDir, "prompts");
 			mkdirSync(promptsDir, { recursive: true });
@@ -2442,7 +2459,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 
 			let activeGitUpdates = 0;
 			let maxConcurrentGitUpdates = 0;
-			const updateGitSpy = vi.spyOn(packageManager as any, "updateGit").mockImplementation(async () => {
+			const installGitSpy = vi.spyOn(packageManager as any, "installGit").mockImplementation(async () => {
 				activeGitUpdates += 1;
 				maxConcurrentGitUpdates = Math.max(maxConcurrentGitUpdates, activeGitUpdates);
 				await new Promise((resolve) => setTimeout(resolve, 20));
@@ -2479,7 +2496,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 				],
 				undefined,
 			);
-			expect(updateGitSpy).toHaveBeenCalledTimes(4);
+			expect(installGitSpy).toHaveBeenCalledTimes(4);
 			expect(maxConcurrentNpmUpdates).toBeGreaterThan(1);
 			expect(maxConcurrentGitUpdates).toBeGreaterThan(1);
 		});

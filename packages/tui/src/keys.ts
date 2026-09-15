@@ -964,82 +964,29 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
 			);
 
 		case "insert":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.insert) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.insert, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "insert", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.insert, modifier);
-
 		case "delete":
+		case "home":
+		case "end":
+		case "pageup":
+		case "pagedown": {
+			const functionalKey = key === "pageup" ? "pageUp" : key === "pagedown" ? "pageDown" : key;
 			if (modifier === 0) {
 				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.delete) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.delete, 0)
+					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES[functionalKey]) ||
+					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS[functionalKey], 0)
 				);
 			}
-			if (matchesLegacyModifierSequence(data, "delete", modifier)) {
+			if (matchesLegacyModifierSequence(data, functionalKey, modifier)) {
 				return true;
 			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.delete, modifier);
+			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS[functionalKey], modifier);
+		}
 
 		case "clear":
 			if (modifier === 0) {
 				return matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.clear);
 			}
 			return matchesLegacyModifierSequence(data, "clear", modifier);
-
-		case "home":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.home) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.home, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "home", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.home, modifier);
-
-		case "end":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.end) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.end, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "end", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.end, modifier);
-
-		case "pageup":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.pageUp) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.pageUp, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "pageUp", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.pageUp, modifier);
-
-		case "pagedown":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.pageDown) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.pageDown, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "pageDown", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.pageDown, modifier);
 
 		case "up":
 			if (modifier === MODIFIERS.alt) {

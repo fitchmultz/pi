@@ -186,49 +186,20 @@ class UnixByteTransport implements ByteTransport {
 	#write(chunk: Uint8Array): Promise<void> {
 		if (this.#closed || !this.#socket.writable) return Promise.reject(new Error("Unix transport is closed"));
 		return new Promise<void>((resolve, reject) => {
-			let callbackComplete = false;
-			let drainComplete = false;
-			let requiresDrain: boolean | undefined;
 			let settled = false;
-
-			const onDrain = (): void => {
-				drainComplete = true;
-				finish();
-			};
-			const cleanup = (): void => {
-				this.#socket.off("drain", onDrain);
-				this.#socket.off("close", onClose);
-			};
-			const fail = (error: Error): void => {
+			const onClose = (): void => finish(new Error("Unix transport closed during write"));
+			const finish = (error?: Error | null): void => {
 				if (settled) return;
 				settled = true;
-				cleanup();
-				reject(error);
+				this.#socket.off("close", onClose);
+				if (error) reject(error);
+				else resolve();
 			};
-			const finish = (): void => {
-				if (settled || !callbackComplete || requiresDrain === undefined) return;
-				if (requiresDrain && !drainComplete) return;
-				settled = true;
-				cleanup();
-				resolve();
-			};
-			const onClose = (): void => fail(new Error("Unix transport closed during write"));
-
+			this.#socket.once("close", onClose);
 			try {
-				this.#socket.once("close", onClose);
-				const accepted = this.#socket.write(chunk, (error) => {
-					if (error) {
-						fail(error);
-						return;
-					}
-					callbackComplete = true;
-					finish();
-				});
-				requiresDrain = !accepted;
-				if (requiresDrain) this.#socket.once("drain", onDrain);
-				finish();
+				this.#socket.write(chunk, finish);
 			} catch (error) {
-				fail(error instanceof Error ? error : new Error(String(error)));
+				finish(error instanceof Error ? error : new Error(String(error)));
 			}
 		});
 	}

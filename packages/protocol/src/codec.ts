@@ -103,36 +103,16 @@ class ValidatedMessageDecoder<T> {
 }
 
 /** Incrementally decodes and validates framed client messages. */
-export class ClientMessageDecoder {
-	private readonly decoder: ValidatedMessageDecoder<ClientMessage>;
-
+export class ClientMessageDecoder extends ValidatedMessageDecoder<ClientMessage> {
 	constructor(options?: FrameDecoderOptions) {
-		this.decoder = new ValidatedMessageDecoder("client", parseClientMessage, options);
-	}
-
-	push(chunk: Uint8Array): ClientMessage[] {
-		return this.decoder.push(chunk);
-	}
-
-	end(): void {
-		this.decoder.end();
+		super("client", parseClientMessage, options);
 	}
 }
 
 /** Incrementally decodes and validates framed server messages. */
-export class ServerMessageDecoder {
-	private readonly decoder: ValidatedMessageDecoder<ServerMessage>;
-
+export class ServerMessageDecoder extends ValidatedMessageDecoder<ServerMessage> {
 	constructor(options?: FrameDecoderOptions) {
-		this.decoder = new ValidatedMessageDecoder("server", parseServerMessage, options);
-	}
-
-	push(chunk: Uint8Array): ServerMessage[] {
-		return this.decoder.push(chunk);
-	}
-
-	end(): void {
-		this.decoder.end();
+		super("server", parseServerMessage, options);
 	}
 }
 
