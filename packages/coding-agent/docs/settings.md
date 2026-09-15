@@ -221,6 +221,8 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 
 For direct `openai`, `"auto"` prefers persistent Responses WebSockets with incremental continuation. `"websocket-cached"` requests the same continuation behavior; `"websocket"` reuses the connection but sends full current input. `"sse"` keeps every request on HTTP. Transport failures before output starts fall back to HTTP with full current input; a fresh context window never continues the previous window's response chain. Other OpenAI-compatible providers keep their existing HTTP behavior. See [OpenAI Responses Transport](../../ai/README.md#openai-responses-transport) for hooks, proxy handling, and connection lifetime.
 
+For `openai-codex`, WebSocket recovery reconnects before falling back and returns to WebSockets after temporary HTTP recovery. See [Codex WebSocket recovery](websocket-recovery.md) for retry behavior and connection diagnostics.
+
 ### Terminal & Images
 
 | Setting | Type | Default | Description |

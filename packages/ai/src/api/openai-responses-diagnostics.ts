@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "../types.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
+import type { WebSocketSocketDiagnostics } from "../utils/websocket-diagnostics.ts";
 
 // New exports live here so adapters can load even when an older shared parser is already cached.
 export type ResponsesDiagnostics = {
@@ -35,7 +36,10 @@ export type ResponsesDiagnostics = {
 		connectMs?: number;
 		websocketConnectTimeoutMs?: number;
 		websocketIdleTimeoutMs?: number;
-		fallbackReason?: "session_disabled" | "before_stream_start";
+		fallbackReason?: "session_disabled" | "before_stream_start" | "repeated_websocket_failure";
+		lastEventType?: string;
+		runtime?: string;
+		socket?: WebSocketSocketDiagnostics;
 		connectionLimitRetries?: number;
 		missingContinuationRetries?: number;
 		closeCode?: number;
@@ -67,6 +71,12 @@ export function createResponsesDiagnostics(output: AssistantMessage): ResponsesD
 			requestedServiceTier: "unknown",
 			returnedServiceTier: "unknown",
 			applicationEvents: 0,
+			runtime:
+				typeof process === "undefined"
+					? "browser"
+					: process.versions?.bun
+						? `bun/${process.versions.bun}`
+						: `node/${process.versions?.node}`,
 			sseAttempts: 0,
 			websocketAttempts: 0,
 		},
@@ -87,6 +97,7 @@ export function recordResponsesEvent(
 	const elapsed = performance.now() - diagnostics.startedAt;
 	const details = diagnostics.details;
 	details.applicationEvents++;
+	if (typeof event.type === "string" && /^[a-z_.]{1,80}$/.test(event.type)) details.lastEventType = event.type;
 	details.firstApplicationEventMs ??= elapsed;
 	details.lastApplicationEventMs = elapsed;
 	if (
