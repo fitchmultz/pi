@@ -2,6 +2,7 @@ import { once } from "node:events";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer, type ServerOptions as HttpsServerOptions } from "node:https";
 import type { Socket } from "node:net";
+import { zstdDecompressSync } from "node:zlib";
 import type { Response as OpenAIResponse, ResponsesClientEvent } from "openai/resources/responses/responses.js";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { Model } from "../src/types.ts";
@@ -47,7 +48,9 @@ export async function createResponsesServer(
 		dispatch({
 			transport: "sse",
 			connection: 0,
-			body: JSON.parse(raw.toString()) as ResponsesRequest,
+			body: JSON.parse(
+				(request.headers["content-encoding"] === "zstd" ? zstdDecompressSync(raw) : raw).toString(),
+			) as ResponsesRequest,
 			headers: request.headers,
 			url: request.url,
 			bytes: raw.byteLength,

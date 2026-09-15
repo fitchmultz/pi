@@ -474,6 +474,8 @@ export class InteractiveMode {
 
 	// Auto-retry state
 	private retryEscapeHandler?: () => void;
+	private failedAttemptComponents: Component[] = [];
+	private failedAttemptMessage?: AssistantMessage;
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
@@ -2016,6 +2018,8 @@ export class InteractiveMode {
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
+		this.failedAttemptComponents = [];
+		this.failedAttemptMessage = undefined;
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
@@ -3330,6 +3334,8 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
+					this.failedAttemptComponents = [];
+					this.failedAttemptMessage = undefined;
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.hideThinkingBlock,
@@ -3396,6 +3402,10 @@ export class InteractiveMode {
 						this.streamingMessage.errorMessage = errorMessage;
 					}
 					this.streamingComponent.updateContent(this.streamingMessage, false);
+					if (this.streamingMessage.stopReason === "error") {
+						this.failedAttemptComponents = [this.streamingComponent, ...this.pendingTools.values()];
+						this.failedAttemptMessage = this.streamingMessage;
+					}
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -3563,6 +3573,17 @@ export class InteractiveMode {
 			}
 
 			case "auto_retry_start": {
+				// Persist presentation state without rewriting the failed message or its diagnostics.
+				const failedEntry =
+					this.failedAttemptMessage &&
+					this.sessionManager
+						.getBranch()
+						.reverse()
+						.find((entry) => entry.type === "message" && entry.message === this.failedAttemptMessage);
+				if (failedEntry) this.sessionManager.appendCustomEntry("pi:retried-message", { messageId: failedEntry.id });
+				this.failedAttemptMessage = undefined;
+				for (const component of this.failedAttemptComponents) this.chatContainer.removeChild(component);
+				this.failedAttemptComponents = [];
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;
 				this.defaultEditor.onEscape = () => {
@@ -3908,7 +3929,23 @@ export class InteractiveMode {
 		entries: SessionEntry[],
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
+		const retriedMessages = new Set(
+			entries.flatMap((entry): string[] => {
+				if (
+					entry.type !== "custom" ||
+					entry.customType !== "pi:retried-message" ||
+					typeof entry.data !== "object" ||
+					entry.data === null ||
+					!("messageId" in entry.data) ||
+					typeof entry.data.messageId !== "string"
+				)
+					return [];
+				return [entry.data.messageId];
+			}),
+		);
 		const items = entries.flatMap((entry): RenderSessionItem[] => {
+			if (retriedMessages.has(entry.id) || (entry.type === "custom" && entry.customType === "pi:retried-message"))
+				return [];
 			if (entry.type === "custom") {
 				return [entry];
 			}

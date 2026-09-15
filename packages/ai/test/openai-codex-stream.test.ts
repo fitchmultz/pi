@@ -1727,7 +1727,10 @@ describe("openai-codex streaming", () => {
 					} else if (failure === "after-start") {
 						socket.dispatchEvent(
 							new MessageEvent("message", {
-								data: JSON.stringify({ type: "response.created", response: { id: "resp_failed" } }),
+								data: JSON.stringify({
+									type: "response.output_item.added",
+									item: { type: "message", id: "msg_failed", role: "assistant", content: [] },
+								}),
 							}),
 						);
 					} else if (failure === "close-1000") {
@@ -1754,11 +1757,11 @@ describe("openai-codex streaming", () => {
 						details: expect.objectContaining({
 							eventsEmitted: afterStart,
 							phase: afterStart ? "after_message_stream_start" : "before_message_stream_start",
-							fallbackTransport: afterStart ? undefined : "sse",
+							fallbackTransport: undefined,
 						}),
 					}),
 				]);
-				expect(fetchMock).toHaveBeenCalledTimes(afterStart ? 0 : 1);
+				expect(fetchMock).not.toHaveBeenCalled();
 				expect(sockets[0].readyState).toBe(3);
 
 				for (let request = 0; request < 2; request++) {
@@ -1767,14 +1770,14 @@ describe("openai-codex streaming", () => {
 					expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 				}
 				expect(sockets).toHaveLength(2);
-				expect(sentBodies).toHaveLength(3);
+				expect(sentBodies).toHaveLength(afterStart ? 3 : 4);
 				expect(sentBodies.every((body) => (body.reasoning as { effort: string }).effort === "low")).toBe(true);
-				expect(fetchMock).toHaveBeenCalledTimes(afterStart ? 0 : 1);
+				expect(fetchMock).not.toHaveBeenCalled();
 				expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toMatchObject({
 					connectionsCreated: 2,
-					connectionsReused: 1,
+					connectionsReused: afterStart ? 1 : 2,
 					websocketFailures: 1,
-					sseFallbacks: afterStart ? 0 : 1,
+					sseFallbacks: 0,
 					websocketFallbackActive: false,
 				});
 			},
@@ -1789,7 +1792,10 @@ describe("openai-codex streaming", () => {
 					else
 						socket.dispatchEvent(
 							new MessageEvent("message", {
-								data: JSON.stringify({ type: "response.created", response: { id: "resp_failed" } }),
+								data: JSON.stringify({
+									type: "response.output_item.added",
+									item: { type: "message", id: "msg_failed", role: "assistant", content: [] },
+								}),
 							}),
 						);
 				});
@@ -1809,7 +1815,9 @@ describe("openai-codex streaming", () => {
 				}
 				const result = await resultStream.result();
 				expect(result.stopReason).toBe("error");
-				expect(result.errorMessage).toBe("WebSocket error");
+				expect(result.errorMessage).toBe(
+					closeCode === undefined ? "WebSocket error" : `WebSocket closed ${closeCode} private-close-reason`,
+				);
 				const details = result.diagnostics?.find((entry) => entry.type === "provider_request")?.details;
 				expect(details).toMatchObject({ transport: "websocket", websocketAttempts: 1, sseAttempts: 0 });
 				expect(details?.closeCode).toBe(closeCode);
@@ -1821,8 +1829,10 @@ describe("openai-codex streaming", () => {
 				}
 				expect(fetchMock).not.toHaveBeenCalled();
 				expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
-				expect(sockets).toHaveLength(2);
-				expect(getOpenAICodexWebSocketDebugStats(options.sessionId)?.websocketFallbackActive).toBe(false);
+				expect(sockets).toHaveLength(closeCode === 1009 ? 1 : 2);
+				expect(getOpenAICodexWebSocketDebugStats(options.sessionId)?.websocketFallbackActive).toBe(
+					closeCode === 1009,
+				);
 			},
 		);
 
@@ -1849,7 +1859,7 @@ describe("openai-codex streaming", () => {
 			expect(result.stopReason).toBe("stop");
 			expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
 				transport: "sse",
-				websocketAttempts: 1,
+				websocketAttempts: 2,
 				sseAttempts: 1,
 				closeCode: 1006,
 				closeWasClean: false,
@@ -1918,7 +1928,10 @@ describe("openai-codex streaming", () => {
 				else
 					socket.dispatchEvent(
 						new MessageEvent("message", {
-							data: JSON.stringify({ type: "response.created", response: { id: "resp_aborted" } }),
+							data: JSON.stringify({
+								type: "response.output_item.added",
+								item: { type: "message", id: "msg_aborted", role: "assistant", content: [] },
+							}),
 						}),
 					);
 			});
