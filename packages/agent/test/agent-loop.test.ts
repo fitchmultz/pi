@@ -165,6 +165,48 @@ describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (
 		},
 	);
 
+	it("settles the full aborted lifecycle when provider preparation is cancelled", async () => {
+		const controller = new AbortController();
+		const prompt = createUserMessage("Hello");
+		const context: AgentContext = { systemPrompt: "", messages: mode === "continue" ? [prompt] : [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareProviderRequest: async (current) => {
+				await Promise.resolve();
+				controller.abort();
+				return current;
+			},
+		};
+		let requests = 0;
+		const streamFn = () => {
+			requests++;
+			throw new Error("Provider must not be reached");
+		};
+		const stream =
+			mode === "prompt"
+				? agentLoop([prompt], context, config, controller.signal, streamFn)
+				: agentLoopContinue(context, config, controller.signal, streamFn);
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+		const messages = await stream.result();
+		const aborted = messages.at(-1);
+		expect(aborted).toMatchObject({ role: "assistant", stopReason: "aborted" });
+		expect(messages).toEqual(mode === "prompt" ? [prompt, aborted] : [aborted]);
+		expect(requests).toBe(0);
+		expect(events.map((event) => event.type)).toEqual([
+			"agent_start",
+			"turn_start",
+			...(mode === "prompt" ? ["message_start", "message_end"] : []),
+			"message_start",
+			"message_end",
+			"turn_end",
+			"agent_end",
+		]);
+		expect(events.at(-2)).toEqual({ type: "turn_end", message: aborted, toolResults: [] });
+		expect(events.at(-1)).toEqual({ type: "agent_end", messages });
+	});
+
 	it("reports the active model after a turn switches providers without changing caller config", async () => {
 		const prompt = createUserMessage("Hello");
 		const reply = createAssistantMessage([{ type: "text", text: "First reply" }]);

@@ -3,7 +3,7 @@ import { fauxAssistantMessage, fauxToolCall, type Usage } from "@earendil-works/
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/index.ts";
-import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createHarness, getMessageText, getUserTexts, type Harness } from "./harness.ts";
 
 const OVERFLOW = "prompt is too long: 300000 tokens > 128000 maximum";
 
@@ -592,6 +592,7 @@ describe("session_before_auto_compact", () => {
 			releaseHook = resolve;
 		});
 		let hookSignal: AbortSignal | undefined;
+		let cancellation: Promise<void> | undefined;
 		const harness = await createHarness({
 			models: [{ id: "small", contextWindow: 64_000, maxTokens: 2048 }],
 			settings: { compaction: { reserveTokens: 16_000, keepRecentTokens: 20_000 }, retry: { enabled: false } },
@@ -621,6 +622,8 @@ describe("session_before_auto_compact", () => {
 			fauxAssistantMessage("continued"),
 		]);
 
+		const stream = vi.fn(harness.session.agent.streamFunction);
+		harness.session.agent.streamFunction = stream;
 		const run = harness.session.prompt("dump it");
 		try {
 			await hookStarted;
@@ -628,13 +631,24 @@ describe("session_before_auto_compact", () => {
 			expect(harness.session.messages.at(-1)).toMatchObject({ role: "toolResult", isError: false });
 			expect(harness.session.isCompacting).toBe(true);
 			expect(harness.session.agent.signal).toBeDefined();
-			if (abort) harness.session.agent.abort();
+			await harness.session.steer("DO NOT LOSE");
+			expect(harness.session.hasPendingMessages).toBe(true);
+			expect(getUserTexts(harness)).not.toContain("DO NOT LOSE");
+			if (abort) cancellation = harness.session.abort();
 			expect(harness.session.agent.signal?.aborted).toBe(abort);
 		} finally {
 			releaseHook();
-			await run;
+			await Promise.all([run, cancellation]);
 		}
 
+		expect(stream).toHaveBeenCalledTimes(abort ? 1 : 2);
+		expect(harness.session.hasPendingMessages).toBe(abort);
+		expect(harness.session.getSteeringMessages()).toEqual(abort ? ["DO NOT LOSE"] : []);
+		expect(getUserTexts(harness).includes("DO NOT LOSE")).toBe(!abort);
+		expect(JSON.stringify(harness.sessionManager.getBranch()).includes("DO NOT LOSE")).toBe(!abort);
+		if (abort) {
+			expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+		}
 		expect(countType(harness, "context_window")).toBe(abort ? 0 : 1);
 		expect(harness.eventsOfType("compaction_end").filter((event) => event.contextWindowStarted)).toHaveLength(
 			abort ? 0 : 1,
@@ -643,6 +657,12 @@ describe("session_before_auto_compact", () => {
 		expect(countType(harness, "compaction")).toBe(0);
 		expect(harness.session.isCompacting).toBe(false);
 		expect(harness.session.isIdle).toBe(true);
+		if (abort) {
+			await harness.session.prompt("continue");
+			expect(harness.session.hasPendingMessages).toBe(false);
+			expect(getUserTexts(harness)).toContain("DO NOT LOSE");
+			expect(stream).toHaveBeenCalledTimes(2);
+		}
 	});
 
 	it("reports a claimed rollover that cannot persist its boundary", async () => {

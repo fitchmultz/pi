@@ -613,6 +613,54 @@ describe("Agent", () => {
 		},
 	);
 
+	it.each(["steer", "followUp"] as const)(
+		"retains already-drained %s messages when next-turn preparation is cancelled",
+		async (queue) => {
+			const queued = { role: "user" as const, content: "DO NOT LOSE", timestamp: Date.now() };
+			const events: AgentEvent[] = [];
+			let requests = 0;
+			const agent = new Agent({
+				prepareNextTurn: async () => {
+					expect(agent.hasQueuedMessages()).toBe(false);
+					await Promise.resolve();
+					agent.abort();
+					return undefined;
+				},
+				streamFn: () => {
+					requests++;
+					const stream = new MockAssistantStream();
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+					return stream;
+				},
+			});
+			agent.subscribe((event) => {
+				events.push(event);
+				if (
+					event.type === "turn_end" &&
+					event.message.role === "assistant" &&
+					event.message.stopReason === "stop"
+				) {
+					agent[queue](queued);
+				}
+			});
+
+			await agent.prompt("start");
+
+			expect(agent.state.messages).toContainEqual(queued);
+			expect(agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+			expect(agent.hasQueuedMessages()).toBe(false);
+			expect(requests).toBe(1);
+			expect(events.filter((event) => event.type === "turn_start")).toHaveLength(2);
+			expect(events.filter((event) => event.type === "turn_end")).toHaveLength(2);
+			expect(events.slice(-4).map((event) => event.type)).toEqual([
+				"message_start",
+				"message_end",
+				"turn_end",
+				"agent_end",
+			]);
+		},
+	);
+
 	it("should handle abort controller", () => {
 		const agent = new Agent({ streamFn: unusedStreamFunction });
 

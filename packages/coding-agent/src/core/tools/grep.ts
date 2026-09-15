@@ -148,7 +148,7 @@ export function createGrepToolDefinition(
 							if (isDirectory) {
 								const relative = path.relative(searchPath, filePath);
 								if (relative && !relative.startsWith("..")) {
-									return relative.replace(/\\/g, "/");
+									return relative.split(path.sep).join("/");
 								}
 							}
 							return path.basename(filePath);
