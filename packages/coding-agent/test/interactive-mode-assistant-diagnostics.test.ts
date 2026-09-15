@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container } from "@earendil-works/pi-tui";
+import type { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
+import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -50,7 +51,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 
 		initTheme("dark");
 		const enabled = {
-			chatContainer: new Container(),
+			chatContainer: new ChatContainer(),
 			settingsManager: { getShowCacheMissNotices: () => true },
 		};
 		maybeShowAssistantDiagnostics.call(enabled, message);
@@ -58,7 +59,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 		expect(output).toContain("Anthropic dropped thinking block: prefix_binding_mismatch at messages.2.content.0");
 
 		const disabled = {
-			chatContainer: new Container(),
+			chatContainer: new ChatContainer(),
 			settingsManager: { getShowCacheMissNotices: () => false },
 		};
 		maybeShowAssistantDiagnostics.call(disabled, message);

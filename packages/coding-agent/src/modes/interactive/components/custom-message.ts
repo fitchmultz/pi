@@ -1,5 +1,5 @@
 import type { TextContent } from "@earendil-works/pi-ai";
-import type { Component } from "@earendil-works/pi-tui";
+import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
@@ -46,6 +46,22 @@ export class CustomMessageComponent extends Container {
 			this._expanded = expanded;
 			this.rebuild();
 		}
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		const result = super.handleMouse(event);
+		if (result || !this.compactView || event.type !== "click" || event.button !== "left") return result;
+		this.setExpanded(!this._expanded);
+		return {
+			handled: true,
+			target: {
+				component: this,
+				originX: event.screenX - event.x,
+				originY: event.screenY - event.y,
+				width: event.width,
+				height: event.height,
+			},
+		};
 	}
 
 	setCompactView(compactView: boolean): void {

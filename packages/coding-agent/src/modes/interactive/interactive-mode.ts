@@ -116,6 +116,7 @@ import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { createChatViewport } from "./chat-viewport.ts";
+import { ChatContainer } from "./components/activity.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -385,7 +386,7 @@ export class InteractiveMode {
 	private ui: TUI;
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
 	private loadedResourcesContainer: Container;
-	private chatContainer: Container;
+	private chatContainer: ChatContainer;
 	private documentContainer: Container;
 	private transcriptScrollView: TuiLayouts.ScrollView | undefined;
 	private fullscreenLayoutRoot: Component | undefined;
@@ -552,7 +553,7 @@ export class InteractiveMode {
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.loadedResourcesContainer = new Container();
-		this.chatContainer = new Container();
+		this.chatContainer = new ChatContainer();
 		this.documentContainer = new Container();
 		this.documentContainer.addChild(this.headerContainer);
 		this.documentContainer.addChild(this.loadedResourcesContainer);
@@ -581,6 +582,7 @@ export class InteractiveMode {
 
 		// Snapshot the future-start default once; reloads must not change this UI's view.
 		this.compactView = this.settingsManager.getCompactView();
+		this.chatContainer.setCompactView(this.compactView);
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.outputPad = this.settingsManager.getOutputPad();
 
@@ -3634,7 +3636,9 @@ export class InteractiveMode {
 		}
 		const message = status.type === "warning" ? `Warning: ${status.message}` : status.message;
 		const color = status.type === "warning" ? "warning" : "dim";
-		this.chatContainer.addChild(new Text(theme.fg(color, message), 1, 0));
+		const text = new Text(theme.fg(color, message), 1, 0);
+		if (status.type === "warning") this.chatContainer.addChild(text);
+		else this.chatContainer.addActivity(text);
 		this.lastStatusSpacer = undefined;
 		this.lastStatusText = undefined;
 		this.ui.requestRender();
@@ -3660,7 +3664,7 @@ export class InteractiveMode {
 		const spacer = new Spacer(1);
 		const text = new Text(theme.fg("dim", message), 1, 0);
 		this.chatContainer.addChild(spacer);
-		this.chatContainer.addChild(text);
+		this.chatContainer.addActivity(text);
 		this.lastStatusSpacer = spacer;
 		this.lastStatusText = text;
 		this.ui.requestRender();
@@ -3671,7 +3675,7 @@ export class InteractiveMode {
 		if (!renderer) {
 			return;
 		}
-		const component = new CustomEntryComponent(entry, renderer);
+		const component = new CustomEntryComponent(entry, renderer, this.compactView);
 		component.setExpanded(this.toolOutputExpanded);
 		if (!component.hasContent()) {
 			return;
@@ -3929,7 +3933,7 @@ export class InteractiveMode {
 		const cost = usage.cost.total >= 0.01 ? ` (~$${usage.cost.total.toFixed(2)})` : "";
 		const label = notice.kind === "compaction" ? "Compaction" : "Branch summary";
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(
+		this.chatContainer.addActivity(
 			new Text(theme.fg("warning", `${label}: ${formatTokens(tokens)} tokens billed${cost}`), 1, 0),
 		);
 	}
@@ -3954,7 +3958,7 @@ export class InteractiveMode {
 
 			const noun = dropped.length === 1 ? "thinking block" : `${dropped.length} thinking blocks`;
 			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(
+			this.chatContainer.addActivity(
 				new Text(theme.fg("warning", `Anthropic dropped ${noun}: ${dropped.join("; ")}`), 1, 0),
 			);
 		}
@@ -3986,7 +3990,7 @@ export class InteractiveMode {
 		}
 		const text = theme.fg("warning", `${label}: ${reBilled}`);
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(text, 1, 0));
+		this.chatContainer.addActivity(new Text(text, 1, 0));
 	}
 
 	private seedStreamingState(): void {
@@ -4390,6 +4394,7 @@ export class InteractiveMode {
 		if (!force && expanded === this.toolOutputExpanded) return;
 
 		this.toolOutputExpanded = expanded;
+		this.chatContainer.setExpanded(expanded);
 		const activeHeader = this.customHeader ?? this.builtInHeader;
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
@@ -4407,6 +4412,7 @@ export class InteractiveMode {
 	private setCompactView(compactView: boolean): void {
 		const enteringCompactView = compactView && !this.compactView;
 		this.compactView = compactView;
+		this.chatContainer.setCompactView(compactView);
 		this.settingsManager.setCompactView(compactView);
 		// Also collapse cards opened by local clicks when global expansion is already off.
 		if (enteringCompactView) this.setToolsExpanded(false, true);
@@ -4416,7 +4422,8 @@ export class InteractiveMode {
 					child instanceof ToolExecutionComponent ||
 					child instanceof BashExecutionComponent ||
 					child instanceof AssistantMessageComponent ||
-					child instanceof CustomMessageComponent
+					child instanceof CustomMessageComponent ||
+					child instanceof CustomEntryComponent
 				) {
 					child.setCompactView(compactView);
 				}

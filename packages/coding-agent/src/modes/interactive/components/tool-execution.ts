@@ -180,7 +180,7 @@ export class ToolExecutionComponent extends Container {
 
 	private createResultRegion(component: Component): MouseRegion {
 		return new MouseRegion(component, (event) => {
-			if (!this.result || event.type !== "click" || event.button !== "left") return undefined;
+			if ((!this.result && !this.compactView) || event.type !== "click" || event.button !== "left") return undefined;
 			this.setExpanded(!this.expanded);
 			return { handled: true };
 		});
@@ -238,6 +238,10 @@ export class ToolExecutionComponent extends Container {
 				}
 			});
 		}
+	}
+
+	getActivityStatus(): "running" | "error" | "complete" {
+		return this.isPartial ? "running" : this.result?.isError ? "error" : "complete";
 	}
 
 	setExpanded(expanded: boolean): void {

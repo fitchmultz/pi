@@ -55,7 +55,7 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 | `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
 | `externalEditor` | string | `$VISUAL`, then `$EDITOR`, then Notepad on Windows or `nano` elsewhere | Command for Ctrl+G external editor; takes precedence over environment variables |
 | `quietStartup` | boolean | `false` | Hide startup header |
-| `compactView` | boolean | `false` | Use one or two terminal rows for collapsed tool and `!`/`!!` cards. Global default for new interactive instances only; project settings cannot override it |
+| `compactView` | boolean | `false` | Group tools and operational updates behind collapsed Activity rows. Global default for new interactive instances only; project settings cannot override it |
 | `defaultProjectTrust` | string | `"ask"` | Fallback project trust behavior: `"ask"`, `"always"`, or `"never"`. Global setting only |
 | `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |
 | `enableInstallTelemetry` | boolean | `true` | Send the anonymous install/update ping and selected provider attribution headers. This does not control update checks |
@@ -74,7 +74,9 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 
 Use `/compact-view` to toggle compact view, or `/compact-view on` and `/compact-view off` to choose explicitly. `/settings` → **Compact view** uses the same control. The change updates this running UI immediately and is remembered for future Pi starts; other running instances keep their own view, including after `/reload`.
 
-Turning compact view on collapses existing cards, including cards opened individually. Ctrl+O and existing fullscreen-mode card clicks still reveal details; later updates keep that choice. Turning it off restores ordinary presentation, not expand-all. Compact view removes hidden-thinking labels and their empty space, but keeps visible thinking, assistant text, and error notices. It does not change messages, model context, or session history. `/compact` remains the separate context-compaction command.
+Compact view keeps user and assistant text visible and folds each intervening run of tools, shell commands, custom messages/entries (including subagent updates), and routine status notices into one **Activity** row. Counts and running/failure status update without opening it. In fullscreen mode, click Activity to reveal the existing compact cards and updates, then click a call or custom update to expand its details. Inner controls keep their own click behavior. The working indicator and input dialogs stay in the input dock; warning/error notifications remain visible.
+
+Turning compact view on collapses existing Activity groups and cards, including those opened individually. Ctrl+O (`app.tools.expand`) expands or collapses all groups and their output, including in regular mode where the terminal owns mouse input. Later updates keep that choice. Turning compact view off restores ordinary presentation, not expand-all. Hidden-thinking-only messages do not split Activity groups; visible thinking and assistant text remain visible. This changes only presentation, not messages, model context, or session history. `/compact` remains the separate context-compaction command.
 
 For VS Code, include `--wait` so pi resumes after the editor exits:
 
