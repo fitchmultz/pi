@@ -480,7 +480,7 @@ function collectAncestorAgentsSkillDirs(startDir: string): string[] {
 	return skillDirs;
 }
 
-function collectAutoPromptEntries(dir: string): string[] {
+function collectAutoFileEntries(dir: string, suffix: string): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
 
@@ -506,44 +506,7 @@ function collectAutoPromptEntries(dir: string): string[] {
 			const relPath = toPosixPath(relative(dir, fullPath));
 			if (ig.ignores(relPath)) continue;
 
-			if (isFile && entry.name.endsWith(".md")) {
-				entries.push(fullPath);
-			}
-		}
-	} catch {
-		// Ignore errors
-	}
-
-	return entries;
-}
-
-function collectAutoThemeEntries(dir: string): string[] {
-	const entries: string[] = [];
-	if (!existsSync(dir)) return entries;
-
-	const ig = ignore();
-	addIgnoreRules(ig, dir, dir);
-
-	try {
-		const dirEntries = readdirSync(dir, { withFileTypes: true });
-		for (const entry of dirEntries) {
-			if (entry.name.startsWith(".")) continue;
-			if (entry.name === "node_modules") continue;
-
-			const fullPath = join(dir, entry.name);
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					isFile = statSync(fullPath).isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(dir, fullPath));
-			if (ig.ignores(relPath)) continue;
-
-			if (isFile && entry.name.endsWith(".json")) {
+			if (isFile && entry.name.endsWith(suffix)) {
 				entries.push(fullPath);
 			}
 		}
@@ -1138,7 +1101,7 @@ export class DefaultPackageManager implements PackageManager {
 			const gitTasks = gitCandidates.map(
 				(entry) => async () =>
 					this.withProgress("update", entry.source, `Updating ${entry.source}...`, async () => {
-						await this.updateGit(entry.parsed, entry.scope);
+						await this.installGit(entry.parsed, entry.scope);
 					}),
 			);
 			tasks.push(this.runWithConcurrency(gitTasks, GIT_UPDATE_CONCURRENCY).then(() => {}));
@@ -1370,29 +1333,6 @@ export class DefaultPackageManager implements PackageManager {
 		return typeof pkg === "string" ? pkg : pkg.source;
 	}
 
-	private getSourceMatchKeyForInput(source: string): string {
-		const parsed = this.parseSource(source);
-		if (parsed.type === "npm") {
-			return `npm:${parsed.name}`;
-		}
-		if (parsed.type === "git") {
-			return `git:${parsed.host}/${parsed.path}`;
-		}
-		return `local:${this.resolvePath(parsed.path)}`;
-	}
-
-	private getSourceMatchKeyForSettings(source: string, scope: SourceScope): string {
-		const parsed = this.parseSource(source);
-		if (parsed.type === "npm") {
-			return `npm:${parsed.name}`;
-		}
-		if (parsed.type === "git") {
-			return `git:${parsed.host}/${parsed.path}`;
-		}
-		const baseDir = this.getBaseDirForScope(scope);
-		return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
-	}
-
 	private buildNoMatchingPackageMessage(source: string, configuredPackages: PackageSource[]): string {
 		const suggestion = this.findSuggestedConfiguredSource(source, configuredPackages);
 		if (!suggestion) {
@@ -1427,8 +1367,8 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private packageSourcesMatch(existing: PackageSource, inputSource: string, scope: SourceScope): boolean {
-		const left = this.getSourceMatchKeyForSettings(this.getPackageSourceString(existing), scope);
-		const right = this.getSourceMatchKeyForInput(inputSource);
+		const left = this.getPackageIdentity(this.getPackageSourceString(existing), scope);
+		const right = this.getPackageIdentity(inputSource);
 		return left === right;
 	}
 
@@ -1862,22 +1802,6 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private async updateGit(source: GitSource, scope: SourceScope): Promise<void> {
-		const targetDir = this.getGitInstallPath(source, scope);
-		if (!existsSync(targetDir)) {
-			await this.installGit(source, scope);
-			return;
-		}
-
-		if (source.ref) {
-			await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD");
-			return;
-		}
-
-		const target = await this.getLocalGitUpdateTarget(targetDir);
-		await this.ensureGitRef(targetDir, target.fetchArgs, target.ref);
-	}
-
 	private hasMissingGitDependencies(targetDir: string): boolean {
 		const packageJsonPath = join(targetDir, "package.json");
 		if (!existsSync(packageJsonPath)) return false;
@@ -1963,7 +1887,7 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		try {
 			await this.withProgress("pull", sourceStr, `Refreshing ${sourceStr}...`, async () => {
-				await this.updateGit(source, "temporary");
+				await this.installGit(source, "temporary");
 			});
 		} catch {
 			// Keep cached temporary checkout if refresh fails.
@@ -2453,14 +2377,14 @@ export class DefaultPackageManager implements PackageManager {
 		if (projectTrusted) {
 			addResources(
 				"prompts",
-				collectAutoPromptEntries(projectDirs.prompts),
+				collectAutoFileEntries(projectDirs.prompts, ".md"),
 				projectMetadata,
 				projectOverrides.prompts,
 				projectBaseDir,
 			);
 			addResources(
 				"themes",
-				collectAutoThemeEntries(projectDirs.themes),
+				collectAutoFileEntries(projectDirs.themes, ".json"),
 				projectMetadata,
 				projectOverrides.themes,
 				projectBaseDir,
@@ -2501,14 +2425,14 @@ export class DefaultPackageManager implements PackageManager {
 
 		addResources(
 			"prompts",
-			collectAutoPromptEntries(userDirs.prompts),
+			collectAutoFileEntries(userDirs.prompts, ".md"),
 			userMetadata,
 			userOverrides.prompts,
 			globalBaseDir,
 		);
 		addResources(
 			"themes",
-			collectAutoThemeEntries(userDirs.themes),
+			collectAutoFileEntries(userDirs.themes, ".json"),
 			userMetadata,
 			userOverrides.themes,
 			globalBaseDir,
