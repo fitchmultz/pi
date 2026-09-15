@@ -42,6 +42,37 @@ describe("Input component", () => {
 		assert.strictEqual(input.getValue(), "\\x");
 	});
 
+	describe("setValue", () => {
+		for (const value of ["😀", "e\u0301", "👩‍💻"]) {
+			it(`keeps edits on grapheme boundaries after replacing text with ${value}`, () => {
+				for (const [key, expected] of [
+					["x", `x${value}`],
+					["\x7f", value],
+					["\x1b[3~", ""],
+				]) {
+					const input = new Input();
+					input.setValue("a");
+					input.handleInput("\x05");
+					input.setValue(value);
+					input.handleInput(key);
+					assert.strictEqual(input.getValue(), expected);
+				}
+			});
+		}
+
+		it("preserves valid cursor positions and clamps to the new end", () => {
+			const input = new Input();
+			input.setValue("abc");
+			input.handleInput("\x1b[C");
+			input.setValue("def");
+			input.handleInput("x");
+			assert.strictEqual(input.getValue(), "dxef");
+			input.setValue("a");
+			input.handleInput("x");
+			assert.strictEqual(input.getValue(), "ax");
+		});
+	});
+
 	describe("render", () => {
 		it("supports a custom prompt and styled placeholder", () => {
 			const input = new Input({

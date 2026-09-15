@@ -1,7 +1,10 @@
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { FileSettingsStorage, InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
 
 /**
  * Tests for the fix to a bug where external file changes to arrays were overwritten.
@@ -32,6 +35,117 @@ describe("SettingsManager - External Edit Preservation", () => {
 		if (existsSync(testDir)) {
 			rmSync(testDir, { recursive: true });
 		}
+	});
+
+	it("serializes concurrent first writes before reading and merging settings", async () => {
+		const workerOptions = {
+			execArgv: ["--import", "tsx"],
+			env: { ...process.env, TSX_TSCONFIG_PATH: fileURLToPath(new URL("../../../tsconfig.json", import.meta.url)) },
+		};
+		const data = { cwd: projectDir, agentDir, barrier: new SharedArrayBuffer(4) };
+		const workerPath = new URL("./fixtures/settings-first-write-worker.ts", import.meta.url);
+		const a = new Worker(workerPath, { ...workerOptions, workerData: { ...data, first: true } });
+		const b = new Worker(workerPath, { ...workerOptions, workerData: { ...data, first: false } });
+		try {
+			await Promise.all([once(a, "message"), once(b, "message")]);
+			const computed = once(a, "message");
+			a.postMessage("start");
+			expect(await computed).toEqual(["computed"]);
+			const finished = Promise.all([once(a, "message"), once(b, "message")]);
+			b.postMessage("start");
+			expect(await finished).toEqual([[{ writes: 1, errors: [] }], [{ writes: 1, errors: [] }]]);
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
+				theme: "dark",
+				defaultThinkingLevel: "high",
+			});
+		} finally {
+			await Promise.all([a.terminate(), b.terminate()]);
+		}
+	});
+
+	it("does not create missing settings directories for read-only callbacks", () => {
+		rmSync(agentDir, { recursive: true });
+		rmSync(join(projectDir, ".pi"), { recursive: true });
+		const storage = new FileSettingsStorage(projectDir, agentDir);
+		for (const scope of ["global", "project"] as const) {
+			let calls = 0;
+			storage.withLock(
+				scope,
+				(current) => {
+					calls++;
+					expect(current).toBeUndefined();
+					return undefined;
+				},
+				{ readOnly: true },
+			);
+			expect(calls).toBe(1);
+		}
+		expect(existsSync(agentDir)).toBe(false);
+		expect(existsSync(join(projectDir, ".pi"))).toBe(false);
+	});
+
+	it("does not replay an earlier queued theme change after another manager saves", async () => {
+		const a = SettingsManager.create(projectDir, agentDir);
+		const b = SettingsManager.create(projectDir, agentDir);
+		a.setTheme("light");
+		a.setDefaultThinkingLevel("high");
+		b.setTheme("dark");
+		await Promise.all([a.flush(), b.flush()]);
+		expect(a.drainErrors()).toEqual([]);
+		expect(b.drainErrors()).toEqual([]);
+		expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
+			theme: "dark",
+			defaultThinkingLevel: "high",
+		});
+	});
+
+	it("does not replay nested or project fields from earlier queued writes", async () => {
+		const a = SettingsManager.create(projectDir, agentDir);
+		const b = SettingsManager.create(projectDir, agentDir);
+		a.setShowImages(false);
+		a.setImageWidthCells(80);
+		b.setShowImages(true);
+		await Promise.all([a.flush(), b.flush()]);
+		expect(a.drainErrors()).toEqual([]);
+		expect(b.drainErrors()).toEqual([]);
+		expect.soft(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
+			terminal: { showImages: true, imageWidthCells: 80 },
+		});
+		a.setProjectExtensionPaths(["./old.ts"]);
+		a.setProjectPromptTemplatePaths(["./prompt.md"]);
+		b.setProjectExtensionPaths(["./new.ts"]);
+		await Promise.all([a.flush(), b.flush()]);
+		expect(a.drainErrors()).toEqual([]);
+		expect(b.drainErrors()).toEqual([]);
+		expect(JSON.parse(readFileSync(join(projectDir, ".pi", "settings.json"), "utf8"))).toEqual({
+			extensions: ["./new.ts"],
+			prompts: ["./prompt.md"],
+		});
+	});
+
+	it("retries failed fields with the next queued unrelated setter", async () => {
+		const storage = new InMemorySettingsStorage();
+		let failOnce = true;
+		const manager = SettingsManager.fromStorage({
+			withLock(scope, fn) {
+				storage.withLock(scope, (current) => {
+					const next = fn(current);
+					if (next !== undefined && failOnce) {
+						failOnce = false;
+						throw new Error("write failed");
+					}
+					return next;
+				});
+			},
+		});
+		manager.setTheme("light");
+		manager.setDefaultThinkingLevel("high");
+		await manager.flush();
+		expect(manager.drainErrors()).toMatchObject([{ scope: "global", error: new Error("write failed") }]);
+		expect(SettingsManager.fromStorage(storage).getGlobalSettings()).toEqual({
+			theme: "light",
+			defaultThinkingLevel: "high",
+		});
 	});
 
 	it("should preserve file changes to packages array when changing unrelated setting", async () => {

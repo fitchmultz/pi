@@ -371,30 +371,24 @@ export function getOsc8LinkAtColumn(line: string, column: number): string | unde
  * differential repaint. Their compatibility decompositions have the same cell
  * width but avoid stale-cell artifacts in terminal renderers. Visible tabs are
  * expanded to the fixed width used by layout so terminal tab stops cannot wrap
- * a logical line, while tabs inside terminal string sequences stay untouched.
+ * a logical line, while terminal string sequences stay byte-identical.
  */
 const THAI_LAO_AM_REGEX = /[\u0e33\u0eb3]/;
-const THAI_LAO_AM_GLOBAL_REGEX = /[\u0e33\u0eb3]/g;
 
 export function normalizeTerminalOutput(str: string): string {
-	let normalized = str;
-	if (THAI_LAO_AM_REGEX.test(normalized)) {
-		normalized = normalized.replace(THAI_LAO_AM_GLOBAL_REGEX, (char) =>
-			char === "\u0e33" ? "\u0e4d\u0e32" : "\u0ecd\u0eb2",
-		);
-	}
-	if (!normalized.includes("\t")) return normalized;
+	if (!THAI_LAO_AM_REGEX.test(str) && !str.includes("\t")) return str;
 
 	let result = "";
 	let i = 0;
-	while (i < normalized.length) {
-		const ansi = extractAnsiCode(normalized, i);
+	while (i < str.length) {
+		const ansi = extractAnsiCode(str, i);
 		if (ansi) {
 			result += ansi.code;
 			i += ansi.length;
 			continue;
 		}
-		result += normalized[i] === "\t" ? "   " : normalized[i];
+		const char = str[i];
+		result += char === "\t" ? "   " : char === "\u0e33" ? "\u0e4d\u0e32" : char === "\u0eb3" ? "\u0ecd\u0eb2" : char;
 		i++;
 	}
 	return result;

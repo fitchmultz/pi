@@ -234,6 +234,7 @@ async function runLoop(
 				pendingMessages = [];
 
 				currentContext = (await config.prepareProviderRequest?.(currentContext)) ?? currentContext;
+				signal?.throwIfAborted();
 				if (!config.prepareProviderRequest || !pollAfterRequestPreparation) break;
 
 				// Pick up one steering drain that arrived during long request preparation, then

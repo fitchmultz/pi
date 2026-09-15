@@ -123,8 +123,7 @@ export function createLsToolDefinition(
 								const entryStat = await ops.stat(fullPath);
 								if (entryStat.isDirectory()) suffix = "/";
 							} catch {
-								// Skip entries we cannot stat.
-								continue;
+								// Keep entries even when their target is missing or unreadable.
 							}
 							results.push(entry + suffix);
 						}

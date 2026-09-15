@@ -204,7 +204,16 @@ export interface SettingsManagerCreateOptions {
 }
 
 export interface SettingsStorage {
-	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
+	/**
+	 * Invoke fn once, with read/modify/write protected by a lock. File storage creates
+	 * parent directories by default. Use readOnly for reads that must not create them;
+	 * read-only callbacks must return undefined. Reads of missing files skip locking.
+	 */
+	withLock(
+		scope: SettingsScope,
+		fn: (current: string | undefined) => string | undefined,
+		options?: { readOnly?: boolean },
+	): void;
 }
 
 export interface SettingsError {
@@ -261,27 +270,23 @@ export class FileSettingsStorage implements SettingsStorage {
 		throw (lastError as Error) ?? new Error("Failed to acquire settings lock");
 	}
 
-	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
+	withLock(
+		scope: SettingsScope,
+		fn: (current: string | undefined) => string | undefined,
+		options: { readOnly?: boolean } = {},
+	): void {
 		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
-		const dir = dirname(path);
+		if (!options.readOnly) mkdirSync(dirname(path), { recursive: true });
 
 		let release: (() => void) | undefined;
 		try {
-			// Only create directory and lock if file exists or we need to write
-			const fileExists = existsSync(path);
-			if (fileExists) {
+			if (!options.readOnly || existsSync(path)) {
 				release = this.acquireLockSyncWithRetry(path);
 			}
-			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
+			const current = release && existsSync(path) ? readFileSync(path, "utf-8") : undefined;
 			const next = fn(current);
 			if (next !== undefined) {
-				// Only create directory when we actually need to write
-				if (!existsSync(dir)) {
-					mkdirSync(dir, { recursive: true });
-				}
-				if (!release) {
-					release = this.acquireLockSyncWithRetry(path);
-				}
+				if (options.readOnly) throw new Error("Cannot write settings in read-only mode");
 				writeFileSync(path, next, "utf-8");
 			}
 		} finally {
@@ -296,10 +301,15 @@ export class InMemorySettingsStorage implements SettingsStorage {
 	private global: string | undefined;
 	private project: string | undefined;
 
-	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
+	withLock(
+		scope: SettingsScope,
+		fn: (current: string | undefined) => string | undefined,
+		options: { readOnly?: boolean } = {},
+	): void {
 		const current = scope === "global" ? this.global : this.project;
 		const next = fn(current);
 		if (next !== undefined) {
+			if (options.readOnly) throw new Error("Cannot write settings in read-only mode");
 			if (scope === "global") {
 				this.global = next;
 			} else {
@@ -409,10 +419,14 @@ export class SettingsManager {
 		}
 
 		let content: string | undefined;
-		storage.withLock(scope, (current) => {
-			content = current;
-			return undefined;
-		});
+		storage.withLock(
+			scope,
+			(current) => {
+				content = current;
+				return undefined;
+			},
+			{ readOnly: true },
+		);
 
 		if (!content) {
 			return {};
@@ -621,6 +635,7 @@ export class SettingsManager {
 		this.modifiedProjectNestedFields.clear();
 	}
 
+	// Read pending changes when each task runs; successful writes must not be replayed by later queued saves.
 	private enqueueWrite(scope: SettingsScope, task: () => void): void {
 		this.writeQueue = this.writeQueue
 			.then(() => {
@@ -635,17 +650,9 @@ export class SettingsManager {
 			});
 	}
 
-	private cloneModifiedNestedFields(source: Map<keyof Settings, Set<string>>): Map<keyof Settings, Set<string>> {
-		const snapshot = new Map<keyof Settings, Set<string>>();
-		for (const [key, value] of source.entries()) {
-			snapshot.set(key, new Set(value));
-		}
-		return snapshot;
-	}
-
 	private persistScopedSettings(
 		scope: SettingsScope,
-		snapshotSettings: Settings,
+		scopedSettings: Settings,
 		modifiedFields: Set<keyof Settings>,
 		modifiedNestedFields: Map<keyof Settings, Set<string>>,
 	): void {
@@ -655,7 +662,7 @@ export class SettingsManager {
 				: {};
 			const mergedSettings: Settings = { ...currentFileSettings };
 			for (const field of modifiedFields) {
-				const value = snapshotSettings[field];
+				const value = scopedSettings[field];
 				if (
 					modifiedNestedFields.has(field) &&
 					(value === undefined || (typeof value === "object" && value !== null))
@@ -685,12 +692,9 @@ export class SettingsManager {
 			return;
 		}
 
-		const snapshotGlobalSettings = structuredClone(this.globalSettings);
-		const modifiedFields = new Set(this.modifiedFields);
-		const modifiedNestedFields = this.cloneModifiedNestedFields(this.modifiedNestedFields);
-
 		this.enqueueWrite("global", () => {
-			this.persistScopedSettings("global", snapshotGlobalSettings, modifiedFields, modifiedNestedFields);
+			if (this.modifiedFields.size === 0) return;
+			this.persistScopedSettings("global", this.globalSettings, this.modifiedFields, this.modifiedNestedFields);
 		});
 	}
 
@@ -702,11 +706,14 @@ export class SettingsManager {
 			return;
 		}
 
-		const snapshotProjectSettings = structuredClone(this.projectSettings);
-		const modifiedFields = new Set(this.modifiedProjectFields);
-		const modifiedNestedFields = this.cloneModifiedNestedFields(this.modifiedProjectNestedFields);
 		this.enqueueWrite("project", () => {
-			this.persistScopedSettings("project", snapshotProjectSettings, modifiedFields, modifiedNestedFields);
+			if (this.modifiedProjectFields.size === 0) return;
+			this.persistScopedSettings(
+				"project",
+				this.projectSettings,
+				this.modifiedProjectFields,
+				this.modifiedProjectNestedFields,
+			);
 		});
 	}
 

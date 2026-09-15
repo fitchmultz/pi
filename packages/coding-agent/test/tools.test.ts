@@ -1,6 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { applyPatch } from "diff";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -880,6 +890,19 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("grep tool", () => {
+		it.skipIf(process.platform === "win32")("preserves literal backslashes in POSIX filenames", async () => {
+			writeFileSync(join(testDir, "part\\name.txt"), "before\nneedle\nafter");
+			mkdirSync(join(testDir, "part"));
+			writeFileSync(join(testDir, "part", "name.txt"), "unrelated");
+			const grep = createGrepTool(testDir);
+			expect(getTextOutput(await grep.execute("literal-path", { pattern: "needle" }))).toBe(
+				"part\\name.txt:2: needle",
+			);
+			expect(getTextOutput(await grep.execute("literal-context", { pattern: "needle", context: 1 }))).toBe(
+				"part\\name.txt-1- before\npart\\name.txt:2: needle\npart\\name.txt-3- after",
+			);
+		});
+
 		it("respects .gitignore outside Git, including nested overrides and explicit files", async () => {
 			mkdirSync(join(testDir, "nested"));
 			writeFileSync(join(testDir, ".gitignore"), "ignored.txt\n");
@@ -1062,6 +1085,23 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("ls tool", () => {
+		it.skipIf(process.platform === "win32")("lists dangling symlinks and marks linked directories", async () => {
+			symlinkSync("missing", join(testDir, "broken-link"));
+			expect(getTextOutput(await lsTool.execute("broken-link", { path: testDir }))).toBe("broken-link");
+
+			mkdirSync(join(testDir, "directory"));
+			writeFileSync(join(testDir, "file"), "content");
+			symlinkSync("directory", join(testDir, "linked-directory"));
+			symlinkSync("file", join(testDir, "linked-file"));
+			expect(getTextOutput(await lsTool.execute("links", { path: testDir })).split("\n")).toEqual([
+				"broken-link",
+				"directory/",
+				"file",
+				"linked-directory/",
+				"linked-file",
+			]);
+		});
+
 		it("should list dotfiles and directories", async () => {
 			writeFileSync(join(testDir, ".hidden-file"), "secret");
 			mkdirSync(join(testDir, ".hidden-dir"));
