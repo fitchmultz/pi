@@ -661,6 +661,46 @@ describe("Agent", () => {
 		},
 	);
 
+	it.each(["one-at-a-time", "all"] as const)(
+		"extracts only matching queued identities and preserves %s delivery",
+		async (mode) => {
+			let requests = 0;
+			const agent = new Agent({
+				steeringMode: mode,
+				followUpMode: mode,
+				streamFn: () => {
+					requests++;
+					const stream = new MockAssistantStream();
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+					return stream;
+				},
+			});
+			const messages = Array.from({ length: 6 }, (_, timestamp) => ({
+				role: "user" as const,
+				content: "same text",
+				timestamp,
+			}));
+			for (const message of messages.slice(0, 3)) agent.steer(message);
+			for (const message of messages.slice(3)) agent.followUp(message);
+			const taken = agent.takeQueuedMessages((message) => message === messages[1] || message === messages[4]);
+			expect(taken).toEqual([messages[1], messages[4]]);
+			expect(taken[0]).toBe(messages[1]);
+			expect(taken[1]).toBe(messages[4]);
+			expect(agent.takeQueuedMessages((message) => taken.includes(message))).toEqual([]);
+			expect(agent.state.messages).toEqual([]);
+			expect(requests).toBe(0);
+			await agent.prompt("start");
+			expect(agent.state.messages.filter((message) => message.role === "user").slice(1)).toEqual([
+				messages[0],
+				messages[2],
+				messages[3],
+				messages[5],
+			]);
+			expect(requests).toBe(mode === "all" ? 2 : 4);
+			expect(agent.hasQueuedMessages()).toBe(false);
+		},
+	);
+
 	it("should handle abort controller", () => {
 		const agent = new Agent({ streamFn: unusedStreamFunction });
 
