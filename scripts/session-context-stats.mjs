@@ -261,12 +261,7 @@ async function scanSessions(sessionsDir, sinceMs, contextWindows, cwdFilter) {
 }
 
 function summarizeGroups(sessions, keyFn) {
-	const groups = new Map();
-	for (const session of sessions) {
-		const key = keyFn(session);
-		if (!groups.has(key)) groups.set(key, []);
-		groups.get(key).push(session);
-	}
+	const groups = Map.groupBy(sessions, keyFn);
 	return [...groups.entries()].map(([key, group]) => summarizeSessionGroup(key, group)).sort((a, b) => a.key.localeCompare(b.key));
 }
 

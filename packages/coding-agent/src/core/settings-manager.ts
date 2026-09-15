@@ -328,7 +328,6 @@ export class SettingsManager {
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
-	private modifiedProjectNestedFields = new Map<keyof Settings, Set<string>>(); // Track project nested field modifications
 	private globalSettingsLoadError: Error | null = null; // Track if global settings file had parse errors
 	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
 	private writeQueue: Promise<void> = Promise.resolve();
@@ -528,7 +527,6 @@ export class SettingsManager {
 
 		this.projectTrusted = trusted;
 		this.modifiedProjectFields.clear();
-		this.modifiedProjectNestedFields.clear();
 
 		if (!trusted) {
 			this.projectSettings = {};
@@ -560,7 +558,6 @@ export class SettingsManager {
 		this.modifiedFields.clear();
 		this.modifiedNestedFields.clear();
 		this.modifiedProjectFields.clear();
-		this.modifiedProjectNestedFields.clear();
 
 		const projectLoad = SettingsManager.tryLoadFromStorage(this.storage, "project", this.projectTrusted);
 		if (!projectLoad.error) {
@@ -603,17 +600,6 @@ export class SettingsManager {
 		}
 	}
 
-	/** Mark a project field as modified during this session */
-	private markProjectModified(field: keyof Settings, nestedKey?: string): void {
-		this.modifiedProjectFields.add(field);
-		if (nestedKey) {
-			if (!this.modifiedProjectNestedFields.has(field)) {
-				this.modifiedProjectNestedFields.set(field, new Set());
-			}
-			this.modifiedProjectNestedFields.get(field)!.add(nestedKey);
-		}
-	}
-
 	private assertProjectTrustedForWrite(): void {
 		if (!this.projectTrusted) {
 			throw new Error("Project is not trusted; refusing to write project settings");
@@ -632,7 +618,6 @@ export class SettingsManager {
 		}
 
 		this.modifiedProjectFields.clear();
-		this.modifiedProjectNestedFields.clear();
 	}
 
 	// Read pending changes when each task runs; successful writes must not be replayed by later queued saves.
@@ -654,7 +639,7 @@ export class SettingsManager {
 		scope: SettingsScope,
 		scopedSettings: Settings,
 		modifiedFields: Set<keyof Settings>,
-		modifiedNestedFields: Map<keyof Settings, Set<string>>,
+		modifiedNestedFields?: Map<keyof Settings, Set<string>>,
 	): void {
 		this.storage.withLock(scope, (current) => {
 			const currentFileSettings = current
@@ -664,7 +649,7 @@ export class SettingsManager {
 			for (const field of modifiedFields) {
 				const value = scopedSettings[field];
 				if (
-					modifiedNestedFields.has(field) &&
+					modifiedNestedFields?.has(field) &&
 					(value === undefined || (typeof value === "object" && value !== null))
 				) {
 					const nestedModified = modifiedNestedFields.get(field)!;
@@ -708,12 +693,7 @@ export class SettingsManager {
 
 		this.enqueueWrite("project", () => {
 			if (this.modifiedProjectFields.size === 0) return;
-			this.persistScopedSettings(
-				"project",
-				this.projectSettings,
-				this.modifiedProjectFields,
-				this.modifiedProjectNestedFields,
-			);
+			this.persistScopedSettings("project", this.projectSettings, this.modifiedProjectFields);
 		});
 	}
 
@@ -721,7 +701,7 @@ export class SettingsManager {
 		this.assertProjectTrustedForWrite();
 		const projectSettings = structuredClone(this.projectSettings);
 		update(projectSettings);
-		this.markProjectModified(field);
+		this.modifiedProjectFields.add(field);
 		this.saveProjectSettings(projectSettings);
 		this.refreshSetting(field);
 	}

@@ -1,5 +1,4 @@
-import type { SessionMetadata } from "@earendil-works/pi-agent-core";
-import type { Usage } from "@earendil-works/pi-ai";
+import { emptyUsage, type SessionMetadata } from "@earendil-works/pi-agent-core";
 import { sql } from "../sql.ts";
 import type { SqliteDatabase } from "../types.ts";
 
@@ -17,17 +16,6 @@ export interface SessionRow {
 export interface SqliteSessionMetadata extends SessionMetadata {
 	/** SQLite container/shard path containing this session. */
 	path: string;
-}
-
-function zeroUsage(): Usage {
-	return {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
 }
 
 export function readSessionRow(db: SqliteDatabase, sessionId: string): SessionRow {
@@ -84,7 +72,7 @@ export function insertSessionRow(
 			${storageVersion},
 			${null},
 			${0},
-			${JSON.stringify(zeroUsage())},
+			${JSON.stringify(emptyUsage())},
 			${nextSeq}
 		)`.run(db);
 }

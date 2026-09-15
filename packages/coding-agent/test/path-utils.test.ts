@@ -91,6 +91,17 @@ describe("path-utils", () => {
 			expect(await resolveRead("Screenshot\u00a010.00 AM.png", tempDir)).toBe(join(tempDir, screenshot));
 		});
 
+		it("tries AM/PM before quote fallbacks when both paths exist", async () => {
+			const input = "Capture d'écran 10.00 AM.png";
+			const amPm = join(tempDir, "Capture d'écran 10.00\u202fAM.png");
+			const curly = join(tempDir, "Capture d\u2019écran 10.00 AM.png");
+			writeFileSync(amPm, "AM/PM");
+			writeFileSync(curly, "curly quote");
+			expect(await resolveRead(input, tempDir)).toBe(amPm);
+			unlinkSync(amPm);
+			expect(await resolveRead(input, tempDir)).toBe(curly);
+		});
+
 		it("expands tilde and @ while retaining missing literal paths", async () => {
 			expect(await resolveRead("@~/pi-missing\u00a0file.txt", tempDir)).toBe(
 				join(homedir(), "pi-missing\u00a0file.txt"),
@@ -181,7 +192,6 @@ describe("path-utils", () => {
 			// User provides regular space path
 			const result = await resolveRead(userName, tempDir);
 
-			// This works because tryMacOSScreenshotPath() handles this case
 			expect(result).toBe(join(tempDir, macosName));
 		});
 
@@ -196,7 +206,6 @@ describe("path-utils", () => {
 			// User provides regular space path
 			const result = await resolveRead(userName, tempDir);
 
-			// This works because tryMacOSScreenshotPath() uses case-insensitive matching
 			expect(result).toBe(join(tempDir, macosName));
 		});
 	});
