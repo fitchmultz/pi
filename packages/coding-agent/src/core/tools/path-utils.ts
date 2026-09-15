@@ -5,15 +5,6 @@ import { normalizePath, resolvePath } from "../../utils/paths.ts";
 
 const NARROW_NO_BREAK_SPACE = "\u202F";
 
-function tryMacOSScreenshotPath(filePath: string): string {
-	return filePath.replace(/ (AM|PM)\./gi, `${NARROW_NO_BREAK_SPACE}$1.`);
-}
-
-function tryNFDVariant(filePath: string): string {
-	// macOS stores filenames in NFD (decomposed) form, try converting user input to NFD
-	return filePath.normalize("NFD");
-}
-
 function tryCurlyQuoteVariant(filePath: string): string {
 	// macOS uses U+2019 (right single quotation mark) in screenshot names like "Capture d'écran"
 	// Users typically type U+0027 (straight apostrophe)
@@ -61,78 +52,36 @@ export function resolveToCwd(filePath: string, cwd: string): string {
 	return resolvePath(filePath, cwd, { stripAtPrefix: true });
 }
 
+// Filename conveniences are read-only fallbacks, never preferred over an exact path.
+function* readPathFallbacks(filePath: string, cwd: string): Generator<string> {
+	const resolved = resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
+	yield resolved;
+
+	const nfdVariant = resolved.normalize("NFD");
+	for (const variant of [
+		resolved.replace(/ (AM|PM)\./gi, `${NARROW_NO_BREAK_SPACE}$1.`),
+		nfdVariant,
+		tryCurlyQuoteVariant(resolved),
+		tryCurlyQuoteVariant(nfdVariant),
+	]) {
+		if (variant !== resolved) yield variant;
+	}
+}
+
 export function resolveReadPath(filePath: string, cwd: string): string {
 	const exact = resolveToCwd(filePath, cwd);
 	if (fileExists(exact)) return exact;
-
-	// Filename conveniences are read-only fallbacks, never preferred over an exact path.
-	const resolved = resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
-
-	if (fileExists(resolved)) {
-		return resolved;
+	for (const candidate of readPathFallbacks(filePath, cwd)) {
+		if (fileExists(candidate)) return candidate;
 	}
-
-	// Try macOS AM/PM variant (narrow no-break space before AM/PM)
-	const amPmVariant = tryMacOSScreenshotPath(resolved);
-	if (amPmVariant !== resolved && fileExists(amPmVariant)) {
-		return amPmVariant;
-	}
-
-	// Try NFD variant (macOS stores filenames in NFD form)
-	const nfdVariant = tryNFDVariant(resolved);
-	if (nfdVariant !== resolved && fileExists(nfdVariant)) {
-		return nfdVariant;
-	}
-
-	// Try curly quote variant (macOS uses U+2019 in screenshot names)
-	const curlyVariant = tryCurlyQuoteVariant(resolved);
-	if (curlyVariant !== resolved && fileExists(curlyVariant)) {
-		return curlyVariant;
-	}
-
-	// Try combined NFD + curly quote (for French macOS screenshots like "Capture d'écran")
-	const nfdCurlyVariant = tryCurlyQuoteVariant(nfdVariant);
-	if (nfdCurlyVariant !== resolved && fileExists(nfdCurlyVariant)) {
-		return nfdCurlyVariant;
-	}
-
 	return exact;
 }
 
 export async function resolveReadPathAsync(filePath: string, cwd: string): Promise<string> {
 	const exact = resolveToCwd(filePath, cwd);
 	if (await pathExists(exact)) return exact;
-
-	// Keep the same fallback order as resolveReadPath.
-	const resolved = resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
-
-	if (await pathExists(resolved)) {
-		return resolved;
+	for (const candidate of readPathFallbacks(filePath, cwd)) {
+		if (await pathExists(candidate)) return candidate;
 	}
-
-	// Try macOS AM/PM variant (narrow no-break space before AM/PM)
-	const amPmVariant = tryMacOSScreenshotPath(resolved);
-	if (amPmVariant !== resolved && (await pathExists(amPmVariant))) {
-		return amPmVariant;
-	}
-
-	// Try NFD variant (macOS stores filenames in NFD form)
-	const nfdVariant = tryNFDVariant(resolved);
-	if (nfdVariant !== resolved && (await pathExists(nfdVariant))) {
-		return nfdVariant;
-	}
-
-	// Try curly quote variant (macOS uses U+2019 in screenshot names)
-	const curlyVariant = tryCurlyQuoteVariant(resolved);
-	if (curlyVariant !== resolved && (await pathExists(curlyVariant))) {
-		return curlyVariant;
-	}
-
-	// Try combined NFD + curly quote (for French macOS screenshots like "Capture d'écran")
-	const nfdCurlyVariant = tryCurlyQuoteVariant(nfdVariant);
-	if (nfdCurlyVariant !== resolved && (await pathExists(nfdCurlyVariant))) {
-		return nfdCurlyVariant;
-	}
-
 	return exact;
 }

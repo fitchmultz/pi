@@ -186,7 +186,7 @@ const timer = setInterval(() => {
 			writeFileSync(
 				extension,
 				`
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, renameSync, writeFileSync } from "node:fs";
 import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
 export default function(pi) {
 	const faux = fauxProvider();
@@ -195,10 +195,15 @@ export default function(pi) {
 	let timer;
 	pi.on("session_start", (_event, ctx) => {
 		appendFileSync(${JSON.stringify(trace)}, JSON.stringify({ pid: process.pid, sessionId: ctx.sessionManager.getSessionId(), sessionFile: ctx.sessionManager.getSessionFile() }) + "\\n");
-		timer = setInterval(() => writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify({
-			pid: process.pid, socket: process.env.PI_RESTART_SOCKET, editor: ctx.ui.getEditorText(),
-			paused: process.stdin.isPaused(), idle: ctx.isIdle(), calls: faux.state.callCount
-		})), 20);
+		timer = setInterval(() => {
+			// Publish complete snapshots while the parent reads this file.
+			const pending = ${JSON.stringify(`${stateFile}.tmp`)};
+			writeFileSync(pending, JSON.stringify({
+				pid: process.pid, socket: process.env.PI_RESTART_SOCKET, editor: ctx.ui.getEditorText(),
+				paused: process.stdin.isPaused(), idle: ctx.isIdle(), calls: faux.state.callCount
+			}));
+			renameSync(pending, ${JSON.stringify(stateFile)});
+		}, 20);
 		timer.unref();
 	});
 	pi.on("session_shutdown", () => clearInterval(timer));
