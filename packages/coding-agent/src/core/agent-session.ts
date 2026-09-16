@@ -417,7 +417,7 @@ export class AgentSession {
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
-	/** Base prompt when the last loadout was prepared; unchanged base inputs are not a pending reset. */
+	/** Base prompt at preparation/restoration; only subsequent local edits schedule a prompt reset. */
 	private _baseSystemPromptAtLastPreparation?: string;
 
 	constructor(config: AgentSessionConfig) {
@@ -452,6 +452,15 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		const restoredSystemMessage = getCurrentSystemMessage(this.messages);
+		if (restoredSystemMessage) {
+			// Resume itself does not schedule a reset of a persisted before_agent_start override.
+			// Use the saved selection as the baseline so explicit startup tool changes stay pending.
+			this._baseSystemPromptAtLastPreparation = buildSystemPrompt({
+				...this._baseSystemPromptOptions,
+				selectedTools: (restoredSystemMessage.toolsAdded ?? []).map((tool) => tool.name),
+			});
+		}
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
 	}
 
@@ -1399,7 +1408,11 @@ export class AgentSession {
 	/** Restore the active tool loadout declared by the session transcript, if it declares one. */
 	private _restoreToolsFromTranscript(): void {
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
-		if (!current) return;
+		if (!current) {
+			this._baseSystemPromptAtLastPreparation = undefined;
+			return;
+		}
+		const hadPendingPrompt = this._getPendingSystemPromptOptions() !== undefined;
 		const toolNames = (current.toolsAdded ?? [])
 			.map((tool) => tool.name)
 			.filter((name) => this._toolRegistry.has(name));
@@ -1407,7 +1420,14 @@ export class AgentSession {
 			const registered = this._toolRegistry.get(name);
 			return registered ? [registered] : [];
 		});
-		this._rebuildSystemPrompt(toolNames);
+		// Restoration changes the selected tools, not local prompt edits or loaded resources.
+		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
+			...this._baseSystemPromptOptions,
+			selectedTools: toolNames,
+		});
+		if (!hadPendingPrompt) {
+			this._baseSystemPromptAtLastPreparation = buildSystemPrompt(this._baseSystemPromptOptions);
+		}
 	}
 
 	// =========================================================================
@@ -3821,7 +3841,6 @@ export class AgentSession {
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
 			this._reportedUsagePrefix = undefined;
-			this._baseSystemPromptAtLastPreparation = undefined;
 			this._restoreToolsFromTranscript();
 
 			// Emit session_tree event
