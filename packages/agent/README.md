@@ -51,10 +51,10 @@ Transport-neutral facet-service primitives live in `@earendil-works/chord`. The 
 ### AgentMessage vs LLM Message
 
 The agent works with `AgentMessage`, a flexible type that can include:
-- Standard LLM messages (`user`, `assistant`, `toolResult`)
+- Standard LLM messages (`system`, `user`, `assistant`, `toolResult`)
 - Custom app-specific message types via declaration merging
 
-LLMs only understand `user`, `assistant`, and `toolResult`. The `convertToLlm` function bridges this gap by filtering and transforming messages before each LLM call.
+LLMs understand `system`, `user`, `assistant`, and `toolResult`. The `convertToLlm` function bridges this gap by filtering and transforming messages before each LLM call.
 
 ### Message Flow
 
@@ -168,7 +168,7 @@ The last message in context must be `user` or `toolResult` (not `assistant`).
 | `agent_end` | Final event for the run. Awaited subscribers for this event still count toward settlement |
 | `turn_start` | New turn begins (one LLM call + tool executions) |
 | `turn_end` | Turn completes with assistant message and tool results |
-| `message_start` | Any message begins (user, assistant, toolResult) |
+| `message_start` | Any message begins (system, user, assistant, toolResult) |
 | `message_update` | **Assistant only.** Includes `assistantMessageEvent` with delta |
 | `message_end` | Message completes |
 | `tool_execution_start` | Tool begins |
@@ -181,7 +181,8 @@ The last message in context must be `user` or `toolResult` (not `assistant`).
 
 ```typescript
 const agent = new Agent({
-  // Initial state
+  // Initial state. systemPrompt and tools become the leading system message
+  // unless messages already starts with one.
   initialState: {
     systemPrompt: string,
     model: Model<any>,
@@ -202,7 +203,8 @@ const agent = new Agent({
   // Follow-up mode: "one-at-a-time" (default) or "all"
   followUpMode: "one-at-a-time",
 
-  // Required stream function
+  // Required stream function. Receives a TranscriptContext: the prompt and tools
+  // are in the transcript's system messages, not on the context.
   streamFn: models.streamSimple.bind(models),
 
   // Session ID for provider caching
@@ -250,7 +252,6 @@ const agent = new Agent({
 
 ```typescript
 interface AgentState {
-  systemPrompt: string;
   model: Model<any>;
   thinkingLevel: ThinkingLevel;
   tools: AgentTool<any>[];
@@ -265,6 +266,17 @@ interface AgentState {
 Access state via `agent.state`.
 
 Assigning `agent.state.tools = [...]` or `agent.state.messages = [...]` copies the top-level array before storing it. Mutating the returned array mutates the current agent state.
+
+The transcript owns the system prompt and tool declarations: the leading system message is the prompt, later system messages patch it (see `SystemMessage` in pi-ai). `agent.state.systemPrompt` is read-only and replays the transcript. `agent.state.tools` is the executable loadout; before every request the loop diffs it against the tools the transcript declares and, if they differ, announces the change in a system message (merged into a pending system message when one exists). pi-ai's `getCurrentSystemMessage(messages)` returns the replayed head, including declared tools, for any message array, including agent transcripts with custom message roles.
+
+To change the prompt mid-conversation, append a system message with `content` (added instructions) or `sections` (named replacements):
+
+```typescript
+await agent.prompt([
+  { role: "system", content: "", sections: { skills: "<skills>...</skills>" }, timestamp: Date.now() },
+  { role: "user", content: "Continue", timestamp: Date.now() },
+]);
+```
 
 During streaming, `agent.state.streamingMessage` contains the current partial assistant message.
 
@@ -293,7 +305,6 @@ await agent.continue();
 ### State Management
 
 ```typescript
-agent.state.systemPrompt = "New prompt";
 agent.state.model = getModel("openai", "gpt-4o");
 agent.state.thinkingLevel = "medium";
 agent.state.tools = [myTool];
@@ -484,14 +495,13 @@ For direct control without the Agent class:
 import { agentLoop, agentLoopContinue } from "@earendil-works/pi-agent-core";
 
 const context: AgentContext = {
-  systemPrompt: "You are helpful.",
-  messages: [],
+  messages: [{ role: "system", content: "You are helpful.", timestamp: Date.now() }],
   tools: [],
 };
 
 const config: AgentLoopConfig = {
   model: getModel("openai", "gpt-4o"),
-  convertToLlm: (msgs) => msgs.filter(m => ["user", "assistant", "toolResult"].includes(m.role)),
+  convertToLlm: (msgs) => msgs.filter(m => ["system", "user", "assistant", "toolResult"].includes(m.role)),
   toolExecution: "parallel",  // overridden by per-tool executionMode if set
   beforeToolCall: async ({ toolCall, args, context }) => undefined,
   afterToolCall: async ({ toolCall, result, isError, context }) => undefined,

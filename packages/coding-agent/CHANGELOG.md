@@ -6,6 +6,7 @@
 
 - Added `ctx.modelRegistry.stream()` and `streamSimple()` for extension model calls through configured providers with resolved authentication ([#8964](https://github.com/earendil-works/pi/issues/8964)).
 - Added per-model `reserveTokens` and `keepRecentTokens` settings through `compaction.modelOverrides`, with ordinary compaction settings as fallback ([#8133](https://github.com/earendil-works/pi-mono/issues/8133)).
+- Added `compat.allowedFallbackModels` configuration for overriding or disabling Anthropic server-side fallback models ([#9294](https://github.com/earendil-works/pi/issues/9294)).
 
 ### Changed
 
@@ -14,6 +15,7 @@
 
 ### Fixed
 
+- Fixed local clipboard failures reporting success when the terminal ignored the fallback OSC 52 write, and added platform-specific setup guidance when no clipboard backend works ([#9618](https://github.com/earendil-works/pi/issues/9618)).
 - Capped agent-level retry backoff at `retry.maxAgentDelayMs` (60s by default) so long retry runs stay responsive during prolonged transient outages ([#8826](https://github.com/earendil-works/pi/issues/8826)).
 - Fixed direct RPC `steer` and `follow_up` commands bypassing extension `input` handlers ([#8718](https://github.com/earendil-works/pi/issues/8718)).
 - Fixed premature missing-model errors after login by waiting for catalog discovery. Radius now defaults to `balanced`, falling back to the first available Radius model when needed.

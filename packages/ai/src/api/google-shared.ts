@@ -12,7 +12,6 @@ import {
 import { calculateCost } from "../models.ts";
 import type {
 	AssistantMessage,
-	Context,
 	ImageContent,
 	Model,
 	ModelThinkingLevel,
@@ -23,10 +22,12 @@ import type {
 	ThinkingLevel,
 	Tool,
 	ToolCall,
+	TranscriptContext,
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { collapseSystemMessages, withoutInitialSystemMessage } from "../utils/transcript.ts";
 import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -139,14 +140,16 @@ function supportsMultimodalFunctionResponse(modelId: string): boolean {
 /**
  * Convert internal messages to Gemini Content[] format.
  */
-export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
+export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: TranscriptContext): Content[] {
+	// Gemini has no mid-conversation system messages; the leading prompt is sent as systemInstruction.
+	const conversation = withoutInitialSystemMessage(collapseSystemMessages(context).messages);
 	const contents: Content[] = [];
 	const normalizeToolCallId = (id: string): string => {
 		if (!requiresToolCallId(model.id)) return id;
 		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(conversation, model, normalizeToolCallId);
 
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {

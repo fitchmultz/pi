@@ -205,8 +205,8 @@ describe("AgentSessionRuntime characterization", () => {
 		const outgoingEntries = SessionManager.open(outgoingSession.sessionFile!)
 			.getEntries()
 			.filter((entry) => entry.type === "message");
-		expect(outgoingEntries.map((entry) => entry.message.role)).toEqual(["user", "assistant", "toolResult"]);
-		expect(outgoingEntries[2].message).toMatchObject({
+		expect(outgoingEntries.map((entry) => entry.message.role)).toEqual(["system", "user", "assistant", "toolResult"]);
+		expect(outgoingEntries[3].message).toMatchObject({
 			role: "toolResult",
 			toolCallId: toolCall.id,
 			toolName: "block",

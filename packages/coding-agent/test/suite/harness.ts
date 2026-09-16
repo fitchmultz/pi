@@ -67,7 +67,6 @@ export interface HarnessOptions {
 	settingsManager?: SettingsManager;
 	/** Replaces the in-memory session manager, e.g. a file-backed one to test resume. */
 	sessionManager?: SessionManager;
-	systemPrompt?: string;
 	tools?: AgentTool[];
 	initialActiveToolNames?: string[];
 	allowedToolNames?: string[];
@@ -149,7 +148,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		streamFn: streamSimple,
 		initialState: {
 			model,
-			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
+			systemPrompt: "",
 			tools: [],
 		},
 		convertToLlm,

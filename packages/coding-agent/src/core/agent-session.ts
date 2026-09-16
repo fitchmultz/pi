@@ -26,13 +26,21 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText, retryDelayMs } from "@earendil-works/pi-ai";
+import {
+	contentText,
+	getCurrentSystemMessage,
+	getCurrentSystemPrompt,
+	getCurrentTools,
+	getToolStateChanges,
+	retryDelayMs,
+} from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
 	ImageContent,
 	Model,
 	ProviderHeaders,
+	SystemMessage,
 	TextContent,
 	Tool,
 	Usage,
@@ -114,7 +122,13 @@ import { getLatestCompactionEntry, sessionEntryToContextMessages } from "./sessi
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
-import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import {
+	buildSystemPrompt,
+	buildSystemPromptSections,
+	diffSystemPromptSections,
+	type NormalizedBuildSystemPromptOptions,
+	normalizeBuildSystemPromptOptions,
+} from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -400,10 +414,13 @@ export class AgentSession {
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
-	// Base system prompt (without extension appends) - used to apply fresh appends each turn
-	private _baseSystemPrompt = "";
-	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
-	private _systemPromptOverride?: string;
+	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
+	/** Prompt options after before_agent_start mutations for the active run. */
+	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
+	/** Snapshot of base inputs; navigation replaces only its selected tools, preserving other pending edits. */
+	private _baseSystemPromptBaseline!: NormalizedBuildSystemPromptOptions;
+	/** Startup discovery completes initial inputs only until a loadout has been prepared. */
+	private _hasPreparedPrompt = false;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -437,6 +454,16 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		const restoredSystemMessage = getCurrentSystemMessage(this.messages);
+		// Resume itself does not schedule a reset of a persisted before_agent_start override.
+		// Use the saved selection as the baseline so explicit startup tool changes stay pending.
+		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions({
+			...this._baseSystemPromptOptions,
+			selectedTools: restoredSystemMessage
+				? (restoredSystemMessage.toolsAdded ?? []).map((tool) => tool.name)
+				: this._baseSystemPromptOptions.selectedTools,
+		});
+		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -582,13 +609,12 @@ export class AgentSession {
 		const messages = this.sessionManager.buildSessionContext().messages;
 		this.agent.state.messages = messages;
 
-		const marker = messages[0]!;
+		const marker = messages.find((message) => message.role === "custom" && message.customType === "context-window")!;
 		this._emit({ type: "message_start", message: marker });
 		this._emit({ type: "message_end", message: marker });
 		this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
 
 		return {
-			systemPrompt: this.agent.state.systemPrompt,
 			messages: messages.slice(),
 			tools: this.agent.state.tools.slice(),
 		};
@@ -628,14 +654,22 @@ export class AgentSession {
 	 * legacy prefix uses the larger of matching-model usage and the full prompt/tool/message estimate.
 	 */
 	private _estimateContextTokens(context: AgentContext = this.agent.state) {
-		const options = {
-			model: this.model,
-			systemPrompt: context.systemPrompt,
-			tools: context.tools,
-		};
+		const options = { model: this.model };
 		if (this._reportedUsageApplies(context)) return estimateContextTokens(context.messages, options);
-
-		const fullEstimate = estimateContextTokens(context.messages, { ...options, useReportedUsage: false });
+		// Include unsent prompt/tool changes without mutating or persisting the transcript.
+		const pendingOptions = this._getPendingSystemPromptOptions();
+		const sections = pendingOptions
+			? diffSystemPromptSections(
+					getCurrentSystemMessage(context.messages)?.sections ?? {},
+					buildSystemPromptSections(pendingOptions),
+				)
+			: undefined;
+		const changes = getToolStateChanges(getCurrentTools(context.messages), context.tools ?? []);
+		const messages: AgentMessage[] =
+			sections || changes.toolsAdded.length || changes.toolsRemoved.length
+				? [...context.messages, { role: "system", content: "", sections, ...changes, timestamp: Date.now() }]
+				: context.messages;
+		const fullEstimate = estimateContextTokens(messages, { ...options, useReportedUsage: false });
 		if (this._reportedUsagePrefix !== undefined || !this._hasCurrentModelUsageAfterActiveCompaction()) {
 			return fullEstimate;
 		}
@@ -661,11 +695,15 @@ export class AgentSession {
 		if (!prefix) return false;
 		const model = this.model;
 		const tools = context.tools ?? [];
+		const pendingOptions = this._getPendingSystemPromptOptions();
+		const systemPrompt = pendingOptions
+			? buildSystemPrompt(pendingOptions)
+			: getCurrentSystemPrompt(context.messages);
 		return (
 			!!model &&
 			prefix.provider === model.provider &&
 			prefix.model === model.id &&
-			prefix.systemPrompt === context.systemPrompt &&
+			prefix.systemPrompt === systemPrompt &&
 			prefix.toolKeys.length === tools.length &&
 			tools.every(
 				(tool, index) =>
@@ -708,14 +746,26 @@ export class AgentSession {
 			const context = this._consumeNewContext(turn.newContext) ?? turn.context;
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
+			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
+			const options = normalizeBuildSystemPromptOptions({
+				...runOptions,
+				selectedTools: this.getActiveToolNames(),
+				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
+				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
+			});
+			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
+			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
+			this._runSystemPromptOptions = options;
 
 			return {
 				...previousSnapshot,
 				context: {
 					...nextContext,
-					systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
 					tools: this.agent.state.tools.slice(),
 				},
+				messages: updateMessage
+					? [...(previousSnapshot?.messages ?? []), updateMessage]
+					: previousSnapshot?.messages,
 				model: this.agent.state.model,
 				thinkingLevel: this.agent.state.thinkingLevel,
 			};
@@ -738,7 +788,12 @@ export class AgentSession {
 				message.display,
 				message.details,
 			);
-		} else if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
+		} else if (
+			message.role === "system" ||
+			message.role === "user" ||
+			message.role === "assistant" ||
+			message.role === "toolResult"
+		) {
 			this.sessionManager.appendMessage(message);
 		}
 	}
@@ -764,7 +819,7 @@ export class AgentSession {
 				? {
 						provider: model.provider,
 						model: model.id,
-						systemPrompt: prepared.systemPrompt,
+						systemPrompt: getCurrentSystemPrompt(prepared.messages),
 						toolKeys: prepared.tools?.map((tool) => this._captureToolPrefix(tool)) ?? [],
 					}
 				: undefined;
@@ -904,7 +959,10 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
-			if (this._isAgentRunActive && (event.message.role === "user" || event.message.role === "custom")) {
+			if (
+				this._isAgentRunActive &&
+				(event.message.role === "system" || event.message.role === "user" || event.message.role === "custom")
+			) {
 				this._pendingProviderMessages.push(event.message);
 				if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
 			} else {
@@ -1156,9 +1214,22 @@ export class AgentSession {
 		return !this._isAgentRunActive && !this.isCompacting;
 	}
 
-	/** Current effective system prompt (includes any per-turn extension modifications) */
+	/** Current effective system prompt, including changes not yet sent to the model. */
 	get systemPrompt(): string {
-		return this.agent.state.systemPrompt;
+		const pendingOptions = this._getPendingSystemPromptOptions();
+		return pendingOptions ? buildSystemPrompt(pendingOptions) : getCurrentSystemPrompt(this.messages);
+	}
+
+	private _getPendingSystemPromptOptions(): NormalizedBuildSystemPromptOptions | undefined {
+		if (this._runSystemPromptOptions) return this._runSystemPromptOptions;
+		// Ending a run does not undo its before_agent_start prompt. Until the base really changes,
+		// the transcript remains authoritative, including after compaction or a new context window.
+		// Compare rendered inputs so mutable getSystemPromptOptions() edits are detected too.
+		// Empty contexts need the initial prompt, but do not erase the baseline used when navigating back.
+		return getCurrentSystemMessage(this.messages) &&
+			buildSystemPrompt(this._baseSystemPromptOptions) === buildSystemPrompt(this._baseSystemPromptBaseline)
+			? undefined
+			: this._baseSystemPromptOptions;
 	}
 
 	/** Current retry attempt (0 if not retrying) */
@@ -1208,10 +1279,7 @@ export class AgentSession {
 			}
 		}
 		this.agent.state.tools = tools;
-
-		// Rebuild base system prompt with new tool set
-		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
-		this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
+		this._rebuildSystemPrompt(validToolNames);
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -1292,30 +1360,21 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
-	private _rebuildSystemPrompt(toolNames: string[]): string {
+	private _rebuildSystemPrompt(toolNames: string[]): void {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
-		const promptGuidelines: string[] = [];
-		for (const name of validToolNames) {
+		for (const name of this._toolRegistry.keys()) {
 			const snippet = this._toolPromptSnippets.get(name);
-			if (snippet) {
-				toolSnippets[name] = snippet;
-			}
-
-			const toolGuidelines = this._toolPromptGuidelines.get(name);
-			if (toolGuidelines) {
-				promptGuidelines.push(...toolGuidelines);
-			}
+			if (snippet) toolSnippets[name] = snippet;
 		}
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const appendSystemPrompt = loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : "";
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
-		this._baseSystemPromptOptions = {
+		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
 			cwd: this._cwd,
 			skills: loadedSkills,
 			contextFiles: loadedContextFiles,
@@ -1323,9 +1382,53 @@ export class AgentSession {
 			appendSystemPrompt,
 			selectedTools: validToolNames,
 			toolSnippets,
-			promptGuidelines,
-		};
-		return buildSystemPrompt(this._baseSystemPromptOptions);
+			toolGuidelines: Object.fromEntries(this._toolPromptGuidelines),
+		});
+	}
+
+	/**
+	 * Apply a prompt and tool loadout for the next request. Sets the executable tools and
+	 * returns a system message patching the prompt sections the model currently has (replayed
+	 * from `messages`), or undefined when the prompt is unchanged. Tool changes are declared by
+	 * the agent loop before the request.
+	 */
+	private _preparePromptAndToolLoadout(
+		options: NormalizedBuildSystemPromptOptions,
+		messages: AgentMessage[] = this.agent.state.messages,
+	): SystemMessage | undefined {
+		options.selectedTools = [...new Set(options.selectedTools)].filter((name) => this._toolRegistry.has(name));
+		this.agent.state.tools = options.selectedTools.flatMap((name) => {
+			const tool = this._toolRegistry.get(name);
+			return tool ? [tool] : [];
+		});
+		const sections = diffSystemPromptSections(
+			getCurrentSystemMessage(messages)?.sections ?? {},
+			buildSystemPromptSections(options),
+		);
+		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions(this._baseSystemPromptOptions);
+		this._hasPreparedPrompt = true;
+		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
+	}
+
+	/** Restore the active tool loadout declared by the session transcript, if it declares one. */
+	private _restoreToolsFromTranscript(): void {
+		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
+		if (!current) return;
+		const toolNames = (current.toolsAdded ?? [])
+			.map((tool) => tool.name)
+			.filter((name) => this._toolRegistry.has(name));
+		this.agent.state.tools = toolNames.flatMap((name) => {
+			const registered = this._toolRegistry.get(name);
+			return registered ? [registered] : [];
+		});
+		// Restoration changes the selected tools, not local prompt edits or loaded resources.
+		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
+			...this._baseSystemPromptOptions,
+			selectedTools: toolNames,
+		});
+		// The destination supersedes pending tool selections on both sides of the comparison.
+		// All other baseline inputs remain unchanged, so genuine prompt/resource edits still differ.
+		this._baseSystemPromptBaseline = { ...this._baseSystemPromptBaseline, selectedTools: toolNames };
 	}
 
 	// =========================================================================
@@ -1340,6 +1443,7 @@ export class AgentSession {
 		this._isAgentRunActive = true;
 		const controller = new AbortController();
 		this._promptAbortController = controller;
+		const previousBaseSystemPromptBaseline = this._baseSystemPromptBaseline;
 		let started = false;
 		try {
 			const accept = await prepare(controller.signal);
@@ -1363,7 +1467,8 @@ export class AgentSession {
 			this._promptAbortController = undefined;
 			if (controller.signal.aborted) this._pendingNewContext = undefined;
 			this._skipNextProviderRequestPreflight = false;
-			this._systemPromptOverride = undefined;
+			this._runSystemPromptOptions = undefined;
+			if (!started) this._baseSystemPromptBaseline = previousBaseSystemPromptBaseline;
 			// No further retry or continuation can deliver these messages. Recover both queued
 			// and drained-but-undelivered customs without starting another turn.
 			this._preserveUndeliveredCustomMessages(true);
@@ -1380,13 +1485,14 @@ export class AgentSession {
 	}
 
 	private async _prepareAgentStart(prompt: string, images?: ImageContent[]): Promise<AgentMessage[]> {
-		const result = await this._extensionRunner.emitBeforeAgentStart(
-			prompt,
-			images,
-			this._baseSystemPrompt,
-			this._baseSystemPromptOptions,
-		);
-		const messages: AgentMessage[] = (result?.messages ?? []).map((message) => ({
+		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
+		const result = await this._extensionRunner.emitBeforeAgentStart(prompt, images, this._baseSystemPromptOptions);
+		// Explicit selectedTools edits win; otherwise honor live setActiveTools() calls.
+		const handlerEditedTools =
+			result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
+			result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
+		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
+		const messages: AgentMessage[] = result.messages.map((message) => ({
 			role: "custom",
 			customType: message.customType,
 			content: message.content ?? [],
@@ -1394,8 +1500,9 @@ export class AgentSession {
 			details: message.details,
 			timestamp: Date.now(),
 		}));
-		this._systemPromptOverride = result?.systemPrompt;
-		this.agent.state.systemPrompt = result?.systemPrompt ?? this._baseSystemPrompt;
+		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
+		this._runSystemPromptOptions = result.systemPromptOptions;
+		if (updateMessage) messages.unshift(updateMessage);
 		return messages;
 	}
 
@@ -1581,7 +1688,9 @@ export class AgentSession {
 				// Consume only these asides after startup succeeds; asides added by the hook stay queued.
 				const nextTurnCount = this._pendingNextTurnMessages.length;
 				messages.push(...this._pendingNextTurnMessages);
-				messages.push(...(await this._prepareAgentStart(expandedText, currentImages)));
+				const startupMessages = await this._prepareAgentStart(expandedText, currentImages);
+				messages.unshift(...startupMessages.filter((message) => message.role === "system"));
+				messages.push(...startupMessages.filter((message) => message.role !== "system"));
 				return () => {
 					preflightResult(true);
 					signal.throwIfAborted();
@@ -1817,7 +1926,12 @@ export class AgentSession {
 			}
 		} else if (options?.triggerTurn) {
 			await this._runAgentPrompt(async () => {
-				const messages = [appMessage, ...(await this._prepareAgentStart(""))];
+				const startupMessages = await this._prepareAgentStart("");
+				const messages = [
+					...startupMessages.filter((message) => message.role === "system"),
+					appMessage,
+					...startupMessages.filter((message) => message.role !== "system"),
+				];
 				return () => messages;
 			});
 		} else if (this.isStreaming) {
@@ -2901,8 +3015,19 @@ export class AgentSession {
 		};
 
 		this._resourceLoader.extendResources(extensionPaths);
-		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		// Discovery adds skills, prompts and themes; only skills affect the system prompt.
+		// Do not rebuild unrelated inputs and discard local prompt edits or tool choices.
+		if (skillPaths.length === 0) return;
+		const skills = this._resourceLoader.getSkills().skills;
+		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({ ...this._baseSystemPromptOptions, skills });
+		if (reason === "startup" && !this._hasPreparedPrompt) {
+			// These are initial resources, not a pending reset of a resumed before_agent_start prompt.
+			// Adopt only the discovered input, retaining the saved tool selection and other baseline fields.
+			this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions({
+				...this._baseSystemPromptBaseline,
+				skills,
+			});
+		}
 	}
 
 	private buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
@@ -3729,6 +3854,7 @@ export class AgentSession {
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
 			this._reportedUsagePrefix = undefined;
+			this._restoreToolsFromTranscript();
 
 			// Emit session_tree event
 			await this._extensionRunner.emit({

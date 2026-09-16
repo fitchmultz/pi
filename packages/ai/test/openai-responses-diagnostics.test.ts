@@ -4,7 +4,8 @@ import { stream as streamAzure } from "../src/api/azure-openai-responses.ts";
 import { stream as streamCodex } from "../src/api/openai-codex-responses.ts";
 import { stream as streamOpenAI } from "../src/api/openai-responses.ts";
 import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts";
-import type { Context, Model, StreamOptions } from "../src/types.ts";
+import type { Model, StreamOptions } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 const model: Model<"openai-responses"> = {
 	id: "test-model",
@@ -19,10 +20,10 @@ const model: Model<"openai-responses"> = {
 	maxTokens: 1000,
 };
 const apiKey = `test.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "account-secret" } }))}.secret`;
-const context: Context = {
+const context = normalizeContext({
 	systemPrompt: "instructions-secret",
 	messages: [{ role: "user", content: "prompt-secret 雪", timestamp: 1 }],
-};
+});
 
 const providers = ["openai", "openai-codex", "azure-openai-responses"] as const;
 function request(provider: (typeof providers)[number], options: StreamOptions & { serviceTier?: "flex" | "priority" }) {
@@ -280,8 +281,8 @@ describe("Responses request diagnostics", () => {
 		expect(
 			Object.values(diagnostic!.details!).every((value) => ["string", "number", "boolean"].includes(typeof value)),
 		).toBe(true);
-		expect(JSON.stringify(convertResponsesMessages(model, { messages: [result] }, new Set([provider])))).not.toMatch(
-			/diagnostics|provider_request|requestedServiceTier|timingOrigin/,
-		);
+		expect(
+			JSON.stringify(convertResponsesMessages(model, normalizeContext({ messages: [result] }), new Set([provider]))),
+		).not.toMatch(/diagnostics|provider_request|requestedServiceTier|timingOrigin/);
 	});
 });

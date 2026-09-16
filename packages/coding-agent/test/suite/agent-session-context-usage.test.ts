@@ -1,9 +1,28 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, type Usage } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	fauxAssistantMessage,
+	getCurrentSystemMessage,
+	getCurrentSystemPrompt,
+	getCurrentTools,
+	getToolStateChanges,
+	type Usage,
+} from "@earendil-works/pi-ai";
+import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createRestartControl } from "../../src/cli/restart-worker.ts";
 import { estimateContextTokens } from "../../src/core/compaction/index.ts";
 import type { ToolDefinition } from "../../src/core/extensions/index.ts";
+import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
+import { createAgentSession } from "../../src/core/sdk.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
+import { SettingsManager } from "../../src/core/settings-manager.ts";
+import { buildSystemPromptSections, diffSystemPromptSections } from "../../src/core/system-prompt.ts";
+import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function usage(totalTokens: number): Usage {
@@ -41,7 +60,7 @@ describe("AgentSession context usage estimate", () => {
 			const scans = [vi.spyOn(sm, "getEntries"), vi.spyOn(sm, "getBranch"), vi.spyOn(sm, "buildContextEntries")];
 			const parents = vi.spyOn(sm, "getEntry");
 			const state = harness.session.agent.state;
-			const options = { model: harness.getModel(), systemPrompt: state.systemPrompt, tools: state.tools };
+			const options = { model: harness.getModel(), systemPrompt: harness.session.systemPrompt, tools: state.tools };
 			const expected =
 				boundary === "compaction"
 					? null
@@ -114,7 +133,7 @@ describe("AgentSession context usage estimate", () => {
 		const harness = await createHarness({ tools: [tool] });
 		harnesses.push(harness);
 
-		const systemPromptChars = harness.session.agent.state.systemPrompt.length;
+		const systemPromptChars = harness.session.systemPrompt.length;
 		expect(systemPromptChars).toBeGreaterThan(1000);
 		const before = harness.session.getContextUsage();
 		// System prompt plus at least the 800 padded description characters of the tool schema.
@@ -126,6 +145,460 @@ describe("AgentSession context usage estimate", () => {
 		const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
 		expect(reported).toBeGreaterThan(0);
 		expect(harness.session.getContextUsage()?.tokens).toBe(reported);
+	});
+
+	it.each(["base", "restart", "sections"])(
+		"keeps reported idle usage and avoids premature next-prompt compaction with %s guidance",
+		async (kind) => {
+			const restart = createRestartControl({ args: [], send: async () => {} });
+			const harness = await createHarness({
+				tools: [],
+				models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+				settings: { compaction: { enabled: true, reserveTokens: 1300, keepRecentTokens: 100 } },
+				extensionFactories:
+					kind === "restart"
+						? [restart.extension]
+						: kind === "sections"
+							? [
+									(pi) => {
+										pi.on("before_agent_start", (event) => {
+											event.systemPromptOptions.sections.policy = "Per-run policy.";
+										});
+									},
+								]
+							: [],
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				fauxAssistantMessage("o".repeat(1000)),
+				fauxAssistantMessage("second"),
+				fauxAssistantMessage("unexpected extra request"),
+			]);
+			await harness.session.prompt("h".repeat(1000));
+			const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+			expect(reported).toBeLessThan(1300);
+			expect.soft(harness.session.getContextUsage()?.tokens).toBe(reported);
+			await harness.session.prompt("again");
+			expect(harness.eventsOfType("compaction_start")).toEqual([]);
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toEqual([]);
+			expect(harness.getPendingResponseCount()).toBe(1);
+			const lastReported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+			expect(harness.session.getContextUsage()?.tokens).toBe(lastReported);
+			harness.session.newContext();
+			expect(harness.sessionManager.getLeafEntry()).toMatchObject({
+				type: "context_window",
+				tokensBefore: lastReported,
+			});
+		},
+	);
+
+	it.each(["resume", "navigation"])(
+		"keeps the persisted restart prompt effective after %s and does not compact the next prompt",
+		async (boundary) => {
+			const directory = mkdtempSync(join(tmpdir(), "pi-accounting-resume-"));
+			const restart = createRestartControl({ args: [], send: async () => {} });
+			const harness = await createHarness({
+				tools: [],
+				models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+				settings: { compaction: { enabled: true, reserveTokens: 1300, keepRecentTokens: 100 } },
+				extensionFactories: [restart.extension],
+				sessionManager: SessionManager.create(directory, directory),
+			});
+			harnesses.push(harness);
+			let session = harness.session;
+			try {
+				harness.setResponses([fauxAssistantMessage("o".repeat(1000)), fauxAssistantMessage("middle")]);
+				await session.prompt("h".repeat(1000));
+				const reported = (session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+				const firstAnswer = harness.sessionManager.getLeafId()!;
+				expect(session.getContextUsage()?.tokens).toBe(reported);
+				if (boundary === "resume") {
+					const extensionsResult = await createTestExtensionsResult(
+						[createRestartControl({ args: [], send: async () => {} }).extension],
+						harness.tempDir,
+					);
+					({ session } = await createAgentSession({
+						cwd: harness.tempDir,
+						agentDir: directory,
+						model: harness.getModel(),
+						modelRuntime: harness.session.modelRuntime,
+						settingsManager: harness.settingsManager,
+						resourceLoader: createTestResourceLoader({ extensionsResult }),
+						sessionManager: SessionManager.open(harness.session.sessionFile!),
+					}));
+				} else {
+					await session.prompt("middle");
+					await session.navigateTree(firstAnswer);
+				}
+				const compactions: string[] = [];
+				session.subscribe((event) => {
+					if (event.type === "compaction_start") compactions.push(event.reason);
+				});
+				expect.soft(session.getContextUsage()?.tokens).toBe(reported);
+				expect.soft(session.systemPrompt).toBe(getCurrentSystemPrompt(session.messages));
+				expect(reported).toBeLessThan(1300);
+				// Keep faux cache-write accounting from doubling the resumed response's reported usage.
+				// The saved session and SDK resume are real; only provider cache simulation is disabled.
+				session.agent.sessionId = undefined;
+				harness.setResponses([fauxAssistantMessage("continued"), fauxAssistantMessage("unexpected summary")]);
+				await session.prompt("again");
+				expect(compactions).toEqual([]);
+				expect(session.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toEqual([]);
+				expect(harness.getPendingResponseCount()).toBe(1);
+
+				// A restored baseline must still notice mutable prompt edits made after restoration.
+				session.setAutoCompactionEnabled(false);
+				session.extensionRunner.createCommandContext().getSystemPromptOptions().customPrompt =
+					"Changed prompt ".repeat(2000);
+				const lastReported = (session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+				expect(session.getContextUsage()!.tokens).toBeGreaterThan(lastReported);
+				harness.setResponses([fauxAssistantMessage("edited")]);
+				await session.prompt("apply edit");
+				expect(getCurrentSystemPrompt(session.messages)).toContain("Changed prompt ");
+			} finally {
+				if (session !== harness.session) session.dispose();
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.each(["unchanged", "tools", "prompt"])(
+		"adopts discovered startup skills on file-backed restart resume with %s inputs",
+		async (change) => {
+			const directory = mkdtempSync(join(tmpdir(), "pi-accounting-resources-"));
+			const skillDir = join(directory, "review-skill");
+			mkdirSync(skillDir);
+			const skillFile = join(skillDir, "SKILL.md");
+			const writeSkill = (description: string) =>
+				writeFileSync(
+					skillFile,
+					`---\nname: review-skill\ndescription: ${description}\n---\nReview instructions.\n`,
+				);
+			writeSkill("d".repeat(400));
+			const makeLoader = async () => {
+				const loader = new DefaultResourceLoader({
+					cwd: directory,
+					agentDir: join(directory, "agent"),
+					settingsManager: SettingsManager.inMemory(),
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+					extensionFactories: [
+						createRestartControl({ args: [], send: async () => {} }).extension,
+						(pi) => {
+							pi.on("resources_discover", () => ({ skillPaths: [skillDir] }));
+						},
+					],
+				});
+				await loader.reload();
+				return loader;
+			};
+			const harness = await createHarness({
+				models: [{ id: "faux-1", contextWindow: 5000, maxTokens: 100 }],
+				settings: { compaction: { enabled: true, reserveTokens: 2500, keepRecentTokens: 100 } },
+				resourceLoader: await makeLoader(),
+				sessionManager: SessionManager.create(directory, directory),
+			});
+			harnesses.push(harness);
+			try {
+				await harness.session.bindExtensions({});
+				harness.setResponses([fauxAssistantMessage("o".repeat(1000))]);
+				await harness.session.prompt("h".repeat(1000));
+				const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+				expect(reported).toBeLessThan(2500);
+				const { session } = await createAgentSession({
+					cwd: harness.tempDir,
+					agentDir: directory,
+					model: harness.getModel(),
+					modelRuntime: harness.session.modelRuntime,
+					settingsManager: harness.settingsManager,
+					resourceLoader: await makeLoader(),
+					sessionManager: SessionManager.open(harness.session.sessionFile!),
+					tools: change === "tools" ? ["read"] : undefined,
+				});
+				try {
+					if (change !== "unchanged") session.setAutoCompactionEnabled(false);
+					if (change === "prompt")
+						session.extensionRunner.createCommandContext().getSystemPromptOptions().customPrompt =
+							"Local edit ".repeat(2000);
+					expect(session.resourceLoader.getSkills().skills).toHaveLength(0);
+					await session.bindExtensions({ onError: () => {} });
+					expect(session.resourceLoader.getSkills().skills).toHaveLength(1);
+					if (change === "unchanged") {
+						expect.soft(session.getContextUsage()?.tokens).toBe(reported);
+						expect.soft(session.systemPrompt).toBe(getCurrentSystemPrompt(session.messages));
+					} else {
+						expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
+						expect(session.getContextUsage()!.tokens).toBeGreaterThan(reported);
+						if (change === "prompt") expect(session.systemPrompt).toContain("Local edit ");
+						else expect(session.getActiveToolNames()).toEqual(["read"]);
+					}
+					const compactions: string[] = [];
+					session.subscribe((event) => {
+						if (event.type === "compaction_start") compactions.push(event.reason);
+					});
+					// Disable faux's optional cache-write simulation, not native accounting/preflight.
+					session.agent.sessionId = undefined;
+					harness.setResponses([fauxAssistantMessage("continued"), fauxAssistantMessage("unexpected summary")]);
+					await session.prompt("again");
+					expect(compactions).toEqual([]);
+					expect(harness.getPendingResponseCount()).toBe(1);
+
+					// Once preparation has occurred, even a later startup discovery is a pending change.
+					session.setAutoCompactionEnabled(false);
+					writeSkill("Later startup guidance ".repeat(30));
+					await session.bindExtensions({});
+					expect(session.systemPrompt).toContain("Later startup guidance");
+					expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
+
+					// Reloaded resource changes also remain pending rather than becoming startup adoption.
+					writeSkill("Changed skill guidance ".repeat(30));
+					await session.reload();
+					expect(session.systemPrompt).toContain("Changed skill guidance");
+					expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
+					expect(session.getContextUsage()!.tokens).toBeGreaterThan(reported);
+				} finally {
+					session.dispose();
+				}
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("counts an explicit SDK resume loadout change as pending", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-accounting-loadout-"));
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [createRestartControl({ args: [], send: async () => {} }).extension],
+			sessionManager: SessionManager.create(directory, directory),
+		});
+		harnesses.push(harness);
+		try {
+			harness.setResponses([fauxAssistantMessage("first")]);
+			await harness.session.prompt("hello");
+			const extensionsResult = await createTestExtensionsResult(
+				[createRestartControl({ args: [], send: async () => {} }).extension],
+				harness.tempDir,
+			);
+			const { session } = await createAgentSession({
+				cwd: harness.tempDir,
+				agentDir: directory,
+				model: harness.getModel(),
+				modelRuntime: harness.session.modelRuntime,
+				settingsManager: harness.settingsManager,
+				resourceLoader: createTestResourceLoader({ extensionsResult }),
+				sessionManager: SessionManager.open(harness.session.sessionFile!),
+				tools: ["read"],
+			});
+			try {
+				expect(getCurrentTools(session.messages)).toEqual([]);
+				expect(session.getActiveToolNames()).toEqual(["read"]);
+				expect(session.systemPrompt).toContain("- read:");
+				expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
+				expect(session.getContextUsage()!.tokens).toBeGreaterThan(harness.session.getContextUsage()!.tokens!);
+				harness.setResponses([fauxAssistantMessage("resumed")]);
+				await session.prompt("with read");
+				expect(getCurrentTools(session.messages).map((tool) => tool.name)).toEqual(["read"]);
+				expect(getCurrentSystemPrompt(session.messages)).toContain("- read:");
+			} finally {
+				session.dispose();
+			}
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("rebases restored tool selections without discarding pending prompt edits or changing cancelled navigation", async () => {
+		let cancel = false;
+		const harness = await createHarness({
+			tools: [],
+			models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+			settings: { compaction: { enabled: false, reserveTokens: 1300, keepRecentTokens: 100 } },
+			extensionFactories: [
+				createRestartControl({ args: [], send: async () => {} }).extension,
+				(pi) => {
+					for (const name of ["first", "second", "third"])
+						pi.registerTool({
+							name,
+							label: name,
+							description: `${name} tool`,
+							promptSnippet: `${name} guidance`,
+							parameters: Type.Object({}),
+							execute: async () => ({ content: [], details: {} }),
+						});
+					pi.on("session_before_tree", () => (cancel ? { cancel: true } : undefined));
+				},
+			],
+		});
+		harnesses.push(harness);
+		const session = harness.session;
+		const root = harness.sessionManager.appendCustomEntry("root");
+		session.setActiveToolsByName(["first"]);
+		harness.setResponses([fauxAssistantMessage("o".repeat(1000)), fauxAssistantMessage("second answer")]);
+		await session.prompt("h".repeat(1000));
+		const first = harness.sessionManager.getLeafId()!;
+		const firstPrompt = session.systemPrompt;
+		const firstReported = (session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+		session.setActiveToolsByName(["second"]);
+		await session.prompt("second input");
+		const second = harness.sessionManager.getLeafId()!;
+		await session.navigateTree(first);
+		expect(session.getActiveToolNames()).toEqual(["first"]);
+		expect(session.systemPrompt).toBe(firstPrompt);
+		expect(session.getContextUsage()?.tokens).toBe(firstReported);
+
+		// Navigation supersedes an idle selection, not just the selection from the last request.
+		await session.navigateTree(second);
+		session.setActiveToolsByName(["third"]);
+		await session.navigateTree(first);
+		expect(session.getActiveToolNames()).toEqual(["first"]);
+		expect.soft(session.systemPrompt).toBe(firstPrompt);
+		expect.soft(session.getContextUsage()?.tokens).toBe(firstReported);
+		expect(firstReported).toBeLessThan(1300);
+		session.setAutoCompactionEnabled(true);
+		harness.setResponses([fauxAssistantMessage("continued"), fauxAssistantMessage("unexpected summary")]);
+		await session.prompt("again");
+		expect(harness.eventsOfType("compaction_start")).toEqual([]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		session.setAutoCompactionEnabled(false);
+		await session.navigateTree(root);
+		expect(session.getContextUsage()!.tokens).toBeGreaterThan(0);
+		await session.navigateTree(first);
+		expect(session.getContextUsage()?.tokens).toBe(firstReported);
+
+		const pendingPrompt = "Pending navigation edit ".repeat(2000);
+		session.extensionRunner.createCommandContext().getSystemPromptOptions().customPrompt = pendingPrompt;
+		const pendingUsage = session.getContextUsage()?.tokens;
+		cancel = true;
+		expect(await session.navigateTree(second)).toMatchObject({ cancelled: true });
+		expect(harness.sessionManager.getLeafId()).toBe(first);
+		expect(session.getContextUsage()?.tokens).toBe(pendingUsage);
+		expect(session.systemPrompt).toContain(pendingPrompt);
+		cancel = false;
+		await session.navigateTree(second);
+		expect(session.getActiveToolNames()).toEqual(["second"]);
+		expect(session.systemPrompt).toContain(pendingPrompt);
+		expect(getCurrentSystemPrompt(session.messages)).not.toContain(pendingPrompt);
+		expect(session.getContextUsage()!.tokens).toBeGreaterThan(firstReported + 5000);
+		harness.setResponses([fauxAssistantMessage("edited")]);
+		await session.prompt("apply pending edit");
+		expect(getCurrentSystemPrompt(session.messages)).toContain(pendingPrompt);
+	});
+
+	it.each(["tools", "base options", "reload", "navigation"])(
+		"accounts for genuinely pending %s changes after a forced-prompt run",
+		async (change) => {
+			let override = true;
+			const harness = await createHarness({
+				settings: { compaction: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_agent_start", (event) =>
+							override ? { systemPrompt: `${event.systemPrompt}\n\nTemporary guidance.` } : undefined,
+						);
+						pi.registerCommand("update-prompt", {
+							handler: async (_args, ctx) => {
+								ctx.getSystemPromptOptions().customPrompt = "Changed base prompt.";
+							},
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const root = harness.sessionManager.appendCustomEntry("root");
+			harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+			await harness.session.prompt("first");
+			(harness.session.messages.at(-1) as AssistantMessage).usage = usage(8000);
+			expect(harness.session.getContextUsage()?.tokens).toBe(8000);
+			expect(harness.session.systemPrompt).toBe(getCurrentSystemPrompt(harness.session.messages));
+
+			if (change === "tools") harness.session.setActiveToolsByName(["read"]);
+			else if (change === "base options") await harness.session.prompt("/update-prompt");
+			else if (change === "reload") {
+				vi.spyOn(harness.session.resourceLoader, "getSystemPrompt").mockReturnValue("Reloaded base prompt.");
+				// Reload clears compat registrations; retain this harness's local faux stream.
+				harness.session.agent.streamFunction = getApiProvider(harness.faux.api)!.streamSimple;
+				await harness.session.reload();
+			} else await harness.session.navigateTree(root);
+
+			const state = harness.session.state;
+			const baseOptions = harness.session.extensionRunner.createCommandContext().getSystemPromptOptions();
+			const expected = estimateContextTokens(
+				[
+					...state.messages,
+					{
+						role: "system",
+						content: "",
+						sections: diffSystemPromptSections(
+							getCurrentSystemMessage(state.messages)?.sections ?? {},
+							buildSystemPromptSections(baseOptions),
+						),
+						...getToolStateChanges(getCurrentTools(state.messages), state.tools),
+						timestamp: 0,
+					},
+				],
+				{ model: harness.getModel(), useReportedUsage: false },
+			).tokens;
+			expect(harness.session.getContextUsage()?.tokens).toBe(expected);
+			expect(expected).toBeLessThan(8000);
+			expect(harness.session.systemPrompt).not.toContain("Temporary guidance.");
+			override = false;
+			await harness.session.prompt("second");
+			const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+			expect(harness.session.getContextUsage()?.tokens).toBe(reported);
+			expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Temporary guidance.");
+		},
+	);
+
+	it("keeps a base prompt change pending when admission aborts after startup preparation", async () => {
+		const harness = await createHarness({ tools: [] });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("first")]);
+		await harness.session.prompt("first");
+		harness.session.extensionRunner.createCommandContext().getSystemPromptOptions().customPrompt = "Pending change.";
+		await expect(
+			harness.session.prompt("cancel", {
+				preflightResult: (accepted) => {
+					if (accepted) void harness.session.abort();
+				},
+			}),
+		).rejects.toThrow();
+		expect(harness.session.systemPrompt).toContain("Pending change.");
+		expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Pending change.");
+		harness.setResponses([fauxAssistantMessage("second")]);
+		await harness.session.prompt("retry");
+		expect(harness.session.getContextUsage()?.tokens).toBe(
+			(harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens,
+		);
+	});
+
+	it("removes a per-run override on the next request without treating idle as a pending reset", async () => {
+		let override = true;
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) =>
+						override ? { systemPrompt: `${event.systemPrompt}\n\nTemporary guidance.` } : undefined,
+					);
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+		await harness.session.prompt("first");
+		override = false;
+		expect(harness.session.systemPrompt).toContain("Temporary guidance.");
+		await harness.session.prompt("second");
+		expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Temporary guidance.");
+		expect(harness.session.getContextUsage()?.tokens).toBe(
+			(harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens,
+		);
 	});
 
 	it.each([
@@ -190,12 +663,21 @@ describe("AgentSession context usage estimate", () => {
 		} else {
 			const state = harness.session.agent.state;
 			expect(harness.session.getContextUsage()?.tokens).toBe(
-				estimateContextTokens(state.messages, {
-					model: harness.getModel(),
-					systemPrompt: state.systemPrompt,
-					tools: state.tools,
-					useReportedUsage: false,
-				}).tokens,
+				estimateContextTokens(
+					[
+						...state.messages,
+						{
+							role: "system",
+							content: "",
+							...getToolStateChanges(getCurrentTools(state.messages), state.tools),
+							timestamp: Date.now(),
+						},
+					],
+					{
+						model: harness.getModel(),
+						useReportedUsage: false,
+					},
+				).tokens,
 			);
 			expect(harness.session.getContextUsage()?.tokens).not.toBe(before);
 		}

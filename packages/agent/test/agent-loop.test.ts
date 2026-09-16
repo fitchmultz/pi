@@ -2,6 +2,7 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	EventStream,
+	getCurrentTools,
 	type Message,
 	type Model,
 	type UserMessage,
@@ -78,7 +79,9 @@ function createUserMessage(text: string): UserMessage {
 
 // Simple identity converter for tests - just passes through standard messages
 function identityConverter(messages: AgentMessage[]): Message[] {
-	return messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
+	return messages.filter(
+		(m) => m.role === "system" || m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+	) as Message[];
 }
 
 describe("default stream function compatibility", () => {
@@ -98,7 +101,7 @@ describe("default stream function compatibility", () => {
 		});
 
 		try {
-			const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+			const context: AgentContext = { messages: [], tools: [] };
 			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
 			const stream = Reflect.apply(agentLoop, undefined, [
 				[createUserMessage("Hello")],
@@ -120,7 +123,7 @@ describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (
 		"settles iteration and result when %s throws",
 		async (callback) => {
 			const prompt = createUserMessage("Hello");
-			const context: AgentContext = { systemPrompt: "", messages: mode === "continue" ? [prompt] : [] };
+			const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
 			const failure = new Error(`${callback} failed`);
 			const fail = () => {
 				throw failure;
@@ -168,7 +171,7 @@ describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (
 	it("settles the full aborted lifecycle when provider preparation is cancelled", async () => {
 		const controller = new AbortController();
 		const prompt = createUserMessage("Hello");
-		const context: AgentContext = { systemPrompt: "", messages: mode === "continue" ? [prompt] : [] };
+		const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
@@ -226,7 +229,7 @@ describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (
 				return undefined;
 			},
 		});
-		const context: AgentContext = { systemPrompt: "", messages: mode === "continue" ? [prompt] : [] };
+		const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
 		const streamFn = () => {
 			const response = new MockAssistantStream();
 			response.push({ type: "done", reason: "stop", message: reply });
@@ -255,7 +258,7 @@ describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (
 
 	it("leaves direct runner rejection catchable", async () => {
 		const prompt = createUserMessage("Hello");
-		const context: AgentContext = { systemPrompt: "", messages: mode === "continue" ? [prompt] : [] };
+		const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
 		const failure = new Error("key resolution failed");
 		const config: AgentLoopConfig = {
 			model: createModel(),
@@ -291,15 +294,9 @@ describe("stream failure lifecycle", () => {
 				throw new Error("cancelled key lookup");
 			},
 		};
-		const stream = agentLoop(
-			[createUserMessage("Hello")],
-			{ systemPrompt: "", messages: [] },
-			config,
-			controller.signal,
-			() => {
-				throw new Error("Provider must not be reached");
-			},
-		);
+		const stream = agentLoop([createUserMessage("Hello")], { messages: [] }, config, controller.signal, () => {
+			throw new Error("Provider must not be reached");
+		});
 		for await (const _event of stream) {
 			/* consume */
 		}
@@ -319,7 +316,7 @@ describe("stream failure lifecycle", () => {
 				throw new Error("follow-up failed");
 			},
 		};
-		const stream = agentLoop([prompt], { systemPrompt: "", messages: [] }, config, undefined, () => {
+		const stream = agentLoop([prompt], { messages: [] }, config, undefined, () => {
 			const response = new MockAssistantStream();
 			response.push({ type: "done", reason: "stop", message: reply });
 			return response;
@@ -341,7 +338,7 @@ describe("stream failure lifecycle", () => {
 	it("does not duplicate terminal events for a provider protocol error", async () => {
 		const failure = { ...createAssistantMessage([], "error"), errorMessage: "provider failed" };
 		const stream = agentLoopContinue(
-			{ systemPrompt: "", messages: [createUserMessage("Hello")] },
+			{ messages: [createUserMessage("Hello")] },
 			{ model: createModel(), convertToLlm: identityConverter },
 			undefined,
 			() => {
@@ -367,7 +364,6 @@ describe("stream failure lifecycle", () => {
 describe("agentLoop with AgentMessage", () => {
 	it("should emit events with AgentMessage types", async () => {
 		const context: AgentContext = {
-			systemPrompt: "You are helpful.",
 			messages: [],
 			tools: [],
 		};
@@ -412,6 +408,45 @@ describe("agentLoop with AgentMessage", () => {
 		expect(eventTypes).toContain("agent_end");
 	});
 
+	it("should build provider context exclusively from transcript messages", async () => {
+		const initialSystem: AgentMessage = {
+			role: "system",
+			content: "Transcript prompt",
+			toolsAdded: [],
+			timestamp: 1,
+		};
+		const context: AgentContext = {
+			messages: [],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+		const stream = agentLoop(
+			[initialSystem, createUserMessage("Hello")],
+			context,
+			config,
+			undefined,
+			(_model, providerContext) => {
+				// The provider receives a transcript: no top-level prompt or tool fields.
+				expect(Object.keys(providerContext)).toEqual(["messages"]);
+				expect(providerContext.messages[0]).toBe(initialSystem);
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					response.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return response;
+			},
+		);
+
+		await stream.result();
+	});
+
 	it("should handle custom message types via convertToLlm", async () => {
 		// Create a custom message type
 		interface CustomNotification {
@@ -427,7 +462,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "You are helpful.",
 			messages: [notification as unknown as AgentMessage], // Custom message in context
 			tools: [],
 		};
@@ -469,7 +503,6 @@ describe("agentLoop with AgentMessage", () => {
 
 	it("should apply transformContext before convertToLlm", async () => {
 		const context: AgentContext = {
-			systemPrompt: "You are helpful.",
 			messages: [
 				createUserMessage("old message 1"),
 				createAssistantMessage([{ type: "text", text: "old response 1" }]),
@@ -556,7 +589,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -635,7 +667,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -708,7 +739,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -787,7 +817,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -862,7 +891,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -945,7 +973,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -1064,7 +1091,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [slowTool],
 		};
@@ -1158,7 +1184,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [slowTool, fastTool],
 		};
@@ -1234,7 +1259,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -1292,11 +1316,10 @@ describe("agentLoop with AgentMessage", () => {
 			},
 		};
 		const context: AgentContext = {
-			systemPrompt: "first prompt",
 			messages: [],
 			tools: [tool],
 		};
-		let convertedSecondTurnSystemPrompt = "";
+		let convertedSecondTurnHasUpdate = false;
 		let prepareCalls = 0;
 		let prepared = false;
 		const config: AgentLoopConfig = {
@@ -1308,10 +1331,10 @@ describe("agentLoop with AgentMessage", () => {
 				prepared = true;
 				return {
 					context: {
-						systemPrompt: "second prompt",
 						messages: currentContext.messages.slice(),
 						tools: currentContext.tools,
 					},
+					messages: [{ role: "system", content: "updated guidance", timestamp: 1 }],
 				};
 			},
 		};
@@ -1320,7 +1343,9 @@ describe("agentLoop with AgentMessage", () => {
 		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, (_model, ctx) => {
 			llmCalls++;
 			if (llmCalls === 2) {
-				convertedSecondTurnSystemPrompt = ctx.systemPrompt ?? "";
+				convertedSecondTurnHasUpdate = ctx.messages.some(
+					(message) => message.role === "system" && message.content === "updated guidance",
+				);
 			}
 			const mockStream = new MockAssistantStream();
 			queueMicrotask(() => {
@@ -1350,7 +1375,7 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(llmCalls).toBe(2);
 		expect(prepareCalls).toBe(1);
-		expect(convertedSecondTurnSystemPrompt).toBe("second prompt");
+		expect(convertedSecondTurnHasUpdate).toBe(true);
 	});
 
 	it("forwards a successful new-context request after the full tool batch", async () => {
@@ -1385,33 +1410,27 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		let llmCalls = 0;
-		const stream = agentLoop(
-			[createUserMessage("work")],
-			{ systemPrompt: "", messages: [], tools: [tool] },
-			config,
-			undefined,
-			() => {
-				llmCalls++;
-				const mockStream = new MockAssistantStream();
-				queueMicrotask(() => {
-					mockStream.push({
-						type: "done",
-						reason: llmCalls === 1 ? "toolUse" : "stop",
-						message:
-							llmCalls === 1
-								? createAssistantMessage(
-										[
-											{ type: "toolCall", id: "reset", name: "work", arguments: { value: "reset" } },
-											{ type: "toolCall", id: "slow", name: "work", arguments: { value: "slow" } },
-										],
-										"toolUse",
-									)
-								: createAssistantMessage([{ type: "text", text: "done" }]),
-					});
+		const stream = agentLoop([createUserMessage("work")], { messages: [], tools: [tool] }, config, undefined, () => {
+			llmCalls++;
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				mockStream.push({
+					type: "done",
+					reason: llmCalls === 1 ? "toolUse" : "stop",
+					message:
+						llmCalls === 1
+							? createAssistantMessage(
+									[
+										{ type: "toolCall", id: "reset", name: "work", arguments: { value: "reset" } },
+										{ type: "toolCall", id: "slow", name: "work", arguments: { value: "slow" } },
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]),
 				});
-				return mockStream;
-			},
-		);
+			});
+			return mockStream;
+		});
 
 		for await (const _event of stream) {
 			// consume
@@ -1451,7 +1470,7 @@ describe("agentLoop with AgentMessage", () => {
 		};
 		const stream = agentLoop(
 			[createUserMessage("work")],
-			{ systemPrompt: "", messages: [], tools: [tool] },
+			{ messages: [], tools: [tool] },
 			config,
 			controller.signal,
 			() => {
@@ -1507,30 +1526,24 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		let llmCalls = 0;
-		const stream = agentLoop(
-			[createUserMessage("work")],
-			{ systemPrompt: "", messages: [], tools: [tool] },
-			config,
-			undefined,
-			() => {
-				llmCalls++;
-				const mockStream = new MockAssistantStream();
-				queueMicrotask(() => {
-					const message =
-						llmCalls === 1
-							? createAssistantMessage(
-									[
-										{ type: "toolCall", id: "reset", name: "work", arguments: { reset: true } },
-										{ type: "toolCall", id: "fail", name: "work", arguments: { reset: false } },
-									],
-									"toolUse",
-								)
-							: createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: llmCalls === 1 ? "toolUse" : "stop", message });
-				});
-				return mockStream;
-			},
-		);
+		const stream = agentLoop([createUserMessage("work")], { messages: [], tools: [tool] }, config, undefined, () => {
+			llmCalls++;
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message =
+					llmCalls === 1
+						? createAssistantMessage(
+								[
+									{ type: "toolCall", id: "reset", name: "work", arguments: { reset: true } },
+									{ type: "toolCall", id: "fail", name: "work", arguments: { reset: false } },
+								],
+								"toolUse",
+							)
+						: createAssistantMessage([{ type: "text", text: "done" }]);
+				mockStream.push({ type: "done", reason: llmCalls === 1 ? "toolUse" : "stop", message });
+			});
+			return mockStream;
+		});
 
 		for await (const _event of stream) {
 			// consume
@@ -1556,7 +1569,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -1617,11 +1629,14 @@ describe("agentLoop with AgentMessage", () => {
 		expect(steeringPolls).toBe(1);
 		expect(followUpPolls).toBe(0);
 		expect(callbackToolResultIds).toEqual(["tool-1"]);
-		expect(callbackContextRoles).toEqual(["user", "assistant", "toolResult"]);
-		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+		expect(callbackContextRoles).toEqual(["system", "user", "assistant", "toolResult"]);
+		// The context declares no tools, so the loop announces the loadout with a system message.
+		expect(messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "toolResult"]);
 		expect(events.map((event) => event.type)).toEqual([
 			"agent_start",
 			"turn_start",
+			"message_start",
+			"message_end",
 			"message_start",
 			"message_end",
 			"message_start",
@@ -1652,7 +1667,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -1683,7 +1697,7 @@ describe("agentLoop with AgentMessage", () => {
 
 		const messages = await stream.result();
 		expect(llmCalls).toBe(1);
-		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+		expect(messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "toolResult"]);
 		expect(events.filter((event) => event.type === "turn_end")).toHaveLength(1);
 	});
 
@@ -1704,7 +1718,6 @@ describe("agentLoop with AgentMessage", () => {
 			},
 		};
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -1763,7 +1776,6 @@ describe("agentLoop with AgentMessage", () => {
 			},
 		};
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -1822,7 +1834,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -1862,6 +1873,7 @@ describe("agentLoop with AgentMessage", () => {
 		const messages = await stream.result();
 		expect(callIndex).toBe(2);
 		expect(messages.map((message) => message.role)).toEqual([
+			"system",
 			"user",
 			"assistant",
 			"toolResult",
@@ -1886,7 +1898,6 @@ describe("agentLoop with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "",
 			messages: [],
 			tools: [tool],
 		};
@@ -1919,10 +1930,50 @@ describe("agentLoop with AgentMessage", () => {
 	});
 });
 
+describe("transcript request preparation", () => {
+	it.each([false, true])("reconciles tools after request preparation (replace context: %s)", async (replace) => {
+		const tool: AgentTool = {
+			name: "prepared",
+			label: "Prepared",
+			description: "Prepared tool",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [], details: {} }),
+		};
+		const events: AgentEvent[] = [];
+		let requestedTools: string[] = [];
+		const messages = await runAgentLoop(
+			[createUserMessage("start")],
+			{ messages: [] },
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				prepareProviderRequest: async (context) => {
+					if (replace) return { messages: context.messages.slice(), tools: [tool] };
+					context.tools = [tool];
+					return undefined;
+				},
+			},
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			(_model, context) => {
+				requestedTools = getCurrentTools(context.messages).map((tool) => tool.name);
+				const stream = new MockAssistantStream();
+				stream.push({ type: "done", reason: "stop", message: createAssistantMessage([]) });
+				return stream;
+			},
+		);
+		expect(requestedTools).toEqual(["prepared"]);
+		expect(messages.map((message) => message.role)).toEqual(["user", "system", "assistant"]);
+		expect(events.filter((event) => event.type === "message_end").map((event) => event.message)).toEqual(messages);
+		expect(messages[1]).toMatchObject({ toolsAdded: [{ name: "prepared" }] });
+	});
+});
+
 describe("agentLoopContinue with AgentMessage", () => {
 	it("should throw when context has no messages", () => {
 		const context: AgentContext = {
-			systemPrompt: "You are helpful.",
 			messages: [],
 			tools: [],
 		};
@@ -1943,7 +1994,6 @@ describe("agentLoopContinue with AgentMessage", () => {
 		const userMessage: AgentMessage = createUserMessage("Hello");
 
 		const context: AgentContext = {
-			systemPrompt: "You are helpful.",
 			messages: [userMessage],
 			tools: [],
 		};
@@ -1996,7 +2046,6 @@ describe("agentLoopContinue with AgentMessage", () => {
 		};
 
 		const context: AgentContext = {
-			systemPrompt: "You are helpful.",
 			messages: [customMessage as unknown as AgentMessage],
 			tools: [],
 		};

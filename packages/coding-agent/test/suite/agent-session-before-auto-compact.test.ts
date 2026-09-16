@@ -1,5 +1,5 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type Usage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type Usage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/index.ts";
@@ -58,7 +58,10 @@ function replacementTools(onRollover: () => void) {
 }
 
 function entryTypes(harness: Harness): string[] {
-	return harness.sessionManager.getBranch().map((entry) => entry.type);
+	return harness.sessionManager
+		.getBranch()
+		.filter((entry) => entry.type !== "message" || entry.message.role !== "system")
+		.map((entry) => entry.type);
 }
 
 function countType(harness: Harness, type: string): number {
@@ -102,7 +105,7 @@ describe("session_before_auto_compact", () => {
 		harness.setResponses([
 			overflowResponse(),
 			(context) => {
-				retryTexts = context.messages.map(getMessageText);
+				retryTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
 				return fauxAssistantMessage("continued in a fresh window");
 			},
 		]);
@@ -114,7 +117,10 @@ describe("session_before_auto_compact", () => {
 		expect(countType(harness, "context_window")).toBe(1);
 		expect(countType(harness, "compaction")).toBe(0);
 		expect(retryTexts).toEqual([expect.stringContaining("handoff after overflow")]);
-		expect(harness.session.messages.map((m) => m.role)).toEqual(["custom", "assistant"]);
+		expect(harness.session.messages.filter((message) => message.role !== "system").map((m) => m.role)).toEqual([
+			"custom",
+			"assistant",
+		]);
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
@@ -141,7 +147,7 @@ describe("session_before_auto_compact", () => {
 		harness.setResponses([
 			(context) => {
 				hookCallsAtRequest = seen.length;
-				requestTexts = context.messages.map(getMessageText);
+				requestTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
 				return fauxAssistantMessage("done");
 			},
 		]);
@@ -168,7 +174,7 @@ describe("session_before_auto_compact", () => {
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" }),
 			(context) => {
-				secondTexts = context.messages.map(getMessageText);
+				secondTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
 				return fauxAssistantMessage("done");
 			},
 		]);
@@ -208,7 +214,7 @@ describe("session_before_auto_compact", () => {
 			fauxAssistantMessage("w".repeat(40_000)),
 			fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" }),
 			(context) => {
-				secondTexts = context.messages.map(getMessageText);
+				secondTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
 				return fauxAssistantMessage("done");
 			},
 		]);
@@ -242,7 +248,7 @@ describe("session_before_auto_compact", () => {
 			fauxAssistantMessage(fauxToolCall("loader", {}), { stopReason: "toolUse" }),
 			(context) => {
 				hookCallsAtSecondRequest = hookCalls;
-				expect(context.tools?.map((tool) => tool.name)).toEqual(["huge"]);
+				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toEqual(["huge"]);
 				return fauxAssistantMessage("done");
 			},
 		]);
@@ -266,7 +272,7 @@ describe("session_before_auto_compact", () => {
 			fauxAssistantMessage("first done"),
 			(context) => {
 				expect(hookCalls).toBe(1);
-				expect(context.tools?.map((tool) => tool.name)).toEqual(["huge"]);
+				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toEqual(["huge"]);
 				expect(context.messages.map(getMessageText)).toContain("p".repeat(28_000));
 				return fauxAssistantMessage("second done");
 			},
@@ -518,7 +524,7 @@ describe("session_before_auto_compact", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			(context) => {
-				expect(context.tools).toEqual([]);
+				expect(getCurrentTools(context.messages)).toEqual([]);
 				return fauxAssistantMessage("first done");
 			},
 			() => {

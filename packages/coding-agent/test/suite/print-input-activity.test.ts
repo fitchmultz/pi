@@ -100,11 +100,14 @@ describe("print-mode input activity", () => {
 			if (mode === "text") {
 				expect(output).toBe("extension answer\n");
 			} else {
-				const messages = output
+				const messageEvents = output
 					.trim()
 					.split("\n")
 					.map((line) => JSON.parse(line))
-					.filter((event) => event.type === "message_end")
+					.filter((event) => event.type === "message_end");
+				expect(messageEvents.filter((event) => event.message.role === "system")).toHaveLength(1);
+				const messages = messageEvents
+					.filter((event) => event.message.role !== "system")
 					.map((event) => getMessageText(event.message));
 				expect(messages).toEqual([
 					"first",
@@ -165,7 +168,8 @@ describe("print-mode input activity", () => {
 
 		expect(errors).not.toHaveBeenCalled();
 		expect(exitCode).toBe(0);
-		expect(harness.session.messages.map(getMessageText)).toEqual([
+		expect(harness.session.messages[0]?.role).toBe("system");
+		expect(harness.session.messages.filter((message) => message.role !== "system").map(getMessageText)).toEqual([
 			"startup",
 			"startup answer",
 			"first",

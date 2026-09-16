@@ -1,5 +1,11 @@
 import type { AgentTool, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type Model, type Usage } from "@earendil-works/pi-ai";
+import {
+	fauxAssistantMessage,
+	fauxToolCall,
+	getCurrentSystemPrompt,
+	type Model,
+	type Usage,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BuildSystemPromptOptions, ExtensionAPI } from "../../src/index.ts";
@@ -474,7 +480,7 @@ describe("AgentSession model and extension characterization", () => {
 		let sawInjectedUserMessage = false;
 		harness.setResponses([
 			(context) => {
-				providerSystemPrompt = context.systemPrompt ?? "";
+				providerSystemPrompt = getCurrentSystemPrompt(context.messages);
 				sawInjectedUserMessage = context.messages.some(
 					(message) =>
 						message.role === "user" &&
@@ -522,11 +528,11 @@ describe("AgentSession model and extension characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			(context) => {
-				prompts.push(context.systemPrompt ?? "");
+				prompts.push(getCurrentSystemPrompt(context.messages));
 				return fauxAssistantMessage([fauxToolCall("noop", {})], { stopReason: "toolUse" });
 			},
 			(context) => {
-				prompts.push(context.systemPrompt ?? "");
+				prompts.push(getCurrentSystemPrompt(context.messages));
 				return fauxAssistantMessage("done");
 			},
 		]);
@@ -571,7 +577,7 @@ describe("AgentSession model and extension characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			async (context) => {
-				requests.push(context.messages.map(getMessageText));
+				requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
 				markRequestStarted();
 				await responseReleased;
 				return fauxAssistantMessage("done");

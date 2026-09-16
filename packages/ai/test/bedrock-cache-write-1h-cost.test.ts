@@ -59,11 +59,10 @@ vi.mock("@aws-sdk/client-bedrock-runtime", () => {
 });
 
 import { stream as streamBedrock } from "../src/api/bedrock-converse-stream.ts";
-import { getModel } from "../src/compat.ts";
-import type { Context } from "../src/types.ts";
+import { getModel, normalizeContext } from "../src/compat.ts";
 
 const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
-const context: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
+const context = normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] });
 
 describe("Bedrock 1h cache write cost", () => {
 	it("prices the 1h cache details at 2x while preserving the total cache write", async () => {
@@ -72,7 +71,7 @@ describe("Bedrock 1h cache write cost", () => {
 
 		expect(result.usage.cacheWrite).toBe(1_000_000);
 		expect(result.usage.cacheWrite1h).toBe(400_000);
-		// 600k * 6.25/Mtok + 400k * 10/Mtok = 3.75 + 4.0 = 7.75
-		expect(result.usage.cost.cacheWrite).toBeCloseTo(7.75, 10);
+		const expectedCacheWriteCost = (600_000 * model.cost.cacheWrite + 400_000 * model.cost.input * 2) / 1_000_000;
+		expect(result.usage.cost.cacheWrite).toBeCloseTo(expectedCacheWriteCost, 10);
 	});
 });
