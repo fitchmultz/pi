@@ -2,14 +2,19 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	fauxAssistantMessage,
+	getCurrentSystemMessage,
+	getCurrentSystemPrompt,
 	getCurrentTools,
 	getToolStateChanges,
 	type Usage,
 } from "@earendil-works/pi-ai";
+import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createRestartControl } from "../../src/cli/restart-worker.ts";
 import { estimateContextTokens } from "../../src/core/compaction/index.ts";
 import type { ToolDefinition } from "../../src/core/extensions/index.ts";
+import { buildSystemPromptSections, diffSystemPromptSections } from "../../src/core/system-prompt.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function usage(totalTokens: number): Usage {
@@ -132,6 +137,163 @@ describe("AgentSession context usage estimate", () => {
 		const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
 		expect(reported).toBeGreaterThan(0);
 		expect(harness.session.getContextUsage()?.tokens).toBe(reported);
+	});
+
+	it.each(["base", "restart", "sections"])(
+		"keeps reported idle usage and avoids premature next-prompt compaction with %s guidance",
+		async (kind) => {
+			const restart = createRestartControl({ args: [], send: async () => {} });
+			const harness = await createHarness({
+				tools: [],
+				models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+				settings: { compaction: { enabled: true, reserveTokens: 1300, keepRecentTokens: 100 } },
+				extensionFactories:
+					kind === "restart"
+						? [restart.extension]
+						: kind === "sections"
+							? [
+									(pi) => {
+										pi.on("before_agent_start", (event) => {
+											event.systemPromptOptions.sections.policy = "Per-run policy.";
+										});
+									},
+								]
+							: [],
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				fauxAssistantMessage("o".repeat(1000)),
+				fauxAssistantMessage("second"),
+				fauxAssistantMessage("unexpected extra request"),
+			]);
+			await harness.session.prompt("h".repeat(1000));
+			const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+			expect(reported).toBeLessThan(1300);
+			expect.soft(harness.session.getContextUsage()?.tokens).toBe(reported);
+			await harness.session.prompt("again");
+			expect(harness.eventsOfType("compaction_start")).toEqual([]);
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toEqual([]);
+			expect(harness.getPendingResponseCount()).toBe(1);
+			const lastReported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+			expect(harness.session.getContextUsage()?.tokens).toBe(lastReported);
+			harness.session.newContext();
+			expect(harness.sessionManager.getLeafEntry()).toMatchObject({
+				type: "context_window",
+				tokensBefore: lastReported,
+			});
+		},
+	);
+
+	it.each(["tools", "base options", "reload", "navigation"])(
+		"accounts for genuinely pending %s changes after a forced-prompt run",
+		async (change) => {
+			let override = true;
+			const harness = await createHarness({
+				settings: { compaction: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_agent_start", (event) =>
+							override ? { systemPrompt: `${event.systemPrompt}\n\nTemporary guidance.` } : undefined,
+						);
+						pi.registerCommand("update-prompt", {
+							handler: async (_args, ctx) => {
+								ctx.getSystemPromptOptions().customPrompt = "Changed base prompt.";
+							},
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const root = harness.sessionManager.appendCustomEntry("root");
+			harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+			await harness.session.prompt("first");
+			(harness.session.messages.at(-1) as AssistantMessage).usage = usage(8000);
+			expect(harness.session.getContextUsage()?.tokens).toBe(8000);
+			expect(harness.session.systemPrompt).toBe(getCurrentSystemPrompt(harness.session.messages));
+
+			if (change === "tools") harness.session.setActiveToolsByName(["read"]);
+			else if (change === "base options") await harness.session.prompt("/update-prompt");
+			else if (change === "reload") {
+				vi.spyOn(harness.session.resourceLoader, "getSystemPrompt").mockReturnValue("Reloaded base prompt.");
+				// Reload clears compat registrations; retain this harness's local faux stream.
+				harness.session.agent.streamFunction = getApiProvider(harness.faux.api)!.streamSimple;
+				await harness.session.reload();
+			} else await harness.session.navigateTree(root);
+
+			const state = harness.session.state;
+			const baseOptions = harness.session.extensionRunner.createCommandContext().getSystemPromptOptions();
+			const expected = estimateContextTokens(
+				[
+					...state.messages,
+					{
+						role: "system",
+						content: "",
+						sections: diffSystemPromptSections(
+							getCurrentSystemMessage(state.messages)?.sections ?? {},
+							buildSystemPromptSections(baseOptions),
+						),
+						...getToolStateChanges(getCurrentTools(state.messages), state.tools),
+						timestamp: 0,
+					},
+				],
+				{ model: harness.getModel(), useReportedUsage: false },
+			).tokens;
+			expect(harness.session.getContextUsage()?.tokens).toBe(expected);
+			expect(expected).toBeLessThan(8000);
+			expect(harness.session.systemPrompt).not.toContain("Temporary guidance.");
+			override = false;
+			await harness.session.prompt("second");
+			const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+			expect(harness.session.getContextUsage()?.tokens).toBe(reported);
+			expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Temporary guidance.");
+		},
+	);
+
+	it("keeps a base prompt change pending when admission aborts after startup preparation", async () => {
+		const harness = await createHarness({ tools: [] });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("first")]);
+		await harness.session.prompt("first");
+		harness.session.extensionRunner.createCommandContext().getSystemPromptOptions().customPrompt = "Pending change.";
+		await expect(
+			harness.session.prompt("cancel", {
+				preflightResult: (accepted) => {
+					if (accepted) void harness.session.abort();
+				},
+			}),
+		).rejects.toThrow();
+		expect(harness.session.systemPrompt).toContain("Pending change.");
+		expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Pending change.");
+		harness.setResponses([fauxAssistantMessage("second")]);
+		await harness.session.prompt("retry");
+		expect(harness.session.getContextUsage()?.tokens).toBe(
+			(harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens,
+		);
+	});
+
+	it("removes a per-run override on the next request without treating idle as a pending reset", async () => {
+		let override = true;
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) =>
+						override ? { systemPrompt: `${event.systemPrompt}\n\nTemporary guidance.` } : undefined,
+					);
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+		await harness.session.prompt("first");
+		override = false;
+		expect(harness.session.systemPrompt).toContain("Temporary guidance.");
+		await harness.session.prompt("second");
+		expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Temporary guidance.");
+		expect(harness.session.getContextUsage()?.tokens).toBe(
+			(harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens,
+		);
 	});
 
 	it.each([

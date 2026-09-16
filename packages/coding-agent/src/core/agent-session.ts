@@ -417,6 +417,8 @@ export class AgentSession {
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
+	/** Base prompt when the last loadout was prepared; unchanged base inputs are not a pending reset. */
+	private _baseSystemPromptAtLastPreparation?: string;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -644,10 +646,13 @@ export class AgentSession {
 		const options = { model: this.model };
 		if (this._reportedUsageApplies(context)) return estimateContextTokens(context.messages, options);
 		// Include unsent prompt/tool changes without mutating or persisting the transcript.
-		const sections = diffSystemPromptSections(
-			getCurrentSystemMessage(context.messages)?.sections ?? {},
-			buildSystemPromptSections(this._runSystemPromptOptions ?? this._baseSystemPromptOptions),
-		);
+		const pendingOptions = this._getPendingSystemPromptOptions();
+		const sections = pendingOptions
+			? diffSystemPromptSections(
+					getCurrentSystemMessage(context.messages)?.sections ?? {},
+					buildSystemPromptSections(pendingOptions),
+				)
+			: undefined;
 		const changes = getToolStateChanges(getCurrentTools(context.messages), context.tools ?? []);
 		const messages: AgentMessage[] =
 			sections || changes.toolsAdded.length || changes.toolsRemoved.length
@@ -679,11 +684,15 @@ export class AgentSession {
 		if (!prefix) return false;
 		const model = this.model;
 		const tools = context.tools ?? [];
+		const pendingOptions = this._getPendingSystemPromptOptions();
+		const systemPrompt = pendingOptions
+			? buildSystemPrompt(pendingOptions)
+			: getCurrentSystemPrompt(context.messages);
 		return (
 			!!model &&
 			prefix.provider === model.provider &&
 			prefix.model === model.id &&
-			prefix.systemPrompt === this.systemPrompt &&
+			prefix.systemPrompt === systemPrompt &&
 			prefix.toolKeys.length === tools.length &&
 			tools.every(
 				(tool, index) =>
@@ -1196,7 +1205,18 @@ export class AgentSession {
 
 	/** Current effective system prompt, including changes not yet sent to the model. */
 	get systemPrompt(): string {
-		return buildSystemPrompt(this._runSystemPromptOptions ?? this._baseSystemPromptOptions);
+		const pendingOptions = this._getPendingSystemPromptOptions();
+		return pendingOptions ? buildSystemPrompt(pendingOptions) : getCurrentSystemPrompt(this.messages);
+	}
+
+	private _getPendingSystemPromptOptions(): NormalizedBuildSystemPromptOptions | undefined {
+		if (this._runSystemPromptOptions) return this._runSystemPromptOptions;
+		// Ending a run does not undo its before_agent_start prompt. Until the base really changes,
+		// the transcript remains authoritative, including after compaction or a new context window.
+		// Compare rendered inputs so mutable getSystemPromptOptions() edits are detected too.
+		return buildSystemPrompt(this._baseSystemPromptOptions) === this._baseSystemPromptAtLastPreparation
+			? undefined
+			: this._baseSystemPromptOptions;
 	}
 
 	/** Current retry attempt (0 if not retrying) */
@@ -1372,6 +1392,7 @@ export class AgentSession {
 			getCurrentSystemMessage(messages)?.sections ?? {},
 			buildSystemPromptSections(options),
 		);
+		this._baseSystemPromptAtLastPreparation = buildSystemPrompt(this._baseSystemPromptOptions);
 		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
 	}
 
@@ -1401,6 +1422,7 @@ export class AgentSession {
 		this._isAgentRunActive = true;
 		const controller = new AbortController();
 		this._promptAbortController = controller;
+		const previousBaseSystemPrompt = this._baseSystemPromptAtLastPreparation;
 		let started = false;
 		try {
 			const accept = await prepare(controller.signal);
@@ -1425,6 +1447,7 @@ export class AgentSession {
 			if (controller.signal.aborted) this._pendingNewContext = undefined;
 			this._skipNextProviderRequestPreflight = false;
 			this._runSystemPromptOptions = undefined;
+			if (!started) this._baseSystemPromptAtLastPreparation = previousBaseSystemPrompt;
 			// No further retry or continuation can deliver these messages. Recover both queued
 			// and drained-but-undelivered customs without starting another turn.
 			this._preserveUndeliveredCustomMessages(true);
@@ -3798,6 +3821,7 @@ export class AgentSession {
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
 			this._reportedUsagePrefix = undefined;
+			this._baseSystemPromptAtLastPreparation = undefined;
 			this._restoreToolsFromTranscript();
 
 			// Emit session_tree event

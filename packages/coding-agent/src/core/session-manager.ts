@@ -489,7 +489,13 @@ export function buildContextEntries(
 			foundFirstKept = true;
 		}
 		if (foundFirstKept && !(entry.type === "message" && entry.message.role === "system")) {
-			contextEntries.push(entry);
+			// The active checkpoint already includes all retained prompt/tool state. Older
+			// boundaries still contribute their summary/marker, but must not replay that state.
+			contextEntries.push(
+				entry.type === "compaction" || entry.type === "context_window"
+					? { ...entry, systemMessage: undefined }
+					: entry,
+			);
 		}
 	}
 	contextEntries.push(...path.slice(compactionIdx + 1));
