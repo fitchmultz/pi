@@ -308,11 +308,12 @@ describe("AgentSession context usage estimate", () => {
 		let cancel = false;
 		const harness = await createHarness({
 			tools: [],
-			settings: { compaction: { enabled: false } },
+			models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+			settings: { compaction: { enabled: false, reserveTokens: 1300, keepRecentTokens: 100 } },
 			extensionFactories: [
 				createRestartControl({ args: [], send: async () => {} }).extension,
 				(pi) => {
-					for (const name of ["first", "second"])
+					for (const name of ["first", "second", "third"])
 						pi.registerTool({
 							name,
 							label: name,
@@ -327,9 +328,10 @@ describe("AgentSession context usage estimate", () => {
 		});
 		harnesses.push(harness);
 		const session = harness.session;
+		const root = harness.sessionManager.appendCustomEntry("root");
 		session.setActiveToolsByName(["first"]);
-		harness.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer")]);
-		await session.prompt("first input");
+		harness.setResponses([fauxAssistantMessage("o".repeat(1000)), fauxAssistantMessage("second answer")]);
+		await session.prompt("h".repeat(1000));
 		const first = harness.sessionManager.getLeafId()!;
 		const firstPrompt = session.systemPrompt;
 		const firstReported = (session.messages.at(-1) as AssistantMessage).usage.totalTokens;
@@ -339,6 +341,25 @@ describe("AgentSession context usage estimate", () => {
 		await session.navigateTree(first);
 		expect(session.getActiveToolNames()).toEqual(["first"]);
 		expect(session.systemPrompt).toBe(firstPrompt);
+		expect(session.getContextUsage()?.tokens).toBe(firstReported);
+
+		// Navigation supersedes an idle selection, not just the selection from the last request.
+		await session.navigateTree(second);
+		session.setActiveToolsByName(["third"]);
+		await session.navigateTree(first);
+		expect(session.getActiveToolNames()).toEqual(["first"]);
+		expect.soft(session.systemPrompt).toBe(firstPrompt);
+		expect.soft(session.getContextUsage()?.tokens).toBe(firstReported);
+		expect(firstReported).toBeLessThan(1300);
+		session.setAutoCompactionEnabled(true);
+		harness.setResponses([fauxAssistantMessage("continued"), fauxAssistantMessage("unexpected summary")]);
+		await session.prompt("again");
+		expect(harness.eventsOfType("compaction_start")).toEqual([]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		session.setAutoCompactionEnabled(false);
+		await session.navigateTree(root);
+		expect(session.getContextUsage()!.tokens).toBeGreaterThan(0);
+		await session.navigateTree(first);
 		expect(session.getContextUsage()?.tokens).toBe(firstReported);
 
 		const pendingPrompt = "Pending navigation edit ".repeat(2000);

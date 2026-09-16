@@ -417,8 +417,8 @@ export class AgentSession {
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
-	/** Base prompt at preparation/restoration; only subsequent local edits schedule a prompt reset. */
-	private _baseSystemPromptAtLastPreparation?: string;
+	/** Snapshot of base inputs; navigation replaces only its selected tools, preserving other pending edits. */
+	private _baseSystemPromptBaseline!: NormalizedBuildSystemPromptOptions;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -453,14 +453,14 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		const restoredSystemMessage = getCurrentSystemMessage(this.messages);
-		if (restoredSystemMessage) {
-			// Resume itself does not schedule a reset of a persisted before_agent_start override.
-			// Use the saved selection as the baseline so explicit startup tool changes stay pending.
-			this._baseSystemPromptAtLastPreparation = buildSystemPrompt({
-				...this._baseSystemPromptOptions,
-				selectedTools: (restoredSystemMessage.toolsAdded ?? []).map((tool) => tool.name),
-			});
-		}
+		// Resume itself does not schedule a reset of a persisted before_agent_start override.
+		// Use the saved selection as the baseline so explicit startup tool changes stay pending.
+		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions({
+			...this._baseSystemPromptOptions,
+			selectedTools: restoredSystemMessage
+				? (restoredSystemMessage.toolsAdded ?? []).map((tool) => tool.name)
+				: this._baseSystemPromptOptions.selectedTools,
+		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
 	}
 
@@ -1223,7 +1223,9 @@ export class AgentSession {
 		// Ending a run does not undo its before_agent_start prompt. Until the base really changes,
 		// the transcript remains authoritative, including after compaction or a new context window.
 		// Compare rendered inputs so mutable getSystemPromptOptions() edits are detected too.
-		return buildSystemPrompt(this._baseSystemPromptOptions) === this._baseSystemPromptAtLastPreparation
+		// Empty contexts need the initial prompt, but do not erase the baseline used when navigating back.
+		return getCurrentSystemMessage(this.messages) &&
+			buildSystemPrompt(this._baseSystemPromptOptions) === buildSystemPrompt(this._baseSystemPromptBaseline)
 			? undefined
 			: this._baseSystemPromptOptions;
 	}
@@ -1401,18 +1403,14 @@ export class AgentSession {
 			getCurrentSystemMessage(messages)?.sections ?? {},
 			buildSystemPromptSections(options),
 		);
-		this._baseSystemPromptAtLastPreparation = buildSystemPrompt(this._baseSystemPromptOptions);
+		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions(this._baseSystemPromptOptions);
 		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
 	}
 
 	/** Restore the active tool loadout declared by the session transcript, if it declares one. */
 	private _restoreToolsFromTranscript(): void {
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
-		if (!current) {
-			this._baseSystemPromptAtLastPreparation = undefined;
-			return;
-		}
-		const hadPendingPrompt = this._getPendingSystemPromptOptions() !== undefined;
+		if (!current) return;
 		const toolNames = (current.toolsAdded ?? [])
 			.map((tool) => tool.name)
 			.filter((name) => this._toolRegistry.has(name));
@@ -1425,9 +1423,9 @@ export class AgentSession {
 			...this._baseSystemPromptOptions,
 			selectedTools: toolNames,
 		});
-		if (!hadPendingPrompt) {
-			this._baseSystemPromptAtLastPreparation = buildSystemPrompt(this._baseSystemPromptOptions);
-		}
+		// The destination supersedes pending tool selections on both sides of the comparison.
+		// All other baseline inputs remain unchanged, so genuine prompt/resource edits still differ.
+		this._baseSystemPromptBaseline = { ...this._baseSystemPromptBaseline, selectedTools: toolNames };
 	}
 
 	// =========================================================================
@@ -1442,7 +1440,7 @@ export class AgentSession {
 		this._isAgentRunActive = true;
 		const controller = new AbortController();
 		this._promptAbortController = controller;
-		const previousBaseSystemPrompt = this._baseSystemPromptAtLastPreparation;
+		const previousBaseSystemPromptBaseline = this._baseSystemPromptBaseline;
 		let started = false;
 		try {
 			const accept = await prepare(controller.signal);
@@ -1467,7 +1465,7 @@ export class AgentSession {
 			if (controller.signal.aborted) this._pendingNewContext = undefined;
 			this._skipNextProviderRequestPreflight = false;
 			this._runSystemPromptOptions = undefined;
-			if (!started) this._baseSystemPromptAtLastPreparation = previousBaseSystemPrompt;
+			if (!started) this._baseSystemPromptBaseline = previousBaseSystemPromptBaseline;
 			// No further retry or continuation can deliver these messages. Recover both queued
 			// and drained-but-undelivered customs without starting another turn.
 			this._preserveUndeliveredCustomMessages(true);
