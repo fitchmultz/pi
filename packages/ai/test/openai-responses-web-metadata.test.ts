@@ -12,6 +12,7 @@ import { stream as streamCodex } from "../src/api/openai-codex-responses.ts";
 import { convertResponsesMessages, processResponsesStream } from "../src/api/openai-responses-shared.ts";
 import type { AssistantMessage, Model } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 const model: Model<"openai-codex-responses"> = {
 	id: "gpt-5.4",
@@ -148,7 +149,11 @@ describe("Responses web-search metadata", () => {
 		]);
 		expect(output.stopReason).toBe("toolUse");
 		// Metadata is observational, not a new executable/replayable tool type.
-		const replay = convertResponsesMessages(model, { messages: [output] }, new Set([model.provider]));
+		const replay = convertResponsesMessages(
+			model,
+			normalizeContext({ messages: [output] }),
+			new Set([model.provider]),
+		);
 		expect(replay.filter((item) => item.type === "function_call")).toHaveLength(1);
 		expect(replay.some((item) => item.type === "web_search_call")).toBe(false);
 	});
@@ -204,7 +209,7 @@ describe("Responses web-search metadata", () => {
 		let requests = 0;
 		const output = await streamCodex(
 			model,
-			{ messages: [{ role: "user", content: "Fixture", timestamp: 1 }] },
+			normalizeContext({ messages: [{ role: "user", content: "Fixture", timestamp: 1 }] }),
 			{
 				apiKey: token,
 				transport: "sse",

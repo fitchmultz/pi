@@ -11,6 +11,7 @@ import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type { AssistantMessage, Model, ProviderResponse } from "../types.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
+import { normalizeContext } from "../utils/transcript.ts";
 import type { OpenAIResponsesOptions } from "./openai-responses.ts";
 import type { ResponsesDiagnostics } from "./openai-responses-diagnostics.ts";
 import { convertResponsesMessages } from "./openai-responses-shared.ts";
@@ -212,7 +213,7 @@ export async function* streamResponsesWebSocket(
 		}
 		keep = !options.signal?.aborted;
 		if (keep && replayable && incremental && fullInput && output.responseId) {
-			const replay = convertResponsesMessages(model, { messages: [output] }, TOOL_CALL_PROVIDERS, {
+			const replay = convertResponsesMessages(model, normalizeContext({ messages: [output] }), TOOL_CALL_PROVIDERS, {
 				includeSystemPrompt: false,
 				grammarToolInputProperties,
 			}).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");

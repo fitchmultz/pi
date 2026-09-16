@@ -2,13 +2,14 @@ import { Agent, WebSocket } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stream } from "../src/api/openai-codex-responses.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { Model } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 import { createResponsesServer, replyWithOutput, textOutput } from "./responses-websocket-server.ts";
 
 const servers: Awaited<ReturnType<typeof createResponsesServer>>[] = [];
 const dispatcher = new Agent();
 const apiKey = `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "local" } })).toString("base64url")}.test`;
-const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+const context = normalizeContext({ messages: [{ role: "user", content: "hello", timestamp: 1 }] });
 const options = { apiKey, sessionId: "recovery", transport: "auto" as const, timeoutMs: 1000 };
 
 function codexModel(server: Awaited<ReturnType<typeof createResponsesServer>>): Model<"openai-codex-responses"> {

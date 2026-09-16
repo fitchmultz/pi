@@ -598,6 +598,7 @@ describe("AgentSession queue characterization", () => {
 		await promptPromise;
 		expectRetainedNotice(harness);
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"system",
 			"user",
 			"assistant",
 			"toolResult",
@@ -784,7 +785,12 @@ describe("AgentSession queue characterization", () => {
 		expect(ctx.getPendingNextTurnCount()).toBe(0);
 		expect(ctx.hasPendingMessages()).toBe(false);
 		expect(sawCustomMessage).toBe(true);
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"system",
+			"user",
+			"custom",
+			"assistant",
+		]);
 	});
 
 	it("updates pendingMessageCount and removes queued text before message_start is emitted", async () => {

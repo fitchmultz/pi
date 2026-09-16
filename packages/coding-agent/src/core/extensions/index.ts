@@ -110,6 +110,7 @@ export type {
 	ModelSelectEvent,
 	ModelSelectSource,
 	NewContextRequest,
+	NormalizedBuildSystemPromptOptions,
 	PowerShellToolCallEvent,
 	PowerShellToolResultEvent,
 	ProjectTrustContext,

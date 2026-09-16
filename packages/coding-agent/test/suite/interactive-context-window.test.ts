@@ -107,7 +107,7 @@ it.each(["idle", "preflight", "tool batch", "automatic"])(
 					? [fauxAssistantMessage(fauxToolCall("work", { reset: true }), { stopReason: "toolUse" })]
 					: []),
 				(context) => {
-					requests.push(context.messages.map(getMessageText));
+					requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
 					return fauxAssistantMessage(fauxToolCall("work", { reset: false }), { stopReason: "toolUse" });
 				},
 				fauxAssistantMessage("current answer"),

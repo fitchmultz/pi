@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -164,17 +164,26 @@ describe("AgentSession prompt admission", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			async (context) => {
-				requests.push({ systemPrompt: context.systemPrompt, texts: context.messages.map(getMessageText) });
+				requests.push({
+					systemPrompt: getCurrentSystemPrompt(context.messages),
+					texts: context.messages.filter((message) => message.role !== "system").map(getMessageText),
+				});
 				requestEntered.resolve();
 				await responseReleased.promise;
 				return fauxAssistantMessage("owner answer");
 			},
 			(context) => {
-				requests.push({ systemPrompt: context.systemPrompt, texts: context.messages.map(getMessageText) });
+				requests.push({
+					systemPrompt: getCurrentSystemPrompt(context.messages),
+					texts: context.messages.filter((message) => message.role !== "system").map(getMessageText),
+				});
 				return fauxAssistantMessage("second answer");
 			},
 			(context) => {
-				requests.push({ systemPrompt: context.systemPrompt, texts: context.messages.map(getMessageText) });
+				requests.push({
+					systemPrompt: getCurrentSystemPrompt(context.messages),
+					texts: context.messages.filter((message) => message.role !== "system").map(getMessageText),
+				});
 				return fauxAssistantMessage("third answer");
 			},
 		]);
@@ -398,7 +407,7 @@ describe("AgentSession prompt admission", () => {
 				const requests: string[][] = [];
 				harness.setResponses([
 					(context) => {
-						requests.push(context.messages.map(getMessageText));
+						requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
 						return fauxAssistantMessage("recovered");
 					},
 				]);
@@ -472,7 +481,7 @@ describe("AgentSession prompt admission", () => {
 			const requests: string[][] = [];
 			harness.setResponses([
 				(context) => {
-					requests.push(context.messages.map(getMessageText));
+					requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
 					return fauxAssistantMessage("recovered");
 				},
 			]);
@@ -579,7 +588,7 @@ describe("AgentSession prompt admission", () => {
 			const requests: string[][] = [];
 			harness.setResponses([
 				(context) => {
-					requests.push(context.messages.map(getMessageText));
+					requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
 					return fauxAssistantMessage("recovered");
 				},
 				fauxAssistantMessage("follow-up"),
@@ -656,7 +665,7 @@ describe("AgentSession prompt admission", () => {
 		const requests: string[][] = [];
 		harness.setResponses([
 			(context) => {
-				requests.push(context.messages.map(getMessageText));
+				requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
 				return fauxAssistantMessage("answer");
 			},
 		]);
