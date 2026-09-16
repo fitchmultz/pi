@@ -419,6 +419,8 @@ export class AgentSession {
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
 	/** Snapshot of base inputs; navigation replaces only its selected tools, preserving other pending edits. */
 	private _baseSystemPromptBaseline!: NormalizedBuildSystemPromptOptions;
+	/** Startup discovery completes initial inputs only until a loadout has been prepared. */
+	private _hasPreparedPrompt = false;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -1404,6 +1406,7 @@ export class AgentSession {
 			buildSystemPromptSections(options),
 		);
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions(this._baseSystemPromptOptions);
+		this._hasPreparedPrompt = true;
 		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
 	}
 
@@ -3012,7 +3015,19 @@ export class AgentSession {
 		};
 
 		this._resourceLoader.extendResources(extensionPaths);
-		this._rebuildSystemPrompt(this.getActiveToolNames());
+		// Discovery adds skills, prompts and themes; only skills affect the system prompt.
+		// Do not rebuild unrelated inputs and discard local prompt edits or tool choices.
+		if (skillPaths.length === 0) return;
+		const skills = this._resourceLoader.getSkills().skills;
+		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({ ...this._baseSystemPromptOptions, skills });
+		if (reason === "startup" && !this._hasPreparedPrompt) {
+			// These are initial resources, not a pending reset of a resumed before_agent_start prompt.
+			// Adopt only the discovered input, retaining the saved tool selection and other baseline fields.
+			this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions({
+				...this._baseSystemPromptBaseline,
+				skills,
+			});
+		}
 	}
 
 	private buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{

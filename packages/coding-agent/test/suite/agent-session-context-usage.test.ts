@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -17,8 +17,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRestartControl } from "../../src/cli/restart-worker.ts";
 import { estimateContextTokens } from "../../src/core/compaction/index.ts";
 import type { ToolDefinition } from "../../src/core/extensions/index.ts";
+import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { buildSystemPromptSections, diffSystemPromptSections } from "../../src/core/system-prompt.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness } from "./harness.ts";
@@ -255,6 +257,112 @@ describe("AgentSession context usage estimate", () => {
 				expect(getCurrentSystemPrompt(session.messages)).toContain("Changed prompt ");
 			} finally {
 				if (session !== harness.session) session.dispose();
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.each(["unchanged", "tools", "prompt"])(
+		"adopts discovered startup skills on file-backed restart resume with %s inputs",
+		async (change) => {
+			const directory = mkdtempSync(join(tmpdir(), "pi-accounting-resources-"));
+			const skillDir = join(directory, "review-skill");
+			mkdirSync(skillDir);
+			const skillFile = join(skillDir, "SKILL.md");
+			const writeSkill = (description: string) =>
+				writeFileSync(
+					skillFile,
+					`---\nname: review-skill\ndescription: ${description}\n---\nReview instructions.\n`,
+				);
+			writeSkill("d".repeat(400));
+			const makeLoader = async () => {
+				const loader = new DefaultResourceLoader({
+					cwd: directory,
+					agentDir: join(directory, "agent"),
+					settingsManager: SettingsManager.inMemory(),
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+					extensionFactories: [
+						createRestartControl({ args: [], send: async () => {} }).extension,
+						(pi) => {
+							pi.on("resources_discover", () => ({ skillPaths: [skillDir] }));
+						},
+					],
+				});
+				await loader.reload();
+				return loader;
+			};
+			const harness = await createHarness({
+				models: [{ id: "faux-1", contextWindow: 5000, maxTokens: 100 }],
+				settings: { compaction: { enabled: true, reserveTokens: 2500, keepRecentTokens: 100 } },
+				resourceLoader: await makeLoader(),
+				sessionManager: SessionManager.create(directory, directory),
+			});
+			harnesses.push(harness);
+			try {
+				await harness.session.bindExtensions({});
+				harness.setResponses([fauxAssistantMessage("o".repeat(1000))]);
+				await harness.session.prompt("h".repeat(1000));
+				const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+				expect(reported).toBeLessThan(2500);
+				const { session } = await createAgentSession({
+					cwd: harness.tempDir,
+					agentDir: directory,
+					model: harness.getModel(),
+					modelRuntime: harness.session.modelRuntime,
+					settingsManager: harness.settingsManager,
+					resourceLoader: await makeLoader(),
+					sessionManager: SessionManager.open(harness.session.sessionFile!),
+					tools: change === "tools" ? ["read"] : undefined,
+				});
+				try {
+					if (change !== "unchanged") session.setAutoCompactionEnabled(false);
+					if (change === "prompt")
+						session.extensionRunner.createCommandContext().getSystemPromptOptions().customPrompt =
+							"Local edit ".repeat(2000);
+					expect(session.resourceLoader.getSkills().skills).toHaveLength(0);
+					await session.bindExtensions({ onError: () => {} });
+					expect(session.resourceLoader.getSkills().skills).toHaveLength(1);
+					if (change === "unchanged") {
+						expect.soft(session.getContextUsage()?.tokens).toBe(reported);
+						expect.soft(session.systemPrompt).toBe(getCurrentSystemPrompt(session.messages));
+					} else {
+						expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
+						expect(session.getContextUsage()!.tokens).toBeGreaterThan(reported);
+						if (change === "prompt") expect(session.systemPrompt).toContain("Local edit ");
+						else expect(session.getActiveToolNames()).toEqual(["read"]);
+					}
+					const compactions: string[] = [];
+					session.subscribe((event) => {
+						if (event.type === "compaction_start") compactions.push(event.reason);
+					});
+					// Disable faux's optional cache-write simulation, not native accounting/preflight.
+					session.agent.sessionId = undefined;
+					harness.setResponses([fauxAssistantMessage("continued"), fauxAssistantMessage("unexpected summary")]);
+					await session.prompt("again");
+					expect(compactions).toEqual([]);
+					expect(harness.getPendingResponseCount()).toBe(1);
+
+					// Once preparation has occurred, even a later startup discovery is a pending change.
+					session.setAutoCompactionEnabled(false);
+					writeSkill("Later startup guidance ".repeat(30));
+					await session.bindExtensions({});
+					expect(session.systemPrompt).toContain("Later startup guidance");
+					expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
+
+					// Reloaded resource changes also remain pending rather than becoming startup adoption.
+					writeSkill("Changed skill guidance ".repeat(30));
+					await session.reload();
+					expect(session.systemPrompt).toContain("Changed skill guidance");
+					expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
+					expect(session.getContextUsage()!.tokens).toBeGreaterThan(reported);
+				} finally {
+					session.dispose();
+				}
+			} finally {
 				rmSync(directory, { recursive: true, force: true });
 			}
 		},
