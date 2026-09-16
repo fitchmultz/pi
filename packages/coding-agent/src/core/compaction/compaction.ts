@@ -108,8 +108,7 @@ function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | u
 		return undefined;
 	}
 	// System messages are prompt state, not conversation; the compaction entry carries their replay.
-	const message = sessionEntryToContextMessages(entry)[0];
-	return message?.role === "system" ? undefined : message;
+	return sessionEntryToContextMessages(entry).find((message) => message.role !== "system");
 }
 
 /** Result from compact() - SessionManager adds uuid/parentUuid when saving */

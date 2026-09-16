@@ -25,6 +25,7 @@ import {
 	migrateSessionEntries,
 	parseSessionEntries,
 	type SessionEntry,
+	SessionManager,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "../src/core/session-manager.ts";
@@ -521,6 +522,68 @@ describe("buildSessionContext", () => {
 });
 
 describe("prepareCompaction with context windows", () => {
+	// PR50: a window projects [system checkpoint, handoff], not just one message.
+	it.each([false, true])(
+		"preserves checkpoint-window handoffs through compaction (split turn: %s)",
+		async (splitTurn) => {
+			const session = SessionManager.inMemory();
+			const handoff = "Do not deploy without owner approval.";
+			const prompt = "System guidance that must not be summarized.";
+			session.appendMessage({ role: "system", content: prompt, timestamp: 1 });
+			session.appendMessage({ role: "user", content: "Earlier window secret", timestamp: 2 });
+			const windowId = session.appendContextWindow(handoff, 100);
+			expect(session.getEntry(windowId)).toMatchObject({ systemMessage: { role: "system", content: prompt } });
+			session.appendMessage(
+				splitTurn
+					? createAssistantMessage("Current progress")
+					: { role: "user", content: "Continue working", timestamp: 3 },
+			);
+			const recent = splitTurn
+				? createAssistantMessage("Recent work ".repeat(100))
+				: { role: "user" as const, content: "Recent request ".repeat(100), timestamp: 4 };
+			const recentId = session.appendMessage(recent);
+			expect(extractText(session.buildSessionContext().messages)).toContain(handoff);
+
+			const preparation = prepareCompaction(session.getBranch(), {
+				...DEFAULT_COMPACTION_SETTINGS,
+				keepRecentTokens: 100,
+			});
+			expect(preparation).toMatchObject({ firstKeptEntryId: recentId, isSplitTurn: splitTurn });
+			const summaryMessages = splitTurn ? preparation!.turnPrefixMessages : preparation!.messagesToSummarize;
+			expect(summaryMessages[0]).toMatchObject({ role: "custom", customType: "context-window" });
+			expect(extractText(summaryMessages)).toContain(handoff);
+			expect(summaryMessages.some((message) => message.role === "system")).toBe(false);
+
+			let requests = 0;
+			const result = await compact(
+				preparation!,
+				getModel("anthropic", "claude-sonnet-4-5")!,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				(_model, context) => {
+					requests++;
+					const conversation = extractText(context.messages);
+					expect(conversation).toContain(handoff);
+					expect(conversation).not.toContain(prompt);
+					expect(conversation).not.toContain("Earlier window secret");
+					const stream = new AssistantMessageEventStream();
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage(handoff) });
+					return stream;
+				},
+			);
+			session.appendCompaction(result.summary, result.firstKeptEntryId, result.tokensBefore);
+			const reloaded = session.buildSessionContext().messages;
+			expect(requests).toBe(1);
+			expect(reloaded.map((message) => message.role)).toEqual(["system", "compactionSummary", recent.role]);
+			expect(reloaded[0]).toMatchObject({ content: prompt });
+			expect(extractText(reloaded)).toContain(handoff);
+			expect(reloaded[2]).toEqual(recent);
+		},
+	);
+
 	it("never summarizes entries from an earlier window", () => {
 		const oldUser = createMessageEntry(createUserMessage("old secret ".repeat(100)));
 		const oldAssistant = createMessageEntry(createAssistantMessage("old response ".repeat(100)));
