@@ -41,8 +41,8 @@ describe("AgentSession last answer", () => {
 		});
 		onTestFinished(() => resumed.dispose());
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom"]);
-		expect(resumed.messages.map((message) => message.role)).toEqual(["custom"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "custom"]);
+		expect(resumed.messages.map((message) => message.role)).toEqual(["system", "custom"]);
 		expect([liveAnswer, resumed.getLastAssistantText()]).toEqual(["finished", "finished"]);
 		expect(resumed.sessionId).toBe(harness.session.sessionId);
 		expect(harness.faux.state.callCount).toBe(1);
@@ -58,7 +58,9 @@ describe("AgentSession last answer", () => {
 			fauxAssistantMessage("branch B"),
 		]);
 		await harness.session.prompt("start");
-		const root = harness.sessionManager.getBranch()[0]!.id;
+		const root = harness.sessionManager
+			.getBranch()
+			.find((entry) => entry.type === "message" && entry.message.role === "user")!.id;
 		const common = harness.sessionManager.getLeafId()!;
 		await harness.session.prompt("try A");
 		harness.session.newContext();
@@ -72,8 +74,8 @@ describe("AgentSession last answer", () => {
 		const answerA = harness.session.getLastAssistantText();
 		await harness.session.navigateTree(root);
 		const rootAnswer = harness.session.getLastAssistantText();
-		expect(harness.session.messages).toEqual([]);
-		expect(harness.sessionManager.getBranch()).toEqual([]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["system"]);
+		expect(harness.sessionManager.getBranch()).toHaveLength(1);
 		await harness.session.navigateTree(windowB);
 
 		expect([answerA, rootAnswer, harness.session.getLastAssistantText()]).toEqual([

@@ -3,6 +3,7 @@ import { runInNewContext } from "node:vm";
 import { build } from "esbuild";
 import { expect, it } from "vitest";
 import type { streamSimple } from "../src/api/openai-responses.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 import { createResponsesServer, replyWithOutput, textOutput } from "./responses-websocket-server.ts";
 
 it("bundles and runs direct Responses over HTTP without Node socket dependencies", async () => {
@@ -48,7 +49,7 @@ it("bundles and runs direct Responses over HTTP without Node socket dependencies
 		const result = await browser
 			.streamSimple(
 				server.model,
-				{ messages: [{ role: "user", content: "browser input", timestamp: 0 }] },
+				normalizeContext({ messages: [{ role: "user", content: "browser input", timestamp: 0 }] }),
 				{
 					apiKey: "local-key",
 					sessionId: "browser-session",

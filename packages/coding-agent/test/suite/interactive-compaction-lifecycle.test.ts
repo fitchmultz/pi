@@ -2,7 +2,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
-import { estimateContextTokens, prepareCompaction } from "../../src/core/compaction/index.ts";
+import { estimateContextTokens, estimateTokens, prepareCompaction } from "../../src/core/compaction/index.ts";
 import type { StatusIndicator } from "../../src/modes/interactive/components/status-indicator.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
@@ -113,6 +113,9 @@ describe("early compaction lifecycle", () => {
 		);
 		await harness.session.prompt(prefixOnly ? "seed" : "s".repeat(20_000));
 		expect(canSummarize).toEqual([]);
+		const initialPromptTokens = harness.session.messages
+			.filter((message) => message.role === "system")
+			.reduce((total, message) => total + estimateTokens(message), 0);
 
 		const run = harness.session.prompt(prefixOnly ? "finish the current task" : "x".repeat(200_000));
 		let phase: string | undefined;
@@ -121,13 +124,11 @@ describe("early compaction lifecycle", () => {
 			expect(canSummarize).toEqual([false]);
 			expect(harness.session.isCompacting).toBe(true);
 			const tokens = estimateContextTokens(harness.session.messages, {
-				systemPrompt: harness.session.systemPrompt,
-				tools: harness.session.agent.state.tools,
 				useReportedUsage: false,
 			}).tokens;
 			expect(tokens).toBeGreaterThan(48_000);
 			expect(tokens).toBeLessThan(64_000);
-			if (prefixOnly) expect(tokens).toBe(50_009);
+			if (prefixOnly) expect(tokens).toBe(initialPromptTokens + 50_009);
 
 			await view.defaultEditor.onSubmit(queuedText);
 			expect(view.compactionQueuedMessages).toEqual([{ text: queuedText, mode: "steer" }]);

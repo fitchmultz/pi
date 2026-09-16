@@ -102,6 +102,7 @@ export type {
 	MarkdownTransformer,
 	// Events - Message
 	MessageEndEvent,
+	MessageEndEventResult,
 	MessageRenderer,
 	MessageRenderOptions,
 	MessageStartEvent,
@@ -109,6 +110,7 @@ export type {
 	ModelSelectEvent,
 	ModelSelectSource,
 	NewContextRequest,
+	NormalizedBuildSystemPromptOptions,
 	PowerShellToolCallEvent,
 	PowerShellToolResultEvent,
 	ProjectTrustContext,
@@ -157,6 +159,7 @@ export type {
 	SummarizationRetryFinishedEvent,
 	SummarizationRetryScheduledEvent,
 	TerminalInputHandler,
+	ThinkingLevelSelectEvent,
 	// Events - Tool
 	ToolCallEvent,
 	ToolCallEventResult,

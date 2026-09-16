@@ -1,5 +1,11 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, type Usage } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	fauxAssistantMessage,
+	getCurrentTools,
+	getToolStateChanges,
+	type Usage,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { estimateContextTokens } from "../../src/core/compaction/index.ts";
@@ -41,7 +47,7 @@ describe("AgentSession context usage estimate", () => {
 			const scans = [vi.spyOn(sm, "getEntries"), vi.spyOn(sm, "getBranch"), vi.spyOn(sm, "buildContextEntries")];
 			const parents = vi.spyOn(sm, "getEntry");
 			const state = harness.session.agent.state;
-			const options = { model: harness.getModel(), systemPrompt: state.systemPrompt, tools: state.tools };
+			const options = { model: harness.getModel(), systemPrompt: harness.session.systemPrompt, tools: state.tools };
 			const expected =
 				boundary === "compaction"
 					? null
@@ -114,7 +120,7 @@ describe("AgentSession context usage estimate", () => {
 		const harness = await createHarness({ tools: [tool] });
 		harnesses.push(harness);
 
-		const systemPromptChars = harness.session.agent.state.systemPrompt.length;
+		const systemPromptChars = harness.session.systemPrompt.length;
 		expect(systemPromptChars).toBeGreaterThan(1000);
 		const before = harness.session.getContextUsage();
 		// System prompt plus at least the 800 padded description characters of the tool schema.
@@ -190,12 +196,21 @@ describe("AgentSession context usage estimate", () => {
 		} else {
 			const state = harness.session.agent.state;
 			expect(harness.session.getContextUsage()?.tokens).toBe(
-				estimateContextTokens(state.messages, {
-					model: harness.getModel(),
-					systemPrompt: state.systemPrompt,
-					tools: state.tools,
-					useReportedUsage: false,
-				}).tokens,
+				estimateContextTokens(
+					[
+						...state.messages,
+						{
+							role: "system",
+							content: "",
+							...getToolStateChanges(getCurrentTools(state.messages), state.tools),
+							timestamp: Date.now(),
+						},
+					],
+					{
+						model: harness.getModel(),
+						useReportedUsage: false,
+					},
+				).tokens,
 			);
 			expect(harness.session.getContextUsage()?.tokens).not.toBe(before);
 		}

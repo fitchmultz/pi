@@ -12,6 +12,7 @@ import {
 	type Usage,
 	uuidv7,
 } from "@earendil-works/pi-ai";
+import { estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { AgentMessage, AgentTool, ThinkingLevel } from "../../types.ts";
 import { type Context, getTelemetryContext } from "../context.ts";
 import { convertToLlm, createBranchSummaryMessage, createCompactionSummaryMessage } from "../messages.ts";
@@ -295,6 +296,8 @@ export function estimateTokens(message: AgentMessage): number {
 	let chars = 0;
 
 	switch (message.role) {
+		case "system":
+			return estimateMessageTokens(message);
 		case "user": {
 			chars = estimateTextAndImageContentChars(
 				(message as { content: string | Array<{ type: string; text?: string }> }).content,

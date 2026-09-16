@@ -7,15 +7,24 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { APIConnectionError } from "openai/error";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { streamSimple } from "../src/api/openai-responses.ts";
+import { streamSimple as streamSimpleTranscript } from "../src/api/openai-responses.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { AssistantMessageEvent, Context, ProviderResponse, SimpleStreamOptions } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 import {
 	createResponsesServer,
 	type LocalResponsesRequest,
 	replyWithOutput,
 	textOutput,
 } from "./responses-websocket-server.ts";
+
+function streamSimple(
+	model: Parameters<typeof streamSimpleTranscript>[0],
+	context: Context,
+	options?: SimpleStreamOptions,
+) {
+	return streamSimpleTranscript(model, normalizeContext(context), options);
+}
 
 const servers: Awaited<ReturnType<typeof createResponsesServer>>[] = [];
 
@@ -136,6 +145,52 @@ describe("native direct Responses WebSockets", () => {
 			{ status: 101, headers: expect.objectContaining({ "x-request-id": "local-websocket" }) },
 		]);
 	});
+
+	it.each([false, true])(
+		"replays mid-conversation instructions with native support=%s without losing continuation safety",
+		async (supportsMidConvoSystemMessages) => {
+			const server = await createResponsesServer((request) =>
+				replyWithOutput(request, `resp_${server.requests.length}`, [textOutput(String(server.requests.length))]),
+			);
+			servers.push(server);
+			const model = { ...server.model, compat: { supportsMidConvoSystemMessages } };
+			const context: Context = {
+				systemPrompt: "Initial instructions",
+				messages: [{ role: "user", content: "First turn", timestamp: 0 }],
+			};
+			const options = { apiKey: "local-key", sessionId: "system-update-session" };
+			const first = await streamSimple(model, context, options).result();
+			context.messages.push(
+				first,
+				{ role: "system", content: "Updated instructions", timestamp: 1 },
+				{ role: "user", content: "Next turn", timestamp: 2 },
+			);
+			const second = await streamSimple(model, context, options).result();
+			expect(second.stopReason).toBe("stop");
+			const request = server.requests[1].body;
+			expect(request.previous_response_id).toBe(supportsMidConvoSystemMessages ? "resp_1" : undefined);
+			expect(request.input).toEqual(
+				supportsMidConvoSystemMessages
+					? [
+							{ role: "developer", content: "Updated instructions" },
+							{ role: "user", content: [{ type: "input_text", text: "Next turn" }] },
+						]
+					: [
+							{ role: "developer", content: "Initial instructions\n\nUpdated instructions" },
+							{ role: "user", content: [{ type: "input_text", text: "First turn" }] },
+							textOutput("1"),
+							{ role: "user", content: [{ type: "input_text", text: "Next turn" }] },
+						],
+			);
+			context.messages.push(second, { role: "user", content: "Continue", timestamp: 3 });
+			expect((await streamSimple(model, context, options).result()).stopReason).toBe("stop");
+			expect(server.requests[2].body).toMatchObject({
+				previous_response_id: "resp_2",
+				input: [{ role: "user", content: [{ type: "input_text", text: "Continue" }] }],
+			});
+			expect(server.connections).toHaveLength(1);
+		},
+	);
 
 	it.each(["previous_response_not_found", "websocket_connection_limit_reached"])(
 		"recovers %s with full current input on a fresh connection, without duplicate events",
@@ -1006,7 +1061,12 @@ describe("native direct Responses WebSockets", () => {
 		servers.push(server);
 		const model = {
 			...server.model,
-			compat: { supportsOpenAIGrammarTools: true, supportsAdditionalTools: true, supportsStrictMode: true },
+			compat: {
+				supportsOpenAIGrammarTools: true,
+				supportsAdditionalTools: true,
+				supportsStrictMode: true,
+				supportsMidConvoSystemMessages: true,
+			},
 		};
 		const context: Context = {
 			messages: [{ role: "user", content: "load and use the query tool", timestamp: 0 }],
@@ -1014,19 +1074,25 @@ describe("native direct Responses WebSockets", () => {
 		};
 		const options = { apiKey: "local-key", sessionId: "grammar-session", reasoning: "high" as const };
 		const load = await streamSimple(model, context, options).result();
-		context.tools!.push({
-			name: "query",
-			description: "Run a query",
-			parameters: Type.Object({ query: Type.String() }),
-			constrainedSampling: { type: "grammar", variants: { openai_lark: "start: /.+/s" } },
-		});
 		context.messages.push(load, {
 			role: "toolResult",
 			toolCallId: "load_call|fc_load",
 			toolName: "load",
 			content: [{ type: "text", text: "query loaded" }],
-			addedToolNames: ["query"],
 			isError: false,
+			timestamp: 1,
+		});
+		context.messages.push({
+			role: "system",
+			content: "",
+			toolsAdded: [
+				{
+					name: "query",
+					description: "Run a query",
+					parameters: Type.Object({ query: Type.String() }),
+					constrainedSampling: { type: "grammar", variants: { openai_lark: "start: /.+/s" } },
+				},
+			],
 			timestamp: 1,
 		});
 		const query = await streamSimple(model, context, options).result();
