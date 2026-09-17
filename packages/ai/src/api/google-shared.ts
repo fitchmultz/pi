@@ -54,6 +54,10 @@ export function resolveGoogleThinkingLevel<T extends GoogleApiType>(
 	model: Model<T>,
 	level: ThinkingLevel,
 ): ResolvedGoogleThinkingLevel {
+	// Custom Gemma 4 models may omit metadata, but only accept MINIMAL and HIGH.
+	if (model.thinkingLevelMap === undefined && /gemma-?4/i.test(model.id)) {
+		return level === "minimal" || level === "low" ? "minimal" : "high";
+	}
 	const mapped = model.thinkingLevelMap?.[level];
 	const resolvedLevel = typeof mapped === "string" ? mapped.toLowerCase() : level;
 	switch (resolvedLevel) {
@@ -106,6 +110,9 @@ export function toGoogleSdkThinkingLevel(level: GoogleApiThinkingLevel): GoogleS
 
 export function getDisabledGoogleThinkingConfig<T extends GoogleApiType>(model: Model<T>): ThinkingConfig {
 	if (!usesGoogleThinkingLevel(model)) return { thinkingBudget: 0 };
+	if (model.thinkingLevelMap === undefined && /gemma-?4/i.test(model.id)) {
+		return { thinkingLevel: GoogleSdkThinkingLevel.MINIMAL };
+	}
 
 	const fallback = clampThinkingLevel(model, "off");
 	if (fallback === "off") return { thinkingBudget: 0 };

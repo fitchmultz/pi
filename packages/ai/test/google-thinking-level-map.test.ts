@@ -10,7 +10,7 @@ const context = normalizeContext({
 	messages: [{ role: "user", content: "Hello", timestamp: 0 }],
 });
 
-function googleModel(id: string, thinkingLevelMap: ThinkingLevelMap): Model<"google-generative-ai"> {
+function googleModel(id: string, thinkingLevelMap: ThinkingLevelMap | undefined): Model<"google-generative-ai"> {
 	return {
 		id,
 		name: id,
@@ -26,7 +26,7 @@ function googleModel(id: string, thinkingLevelMap: ThinkingLevelMap): Model<"goo
 	};
 }
 
-function vertexModel(id: string, thinkingLevelMap: ThinkingLevelMap): Model<"google-vertex"> {
+function vertexModel(id: string, thinkingLevelMap: ThinkingLevelMap | undefined): Model<"google-vertex"> {
 	return {
 		id,
 		name: id,
@@ -87,12 +87,12 @@ async function captureVertexPayload(
 const googleAdapters = [
 	{
 		name: "Google Generative AI",
-		capture: (id: string, thinkingLevelMap: ThinkingLevelMap, reasoning?: ThinkingLevel) =>
+		capture: (id: string, thinkingLevelMap: ThinkingLevelMap | undefined, reasoning?: ThinkingLevel) =>
 			captureGooglePayload(googleModel(id, thinkingLevelMap), reasoning),
 	},
 	{
 		name: "Google Vertex",
-		capture: (id: string, thinkingLevelMap: ThinkingLevelMap, reasoning?: ThinkingLevel) =>
+		capture: (id: string, thinkingLevelMap: ThinkingLevelMap | undefined, reasoning?: ThinkingLevel) =>
 			captureVertexPayload(vertexModel(id, thinkingLevelMap), reasoning),
 	},
 ] as const;
@@ -133,6 +133,39 @@ describe("Google thinking level maps", () => {
 		expect(() => resolveGoogleThinkingLevel(googleModel("gemini-3.7-flash", {}), "max")).toThrow(
 			"Unsupported Google thinking level mapping for test-google/gemini-3.7-flash: max -> undefined",
 		);
+	});
+
+	it.each(googleAdapters)("preserves Gemma 4 defaults without a thinking map on $name", async ({ capture }) => {
+		for (const id of ["gemma-4-31b-it", "gemma4-31b-it"]) {
+			for (const [reasoning, expected] of [
+				[undefined, "MINIMAL"],
+				["minimal", "MINIMAL"],
+				["low", "MINIMAL"],
+				["medium", "HIGH"],
+				["high", "HIGH"],
+			] as const) {
+				const payload = await capture(id, undefined, reasoning);
+				expect.soft(payload.config?.thinkingConfig).toEqual({
+					...(reasoning && { includeThoughts: true }),
+					thinkingLevel: expected,
+				});
+			}
+		}
+	});
+
+	it.each(googleAdapters)("keeps explicit Gemma 4 thinking maps authoritative on $name", async ({ capture }) => {
+		const map = { off: null, minimal: "HIGH", low: "HIGH", medium: "MINIMAL" };
+		for (const [reasoning, expected] of [
+			[undefined, "HIGH"],
+			["low", "HIGH"],
+			["medium", "MINIMAL"],
+		] as const) {
+			const payload = await capture("gemma-4-31b-it", map, reasoning);
+			expect(payload.config?.thinkingConfig).toEqual({
+				...(reasoning && { includeThoughts: true }),
+				thinkingLevel: expected,
+			});
+		}
 	});
 
 	// Regression test for https://github.com/earendil-works/pi/issues/9455
