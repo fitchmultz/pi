@@ -485,7 +485,6 @@ describe("openai-responses provider defaults", () => {
 		["gpt-5.4", "priority", 2],
 		["gpt-5.5", "priority", 2.5],
 		["gpt-5.5", "flex", 0.5],
-		["gpt-5.5", "fast", 1],
 		["gpt-6-astra", "fast", 2],
 		["gpt-6-astra", "default", 1],
 		["gpt-6-astra", "priority", 2],

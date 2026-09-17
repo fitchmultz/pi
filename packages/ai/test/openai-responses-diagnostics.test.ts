@@ -66,7 +66,7 @@ describe("Responses request diagnostics", () => {
 			requestedServiceTier: "fast",
 			returnedServiceTier: "fast",
 		});
-		expect(result.usage.cost.total).toBe(3);
+		expect(result.usage.cost.total).toBe(provider === "azure-openai-responses" ? 3 : 6);
 	});
 
 	it.each(["openai", "azure-openai-responses"] as const)("records the native SDK timeout for %s", async (provider) => {
