@@ -327,6 +327,7 @@ export class ExtensionRunner {
 	private waitForIdleFn: () => Promise<void> = async () => {};
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
+	private hasPendingSteeringMessagesFn: () => boolean = () => false;
 	private getPendingNextTurnCountFn!: () => number;
 	private getPendingInputCountFn!: () => number;
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
@@ -397,6 +398,7 @@ export class ExtensionRunner {
 		this.getSignalFn = contextActions.getSignal;
 		this.abortFn = contextActions.abort;
 		this.hasPendingMessagesFn = contextActions.hasPendingMessages;
+		this.hasPendingSteeringMessagesFn = contextActions.hasPendingSteeringMessages;
 		this.getPendingNextTurnCountFn = contextActions.getPendingNextTurnCount;
 		this.getPendingInputCountFn = contextActions.getPendingInputCount;
 		this.shutdownHandler = contextActions.shutdown;
@@ -848,6 +850,10 @@ export class ExtensionRunner {
 			hasPendingMessages: () => {
 				runner.assertActive();
 				return runner.hasPendingMessagesFn();
+			},
+			hasPendingSteeringMessages: () => {
+				runner.assertActive();
+				return runner.hasPendingSteeringMessagesFn();
 			},
 			getPendingNextTurnCount: () => {
 				runner.assertActive();

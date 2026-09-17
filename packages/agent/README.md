@@ -379,7 +379,7 @@ agent.clearFollowUpQueue();
 agent.clearAllQueues();
 ```
 
-Use clearSteeringQueue, clearFollowUpQueue, or clearAllQueues to drop queued messages.
+Use clearSteeringQueue, clearFollowUpQueue, or clearAllQueues to drop queued messages. `hasQueuedSteeringMessages()` inspects only pending steering; `hasQueuedMessages()` includes follow-ups. Neither query consumes messages.
 
 When steering messages are detected after a turn completes:
 1. All tool calls from the current assistant message have already finished

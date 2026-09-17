@@ -679,6 +679,7 @@ function getServiceTierCostMultiplier(
 	switch (serviceTier) {
 		case "flex":
 			return 0.5;
+		case "fast":
 		case "priority":
 			return model.id === "gpt-5.5" ? 2.5 : 2;
 		default:
@@ -759,7 +760,7 @@ class CodexApiError extends Error {
 	readonly payload?: Record<string, unknown>;
 
 	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
-		super(message);
+		super(options?.code ? `${options.code}: ${message}` : message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
 		this.payload = options?.payload;

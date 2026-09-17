@@ -1,8 +1,10 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type ImageContent } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, InputEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionRunner, InputEvent } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { KeybindingsManager } from "../../src/core/keybindings.ts";
+import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
 
 async function createWaitingHarness(
@@ -89,6 +91,67 @@ describe("AgentSession queue characterization", () => {
 	afterEach(() => {
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
+		}
+	});
+
+	it.each(["event", "shortcut"] as const)("reports only native steering through the %s context", async (source) => {
+		let shortcutContext: ExtensionContext | undefined;
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = await createWaitingHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerShortcut("ctrl+shift+y", {
+						handler: (ctx) => {
+							shortcutContext = ctx;
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		await waitForToolStart;
+		try {
+			const view = Object.assign(Object.create(InteractiveMode.prototype), {
+				runtimeHost: { session: harness.session },
+				keybindings: new KeybindingsManager(),
+				defaultEditor: {},
+			}) as {
+				setupExtensionShortcuts(runner: ExtensionRunner): void;
+				defaultEditor: { onExtensionShortcut(data: string): boolean };
+			};
+			if (source === "shortcut") {
+				view.setupExtensionShortcuts(harness.session.extensionRunner);
+				expect(view.defaultEditor.onExtensionShortcut("\u001b[121;6u")).toBe(true);
+			}
+			const ctx = source === "shortcut" ? shortcutContext! : harness.session.extensionRunner.createContext();
+			expect(ctx.hasPendingSteeringMessages()).toBe(false);
+			for (const custom of [false, true]) {
+				for (const deliverAs of ["followUp", "steer"] as const) {
+					if (custom)
+						await harness.session.sendCustomMessage(
+							{ customType: "queue-test", content: deliverAs, display: true },
+							{ deliverAs },
+						);
+					else await harness.session[deliverAs](deliverAs);
+					expect(ctx.hasPendingMessages()).toBe(true);
+					expect(ctx.hasPendingSteeringMessages()).toBe(deliverAs === "steer");
+				}
+				harness.session.clearQueue();
+				expect(ctx.hasPendingMessages()).toBe(false);
+				expect(ctx.hasPendingSteeringMessages()).toBe(false);
+			}
+			await harness.session.steer("delivered");
+			expect(ctx.hasPendingSteeringMessages()).toBe(true);
+			releaseToolExecution();
+			await promptPromise;
+			expect(getUserTexts(harness)).toEqual(["start", "delivered"]);
+			expect(ctx.hasPendingSteeringMessages()).toBe(false);
+		} finally {
+			releaseToolExecution();
+			await promptPromise;
 		}
 	});
 
@@ -467,8 +530,10 @@ describe("AgentSession queue characterization", () => {
 			expect(harness.session.agent.hasQueuedMessages()).toBe(true);
 			expect(queued).toBe(true);
 			expect(ctx.hasPendingMessages()).toBe(true);
+			expect(ctx.hasPendingSteeringMessages()).toBe(deliverAs === "steer");
 			expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: [] });
 			expect(ctx.hasPendingMessages()).toBe(false);
+			expect(ctx.hasPendingSteeringMessages()).toBe(false);
 		},
 	);
 
@@ -740,6 +805,7 @@ describe("AgentSession queue characterization", () => {
 			{ triggerTurn: false },
 		);
 		const queued = ctx.hasPendingMessages();
+		expect(ctx.hasPendingSteeringMessages()).toBe(false);
 		releaseToolExecution();
 		await promptPromise;
 
@@ -763,6 +829,7 @@ describe("AgentSession queue characterization", () => {
 		expect(ctx.getPendingNextTurnCount()).toBe(1);
 		expect(ctx.isIdle()).toBe(true);
 		expect(ctx.hasPendingMessages()).toBe(false);
+		expect(ctx.hasPendingSteeringMessages()).toBe(false);
 		expect(harness.session.pendingMessageCount).toBe(0);
 		harness.session.clearQueue();
 		expect(ctx.hasPendingMessages()).toBe(false);

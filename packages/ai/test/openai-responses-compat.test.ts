@@ -485,9 +485,13 @@ describe("openai-responses provider defaults", () => {
 		["gpt-5.4", "priority", 2],
 		["gpt-5.5", "priority", 2.5],
 		["gpt-5.5", "flex", 0.5],
-	] as const)("applies %s %s service-tier cost multiplier", async (modelId, serviceTier, multiplier) => {
+		["gpt-6-astra", "fast", 2],
+		["gpt-6-astra", "default", 1],
+		["gpt-6-astra", "priority", 2],
+		["gpt-6-astra", "flex", 0.5],
+	] as const)("applies %s %s returned service-tier cost multiplier", async (modelId, serviceTier, multiplier) => {
 		const model = getModel("openai", modelId);
-		const tokenCount = 100_000;
+		const tokenCount = 10_000;
 		const tokenScale = tokenCount / 1_000_000;
 		const sse = `${[
 			`data: ${JSON.stringify({
@@ -496,10 +500,10 @@ describe("openai-responses provider defaults", () => {
 					status: "completed",
 					service_tier: serviceTier,
 					usage: {
-						input_tokens: tokenCount,
+						input_tokens: tokenCount * 3,
 						output_tokens: tokenCount,
-						total_tokens: tokenCount * 2,
-						input_tokens_details: { cached_tokens: 0 },
+						total_tokens: tokenCount * 4,
+						input_tokens_details: { cached_tokens: tokenCount, cache_write_tokens: tokenCount },
 					},
 				},
 			})}`,
@@ -514,18 +518,23 @@ describe("openai-responses provider defaults", () => {
 
 		const stream = streamOpenAIResponses(
 			model,
-			normalizeContext({
-				systemPrompt: "sys",
-				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-			}),
-			{ apiKey: "test-key", transport: "sse", serviceTier },
+			normalizeContext({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 }] }),
+			{ apiKey: "test-key", transport: "sse", serviceTier: "priority" },
 		);
 
 		const result = await stream.result();
 
-		expect(result.usage.cost.input).toBe(model.cost.input * multiplier * tokenScale);
-		expect(result.usage.cost.output).toBe(model.cost.output * multiplier * tokenScale);
-		expect(result.usage.cost.total).toBe((model.cost.input + model.cost.output) * multiplier * tokenScale);
+		expect(result.stopReason).toBe("stop");
+		for (const field of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+			expect(result.usage[field]).toBe(tokenCount);
+			expect(result.usage.cost[field]).toBeCloseTo(model.cost[field] * multiplier * tokenScale, 12);
+		}
+		expect(result.usage.cost.total).toBeCloseTo(
+			(model.cost.input + model.cost.output + model.cost.cacheRead + model.cost.cacheWrite) *
+				multiplier *
+				tokenScale,
+			12,
+		);
 	});
 });
 

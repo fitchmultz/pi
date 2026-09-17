@@ -1110,6 +1110,10 @@ pi.on("tool_result", async (event, ctx) => {
 
 Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, compaction, branch summary, automatic retry, or queued continuation. It also stays false once host shutdown begins, before `session_shutdown` handlers run. New native model runs are rejected during shutdown; extension state remains available for cleanup. User Bash and input awaiting native preflight are separate. `ctx.hasPendingMessages()` reports queued steering/follow-up work, including custom messages. It excludes `nextTurn` and context-only asides.
 
+### ctx.hasPendingSteeringMessages()
+
+Returns whether user or custom steering messages await delivery, excluding follow-ups and `nextTurn`/context-only asides. Long-running tools can use this to return early for steering without interrupting for follow-ups. Reading it does not consume messages or prove they have been applied.
+
 ### ctx.isBashRunning()
 
 Returns whether any `AgentSession.executeBash()` call is unfinished. This includes asynchronous `user_bash` handlers, complete replacement results, local/custom operations, and result recording. Concurrent calls remain busy until every call finishes or fails. An abort request is not completion: an interceptor that is still awaiting work keeps this true until it returns. Cancellation during interception prevents subsequent shell execution. This does not report arbitrary extension processes or model tool calls.

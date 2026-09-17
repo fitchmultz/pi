@@ -97,6 +97,7 @@ describe("ExtensionRunner", () => {
 		getSignal: () => undefined,
 		abort: () => {},
 		hasPendingMessages: () => false,
+		hasPendingSteeringMessages: () => false,
 		getPendingNextTurnCount: () => 0,
 		getPendingInputCount: () => 0,
 		shutdown: () => {},

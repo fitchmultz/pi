@@ -3244,6 +3244,7 @@ export class AgentSession {
 					void this.abort();
 				},
 				hasPendingMessages: () => this.hasPendingMessages,
+				hasPendingSteeringMessages: () => this.agent.hasQueuedSteeringMessages(),
 				getPendingNextTurnCount: () => this.pendingNextTurnCount,
 				getPendingInputCount: () => this.pendingInputCount,
 				shutdown: () => {
