@@ -1067,6 +1067,24 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("find tool", () => {
+		it.each([
+			["src/*.ts", ["src/UPPER.TS", "src/main.ts"]],
+			["./src/*.ts", ["src/UPPER.TS", "src/main.ts"]],
+			["src/**/*.ts", ["src/UPPER.TS", "src/main.ts", "src/nested/inner.ts"]],
+			["./src/**/*.ts", ["src/UPPER.TS", "src/main.ts", "src/nested/inner.ts"]],
+			["**/src/**/*.ts", ["packages/api/src/server.ts", "src/UPPER.TS", "src/main.ts", "src/nested/inner.ts"]],
+			["src/*.TS", ["src/UPPER.TS"]],
+		])("matches %s relative to the search directory", async (pattern, expected) => {
+			const root = join(testDir, "Project [v1]");
+			mkdirSync(join(root, "src", "nested"), { recursive: true });
+			mkdirSync(join(root, "packages", "api", "src"), { recursive: true });
+			for (const file of ["src/main.ts", "src/UPPER.TS", "src/nested/inner.ts", "packages/api/src/server.ts"]) {
+				writeFileSync(join(root, file), "export const value = 1;\n");
+			}
+			const result = await findTool.execute("relative-glob", { pattern, path: root });
+			expect(getTextOutput(result).split("\n").sort()).toEqual(expected);
+		});
+
 		it("should include hidden files that are not gitignored", async () => {
 			const hiddenDir = join(testDir, ".secret");
 			mkdirSync(hiddenDir);

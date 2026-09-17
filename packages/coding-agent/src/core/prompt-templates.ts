@@ -25,6 +25,7 @@ export function parseCommandArgs(argsString: string): string[] {
 	const args: string[] = [];
 	let current = "";
 	let inQuote: string | null = null;
+	let started = false;
 
 	for (let i = 0; i < argsString.length; i++) {
 		const char = argsString[i];
@@ -37,17 +38,20 @@ export function parseCommandArgs(argsString: string): string[] {
 			}
 		} else if (char === '"' || char === "'") {
 			inQuote = char;
+			started = true;
 		} else if (/\s/.test(char)) {
-			if (current) {
+			if (started) {
 				args.push(current);
 				current = "";
+				started = false;
 			}
 		} else {
 			current += char;
+			started = true;
 		}
 	}
 
-	if (current) {
+	if (started) {
 		args.push(current);
 	}
 

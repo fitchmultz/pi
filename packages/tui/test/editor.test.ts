@@ -2129,6 +2129,34 @@ describe("Editor component", () => {
 	});
 
 	describe("Autocomplete", () => {
+		for (const [action, keys] of [
+			["delete to line start", ["\x15"]],
+			["delete to line end", ["\x01", "\x0b"]],
+			["delete word backward", ["\x17", "\x17"]],
+			["delete word forward", ["\x01", "\x1bd", "\x1bd"]],
+			["undo", ["\x1b[45;5u"]],
+		] as const) {
+			it(`does not submit a deleted slash command after ${action}`, async () => {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				editor.setAutocompleteProvider(new CombinedAutocompleteProvider([{ name: "quit" }], process.cwd()));
+				let submitted: string | undefined;
+				editor.onSubmit = (text) => {
+					submitted = text;
+				};
+				for (const char of "/qui") editor.handleInput(char);
+				await flushAutocomplete();
+				assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+				for (const key of keys) editor.handleInput(key);
+				assert.strictEqual(editor.getText(), "");
+				assert.strictEqual(editor.isShowingAutocomplete(), false);
+				editor.handleInput("\r");
+				assert.strictEqual(submitted, "");
+				await flushAutocomplete();
+				assert.strictEqual(editor.isShowingAutocomplete(), false);
+			});
+		}
+
 		it("auto-applies single force-file suggestion without showing menu", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
