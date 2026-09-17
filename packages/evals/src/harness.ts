@@ -255,10 +255,9 @@ async function promptAgent(session: AgentSession, input: string, signal: AbortSi
 }
 
 export function verifySystemPrompt(
-	messages: AgentSession["messages"],
+	systemPrompt: string,
 	options: Pick<PiCodingAgentHarnessOptions, "name" | "expectedPiDocumentation">,
 ): string {
-	const systemPrompt = getCurrentSystemPrompt(messages);
 	if (options.expectedPiDocumentation === undefined) return systemPrompt;
 	if (!systemPrompt.includes("\n<rules>\n")) {
 		throw new Error(`Pi system prompt lost its rules in the ${options.name} eval variant.`);
@@ -286,13 +285,17 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 	const isolatedHome = join(root, "home");
 	const agentDir = join(isolatedHome, ".pi", "agent");
 	const extensionFactories: InlineExtension[] = [];
+	let forcedSystemPrompt: string | undefined;
 	if (options.transformSystemPrompt) {
 		const transform = options.transformSystemPrompt;
 		extensionFactories.push({
 			name: "eval-system-prompt-transform",
 			hidden: true,
 			factory: (pi) => {
-				pi.on("before_agent_start", ({ systemPrompt }) => ({ systemPrompt: transform(systemPrompt) }));
+				pi.on("before_agent_start", ({ systemPrompt }) => {
+					forcedSystemPrompt = transform(systemPrompt);
+					return { systemPrompt: forcedSystemPrompt };
+				});
 			},
 		});
 	}
@@ -382,7 +385,9 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 		if (response === undefined) {
 			throw new Error("Pi eval input must include at least one prompt step.");
 		}
-		const systemPrompt = getCurrentSystemPrompt(session.messages);
+		// A forced prompt is not recorded in the transcript, so use the one the transform
+		// extension sent; otherwise the replayed transcript prompt is what the provider received.
+		const systemPrompt = forcedSystemPrompt ?? getCurrentSystemPrompt(session.messages);
 		const stats = session.getSessionStats();
 		const hasPricing = [model.cost, ...(model.cost.tiers ?? [])].some(
 			({ input: inputCost, output: outputCost, cacheRead, cacheWrite }) =>
@@ -405,7 +410,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 				},
 			},
 		};
-		verifySystemPrompt(session.messages, options);
+		verifySystemPrompt(systemPrompt, options);
 		const output =
 			"output" in options ? await options.output({ response, session, systemPrompt, agentDir }) : response;
 		result = { output, ...runDiagnostics };

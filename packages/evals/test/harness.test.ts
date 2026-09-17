@@ -1,5 +1,4 @@
 import { homedir } from "node:os";
-import type { Message } from "@earendil-works/pi-ai";
 import { getDocsPath, getExamplesPath, getReadmePath } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { buildSystemPrompt } from "../../coding-agent/src/core/system-prompt.ts";
@@ -97,18 +96,17 @@ describe("documentation variant", () => {
 		expect(stripped).not.toContain(getExamplesPath());
 	});
 
-	it("verifies the replayed prompt that was sent before a later reload", () => {
+	it("verifies the prompt that was sent", () => {
 		const prompt = buildSystemPrompt({
 			cwd: "/workspace",
 			selectedTools: [...DOCUMENTATION_EVAL_TOOLS],
 		});
 		const stripped = excludePiDocumentation(prompt);
-		const messages: Message[] = [
-			{ role: "system", content: stripped, replace: true, timestamp: 0 },
-			{ role: "user", content: [{ type: "text", text: "Configure Pi" }], timestamp: 1 },
-		];
 
-		expect(verifySystemPrompt(messages, { name: "without_docs", expectedPiDocumentation: false })).toBe(stripped);
+		expect(verifySystemPrompt(stripped, { name: "without_docs", expectedPiDocumentation: false })).toBe(stripped);
+		expect(() => verifySystemPrompt(prompt, { name: "without_docs", expectedPiDocumentation: false })).toThrow(
+			"does not match",
+		);
 	});
 
 	it("fails closed when prompt markers are missing", () => {
