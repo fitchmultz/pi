@@ -35,6 +35,7 @@ import {
 	Spacer,
 	setCapabilityOverrides,
 	setKeybindings,
+	type Terminal,
 	Text,
 	TruncatedText,
 	type TUI,
@@ -378,6 +379,8 @@ export interface InteractiveModeOptions {
 	initialThemeSetting?: string;
 	/** Synchronous host notification before shutdown can yield or re-enter. */
 	onShutdownRequested?: (source: "user" | "extension" | "signal") => void;
+	/** Terminal implementation. Defaults to the current process terminal. */
+	terminal?: Terminal;
 }
 
 export class InteractiveMode {
@@ -548,6 +551,7 @@ export class InteractiveMode {
 			tuiMode,
 			showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 			logDirectory: getAgentDir(),
+			terminal: options.terminal,
 			onRightClickPaste: this.onRightClickPaste,
 			fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
 		});
