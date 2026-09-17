@@ -1611,6 +1611,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	private deleteToStartOfLine(): void {
+		this.cancelAutocomplete();
 		this.exitHistoryBrowsing();
 
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
@@ -1646,6 +1647,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	private deleteToEndOfLine(): void {
+		this.cancelAutocomplete();
 		this.exitHistoryBrowsing();
 
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
@@ -1678,6 +1680,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	private deleteWordBackwards(): void {
+		this.cancelAutocomplete();
 		this.exitHistoryBrowsing();
 
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
@@ -1723,6 +1726,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	private deleteWordForward(): void {
+		this.cancelAutocomplete();
 		this.exitHistoryBrowsing();
 
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
@@ -2109,6 +2113,7 @@ export class Editor implements Component, Focusable {
 		this.exitHistoryBrowsing();
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
+		this.cancelAutocomplete();
 		Object.assign(this.state, snapshot.state);
 		this.pastes = snapshot.pastes;
 		this.pasteCounter = snapshot.pasteCounter;
