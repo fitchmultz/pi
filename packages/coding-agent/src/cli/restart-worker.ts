@@ -223,9 +223,15 @@ export function createRestartControl(options: {
 					ctx.ui.notify("Restart cancelled because the agent run was interrupted.", "warning");
 				}
 			});
-			pi.on("before_agent_start", (event) => ({
-				systemPrompt: `${event.systemPrompt}\n\nTo activate changed extension or runtime code, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. This queues a restart after final idle; it does not replay completed commands.`,
-			}));
+			pi.on("before_agent_start", (event) => {
+				const guidance =
+					'To activate changed extension or runtime code, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. This queues a restart after final idle; it does not replay completed commands.';
+				if (event.systemPromptOptions.forceSystemPrompt !== undefined) {
+					event.systemPromptOptions.forceSystemPrompt += `\n\n${guidance}`;
+				} else {
+					event.systemPromptOptions.sections.restart = guidance;
+				}
+			});
 			pi.registerCommand("restart", {
 				description: "Restart Pi and resume this session; optional text continues the agent afterward",
 				handler: async (message, ctx) => {

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -64,6 +64,49 @@ async function setup(
 }
 
 describe("native restart control at session boundaries", () => {
+	it("retains restart guidance in structured prompt state while tool changes use patches", async () => {
+		const { harness } = await setup();
+		harness.setResponses([fauxAssistantMessage("Ready"), fauxAssistantMessage("Updated")]);
+		await harness.session.prompt("First turn");
+		const first = getCurrentSystemMessage(harness.session.messages);
+		expect.soft(first?.sections?.restart).toContain('pi restart --message "what to continue after restarting"');
+		expect.soft(first?.sections?.restart).toContain("Keep the working runtime and extension files intact");
+		expect.soft(first?.sections?.tools).toContain("bash");
+		const start = harness.session.messages.length;
+		harness.session.setActiveToolsByName(["read"]);
+		await harness.session.prompt("Second turn");
+		const updates = harness.session.messages.slice(start).filter((message) => message.role === "system");
+		expect(updates).toHaveLength(1);
+		expect.soft(updates[0].replace).not.toBe(true);
+		expect.soft(updates[0].content).toBe("");
+		expect.soft(updates[0].sections?.tools).toContain("read");
+		expect.soft(updates[0].sections?.tools).not.toContain("bash");
+		expect.soft(updates[0].sections).not.toHaveProperty("restart");
+		expect.soft(updates[0].sections).not.toHaveProperty("docs");
+		expect(getCurrentSystemMessage(harness.session.messages)?.sections?.restart).toBe(first?.sections?.restart);
+		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("keeps restart guidance when an earlier extension forces the prompt", async () => {
+		const { harness } = await setup({
+			extra: [
+				{
+					name: "forced",
+					factory: (pi) => {
+						pi.on("before_agent_start", () => ({ systemPrompt: "Exact custom instructions." }));
+					},
+				},
+			],
+		});
+		harness.setResponses([fauxAssistantMessage("Ready")]);
+		await harness.session.prompt("First turn");
+		const prompt = getCurrentSystemMessage(harness.session.messages);
+		expect(prompt?.sections).toBeUndefined();
+		expect(prompt?.content).toBe(
+			'Exact custom instructions.\n\nTo activate changed extension or runtime code, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. This queues a restart after final idle; it does not replay completed commands.',
+		);
+	});
+
 	it.skipIf(process.platform === "win32").each([
 		{ name: "short", component: "tmp", keepTemporary: true },
 		{ name: "long ASCII", component: "x".repeat(96), keepTemporary: false },

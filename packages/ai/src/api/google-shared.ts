@@ -54,9 +54,14 @@ export function resolveGoogleThinkingLevel<T extends GoogleApiType>(
 	model: Model<T>,
 	level: ThinkingLevel,
 ): ResolvedGoogleThinkingLevel {
-	// Custom Gemma 4 models may omit metadata, but only accept MINIMAL and HIGH.
-	if (model.thinkingLevelMap === undefined && /gemma-?4/i.test(model.id)) {
-		return level === "minimal" || level === "low" ? "minimal" : "high";
+	// Custom models without metadata retain the original family defaults.
+	if (model.thinkingLevelMap === undefined) {
+		if (/gemini-3(?:\.\d+)?-pro/i.test(model.id)) {
+			return level === "minimal" || level === "low" ? "low" : "high";
+		}
+		if (/gemma-?4/i.test(model.id)) {
+			return level === "minimal" || level === "low" ? "minimal" : "high";
+		}
 	}
 	const mapped = model.thinkingLevelMap?.[level];
 	const resolvedLevel = typeof mapped === "string" ? mapped.toLowerCase() : level;
@@ -75,8 +80,8 @@ export function resolveGoogleThinkingLevel<T extends GoogleApiType>(
 
 /**
  * Whether this model uses Gemini's discrete `thinkingLevel` control instead of
- * the token-based `thinkingBudget` control. Supported levels come from the
- * model's `thinkingLevelMap`; this only selects the Google wire format.
+ * the token-based `thinkingBudget` control. This only selects the Google wire format;
+ * explicit thinking maps take precedence over family defaults.
  */
 export function usesGoogleThinkingLevel<T extends GoogleApiType>(model: Model<T>): boolean {
 	const id = model.id.toLowerCase();
@@ -110,11 +115,7 @@ export function toGoogleSdkThinkingLevel(level: GoogleApiThinkingLevel): GoogleS
 
 export function getDisabledGoogleThinkingConfig<T extends GoogleApiType>(model: Model<T>): ThinkingConfig {
 	if (!usesGoogleThinkingLevel(model)) return { thinkingBudget: 0 };
-	if (model.thinkingLevelMap === undefined && /gemma-?4/i.test(model.id)) {
-		return { thinkingLevel: GoogleSdkThinkingLevel.MINIMAL };
-	}
-
-	const fallback = clampThinkingLevel(model, "off");
+	const fallback = model.thinkingLevelMap === undefined ? "minimal" : clampThinkingLevel(model, "off");
 	if (fallback === "off") return { thinkingBudget: 0 };
 
 	const resolvedLevel = resolveGoogleThinkingLevel(model, fallback);

@@ -135,19 +135,23 @@ describe("Google thinking level maps", () => {
 		);
 	});
 
-	it.each(googleAdapters)("preserves Gemma 4 defaults without a thinking map on $name", async ({ capture }) => {
-		for (const id of ["gemma-4-31b-it", "gemma4-31b-it"]) {
-			for (const [reasoning, expected] of [
-				[undefined, "MINIMAL"],
-				["minimal", "MINIMAL"],
-				["low", "MINIMAL"],
-				["medium", "HIGH"],
-				["high", "HIGH"],
-			] as const) {
+	it.each(googleAdapters)("preserves family defaults without a thinking map on $name", async ({ capture }) => {
+		// Preserve the pre-merge family defaults, including Pro's minimal/medium aliases.
+		for (const [id, levels] of [
+			["gemma-4-31b-it", ["MINIMAL", "MINIMAL", "MINIMAL", "HIGH", "HIGH"]],
+			["gemma4-31b-it", ["MINIMAL", "MINIMAL", "MINIMAL", "HIGH", "HIGH"]],
+			["gemini-3-pro-preview", ["LOW", "LOW", "LOW", "HIGH", "HIGH"]],
+			["gemini-3.1-pro-preview", ["LOW", "LOW", "LOW", "HIGH", "HIGH"]],
+			["gemini-3-flash-preview", ["MINIMAL", "MINIMAL", "LOW", "MEDIUM", "HIGH"]],
+			["gemini-3.1-flash-lite", ["MINIMAL", "MINIMAL", "LOW", "MEDIUM", "HIGH"]],
+			["gemini-flash-latest", ["MINIMAL", "MINIMAL", "LOW", "MEDIUM", "HIGH"]],
+			["gemini-flash-lite-latest", ["MINIMAL", "MINIMAL", "LOW", "MEDIUM", "HIGH"]],
+		] as const) {
+			for (const [index, reasoning] of ([undefined, "minimal", "low", "medium", "high"] as const).entries()) {
 				const payload = await capture(id, undefined, reasoning);
 				expect.soft(payload.config?.thinkingConfig).toEqual({
 					...(reasoning && { includeThoughts: true }),
-					thinkingLevel: expected,
+					thinkingLevel: levels[index],
 				});
 			}
 		}

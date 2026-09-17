@@ -5,6 +5,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	fauxAssistantMessage,
+	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	getToolStateChanges,
@@ -21,7 +22,11 @@ import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import { buildSystemPrompt } from "../../src/core/system-prompt.ts";
+import {
+	buildSystemPrompt,
+	buildSystemPromptSections,
+	diffSystemPromptSections,
+} from "../../src/core/system-prompt.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -319,6 +324,25 @@ describe("AgentSession context usage estimate", () => {
 					tools: change === "tools" ? ["read"] : undefined,
 				});
 				try {
+					const pendingEstimate = () =>
+						estimateContextTokens(
+							[
+								...session.messages,
+								{
+									role: "system",
+									content: "",
+									sections: diffSystemPromptSections(
+										getCurrentSystemMessage(session.messages)?.sections ?? {},
+										buildSystemPromptSections(
+											session.extensionRunner.createCommandContext().getSystemPromptOptions(),
+										),
+									),
+									...getToolStateChanges(getCurrentTools(session.messages), session.state.tools),
+									timestamp: 0,
+								},
+							],
+							{ useReportedUsage: false },
+						).tokens;
 					if (change !== "unchanged") session.setAutoCompactionEnabled(false);
 					if (change === "prompt")
 						session.extensionRunner.createCommandContext().getSystemPromptOptions().customPrompt =
@@ -331,20 +355,8 @@ describe("AgentSession context usage estimate", () => {
 						expect.soft(session.systemPrompt).toBe(getCurrentSystemPrompt(session.messages));
 					} else {
 						expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
-						const pendingTokens = estimateContextTokens(
-							[
-								{
-									role: "system",
-									content: session.systemPrompt,
-									toolsAdded: session.state.tools.map(toToolDeclaration),
-									timestamp: 0,
-								},
-								...session.messages.filter((message) => message.role !== "system"),
-							],
-							{ useReportedUsage: false },
-						).tokens;
-						// Resumed usage has an unknown prefix: retain the larger estimate, not both prompts.
-						expect(session.getContextUsage()!.tokens).toBe(Math.max(reported, pendingTokens));
+						// Structured updates retain the prefix and append only changed sections/tools.
+						expect(session.getContextUsage()!.tokens).toBe(Math.max(reported, pendingEstimate()));
 						if (change === "prompt") expect(session.systemPrompt).toContain("Local edit ");
 						else expect(session.getActiveToolNames()).toEqual(["read"]);
 					}
@@ -371,20 +383,7 @@ describe("AgentSession context usage estimate", () => {
 					await session.reload();
 					expect(session.systemPrompt).toContain("Changed skill guidance");
 					expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
-					expect(session.getContextUsage()!.tokens).toBe(
-						estimateContextTokens(
-							[
-								{
-									role: "system",
-									content: session.systemPrompt,
-									toolsAdded: session.state.tools.map(toToolDeclaration),
-									timestamp: 0,
-								},
-								...session.messages.filter((message) => message.role !== "system"),
-							],
-							{ useReportedUsage: false },
-						).tokens,
-					);
+					expect(session.getContextUsage()!.tokens).toBe(pendingEstimate());
 				} finally {
 					session.dispose();
 				}
