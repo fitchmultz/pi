@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed Vercel AI Gateway replaying unsigned thinking as assistant text ([#9676](https://github.com/earendil-works/pi/issues/9676)).
 - Fixed Google Generative AI and Vertex AI using unsupported thinking levels when reasoning is omitted or when model capabilities differ within a Gemini family ([#9455](https://github.com/earendil-works/pi/issues/9455)).
 - Fixed Anthropic-compatible relays breaking signed thinking replay when they report a different response model, while preserving fallback pricing ([#9188](https://github.com/earendil-works/pi/issues/9188)).
 - Fixed Amazon Bedrock one-hour cache writes being priced at the five-minute rate ([#9457](https://github.com/earendil-works/pi/issues/9457)).

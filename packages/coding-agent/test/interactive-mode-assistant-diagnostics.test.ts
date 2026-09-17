@@ -33,6 +33,16 @@ const message: AssistantMessage = {
 						path: "messages.2.content.0",
 						reason: "prefix_binding_mismatch",
 					},
+					{
+						type: "thinking_dropped",
+						path: "messages.5.content.0",
+						reason: "prefix_binding_mismatch",
+					},
+					{
+						type: "thinking_dropped",
+						path: "messages.8.content.0",
+						reason: "prefix_binding_mismatch",
+					},
 				],
 			},
 		},
@@ -56,7 +66,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 		};
 		maybeShowAssistantDiagnostics.call(enabled, message);
 		const output = stripAnsi(enabled.chatContainer.render(120).join("\n"));
-		expect(output).toContain("Anthropic dropped thinking block: prefix_binding_mismatch at messages.2.content.0");
+		expect(output).toContain("Anthropic dropped 3 thinking blocks (details in session)");
 
 		const disabled = {
 			chatContainer: new ChatContainer(),
