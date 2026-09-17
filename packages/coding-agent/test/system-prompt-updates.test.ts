@@ -9,6 +9,7 @@ import {
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	getSystemMessageText,
+	resolveTranscript,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { getModel } from "@earendil-works/pi-ai/compat";
@@ -17,7 +18,11 @@ import { describe, expect, test } from "vitest";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { buildSystemPromptSections, diffSystemPromptSections } from "../src/core/system-prompt.ts";
+import {
+	buildSystemPromptSections,
+	buildSystemPromptState,
+	diffSystemPromptSections,
+} from "../src/core/system-prompt.ts";
 import type { ExtensionFactory } from "../src/index.ts";
 import { createHarness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./utilities.ts";
@@ -95,12 +100,108 @@ describe("system prompt updates", () => {
 		expect(previous.preamble).toBe("You are A.");
 		expect(diffSystemPromptSections(previous, current)).toEqual({ preamble: "You are B." });
 
-		const override = buildSystemPromptSections({ forceSystemPrompt: "Exact prompt.", cwd: "/tmp" });
-		expect(override).toEqual({ preamble: "Exact prompt." });
-		expect(diffSystemPromptSections(current, override)).toEqual({ preamble: "Exact prompt.", cwd: null });
+		expect(buildSystemPromptState({ forceSystemPrompt: "Exact prompt.", cwd: "/tmp" })).toEqual({
+			content: "Exact prompt.",
+		});
+		expect(buildSystemPromptState({ cwd: "/tmp" })).toEqual({
+			content: "",
+			sections: buildSystemPromptSections({ cwd: "/tmp" }),
+		});
 		expect(() => buildSystemPromptSections({ cwd: "/tmp", sections: { preamble: "x" } })).toThrow(
 			"Invalid system prompt section name",
 		);
+	});
+
+	test("a forced prompt replaces the prompt and tool state and is replayed as the leading prompt", async () => {
+		let turn = 0;
+		const extension: ExtensionFactory = (pi) => {
+			pi.on("before_agent_start", () =>
+				++turn === 2 || turn === 3 ? { systemPrompt: "Exact prompt." } : undefined,
+			);
+		};
+		const harness = await createHarness({ extensionFactories: [extension] });
+		try {
+			const requests: TranscriptContext[] = [];
+			harness.setResponses(
+				["one", "two", "three", "four"].map((text) => (providerContext: TranscriptContext) => {
+					requests.push(providerContext);
+					return fauxAssistantMessage(text);
+				}),
+			);
+			for (const text of ["one", "two", "three", "four"]) await harness.session.prompt(text);
+			const systemMessages = requests.map((request) =>
+				request.messages.filter((message) => message.role === "system"),
+			);
+			expect(systemMessages.map((messages) => messages.length)).toEqual([1, 2, 2, 3]);
+
+			const forced = systemMessages[1]?.at(-1);
+			expect(forced).toEqual({
+				role: "system",
+				content: "Exact prompt.",
+				toolsAdded: systemMessages[0]?.[0]?.toolsAdded,
+				replace: true,
+				timestamp: expect.any(Number),
+			});
+			expect(getCurrentSystemPrompt(requests[2]!.messages)).toBe("Exact prompt.");
+			// Anthropic-style providers keep later system messages in place, but a replacement collapses.
+			expect(resolveTranscript(requests[2]!, true).messages.map((message) => message.role)).toEqual([
+				"system",
+				"user",
+				"assistant",
+				"user",
+				"assistant",
+				"user",
+			]);
+
+			const restored = systemMessages[3]?.at(-1);
+			expect(restored).toMatchObject({ content: "", replace: true, sections: systemMessages[0]?.[0]?.sections });
+			expect(restored?.toolsAdded).toEqual(forced?.toolsAdded);
+			expect(getCurrentSystemPrompt(harness.session.messages)).toBe(harness.session.systemPrompt);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("restores a forced prompt and its tool selection across rollover and tree navigation", async () => {
+		let force = false;
+		const harness = await createHarness({
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) => {
+						if (!force) return;
+						event.systemPromptOptions.selectedTools = ["read"];
+						return { systemPrompt: "Exact checkpoint prompt." };
+					});
+				},
+			],
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage("base"),
+				fauxAssistantMessage("forced"),
+				fauxAssistantMessage("continued"),
+			]);
+			await harness.session.prompt("base");
+			const baseLeaf = harness.sessionManager.getLeafId()!;
+			force = true;
+			await harness.session.prompt("force");
+			harness.session.newContext({ handoff: "Continue the task" });
+			const windowLeaf = harness.sessionManager.getLeafId()!;
+			expect(getCurrentSystemPrompt(harness.session.messages)).toBe("Exact checkpoint prompt.");
+			expect(getCurrentTools(harness.session.messages).map((tool) => tool.name)).toEqual(["read"]);
+			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "custom"]);
+			await harness.session.navigateTree(baseLeaf);
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+			await harness.session.navigateTree(windowLeaf);
+			expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+			expect(harness.session.systemPrompt).toBe("Exact checkpoint prompt.");
+			await harness.session.prompt("continue");
+			expect(getCurrentSystemPrompt(harness.session.messages)).toBe("Exact checkpoint prompt.");
+			expect(harness.session.messages.filter((message) => message.role === "system")).toHaveLength(1);
+		} finally {
+			harness.cleanup();
+		}
 	});
 
 	test("setActiveTools emits prompt sections and tool changes before the next request", async () => {

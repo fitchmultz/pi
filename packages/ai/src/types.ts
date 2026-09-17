@@ -432,9 +432,11 @@ export interface DeferredHandle {
  * The leading system message is the system prompt. Later system messages change it:
  * `content` adds instructions from that point on, `sections` replace or remove named
  * prompt sections, and `toolsAdded`/`toolsRemoved` change the tool set. Replaying
- * every system message in order yields the current prompt and tools. Providers that
- * accept system messages mid-conversation send each one in place; other providers
- * rebuild the leading system message from the replayed state.
+ * every system message in order yields the current prompt and tools. A message with
+ * `replace` discards the replayed state first, so it is a complete new baseline.
+ * Providers that accept system messages mid-conversation send each one in place; other
+ * providers, and every provider after a replacement, rebuild the leading system message
+ * from the replayed state.
  */
 export interface SystemMessage {
 	role: "system";
@@ -451,6 +453,11 @@ export interface SystemMessage {
 	toolsAdded?: Tool[];
 	/** Tools that stop being available at this point. */
 	toolsRemoved?: ToolReference[];
+	/**
+	 * Discard every earlier system message before applying this one, so its `content`,
+	 * `sections`, and `toolsAdded` are the complete prompt and tool state from here on.
+	 */
+	replace?: boolean;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
@@ -477,7 +484,7 @@ export interface AssistantMessage {
 	api: Api;
 	provider: ProviderId;
 	model: string;
-	responseModel?: string; // Concrete `chunk.model` when different from the requested `model` (e.g. OpenRouter `auto` -> `anthropic/...`)
+	responseModel?: string; // Concrete model reported by the provider when different from the requested `model`
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
 	providerThinkingLevel?: string;

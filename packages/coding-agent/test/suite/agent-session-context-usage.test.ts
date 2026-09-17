@@ -9,6 +9,7 @@ import {
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	getToolStateChanges,
+	toToolDeclaration,
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
@@ -21,7 +22,11 @@ import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import { buildSystemPromptSections, diffSystemPromptSections } from "../../src/core/system-prompt.ts";
+import {
+	buildSystemPrompt,
+	buildSystemPromptSections,
+	diffSystemPromptSections,
+} from "../../src/core/system-prompt.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -319,6 +324,25 @@ describe("AgentSession context usage estimate", () => {
 					tools: change === "tools" ? ["read"] : undefined,
 				});
 				try {
+					const pendingEstimate = () =>
+						estimateContextTokens(
+							[
+								...session.messages,
+								{
+									role: "system",
+									content: "",
+									sections: diffSystemPromptSections(
+										getCurrentSystemMessage(session.messages)?.sections ?? {},
+										buildSystemPromptSections(
+											session.extensionRunner.createCommandContext().getSystemPromptOptions(),
+										),
+									),
+									...getToolStateChanges(getCurrentTools(session.messages), session.state.tools),
+									timestamp: 0,
+								},
+							],
+							{ useReportedUsage: false },
+						).tokens;
 					if (change !== "unchanged") session.setAutoCompactionEnabled(false);
 					if (change === "prompt")
 						session.extensionRunner.createCommandContext().getSystemPromptOptions().customPrompt =
@@ -331,7 +355,8 @@ describe("AgentSession context usage estimate", () => {
 						expect.soft(session.systemPrompt).toBe(getCurrentSystemPrompt(session.messages));
 					} else {
 						expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
-						expect(session.getContextUsage()!.tokens).toBeGreaterThan(reported);
+						// Structured updates retain the prefix and append only changed sections/tools.
+						expect(session.getContextUsage()!.tokens).toBe(Math.max(reported, pendingEstimate()));
 						if (change === "prompt") expect(session.systemPrompt).toContain("Local edit ");
 						else expect(session.getActiveToolNames()).toEqual(["read"]);
 					}
@@ -358,7 +383,7 @@ describe("AgentSession context usage estimate", () => {
 					await session.reload();
 					expect(session.systemPrompt).toContain("Changed skill guidance");
 					expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
-					expect(session.getContextUsage()!.tokens).toBeGreaterThan(reported);
+					expect(session.getContextUsage()!.tokens).toBe(pendingEstimate());
 				} finally {
 					session.dispose();
 				}
@@ -529,17 +554,13 @@ describe("AgentSession context usage estimate", () => {
 			const baseOptions = harness.session.extensionRunner.createCommandContext().getSystemPromptOptions();
 			const expected = estimateContextTokens(
 				[
-					...state.messages,
 					{
 						role: "system",
-						content: "",
-						sections: diffSystemPromptSections(
-							getCurrentSystemMessage(state.messages)?.sections ?? {},
-							buildSystemPromptSections(baseOptions),
-						),
-						...getToolStateChanges(getCurrentTools(state.messages), state.tools),
+						content: buildSystemPrompt(baseOptions),
+						toolsAdded: state.tools.map(toToolDeclaration),
 						timestamp: 0,
 					},
+					...state.messages.filter((message) => message.role !== "system"),
 				],
 				{ model: harness.getModel(), useReportedUsage: false },
 			).tokens;
