@@ -9,7 +9,6 @@ import {
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	getSystemMessageText,
-	resolveTranscript,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { getModel } from "@earendil-works/pi-ai/compat";
@@ -112,12 +111,13 @@ describe("system prompt updates", () => {
 		);
 	});
 
-	test("a forced prompt replaces the prompt and tool state and is replayed as the leading prompt", async () => {
+	test("a forced prompt is sent as the leading prompt for the run and never recorded", async () => {
 		let turn = 0;
 		const extension: ExtensionFactory = (pi) => {
-			pi.on("before_agent_start", () =>
-				++turn === 2 || turn === 3 ? { systemPrompt: "Exact prompt." } : undefined,
-			);
+			pi.on("before_agent_start", (event) => {
+				if (++turn === 3) event.systemPromptOptions.sections.plan_mode = "Plan only.";
+				return turn === 2 || turn === 3 ? { systemPrompt: "Exact prompt." } : undefined;
+			});
 		};
 		const harness = await createHarness({ extensionFactories: [extension] });
 		try {
@@ -132,19 +132,20 @@ describe("system prompt updates", () => {
 			const systemMessages = requests.map((request) =>
 				request.messages.filter((message) => message.role === "system"),
 			);
-			expect(systemMessages.map((messages) => messages.length)).toEqual([1, 2, 2, 3]);
+			// Forced turns collapse to one leading message; the unforced fourth turn passes the
+			// recorded head and both plan_mode patches through.
+			expect(systemMessages.map((messages) => messages.length)).toEqual([1, 1, 1, 3]);
 
 			const forced = systemMessages[1]?.at(-1);
 			expect(forced).toEqual({
 				role: "system",
 				content: "Exact prompt.",
 				toolsAdded: systemMessages[0]?.[0]?.toolsAdded,
-				replace: true,
-				timestamp: expect.any(Number),
+				timestamp: systemMessages[0]?.[0]?.timestamp,
 			});
+			expect(systemMessages[2]?.at(-1)).toEqual(forced);
 			expect(getCurrentSystemPrompt(requests[2]!.messages)).toBe("Exact prompt.");
-			// Anthropic-style providers keep later system messages in place, but a replacement collapses.
-			expect(resolveTranscript(requests[2]!, true).messages.map((message) => message.role)).toEqual([
+			expect(requests[2]!.messages.map((message) => message.role)).toEqual([
 				"system",
 				"user",
 				"assistant",
@@ -153,16 +154,22 @@ describe("system prompt updates", () => {
 				"user",
 			]);
 
-			const restored = systemMessages[3]?.at(-1);
-			expect(restored).toMatchObject({ content: "", replace: true, sections: systemMessages[0]?.[0]?.sections });
-			expect(restored?.toolsAdded).toEqual(forced?.toolsAdded);
+			// The transcript only records the structured sections, never the forced text.
+			const recorded = harness.session.messages.flatMap((message) =>
+				message.role === "system" ? [message.sections] : [],
+			);
+			expect(recorded).toEqual([
+				systemMessages[0]?.[0]?.sections,
+				{ plan_mode: "<plan_mode>\nPlan only.\n</plan_mode>" },
+				{ plan_mode: null },
+			]);
 			expect(getCurrentSystemPrompt(harness.session.messages)).toBe(harness.session.systemPrompt);
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	test("restores a forced prompt and its tool selection across rollover and tree navigation", async () => {
+	test("restores structured state and tool selection across rollover and regenerates forced requests", async () => {
 		let force = false;
 		const harness = await createHarness({
 			settings: { compaction: { enabled: false } },
@@ -177,28 +184,175 @@ describe("system prompt updates", () => {
 			],
 		});
 		try {
-			harness.setResponses([
-				fauxAssistantMessage("base"),
-				fauxAssistantMessage("forced"),
-				fauxAssistantMessage("continued"),
-			]);
+			const requests: TranscriptContext[] = [];
+			harness.setResponses(
+				["base", "forced", "continued"].map((text) => (context: TranscriptContext) => {
+					requests.push(context);
+					return fauxAssistantMessage(text);
+				}),
+			);
 			await harness.session.prompt("base");
 			const baseLeaf = harness.sessionManager.getLeafId()!;
 			force = true;
 			await harness.session.prompt("force");
 			harness.session.newContext({ handoff: "Continue the task" });
 			const windowLeaf = harness.sessionManager.getLeafId()!;
-			expect(getCurrentSystemPrompt(harness.session.messages)).toBe("Exact checkpoint prompt.");
+			expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Exact checkpoint prompt.");
+			expect(getCurrentSystemMessage(harness.session.messages)?.sections?.preamble).toBeDefined();
 			expect(getCurrentTools(harness.session.messages).map((tool) => tool.name)).toEqual(["read"]);
 			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "custom"]);
 			await harness.session.navigateTree(baseLeaf);
 			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
 			await harness.session.navigateTree(windowLeaf);
 			expect(harness.session.getActiveToolNames()).toEqual(["read"]);
-			expect(harness.session.systemPrompt).toBe("Exact checkpoint prompt.");
+			expect(harness.session.systemPrompt).toBe(getCurrentSystemPrompt(harness.session.messages));
 			await harness.session.prompt("continue");
-			expect(getCurrentSystemPrompt(harness.session.messages)).toBe("Exact checkpoint prompt.");
+			expect(getCurrentSystemPrompt(requests[1].messages)).toBe("Exact checkpoint prompt.");
+			expect(getCurrentSystemPrompt(requests[2].messages)).toBe("Exact checkpoint prompt.");
+			expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Exact checkpoint prompt.");
+			expect(getCurrentSystemMessage(harness.session.messages)?.sections?.preamble).toBeDefined();
 			expect(harness.session.messages.filter((message) => message.role === "system")).toHaveLength(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("replays a saved replacement on SDK resume and resets its opaque prefix on the next run", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-replacement-resume-"));
+		const harness = await createHarness({
+			sessionManager: SessionManager.create(directory, directory),
+			settings: { compaction: { enabled: false } },
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage("old answer")]);
+			await harness.session.prompt("old question");
+			const read = getCurrentTools(harness.session.messages).find((tool) => tool.name === "read")!;
+			harness.sessionManager.appendMessage({
+				role: "system",
+				content: "Saved exact prompt.",
+				replace: true,
+				toolsAdded: [read],
+				timestamp: 10,
+			});
+			harness.sessionManager.appendMessage({
+				role: "system",
+				content: "",
+				sections: { legacy: "Saved section." },
+				timestamp: 11,
+			});
+			const { session } = await createAgentSession({
+				cwd: harness.tempDir,
+				agentDir: directory,
+				model: harness.getModel(),
+				modelRuntime: harness.session.modelRuntime,
+				settingsManager: harness.settingsManager,
+				resourceLoader: harness.session.resourceLoader,
+				sessionManager: SessionManager.open(harness.session.sessionFile!),
+			});
+			try {
+				expect(session.systemPrompt).toBe("Saved exact prompt.\n\nSaved section.");
+				expect(session.getActiveToolNames()).toEqual(["read"]);
+				expect(getCurrentTools(session.messages)).toEqual([read]);
+				const requests: TranscriptContext[] = [];
+				harness.setResponses(
+					["resumed", "next"].map((text) => (context: TranscriptContext) => {
+						requests.push(context);
+						return fauxAssistantMessage(text);
+					}),
+				);
+				await session.prompt("resume");
+				await session.prompt("next");
+				for (const request of requests) {
+					expect(getCurrentSystemPrompt(request.messages)).not.toContain("Saved ");
+					expect(getCurrentSystemPrompt(request.messages)).toContain("<cwd>");
+					expect(getCurrentTools(request.messages).map((tool) => tool.name)).toEqual(["read"]);
+				}
+				const replacements = session.messages.filter((message) => message.role === "system" && message.replace);
+				expect(replacements).toHaveLength(2); // The saved record and one structured reset, not one per run.
+				expect(getCurrentSystemMessage(session.messages)?.content).toBe("");
+				expect(session.messages).toEqual(session.sessionManager.buildSessionContext().messages);
+			} finally {
+				session.dispose();
+			}
+		} finally {
+			harness.cleanup();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("keeps exact forced guidance across same-run rollover and dynamic tool loading", async () => {
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) => {
+						event.systemPromptOptions.sections.policy = "Structured policy.";
+						return { systemPrompt: "Exact child guidance." };
+					});
+					pi.on("context", (event) => ({
+						messages: [
+							...event.messages,
+							{ role: "system", content: "Context must not override force.", timestamp: 0 },
+						],
+					}));
+					pi.registerTool({
+						name: "load",
+						label: "Load",
+						description: "Load a final tool and start a fresh window",
+						parameters: Type.Object({}),
+						async execute() {
+							pi.registerTool({
+								name: "structured_output",
+								label: "Output",
+								description: "Deliver the result",
+								parameters: Type.Object({ answer: Type.String() }),
+								async execute(_id, params) {
+									return {
+										content: [{ type: "text", text: params.answer }],
+										details: undefined,
+										terminate: true,
+									};
+								},
+							});
+							pi.setActiveTools(["structured_output"]);
+							return { content: [], details: undefined, newContext: { handoff: "Continue here." } };
+						},
+					});
+				},
+			],
+		});
+		try {
+			const requests: TranscriptContext[] = [];
+			const prompts: string[] = [];
+			harness.setResponses(
+				[fauxToolCall("load", {}), fauxToolCall("structured_output", { answer: "done" })].map(
+					(call) => (context: TranscriptContext) => {
+						requests.push(context);
+						prompts.push(harness.session.systemPrompt);
+						return fauxAssistantMessage([call], { stopReason: "toolUse" });
+					},
+				),
+			);
+			await harness.session.prompt("start");
+			expect(requests).toHaveLength(2);
+			expect(prompts).toEqual(["Exact child guidance.", "Exact child guidance."]);
+			for (const request of requests) {
+				expect(getCurrentSystemPrompt(request.messages)).toBe("Exact child guidance.");
+				expect(request.messages.filter((message) => message.role === "system")).toHaveLength(1);
+			}
+			expect(getCurrentTools(requests[0].messages).map((tool) => tool.name)).toEqual(["load"]);
+			expect(getCurrentTools(requests[1].messages).map((tool) => tool.name)).toEqual(["structured_output"]);
+			expect(JSON.stringify(requests[1].messages)).toContain("Continue here.");
+			expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
+			expect(harness.session.messages.at(-1)).toMatchObject({
+				role: "toolResult",
+				toolName: "structured_output",
+				isError: false,
+			});
+			expect(getCurrentSystemPrompt(harness.session.messages)).toContain("Structured policy.");
+			expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Exact child guidance.");
+			expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionContext().messages);
 		} finally {
 			harness.cleanup();
 		}

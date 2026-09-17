@@ -5,11 +5,11 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	fauxAssistantMessage,
+	fauxToolCall,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	getToolStateChanges,
-	toToolDeclaration,
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
@@ -22,11 +22,7 @@ import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import {
-	buildSystemPrompt,
-	buildSystemPromptSections,
-	diffSystemPromptSections,
-} from "../../src/core/system-prompt.ts";
+import { buildSystemPromptSections, diffSystemPromptSections } from "../../src/core/system-prompt.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -554,13 +550,17 @@ describe("AgentSession context usage estimate", () => {
 			const baseOptions = harness.session.extensionRunner.createCommandContext().getSystemPromptOptions();
 			const expected = estimateContextTokens(
 				[
+					...state.messages,
 					{
 						role: "system",
-						content: buildSystemPrompt(baseOptions),
-						toolsAdded: state.tools.map(toToolDeclaration),
+						content: "",
+						sections: diffSystemPromptSections(
+							getCurrentSystemMessage(state.messages)?.sections ?? {},
+							buildSystemPromptSections(baseOptions),
+						),
+						...getToolStateChanges(getCurrentTools(state.messages), state.tools),
 						timestamp: 0,
 					},
-					...state.messages.filter((message) => message.role !== "system"),
 				],
 				{ model: harness.getModel(), useReportedUsage: false },
 			).tokens;
@@ -597,7 +597,7 @@ describe("AgentSession context usage estimate", () => {
 		);
 	});
 
-	it("removes a per-run override on the next request without treating idle as a pending reset", async () => {
+	it("ends a request-only override when the run settles", async () => {
 		let override = true;
 		const harness = await createHarness({
 			tools: [],
@@ -614,12 +614,105 @@ describe("AgentSession context usage estimate", () => {
 		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
 		await harness.session.prompt("first");
 		override = false;
-		expect(harness.session.systemPrompt).toContain("Temporary guidance.");
+		expect(harness.session.systemPrompt).not.toContain("Temporary guidance.");
 		await harness.session.prompt("second");
 		expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Temporary guidance.");
 		expect(harness.session.getContextUsage()?.tokens).toBe(
 			(harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens,
 		);
+	});
+
+	it("checks the next run's forced prompt before deciding whether to roll over", async () => {
+		let starts = 0;
+		const harness = await createHarness({
+			tools: [],
+			models: [{ id: "small", contextWindow: 6000, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, reserveTokens: 2000 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) => {
+						starts++;
+						event.systemPromptOptions.sections.hidden = "Hidden guidance. ".repeat(3000);
+						return { systemPrompt: "Short request-only instructions." };
+					});
+					pi.on("session_before_auto_compact", () => ({ newContext: { handoff: "Unexpected rollover" } }));
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+		await harness.session.prompt("one");
+		const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+		expect(harness.session.getContextUsage()?.tokens).toBe(reported);
+		expect(harness.session.systemPrompt).not.toContain("Short request-only instructions.");
+		await harness.session.prompt("two");
+		expect(starts).toBe(2);
+		expect(harness.eventsOfType("compaction_start")).toEqual([]);
+		expect(harness.eventsOfType("context_window_started")).toEqual([]);
+		expect(harness.session.messages.filter((message) => message.role === "user")).toHaveLength(2);
+		expect(harness.getPendingResponseCount()).toBe(0);
+		// A direct SDK edit to the stored prompt invalidates the last request's usage too.
+		harness.session.agent.state.messages.push({ role: "system", content: "SDK edit", timestamp: Date.now() });
+		expect(harness.session.getContextUsage()?.tokens).toBe(
+			estimateContextTokens(harness.session.messages, { useReportedUsage: false }).tokens,
+		);
+	});
+
+	it("counts the forced request once and reuses its reported usage through hidden section updates", async () => {
+		let options: ReturnType<typeof buildSystemPromptSections> | undefined;
+		const estimates: Array<{ actual: number | null | undefined; expected: number }> = [];
+		const reported: Array<{ actual: number | null | undefined; expected: number }> = [];
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) => {
+						options = event.systemPromptOptions.sections;
+						options.hidden = "Hidden structured guidance. ".repeat(2000);
+						return { systemPrompt: "Only this forced prompt." };
+					});
+					pi.registerTool({
+						name: "update",
+						label: "Update",
+						description: "Update the hidden section",
+						parameters: Type.Object({}),
+						async execute() {
+							options!.hidden = "Different hidden guidance. ".repeat(2000);
+							return { content: [{ type: "text", text: "updated" }], details: undefined };
+						},
+					});
+					pi.on("turn_end", (event, ctx) => {
+						if (event.message.role !== "assistant") throw new Error("expected assistant turn");
+						reported.push({
+							actual: ctx.getContextUsage()?.tokens,
+							expected:
+								event.message.usage.totalTokens +
+								estimateContextTokens(event.toolResults, { useReportedUsage: false }).tokens,
+						});
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses(
+			[
+				fauxAssistantMessage([fauxToolCall("update", {})], { stopReason: "toolUse" }),
+				fauxAssistantMessage("done"),
+			].map((response) => (context) => {
+				estimates.push({
+					actual: harness.session.getContextUsage()?.tokens,
+					expected: estimateContextTokens(context.messages, { model: harness.getModel() }).tokens,
+				});
+				return response;
+			}),
+		);
+		await harness.session.prompt("start");
+		expect(estimates).toHaveLength(2);
+		expect(reported).toHaveLength(2);
+		for (const result of [...estimates, ...reported]) expect(result.actual).toBe(result.expected);
+		expect(getCurrentSystemPrompt(harness.session.messages)).toContain("Different hidden guidance.");
+		expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Only this forced prompt.");
 	});
 
 	it.each([

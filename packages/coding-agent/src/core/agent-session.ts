@@ -125,6 +125,7 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import {
 	buildSystemPrompt,
+	buildSystemPromptSections,
 	buildSystemPromptState,
 	diffSystemPromptSections,
 	type NormalizedBuildSystemPromptOptions,
@@ -325,6 +326,8 @@ interface ProviderRequestPrefix {
 	provider: string;
 	model: string;
 	systemPrompt: string;
+	/** Structured prompt at dispatch; idle usage stays valid when a request-only force ends. */
+	transcriptSystemPrompt: string;
 	toolKeys: readonly string[];
 }
 
@@ -447,6 +450,7 @@ export class AgentSession {
 		this._installAgentNextTurnRefresh();
 		this._installAgentRequestPreflight();
 		this._installAgentContextPersistence();
+		this._installAgentForcedPromptProjection();
 		const shouldStopAfterTurn = this.agent.shouldStopAfterTurn;
 		this.agent.shouldStopAfterTurn = (context, signal) =>
 			this._shutdownAbortController.signal.aborted || shouldStopAfterTurn?.(context, signal) || false;
@@ -656,12 +660,21 @@ export class AgentSession {
 	 */
 	private _estimateContextTokens(context: AgentContext = this.agent.state) {
 		const options = { model: this.model };
-		if (this._reportedUsageApplies(context)) return estimateContextTokens(context.messages, options);
+		if (this._reportedUsageApplies(context)) {
+			const messages =
+				this._runSystemPromptOptions?.forceSystemPrompt === undefined
+					? context.messages
+					: context.messages.filter((message) => message.role !== "system");
+			return estimateContextTokens(messages, options);
+		}
 		// Include unsent prompt/tool changes without mutating or persisting the transcript.
 		const pendingOptions = this._getPendingSystemPromptOptions();
 		const current = getCurrentSystemMessage(context.messages);
 		const desired = pendingOptions ? buildSystemPromptState(pendingOptions) : undefined;
-		const replace = desired && (desired.sections === undefined || (current && current.sections === undefined));
+		const replace =
+			desired &&
+			(desired.sections === undefined ||
+				(current && (current.sections === undefined || contentText(current.content).length > 0)));
 		const sections =
 			desired && !replace ? diffSystemPromptSections(current?.sections ?? {}, desired.sections ?? {}) : undefined;
 		const changes = getToolStateChanges(getCurrentTools(context.messages), context.tools ?? []);
@@ -680,13 +693,18 @@ export class AgentSession {
 				? [...context.messages, { role: "system", content: "", sections, ...changes, timestamp: Date.now() }]
 				: context.messages;
 		// Replacement prompts are sent as one leading checkpoint, not accumulated patches.
-		const estimatedMessages = messages.some(
-			(message, index) => index > 0 && message.role === "system" && message.replace,
-		)
-			? [getCurrentSystemMessage(messages)!, ...messages.filter((message) => message.role !== "system")]
-			: messages;
+		const forced = pendingOptions?.forceSystemPrompt;
+		const estimatedMessages =
+			forced !== undefined ||
+			messages.some((message, index) => index > 0 && message.role === "system" && message.replace)
+				? [getCurrentSystemMessage(messages)!, ...messages.filter((message) => message.role !== "system")]
+				: messages;
 		const fullEstimate = estimateContextTokens(estimatedMessages, { ...options, useReportedUsage: false });
-		if (this._reportedUsagePrefix !== undefined || !this._hasCurrentModelUsageAfterActiveCompaction()) {
+		if (
+			forced !== undefined ||
+			this._reportedUsagePrefix !== undefined ||
+			!this._hasCurrentModelUsageAfterActiveCompaction()
+		) {
 			return fullEstimate;
 		}
 
@@ -719,7 +737,7 @@ export class AgentSession {
 			!!model &&
 			prefix.provider === model.provider &&
 			prefix.model === model.id &&
-			prefix.systemPrompt === systemPrompt &&
+			(pendingOptions ? prefix.systemPrompt : prefix.transcriptSystemPrompt) === systemPrompt &&
 			prefix.toolKeys.length === tools.length &&
 			tools.every(
 				(tool, index) =>
@@ -831,11 +849,13 @@ export class AgentSession {
 			}
 			prepared = this._restorePendingProviderMessages(this._consumeNewContext() ?? prepared);
 			const model = this.model;
+			const systemPrompt = getCurrentSystemPrompt(prepared.messages);
 			this._providerRequestPrefix = model
 				? {
 						provider: model.provider,
 						model: model.id,
-						systemPrompt: getCurrentSystemPrompt(prepared.messages),
+						systemPrompt,
+						transcriptSystemPrompt: systemPrompt,
 						toolKeys: prepared.tools?.map((tool) => this._captureToolPrefix(tool)) ?? [],
 					}
 				: undefined;
@@ -1238,8 +1258,8 @@ export class AgentSession {
 
 	private _getPendingSystemPromptOptions(): NormalizedBuildSystemPromptOptions | undefined {
 		if (this._runSystemPromptOptions) return this._runSystemPromptOptions;
-		// Ending a run does not undo its before_agent_start prompt. Until the base really changes,
-		// the transcript remains authoritative, including after compaction or a new context window.
+		// Structured before_agent_start edits remain in the transcript after a run ends.
+		// Forced text is request-only; saved replacement records still replay until the next run.
 		// Compare rendered inputs so mutable getSystemPromptOptions() edits are detected too.
 		// Empty contexts need the initial prompt, but do not erase the baseline used when navigating back.
 		return getCurrentSystemMessage(this.messages) &&
@@ -1408,9 +1428,9 @@ export class AgentSession {
 	 * from `messages`), or undefined when the prompt is unchanged. Tool changes are declared by
 	 * the agent loop before the request.
 	 *
-	 * A forced prompt is opaque, so entering, changing, or leaving one cannot be expressed as
-	 * a section patch: it returns a `replace` message that discards the replayed state. The
-	 * agent loop fills in the full tool set, since replay through a replacement starts empty.
+	 * A forced prompt does not affect the transcript: the structured sections are still diffed
+	 * and persisted, and the forced text is projected onto the request by
+	 * {@link _installAgentForcedPromptProjection}.
 	 */
 	private _preparePromptAndToolLoadout(
 		options: NormalizedBuildSystemPromptOptions,
@@ -1424,17 +1444,43 @@ export class AgentSession {
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions(this._baseSystemPromptOptions);
 		this._hasPreparedPrompt = true;
 		const current = getCurrentSystemMessage(messages);
-		const desired = buildSystemPromptState(options);
-		const currentIsOpaque = current !== undefined && current.sections === undefined;
-		if (desired.sections === undefined || currentIsOpaque) {
-			const unchanged =
-				currentIsOpaque &&
-				desired.sections === undefined &&
-				contentText(current.content) === contentText(desired.content);
-			return unchanged ? undefined : { role: "system", ...desired, replace: true, timestamp: Date.now() };
+		const desired = buildSystemPromptSections(options);
+		// Saved full-prompt replacements must not become a permanent opaque prefix.
+		if (current && (current.sections === undefined || contentText(current.content).length > 0)) {
+			return { role: "system", content: "", sections: desired, replace: true, timestamp: Date.now() };
 		}
-		const sections = diffSystemPromptSections(current?.sections ?? {}, desired.sections);
+		const sections = diffSystemPromptSections(current?.sections ?? {}, desired);
 		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
+	}
+
+	/**
+	 * Send a forced prompt as the provider's leading system prompt without recording it.
+	 *
+	 * A `before_agent_start` handler that returns `systemPrompt` needs that exact text at the
+	 * head of the request; a mid-conversation system message would leave the original prompt
+	 * in place. The forced text is a rendering of the current prompt, so the transcript keeps
+	 * its structured sections and the request is projected instead: the system messages
+	 * collapse into one head holding the forced text and the current tools. Runs after the
+	 * `context` extension handlers.
+	 */
+	private _installAgentForcedPromptProjection(): void {
+		const previousTransformContext = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
+			const forced = this._runSystemPromptOptions?.forceSystemPrompt;
+			if (this._providerRequestPrefix) {
+				this._providerRequestPrefix.systemPrompt = forced ?? getCurrentSystemPrompt(transformed);
+			}
+			if (forced === undefined) return transformed;
+			const current = getCurrentSystemMessage(transformed);
+			const head: SystemMessage = {
+				role: "system",
+				content: forced,
+				...(current?.toolsAdded ? { toolsAdded: current.toolsAdded } : {}),
+				timestamp: current?.timestamp ?? Date.now(),
+			};
+			return [head, ...transformed.filter((message) => message.role !== "system")];
+		};
 	}
 
 	/** Restore the active tool loadout declared by the session transcript, if it declares one. */
@@ -1698,14 +1744,6 @@ export class AgentSession {
 					throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 				}
 
-				// Check if we need to compact before sending (catches aborted responses).
-				// The user's new prompt is sent below, so do not call agent.continue() here.
-				const lastAssistant = this._findLastAssistantMessage();
-				if (lastAssistant) {
-					await this._checkCompaction(lastAssistant, false);
-				}
-				signal.throwIfAborted();
-
 				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 				if (currentImages) {
 					userContent.push(...currentImages);
@@ -1716,6 +1754,13 @@ export class AgentSession {
 				const nextTurnCount = this._pendingNextTurnMessages.length;
 				messages.push(...this._pendingNextTurnMessages);
 				const startupMessages = await this._prepareAgentStart(expandedText, currentImages);
+				// Renew request-only guidance before checking the budget, but keep compaction
+				// inside admission. Provider preflight also counts the new input and asides.
+				const lastAssistant = this._findLastAssistantMessage();
+				if (lastAssistant) {
+					await this._checkCompaction(lastAssistant, false);
+				}
+				signal.throwIfAborted();
 				messages.unshift(...startupMessages.filter((message) => message.role === "system"));
 				messages.push(...startupMessages.filter((message) => message.role !== "system"));
 				return () => {

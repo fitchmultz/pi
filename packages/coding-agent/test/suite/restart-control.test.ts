@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage, type SystemMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -98,9 +98,16 @@ describe("native restart control at session boundaries", () => {
 				},
 			],
 		});
-		harness.setResponses([fauxAssistantMessage("Ready")]);
+		let prompt: SystemMessage | undefined;
+		harness.setResponses([
+			(context) => {
+				prompt = getCurrentSystemMessage(context.messages);
+				return fauxAssistantMessage("Ready");
+			},
+		]);
 		await harness.session.prompt("First turn");
-		const prompt = getCurrentSystemMessage(harness.session.messages);
+		expect(getCurrentSystemMessage(harness.session.messages)?.content).toBe("");
+		expect(getCurrentSystemMessage(harness.session.messages)?.sections).toBeDefined();
 		expect(prompt?.sections).toBeUndefined();
 		expect(prompt?.content).toBe(
 			'Exact custom instructions.\n\nTo activate changed extension or runtime code, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. This queues a restart after final idle; it does not replay completed commands.',

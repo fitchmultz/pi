@@ -2,7 +2,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
-import { estimateContextTokens, estimateTokens, prepareCompaction } from "../../src/core/compaction/index.ts";
+import { estimateTokens, prepareCompaction } from "../../src/core/compaction/index.ts";
 import type { StatusIndicator } from "../../src/modes/interactive/components/status-indicator.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
@@ -113,9 +113,6 @@ describe("early compaction lifecycle", () => {
 		);
 		await harness.session.prompt(prefixOnly ? "seed" : "s".repeat(20_000));
 		expect(canSummarize).toEqual([]);
-		const initialPromptTokens = harness.session.messages
-			.filter((message) => message.role === "system")
-			.reduce((total, message) => total + estimateTokens(message), 0);
 
 		const run = harness.session.prompt(prefixOnly ? "finish the current task" : "x".repeat(200_000));
 		let phase: string | undefined;
@@ -123,12 +120,15 @@ describe("early compaction lifecycle", () => {
 			await hookStarted;
 			expect(canSummarize).toEqual([false]);
 			expect(harness.session.isCompacting).toBe(true);
-			const tokens = estimateContextTokens(harness.session.messages, {
-				useReportedUsage: false,
-			}).tokens;
+			const tokens = harness.session.getContextUsage()!.tokens!;
 			expect(tokens).toBeGreaterThan(48_000);
 			expect(tokens).toBeLessThan(64_000);
-			if (prefixOnly) expect(tokens).toBe(initialPromptTokens + 50_009);
+			if (prefixOnly) {
+				const conversationTokens = harness.session.messages
+					.filter((message) => message.role !== "system")
+					.reduce((total, message) => total + estimateTokens(message), 0);
+				expect(tokens).toBe(50_000 + conversationTokens);
+			}
 
 			await view.defaultEditor.onSubmit(queuedText);
 			expect(view.compactionQueuedMessages).toEqual([{ text: queuedText, mode: "steer" }]);
@@ -136,7 +136,7 @@ describe("early compaction lifecycle", () => {
 			if (cancel) {
 				view.defaultEditor.onEscape();
 				expect(hookSignal?.aborted).toBe(true);
-				expect(harness.session.agent.signal?.aborted).toBe(false);
+				expect(harness.session.agent.signal?.aborted ?? false).toBe(false);
 			}
 		} finally {
 			releaseHook();

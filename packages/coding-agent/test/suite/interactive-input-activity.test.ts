@@ -381,14 +381,12 @@ describe("native pending input visibility", () => {
 					pi.on("input", (event) => {
 						inputs.push(event.text);
 					});
-					pi.on("session_before_auto_compact", () => ({ newContext: { handoff: "short handoff" } }));
-					pi.on("before_agent_start", async (event) => {
-						if (event.prompt === "first input") {
-							entered.resolve();
-							await released.promise;
-						}
-						return { systemPrompt: "short instructions" };
+					pi.on("session_before_auto_compact", async () => {
+						entered.resolve();
+						await released.promise;
+						return { newContext: { handoff: "short handoff" } };
 					});
+					pi.on("before_agent_start", () => ({ systemPrompt: "short instructions" }));
 				},
 			],
 		});
@@ -410,12 +408,14 @@ describe("native pending input visibility", () => {
 		const flush = view.flushCompactionQueue();
 		try {
 			await entered.promise;
-			expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+			expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
+			expect(harness.eventsOfType("compaction_end")).toHaveLength(0);
 			expect(inputs).toEqual(["first input"]);
 			expect(ctx.getPendingInputCount()).toBe(2);
 			released.resolve();
 			await flush;
 			await harness.session.waitForIdle();
+			expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
 			expect(inputs).toEqual(["first input", "tail input"]);
 			expect(getUserTexts(harness).slice(-2)).toEqual(["first input", "tail input"]);
 			expect(harness.faux.state.callCount).toBe(2);
