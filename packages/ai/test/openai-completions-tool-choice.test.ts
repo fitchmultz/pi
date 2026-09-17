@@ -320,32 +320,35 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("stores z.ai effort metadata", () => {
+		// GLM-5.2 remains listed only in the international Coding Plan.
+		for (const modelId of ["glm-5.2", "glm-5.2-highspeed"] as const) {
+			const model = getModel("zai", modelId)!;
+			expect(model.compat?.supportsReasoningEffort).toBe(true);
+			expect(model.thinkingLevelMap).toEqual({
+				off: "none",
+				minimal: null,
+				low: null,
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: "max",
+			});
+		}
+
 		for (const provider of ["zai", "zai-coding-cn"] as const) {
-			for (const modelId of ["glm-5.2", "glm-5.2-highspeed"] as const) {
-				const model = getModel(provider, modelId)!;
-				expect(model.compat?.supportsReasoningEffort).toBe(true);
-				expect(model.thinkingLevelMap).toEqual({
-					off: "none",
+			for (const modelId of ["glm-5.3", "glm-5.3-highspeed"] as const) {
+				const glm53 = getModel(provider, modelId)!;
+				expect(glm53.compat?.supportsReasoningEffort).toBe(true);
+				expect(glm53.thinkingLevelMap).toEqual({
+					off: null,
 					minimal: null,
-					low: null,
+					low: "low",
 					medium: null,
 					high: "high",
 					xhigh: null,
 					max: "max",
 				});
 			}
-
-			const glm53 = getModel(provider, "glm-5.3")!;
-			expect(glm53.compat?.supportsReasoningEffort).toBe(true);
-			expect(glm53.thinkingLevelMap).toEqual({
-				off: null,
-				minimal: null,
-				low: "low",
-				medium: null,
-				high: "high",
-				xhigh: null,
-				max: "max",
-			});
 		}
 	});
 
