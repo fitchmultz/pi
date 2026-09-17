@@ -352,6 +352,11 @@ export class Agent {
 		return [...this.steeringQueue.take(predicate), ...this.followUpQueue.take(predicate)];
 	}
 
+	/** Returns true when steering messages await delivery, excluding follow-ups. */
+	hasQueuedSteeringMessages(): boolean {
+		return this.steeringQueue.hasItems();
+	}
+
 	/** Returns true when either queue still contains pending messages. */
 	hasQueuedMessages(): boolean {
 		return this.steeringQueue.hasItems() || this.followUpQueue.hasItems();

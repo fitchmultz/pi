@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { stream } from "../src/api/openai-codex-responses.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { Model } from "../src/types.ts";
+import { isRetryableAssistantError } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 import { createResponsesServer, replyWithOutput, textOutput } from "./responses-websocket-server.ts";
 
@@ -34,6 +35,33 @@ afterEach(async () => {
 });
 
 describe("Codex connection recovery with real sockets", () => {
+	it.each(["sse", "websocket"] as const)(
+		"preserves streamed error codes for native retry decisions over %s",
+		async (transport) => {
+			for (const type of ["response.failed", "error"]) {
+				for (const code of ["server_error", "invalid_request_error", "insufficient_quota", undefined]) {
+					const error = { code, message: "Sorry, something went wrong." };
+					const server = await createResponsesServer((request) => {
+						request.send(
+							type === "response.failed" ? { type, response: { status: "failed", error } } : { type, error },
+						);
+					});
+					const result = await stream(
+						codexModel(server),
+						normalizeContext({
+							messages: [{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: 1 }],
+						}),
+						{ ...options, transport },
+					).result();
+					expect(result.stopReason).toBe("error");
+					if (code) expect(result.errorMessage).toContain(code);
+					expect(isRetryableAssistantError(result)).toBe(code === "server_error");
+					expect(server.requests).toHaveLength(1);
+				}
+			}
+		},
+	);
+
 	it("reconnects after metadata-only loss without emitting an error or retaining the failed response ID", async () => {
 		const server = await createResponsesServer((request) => {
 			if (server.requests.length === 1) {

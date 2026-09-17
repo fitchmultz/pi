@@ -342,6 +342,8 @@ export interface ExtensionContext {
 	abort(): void;
 	/** Whether steering/follow-up messages await delivery, including custom messages. Excludes nextTurn/context-only asides. */
 	hasPendingMessages(): boolean;
+	/** Whether user or custom steering messages await delivery. Excludes follow-ups and nextTurn/context-only asides. */
+	hasPendingSteeringMessages(): boolean;
 	/** Number of unpersisted custom messages queued with deliverAs: "nextTurn". */
 	getPendingNextTurnCount(): number;
 	/** Submitted inputs awaiting native preflight or held in the current mode's input queues. Excludes dispatched extension commands. */
@@ -1814,6 +1816,7 @@ export interface ExtensionContextActions {
 	getSignal: () => AbortSignal | undefined;
 	abort: () => void;
 	hasPendingMessages: () => boolean;
+	hasPendingSteeringMessages: () => boolean;
 	getPendingNextTurnCount: () => number;
 	getPendingInputCount: () => number;
 	shutdown: () => void;

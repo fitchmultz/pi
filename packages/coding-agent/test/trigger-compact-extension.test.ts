@@ -18,6 +18,7 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		signal: undefined,
 		abort: vi.fn(),
 		hasPendingMessages: () => false,
+		hasPendingSteeringMessages: () => false,
 		getPendingNextTurnCount: () => 0,
 		getPendingInputCount: () => 0,
 		shutdown: vi.fn(),
