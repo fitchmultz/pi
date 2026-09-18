@@ -75,6 +75,8 @@ export interface SessionCheckpoint {
 	header: SessionHeader;
 	entries: SessionEntry[];
 	queues: SessionCheckpointQueues;
+	/** Native registry restrictions, not inferred from the active/known tool names. Absent on older v1 artifacts. */
+	toolConfiguration?: { allowedToolNames?: string[]; excludedToolNames?: string[]; noBuiltinTools?: boolean };
 	/** Exact native cycling scope, including session-only picker changes. Absent on older artifacts. */
 	scopedModels?: Array<{ provider: string; id: string; thinkingLevel?: RestartCheckpoint["thinkingLevel"] }>;
 	boundary: CheckpointBoundary;
@@ -124,8 +126,11 @@ export function prepareCheckpointExit(path: string): (checkpoint: SessionCheckpo
 	if (!isAbsolute(path)) throw new Error(`${CHECKPOINT_EXIT_PATH_ENV} must be absolute`);
 	if (!statSync(dirname(path)).isDirectory()) throw new Error("Checkpoint exit parent must be a directory");
 	// Never clear an unrelated file or native journal merely because an environment variable names it.
-	if (existsSync(path)) readSessionCheckpoint(path);
-	rmSync(path, { force: true });
+	if (existsSync(path)) {
+		const previous = readSessionCheckpoint(path);
+		// Revoke completed-exit proof without destroying a possible cold-restore input.
+		if (previous.completedExit) writeSessionCheckpoint(path, { ...previous, completedExit: undefined });
+	}
 	return (checkpoint) => {
 		if (resolve(checkpoint.selection.sessionFile) === resolve(path))
 			throw new Error("Exit checkpoint path must not replace the native journal");
@@ -196,14 +201,9 @@ export function openSessionCheckpoint(checkpoint: SessionCheckpoint): SessionMan
 export function restoreSessionCheckpoint(session: AgentSession, checkpoint: SessionCheckpoint): void {
 	if (session.sessionId !== checkpoint.selection.sessionId) throw new Error("Checkpoint session identity mismatch");
 	const model = checkpoint.selection.model;
-	if (model) {
-		const resolved = session.modelRuntime.getModel(model.provider, model.id);
-		if (!resolved) throw new Error(`Checkpoint model unavailable: ${model.provider}/${model.id}`);
-		session.agent.state.model = resolved;
-	}
-	const available = new Set(session.getAllTools().map((tool) => tool.name));
-	if (checkpoint.selection.activeTools.some((name) => !available.has(name)))
-		throw new Error("Checkpoint tools unavailable");
+	const resolved = model ? session.modelRuntime.getModel(model.provider, model.id) : undefined;
+	if (model && !resolved) throw new Error(`Checkpoint model unavailable: ${model.provider}/${model.id}`);
+	session.agent.selectedModel = resolved;
 	if (checkpoint.scopedModels) {
 		session.setScopedModels(
 			checkpoint.scopedModels.map((scoped) => {
@@ -214,6 +214,6 @@ export function restoreSessionCheckpoint(session: AgentSession, checkpoint: Sess
 		);
 	}
 	session.agent.state.thinkingLevel = checkpoint.selection.thinkingLevel;
-	session.setActiveToolsByName(checkpoint.selection.activeTools);
+	session.restoreCheckpointTools(checkpoint.selection.activeTools, checkpoint.toolConfiguration);
 	session.restoreCheckpointQueues(checkpoint.queues);
 }

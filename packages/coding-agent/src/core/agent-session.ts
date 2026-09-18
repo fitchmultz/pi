@@ -249,6 +249,8 @@ export interface AgentSessionConfig {
 	modelRuntime: ModelRuntime;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: string[];
+	/** Suppress default built-ins, retaining extension tools and explicit selection. */
+	noBuiltinTools?: boolean;
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
 	/** Optional denylist of tool names. When provided, these tool names are not exposed. */
@@ -377,6 +379,7 @@ export class AgentSession {
 	private _settling = 0;
 	private _checkpointHeld = false;
 	private _checkpointRestored = false;
+	private _checkpointActiveTools?: string[];
 	private _checkpointEntryPersistence?: AbortSignal;
 	private readonly _shutdownCheckpointWaiters = new Set<() => void>();
 	private _checkpointRequest?: {
@@ -417,6 +420,7 @@ export class AgentSession {
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
+	private _noBuiltinTools: boolean;
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
@@ -458,6 +462,7 @@ export class AgentSession {
 		this._modelRuntime = config.modelRuntime;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
+		this._noBuiltinTools = config.noBuiltinTools ?? false;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
@@ -944,7 +949,7 @@ export class AgentSession {
 	}
 
 	private _resolveIdleWaitIfIdle(): void {
-		this._notifyShutdownCheckpointWaiters();
+		this.notifyCheckpointStateChanged();
 		if (!this.isIdle || !this._resolveIdleWait) {
 			return;
 		}
@@ -1261,7 +1266,7 @@ export class AgentSession {
 
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
-		return this.agent.state.model;
+		return this.agent.selectedModel;
 	}
 
 	/** Current thinking level */
@@ -1542,6 +1547,7 @@ export class AgentSession {
 	private async _runAgentPrompt(prepare: (signal: AbortSignal) => Promise<() => AgentMessage[]>): Promise<void> {
 		this._assertNotCheckpointHeld();
 		this._shutdownAbortController.signal.throwIfAborted();
+		if (this._checkpointActiveTools) throw new Error("Checkpoint restore requires extension initialization");
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
 		}
@@ -2197,13 +2203,14 @@ export class AgentSession {
 	}
 
 	private async _flushCheckpointSettings(): Promise<void> {
-		await this.settingsManager.flush();
+		await this.settingsManager.flush({ requireSuccessfulPersistence: true });
 		const errors = this.settingsManager.drainErrors();
 		if (errors.length)
 			throw new Error(`Settings checkpoint failed: ${errors.map((error) => error.error.message).join("; ")}`);
 	}
 
 	private _captureCheckpoint(boundary: CheckpointBoundary): SessionCheckpoint {
+		if (this._checkpointActiveTools) throw new Error("Checkpoint restore requires extension initialization");
 		const sessionFile = this.sessionFile;
 		const header = this.sessionManager.getHeader();
 		if (!sessionFile || !header) throw new Error("Checkpoint requires a persistent session");
@@ -2223,6 +2230,11 @@ export class AgentSession {
 			header,
 			entries: this.sessionManager.getEntries(),
 			queues: this.getCheckpointQueues(),
+			toolConfiguration: {
+				noBuiltinTools: this._noBuiltinTools || undefined,
+				allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
+				excludedToolNames: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
+			},
 			scopedModels: this._scopedModels.map(({ model, thinkingLevel }) => ({
 				provider: model.provider,
 				id: model.id,
@@ -2299,7 +2311,7 @@ export class AgentSession {
 	}
 
 	/** Acquire a completed-turn or fully settled native hold. Never call from an awaited run handler. */
-	acquireCheckpoint(options: CheckpointOptions = {}): Promise<CheckpointHold> {
+	async acquireCheckpoint(options: CheckpointOptions = {}): Promise<CheckpointHold> {
 		if (this._checkpointRequest) return Promise.reject(new Error("Checkpoint already requested"));
 		this._shutdownAbortController.signal.throwIfAborted();
 		options.signal?.throwIfAborted();
@@ -2443,6 +2455,32 @@ export class AgentSession {
 				message.role === "custom" && this._cancelPersistentCustomMessages.has(message) ? [index] : [],
 			),
 		});
+	}
+
+	/** Startup handlers may reconstruct tools; apply the exact saved selection after they finish. */
+	restoreCheckpointTools(names: string[], configuration?: SessionCheckpoint["toolConfiguration"]): void {
+		this._assertNotCheckpointHeld();
+		if (configuration) {
+			this._noBuiltinTools = configuration.noBuiltinTools ?? false;
+			this._allowedToolNames = configuration.allowedToolNames ? new Set(configuration.allowedToolNames) : undefined;
+			this._excludedToolNames = configuration.excludedToolNames
+				? new Set(configuration.excludedToolNames)
+				: undefined;
+			this._refreshToolRegistry();
+		}
+		this._checkpointActiveTools = [...names];
+		this.setActiveToolsByName(names);
+		if (!this.hasExtensionHandlers("session_start") && !this.hasExtensionHandlers("resources_discover"))
+			this._finishCheckpointToolRestore();
+	}
+
+	private _finishCheckpointToolRestore(): void {
+		const names = this._checkpointActiveTools;
+		if (!names) return;
+		if (names.some((name) => !this._toolRegistry.has(name)))
+			throw new Error("Checkpoint tools unavailable after extension initialization");
+		this.setActiveToolsByName(names);
+		this._checkpointActiveTools = undefined;
 	}
 
 	/** Restore once into an idle, empty queue; no handlers, expansion, or model calls are replayed. */
@@ -3397,6 +3435,7 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+		this._finishCheckpointToolRestore();
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -3767,9 +3806,11 @@ export class AgentSession {
 		this._bindExtensionCore(this._extensionRunner);
 		this._applyExtensionBindings(this._extensionRunner);
 
-		const defaultActiveToolNames = this._baseToolsOverride
-			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+		const defaultActiveToolNames = this._noBuiltinTools
+			? []
+			: this._baseToolsOverride
+				? Object.keys(this._baseToolsOverride)
+				: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

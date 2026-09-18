@@ -204,14 +204,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const hasExistingSession = existingSession.messages.length > 0;
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
-	let model = checkpoint?.selection.model
-		? modelRuntime.getModel(checkpoint.selection.model.provider, checkpoint.selection.model.id)
+	let model = checkpoint
+		? checkpoint.selection.model
+			? modelRuntime.getModel(checkpoint.selection.model.provider, checkpoint.selection.model.id)
+			: undefined
 		: options.model;
 	if (checkpoint?.selection.model && !model) throw new Error("Checkpoint model unavailable");
 	let modelFallbackMessage: string | undefined;
 
 	// If session has data, try to restore model from it
-	if (!model && hasExistingSession && existingSession.model) {
+	if (!checkpoint && !model && hasExistingSession && existingSession.model) {
 		const restoredModel = modelRuntime.getModel(existingSession.model.provider, existingSession.model.modelId);
 		if (restoredModel && modelRuntime.hasConfiguredAuth(restoredModel.provider)) {
 			model = restoredModel;
@@ -222,7 +224,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	// If still no model, use findInitialModel (checks settings default, then provider defaults)
-	if (!model) {
+	if (!checkpoint && !model) {
 		const result = await findInitialModel({
 			scopedModels: [],
 			isContinuing: hasExistingSession,
@@ -412,6 +414,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		customTools: options.customTools,
 		modelRuntime,
 		initialActiveToolNames,
+		noBuiltinTools: options.noTools === "builtin",
 		allowedToolNames,
 		excludedToolNames,
 		extensionRunnerRef,

@@ -1,6 +1,7 @@
 import type { Api, Model, Provider } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import { CheckpointActivity } from "../../../src/core/checkpoint.ts";
 import { defaultModelPerProvider } from "../../../src/core/model-resolver.ts";
 import { ModelRuntime } from "../../../src/core/model-runtime.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
@@ -109,6 +110,7 @@ describe("issues #7027 and #7113 credential refresh hang", () => {
 		const showWarning = vi.fn();
 		const context = {
 			checkpointCallback,
+			checkpointUIActivity: new CheckpointActivity(),
 			session: harness.session,
 			updateAvailableProviderCount: vi.fn(),
 			footer: { invalidate: vi.fn() },
@@ -163,6 +165,7 @@ describe("post-login model discovery", () => {
 		const setModel = vi.spyOn(session, "setModel").mockResolvedValue();
 		const context = {
 			checkpointCallback,
+			checkpointUIActivity: new CheckpointActivity(),
 			session,
 			updateAvailableProviderCount: vi.fn(),
 			footer: { invalidate: vi.fn() },

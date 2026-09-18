@@ -184,7 +184,7 @@ describe("native deliberate clean-exit checkpoint", () => {
 				const view = this as unknown as ExitView;
 				const session = view.runtimeHost.session;
 				try {
-					expect(existsSync(f.path)).toBe(false);
+					expect(readSessionCheckpoint(f.path).completedExit).toBeUndefined();
 					expect(session).not.toBe(f.h.session);
 					expect(session.sessionId).toBe(saved.selection.sessionId);
 					expect(session.sessionManager.getLeafId()).toBe(selected);
@@ -218,7 +218,7 @@ describe("native deliberate clean-exit checkpoint", () => {
 					],
 				});
 				expect(restored).toBe(true);
-				expect(existsSync(f.path)).toBe(false); // Merely returning from a host/test loop is not clean-exit proof.
+				expect(readSessionCheckpoint(f.path).completedExit).toBeUndefined(); // Loop return is not clean-exit proof.
 			} finally {
 				if (inputDescriptor) Object.defineProperty(process.stdin, "isTTY", inputDescriptor);
 				else Reflect.deleteProperty(process.stdin, "isTTY");
@@ -489,7 +489,7 @@ describe("native deliberate clean-exit checkpoint", () => {
 		hold.release();
 		vi.stubEnv("PI_CHECKPOINT_EXIT_PATH", f.path);
 		await expect(main(["--checkpoint", join(f.directory, "missing.json")])).rejects.toThrow();
-		expect(existsSync(f.path)).toBe(false);
+		expect(readSessionCheckpoint(f.path).completedExit).toBeUndefined();
 	});
 
 	it("a signal racing with deliberate shutdown suppresses completed proof", async () => {

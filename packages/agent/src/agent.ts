@@ -309,6 +309,15 @@ export class Agent {
 		return this._state;
 	}
 
+	/** The selected model, excluding the internal placeholder used before model selection. */
+	get selectedModel(): Model<any> | undefined {
+		return this._state.model === DEFAULT_MODEL ? undefined : this._state.model;
+	}
+
+	set selectedModel(model: Model<any> | undefined) {
+		this._state.model = model ?? DEFAULT_MODEL;
+	}
+
 	/** Controls how queued steering messages are drained. */
 	set steeringMode(mode: QueueMode) {
 		this.steeringQueue.mode = mode;

@@ -924,9 +924,10 @@ export async function main(args: string[], options?: MainOptions) {
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
-			tools: sessionOptions.tools,
-			excludeTools: sessionOptions.excludeTools,
-			noTools: sessionOptions.noTools,
+			// Retain CLI registry restrictions across later native session replacements too.
+			tools: checkpoint?.toolConfiguration?.allowedToolNames ?? sessionOptions.tools,
+			excludeTools: checkpoint?.toolConfiguration?.excludedToolNames ?? sessionOptions.excludeTools,
+			noTools: checkpoint?.toolConfiguration?.noBuiltinTools ? "builtin" : sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;

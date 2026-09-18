@@ -706,8 +706,19 @@ export class SettingsManager {
 		this.refreshSetting(field);
 	}
 
-	async flush(): Promise<void> {
+	async flush(options?: { requireSuccessfulPersistence: boolean }): Promise<void> {
 		await this.writeQueue;
+		// Presentation diagnostics can be drained independently. Only successful writes or
+		// an explicit reload/trust reconciliation clear the native dirty/load-error state.
+		if (
+			options?.requireSuccessfulPersistence &&
+			(this.modifiedFields.size ||
+				this.modifiedProjectFields.size ||
+				this.globalSettingsLoadError ||
+				this.projectSettingsLoadError)
+		) {
+			throw new Error("Settings checkpoint failed: unresolved persistence or load failure");
+		}
 	}
 
 	drainErrors(): SettingsError[] {

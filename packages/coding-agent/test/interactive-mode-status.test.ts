@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import { type Component, Container, type Focusable, type TUI } from "../../tui/src/tui.ts";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { CheckpointActivity } from "../src/core/checkpoint.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
@@ -262,6 +263,7 @@ describe("InteractiveMode.showExtensionCustom", () => {
 		};
 		const fakeThis = {
 			checkpointCallback,
+			checkpointUIActivity: new CheckpointActivity(),
 			session: { notifyCheckpointStateChanged: vi.fn() },
 			editor,
 			editorContainer,

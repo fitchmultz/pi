@@ -155,14 +155,19 @@ export class ModelRuntime implements Models {
 	private readonly checkpointActivity = new CheckpointActivity();
 	private readonly checkpointPersistenceErrors = new Map<string, unknown>();
 
-	private persistForCheckpoint<T>(key: string, write: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+	private persistForCheckpoint<T>(
+		key: string,
+		write: () => Promise<T>,
+		signal?: AbortSignal,
+		isPersistenceFailure: () => boolean = () => true,
+	): Promise<T> {
 		return this.checkpointActivity.run(async () => {
 			try {
 				const result = await write();
 				this.checkpointPersistenceErrors.delete(key);
 				return result;
 			} catch (error) {
-				if (!signal?.aborted) this.checkpointPersistenceErrors.set(key, error);
+				if (!signal?.aborted && isPersistenceFailure()) this.checkpointPersistenceErrors.set(key, error);
 				throw error;
 			}
 		});
@@ -213,12 +218,28 @@ export class ModelRuntime implements Models {
 			credentials: {
 				read: (id, options) => this.checkpointActivity.run(() => credentials.read(id, options)),
 				list: (options) => this.checkpointActivity.run(() => credentials.list(options)),
-				modify: (id, fn, options) =>
-					this.persistForCheckpoint(
+				modify: (id, fn, options) => {
+					let callbackFailed = false;
+					return this.persistForCheckpoint(
 						`credentials:${id}`,
-						() => credentials.modify(id, fn, options),
+						() =>
+							credentials.modify(
+								id,
+								async (current) => {
+									try {
+										return await fn(current);
+									} catch (error) {
+										// OAuth refresh runs inside modify, before any credential is adopted or written.
+										callbackFailed = true;
+										throw error;
+									}
+								},
+								options,
+							),
 						options?.signal,
-					),
+						() => !callbackFailed,
+					);
+				},
 				delete: (id, options) =>
 					this.persistForCheckpoint(`credentials:${id}`, () => credentials.delete(id, options), options?.signal),
 			},

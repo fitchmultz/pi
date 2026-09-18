@@ -70,7 +70,7 @@ import {
 	computeCacheWaste,
 	detectCacheMiss,
 } from "../../core/cache-stats.ts";
-import type { SessionCheckpoint, ShutdownCheckpoint } from "../../core/checkpoint.ts";
+import { CheckpointActivity, type SessionCheckpoint, type ShutdownCheckpoint } from "../../core/checkpoint.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "../../core/defaults.ts";
 import type {
 	AutocompleteProviderFactory,
@@ -418,8 +418,7 @@ export class InteractiveMode {
 	private hostedActive = false;
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
-	private checkpointUIBusy = 0;
-	private readonly checkpointUIIdleWaiters = new Set<() => void>();
+	private readonly checkpointUIActivity = new CheckpointActivity();
 	private checkpointExitInterrupted = false;
 	private checkpointExitSealed = false;
 	private pendingInitialMessages: number;
@@ -541,6 +540,7 @@ export class InteractiveMode {
 
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
+		this.checkpointUIActivity.onIdle = () => this.session.notifyCheckpointStateChanged();
 		setCapabilityOverrides(this.settingsManager.getTerminalCapabilityOverrides());
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
 		this.options = { ...options, tuiMode };
@@ -2478,18 +2478,12 @@ export class InteractiveMode {
 	private checkpointCallback<Args extends unknown[], Result>(
 		callback: (...args: Args) => Result | Promise<Result>,
 	): (...args: Args) => Promise<Result> {
-		return async (...args) => {
-			if (this.checkpointExitSealed) this.checkpointExitInterrupted = true;
-			if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
-			this.checkpointUIBusy = (this.checkpointUIBusy ?? 0) + 1;
-			try {
-				return await callback(...args);
-			} finally {
-				this.checkpointUIBusy--;
-				if (!this.checkpointUIBusy) for (const notify of this.checkpointUIIdleWaiters ?? []) notify();
-				this.session.notifyCheckpointStateChanged();
-			}
-		};
+		return (...args) =>
+			this.checkpointUIActivity.run(() => {
+				if (this.checkpointExitSealed) this.checkpointExitInterrupted = true;
+				if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
+				return callback(...args);
+			});
 	}
 
 	/** Native idle qualification, including UI operations that outlive their visible selector. */
@@ -2500,7 +2494,7 @@ export class InteractiveMode {
 			this.shutdownRequested ||
 			this.hosted ||
 			process.stdin.isPaused() ||
-			this.checkpointUIBusy ||
+			this.checkpointUIActivity.busy ||
 			this.isFlushingCompactionQueue ||
 			this.getQueuedInputCount() ||
 			this.editor !== this.defaultEditor ||
@@ -4336,14 +4330,7 @@ export class InteractiveMode {
 					checkpoint = await this.runtimeHost.disposeWithCheckpoint({
 						signal: controller.signal,
 						waitForHost: async () => {
-							while (this.checkpointUIBusy) {
-								let notify!: () => void;
-								await new Promise<void>((resolve) => {
-									notify = resolve;
-									this.checkpointUIIdleWaiters.add(notify);
-								});
-								this.checkpointUIIdleWaiters.delete(notify);
-							}
+							await this.checkpointUIActivity.flush();
 							if (
 								unsupportedInput ||
 								this.getQueuedInputCount() ||
