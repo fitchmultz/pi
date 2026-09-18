@@ -106,13 +106,26 @@ for (const outcome of ["cancel", "success", "callback-error", "switch-error"]) {
 	});
 }
 
-test("redraw stats currently report zero when RPC does not invoke custom UI", async () => {
+test("redraw stats report unavailable when RPC does not invoke custom UI", async () => {
 	let command;
 	redraws({ registerCommand: (_name, definition) => { command = definition; } });
 	const notices = [];
 	await command.handler("", { hasUI: true, mode: "rpc", ui: { custom: async () => undefined, notify: (...args) => notices.push(args) } });
-	assert.deepEqual(notices, [["TUI full redraws: 0", "info"]]);
+	assert.deepEqual(notices, [["TUI redraw stats are unavailable in this UI.", "info"]]);
 });
+
+for (const [mode, fullRedraws] of [["tui", 0], ["rpc", 7]]) {
+	test(`redraw stats read the actual ${mode} interactive frontend count`, async () => {
+		let command;
+		redraws({ registerCommand: (_name, definition) => { command = definition; } });
+		const notices = [];
+		await command.handler("", { hasUI: true, mode, ui: {
+			custom: (factory) => new Promise((done) => factory({ fullRedraws }, undefined, undefined, done)),
+			notify: (...args) => notices.push(args),
+		} });
+		assert.deepEqual(notices, [[`TUI full redraws: ${fullRedraws}`, "info"]]);
+	});
+}
 
 test("TPS reports each low-level run separately across retries", (t) => {
 	const handlers = new Map();

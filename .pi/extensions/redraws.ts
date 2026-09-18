@@ -12,13 +12,14 @@ export default function (pi: ExtensionAPI) {
 		description: "Show TUI stats",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) return;
-			let redraws = 0;
-			await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
-				redraws = tui.fullRedraws;
-				done(undefined);
+			const redraws = await ctx.ui.custom<number | undefined>((tui, _theme, _keybindings, done) => {
+				done(tui.fullRedraws);
 				return new Text("", 0, 0);
 			});
-			ctx.ui.notify(`TUI full redraws: ${redraws}`, "info");
+			ctx.ui.notify(
+				redraws === undefined ? "TUI redraw stats are unavailable in this UI." : `TUI full redraws: ${redraws}`,
+				"info",
+			);
 		},
 	});
 }
