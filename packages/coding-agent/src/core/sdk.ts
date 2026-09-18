@@ -6,6 +6,7 @@ import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
+import { openSessionCheckpoint, restoreSessionCheckpoint, type SessionCheckpoint } from "./checkpoint.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
@@ -79,6 +80,9 @@ export interface CreateAgentSessionOptions {
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
+
+	/** Restore exact native selection and pending queues without starting a run. */
+	checkpoint?: SessionCheckpoint;
 
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
@@ -173,7 +177,11 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
+	const checkpoint = options.checkpoint;
+	const checkpointManager = checkpoint ? openSessionCheckpoint(checkpoint) : undefined;
+	const cwd = resolvePath(
+		checkpoint?.selection.cwd ?? options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd(),
+	);
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
 
@@ -182,7 +190,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
-	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+	const sessionManager =
+		checkpointManager ?? options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
@@ -195,7 +204,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const hasExistingSession = existingSession.messages.length > 0;
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
-	let model = options.model;
+	let model = checkpoint?.selection.model
+		? modelRuntime.getModel(checkpoint.selection.model.provider, checkpoint.selection.model.id)
+		: options.model;
+	if (checkpoint?.selection.model && !model) throw new Error("Checkpoint model unavailable");
 	let modelFallbackMessage: string | undefined;
 
 	// If session has data, try to restore model from it
@@ -228,7 +240,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
-	let thinkingLevel = options.thinkingLevel;
+	let thinkingLevel = checkpoint?.selection.thinkingLevel ?? options.thinkingLevel;
 
 	// If session has data, restore thinking level from it
 	if (thinkingLevel === undefined && hasExistingSession) {
@@ -379,10 +391,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Restore messages if session has existing data
 	if (hasExistingSession) {
 		agent.state.messages = existingSession.messages;
-		if (!hasThinkingEntry) {
+		if (!hasThinkingEntry && !checkpoint) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}
-	} else {
+	} else if (!checkpoint) {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
 		if (model) {
 			sessionManager.appendModelChange(model.provider, model.id);
@@ -405,6 +417,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
 	});
+	if (checkpoint) restoreSessionCheckpoint(session, checkpoint);
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

@@ -574,6 +574,7 @@ cat README.md | pi -p "Summarize this text"
 |--------|-------------|
 | `-c`, `--continue` | Continue most recent session |
 | `-r`, `--resume` | Browse and select session |
+| `--checkpoint <path>` | Restore exact native working-session selection and pending queues; see [checkpoints](docs/checkpoint.md) |
 | `--session <path\|id>` | Use specific session file or partial UUID |
 | `--session-cwd <path>` | Override the working directory for `--session` for this run; must be an existing directory |
 | `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |

@@ -415,6 +415,7 @@ export class InteractiveMode {
 	private hostedActive = false;
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
+	private checkpointUIBusy = 0;
 	private pendingInitialMessages: number;
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
 	private activeWorkingIndicatorEmbedded = false;
@@ -854,6 +855,7 @@ export class InteractiveMode {
 		nextUi.invalidate();
 		nextUi.setFocus(focus);
 		if (!startRenderer) return true;
+		this.bindCheckpointInputGuard();
 		nextUi.start();
 		this.themeController.rebindTui();
 		this.rebindExtensionTerminalInputListeners();
@@ -921,6 +923,7 @@ export class InteractiveMode {
 		this.defaultEditor.onSubmit = (text) => this.handleStartupSubmit(text);
 		this.ui.setFocus(this.editor);
 
+		this.bindCheckpointInputGuard();
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
 		this.isInitialized = true;
@@ -2450,6 +2453,43 @@ export class InteractiveMode {
 		return this.createExtensionUIContext();
 	}
 
+	private bindCheckpointInputGuard(): void {
+		// A decoder may already have a delayed key pending when stdin is paused.
+		// Invalidate the cut before that key reaches extensions or native handlers.
+		this.ui.addInputListener(() => {
+			if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
+			return undefined;
+		});
+	}
+
+	/** Close terminal ingress without consuming buffered input. Live UI and drafts are not serializable. */
+	quiesceForCheckpoint(): () => void {
+		if (
+			!this.isInitialized ||
+			this.isShuttingDown ||
+			this.hosted ||
+			process.stdin.isPaused() ||
+			this.checkpointUIBusy ||
+			this.getQueuedInputCount() ||
+			this.editor !== this.defaultEditor ||
+			this.renderer.getFocusedComponent() !== this.editor ||
+			this.renderer.hasOverlayEntries ||
+			this.activeSelectorToken ||
+			this.extensionSelector ||
+			this.extensionInput ||
+			this.extensionEditor ||
+			(this.editor.getExpandedText?.() ?? this.editor.getText()).length > 0
+		) {
+			throw new Error(
+				"Checkpoint unavailable: live UI operation, mode input, or unsent draft; keep compute running",
+			);
+		}
+		process.stdin.pause();
+		return () => {
+			if (this.isInitialized && !this.isShuttingDown) process.stdin.resume();
+		};
+	}
+
 	getQueuedInputCount(): number {
 		return this.pendingInitialMessages + this.pendingUserInputs.length + this.compactionQueuedMessages.length;
 	}
@@ -3266,6 +3306,15 @@ export class InteractiveMode {
 				this.pendingUserInputs.push(text);
 			}
 			this.editor.addToHistory?.(text);
+		};
+		const submit = this.defaultEditor.onSubmit;
+		this.defaultEditor.onSubmit = async (text) => {
+			this.checkpointUIBusy = (this.checkpointUIBusy ?? 0) + 1;
+			try {
+				await submit(text);
+			} finally {
+				this.checkpointUIBusy--;
+			}
 		};
 	}
 
@@ -4088,6 +4137,7 @@ export class InteractiveMode {
 			updateFooter: true,
 			populateHistory: true,
 		});
+		this.updatePendingMessagesDisplay();
 		this.renderProjectTrustWarningIfNeeded();
 
 		// Show compaction info if session was compacted
@@ -4632,6 +4682,20 @@ export class InteractiveMode {
 			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
 			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
 			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
+		}
+		if (this.session.pendingCustomMessageCount > 0) {
+			this.pendingMessagesContainer.addChild(
+				new TruncatedText(
+					theme.fg("dim", `Queued extension messages: ${this.session.pendingCustomMessageCount}`),
+					1,
+					0,
+				),
+			);
+		}
+		if (this.session.pendingNextTurnCount > 0) {
+			this.pendingMessagesContainer.addChild(
+				new TruncatedText(theme.fg("dim", `Next-turn context: ${this.session.pendingNextTurnCount}`), 1, 0),
+			);
 		}
 		for (const component of bashComponents) this.pendingMessagesContainer.addChild(component);
 	}

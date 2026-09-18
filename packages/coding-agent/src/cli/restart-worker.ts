@@ -23,6 +23,7 @@ export function getRestartArgs(args: string[], keepApiKey = false): string[] {
 	const result: string[] = [];
 	const replaced = new Set([
 		"--session",
+		"--checkpoint",
 		"--session-cwd",
 		"--session-id",
 		"--no-session",

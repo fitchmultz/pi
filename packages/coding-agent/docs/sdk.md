@@ -250,6 +250,12 @@ Both `steer()` and `followUp()` expand file-based prompt templates but error on 
 
 `session.pendingInputCount` reports submitted inputs still in native prompt preflight, plus input held by the bound mode. It covers asynchronous input handlers until handling, admission or failure; extension commands run first and do not count themselves. Native interactive bindings include both pending prompt-loop input and retained compaction/tree input. SDK hosts with their own input queue can supply its read-only count through `session.bindExtensions({ getQueuedInputCount })`. This does not change `isIdle` or steering/follow-up semantics. Extensions read the same fact with `ctx.getPendingInputCount()`.
 
+### Working-session checkpoints
+
+`await session.acquireCheckpoint({ boundary: "turn" | "settled", signal?, quiesce? })` returns an explicit `{ checkpoint, signal, release() }` hold after awaited native persistence and extension callbacks. Release it in `finally`. `createAgentSession({ checkpoint: readSessionCheckpoint(path) })` restores exact selection and full pending queues without running them automatically.
+
+See [Working-session checkpoints](checkpoint.md) for the artifact, local CLI control, input coordination, and limitations. In particular, native settlement alone is not permission to sleep compute; the current TUI control reports `sleepReady: false`.
+
 ### User Bash
 
 `session.executeBash(command, onChunk?, options?)` owns the whole user-Bash operation: `user_bash` interception, selected local/custom operations, and result recording. Interactive `!`/`!!`, RPC `bash`, and direct SDK calls share this path. A replacement result is recorded once and its output is sent to `onChunk`; normal execution also emits `bash_execution_update` events. The first intercepting handler remains authoritative.

@@ -25,6 +25,7 @@ export interface Args {
 	name?: string;
 	noSession?: boolean;
 	session?: string;
+	checkpoint?: string;
 	sessionCwd?: string;
 	sessionId?: string;
 	fork?: string;
@@ -122,6 +123,11 @@ export function parseArgs(args: string[], onOption?: (option: string, tokens: st
 			}
 		} else if (arg === "--no-session") {
 			result.noSession = true;
+		} else if (arg === "--checkpoint") {
+			const value = args[i + 1];
+			if (!value || value.startsWith("-"))
+				result.diagnostics.push({ type: "error", message: "--checkpoint requires a path" });
+			else result.checkpoint = args[++i];
 		} else if (arg === "--session" && i + 1 < args.length) {
 			result.session = args[++i];
 		} else if (arg === "--session-cwd") {
@@ -300,6 +306,7 @@ ${chalk.bold("Options:")}
   --print, -p                    Non-interactive mode: process prompt and exit
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
+  --checkpoint <path>            Restore a native working-session checkpoint without replay
   --session <path|id>            Use specific session file or partial UUID
   --session-cwd <path>           Override --session working directory for this run (existing directory)
                                  Not with --fork, --continue, --resume, --session-id, or --no-session

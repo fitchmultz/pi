@@ -27,6 +27,7 @@ import {
 	printAuthCommandHelp,
 	validateAuthCommandArgs,
 } from "./cli/auth-command.ts";
+import { CHECKPOINT_SOCKET_ENV, startCheckpointControl } from "./cli/checkpoint-control.ts";
 import { resolveCredentialForPrint } from "./cli/credential-print.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
@@ -44,6 +45,7 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
+import { openSessionCheckpoint, readSessionCheckpoint } from "./core/checkpoint.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
@@ -690,6 +692,33 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
+	if (
+		parsed.checkpoint &&
+		(appMode !== "interactive" ||
+			parsed.session ||
+			parsed.sessionCwd ||
+			parsed.sessionId ||
+			parsed.fork ||
+			parsed.continue ||
+			parsed.resume ||
+			parsed.noSession ||
+			parsed.name ||
+			parsed.messages.length ||
+			parsed.fileArgs.length ||
+			parsed.model ||
+			parsed.provider ||
+			parsed.thinking ||
+			parsed.tools ||
+			parsed.noTools ||
+			parsed.noBuiltinTools ||
+			parsed.excludeTools)
+	) {
+		throw new Error(
+			"--checkpoint requires interactive mode without startup prompts or session/model/tool selection overrides",
+		);
+	}
+	const checkpoint = parsed.checkpoint ? readSessionCheckpoint(resolvePath(parsed.checkpoint, cwd)) : undefined;
+
 	validateSessionCwdFlags(parsed);
 	validateForkFlags(parsed);
 	validateSessionIdFlags(parsed);
@@ -722,10 +751,13 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
+	let sessionManager = checkpoint
+		? openSessionCheckpoint(checkpoint)
+		: await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	if (restart?.handoff) restoreRestartSession(sessionManager, restart.handoff);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
+		if (checkpoint) throw new MissingSessionCwdError(missingSessionCwdIssue);
 		if (appMode === "interactive") {
 			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
 			if (!selectedCwd) {
@@ -866,6 +898,7 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		const created = await createAgentSessionFromServices({
+			checkpoint: isInitialRuntime ? checkpoint : undefined,
 			services,
 			sessionManager,
 			sessionStartEvent,
@@ -1030,8 +1063,21 @@ export async function main(args: string[], options?: MainOptions) {
 			await interactiveMode.init();
 			if (!(await restart.ready())) return;
 		}
+		let closeCheckpointControl: (() => void) | undefined;
+		if (process.env[CHECKPOINT_SOCKET_ENV]) {
+			await interactiveMode.init();
+			closeCheckpointControl = await startCheckpointControl({
+				path: process.env[CHECKPOINT_SOCKET_ENV]!,
+				getSession: () => runtime.session,
+				quiesce: () => interactiveMode.quiesceForCheckpoint(),
+			});
+		}
 		printTimings();
-		await interactiveMode.run();
+		try {
+			await interactiveMode.run();
+		} finally {
+			closeCheckpointControl?.();
+		}
 	} else {
 		printTimings();
 		const exitCode = await runPrintMode(runtime, {
