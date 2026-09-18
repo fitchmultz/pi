@@ -267,9 +267,6 @@ test("threshold collapse: created foreground after a response over threshold; su
 	assert.equal(head?.kind, "pi.summary");
 	assert.ok(entries.length < 8);
 	assert.equal(contentOf(head), "SUMMARY ");
-	// summarizer request was tool-free and ended with the instruction
-	const req = (env.h as unknown as { options?: unknown }) && null;
-	void req;
 });
 
 test("beforeCollapse: decline → failed/declined; hook summary → no provider call; instructions override", async () => {

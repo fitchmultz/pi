@@ -839,18 +839,23 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 		// every op is emitted once per live position of this object
 		const emit = (op: Op): void => {
 			if (aliased ? liveCells().length === 0 : isDetached(cell)) return;
-			record(op);
-			if (!aliased) return;
+			if (!aliased || op[0] === "r") {
+				record(op);
+				return;
+			}
 			const live = liveCells();
-			if (live.length <= 1) return;
-			const base = pathNow();
-			const head = primary();
+			if (live.length <= 1) {
+				record(op);
+				return;
+			}
+			const rest = op[1].slice(pathNow().length);
 			for (const c of live) {
-				if (c === head) continue;
-				if (op[0] === "r") continue;
-				const rest = (op[1] as Seg[]).slice(base.length);
-				const cloned = [...op] as unknown as Op;
-				(cloned as unknown as Seg[][])[1] = [...pathOf(c), ...rest];
+				const cloned: [...Op] = [...op];
+				cloned[1] = [...pathOf(c), ...rest] as unknown as NonEmptyPath;
+				// Even the first path needs its own payload before record() can fold
+				// into it. Mutable apply() later adopts these payloads without copying.
+				if (cloned[0] === "s") cloned[2] = cloneJson(cloned[2]);
+				else if (cloned[0] === "p") cloned[4] = cloneJson(cloned[4]);
 				record(cloned);
 			}
 		};
