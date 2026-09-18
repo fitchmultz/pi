@@ -269,6 +269,7 @@ describe("InteractiveMode compaction events", () => {
 			compactionQueuedMessages: [{ text: "change direction", mode: "steer" as const }],
 			session: {
 				clearQueue: vi.fn(),
+				notifyCheckpointStateChanged: vi.fn(),
 				prompt: vi.fn(async (_text: string, options: PromptOptions) => options.preflightResult?.(true)),
 			},
 			updatePendingMessagesDisplay: vi.fn(),

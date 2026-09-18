@@ -433,6 +433,8 @@ const { session } = await createAgentSession({
 });
 ```
 
+RPC can inspect a pre-login session and run non-model extension commands without a selected model. Model prompts still fail native admission until a model is selected; print/JSON invocations require one at startup.
+
 If no model is provided:
 1. Tries to restore from session (if continuing)
 2. Uses default from settings

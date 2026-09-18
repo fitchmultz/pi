@@ -1011,7 +1011,9 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createAgentSession");
 
-	if (appMode !== "interactive" && !session.model) {
+	// RPC, like the TUI, supports pre-login commands and session inspection without a model.
+	// Actual model runs still reject through AgentSession's native admission checks.
+	if (appMode !== "interactive" && appMode !== "rpc" && !session.model) {
 		console.error(chalk.red(formatNoModelsAvailableMessage()));
 		process.exit(1);
 	}

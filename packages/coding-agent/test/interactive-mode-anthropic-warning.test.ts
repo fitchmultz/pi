@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import { CheckpointActivity } from "../src/core/checkpoint.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 function createSettingsManager(warnings: { anthropicExtraUsage?: boolean } = {}) {
@@ -14,10 +15,19 @@ function createModelRuntime(credential: { type: "oauth" } | undefined, apiKey?: 
 	};
 }
 
+function checkpointFields() {
+	return {
+		checkpointCallback: Reflect.get(InteractiveMode.prototype, "checkpointCallback"),
+		checkAnthropicSubscriptionAuth: Reflect.get(InteractiveMode.prototype, "checkAnthropicSubscriptionAuth"),
+		checkpointUIActivity: new CheckpointActivity(),
+	};
+}
+
 describe("InteractiveMode.maybeWarnAboutAnthropicSubscriptionAuth", () => {
 	test("warns once when Anthropic subscription auth is detected", async () => {
 		const modelRuntime = createModelRuntime(undefined, "sk-ant-oat01-test");
 		const fakeThis: any = {
+			...checkpointFields(),
 			anthropicSubscriptionWarningShown: false,
 			settingsManager: createSettingsManager(),
 			session: { modelRuntime },
@@ -38,6 +48,7 @@ describe("InteractiveMode.maybeWarnAboutAnthropicSubscriptionAuth", () => {
 	test("warns when Anthropic OAuth is stored even if token refresh lookup would fail", async () => {
 		const modelRuntime = createModelRuntime({ type: "oauth" });
 		const fakeThis: any = {
+			...checkpointFields(),
 			anthropicSubscriptionWarningShown: false,
 			settingsManager: createSettingsManager(),
 			session: { modelRuntime },
@@ -59,6 +70,7 @@ describe("InteractiveMode.maybeWarnAboutAnthropicSubscriptionAuth", () => {
 			settingsManager: createSettingsManager(),
 			session: { modelRuntime },
 			showWarning: vi.fn(),
+			...checkpointFields(),
 		};
 
 		await (InteractiveMode as any).prototype.maybeWarnAboutAnthropicSubscriptionAuth.call(fakeThis, {
@@ -73,6 +85,7 @@ describe("InteractiveMode.maybeWarnAboutAnthropicSubscriptionAuth", () => {
 		const modelRuntime = createModelRuntime(undefined);
 		const fakeThis: any = {
 			anthropicSubscriptionWarningShown: false,
+			...checkpointFields(),
 			settingsManager: createSettingsManager({ anthropicExtraUsage: false }),
 			session: { modelRuntime },
 			showWarning: vi.fn(),
