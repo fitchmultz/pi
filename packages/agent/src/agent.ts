@@ -182,6 +182,10 @@ class PendingMessageQueue {
 		return taken;
 	}
 
+	snapshot(): AgentMessage[] {
+		return this.messages.slice();
+	}
+
 	clear(): void {
 		this.messages = [];
 	}
@@ -242,6 +246,8 @@ export class Agent {
 		context: AgentContext,
 		signal?: AbortSignal,
 	) => Promise<AgentContext | undefined> | AgentContext | undefined;
+	/** Awaited after all turn_end subscribers, before the loop can drain queues or start another turn. */
+	public afterTurn?: (signal: AbortSignal) => Promise<void>;
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
@@ -303,6 +309,15 @@ export class Agent {
 		return this._state;
 	}
 
+	/** The selected model, excluding the internal placeholder used before model selection. */
+	get selectedModel(): Model<any> | undefined {
+		return this._state.model === DEFAULT_MODEL ? undefined : this._state.model;
+	}
+
+	set selectedModel(model: Model<any> | undefined) {
+		this._state.model = model ?? DEFAULT_MODEL;
+	}
+
 	/** Controls how queued steering messages are drained. */
 	set steeringMode(mode: QueueMode) {
 		this.steeringQueue.mode = mode;
@@ -350,6 +365,11 @@ export class Agent {
 	/** Remove matching queued messages, steering first, preserving unmatched order and queue modes. */
 	takeQueuedMessages(predicate: (message: AgentMessage) => boolean): AgentMessage[] {
 		return [...this.steeringQueue.take(predicate), ...this.followUpQueue.take(predicate)];
+	}
+
+	/** Non-consuming queue snapshot. Message objects retain their native content, including images. */
+	getQueuedMessages(): { steering: AgentMessage[]; followUp: AgentMessage[] } {
+		return { steering: this.steeringQueue.snapshot(), followUp: this.followUpQueue.snapshot() };
 	}
 
 	/** Returns true when steering messages await delivery, excluding follow-ups. */
@@ -647,5 +667,6 @@ export class Agent {
 		for (const listener of this.listeners) {
 			await listener(event, signal);
 		}
+		if (event.type === "turn_end") await this.afterTurn?.(signal);
 	}
 }

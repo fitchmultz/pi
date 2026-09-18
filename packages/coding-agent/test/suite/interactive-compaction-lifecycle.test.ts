@@ -2,6 +2,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
+import { CheckpointActivity } from "../../src/core/checkpoint.ts";
 import { estimateTokens, prepareCompaction } from "../../src/core/compaction/index.ts";
 import type { StatusIndicator } from "../../src/modes/interactive/components/status-indicator.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
@@ -24,6 +25,7 @@ function createCompactionView(harness: Harness) {
 	// Run native Enter, Escape, queue, and event handling without a terminal or transcript rendering.
 	const view = Object.assign(Object.create(InteractiveMode.prototype), {
 		runtimeHost: { session: harness.session },
+		checkpointUIActivity: new CheckpointActivity(),
 		isInitialized: true,
 		defaultEditor: { onAction() {} },
 		editor: { addToHistory() {}, setText() {}, getText: () => "" },

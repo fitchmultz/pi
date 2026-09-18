@@ -40,7 +40,8 @@ import {
 import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";
 import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
-import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
+import { AuthStorage as DefaultAuthStorage, FileAuthStorageBackend } from "./auth-storage.ts";
+import { CheckpointActivity } from "./checkpoint.ts";
 import { ModelConfig } from "./model-config.ts";
 import { FileModelsStore, InMemoryCodingAgentModelsStore } from "./models-store.ts";
 import {
@@ -151,6 +152,51 @@ export class ModelRuntime implements Models {
 	private readonly providerAvailabilitySeq = new Map<string, number>();
 	private availabilityError: string | undefined;
 	private readonly credentialOperations = new Map<string, Promise<unknown>>();
+	private readonly checkpointActivity = new CheckpointActivity();
+	private readonly checkpointPersistenceErrors = new Map<string, unknown>();
+
+	private persistForCheckpoint<T>(
+		key: string,
+		write: () => Promise<T>,
+		signal?: AbortSignal,
+		isPersistenceFailure: (error: unknown) => boolean = () => true,
+	): Promise<T> {
+		return this.checkpointActivity.run(async () => {
+			try {
+				const result = await write();
+				this.checkpointPersistenceErrors.delete(key);
+				return result;
+			} catch (error) {
+				if (!signal?.aborted && isPersistenceFailure(error)) this.checkpointPersistenceErrors.set(key, error);
+				throw error;
+			}
+		});
+	}
+
+	/** Join catalog/auth operations and their underlying storage, including cancelled callers' unlock tails. */
+	async flushForCheckpoint(options?: { requireSuccessfulPersistence: boolean }): Promise<void> {
+		await this.checkpointActivity.flush();
+		await FileAuthStorageBackend.checkpointActivity.flush();
+		if (options?.requireSuccessfulPersistence && this.checkpointPersistenceErrors.size)
+			throw new Error(
+				`Native persistence failed: ${[...this.checkpointPersistenceErrors].map(([key, error]) => `${key}: ${error instanceof Error ? error.message : String(error)}`).join("; ")}`,
+			);
+	}
+
+	/** New native model/auth work invalidates the receipt before it starts. */
+	holdForCheckpoint(invalidate: () => void): () => void {
+		const release = this.checkpointActivity.hold(invalidate);
+		try {
+			const releaseStorage = FileAuthStorageBackend.checkpointActivity.hold(invalidate);
+			return () => {
+				releaseStorage();
+				release();
+			};
+		} catch (error) {
+			release();
+			throw error;
+		}
+	}
 
 	private constructor(
 		credentials: RuntimeCredentials,
@@ -166,7 +212,45 @@ export class ModelRuntime implements Models {
 		this.modelNetworkEnabled = modelNetworkEnabled;
 		this.defaultBuiltins = new Map(providers.map((provider) => [provider.id, provider]));
 		for (const [providerId, provider] of this.defaultBuiltins) this.builtins.set(providerId, provider);
-		this.models = createModels({ credentials, modelsStore });
+		// Track the actual stores as well as public operations: cancellation can return before
+		// a provider/store continuation releases its file lock. Keep native auth unchanged.
+		this.models = createModels({
+			credentials: {
+				read: (id, options) => this.checkpointActivity.run(() => credentials.read(id, options)),
+				list: (options) => this.checkpointActivity.run(() => credentials.list(options)),
+				modify: (id, fn, options) => {
+					let callbackFailure: { error: unknown } | undefined;
+					return this.persistForCheckpoint(
+						`credentials:${id}`,
+						() =>
+							credentials.modify(
+								id,
+								async (current) => {
+									try {
+										return await fn(current);
+									} catch (error) {
+										// OAuth refresh runs inside modify, before any credential is adopted or written.
+										callbackFailure = { error };
+										throw error;
+									}
+								},
+								options,
+							),
+						options?.signal,
+						(error) => !callbackFailure || error !== callbackFailure.error,
+					);
+				},
+				delete: (id, options) =>
+					this.persistForCheckpoint(`credentials:${id}`, () => credentials.delete(id, options), options?.signal),
+			},
+			modelsStore: {
+				read: (id, options) => this.checkpointActivity.run(() => modelsStore.read(id, options)),
+				write: (id, entry, options) =>
+					this.persistForCheckpoint(`catalog:${id}`, () => modelsStore.write(id, entry, options), options?.signal),
+				delete: (id, options) =>
+					this.persistForCheckpoint(`catalog:${id}`, () => modelsStore.delete(id, options), options?.signal),
+			},
+		});
 		this.rebuildProviders();
 	}
 
@@ -474,6 +558,13 @@ export class ModelRuntime implements Models {
 		providerOrModel: string | Model<Api>,
 		overrides: ModelRuntimeAuthOverrides = {},
 	): Promise<AuthResult | undefined> {
+		return this.checkpointActivity.run(() => this.resolveAuth(providerOrModel, overrides));
+	}
+
+	private async resolveAuth(
+		providerOrModel: string | Model<Api>,
+		overrides: ModelRuntimeAuthOverrides,
+	): Promise<AuthResult | undefined> {
 		if (typeof providerOrModel === "string") return this.models.getAuth(providerOrModel, overrides);
 		const resolution = await this.models.getAuth(providerOrModel, overrides);
 		if (!resolution) return undefined;
@@ -502,14 +593,14 @@ export class ModelRuntime implements Models {
 			await previous.catch(() => {});
 			signal.throwIfAborted();
 			markStarted?.();
-			return task();
+			return this.checkpointActivity.run(task);
 		})();
 		const tail = operation.catch(() => {});
 		this.credentialOperations.set(providerId, tail);
 		void tail.then(() => {
 			if (this.credentialOperations.get(providerId) === tail) this.credentialOperations.delete(providerId);
 		});
-		return raceWithAbortSignal(started, signal).then(() => operation);
+		return this.checkpointActivity.run(() => raceWithAbortSignal(started, signal).then(() => operation));
 	}
 
 	private async synchronizeCredentialState(
@@ -710,7 +801,11 @@ export class ModelRuntime implements Models {
 		});
 	}
 
-	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
+	refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
+		return this.checkpointActivity.run(() => this.refreshCatalogs(options));
+	}
+
+	private async refreshCatalogs(options: ModelsRefreshOptions): Promise<ModelsRefreshResult> {
 		this.config = await ModelConfig.load(this.modelsPath);
 		this.configureRadiusProviders();
 		if (options.providers) {
@@ -754,6 +849,7 @@ export class ModelRuntime implements Models {
 	}
 
 	registerNativeProvider(provider: Provider): void {
+		this.checkpointActivity.invalidate();
 		if (!provider.id.trim()) throw new Error("Provider id must not be empty.");
 		this.extensionProviders.delete(provider.id);
 		this.nativeExtensionProviders.set(provider.id, provider);
@@ -763,6 +859,7 @@ export class ModelRuntime implements Models {
 	}
 
 	registerProvider(providerId: string, config: ProviderConfigInput): void {
+		this.checkpointActivity.invalidate();
 		// Validate the incoming registration on its own, like the legacy registry:
 		// a broken re-registration must throw without touching the stored config.
 		validateExtensionProvider(providerId, this.builtins.get(providerId), this.config.getProvider(providerId), config);
@@ -801,6 +898,7 @@ export class ModelRuntime implements Models {
 	}
 
 	unregisterProvider(providerId: string): void {
+		this.checkpointActivity.invalidate();
 		this.extensionProviders.delete(providerId);
 		this.nativeExtensionProviders.delete(providerId);
 		this.recomposeProvider(providerId);

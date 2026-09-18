@@ -25,6 +25,7 @@ import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../
 // avoiding a circular dependency. Extensions can import from @earendil-works/pi-coding-agent.
 import * as _bundledPiCodingAgent from "../../index.ts";
 import { resolvePath } from "../../utils/paths.ts";
+import { CheckpointActivity } from "../checkpoint.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
@@ -194,6 +195,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 	};
 
 	const runtime: ExtensionRuntime = {
+		checkpointActivity: new CheckpointActivity(),
 		sendMessage: notInitialized,
 		sendUserMessage: notInitialized,
 		appendEntry: notInitialized,
@@ -262,6 +264,8 @@ function createExtensionAPI(
 	cwd: string,
 	eventBus: EventBus,
 ): { api: ExtensionAPI; commit: () => void; discard: () => void } {
+	runtime.checkpointActivity ??= new CheckpointActivity();
+	const checkpointActivity = runtime.checkpointActivity;
 	const pendingFlagValues = new Map<string, boolean | string>();
 	const pendingRuntimeChanges: Array<() => void> = [];
 	const loadingUnsubscribers: Array<() => void> = [];
@@ -417,7 +421,7 @@ function createExtensionAPI(
 
 		exec(command: string, args: string[], options?: ExecOptions) {
 			assertActive();
-			return execCommand(command, args, options?.cwd ?? cwd, options);
+			return checkpointActivity.run(() => execCommand(command, args, options?.cwd ?? cwd, options));
 		},
 
 		getActiveTools(): string[] {
@@ -442,7 +446,7 @@ function createExtensionAPI(
 
 		setModel(model) {
 			assertActive();
-			return runtime.setModel(model);
+			return checkpointActivity.run(() => runtime.setModel(model));
 		},
 
 		getThinkingLevel() {
@@ -477,7 +481,9 @@ function createExtensionAPI(
 			},
 			on(channel, handler) {
 				assertActive();
-				const unsubscribe = runtime.trackEventBusSubscription(eventBus.on(channel, handler));
+				const unsubscribe = runtime.trackEventBusSubscription(
+					eventBus.on(channel, (data) => checkpointActivity.run(() => handler(data))),
+				);
 				if (state === "loading") loadingUnsubscribers.push(unsubscribe);
 				return unsubscribe;
 			},

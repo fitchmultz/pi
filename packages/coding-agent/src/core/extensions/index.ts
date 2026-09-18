@@ -143,6 +143,8 @@ export type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
+	SessionCheckpointEvent,
+	SessionCheckpointResult,
 	SessionCompactEvent,
 	SessionCompactFailedEvent,
 	SessionEvent,

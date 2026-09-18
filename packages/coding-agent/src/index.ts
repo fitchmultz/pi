@@ -24,6 +24,17 @@ export {
 	type SessionStats,
 } from "./core/agent-session.ts";
 export { readStoredCredential } from "./core/auth-storage.ts";
+export {
+	type CheckpointBoundary,
+	type CheckpointHold,
+	type CheckpointOptions,
+	openSessionCheckpoint,
+	readSessionCheckpoint,
+	restoreSessionCheckpoint,
+	type SessionCheckpoint,
+	type SessionCheckpointQueues,
+	writeSessionCheckpoint,
+} from "./core/checkpoint.ts";
 // Compaction
 export {
 	type BranchPreparation,
@@ -140,6 +151,8 @@ export type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
+	SessionCheckpointEvent,
+	SessionCheckpointResult,
 	SessionCompactEvent,
 	SessionCompactFailedEvent,
 	SessionInfoChangedEvent,

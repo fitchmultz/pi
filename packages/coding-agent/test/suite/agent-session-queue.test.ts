@@ -3,6 +3,7 @@ import { fauxAssistantMessage, fauxToolCall, type ImageContent } from "@earendil
 import type { ExtensionAPI, ExtensionContext, ExtensionRunner, InputEvent } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { CheckpointActivity } from "../../src/core/checkpoint.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
@@ -116,6 +117,7 @@ describe("AgentSession queue characterization", () => {
 		try {
 			const view = Object.assign(Object.create(InteractiveMode.prototype), {
 				runtimeHost: { session: harness.session },
+				checkpointUIActivity: new CheckpointActivity(),
 				keybindings: new KeybindingsManager(),
 				defaultEditor: {},
 			}) as {

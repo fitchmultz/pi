@@ -1,8 +1,10 @@
 import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, parse, resolve } from "node:path";
+import { raceWithAbortSignal } from "../utils/abort.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
+import type { ShutdownCheckpoint } from "./checkpoint.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -405,12 +407,62 @@ export class AgentSessionRuntime {
 
 	async dispose(): Promise<void> {
 		this.session.beginShutdown();
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason: "quit",
-		});
+		await emitSessionShutdownEvent(this.session.extensionRunner, { type: "session_shutdown", reason: "quit" });
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
+	}
+
+	/** Opt-in final capture: preserve default disposal semantics for all existing callers. */
+	async disposeWithCheckpoint(options: {
+		signal: AbortSignal;
+		waitForHost: () => Promise<void>;
+	}): Promise<ShutdownCheckpoint> {
+		this.session.beginShutdown();
+		const errors: string[] = [];
+		const unsubscribe = this.session.extensionRunner.onError((error) =>
+			errors.push(`${error.extensionPath}: ${error.error}`),
+		);
+		let checkpoint: ShutdownCheckpoint | undefined;
+		let disposed = false;
+		try {
+			const result = await raceWithAbortSignal(
+				(async () => {
+					await emitSessionShutdownEvent(this.session.extensionRunner, {
+						type: "session_shutdown",
+						reason: "quit",
+					});
+					options.signal.throwIfAborted();
+					await this.session.finishShutdownForCheckpoint();
+					options.signal.throwIfAborted();
+					this.beforeSessionInvalidate?.();
+					await options.waitForHost();
+					options.signal.throwIfAborted();
+					// UI teardown can initiate native cleanup (for example pi.exec from a component disposer).
+					await this.session.finishShutdownForCheckpoint();
+					options.signal.throwIfAborted();
+					const candidate = await this.session.captureShutdownCheckpoint();
+					checkpoint = candidate;
+					try {
+						options.signal.throwIfAborted();
+						if (errors.length) throw new Error(`Extension shutdown persistence failed: ${errors.join("; ")}`);
+						return candidate;
+					} catch (error) {
+						candidate.release();
+						throw error;
+					}
+				})(),
+				options.signal,
+			);
+			disposed = true;
+			this.session.dispose();
+			return result;
+		} catch (error) {
+			checkpoint?.release();
+			throw error;
+		} finally {
+			unsubscribe();
+			if (!disposed) this.session.dispose();
+		}
 	}
 }
 

@@ -41,7 +41,14 @@ export default function (pi) {
 		cliPath: process.env.PI_TEST_CLI ?? resolve(__dirname, "../src/cli.ts"),
 		cwd: root,
 		env: {
+			// Exercise pre-login RPC deterministically, even in a developer shell with provider keys.
+			...Object.fromEntries(Object.keys(process.env).map((name) => [name, ""])),
+			PATH: process.env.PATH ?? "",
+			SystemRoot: process.env.SystemRoot ?? "",
 			HOME: root,
+			USERPROFILE: root,
+			PI_NO_LOCAL_LLM: "1",
+			AWS_EC2_METADATA_DISABLED: "true",
 			PI_CODING_AGENT_DIR: join(root, "agent"),
 			PI_OFFLINE: "1",
 			NODE_OPTIONS: process.env.PI_TEST_CLI
@@ -66,6 +73,15 @@ export default function (pi) {
 	let pendingInput: ReturnType<RpcClient["prompt"]> | undefined;
 	try {
 		await client.start();
+		expect((await client.getState()).model).toBeUndefined();
+		const send = Reflect.get(client, "send") as (
+			this: RpcClient,
+			command: { type: "prompt"; message: string },
+		) => Promise<unknown>;
+		expect(await send.call(client, { type: "prompt", message: "requires a model" })).toMatchObject({
+			success: false,
+			error: expect.stringContaining("No model selected"),
+		});
 		await client.prompt("/aside");
 		pending = client.bash("must not execute locally");
 		void pending.catch(() => {});

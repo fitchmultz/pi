@@ -27,6 +27,7 @@ import {
 	printAuthCommandHelp,
 	validateAuthCommandArgs,
 } from "./cli/auth-command.ts";
+import { CHECKPOINT_SOCKET_ENV, startCheckpointControl } from "./cli/checkpoint-control.ts";
 import { resolveCredentialForPrint } from "./cli/credential-print.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
@@ -44,6 +45,12 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
+import {
+	CHECKPOINT_EXIT_PATH_ENV,
+	openSessionCheckpoint,
+	prepareCheckpointExit,
+	readSessionCheckpoint,
+} from "./core/checkpoint.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
@@ -599,6 +606,18 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
+	const exitCheckpointPath = process.env[CHECKPOINT_EXIT_PATH_ENV];
+	let exitRestoreCheckpoint: ReturnType<typeof readSessionCheckpoint> | undefined;
+	let writeExitCheckpoint: ReturnType<typeof prepareCheckpointExit> | undefined;
+	if (exitCheckpointPath) {
+		// Load a shared restore/output path first, but clear old proof even if another restore input fails.
+		try {
+			const restorePath = parseArgs(args).checkpoint;
+			if (restorePath) exitRestoreCheckpoint = readSessionCheckpoint(resolvePath(restorePath, process.cwd()));
+		} finally {
+			writeExitCheckpoint = prepareCheckpointExit(exitCheckpointPath);
+		}
+	}
 	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	const restart = createManagedRestart(args);
 	const managedInteractive =
@@ -690,6 +709,35 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
+	if (
+		parsed.checkpoint &&
+		(appMode !== "interactive" ||
+			parsed.session ||
+			parsed.sessionCwd ||
+			parsed.sessionId ||
+			parsed.fork ||
+			parsed.continue ||
+			parsed.resume ||
+			parsed.noSession ||
+			parsed.name ||
+			parsed.messages.length ||
+			parsed.fileArgs.length ||
+			parsed.model ||
+			parsed.provider ||
+			parsed.thinking ||
+			parsed.tools ||
+			parsed.noTools ||
+			parsed.noBuiltinTools ||
+			parsed.excludeTools)
+	) {
+		throw new Error(
+			"--checkpoint requires interactive mode without startup prompts or session/model/tool selection overrides",
+		);
+	}
+	const checkpoint =
+		exitRestoreCheckpoint ??
+		(parsed.checkpoint ? readSessionCheckpoint(resolvePath(parsed.checkpoint, cwd)) : undefined);
+
 	validateSessionCwdFlags(parsed);
 	validateForkFlags(parsed);
 	validateSessionIdFlags(parsed);
@@ -722,10 +770,13 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
+	let sessionManager = checkpoint
+		? openSessionCheckpoint(checkpoint)
+		: await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	if (restart?.handoff) restoreRestartSession(sessionManager, restart.handoff);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
+		if (checkpoint) throw new MissingSessionCwdError(missingSessionCwdIssue);
 		if (appMode === "interactive") {
 			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
 			if (!selectedCwd) {
@@ -866,15 +917,17 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		const created = await createAgentSessionFromServices({
+			checkpoint: isInitialRuntime ? checkpoint : undefined,
 			services,
 			sessionManager,
 			sessionStartEvent,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
-			tools: sessionOptions.tools,
-			excludeTools: sessionOptions.excludeTools,
-			noTools: sessionOptions.noTools,
+			// Retain CLI registry restrictions across later native session replacements too.
+			tools: checkpoint?.toolConfiguration?.allowedToolNames ?? sessionOptions.tools,
+			excludeTools: checkpoint?.toolConfiguration?.excludedToolNames ?? sessionOptions.excludeTools,
+			noTools: checkpoint?.toolConfiguration?.noBuiltinTools ? "builtin" : sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
@@ -958,7 +1011,9 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createAgentSession");
 
-	if (appMode !== "interactive" && !session.model) {
+	// RPC, like the TUI, supports pre-login commands and session inspection without a model.
+	// Actual model runs still reject through AgentSession's native admission checks.
+	if (appMode !== "interactive" && appMode !== "rpc" && !session.model) {
 		console.error(chalk.red(formatNoModelsAvailableMessage()));
 		process.exit(1);
 	}
@@ -1007,6 +1062,7 @@ export async function main(args: string[], options?: MainOptions) {
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
 			onShutdownRequested: restart?.shutdownRequested,
+			writeExitCheckpoint,
 		});
 		if (startupBenchmark) {
 			await interactiveMode.init();
@@ -1030,8 +1086,22 @@ export async function main(args: string[], options?: MainOptions) {
 			await interactiveMode.init();
 			if (!(await restart.ready())) return;
 		}
+		let closeCheckpointControl: (() => void) | undefined;
+		if (process.env[CHECKPOINT_SOCKET_ENV]) {
+			await interactiveMode.init();
+			closeCheckpointControl = await startCheckpointControl({
+				path: process.env[CHECKPOINT_SOCKET_ENV]!,
+				getSession: () => runtime.session,
+				quiesce: () => interactiveMode.quiesceForCheckpoint(),
+				canQuiesce: () => interactiveMode.canQuiesceForCheckpoint(),
+			});
+		}
 		printTimings();
-		await interactiveMode.run();
+		try {
+			await interactiveMode.run();
+		} finally {
+			closeCheckpointControl?.();
+		}
 	} else {
 		printTimings();
 		const exitCode = await runPrintMode(runtime, {

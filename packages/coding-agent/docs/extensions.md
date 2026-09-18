@@ -539,6 +539,24 @@ pi.on("session_shutdown", async (event, ctx) => {
 });
 ```
 
+#### session_checkpoint
+
+Optional, awaited persistence barrier for [working-session checkpoints](checkpoint.md). Runs after a native turn or final settlement with ingress held, before artifact publication. Existing extensions that await work and reconstruct from persisted entries/files need no hook. Extensions with a `session_shutdown` handler require a positive checkpoint result to authorize sleep; shutdown is never invoked just to save.
+
+```typescript
+pi.on("session_checkpoint", async (event, ctx) => {
+  // event.boundary: "turn" | "settled"
+  // event.signal: aborts on release/cancellation
+  // event.invalidate(): invalidate BEFORE accepting background work while held
+  if (pendingMemoryOnlyTask) return { sleepReady: false, reason: "Task callback is live" };
+  await persistFiles();
+  pi.appendEntry("my-state", serializableState);
+  return { sleepReady: true };
+});
+```
+
+A positive result promises all extension state is persisted/reconstructible and owned callbacks remain quiescent until release. Use `event.signal` to undo temporary quiescence. Throws reject acquisition; a negative/missing result keeps compute alive. Do not prompt, run tools, open dialogs, or acquire another checkpoint inside this hook. Detached arbitrary promises are not automatically resumable: return a negative result or join/quiesce them. No extension install allowlist is imposed, and ordinary native authentication/rendering are unchanged.
+
 ### Agent Events
 
 #### before_agent_start

@@ -12,6 +12,7 @@ import { getAgentDir } from "../config.ts";
 import { raceWithAbortSignal } from "../utils/abort.ts";
 import { getFileRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
+import { CheckpointActivity } from "./checkpoint.ts";
 import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
 
 type AuthStorageData = Record<string, Credential>;
@@ -47,6 +48,9 @@ export interface AuthStorageBackend {
 }
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
+	// Read caches can share an in-flight reload across backend instances. Own actual locks,
+	// not just callers racing those reads against cancellation. Also used by FileModelsStore.
+	static readonly checkpointActivity = new CheckpointActivity();
 	private authPath: string;
 
 	constructor(authPath: string = join(getAgentDir(), "auth.json")) {
@@ -94,6 +98,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	}
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
+		FileAuthStorageBackend.checkpointActivity.invalidate();
 		this.ensureParentDir();
 		this.ensureFileExists();
 
@@ -154,7 +159,14 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		}
 	}
 
-	async withLockAsync<T>(
+	withLockAsync<T>(
+		fn: (current: string | undefined) => Promise<LockResult<T>>,
+		options?: AuthOperationOptions,
+	): Promise<T> {
+		return FileAuthStorageBackend.checkpointActivity.run(() => this.runWithLockAsync(fn, options));
+	}
+
+	private async runWithLockAsync<T>(
 		fn: (current: string | undefined) => Promise<LockResult<T>>,
 		options?: AuthOperationOptions,
 	): Promise<T> {

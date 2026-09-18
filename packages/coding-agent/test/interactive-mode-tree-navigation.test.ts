@@ -1,5 +1,6 @@
 import { Container } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CheckpointActivity } from "../src/core/checkpoint.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { StatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
@@ -17,9 +18,12 @@ function createTreeUI() {
 	let selector: TreeSelectorComponent | undefined;
 	const onEscape = vi.fn();
 	const ui = {
+		checkpointUIActivity: new CheckpointActivity(),
+		checkpointCallback: Reflect.get(InteractiveMode.prototype, "checkpointCallback"),
 		sessionManager,
 		settingsManager: SettingsManager.inMemory(),
 		session: {
+			notifyCheckpointStateChanged: vi.fn(),
 			isStreaming: false,
 			isCompacting: false,
 			abort: vi.fn(async () => {

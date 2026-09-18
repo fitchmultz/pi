@@ -757,6 +757,8 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
 			showRenameHint?: boolean;
 			keybindings?: KeybindingsManager;
+			/** Own file mutations even if the selector is dismissed before completion. */
+			runMutation?: (operation: () => Promise<void>) => Promise<void>;
 		},
 		currentSessionFilePath?: string,
 	) {
@@ -828,32 +830,34 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			this.requestRender();
 		};
 
+		const runMutation = options?.runMutation ?? ((operation: () => Promise<void>) => operation());
 		// Handle session deletion
-		this.sessionList.onDeleteSession = async (sessionPath: string) => {
-			const result = await deleteSessionFile(sessionPath);
+		this.sessionList.onDeleteSession = (sessionPath: string) =>
+			runMutation(async () => {
+				const result = await deleteSessionFile(sessionPath);
 
-			if (result.ok) {
-				if (this.currentSessions) {
-					this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
+				if (result.ok) {
+					if (this.currentSessions) {
+						this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
+					}
+					if (this.allSessions) {
+						this.allSessions = this.allSessions.filter((s) => s.path !== sessionPath);
+					}
+
+					const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
+					const showCwd = this.scope === "all";
+					this.sessionList.setSessions(sessions, showCwd);
+
+					const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
+					this.header.setStatusMessage({ type: "info", message: msg }, 2000);
+					await this.refreshSessionsAfterMutation();
+				} else {
+					const errorMessage = result.error ?? "Unknown error";
+					this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
 				}
-				if (this.allSessions) {
-					this.allSessions = this.allSessions.filter((s) => s.path !== sessionPath);
-				}
 
-				const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
-				const showCwd = this.scope === "all";
-				this.sessionList.setSessions(sessions, showCwd);
-
-				const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
-				this.header.setStatusMessage({ type: "info", message: msg }, 2000);
-				await this.refreshSessionsAfterMutation();
-			} else {
-				const errorMessage = result.error ?? "Unknown error";
-				this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
-			}
-
-			this.requestRender();
-		};
+				this.requestRender();
+			});
 
 		// Start loading current sessions immediately
 		this.loadCurrentSessions();

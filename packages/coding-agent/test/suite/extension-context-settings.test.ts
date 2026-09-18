@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { CheckpointActivity } from "../../src/core/checkpoint.ts";
 import type { CompactionSettings } from "../../src/core/compaction/index.ts";
 import type { ExtensionContext, ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
@@ -58,6 +59,7 @@ describe("ctx.getCompactionSettings", () => {
 			// Exercise native shortcut dispatch and context construction without starting a terminal.
 			const view = Object.assign(Object.create(InteractiveMode.prototype), {
 				runtimeHost: { session: harness.session },
+				checkpointUIActivity: new CheckpointActivity(),
 				keybindings: new KeybindingsManager(),
 				defaultEditor: {},
 			}) as {

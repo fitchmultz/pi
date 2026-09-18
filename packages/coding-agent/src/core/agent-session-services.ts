@@ -54,6 +54,7 @@ export interface CreateAgentSessionServicesOptions {
 export interface CreateAgentSessionFromServicesOptions {
 	services: AgentSessionServices;
 	sessionManager: SessionManager;
+	checkpoint?: CreateAgentSessionOptions["checkpoint"];
 	sessionStartEvent?: SessionStartEvent;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
@@ -209,6 +210,7 @@ export async function createAgentSessionFromServices(
 		settingsManager: options.services.settingsManager,
 		resourceLoader: options.services.resourceLoader,
 		sessionManager: options.sessionManager,
+		checkpoint: options.checkpoint,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
 		scopedModels: options.scopedModels,

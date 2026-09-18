@@ -65,6 +65,14 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import type {
+	CheckpointBoundary,
+	CheckpointHold,
+	CheckpointOptions,
+	SessionCheckpoint,
+	SessionCheckpointQueues,
+	ShutdownCheckpoint,
+} from "./checkpoint.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -241,6 +249,8 @@ export interface AgentSessionConfig {
 	modelRuntime: ModelRuntime;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: string[];
+	/** Suppress default built-ins, retaining extension tools and explicit selection. */
+	noBuiltinTools?: boolean;
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
 	/** Optional denylist of tool names. When provided, these tool names are not exposed. */
@@ -365,6 +375,19 @@ export class AgentSession {
 	private _pendingProviderMessages: AgentMessage[] = [];
 	/** Native inputs awaiting handling, admission, queueing, or rejection. */
 	private _pendingInputCount = 0;
+	private _activeCommands = 0;
+	private _settling = 0;
+	private _checkpointHeld = false;
+	private _checkpointRestored = false;
+	private _checkpointActiveTools?: string[];
+	private _checkpointEntryPersistence?: AbortSignal;
+	private readonly _shutdownCheckpointWaiters = new Set<() => void>();
+	private _checkpointRequest?: {
+		boundary: CheckpointBoundary;
+		canQuiesce?: () => boolean;
+		run: (boundary: CheckpointBoundary) => Promise<void>;
+		cancel: () => void;
+	};
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -397,6 +420,7 @@ export class AgentSession {
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
+	private _noBuiltinTools: boolean;
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
@@ -438,6 +462,7 @@ export class AgentSession {
 		this._modelRuntime = config.modelRuntime;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
+		this._noBuiltinTools = config.noBuiltinTools ?? false;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
@@ -446,6 +471,11 @@ export class AgentSession {
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		const afterTurn = this.agent.afterTurn;
+		this.agent.afterTurn = async (signal) => {
+			await afterTurn?.(signal);
+			await this._checkpointSafePoint("turn");
+		};
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
 		this._installAgentRequestPreflight();
@@ -627,6 +657,7 @@ export class AgentSession {
 
 	/** Start a fresh model context while preserving the full session transcript. */
 	newContext(options: NewContextRequest = {}): void {
+		this._assertNotCheckpointHeld();
 		const request = { handoff: options.handoff?.trim() || undefined };
 		if (this.isStreaming) {
 			this._pendingNewContext = request;
@@ -918,6 +949,7 @@ export class AgentSession {
 	}
 
 	private _resolveIdleWaitIfIdle(): void {
+		this.notifyCheckpointStateChanged();
 		if (!this.isIdle || !this._resolveIdleWait) {
 			return;
 		}
@@ -929,10 +961,13 @@ export class AgentSession {
 
 	private async _emitAgentSettled(): Promise<void> {
 		this._isAgentRunActive = false;
+		this._settling++;
 		try {
 			await this._extensionRunner.emit({ type: "agent_settled" });
 			this._emit({ type: "agent_settled" });
 		} finally {
+			this._settling--;
+			await this._checkpointSafePoint("settled");
 			this._resolveIdleWaitIfIdle();
 		}
 	}
@@ -957,19 +992,16 @@ export class AgentSession {
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._overflowRecoveryAttempted = false;
 			const messageText = contentText(event.message.content, "");
-			if (messageText) {
-				// Check steering queue first
-				const steeringIndex = this._steeringMessages.indexOf(messageText);
-				if (steeringIndex !== -1) {
-					this._steeringMessages.splice(steeringIndex, 1);
+			// Image-only queued inputs have empty text and still leave the pending display.
+			const steeringIndex = this._steeringMessages.indexOf(messageText);
+			if (steeringIndex !== -1) {
+				this._steeringMessages.splice(steeringIndex, 1);
+				this._emitQueueUpdate();
+			} else {
+				const followUpIndex = this._followUpMessages.indexOf(messageText);
+				if (followUpIndex !== -1) {
+					this._followUpMessages.splice(followUpIndex, 1);
 					this._emitQueueUpdate();
-				} else {
-					// Check follow-up queue
-					const followUpIndex = this._followUpMessages.indexOf(messageText);
-					if (followUpIndex !== -1) {
-						this._followUpMessages.splice(followUpIndex, 1);
-						this._emitQueueUpdate();
-					}
 				}
 			}
 		}
@@ -1192,6 +1224,7 @@ export class AgentSession {
 
 	/** Close admission before host cleanup yields. Active responses are aborted only at final disposal. */
 	beginShutdown(): void {
+		this._checkpointRequest?.cancel();
 		this._shutdownAbortController.abort();
 		this._promptAbortController?.abort();
 	}
@@ -1201,6 +1234,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._checkpointRequest?.cancel();
 		this._shutdownAbortController.abort();
 		try {
 			this.abortRetry();
@@ -1232,7 +1266,7 @@ export class AgentSession {
 
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
-		return this.agent.state.model;
+		return this.agent.selectedModel;
 	}
 
 	/** Current thinking level */
@@ -1305,6 +1339,7 @@ export class AgentSession {
 	 * Changes take effect on the next agent turn.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
+		this._assertNotCheckpointHeld();
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const name of toolNames) {
@@ -1364,6 +1399,7 @@ export class AgentSession {
 
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
+		this._assertNotCheckpointHeld();
 		this._scopedModels = scopedModels;
 	}
 
@@ -1509,7 +1545,9 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(prepare: (signal: AbortSignal) => Promise<() => AgentMessage[]>): Promise<void> {
+		this._assertNotCheckpointHeld();
 		this._shutdownAbortController.signal.throwIfAborted();
+		if (this._checkpointActiveTools) throw new Error("Checkpoint restore requires extension initialization");
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
 		}
@@ -1649,6 +1687,7 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		this._assertNotCheckpointHeld();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		let preflightComplete = false;
 		let pendingInput = false;
@@ -1774,6 +1813,8 @@ export class AgentSession {
 		} catch (error) {
 			if (!preflightComplete) preflightResult(false);
 			throw error;
+		} finally {
+			await this._checkpointSafePoint("settled");
 		}
 	}
 
@@ -1792,6 +1833,7 @@ export class AgentSession {
 		// Get command context from extension runner (includes session control methods)
 		const ctx = this._extensionRunner.createCommandContext();
 
+		this._activeCommands++;
 		try {
 			await command.handler(args, ctx);
 			return true;
@@ -1803,6 +1845,9 @@ export class AgentSession {
 				error: err instanceof Error ? err.message : String(err),
 			});
 			return true;
+		} finally {
+			this._activeCommands--;
+			await this._checkpointSafePoint("settled");
 		}
 	}
 
@@ -1843,6 +1888,7 @@ export class AgentSession {
 		behavior: "steer" | "followUp",
 		source: InputSource,
 	): Promise<void> {
+		this._assertNotCheckpointHeld();
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
 		}
@@ -1867,6 +1913,7 @@ export class AgentSession {
 			}
 		} finally {
 			this._pendingInputCount--;
+			await this._checkpointSafePoint("settled");
 		}
 	}
 
@@ -1978,6 +2025,7 @@ export class AgentSession {
 			persistOnCancel?: boolean;
 		},
 	): Promise<void> {
+		this._assertNotCheckpointHeld();
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
@@ -2103,6 +2151,7 @@ export class AgentSession {
 	 * @returns Object with steering and followUp arrays
 	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
+		this._assertNotCheckpointHeld();
 		this._preserveUndeliveredCustomMessages();
 		const steering = [...this._steeringMessages];
 		const followUp = [...this._followUpMessages];
@@ -2137,6 +2186,12 @@ export class AgentSession {
 		return this._steeringMessages.length + this._followUpMessages.length;
 	}
 
+	/** Pending non-user steering/follow-up messages, retained in the native agent queues. */
+	get pendingCustomMessageCount(): number {
+		const queues = this.agent.getQueuedMessages();
+		return [...queues.steering, ...queues.followUp].filter((message) => message.role !== "user").length;
+	}
+
 	/** Get pending steering messages (read-only) */
 	getSteeringMessages(): readonly string[] {
 		return this._steeringMessages;
@@ -2147,6 +2202,313 @@ export class AgentSession {
 		return this._followUpMessages;
 	}
 
+	private async _flushCheckpointSettings(): Promise<void> {
+		await this.settingsManager.flush({ requireSuccessfulPersistence: true });
+		const errors = this.settingsManager.drainErrors();
+		if (errors.length)
+			throw new Error(`Settings checkpoint failed: ${errors.map((error) => error.error.message).join("; ")}`);
+	}
+
+	private _captureCheckpoint(boundary: CheckpointBoundary): SessionCheckpoint {
+		if (this._checkpointActiveTools) throw new Error("Checkpoint restore requires extension initialization");
+		const sessionFile = this.sessionFile;
+		const header = this.sessionManager.getHeader();
+		if (!sessionFile || !header) throw new Error("Checkpoint requires a persistent session");
+		const checkpoint: SessionCheckpoint = {
+			version: 1,
+			createdAt: new Date().toISOString(),
+			selection: {
+				sessionFile,
+				sessionId: this.sessionId,
+				cwd: this._cwd,
+				leafId: this.sessionManager.getLeafId(),
+				model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
+				thinkingLevel: this.thinkingLevel,
+				activeTools: this.getActiveToolNames(),
+				knownTools: this.getAllTools().map((tool) => tool.name),
+			},
+			header,
+			entries: this.sessionManager.getEntries(),
+			queues: this.getCheckpointQueues(),
+			toolConfiguration: {
+				noBuiltinTools: this._noBuiltinTools || undefined,
+				allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
+				excludedToolNames: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
+			},
+			scopedModels: this._scopedModels.map(({ model, thinkingLevel }) => ({
+				provider: model.provider,
+				id: model.id,
+				thinkingLevel,
+			})),
+			boundary,
+			settled: boundary === "settled" && this.isIdle,
+		};
+		// Both held and final-exit artifacts use the same native snapshot and JSON validation.
+		return JSON.parse(JSON.stringify(checkpoint)) as SessionCheckpoint;
+	}
+
+	private _notifyShutdownCheckpointWaiters(): void {
+		for (const notify of this._shutdownCheckpointWaiters) notify();
+	}
+
+	/** After shutdown hooks, cancel and join actual native work without consuming accepted remaining queues. */
+	async finishShutdownForCheckpoint(): Promise<void> {
+		if (!this._shutdownAbortController.signal.aborted) throw new Error("Session shutdown has not begun");
+		this.abortBash();
+		await this.abort();
+		while (!this._isShutdownCheckpointSettled()) {
+			let notify!: () => void;
+			await new Promise<void>((resolve) => {
+				notify = resolve;
+				this._shutdownCheckpointWaiters.add(notify);
+			});
+			this._shutdownCheckpointWaiters.delete(notify);
+		}
+	}
+
+	private _isShutdownCheckpointSettled(): boolean {
+		return (
+			this.isIdle &&
+			!this.agent.state.isStreaming &&
+			!this._settling &&
+			!this._pendingInputCount &&
+			!this._activeCommands &&
+			!this.isBashRunning &&
+			!this.isRetrying &&
+			this.agent.state.pendingToolCalls.size === 0 &&
+			!this._extensionRunner.checkpointActivity.busy
+		);
+	}
+
+	/** Caller owns stopped ingress and completed shutdown handlers. Never use this as a live-process sleep receipt. */
+	async captureShutdownCheckpoint(): Promise<ShutdownCheckpoint> {
+		if (!this._shutdownAbortController.signal.aborted) throw new Error("Session shutdown has not begun");
+		this._flushPendingProviderMessages();
+		this._flushPendingBashMessages();
+		this._flushPendingCustomMessages();
+		await this._modelRuntime.flushForCheckpoint({ requireSuccessfulPersistence: true });
+		const controller = new AbortController();
+		const invalidate = () => controller.abort(new Error("Late native activity invalidated clean-exit capture"));
+		const releases: Array<() => void> = [];
+		const release = () => {
+			for (const done of releases.splice(0)) done();
+			controller.abort();
+		};
+		try {
+			releases.push(this._modelRuntime.holdForCheckpoint(invalidate));
+			releases.push(this._extensionRunner.checkpointActivity.hold(invalidate));
+			await this._flushCheckpointSettings();
+			controller.signal.throwIfAborted();
+			if (!this._isShutdownCheckpointSettled() || this.pendingInputCount)
+				throw new Error("Unfinished native callbacks or input prevent a clean-exit checkpoint");
+			if (this.model && this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime")
+				throw new Error("Runtime-only API key cannot be restored from a clean-exit checkpoint");
+			return { checkpoint: this._captureCheckpoint("settled"), signal: controller.signal, release };
+		} catch (error) {
+			release();
+			throw error;
+		}
+	}
+
+	/** Acquire a completed-turn or fully settled native hold. Never call from an awaited run handler. */
+	async acquireCheckpoint(options: CheckpointOptions = {}): Promise<CheckpointHold> {
+		if (this._checkpointRequest) return Promise.reject(new Error("Checkpoint already requested"));
+		this._shutdownAbortController.signal.throwIfAborted();
+		options.signal?.throwIfAborted();
+		return new Promise((resolve, reject) => {
+			const holdController = new AbortController();
+			let released = false;
+			let unquiesce: (() => void) | undefined;
+			const releaseWriters: Array<() => void> = [];
+			let resume: (() => void) | undefined;
+			const release = () => {
+				if (released) return;
+				released = true;
+				this._checkpointHeld = false;
+				this._checkpointRequest = undefined;
+				options.signal?.removeEventListener("abort", cancel);
+				holdController.abort();
+				for (const releaseWriter of releaseWriters) releaseWriter();
+				try {
+					unquiesce?.();
+				} finally {
+					resume?.();
+				}
+			};
+			const cancel = () => {
+				reject(new Error("Checkpoint cancelled"));
+				release();
+			};
+			this._checkpointRequest = {
+				boundary: options.boundary ?? "settled",
+				canQuiesce: options.canQuiesce,
+				cancel,
+				run: async (boundary) => {
+					if (released) return;
+					this._checkpointHeld = true;
+					const held = new Promise<void>((done) => {
+						resume = done;
+					});
+					try {
+						unquiesce = options.quiesce?.();
+						this._flushPendingProviderMessages();
+						this._flushPendingBashMessages();
+						this._flushPendingCustomMessages();
+						this._checkpointEntryPersistence = holdController.signal;
+						let sleepBlockers: string[];
+						try {
+							sleepBlockers = await this._extensionRunner.prepareCheckpoint({
+								type: "session_checkpoint",
+								boundary,
+								signal: holdController.signal,
+								invalidate: cancel,
+							});
+						} finally {
+							if (this._checkpointEntryPersistence === holdController.signal)
+								this._checkpointEntryPersistence = undefined;
+						}
+						if (released) return;
+						await this._modelRuntime.flushForCheckpoint();
+						if (released) return;
+						releaseWriters.push(this._modelRuntime.holdForCheckpoint(cancel));
+						releaseWriters.push(this._extensionRunner.checkpointActivity.hold(cancel));
+						await this._flushCheckpointSettings();
+						if (released) return;
+						const checkpoint = this._captureCheckpoint(boundary);
+						if (this.model && this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime")
+							sleepBlockers.push(
+								"Selected provider uses a runtime-only API key; persist native authentication first",
+							);
+						if (!options.quiesce) sleepBlockers.push("Host input is not quiesced");
+						if (!checkpoint.settled) sleepBlockers.push("Native run has not settled");
+						resolve({
+							checkpoint,
+							sleepReady: sleepBlockers.length === 0,
+							sleepBlockers,
+							signal: holdController.signal,
+							release,
+						});
+						await held;
+					} catch (error) {
+						reject(error);
+					} finally {
+						release();
+					}
+				},
+			};
+			options.signal?.addEventListener("abort", cancel, { once: true });
+			if (this.isIdle && !this._settling) void this._checkpointSafePoint("settled");
+		});
+	}
+
+	private async _checkpointSafePoint(boundary: CheckpointBoundary): Promise<void> {
+		this._notifyShutdownCheckpointWaiters();
+		const request = this._checkpointRequest;
+		if (!request || this._checkpointHeld || this._settling || (boundary === "turn" && request.boundary === "settled"))
+			return;
+		if (
+			this.pendingInputCount ||
+			this._activeCommands ||
+			this._extensionRunner.checkpointActivity.busy ||
+			this.isBashRunning ||
+			this.isCompacting ||
+			this.isRetrying ||
+			this.agent.state.pendingToolCalls.size > 0 ||
+			(boundary === "settled" && (!this.isIdle || this.agent.state.isStreaming)) ||
+			(request.canQuiesce && !request.canQuiesce())
+		)
+			return;
+		await request.run(boundary);
+	}
+
+	/** Native host callbacks call this after releasing mode-held input or finishing asynchronous UI work. */
+	notifyCheckpointStateChanged(): void {
+		this._notifyShutdownCheckpointWaiters();
+		if (this._checkpointRequest && !this._checkpointHeld)
+			setImmediate(() => void this._checkpointSafePoint("settled"));
+	}
+
+	get isCheckpointHeld(): boolean {
+		return this._checkpointHeld;
+	}
+
+	/** Invalidate a pending or acquired hold without interrupting the agent's work. */
+	cancelCheckpoint(): void {
+		this._checkpointRequest?.cancel();
+	}
+
+	private _assertNotCheckpointHeld(): void {
+		if (this._checkpointHeld) {
+			this.cancelCheckpoint();
+			throw new Error("Session is held for checkpoint; hold invalidated, retry after release");
+		}
+	}
+
+	getCheckpointQueues(): SessionCheckpointQueues {
+		const queues = this.agent.getQueuedMessages();
+		return structuredClone({
+			...queues,
+			steeringMode: this.steeringMode,
+			followUpMode: this.followUpMode,
+			nextTurn: this._pendingNextTurnMessages,
+			persistOnCancel: [...queues.steering, ...queues.followUp].flatMap((message, index) =>
+				message.role === "custom" && this._cancelPersistentCustomMessages.has(message) ? [index] : [],
+			),
+		});
+	}
+
+	/** Startup handlers may reconstruct tools; apply the exact saved selection after they finish. */
+	restoreCheckpointTools(names: string[], configuration?: SessionCheckpoint["toolConfiguration"]): void {
+		this._assertNotCheckpointHeld();
+		if (configuration) {
+			this._noBuiltinTools = configuration.noBuiltinTools ?? false;
+			this._allowedToolNames = configuration.allowedToolNames ? new Set(configuration.allowedToolNames) : undefined;
+			this._excludedToolNames = configuration.excludedToolNames
+				? new Set(configuration.excludedToolNames)
+				: undefined;
+			this._refreshToolRegistry();
+		}
+		this._checkpointActiveTools = [...names];
+		this.setActiveToolsByName(names);
+		if (!this.hasExtensionHandlers("session_start") && !this.hasExtensionHandlers("resources_discover"))
+			this._finishCheckpointToolRestore();
+	}
+
+	private _finishCheckpointToolRestore(): void {
+		const names = this._checkpointActiveTools;
+		if (!names) return;
+		if (names.some((name) => !this._toolRegistry.has(name)))
+			throw new Error("Checkpoint tools unavailable after extension initialization");
+		this.setActiveToolsByName(names);
+		this._checkpointActiveTools = undefined;
+	}
+
+	/** Restore once into an idle, empty queue; no handlers, expansion, or model calls are replayed. */
+	restoreCheckpointQueues(saved: SessionCheckpointQueues): void {
+		this._assertNotCheckpointHeld();
+		if (this._checkpointRestored || !this.isIdle || this.hasPendingMessages || this.pendingNextTurnCount)
+			throw new Error("Checkpoint queues require a fresh idle session");
+		const queues = structuredClone(saved);
+		this._checkpointRestored = true;
+		this.agent.steeringMode = queues.steeringMode;
+		this.agent.followUpMode = queues.followUpMode;
+		for (const message of queues.steering) this.agent.steer(message);
+		for (const message of queues.followUp) this.agent.followUp(message);
+		this._steeringMessages = queues.steering
+			.filter((message) => message.role === "user")
+			.map((message) => contentText(message.content, ""));
+		this._followUpMessages = queues.followUp
+			.filter((message) => message.role === "user")
+			.map((message) => contentText(message.content, ""));
+		this._pendingNextTurnMessages = queues.nextTurn;
+		const messages = [...queues.steering, ...queues.followUp];
+		for (const index of queues.persistOnCancel) {
+			const message = messages[index];
+			if (message?.role === "custom") this._cancelPersistentCustomMessages.add(message);
+		}
+		this._emitQueueUpdate();
+	}
+
 	get resourceLoader(): ResourceLoader {
 		return this._resourceLoader;
 	}
@@ -2155,6 +2517,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		this._checkpointRequest?.cancel();
 		this._promptAbortController?.abort();
 		this.abortRetry();
 		this.abortCompaction();
@@ -2195,10 +2558,12 @@ export class AgentSession {
 	 * @throws Error if no auth is configured for the model
 	 */
 	async setModel(model: Model<any>, options: ModelMutationOptions = {}): Promise<void> {
+		this._assertNotCheckpointHeld();
 		if (!(await this._modelRuntime.checkAuth(model.provider))) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
+		this._assertNotCheckpointHeld();
 		const previousModel = this.model;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(model);
 		this.agent.state.model = model;
@@ -2240,6 +2605,7 @@ export class AgentSession {
 		direction: "forward" | "backward" = "forward",
 		options: ModelMutationOptions = {},
 	): Promise<ModelCycleResult | undefined> {
+		this._assertNotCheckpointHeld();
 		if (this._scopedModels.length > 0) {
 			return this._cycleScopedModel(direction, options);
 		}
@@ -2330,6 +2696,7 @@ export class AgentSession {
 	 * Persists the requested level to global defaults only when options.persist is true.
 	 */
 	setThinkingLevel(level: ThinkingLevel, options: ModelMutationOptions = {}): void {
+		this._assertNotCheckpointHeld();
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
@@ -2418,6 +2785,7 @@ export class AgentSession {
 	 * Saves to settings.
 	 */
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
+		this._assertNotCheckpointHeld();
 		this.agent.steeringMode = mode;
 		this.settingsManager.setSteeringMode(mode);
 	}
@@ -2427,6 +2795,7 @@ export class AgentSession {
 	 * Saves to settings.
 	 */
 	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
+		this._assertNotCheckpointHeld();
 		this.agent.followUpMode = mode;
 		this.settingsManager.setFollowUpMode(mode);
 	}
@@ -2483,6 +2852,7 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		this._assertNotCheckpointHeld();
 		this._shutdownAbortController.signal.throwIfAborted();
 		await this.abort();
 		this._compactionAbortController = new AbortController();
@@ -3024,6 +3394,7 @@ export class AgentSession {
 	 * Toggle auto-compaction setting.
 	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
+		this._assertNotCheckpointHeld();
 		this.settingsManager.setCompactionEnabled(enabled);
 	}
 
@@ -3064,6 +3435,7 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+		this._finishCheckpointToolRestore();
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -3183,6 +3555,7 @@ export class AgentSession {
 		runner.bindCore(
 			{
 				sendMessage: (message, options) => {
+					if (this.isCheckpointHeld) this.cancelCheckpoint();
 					this.sendCustomMessage(message, options).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
@@ -3192,6 +3565,7 @@ export class AgentSession {
 					});
 				},
 				sendUserMessage: (content, options) => {
+					if (this.isCheckpointHeld) this.cancelCheckpoint();
 					this.sendUserMessage(content, options).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
@@ -3201,6 +3575,8 @@ export class AgentSession {
 					});
 				},
 				appendEntry: (customType, data) => {
+					if (!this._checkpointEntryPersistence || this._checkpointEntryPersistence.aborted)
+						this._assertNotCheckpointHeld();
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
 					const entry = this.sessionManager.getEntry(entryId);
 					if (entry) {
@@ -3214,6 +3590,7 @@ export class AgentSession {
 					return this.sessionManager.getSessionName();
 				},
 				setLabel: (entryId, label) => {
+					this._assertNotCheckpointHeld();
 					this.sessionManager.appendLabelChange(entryId, label);
 				},
 				getActiveTools: () => this.getActiveToolNames(),
@@ -3254,7 +3631,7 @@ export class AgentSession {
 				getCompactionSettings: () => this.settingsManager.getCompactionSettings(this.model),
 				newContext: (options) => this.newContext(options),
 				compact: (options) => {
-					void (async () => {
+					void runner.checkpointActivity.run(async () => {
 						try {
 							const result = await this.compact(options?.customInstructions);
 							options?.onComplete?.(result);
@@ -3262,7 +3639,7 @@ export class AgentSession {
 							const err = error instanceof Error ? error : new Error(String(error));
 							options?.onError?.(err);
 						}
-					})();
+					});
 				},
 				getSystemPrompt: () => this.systemPrompt,
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
@@ -3419,15 +3796,21 @@ export class AgentSession {
 			this.sessionManager,
 			new ModelRegistry(this._modelRuntime),
 		);
+		this._extensionRunner.checkpointActivity.onIdle = () => {
+			// Let the enclosing native callback finish its continuation before checking settlement.
+			this.notifyCheckpointStateChanged();
+		};
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}
 		this._bindExtensionCore(this._extensionRunner);
 		this._applyExtensionBindings(this._extensionRunner);
 
-		const defaultActiveToolNames = this._baseToolsOverride
-			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+		const defaultActiveToolNames = this._noBuiltinTools
+			? []
+			: this._baseToolsOverride
+				? Object.keys(this._baseToolsOverride)
+				: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -3437,6 +3820,7 @@ export class AgentSession {
 
 	/** Refresh resources and reinitialize extensions. Extension code updates require a process restart. */
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		this._checkpointRequest?.cancel();
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
@@ -3588,6 +3972,7 @@ export class AgentSession {
 	 * Toggle auto-retry setting.
 	 */
 	setAutoRetryEnabled(enabled: boolean): void {
+		this._assertNotCheckpointHeld();
 		this.settingsManager.setRetryEnabled(enabled);
 	}
 
@@ -3609,6 +3994,7 @@ export class AgentSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations },
 	): Promise<BashResult> {
+		this._assertNotCheckpointHeld();
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
@@ -3648,6 +4034,7 @@ export class AgentSession {
 			return result;
 		} finally {
 			this._bashAbortControllers.delete(abortController);
+			await this._checkpointSafePoint("settled");
 		}
 	}
 
@@ -3656,6 +4043,7 @@ export class AgentSession {
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
+		this._assertNotCheckpointHeld();
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
 			command,
@@ -3726,6 +4114,7 @@ export class AgentSession {
 	 * Set a display name for the current session.
 	 */
 	setSessionName(name: string): void {
+		this._assertNotCheckpointHeld();
 		this.sessionManager.appendSessionInfo(name);
 		const event = { type: "session_info_changed", name: this.sessionManager.getSessionName() } as const;
 		this._emit(event);
@@ -3751,6 +4140,7 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+		this._assertNotCheckpointHeld();
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish before navigating the session tree.");
 		}

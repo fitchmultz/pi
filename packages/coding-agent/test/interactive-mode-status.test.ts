@@ -5,12 +5,20 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import { type Component, Container, type Focusable, type TUI } from "../../tui/src/tui.ts";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { CheckpointActivity } from "../src/core/checkpoint.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+
+const checkpointCallback = Reflect.get(InteractiveMode.prototype, "checkpointCallback") as <
+	Args extends unknown[],
+	Result,
+>(
+	callback: (...args: Args) => Result | Promise<Result>,
+) => (...args: Args) => Promise<Result>;
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -183,7 +191,8 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 			}),
 		};
 		const fakeThis: any = {
-			session: { settingsManager },
+			checkpointCallback,
+			session: { settingsManager, notifyCheckpointStateChanged: vi.fn() },
 			settingsManager,
 			themeController: {
 				setThemeInstance: vi.fn(() => ({ success: true })),
@@ -213,7 +222,8 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 			setTheme: vi.fn(),
 		};
 		const fakeThis: any = {
-			session: { settingsManager },
+			checkpointCallback,
+			session: { settingsManager, notifyCheckpointStateChanged: vi.fn() },
 			settingsManager,
 			themeController: {
 				setThemeInstance: vi.fn(() => ({ success: true })),
@@ -252,6 +262,9 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			throw new Error("closeReplacement was not initialized");
 		};
 		const fakeThis = {
+			checkpointCallback,
+			checkpointUIActivity: new CheckpointActivity(),
+			session: { notifyCheckpointStateChanged: vi.fn() },
 			editor,
 			editorContainer,
 			keybindings: {},
@@ -309,6 +322,8 @@ describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () 
 	test("stores wrapper factories and rebuilds autocomplete immediately", () => {
 		const wrapper: AutocompleteProviderFactory = (current) => current;
 		const fakeThis = {
+			checkpointCallback,
+			session: { notifyCheckpointStateChanged: vi.fn() },
 			autocompleteProviderWrappers: [] as AutocompleteProviderFactory[],
 			setupAutocompleteProvider: vi.fn(),
 		};
@@ -360,6 +375,7 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
 			defaultEditor,
 			editor: customEditor,
+			checkpointCallback,
 			autocompleteProviderWrappers: [wrap1, wrap2],
 		};
 
@@ -390,6 +406,7 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
 			defaultEditor,
 			editor: customEditor,
+			checkpointCallback,
 			autocompleteProviderWrappers: [passThrough(["$"]), passThrough(["!"])],
 		};
 

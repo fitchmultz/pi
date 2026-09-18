@@ -250,6 +250,12 @@ Both `steer()` and `followUp()` expand file-based prompt templates but error on 
 
 `session.pendingInputCount` reports submitted inputs still in native prompt preflight, plus input held by the bound mode. It covers asynchronous input handlers until handling, admission or failure; extension commands run first and do not count themselves. Native interactive bindings include both pending prompt-loop input and retained compaction/tree input. SDK hosts with their own input queue can supply its read-only count through `session.bindExtensions({ getQueuedInputCount })`. This does not change `isIdle` or steering/follow-up semantics. Extensions read the same fact with `ctx.getPendingInputCount()`.
 
+### Working-session checkpoints
+
+`await session.acquireCheckpoint({ boundary: "turn" | "settled", signal?, quiesce? })` returns an explicit `{ checkpoint, signal, release() }` hold after awaited native persistence and extension callbacks. Release it in `finally`. `createAgentSession({ checkpoint: readSessionCheckpoint(path) })` restores exact selection, native tool restrictions and full pending queues without running them automatically. An absent saved model means no selection, not a request for a default. Bind extensions through the host's usual `session.bindExtensions(...)` before prompting: startup handlers may reconstruct dynamic tools, after which the saved active selection is validated and reapplied.
+
+The hold also returns `sleepReady` and `sleepBlockers`. The native TUI can positively qualify a settled working session; active-turn artifacts remain recovery-only. Readiness requires host input quiescence and supported extension persistence. The archive owner still freezes filesystem writers and commits the verified archive before sleep. See [Working-session checkpoints](checkpoint.md) for the receipt, optional extension barrier, and unsupported live state.
+
 ### User Bash
 
 `session.executeBash(command, onChunk?, options?)` owns the whole user-Bash operation: `user_bash` interception, selected local/custom operations, and result recording. Interactive `!`/`!!`, RPC `bash`, and direct SDK calls share this path. A replacement result is recorded once and its output is sent to `onChunk`; normal execution also emits `bash_execution_update` events. The first intercepting handler remains authoritative.
@@ -426,6 +432,8 @@ const { session } = await createAgentSession({
   modelRuntime,
 });
 ```
+
+RPC can inspect a pre-login session and run non-model extension commands without a selected model. Model prompts still fail native admission until a model is selected; print/JSON invocations require one at startup.
 
 If no model is provided:
 1. Tries to restore from session (if continuing)
@@ -960,7 +968,7 @@ Project overrides global. Nested objects merge keys. Setters modify global setti
 
 - Settings getters/setters are synchronous for in-memory state.
 - Setters enqueue persistence writes asynchronously.
-- Call `await settingsManager.flush()` when you need a durability boundary (for example, before process exit or before asserting file contents in tests).
+- `await settingsManager.flush()` joins queued writes. Use `flush({ requireSuccessfulPersistence: true })` for a strict persistence boundary: unresolved dirty fields or load failures reject even after diagnostics are drained. Successful writes or explicit reload/trust reconciliation clear that state.
 - `SettingsManager` does not print settings I/O errors. Use `settingsManager.drainErrors()` and report them in your app layer.
 
 > See [examples/sdk/10-settings.ts](../examples/sdk/10-settings.ts)
