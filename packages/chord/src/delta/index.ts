@@ -762,7 +762,7 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 		return segment;
 	};
 
-	const adoptItems = (values: readonly unknown[]): JsonValue[] => values as JsonValue[];
+	const adoptItems = (values: readonly unknown[]): JsonValue[] => values.map(unwrap) as JsonValue[];
 
 	const integer = (value: unknown): number => {
 		const number = Number(value);
@@ -793,8 +793,9 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 	// cell, which is what a baseline diff produces for the same shape.
 	const wrappers = new WeakMap<
 		object,
-		{ proxy: object; target: object; cells: Set<Cell>; blocked: Seg | undefined }
+		{ proxy: object; target: object; addCell: (cell: Cell) => void; blocked: Seg | undefined }
 	>();
+	const unwrap = (value: unknown): unknown => (isObj(value) ? (wrappers.get(value)?.target ?? value) : value);
 	// Almost no document ever puts one object at two positions. Until one does,
 	// every write has exactly one path, so the per-write cell walk is skipped.
 	let aliased = false;
@@ -812,13 +813,14 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 		return out as Path;
 	};
 
-	const wrap = <V extends object>(object: V, cell: Cell, blockedSegment?: Seg): V => {
+	const wrap = <V extends object>(object: V, cell: Cell, blockedSegment?: Seg, adopt = false): V => {
 		// A wrapper is shared across the positions an object occupies, but only when
 		// the access is equally (un)blocked: the reserved-key guard is a property of
 		// how the object was reached, not of the object.
+		object = unwrap(object) as V;
 		const existing = wrappers.get(object);
 		if (existing !== undefined && existing.blocked === blockedSegment) {
-			existing.cells.add(cell);
+			existing.addCell(cell);
 			return existing.proxy as V;
 		}
 		// otherwise fall through and build a separate wrapper for this blocked view;
@@ -826,13 +828,17 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 		const cells = new Set<Cell>([cell]);
 		const liveCells = (): Cell[] => {
 			const out: Cell[] = [];
-			for (const c of cells) if (!isDetached(c)) out.push(c);
+			for (const c of cells) {
+				if (isDetached(c)) cells.delete(c);
+				else out.push(c);
+			}
 			return out;
 		};
 		const primary = (): Cell => (aliased ? (liveCells()[0] ?? cell) : cell);
 		const pathNow = (): Path => pathOf(primary());
 		// every op is emitted once per live position of this object
 		const emit = (op: Op): void => {
+			if (aliased ? liveCells().length === 0 : isDetached(cell)) return;
 			record(op);
 			if (!aliased) return;
 			const live = liveCells();
@@ -848,13 +854,54 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 				record(cloned);
 			}
 		};
-		const childProxies = new Map<string | symbol, { target: object; proxy: object; cell: Cell }>();
+		const childProxies = new Map<string | symbol, { target: object; proxy: object }>();
 		// Renumbering is driven by this, not by the cache: two shifting children can
 		// collide on one cache key, and the evicted one would silently stop tracking.
-		const childCells = new Set<{ target: object; cell: Cell }>();
+		const childCells = new Set<{ target: object; cell: Cell; blocked?: Seg }>();
+		const attachChild = (value: object, segment: Seg, blocked?: Seg, fresh = false, adopt = false): object => {
+			value = unwrap(value) as object;
+			let child: object = value;
+			const parents = liveCells();
+			// Keep local descendant positions so reinserting a detached object also
+			// reattaches references read while it was detached.
+			if (parents.length === 0) parents.push(cell);
+			for (const parent of parents) {
+				const existing = fresh
+					? undefined
+					: [...childCells].find((entry) => entry.cell.parent === parent && entry.cell.seg === segment);
+				if (existing !== undefined) {
+					child = wrap(value, existing.cell, blocked, adopt);
+					continue;
+				}
+				const childCell: Cell = { parent, seg: segment, dead: false };
+				childCells.add({ target: value, cell: childCell, blocked });
+				child = wrap(value, childCell, blocked, adopt);
+			}
+			childProxies.set(String(segment), { target: value, proxy: child });
+			return child;
+		};
+		const detachChild = (segment: Seg): void => {
+			for (const entry of childCells) {
+				if (entry.cell.seg !== segment) continue;
+				entry.cell.dead = true;
+				childCells.delete(entry);
+			}
+		};
+		const addCell = (next: Cell): void => {
+			if (cells.has(next)) return;
+			cells.add(next);
+			aliased = true;
+			// Existing held descendants must acquire the new parent position too.
+			const children = new Map<Seg, { target: object; blocked?: Seg }>();
+			for (const entry of childCells) {
+				children.set(entry.cell.seg, entry);
+				if (isDetached(entry.cell)) childCells.delete(entry);
+			}
+			for (const [segment, entry] of children) attachChild(entry.target, segment, entry.blocked);
+		};
 		// Structural mutation shifts indices. Live children are renumbered so a
 		// reference taken before the mutation keeps addressing its own element;
-		// children whose element was removed are marked dead and throw on write.
+		// children whose element was removed are marked dead and mutate only locally.
 		const renumber = (
 			key: string,
 			before: number,
@@ -866,7 +913,6 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 			shape++; // invalidate cached paths
 			if (key === "push") return; // an append shifts nothing
 			if (!Array.isArray(object)) return;
-			if (childCells.size === 0) return; // nobody took a reference
 			let index: number;
 			let remove = 0;
 			let insert = 0;
@@ -884,16 +930,15 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 				remove = spliceRemove;
 				insert = spliceInsert;
 			} else {
-				// sort/reverse/fill/copyWithin permute rather than shift: locate each
-				// held child by identity. Held children are few and these are rare.
-				for (const entry of [...childCells]) {
-					const at = (object as unknown as unknown[]).indexOf(entry.target);
-					if (at < 0) {
-						entry.cell.dead = true;
-						childCells.delete(entry);
-					} else entry.cell.seg = at;
-				}
+				// Whole-array mutators can duplicate positions, not just permute them.
+				// Retire outgoing positions and register every resulting occurrence.
+				for (const entry of childCells) entry.cell.dead = true;
+				childCells.clear();
 				childProxies.clear();
+				for (let i = 0; i < object.length; i++) {
+					const value: unknown = object[i];
+					if (isObj(value)) attachChild(value, i, undefined, true, true);
+				}
 				return;
 			}
 			const delta = insert - remove;
@@ -913,8 +958,6 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 				if (Array.isArray(target) && typeof key === "string" && MUTATORS.has(key)) {
 					return (...args: unknown[]) => {
 						if (blockedSegment !== undefined) throw new UnsafePathError(blockedSegment);
-						if (aliased ? liveCells().length === 0 : isDetached(cell))
-							return Reflect.apply(Array.prototype[key as "push"], target, args);
 						const before = target.length;
 						let spliceAt = -1;
 						let spliceRemove = 0;
@@ -969,6 +1012,7 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 								break;
 							}
 							default: {
+								if (key === "fill") args[0] = unwrap(args[0]);
 								result = Reflect.apply(Array.prototype[key as "sort"], target, args);
 								if (pathNow().length === 0) emit(["r", cloneJson(target as unknown as JsonValue)]);
 								else
@@ -987,14 +1031,7 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 						for (let i = insertAt; insertCount > 0 && i < insertAt + insertCount; i++) {
 							const item = (target as unknown[])[i];
 							if (!isObj(item)) continue;
-							const known = wrappers.get(item as object);
-							if (known === undefined || known.target === object) continue;
-							let seen = false;
-							for (const c of known.cells) if (!c.dead && c.parent === primary() && c.seg === i) seen = true;
-							if (!seen && [...known.cells].some((c) => !c.dead)) {
-								known.cells.add({ parent: primary(), seg: i, dead: false });
-								aliased = true;
-							}
+							attachChild(item, i, undefined, true, true);
 						}
 						return key === "sort" || key === "reverse" || key === "fill" || key === "copyWithin" ? proxy : result;
 					};
@@ -1017,27 +1054,17 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 					segment = rawSegment;
 					childBlocked = rawSegment;
 				} else segment = guard(rawSegment);
-				const childCell: Cell = { parent: cell, seg: segment, dead: false };
-				const child = wrap(value, childCell, childBlocked);
-				childProxies.set(key, { target: value, proxy: child, cell: childCell });
-				if (Array.isArray(target)) childCells.add({ target: value, cell: childCell });
+				const child = attachChild(value, segment, childBlocked);
+				childProxies.set(key, { target: value, proxy: child });
 				return child;
 			},
 
 			set(target, key, value) {
 				if (blockedSegment !== undefined) throw new UnsafePathError(blockedSegment);
 				// detached means the object has no live position left in the document
-				if (aliased ? liveCells().length === 0 : isDetached(cell)) return Reflect.set(target, key, value);
-				// the assigned value may already live elsewhere in the document; the
-				// destination becomes another position of the same object, so later
-				// writes through it emit an op for both
-				if (isObj(value)) {
-					const known = wrappers.get(value as object);
-					if (known !== undefined) {
-						known.cells.add({ parent: primary(), seg: guard(norm(target, key)), dead: false });
-						aliased = true;
-					}
-				}
+				const detached = aliased ? liveCells().length === 0 : isDetached(cell);
+				// Store targets, not proxies: aliases share identity without nested traps.
+				value = unwrap(value);
 				if (Array.isArray(target) && key === "length") {
 					const before = target.length;
 					const next = Number(value);
@@ -1075,6 +1102,7 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 						throw new TypeError("undefined would create a sparse array; use splice instead");
 					}
 					if (Object.hasOwn(target, key)) emit(["d", at]);
+					detachChild(segment);
 					childProxies.delete(key);
 					const deleted = Reflect.deleteProperty(target, key);
 					if (deleted) collapsePending();
@@ -1090,32 +1118,36 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 				} else if (isObj(previous) && isObj(value)) {
 					// whole-container assignment: diff locally so a producer that rebuilds
 					// its partial each frame still emits appends rather than replacements
-					diffInto(previous as JsonValue, value as JsonValue, [...pathNow(), segment] as Seg[]);
+					for (const c of liveCells()) {
+						diffInto(previous as JsonValue, value as JsonValue, [...pathOf(c), segment] as Seg[]);
+					}
 				} else if (typeof previous === "string" && typeof value === "string") {
 					// A string path keeps an anchor: the value it had at the first write in
 					// this window. Every later write updates the anchored value, and flush
 					// diffs anchor -> final once. That gives the same truncate/append pair a
 					// baseline diff would, without keeping a baseline for the whole document.
-					if (!aliased) recordString([...pathNow(), segment] as Path, previous, value);
+					if (!aliased && !detached) recordString([...pathNow(), segment] as Path, previous, value);
 					else for (const c of liveCells()) recordString([...pathOf(c), segment] as Path, previous, value);
 				} else {
 					emit(["s", at, cloneJson(value as JsonValue)]);
 				}
+				detachChild(segment);
 				childProxies.delete(key);
 				const updated = Reflect.set(target, key, value);
+				if (updated && isObj(value)) attachChild(value, segment, undefined, true, true);
 				if (updated) collapsePending();
 				return updated;
 			},
 
 			deleteProperty(target, key) {
 				if (blockedSegment !== undefined) throw new UnsafePathError(blockedSegment);
-				if (aliased ? liveCells().length === 0 : isDetached(cell)) return Reflect.deleteProperty(target, key);
 				const segment = guard(norm(target, key));
 				if (Array.isArray(target)) {
 					if (typeof segment !== "number") throw new UnsafePathError(segment);
 					throw new TypeError("delete would create a sparse array; use splice instead");
 				}
 				if (Object.hasOwn(target, key)) emit(["d", [...pathNow(), segment] as unknown as NonEmptyPath]);
+				detachChild(segment);
 				childProxies.delete(key);
 				const deleted = Reflect.deleteProperty(target, key);
 				if (deleted) collapsePending();
@@ -1133,15 +1165,27 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 			},
 		});
 
-		const entry = { proxy, target: object, cells, blocked: blockedSegment };
+		const entry = { proxy, target: object, addCell, blocked: blockedSegment };
 		if (existing === undefined) {
 			wrappers.set(object, entry);
 			wrappers.set(proxy, entry); // so an assigned proxy resolves to the same entry
 		}
+		if (adopt) {
+			// A fresh container may reuse tracked descendants (e.g. {...state.a}).
+			// Register those positions before held references can be mutated again.
+			for (const key of Object.keys(object)) {
+				const value = unwrap(Reflect.get(object, key));
+				if (!isObj(value)) continue;
+				Reflect.set(object, key, value);
+				const blocked = blockedSegment ?? (RESERVED_SEGMENTS.has(key) ? key : undefined);
+				attachChild(value, norm(object, key) as Seg, blocked, true, true);
+			}
+		}
 		return proxy as V;
 	};
 
-	let state = wrap(root, { parent: undefined, seg: "", dead: false });
+	let rootCell: Cell = { parent: undefined, seg: "", dead: false };
+	let state = wrap(root, rootCell);
 
 	return {
 		get state() {
@@ -1157,8 +1201,10 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 				return;
 			}
 			clearPending();
-			root = next;
-			state = wrap(root, { parent: undefined, seg: "", dead: false });
+			rootCell.dead = true;
+			rootCell = { parent: undefined, seg: "", dead: false };
+			root = unwrap(next) as T;
+			state = wrap(root, rootCell, undefined, true);
 			forceBase = true;
 		},
 		rebase() {

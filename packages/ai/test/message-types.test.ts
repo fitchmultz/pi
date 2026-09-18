@@ -46,7 +46,41 @@ describe("message JSON types", () => {
 		expectTypeOf<ToolResultMessage["details"]>().toEqualTypeOf<JsonValue | undefined>();
 	});
 
+	it("accepts recursive JSON interfaces at the transcript boundary", () => {
+		interface TreeDetails {
+			label: string;
+			children: TreeDetails[];
+		}
+		interface Branch {
+			readonly leaves: readonly Leaf[];
+		}
+		interface Leaf {
+			label: string;
+			branch?: Branch;
+		}
+		const details: TreeDetails = { label: "root", children: [{ label: "leaf", children: [] }] };
+		const tree: ToolResultMessage<TreeDetails> = { ...base, details };
+		const mutual: ToolResultMessage<Branch> = { ...base, details: { leaves: [{ label: "leaf" }] } };
+		const context: Context = { messages: [tree, mutual] };
+		expect(context.messages).toEqual([tree, mutual]);
+		expect(tree.details?.children[0]?.label).toBe("leaf");
+	});
+
 	it("rejects non-JSON detail types", () => {
+		interface InvalidTree {
+			children: InvalidTree[];
+			value: unknown;
+		}
+		interface InvalidBranch {
+			leaf?: { parent?: InvalidBranch; callback: () => void };
+		}
+		expectTypeOf<ToolResultMessage<InvalidTree>>().toEqualTypeOf<never>();
+		expectTypeOf<ToolResultMessage<InvalidBranch>>().toEqualTypeOf<never>();
+		expectTypeOf<ToolResultMessage<{ value: string | Date }>>().toEqualTypeOf<never>();
+		expectTypeOf<ToolResultMessage<readonly [string, undefined]>>().toEqualTypeOf<never>();
+		expectTypeOf<ToolResultMessage<{ value: bigint }>>().toEqualTypeOf<never>();
+		expectTypeOf<ToolResultMessage<{ value: symbol }>>().toEqualTypeOf<never>();
+		expectTypeOf<ToolResultMessage<{ [key: symbol]: string }>>().toEqualTypeOf<never>();
 		type OptionalAny = { value?: any };
 		expectTypeOf<ToolResultMessage<OptionalAny>>().toEqualTypeOf<never>();
 		expectTypeOf<ToolResultMessage<undefined[]>>().toEqualTypeOf<never>();

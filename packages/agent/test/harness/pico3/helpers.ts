@@ -334,6 +334,7 @@ export async function open(
 		storage,
 		{
 			models,
+			now: opts.now,
 			tools: opts.tools,
 			taskKinds: opts.taskKinds,
 			sections: opts.sections,
