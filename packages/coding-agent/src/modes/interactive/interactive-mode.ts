@@ -517,7 +517,7 @@ export class InteractiveMode {
 
 	private options: InteractiveModeOptions;
 	private readonly onRightClickPaste = (): void => {
-		void this.handleRightClickPaste();
+		void this.checkpointCallback(() => this.handleRightClickPaste())();
 	};
 	private autoTrustOnReloadCwd: string | undefined;
 	private themeController: InteractiveThemeController;
@@ -762,10 +762,15 @@ export class InteractiveMode {
 			provider.triggerCharacters = [...new Set(triggerCharacters)];
 		}
 
-		this.autocompleteProvider = provider;
-		this.defaultEditor.setAutocompleteProvider(provider);
+		this.autocompleteProvider = {
+			triggerCharacters: provider.triggerCharacters,
+			getSuggestions: this.checkpointCallback((...args) => provider.getSuggestions(...args)),
+			applyCompletion: (...args) => provider.applyCompletion(...args),
+			shouldTriggerFileCompletion: provider.shouldTriggerFileCompletion?.bind(provider),
+		};
+		this.defaultEditor.setAutocompleteProvider(this.autocompleteProvider);
 		if (this.editor !== this.defaultEditor) {
-			this.editor.setAutocompleteProvider?.(provider);
+			this.editor.setAutocompleteProvider?.(this.autocompleteProvider);
 		}
 	}
 
@@ -2084,7 +2089,7 @@ export class InteractiveMode {
 			getCompactionSettings: () => this.settingsManager.getCompactionSettings(this.session.model),
 			newContext: (options) => this.session.newContext(options),
 			compact: (options) => {
-				void (async () => {
+				void this.checkpointCallback(async () => {
 					try {
 						const result = await this.session.compact(options?.customInstructions);
 						options?.onComplete?.(result);
@@ -2103,7 +2108,7 @@ export class InteractiveMode {
 				// Cast to KeyId - extension shortcuts use the same format
 				if (matchesKey(data, shortcutStr as KeyId)) {
 					// Run handler async, don't block input
-					Promise.resolve(shortcut.handler(createContext())).catch((err) => {
+					this.checkpointCallback(() => shortcut.handler(createContext()))().catch((err) => {
 						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
 					});
 					return true;
@@ -2458,18 +2463,37 @@ export class InteractiveMode {
 		// Invalidate the cut before that key reaches extensions or native handlers.
 		this.ui.addInputListener(() => {
 			if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
+			this.session.notifyCheckpointStateChanged();
 			return undefined;
 		});
 	}
 
-	/** Close terminal ingress without consuming buffered input. Live UI and drafts are not serializable. */
-	quiesceForCheckpoint(): () => void {
-		if (
+	/** Own callbacks through their async continuations, not just while a selector is visible. */
+	private checkpointCallback<Args extends unknown[], Result>(
+		callback: (...args: Args) => Result | Promise<Result>,
+	): (...args: Args) => Promise<Result> {
+		return async (...args) => {
+			if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
+			this.checkpointUIBusy = (this.checkpointUIBusy ?? 0) + 1;
+			try {
+				return await callback(...args);
+			} finally {
+				this.checkpointUIBusy--;
+				this.session.notifyCheckpointStateChanged();
+			}
+		};
+	}
+
+	/** Native idle qualification, including UI operations that outlive their visible selector. */
+	canQuiesceForCheckpoint(): boolean {
+		return !(
 			!this.isInitialized ||
 			this.isShuttingDown ||
+			this.shutdownRequested ||
 			this.hosted ||
 			process.stdin.isPaused() ||
 			this.checkpointUIBusy ||
+			this.isFlushingCompactionQueue ||
 			this.getQueuedInputCount() ||
 			this.editor !== this.defaultEditor ||
 			this.renderer.getFocusedComponent() !== this.editor ||
@@ -2479,7 +2503,12 @@ export class InteractiveMode {
 			this.extensionInput ||
 			this.extensionEditor ||
 			(this.editor.getExpandedText?.() ?? this.editor.getText()).length > 0
-		) {
+		);
+	}
+
+	/** Close terminal ingress without consuming buffered input. Live UI and drafts are not serializable. */
+	quiesceForCheckpoint(): () => void {
+		if (!this.canQuiesceForCheckpoint()) {
 			throw new Error(
 				"Checkpoint unavailable: live UI operation, mode input, or unsent draft; keep compute running",
 			);
@@ -2548,10 +2577,23 @@ export class InteractiveMode {
 	}
 
 	private createExtensionUIContext(): ExtensionUIContext {
+		// Captured UI functions can be called by a late extension callback without terminal input.
+		const mutate =
+			<Args extends unknown[], Result>(callback: (...args: Args) => Result) =>
+			(...args: Args): Result => {
+				if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
+				try {
+					return callback(...args);
+				} finally {
+					this.session.notifyCheckpointStateChanged();
+				}
+			};
 		return {
-			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
-			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
-			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
+			select: this.checkpointCallback((title, options, opts) => this.showExtensionSelector(title, options, opts)),
+			confirm: this.checkpointCallback((title, message, opts) => this.showExtensionConfirm(title, message, opts)),
+			input: this.checkpointCallback((title, placeholder, opts) =>
+				this.showExtensionInput(title, placeholder, opts),
+			),
 			notify: (message, type) => this.showExtensionNotify(message, type),
 			onTerminalInput: (handler) => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setExtensionStatus(key, text),
@@ -2568,23 +2610,23 @@ export class InteractiveMode {
 			setFooter: (factory) => this.setExtensionFooter(factory),
 			setHeader: (factory) => this.setExtensionHeader(factory),
 			setTitle: (title) => this.ui.terminal.setTitle(title),
-			custom: (factory, options) => this.showExtensionCustom(factory, options),
-			pasteToEditor: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
-			setEditorText: (text) => this.editor.setText(text),
+			custom: (factory, options) => this.checkpointCallback(() => this.showExtensionCustom(factory, options))(),
+			pasteToEditor: mutate((text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`)),
+			setEditorText: mutate((text) => this.editor.setText(text)),
 			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
-			editor: (title, prefill, opts) => this.showExtensionEditor(title, prefill, opts),
-			addAutocompleteProvider: (factory) => {
+			editor: this.checkpointCallback((title, prefill, opts) => this.showExtensionEditor(title, prefill, opts)),
+			addAutocompleteProvider: mutate((factory) => {
 				this.autocompleteProviderWrappers.push(factory);
 				this.setupAutocompleteProvider();
-			},
-			setEditorComponent: (factory) => this.setCustomEditorComponent(factory),
+			}),
+			setEditorComponent: mutate((factory) => this.setCustomEditorComponent(factory)),
 			getEditorComponent: () => this.editorComponentFactory,
 			get theme() {
 				return theme;
 			},
 			getAllThemes: () => getAvailableThemesWithPaths(),
 			getTheme: (name) => getThemeByName(name),
-			setTheme: (themeOrName) => {
+			setTheme: mutate((themeOrName) => {
 				if (themeOrName instanceof Theme) {
 					return this.themeController.setThemeInstance(themeOrName);
 				}
@@ -2595,7 +2637,7 @@ export class InteractiveMode {
 					}
 				}
 				return result;
-			},
+			}),
 			getToolsExpanded: () => this.toolOutputExpanded,
 			setToolsExpanded: (expanded) => this.setToolsExpanded(expanded),
 		};
@@ -2927,7 +2969,7 @@ export class InteractiveMode {
 				}
 			};
 
-			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
+			this.checkpointCallback(factory)(this.ui, theme, this.keybindings, close)
 				.then((c) => {
 					if (closed) return;
 					component = c;
@@ -3025,22 +3067,37 @@ export class InteractiveMode {
 		this.defaultEditor.onCtrlD = () => this.handleCtrlD();
 		this.defaultEditor.onAction("app.suspend", () => this.handleCtrlZ());
 		this.defaultEditor.onAction("app.thinking.cycle", () => this.cycleThinkingLevel());
-		this.defaultEditor.onAction("app.model.cycleForward", () => this.cycleModel("forward"));
-		this.defaultEditor.onAction("app.model.cycleBackward", () => this.cycleModel("backward"));
+		this.defaultEditor.onAction(
+			"app.model.cycleForward",
+			this.checkpointCallback(() => this.cycleModel("forward")),
+		);
+		this.defaultEditor.onAction(
+			"app.model.cycleBackward",
+			this.checkpointCallback(() => this.cycleModel("backward")),
+		);
 
 		// Global debug handler on TUI (works regardless of focus)
 		this.ui.onDebug = () => this.handleDebugCommand();
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
-		this.defaultEditor.onAction("app.editor.external", () => void this.handleOpenExternalEditor());
+		this.defaultEditor.onAction(
+			"app.editor.external",
+			this.checkpointCallback(() => this.handleOpenExternalEditor()),
+		);
 		this.defaultEditor.onAction(
 			"app.message.copy",
 			() => void this.handleCopyCommand({ flashConfirmation: true, preferSelection: true }),
 		);
-		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
+		this.defaultEditor.onAction(
+			"app.message.followUp",
+			this.checkpointCallback(() => this.handleFollowUp()),
+		);
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
-		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
+		this.defaultEditor.onAction(
+			"app.session.new",
+			this.checkpointCallback(() => this.handleClearCommand()),
+		);
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
 		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
@@ -3056,7 +3113,7 @@ export class InteractiveMode {
 		// Handle clipboard paste (triggered on Ctrl+V). Images are attached by path;
 		// otherwise, paste plain text from the system clipboard.
 		this.defaultEditor.onPasteImage = () => {
-			void this.handleClipboardPaste();
+			void this.checkpointCallback(() => this.handleClipboardPaste())();
 		};
 	}
 
@@ -3209,7 +3266,7 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/logout") {
-				this.showOAuthSelector("logout");
+				await this.showOAuthSelector("logout");
 				this.editor.setText("");
 				return;
 			}
@@ -3307,15 +3364,7 @@ export class InteractiveMode {
 			}
 			this.editor.addToHistory?.(text);
 		};
-		const submit = this.defaultEditor.onSubmit;
-		this.defaultEditor.onSubmit = async (text) => {
-			this.checkpointUIBusy = (this.checkpointUIBusy ?? 0) + 1;
-			try {
-				await submit(text);
-			} finally {
-				this.checkpointUIBusy--;
-			}
-		};
+		this.defaultEditor.onSubmit = this.checkpointCallback(this.defaultEditor.onSubmit);
 	}
 
 	private subscribeToAgent(): void {
@@ -4770,6 +4819,7 @@ export class InteractiveMode {
 			}
 		} finally {
 			this.isFlushingCompactionQueue = false;
+			this.session.notifyCheckpointStateChanged();
 		}
 	}
 
@@ -4940,7 +4990,7 @@ export class InteractiveMode {
 					},
 					onThemeChange: (themeSetting) => {
 						this.settingsManager.setTheme(themeSetting);
-						void this.themeController.setThemeSetting(themeSetting);
+						void this.checkpointCallback(() => this.themeController.setThemeSetting(themeSetting))();
 					},
 					onThemePreview: (themeName) => this.themeController.preview(themeName),
 					onCompactViewChange: (compactView) => this.setCompactView(compactView),
@@ -5176,9 +5226,11 @@ export class InteractiveMode {
 		this.footerDataProvider.setAvailableProviderCount(uniqueProviders.size);
 	}
 
-	private async maybeWarnAboutAnthropicSubscriptionAuth(
-		model: Model<any> | undefined = this.session.model,
-	): Promise<void> {
+	private maybeWarnAboutAnthropicSubscriptionAuth(model: Model<any> | undefined = this.session.model): Promise<void> {
+		return this.checkpointCallback(() => this.checkAnthropicSubscriptionAuth(model))();
+	}
+
+	private async checkAnthropicSubscriptionAuth(model: Model<any> | undefined): Promise<void> {
 		if (this.settingsManager.getWarnings().anthropicExtraUsage === false) {
 			return;
 		}
@@ -5259,7 +5311,7 @@ export class InteractiveMode {
 
 	private showModelSelector(initialSearchInput?: string): void {
 		this.showSelector((done) => {
-			const selectModel = async (model: Model<any>, persist: boolean) => {
+			const selectModel = this.checkpointCallback(async (model: Model<any>, persist: boolean) => {
 				try {
 					await this.session.setModel(model, { persist });
 					this.updateAvailableProviderCount();
@@ -5273,7 +5325,7 @@ export class InteractiveMode {
 					done();
 					this.showError(error instanceof Error ? error.message : String(error));
 				}
-			};
+			});
 			const defaultProvider = this.settingsManager.getDefaultProvider();
 			const defaultModel = this.settingsManager.getDefaultModel();
 			const selector = new ModelSelectorComponent(
@@ -5429,7 +5481,7 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selector = new UserMessageSelectorComponent(
 				userMessages.map((m) => ({ id: m.entryId, text: m.text })),
-				async (entryId) => {
+				this.checkpointCallback(async (entryId: string) => {
 					done();
 					try {
 						const result = await this.runtimeHost.fork(entryId);
@@ -5443,7 +5495,7 @@ export class InteractiveMode {
 					} catch (error: unknown) {
 						this.showError(error instanceof Error ? error.message : String(error));
 					}
-				},
+				}),
 				() => {
 					done();
 					this.ui.requestRender();
@@ -5490,7 +5542,7 @@ export class InteractiveMode {
 				tree,
 				realLeafId,
 				this.ui.terminal.rows,
-				async (entryId) => {
+				this.checkpointCallback(async (entryId: string) => {
 					// Selecting the current leaf is a no-op (already there)
 					if (entryId === this.sessionManager.getLeafId()) {
 						done();
@@ -5596,7 +5648,7 @@ export class InteractiveMode {
 						}
 						this.defaultEditor.onEscape = originalOnEscape;
 					}
-				},
+				}),
 				() => {
 					done();
 					this.ui.requestRender();
@@ -5633,10 +5685,10 @@ export class InteractiveMode {
 					this.sessionManager.usesDefaultSessionDir()
 						? SessionManager.listAll(onProgress)
 						: SessionManager.listAll(this.sessionManager.getSessionDir(), onProgress),
-				async (sessionPath) => {
+				this.checkpointCallback(async (sessionPath: string) => {
 					done();
 					await this.handleResumeSession(sessionPath);
-				},
+				}),
 				() => {
 					done();
 					this.ui.requestRender();
@@ -5654,6 +5706,7 @@ export class InteractiveMode {
 					},
 					showRenameHint: true,
 					keybindings: this.keybindings,
+					runMutation: (operation) => this.checkpointCallback(operation)(),
 				},
 
 				this.sessionManager.getSessionFile(),
@@ -5778,7 +5831,11 @@ export class InteractiveMode {
 		this.showLoginProviderSelector(undefined, providerRef);
 	}
 
-	private async startProviderLogin(providerOption: AuthSelectorProvider): Promise<void> {
+	private startProviderLogin(providerOption: AuthSelectorProvider): Promise<void> {
+		return this.checkpointCallback(() => this.runProviderLogin(providerOption))();
+	}
+
+	private async runProviderLogin(providerOption: AuthSelectorProvider): Promise<void> {
 		if (providerOption.authType === "oauth") {
 			await this.showLoginDialog(providerOption.id, providerOption.name);
 		} else if (providerOption.method?.login) {
@@ -5913,7 +5970,7 @@ export class InteractiveMode {
 			const selector = new OAuthSelectorComponent(
 				mode,
 				providerOptions,
-				async (providerId: string) => {
+				this.checkpointCallback(async (providerId: string) => {
 					done();
 
 					const providerOption = providerOptions.find((provider) => provider.id === providerId);
@@ -5939,7 +5996,7 @@ export class InteractiveMode {
 								: `Logout failed: ${message}`,
 						);
 					}
-				},
+				}),
 				() => {
 					done();
 					this.ui.requestRender();
@@ -6022,28 +6079,32 @@ export class InteractiveMode {
 
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 15_000);
-		void session.modelRuntime
-			.refresh({ providers: [providerId], signal: controller.signal })
-			.then(async (result) => {
-				if (result.aborted) {
-					this.showWarning(`${actionLabel}, but its model catalog refresh timed out; using cached models.`);
-				} else if (result.errors.size > 0) {
-					this.showWarning(`${actionLabel}, but its model catalog could not be refreshed; using cached models.`);
-				}
-				// Do not replace a model or session selected while the refresh was running.
-				if (deferSelection && this.session === session && session.model === previousModel) {
-					await finishAuthentication();
-				}
-				this.updateAvailableProviderCount();
-				this.footer.invalidate();
-				this.ui.requestRender();
-			})
-			.catch((error: unknown) => {
-				this.showWarning(
-					`${actionLabel}, but its model catalog could not be refreshed: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			})
-			.finally(() => clearTimeout(timeout));
+		void this.checkpointCallback(() =>
+			session.modelRuntime
+				.refresh({ providers: [providerId], signal: controller.signal })
+				.then(async (result) => {
+					if (result.aborted) {
+						this.showWarning(`${actionLabel}, but its model catalog refresh timed out; using cached models.`);
+					} else if (result.errors.size > 0) {
+						this.showWarning(
+							`${actionLabel}, but its model catalog could not be refreshed; using cached models.`,
+						);
+					}
+					// Do not replace a model or session selected while the refresh was running.
+					if (deferSelection && this.session === session && session.model === previousModel) {
+						await finishAuthentication();
+					}
+					this.updateAvailableProviderCount();
+					this.footer.invalidate();
+					this.ui.requestRender();
+				})
+				.catch((error: unknown) => {
+					this.showWarning(
+						`${actionLabel}, but its model catalog could not be refreshed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				})
+				.finally(() => clearTimeout(timeout)),
+		)();
 	}
 
 	private showAmbientAuthDialog(providerOption: AuthSelectorProvider): void {
@@ -6834,6 +6895,7 @@ export class InteractiveMode {
 	}
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
+		this.session.cancelCheckpoint();
 		this.disposeActiveSelector();
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);

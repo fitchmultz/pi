@@ -254,7 +254,7 @@ Both `steer()` and `followUp()` expand file-based prompt templates but error on 
 
 `await session.acquireCheckpoint({ boundary: "turn" | "settled", signal?, quiesce? })` returns an explicit `{ checkpoint, signal, release() }` hold after awaited native persistence and extension callbacks. Release it in `finally`. `createAgentSession({ checkpoint: readSessionCheckpoint(path) })` restores exact selection and full pending queues without running them automatically.
 
-See [Working-session checkpoints](checkpoint.md) for the artifact, local CLI control, input coordination, and limitations. In particular, native settlement alone is not permission to sleep compute; the current TUI control reports `sleepReady: false`.
+The hold also returns `sleepReady` and `sleepBlockers`. The native TUI can positively qualify a settled working session; active-turn artifacts remain recovery-only. Readiness requires host input quiescence and supported extension persistence. The archive owner still freezes filesystem writers and commits the verified archive before sleep. See [Working-session checkpoints](checkpoint.md) for the receipt, optional extension barrier, and unsupported live state.
 
 ### User Bash
 

@@ -14,6 +14,14 @@ const complete = Reflect.get(InteractiveMode.prototype, "completeProviderAuthent
 	previousModel: Model<Api>,
 ) => Promise<void>;
 
+// Keep the native callback-ownership wrapper in these focused presentation fixtures.
+const checkpointCallback = Reflect.get(InteractiveMode.prototype, "checkpointCallback") as <
+	Args extends unknown[],
+	Result,
+>(
+	callback: (...args: Args) => Result | Promise<Result>,
+) => (...args: Args) => Promise<Result>;
+
 const dynamicModel: Model<"openai-completions"> = {
 	id: "dynamic",
 	name: "Dynamic",
@@ -100,6 +108,7 @@ describe("issues #7027 and #7113 credential refresh hang", () => {
 		);
 		const showWarning = vi.fn();
 		const context = {
+			checkpointCallback,
 			session: harness.session,
 			updateAvailableProviderCount: vi.fn(),
 			footer: { invalidate: vi.fn() },
@@ -153,6 +162,7 @@ describe("post-login model discovery", () => {
 		);
 		const setModel = vi.spyOn(session, "setModel").mockResolvedValue();
 		const context = {
+			checkpointCallback,
 			session,
 			updateAvailableProviderCount: vi.fn(),
 			footer: { invalidate: vi.fn() },

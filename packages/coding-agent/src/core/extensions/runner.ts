@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import { CheckpointActivity } from "../checkpoint.ts";
 import type { CompactionSettings } from "../compaction/index.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
@@ -64,6 +65,8 @@ import type {
 	SessionBeforeForkResult,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
+	SessionCheckpointEvent,
+	SessionCheckpointResult,
 	SessionShutdownEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -169,6 +172,7 @@ type RunnerEmitEvent = Exclude<
 	| MessageEndEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
+	| SessionCheckpointEvent
 >;
 
 type SessionBeforeEvent = Extract<
@@ -348,6 +352,31 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
+	readonly checkpointActivity: CheckpointActivity;
+
+	/** Optional persistence barrier; legacy persisted entries need no hook. Never run shutdown to save. */
+	prepareCheckpoint(event: SessionCheckpointEvent): Promise<string[]> {
+		return this.checkpointActivity.run(() => this.prepareCheckpointHandlers(event));
+	}
+
+	private async prepareCheckpointHandlers(event: SessionCheckpointEvent): Promise<string[]> {
+		const blockers: string[] = [];
+		const ctx = this.createContext();
+		for (const extension of this.extensions) {
+			const handlers = extension.handlers.get("session_checkpoint") ?? [];
+			if (handlers.length === 0 && extension.handlers.get("session_shutdown")?.length) {
+				blockers.push(`Extension requires shutdown: ${extension.path}`);
+			}
+			for (const handler of handlers) {
+				event.signal.throwIfAborted();
+				// Unlike notification events, a failed persistence barrier rejects the checkpoint.
+				const result = (await handler(event, ctx)) as SessionCheckpointResult | undefined;
+				if (result?.sleepReady !== true)
+					blockers.push(`Extension not resumable: ${extension.path}${result?.reason ? `: ${result.reason}` : ""}`);
+			}
+		}
+		return blockers;
+	}
 
 	constructor(
 		extensions: Extension[],
@@ -358,6 +387,7 @@ export class ExtensionRunner {
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
+		this.checkpointActivity = runtime.checkpointActivity ??= new CheckpointActivity();
 		this.uiContext = noOpUIContext;
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
@@ -537,8 +567,9 @@ export class ExtensionRunner {
 	}
 
 	private emitUIPromptEvent(event: Extract<RunnerEmitEvent, { type: "ui_prompt_start" | "ui_prompt_end" }>): void {
-		queueMicrotask(() => {
-			void this.emit(event);
+		void this.checkpointActivity.run(async () => {
+			await Promise.resolve();
+			await this.emit(event);
 		});
 	}
 
@@ -939,7 +970,11 @@ export class ExtensionRunner {
 		);
 	}
 
-	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+	emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+		return this.checkpointActivity.run(() => this.emitEvent(event));
+	}
+
+	private async emitEvent<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
 		const ctx = this.createContext();
 		let result: SessionBeforeEventResult | undefined;
 

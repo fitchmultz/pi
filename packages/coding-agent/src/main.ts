@@ -1070,6 +1070,7 @@ export async function main(args: string[], options?: MainOptions) {
 				path: process.env[CHECKPOINT_SOCKET_ENV]!,
 				getSession: () => runtime.session,
 				quiesce: () => interactiveMode.quiesceForCheckpoint(),
+				canQuiesce: () => interactiveMode.canQuiesceForCheckpoint(),
 			});
 		}
 		printTimings();

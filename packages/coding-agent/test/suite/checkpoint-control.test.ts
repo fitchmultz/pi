@@ -66,12 +66,18 @@ describe.skipIf(process.platform === "win32")("native checkpoint local control",
 		expect(getRestartArgs(args)).toEqual(["-ne"]);
 	});
 
-	it("keeps the connection-owned hold until explicit release, never claims TUI sleep readiness", async () => {
+	it("keeps a qualified settled hold until explicit release", async () => {
 		const f = await setup();
 		await f.h.session.steer("accepted queue");
 		f.send({ action: "acquire", path: join(f.directory, "checkpoint.json"), boundary: "settled" });
 		const receipt = await f.next();
-		expect(receipt).toMatchObject({ ok: true, settled: true, sleepReady: false });
+		expect(receipt).toMatchObject({
+			ok: true,
+			boundary: "settled",
+			settled: true,
+			sleepReady: true,
+			sleepBlockers: [],
+		});
 		expect(f.h.session.isCheckpointHeld).toBe(true);
 		expect(f.releaseInput).not.toHaveBeenCalled();
 		expect(readSessionCheckpoint(join(f.directory, "checkpoint.json")).queues.steering).toHaveLength(1);

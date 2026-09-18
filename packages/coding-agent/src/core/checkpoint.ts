@@ -9,6 +9,54 @@ import { type SessionEntry, type SessionHeader, SessionManager } from "./session
 
 export type CheckpointBoundary = "turn" | "settled";
 
+/** Native callback ownership, not a registry of arbitrary extension promises or external processes. */
+export class CheckpointActivity {
+	private readonly pending = new Set<Promise<unknown>>();
+	private readonly invalidators = new Set<() => void>();
+	onIdle?: () => void;
+
+	get busy(): boolean {
+		return this.pending.size > 0;
+	}
+
+	invalidate(): void {
+		for (const invalidate of [...this.invalidators]) invalidate();
+	}
+
+	run<T>(callback: () => T | Promise<T>): Promise<T> {
+		// Reserve before invalidation listeners or callbacks can re-enter checkpoint acquisition.
+		let finish!: () => void;
+		const reservation = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		this.pending.add(reservation);
+		const release = () => {
+			this.pending.delete(reservation);
+			finish();
+			if (!this.busy) this.onIdle?.();
+		};
+		try {
+			this.invalidate();
+			return Promise.resolve(callback()).finally(release);
+		} catch (error) {
+			release();
+			return Promise.reject(error);
+		}
+	}
+
+	async flush(): Promise<void> {
+		while (this.busy) await Promise.all([...this.pending]);
+	}
+
+	hold(invalidate: () => void): () => void {
+		if (this.busy) throw new Error("Checkpoint unavailable: native callbacks still running");
+		this.invalidators.add(invalidate);
+		return () => {
+			this.invalidators.delete(invalidate);
+		};
+	}
+}
+
 export interface SessionCheckpointQueues {
 	steering: AgentMessage[];
 	followUp: AgentMessage[];
@@ -26,6 +74,8 @@ export interface SessionCheckpoint {
 	header: SessionHeader;
 	entries: SessionEntry[];
 	queues: SessionCheckpointQueues;
+	/** Exact native cycling scope, including session-only picker changes. Absent on older artifacts. */
+	scopedModels?: Array<{ provider: string; id: string; thinkingLevel?: RestartCheckpoint["thinkingLevel"] }>;
 	boundary: CheckpointBoundary;
 	/** Native settlement only. The host must still coordinate UI and external writers. */
 	settled: boolean;
@@ -33,6 +83,9 @@ export interface SessionCheckpoint {
 
 export interface CheckpointHold {
 	checkpoint: SessionCheckpoint;
+	/** Native resumability only; the archive owner must separately freeze filesystem writers. */
+	sleepReady: boolean;
+	sleepBlockers: string[];
 	/** Aborted when released or invalidated by cancellation/reload/shutdown. */
 	signal: AbortSignal;
 	/** Idempotent; release on every failure path. No queue is consumed by capture. */
@@ -44,6 +97,8 @@ export interface CheckpointOptions {
 	signal?: AbortSignal;
 	/** Synchronously close host input; reject unsupported UI/callback state. */
 	quiesce?: () => () => void;
+	/** Defer until the native host can quiesce; notifyCheckpointStateChanged retries idle acquisition. */
+	canQuiesce?: () => boolean;
 }
 
 /** Private, atomic replacement. The parent archive/upload supplies durable storage. */
@@ -127,6 +182,15 @@ export function restoreSessionCheckpoint(session: AgentSession, checkpoint: Sess
 	const available = new Set(session.getAllTools().map((tool) => tool.name));
 	if (checkpoint.selection.activeTools.some((name) => !available.has(name)))
 		throw new Error("Checkpoint tools unavailable");
+	if (checkpoint.scopedModels) {
+		session.setScopedModels(
+			checkpoint.scopedModels.map((scoped) => {
+				const model = session.modelRuntime.getModel(scoped.provider, scoped.id);
+				if (!model) throw new Error(`Checkpoint scoped model unavailable: ${scoped.provider}/${scoped.id}`);
+				return { model, thinkingLevel: scoped.thinkingLevel };
+			}),
+		);
+	}
 	session.agent.state.thinkingLevel = checkpoint.selection.thinkingLevel;
 	session.setActiveToolsByName(checkpoint.selection.activeTools);
 	session.restoreCheckpointQueues(checkpoint.queues);

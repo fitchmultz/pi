@@ -77,6 +77,7 @@ export function createRestartControl(options: {
 			let pending: RestartRequest | undefined;
 			let committed: RestartRequest | undefined;
 			let timer: NodeJS.Timeout | undefined;
+			let invalidateCheckpoint: (() => void) | undefined;
 			const sockets = new Set<Socket>();
 
 			const cleanup = () => {
@@ -137,6 +138,7 @@ export function createRestartControl(options: {
 				if (ctx.getPendingNextTurnCount() > 0 || ctx.ui.getEditorText().length > 0) {
 					throw new Error("Handle unsent editor text and next-turn messages before restarting");
 				}
+				invalidateCheckpoint?.();
 				pending = request;
 				clearTimeout(timer);
 				// Return the shell result before considering shutdown. Final idle, not tool completion, is the gate.
@@ -208,6 +210,20 @@ export function createRestartControl(options: {
 					cleanup();
 					throw error;
 				}
+			});
+			// An idle control socket is recreated by session_start; an accepted restart is memory-only.
+			pi.on("session_checkpoint", (event) => {
+				if (pending || committed || closing || !startupComplete)
+					return { sleepReady: false, reason: "Native restart is pending" };
+				invalidateCheckpoint = event.invalidate;
+				event.signal.addEventListener(
+					"abort",
+					() => {
+						if (invalidateCheckpoint === event.invalidate) invalidateCheckpoint = undefined;
+					},
+					{ once: true },
+				);
+				return { sleepReady: true };
 			});
 			pi.on("agent_settled", tryRestart);
 			pi.on("auto_retry_end", (event, ctx) => {

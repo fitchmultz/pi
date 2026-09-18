@@ -376,8 +376,10 @@ export class AgentSession {
 	private _settling = 0;
 	private _checkpointHeld = false;
 	private _checkpointRestored = false;
+	private _checkpointEntryPersistence?: AbortSignal;
 	private _checkpointRequest?: {
 		boundary: CheckpointBoundary;
+		canQuiesce?: () => boolean;
 		run: (boundary: CheckpointBoundary) => Promise<void>;
 		cancel: () => void;
 	};
@@ -1389,6 +1391,7 @@ export class AgentSession {
 
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
+		this._assertNotCheckpointHeld();
 		this._scopedModels = scopedModels;
 	}
 
@@ -2199,6 +2202,7 @@ export class AgentSession {
 			const holdController = new AbortController();
 			let released = false;
 			let unquiesce: (() => void) | undefined;
+			const releaseWriters: Array<() => void> = [];
 			let resume: (() => void) | undefined;
 			const release = () => {
 				if (released) return;
@@ -2207,6 +2211,7 @@ export class AgentSession {
 				this._checkpointRequest = undefined;
 				options.signal?.removeEventListener("abort", cancel);
 				holdController.abort();
+				for (const releaseWriter of releaseWriters) releaseWriter();
 				try {
 					unquiesce?.();
 				} finally {
@@ -2219,6 +2224,7 @@ export class AgentSession {
 			};
 			this._checkpointRequest = {
 				boundary: options.boundary ?? "settled",
+				canQuiesce: options.canQuiesce,
 				cancel,
 				run: async (boundary) => {
 					if (released) return;
@@ -2231,6 +2237,24 @@ export class AgentSession {
 						this._flushPendingProviderMessages();
 						this._flushPendingBashMessages();
 						this._flushPendingCustomMessages();
+						this._checkpointEntryPersistence = holdController.signal;
+						let sleepBlockers: string[];
+						try {
+							sleepBlockers = await this._extensionRunner.prepareCheckpoint({
+								type: "session_checkpoint",
+								boundary,
+								signal: holdController.signal,
+								invalidate: cancel,
+							});
+						} finally {
+							if (this._checkpointEntryPersistence === holdController.signal)
+								this._checkpointEntryPersistence = undefined;
+						}
+						if (released) return;
+						await this._modelRuntime.flushForCheckpoint();
+						if (released) return;
+						releaseWriters.push(this._modelRuntime.holdForCheckpoint(cancel));
+						releaseWriters.push(this._extensionRunner.checkpointActivity.hold(cancel));
 						await this.settingsManager.flush();
 						const errors = this.settingsManager.drainErrors();
 						if (errors.length)
@@ -2257,12 +2281,25 @@ export class AgentSession {
 							header,
 							entries: this.sessionManager.getEntries(),
 							queues: this.getCheckpointQueues(),
+							scopedModels: this._scopedModels.map(({ model, thinkingLevel }) => ({
+								provider: model.provider,
+								id: model.id,
+								thinkingLevel,
+							})),
 							boundary,
 							settled: boundary === "settled" && this.isIdle,
 						};
 						// JSON serialization is intentional: reject cycles/BigInt before reporting success.
+						if (this.model && this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime")
+							sleepBlockers.push(
+								"Selected provider uses a runtime-only API key; persist native authentication first",
+							);
+						if (!options.quiesce) sleepBlockers.push("Host input is not quiesced");
+						if (!checkpoint.settled) sleepBlockers.push("Native run has not settled");
 						resolve({
 							checkpoint: JSON.parse(JSON.stringify(checkpoint)) as SessionCheckpoint,
+							sleepReady: sleepBlockers.length === 0,
+							sleepBlockers,
 							signal: holdController.signal,
 							release,
 						});
@@ -2286,14 +2323,22 @@ export class AgentSession {
 		if (
 			this.pendingInputCount ||
 			this._activeCommands ||
+			this._extensionRunner.checkpointActivity.busy ||
 			this.isBashRunning ||
 			this.isCompacting ||
 			this.isRetrying ||
 			this.agent.state.pendingToolCalls.size > 0 ||
-			(boundary === "settled" && (!this.isIdle || this.agent.state.isStreaming))
+			(boundary === "settled" && (!this.isIdle || this.agent.state.isStreaming)) ||
+			(request.canQuiesce && !request.canQuiesce())
 		)
 			return;
 		await request.run(boundary);
+	}
+
+	/** Native host callbacks call this after releasing mode-held input or finishing asynchronous UI work. */
+	notifyCheckpointStateChanged(): void {
+		if (this._checkpointRequest && !this._checkpointHeld)
+			setImmediate(() => void this._checkpointSafePoint("settled"));
 	}
 
 	get isCheckpointHeld(): boolean {
@@ -2306,7 +2351,10 @@ export class AgentSession {
 	}
 
 	private _assertNotCheckpointHeld(): void {
-		if (this._checkpointHeld) throw new Error("Session is held for checkpoint; retry after release");
+		if (this._checkpointHeld) {
+			this.cancelCheckpoint();
+			throw new Error("Session is held for checkpoint; hold invalidated, retry after release");
+		}
 	}
 
 	getCheckpointQueues(): SessionCheckpointQueues {
@@ -3233,6 +3281,7 @@ export class AgentSession {
 	 * Toggle auto-compaction setting.
 	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
+		this._assertNotCheckpointHeld();
 		this.settingsManager.setCompactionEnabled(enabled);
 	}
 
@@ -3392,6 +3441,7 @@ export class AgentSession {
 		runner.bindCore(
 			{
 				sendMessage: (message, options) => {
+					if (this.isCheckpointHeld) this.cancelCheckpoint();
 					this.sendCustomMessage(message, options).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
@@ -3401,6 +3451,7 @@ export class AgentSession {
 					});
 				},
 				sendUserMessage: (content, options) => {
+					if (this.isCheckpointHeld) this.cancelCheckpoint();
 					this.sendUserMessage(content, options).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
@@ -3410,7 +3461,8 @@ export class AgentSession {
 					});
 				},
 				appendEntry: (customType, data) => {
-					this._assertNotCheckpointHeld();
+					if (!this._checkpointEntryPersistence || this._checkpointEntryPersistence.aborted)
+						this._assertNotCheckpointHeld();
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
 					const entry = this.sessionManager.getEntry(entryId);
 					if (entry) {
@@ -3465,7 +3517,7 @@ export class AgentSession {
 				getCompactionSettings: () => this.settingsManager.getCompactionSettings(this.model),
 				newContext: (options) => this.newContext(options),
 				compact: (options) => {
-					void (async () => {
+					void runner.checkpointActivity.run(async () => {
 						try {
 							const result = await this.compact(options?.customInstructions);
 							options?.onComplete?.(result);
@@ -3473,7 +3525,7 @@ export class AgentSession {
 							const err = error instanceof Error ? error : new Error(String(error));
 							options?.onError?.(err);
 						}
-					})();
+					});
 				},
 				getSystemPrompt: () => this.systemPrompt,
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
@@ -3630,6 +3682,10 @@ export class AgentSession {
 			this.sessionManager,
 			new ModelRegistry(this._modelRuntime),
 		);
+		this._extensionRunner.checkpointActivity.onIdle = () => {
+			// Let the enclosing native callback finish its continuation before checking settlement.
+			this.notifyCheckpointStateChanged();
+		};
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}
@@ -3800,6 +3856,7 @@ export class AgentSession {
 	 * Toggle auto-retry setting.
 	 */
 	setAutoRetryEnabled(enabled: boolean): void {
+		this._assertNotCheckpointHeld();
 		this.settingsManager.setRetryEnabled(enabled);
 	}
 

@@ -12,6 +12,13 @@ import type { AuthSelectorProvider } from "../src/modes/interactive/components/o
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
+const checkpointCallback = Reflect.get(InteractiveMode.prototype, "checkpointCallback") as <
+	Args extends unknown[],
+	Result,
+>(
+	callback: (...args: Args) => Result | Promise<Result>,
+) => (...args: Args) => Promise<Result>;
+
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
 	if (!last) return "";
@@ -183,7 +190,8 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 			}),
 		};
 		const fakeThis: any = {
-			session: { settingsManager },
+			checkpointCallback,
+			session: { settingsManager, notifyCheckpointStateChanged: vi.fn() },
 			settingsManager,
 			themeController: {
 				setThemeInstance: vi.fn(() => ({ success: true })),
@@ -213,7 +221,8 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 			setTheme: vi.fn(),
 		};
 		const fakeThis: any = {
-			session: { settingsManager },
+			checkpointCallback,
+			session: { settingsManager, notifyCheckpointStateChanged: vi.fn() },
 			settingsManager,
 			themeController: {
 				setThemeInstance: vi.fn(() => ({ success: true })),
@@ -252,6 +261,8 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			throw new Error("closeReplacement was not initialized");
 		};
 		const fakeThis = {
+			checkpointCallback,
+			session: { notifyCheckpointStateChanged: vi.fn() },
 			editor,
 			editorContainer,
 			keybindings: {},
@@ -309,6 +320,8 @@ describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () 
 	test("stores wrapper factories and rebuilds autocomplete immediately", () => {
 		const wrapper: AutocompleteProviderFactory = (current) => current;
 		const fakeThis = {
+			checkpointCallback,
+			session: { notifyCheckpointStateChanged: vi.fn() },
 			autocompleteProviderWrappers: [] as AutocompleteProviderFactory[],
 			setupAutocompleteProvider: vi.fn(),
 		};
@@ -360,6 +373,7 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
 			defaultEditor,
 			editor: customEditor,
+			checkpointCallback,
 			autocompleteProviderWrappers: [wrap1, wrap2],
 		};
 
@@ -390,6 +404,7 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
 			defaultEditor,
 			editor: customEditor,
+			checkpointCallback,
 			autocompleteProviderWrappers: [passThrough(["$"]), passThrough(["!"])],
 		};
 

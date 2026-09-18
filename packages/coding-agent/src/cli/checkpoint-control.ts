@@ -12,6 +12,7 @@ export async function startCheckpointControl(options: {
 	path: string;
 	getSession: () => AgentSession;
 	quiesce: () => () => void;
+	canQuiesce?: () => boolean;
 }): Promise<() => void> {
 	if (process.platform === "win32" || !isAbsolute(options.path))
 		throw new Error("Checkpoint control requires an absolute Unix socket path");
@@ -63,14 +64,18 @@ export async function startCheckpointControl(options: {
 				if (boundary !== "turn" && boundary !== "settled") throw new Error("Invalid checkpoint boundary");
 				pending = true;
 				try {
-					hold = await options
-						.getSession()
-						.acquireCheckpoint({ boundary, signal: controller.signal, quiesce: options.quiesce });
+					hold = await options.getSession().acquireCheckpoint({
+						boundary,
+						signal: controller.signal,
+						quiesce: options.quiesce,
+						canQuiesce: options.canQuiesce,
+					});
 					if (socket.destroyed) {
 						hold.release();
 						hold = undefined;
 						return;
 					}
+					if (hold.signal.aborted) throw new Error("Checkpoint invalidated before publication");
 					writeSessionCheckpoint(request.path, hold.checkpoint);
 					token = randomUUID();
 					const acquired = hold;
@@ -94,7 +99,8 @@ export async function startCheckpointControl(options: {
 						path: request.path,
 						boundary: hold.checkpoint.boundary,
 						settled: hold.checkpoint.settled,
-						sleepReady: false,
+						sleepReady: hold.sleepReady,
+						sleepBlockers: hold.sleepBlockers,
 						selection: hold.checkpoint.selection,
 					});
 				} catch (error) {

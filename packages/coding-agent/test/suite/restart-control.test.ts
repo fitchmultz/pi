@@ -64,6 +64,18 @@ async function setup(
 }
 
 describe("native restart control at session boundaries", () => {
+	it("allows a clean managed TUI to checkpoint and invalidates before accepting a later restart", async () => {
+		const f = await setup();
+		const hold = await f.harness.session.acquireCheckpoint({ quiesce: () => () => {} });
+		expect(hold.sleepReady).toBe(true);
+		await requestRestart(f.socket, { message: "new accepted work" });
+		expect(hold.signal.aborted).toBe(true);
+		const pending = await f.harness.session.acquireCheckpoint({ quiesce: () => () => {} });
+		expect(pending.sleepReady).toBe(false);
+		expect(pending.sleepBlockers.join(" ")).toContain("Native restart is pending");
+		pending.release();
+		f.control.shutdownRequested("user");
+	});
 	it("retains restart guidance in structured prompt state while tool changes use patches", async () => {
 		const { harness } = await setup();
 		harness.setResponses([fauxAssistantMessage("Ready"), fauxAssistantMessage("Updated")]);

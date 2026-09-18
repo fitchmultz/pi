@@ -49,6 +49,7 @@ import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { AgentSessionEvent } from "../agent-session.ts";
 import type { BashResult } from "../bash-executor.ts";
+import type { CheckpointActivity, CheckpointBoundary } from "../checkpoint.ts";
 import type { CompactionPreparation, CompactionResult, CompactionSettings } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
@@ -674,6 +675,22 @@ export interface SessionShutdownEvent {
 	targetSessionFile?: string;
 }
 
+/** Awaited after native settlement/turn persistence and input quiescence, before the artifact is captured. */
+export interface SessionCheckpointEvent {
+	type: "session_checkpoint";
+	boundary: CheckpointBoundary;
+	/** Aborted on release/cancellation. Undo temporary extension quiescence when this aborts. */
+	signal: AbortSignal;
+	/** Call BEFORE accepting new background work or mutating state while the receipt is held. */
+	invalidate(): void;
+}
+
+export interface SessionCheckpointResult {
+	/** All extension state is persisted/reconstructible and live callbacks are quiesced until release. */
+	sleepReady: boolean;
+	reason?: string;
+}
+
 /** Preparation data for tree navigation */
 export interface TreePreparation {
 	targetId: string;
@@ -715,6 +732,7 @@ export type SessionEvent =
 	| SessionCompactEvent
 	| SessionCompactFailedEvent
 	| SessionShutdownEvent
+	| SessionCheckpointEvent
 	| SessionBeforeTreeEvent
 	| SessionTreeEvent;
 
@@ -1344,6 +1362,7 @@ export interface ExtensionAPI {
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
 	on(event: "session_compact_failed", handler: ExtensionHandler<SessionCompactFailedEvent>): void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
+	on(event: "session_checkpoint", handler: ExtensionHandler<SessionCheckpointEvent, SessionCheckpointResult>): void;
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): void;
 	on(event: "context", handler: ExtensionHandler<ContextEvent, ContextEventResult>): void;
@@ -1760,6 +1779,8 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
  * Contains flag values (defaults set during registration, CLI values set after).
  */
 export interface ExtensionRuntimeState {
+	/** Native dispatch/exec ownership; optional for custom upstream-compatible runtime implementations. */
+	checkpointActivity?: CheckpointActivity;
 	flagValues: Map<string, boolean | string>;
 	/** Legacy provider-config registrations queued during extension loading, processed when runner binds. */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;

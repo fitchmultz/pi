@@ -5,6 +5,7 @@ import { fauxAssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.ts";
 import { openSessionCheckpoint, readSessionCheckpoint, writeSessionCheckpoint } from "../../src/core/checkpoint.ts";
+import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
@@ -40,6 +41,144 @@ async function setup(options: Parameters<typeof createHarness>[0] = {}) {
 }
 
 describe("native working-session checkpoint", () => {
+	it("restores session-only model cycling scope and keeps runtime-only authentication awake", async () => {
+		const h = await setup({ models: [{ id: "first" }, { id: "second" }] });
+		h.session.setScopedModels([{ model: h.getModel("second")!, thinkingLevel: "off" }]);
+		const hold = await h.session.acquireCheckpoint({ quiesce: () => () => {} });
+		const { session } = await createAgentSession({
+			checkpoint: hold.checkpoint,
+			modelRuntime: h.session.modelRuntime,
+			resourceLoader: h.session.resourceLoader,
+			settingsManager: h.settingsManager,
+		});
+		restored.push(session);
+		expect(session.scopedModels.map((entry) => entry.model.id)).toEqual(["second"]);
+		hold.release();
+		await h.session.modelRuntime.setRuntimeApiKey(h.getModel().provider, "memory-only-key");
+		const unsupported = await h.session.acquireCheckpoint({ quiesce: () => () => {} });
+		expect(unsupported.sleepReady).toBe(false);
+		expect(unsupported.sleepBlockers.join(" ")).toContain("runtime-only API key");
+		unsupported.release();
+	});
+
+	it("joins fire-and-forget native metadata notification handlers before capturing", async () => {
+		const entered = deferred();
+		const finish = deferred();
+		const h = await setup({
+			extensionFactories: [
+				(pi) =>
+					pi.on("session_info_changed", async () => {
+						entered.resolve();
+						await finish.promise;
+						pi.appendEntry("metadata-tail", { saved: true });
+					}),
+			],
+		});
+		h.session.setSessionName("held name");
+		await entered.promise;
+		let ready = false;
+		const pending = h.session.acquireCheckpoint({ quiesce: () => () => {} }).then((hold) => {
+			ready = true;
+			return hold;
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(ready).toBe(false);
+		finish.resolve();
+		const hold = await pending;
+		expect(hold.sleepReady).toBe(true);
+		expect(JSON.stringify(hold.checkpoint.entries)).toContain("metadata-tail");
+		hold.release();
+	});
+
+	it("owns native pi.exec even when the extension does not await its returned promise", async () => {
+		let api!: ExtensionAPI;
+		const h = await setup({
+			extensionFactories: [
+				(pi) => {
+					api = pi;
+				},
+			],
+		});
+		const started = join(h.tempDir, "exec-started");
+		const gate = join(h.tempDir, "exec-release");
+		const saved = join(h.tempDir, "exec-saved");
+		const execution = api.exec(process.execPath, [
+			"-e",
+			`const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(started)}, 'started'); const timer = setInterval(() => { if (!fs.existsSync(${JSON.stringify(gate)})) return; fs.writeFileSync(${JSON.stringify(saved)}, 'saved'); clearInterval(timer); }, 10);`,
+		]);
+		try {
+			await vi.waitFor(() => expect(existsSync(started)).toBe(true));
+			let ready = false;
+			const pending = h.session.acquireCheckpoint({ quiesce: () => () => {} }).then((hold) => {
+				ready = true;
+				return hold;
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(ready).toBe(false);
+			writeFileSync(gate, "release");
+			const hold = await pending;
+			expect(hold.sleepReady).toBe(true);
+			expect(readFileSync(saved, "utf8")).toBe("saved");
+			hold.release();
+		} finally {
+			writeFileSync(gate, "release");
+			await execution;
+		}
+	});
+
+	it("a cancelled extension barrier remains owned until its continuation finishes", async () => {
+		const entered = deferred();
+		const finish = deferred();
+		let first = true;
+		const h = await setup({
+			extensionFactories: [
+				(pi) =>
+					pi.on("session_checkpoint", async () => {
+						if (first) {
+							first = false;
+							entered.resolve();
+							await finish.promise;
+							pi.appendEntry("cancelled-barrier-tail", { complete: true });
+						}
+						return { sleepReady: true };
+					}),
+			],
+		});
+		const controller = new AbortController();
+		const cancelled = h.session.acquireCheckpoint({ signal: controller.signal, quiesce: () => () => {} });
+		await entered.promise;
+		controller.abort();
+		await expect(cancelled).rejects.toThrow("cancelled");
+		let ready = false;
+		const pending = h.session.acquireCheckpoint({ quiesce: () => () => {} }).then((hold) => {
+			ready = true;
+			return hold;
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(ready).toBe(false);
+		finish.resolve();
+		const hold = await pending;
+		expect(hold.sleepReady).toBe(true);
+		expect(JSON.stringify(hold.checkpoint.entries)).toContain("cancelled-barrier-tail");
+		hold.release();
+	});
+
+	it("failed extension persistence releases the hold and retains accepted queues", async () => {
+		const h = await setup({
+			extensionFactories: [
+				(pi) =>
+					pi.on("session_checkpoint", async () => {
+						throw new Error("extension disk full");
+					}),
+			],
+		});
+		await h.session.steer("accepted");
+		const release = vi.fn();
+		await expect(h.session.acquireCheckpoint({ quiesce: () => release })).rejects.toThrow("extension disk full");
+		expect(release).toHaveBeenCalledOnce();
+		expect(h.session.isCheckpointHeld).toBe(false);
+		expect(h.session.getSteeringMessages()).toEqual(["accepted"]);
+	});
 	it("holds after later native/extension writes, restores full queues once, and never auto-replays", async () => {
 		const providerEntered = deferred();
 		const providerRelease = deferred();
@@ -122,7 +261,6 @@ describe("native working-session checkpoint", () => {
 		expect(hold.checkpoint.queues.nextTurn).toHaveLength(1);
 		expect(hold.checkpoint.queues.persistOnCancel).toEqual([1]);
 		expect(h.getPendingResponseCount()).toBe(3);
-		await expect(h.session.steer("not accepted while held")).rejects.toThrow("held");
 		const file = join(h.tempDir, "checkpoint.json");
 		writeSessionCheckpoint(file, hold.checkpoint);
 		const saved = readSessionCheckpoint(file);
@@ -141,6 +279,8 @@ describe("native working-session checkpoint", () => {
 		expect(session.getFollowUpMessages()).toEqual(["follow-up"]);
 		expect(session.isIdle).toBe(true);
 		expect(() => session.restoreCheckpointQueues(saved.queues)).toThrow("fresh idle");
+		await expect(h.session.steer("not accepted while held")).rejects.toThrow("held");
+		expect(hold.signal.aborted).toBe(true);
 		hold.release();
 		hold.release();
 		await running;
