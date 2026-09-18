@@ -66,12 +66,13 @@ describe("native working-session checkpoint", () => {
 		const finish = deferred();
 		const h = await setup({
 			extensionFactories: [
-				(pi) =>
+				(pi) => {
 					pi.on("session_info_changed", async () => {
 						entered.resolve();
 						await finish.promise;
 						pi.appendEntry("metadata-tail", { saved: true });
-					}),
+					});
+				},
 			],
 		});
 		h.session.setSessionName("held name");
@@ -132,7 +133,7 @@ describe("native working-session checkpoint", () => {
 		let first = true;
 		const h = await setup({
 			extensionFactories: [
-				(pi) =>
+				(pi) => {
 					pi.on("session_checkpoint", async () => {
 						if (first) {
 							first = false;
@@ -141,7 +142,8 @@ describe("native working-session checkpoint", () => {
 							pi.appendEntry("cancelled-barrier-tail", { complete: true });
 						}
 						return { sleepReady: true };
-					}),
+					});
+				},
 			],
 		});
 		const controller = new AbortController();
@@ -166,10 +168,11 @@ describe("native working-session checkpoint", () => {
 	it("failed extension persistence releases the hold and retains accepted queues", async () => {
 		const h = await setup({
 			extensionFactories: [
-				(pi) =>
+				(pi) => {
 					pi.on("session_checkpoint", async () => {
 						throw new Error("extension disk full");
-					}),
+					});
+				},
 			],
 		});
 		await h.session.steer("accepted");

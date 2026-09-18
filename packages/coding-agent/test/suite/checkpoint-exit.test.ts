@@ -234,13 +234,14 @@ describe("native deliberate clean-exit checkpoint", () => {
 		let file = "";
 		const f = await setup({
 			extensions: [
-				(pi) =>
+				(pi) => {
 					pi.on("session_shutdown", async () => {
 						entered.resolve();
 						await finish.promise;
 						writeFileSync(file, "shutdown complete");
 						pi.appendEntry("shutdown-tail", { complete: true });
-					}),
+					});
+				},
 			],
 		});
 		file = join(f.directory, "late.json");
@@ -313,12 +314,13 @@ describe("native deliberate clean-exit checkpoint", () => {
 		const finish = deferred();
 		const f = await setup({
 			extensions: [
-				(pi) =>
+				(pi) => {
 					pi.on("user_bash", async () => {
 						entered.resolve();
 						await finish.promise;
 						return { result: { output: "intercepted", exitCode: 0, cancelled: false, truncated: false } };
-					}),
+					});
+				},
 			],
 		});
 		const running = f.h.session.executeBash("intercepted command");
@@ -353,10 +355,11 @@ describe("native deliberate clean-exit checkpoint", () => {
 			extensions:
 				failure === "extension"
 					? [
-							(pi) =>
+							(pi) => {
 								pi.on("session_shutdown", () => {
 									throw new Error("shutdown disk full");
-								}),
+								});
+							},
 						]
 					: [],
 		});
@@ -427,10 +430,11 @@ describe("native deliberate clean-exit checkpoint", () => {
 		const f = await setup({
 			enabled: false,
 			extensions: [
-				(pi) =>
+				(pi) => {
 					pi.on("session_shutdown", () => {
 						throw new Error("ordinary extension error");
-					}),
+					});
+				},
 			],
 		});
 		await quit(f);
@@ -497,11 +501,12 @@ describe("native deliberate clean-exit checkpoint", () => {
 		const finish = deferred();
 		const f = await setup({
 			extensions: [
-				(pi) =>
+				(pi) => {
 					pi.on("session_shutdown", async () => {
 						entered.resolve();
 						await finish.promise;
-					}),
+					});
+				},
 			],
 		});
 		const closing = f.view.shutdown();

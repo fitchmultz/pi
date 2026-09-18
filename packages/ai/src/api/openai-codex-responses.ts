@@ -412,10 +412,10 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							output,
 							createAssistantMessageDiagnostic("provider_transport_failure", error, {
 								configuredTransport: transport,
-								fallbackTransport: websocketStarted || reconnect ? undefined : "sse",
+								...(websocketStarted || reconnect ? {} : { fallbackTransport: "sse" }),
 								eventsEmitted: websocketStarted,
 								phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
-								responseId: output.responseId,
+								...(output.responseId === undefined ? {} : { responseId: output.responseId }),
 								...details,
 							}),
 						);
@@ -1193,7 +1193,8 @@ async function connectWebSocket(
 			if (closeReason) {
 				closeWebSocketSilently(socket, 1000, closeReason);
 			}
-			diagnostics.details.socket = snapshotWebSocketSocket(socket);
+			const socketDetails = snapshotWebSocketSocket(socket);
+			if (socketDetails) diagnostics.details.socket = socketDetails;
 			reject(error);
 		};
 		const onOpen: WebSocketListener = () => {
@@ -1725,7 +1726,8 @@ async function processWebSocketStream(
 		keepConnection = false;
 		throw error;
 	} finally {
-		details.socket = snapshotWebSocketSocket(socket);
+		const socketDetails = snapshotWebSocketSocket(socket);
+		if (socketDetails) details.socket = socketDetails;
 		release({ keep: keepConnection });
 	}
 }

@@ -159,7 +159,7 @@ export class ModelRuntime implements Models {
 		key: string,
 		write: () => Promise<T>,
 		signal?: AbortSignal,
-		isPersistenceFailure: () => boolean = () => true,
+		isPersistenceFailure: (error: unknown) => boolean = () => true,
 	): Promise<T> {
 		return this.checkpointActivity.run(async () => {
 			try {
@@ -167,7 +167,7 @@ export class ModelRuntime implements Models {
 				this.checkpointPersistenceErrors.delete(key);
 				return result;
 			} catch (error) {
-				if (!signal?.aborted && isPersistenceFailure()) this.checkpointPersistenceErrors.set(key, error);
+				if (!signal?.aborted && isPersistenceFailure(error)) this.checkpointPersistenceErrors.set(key, error);
 				throw error;
 			}
 		});
@@ -219,7 +219,7 @@ export class ModelRuntime implements Models {
 				read: (id, options) => this.checkpointActivity.run(() => credentials.read(id, options)),
 				list: (options) => this.checkpointActivity.run(() => credentials.list(options)),
 				modify: (id, fn, options) => {
-					let callbackFailed = false;
+					let callbackFailure: { error: unknown } | undefined;
 					return this.persistForCheckpoint(
 						`credentials:${id}`,
 						() =>
@@ -230,14 +230,14 @@ export class ModelRuntime implements Models {
 										return await fn(current);
 									} catch (error) {
 										// OAuth refresh runs inside modify, before any credential is adopted or written.
-										callbackFailed = true;
+										callbackFailure = { error };
 										throw error;
 									}
 								},
 								options,
 							),
 						options?.signal,
-						() => !callbackFailed,
+						(error) => !callbackFailure || error !== callbackFailure.error,
 					);
 				},
 				delete: (id, options) =>

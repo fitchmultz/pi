@@ -153,12 +153,13 @@ describe("native checkpoint TUI boundary", () => {
 		const f = await setup({
 			models: [{ id: "first" }, { id: "second" }],
 			extensionFactories: [
-				(pi) =>
+				(pi) => {
 					pi.on("model_select", async () => {
 						entered.resolve();
 						await finish.promise;
 						pi.appendEntry("model-tail", { saved: true });
-					}),
+					});
+				},
 			],
 		});
 		f.terminal.sendInput("\x0c"); // configured native Ctrl+L

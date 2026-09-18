@@ -412,6 +412,53 @@ it("an OAuth refresh callback failure before any credential write does not poiso
 	h.session.beginShutdown();
 	const candidate = await h.session.captureShutdownCheckpoint();
 	candidate.release();
+	// A distinct storage/unlock error replacing the callback failure must still fail closed.
+	const modify = h.authStorage.modify.bind(h.authStorage);
+	vi.spyOn(h.authStorage, "modify").mockImplementation((...args) =>
+		modify(...args).catch(() => {
+			throw new Error("storage cleanup failure");
+		}),
+	);
+	await expect(runtime.getAuth(runtime.getModel("broken-oauth", h.getModel().id)!)).rejects.toThrow();
+	await expect(h.session.captureShutdownCheckpoint()).rejects.toThrow("storage cleanup failure");
+});
+
+it("checkpoint barriers retain native on() unsubscribe and dispatch snapshot semantics", async () => {
+	const calls: string[] = [];
+	const h = await harness({
+		extensionFactories: [
+			(pi) => {
+				let changed = false;
+				pi.on("session_checkpoint", () => {
+					calls.push("first");
+					if (!changed) {
+						changed = true;
+						removeSecond();
+						removeSecond();
+						pi.on("session_checkpoint", () => {
+							calls.push("added");
+							return { sleepReady: true };
+						});
+					}
+					return { sleepReady: true };
+				});
+				const removeSecond = pi.on("session_checkpoint", () => {
+					calls.push("second");
+					return { sleepReady: false, reason: "current dispatch veto" };
+				});
+			},
+		],
+	});
+	const hold = await h.session.acquireCheckpoint({ quiesce: () => () => {} });
+	try {
+		expect(calls).toEqual(["first", "second"]);
+		expect(hold.sleepReady).toBe(false);
+	} finally {
+		hold.release();
+	}
+	calls.length = 0;
+	await snapshot(h.session);
+	expect(calls).toEqual(["first", "added"]);
 });
 
 it("failed same-path CLI restore clears completed proof but retains native data for retry", async () => {
