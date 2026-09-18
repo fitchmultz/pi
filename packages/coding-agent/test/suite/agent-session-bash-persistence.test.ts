@@ -134,16 +134,18 @@ describe("AgentSession bash and persistence characterization", () => {
 		let laterObserver = 0;
 		const harness = await createHarness({
 			extensionFactories: [
-				(pi) =>
+				(pi) => {
 					pi.on("user_bash", async () => {
 						intercepted++;
 						await interception;
 						return { operations };
-					}),
-				(pi) =>
+					});
+				},
+				(pi) => {
 					pi.on("user_bash", () => {
 						laterObserver++;
-					}),
+					});
+				},
 			],
 		});
 		harnesses.push(harness);
@@ -179,11 +181,12 @@ describe("AgentSession bash and persistence characterization", () => {
 		const replacement = { output: "remote result", exitCode: 0, cancelled: false, truncated: false };
 		const harness = await createHarness({
 			extensionFactories: [
-				(pi) =>
+				(pi) => {
 					pi.on("user_bash", async () => {
 						await gate;
 						return { result: replacement };
-					}),
+					});
+				},
 			],
 		});
 		harnesses.push(harness);
@@ -218,7 +221,7 @@ describe("AgentSession bash and persistence characterization", () => {
 		let executed = false;
 		const harness = await createHarness({
 			extensionFactories: [
-				(pi) =>
+				(pi) => {
 					pi.on("user_bash", async () => {
 						await gate;
 						return {
@@ -229,7 +232,8 @@ describe("AgentSession bash and persistence characterization", () => {
 								},
 							},
 						};
-					}),
+					});
+				},
 			],
 		});
 		harnesses.push(harness);

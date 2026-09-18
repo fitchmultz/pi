@@ -8,11 +8,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
+import {
+	createExtensionRuntime,
+	discoverAndLoadExtensions,
+	loadExtensionFromFactory,
+	loadExtensions,
+} from "../src/core/extensions/loader.ts";
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
 	ExtensionContextActions,
+	ExtensionFactory,
 	ExtensionUIContext,
 	ProviderConfig,
 } from "../src/core/extensions/types.ts";
@@ -1070,6 +1077,224 @@ describe("ExtensionRunner", () => {
 
 			await commandContext.fork("entry-2", { position: "at" });
 			expect(fork).toHaveBeenLastCalledWith("entry-2", { position: "at" });
+		});
+	});
+
+	// #8967: event handler unsubscription must not disturb other registrations.
+	describe("event subscriptions", () => {
+		async function loadSubscriptionExtension(factory: ExtensionFactory) {
+			const runtime = createExtensionRuntime();
+			const extension = await loadExtensionFromFactory(factory, tempDir, createEventBus(), runtime);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			return { extension, runner };
+		}
+
+		it("snapshots fork preflight handlers across extensions before awaiting dispatch", async () => {
+			const runtime = createExtensionRuntime();
+			const calls: string[] = [];
+			let stopSecond!: () => void;
+			let release!: () => void;
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_before_auto_compact", async () => {
+						calls.push("first");
+						await gate;
+						stopSecond();
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					stopSecond = pi.on("session_before_auto_compact", () => {
+						calls.push("second");
+						return { newContext: { handoff: "native handoff" } };
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+			const event = {
+				type: "session_before_auto_compact" as const,
+				branchEntries: [],
+				pendingMessages: [],
+				reason: "threshold" as const,
+				willRetry: false,
+				signal: new AbortController().signal,
+			};
+			const pending = runner.emit(event);
+			expect(calls).toEqual(["first"]);
+			release();
+			expect(await pending).toEqual({ newContext: { handoff: "native handoff" } });
+			expect(calls).toEqual(["first", "second"]);
+			expect(await runner.emit(event)).toBeUndefined();
+			expect(calls).toEqual(["first", "second", "first"]);
+			runtime.invalidate();
+			expect(() => {
+				stopSecond();
+				stopSecond();
+			}).not.toThrow();
+		});
+
+		it("keeps a removed cross-extension tool gate in the current interception", async () => {
+			const runtime = createExtensionRuntime();
+			let stopGate!: () => void;
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("tool_call", () => {
+						stopGate();
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					stopGate = pi.on("tool_call", () => ({ block: true, reason: "policy" }));
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+			const event = { type: "tool_call" as const, toolCallId: "call", toolName: "custom", input: {} };
+			expect(await runner.emitToolCall(event)).toEqual({ block: true, reason: "policy" });
+			expect(await runner.emitToolCall(event)).toBeUndefined();
+		});
+
+		it("returns idempotent disposers for every fork retry hook", async () => {
+			const stops: Array<() => void> = [];
+			const { extension } = await loadSubscriptionExtension((pi) => {
+				stops.push(pi.on("auto_retry_start", () => {}));
+				stops.push(pi.on("auto_retry_end", () => {}));
+				stops.push(pi.on("summarization_retry_scheduled", () => {}));
+				stops.push(pi.on("summarization_retry_attempt_start", () => {}));
+				stops.push(pi.on("summarization_retry_finished", () => {}));
+			});
+			for (const stop of stops) {
+				stop();
+				stop();
+			}
+			expect([...extension.handlers.keys()]).toEqual([]);
+		});
+
+		it("allows self-removal without skipping neighboring handlers", async () => {
+			const calls: string[] = [];
+			const { runner } = await loadSubscriptionExtension((pi) => {
+				const unsubscribe = pi.on("agent_end", () => {
+					calls.push("A");
+					unsubscribe();
+				});
+				pi.on("agent_end", () => {
+					calls.push("B");
+				});
+			});
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B"]);
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B", "B"]);
+		});
+
+		it("removes duplicate registrations independently and cleans up the last handler", async () => {
+			const calls: string[] = [];
+			const unsubscribers: Array<() => void> = [];
+			const { extension, runner } = await loadSubscriptionExtension((pi) => {
+				const shared = () => {
+					calls.push("shared");
+				};
+				unsubscribers.push(pi.on("agent_end", shared));
+				unsubscribers.push(
+					pi.on("agent_end", () => {
+						calls.push("B");
+					}),
+				);
+				unsubscribers.push(pi.on("agent_end", shared));
+			});
+			const [stopFirst, stopB, stopSecond] = unsubscribers;
+
+			stopSecond();
+			stopSecond();
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["shared", "B"]);
+
+			stopFirst();
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["shared", "B", "B"]);
+
+			stopB();
+			expect(extension.handlers.has("agent_end")).toBe(false);
+		});
+
+		it("keeps removed pending handlers in the current dispatch", async () => {
+			const calls: string[] = [];
+			const { runner } = await loadSubscriptionExtension((pi) => {
+				pi.on("agent_end", () => {
+					calls.push("A");
+					stopB();
+				});
+				const stopB = pi.on("agent_end", () => {
+					calls.push("B");
+				});
+				pi.on("agent_end", () => {
+					calls.push("C");
+				});
+			});
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B", "C"]);
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B", "C", "A", "C"]);
+		});
+
+		it("defers registrations made during dispatch until the next dispatch", async () => {
+			const calls: string[] = [];
+			const { runner } = await loadSubscriptionExtension((pi) => {
+				pi.on("agent_end", () => {
+					calls.push("A");
+					pi.on("agent_end", () => {
+						calls.push("C");
+					});
+				});
+				pi.on("agent_end", () => {
+					calls.push("B");
+				});
+			});
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B"]);
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B", "A", "B", "C"]);
+		});
+
+		it("uses a fresh handler list for nested dispatches", async () => {
+			const calls: string[] = [];
+			const { runner } = await loadSubscriptionExtension((pi) => {
+				const stopA = pi.on("agent_end", async () => {
+					calls.push("A");
+					stopA();
+					stopB();
+					pi.on("agent_end", () => {
+						calls.push("C");
+					});
+					await runner.emit({ type: "agent_end", messages: [] });
+				});
+				const stopB = pi.on("agent_end", () => {
+					calls.push("B");
+				});
+			});
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "C", "B"]);
 		});
 	});
 

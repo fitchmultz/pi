@@ -290,6 +290,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			let notificationContext = ctx;
 			try {
 				const targetCwd = ctx.sessionManager.getCwd();
 				const sessionDir = ctx.sessionManager.getSessionDir();
@@ -331,6 +332,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`Imported session ${decoded.header.id} (cwd ${decoded.header.cwd} -> ${targetCwd})`, "info");
 				await ctx.switchSession(destination, {
 					withSession: async (nextCtx) => {
+						notificationContext = nextCtx;
 						if (!platformNotice) return;
 						await nextCtx.sendMessage(
 							{
@@ -344,7 +346,7 @@ export default function (pi: ExtensionAPI) {
 					},
 				});
 			} catch (error) {
-				ctx.ui.notify(`ir: ${error instanceof Error ? error.message : String(error)}`, "error");
+				notificationContext.ui.notify(`ir: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		},
 	});
