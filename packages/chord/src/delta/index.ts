@@ -860,9 +860,9 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 			}
 		};
 		const childProxies = new Map<string | symbol, { target: object; proxy: object }>();
-		// Renumbering is driven by this, not by the cache: two shifting children can
-		// collide on one cache key, and the evicted one would silently stop tracking.
-		const childCells = new Set<{ target: object; cell: Cell; blocked?: Seg }>();
+		// Keep positions indexed independently of the proxy cache, which renumbering
+		// clears. Uncached reads must not scan all previously registered children.
+		const childCells = new Map<Cell, Map<Seg, { target: object; cell: Cell; blocked?: Seg }>>();
 		const attachChild = (value: object, segment: Seg, blocked?: Seg, fresh = false, adopt = false): object => {
 			value = unwrap(value) as object;
 			let child: object = value;
@@ -871,25 +871,30 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 			// reattaches references read while it was detached.
 			if (parents.length === 0) parents.push(cell);
 			for (const parent of parents) {
-				const existing = fresh
-					? undefined
-					: [...childCells].find((entry) => entry.cell.parent === parent && entry.cell.seg === segment);
+				let positions = childCells.get(parent);
+				if (positions === undefined) {
+					positions = new Map();
+					childCells.set(parent, positions);
+				}
+				const existing = fresh ? undefined : positions.get(segment);
 				if (existing !== undefined) {
 					child = wrap(value, existing.cell, blocked, adopt);
 					continue;
 				}
 				const childCell: Cell = { parent, seg: segment, dead: false };
-				childCells.add({ target: value, cell: childCell, blocked });
+				positions.set(segment, { target: value, cell: childCell, blocked });
 				child = wrap(value, childCell, blocked, adopt);
 			}
 			childProxies.set(String(segment), { target: value, proxy: child });
 			return child;
 		};
 		const detachChild = (segment: Seg): void => {
-			for (const entry of childCells) {
-				if (entry.cell.seg !== segment) continue;
+			for (const [parent, positions] of childCells) {
+				const entry = positions.get(segment);
+				if (entry === undefined) continue;
 				entry.cell.dead = true;
-				childCells.delete(entry);
+				positions.delete(segment);
+				if (positions.size === 0) childCells.delete(parent);
 			}
 		};
 		const addCell = (next: Cell): void => {
@@ -898,9 +903,12 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 			aliased = true;
 			// Existing held descendants must acquire the new parent position too.
 			const children = new Map<Seg, { target: object; blocked?: Seg }>();
-			for (const entry of childCells) {
-				children.set(entry.cell.seg, entry);
-				if (isDetached(entry.cell)) childCells.delete(entry);
+			for (const [parent, positions] of childCells) {
+				for (const entry of positions.values()) {
+					children.set(entry.cell.seg, entry);
+					if (isDetached(entry.cell)) positions.delete(entry.cell.seg);
+				}
+				if (positions.size === 0) childCells.delete(parent);
 			}
 			for (const [segment, entry] of children) attachChild(entry.target, segment, entry.blocked);
 		};
@@ -937,7 +945,9 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 			} else {
 				// Whole-array mutators can duplicate positions, not just permute them.
 				// Retire outgoing positions and register every resulting occurrence.
-				for (const entry of childCells) entry.cell.dead = true;
+				for (const positions of childCells.values()) {
+					for (const entry of positions.values()) entry.cell.dead = true;
+				}
 				childCells.clear();
 				childProxies.clear();
 				for (let i = 0; i < object.length; i++) {
@@ -947,13 +957,22 @@ export function track<T extends object>(root: T, options: TrackerOptions = {}): 
 				return;
 			}
 			const delta = insert - remove;
-			for (const entry of [...childCells]) {
-				const at = entry.cell.seg;
-				if (typeof at !== "number") continue;
-				if (at >= index && at < index + remove) {
-					entry.cell.dead = true;
-					childCells.delete(entry);
-				} else if (at >= index + remove) entry.cell.seg = at + delta;
+			for (const positions of childCells.values()) {
+				// Rebuild from the old generation so shifting keys cannot overwrite a
+				// child that has not moved yet, regardless of its first-access order.
+				const entries = [...positions.values()];
+				positions.clear();
+				for (const entry of entries) {
+					const at = entry.cell.seg;
+					if (typeof at === "number") {
+						if (at >= index && at < index + remove) {
+							entry.cell.dead = true;
+							continue;
+						}
+						if (at >= index + remove) entry.cell.seg = at + delta;
+					}
+					positions.set(entry.cell.seg, entry);
+				}
 			}
 			childProxies.clear(); // the cache is keyed by index; rebuild it lazily
 		};

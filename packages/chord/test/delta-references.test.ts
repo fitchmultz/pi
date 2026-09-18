@@ -173,6 +173,33 @@ describe("tracked reference positions", () => {
 		expect(state.value).toEqual({ items: [item(3), item(3)] });
 	});
 
+	it("reuses positions after renumbering children first read out of index order", () => {
+		const t = track<{ a: Item[]; b: Item[] | null }>({ a: [item(0), item(1), item(2), item(3)], b: null });
+		let replica = apply<typeof t.state>(undefined, t.flush());
+		const held = [2, 0, 3, 1].map((index) => t.state.a[index]!);
+		t.state.b = t.state.a;
+		t.state.a.splice(1, 0, item(4));
+		for (const [i, index] of [3, 0, 4, 2].entries()) {
+			expect(t.state.a[index]).toBe(held[i]);
+			held[i]!.nested.x += 10;
+		}
+		replica = apply(replica, t.flush());
+		expect(replica).toEqual(t.state);
+
+		t.state.b!.splice(0, 2);
+		for (const [i, index] of [1, -1, 2, 0].entries()) {
+			if (index >= 0) expect(t.state.a[index]).toBe(held[i]);
+			held[i]!.nested.x += 10;
+		}
+		replica = apply(replica, t.flush());
+		expect(replica).toEqual(t.state);
+		t.state.a[1] = item(5);
+		held[0]!.nested.x = 99; // re-reading after shifts must not leave a duplicate live cell
+		replica = apply(replica, t.flush());
+		expect(replica).toEqual(t.state);
+		expect(replica.a[1]).toEqual(item(5));
+	});
+
 	it("detaches public replicated-state references on replacement", () => {
 		const state = replicatedState({ a: item(1) });
 		const held = state.state.a;
