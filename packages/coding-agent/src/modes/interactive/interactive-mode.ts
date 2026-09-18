@@ -70,6 +70,7 @@ import {
 	computeCacheWaste,
 	detectCacheMiss,
 } from "../../core/cache-stats.ts";
+import type { SessionCheckpoint, ShutdownCheckpoint } from "../../core/checkpoint.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "../../core/defaults.ts";
 import type {
 	AutocompleteProviderFactory,
@@ -379,6 +380,8 @@ export interface InteractiveModeOptions {
 	initialThemeSetting?: string;
 	/** Synchronous host notification before shutdown can yield or re-enter. */
 	onShutdownRequested?: (source: "user" | "extension" | "signal") => void;
+	/** CLI-owned final artifact writer, called only immediately before a deliberate successful user exit. */
+	writeExitCheckpoint?: (checkpoint: SessionCheckpoint) => void;
 	/** Terminal implementation. Defaults to the current process terminal. */
 	terminal?: Terminal;
 }
@@ -416,6 +419,9 @@ export class InteractiveMode {
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
 	private checkpointUIBusy = 0;
+	private readonly checkpointUIIdleWaiters = new Set<() => void>();
+	private checkpointExitInterrupted = false;
+	private checkpointExitSealed = false;
 	private pendingInitialMessages: number;
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
 	private activeWorkingIndicatorEmbedded = false;
@@ -2473,12 +2479,14 @@ export class InteractiveMode {
 		callback: (...args: Args) => Result | Promise<Result>,
 	): (...args: Args) => Promise<Result> {
 		return async (...args) => {
+			if (this.checkpointExitSealed) this.checkpointExitInterrupted = true;
 			if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
 			this.checkpointUIBusy = (this.checkpointUIBusy ?? 0) + 1;
 			try {
 				return await callback(...args);
 			} finally {
 				this.checkpointUIBusy--;
+				if (!this.checkpointUIBusy) for (const notify of this.checkpointUIIdleWaiters ?? []) notify();
 				this.session.notifyCheckpointStateChanged();
 			}
 		};
@@ -2581,6 +2589,7 @@ export class InteractiveMode {
 		const mutate =
 			<Args extends unknown[], Result>(callback: (...args: Args) => Result) =>
 			(...args: Args): Result => {
+				if (this.checkpointExitSealed) this.checkpointExitInterrupted = true;
 				if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
 				try {
 					return callback(...args);
@@ -3364,7 +3373,10 @@ export class InteractiveMode {
 			}
 			this.editor.addToHistory?.(text);
 		};
-		this.defaultEditor.onSubmit = this.checkpointCallback(this.defaultEditor.onSubmit);
+		const submit = this.defaultEditor.onSubmit;
+		const trackedSubmit = this.checkpointCallback(submit);
+		// /quit owns shutdown itself; joining that same input callback would deadlock final capture.
+		this.defaultEditor.onSubmit = (text) => (text.trim() === "/quit" ? submit(text) : trackedSubmit(text));
 	}
 
 	private subscribeToAgent(): void {
@@ -4264,6 +4276,7 @@ export class InteractiveMode {
 	private isShuttingDown = false;
 
 	private async shutdown(options?: { fromSignal?: boolean; fromExtension?: boolean }): Promise<void> {
+		if (options?.fromSignal) this.checkpointExitInterrupted = true;
 		this.options.onShutdownRequested?.(
 			options?.fromSignal ? "signal" : options?.fromExtension ? "extension" : "user",
 		);
@@ -4286,7 +4299,7 @@ export class InteractiveMode {
 			this.themeController.disableAutoSync();
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
-			process.exit(0);
+			return process.exit(0);
 		}
 
 		// Interactive quit (Ctrl+D, Ctrl+C, /quit, extension shutdown()). Stop the
@@ -4294,17 +4307,71 @@ export class InteractiveMode {
 		// the final frame while the process is exiting.
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
-		this.themeController.disableAutoSync();
-		await this.ui.terminal.drainInput(1000);
-
-		this.stop();
-		await this.runtimeHost.dispose();
-
-		const resumeCommand = formatResumeCommand(this.sessionManager);
-		if (resumeCommand) {
-			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
+		const writeExitCheckpoint = options?.fromExtension ? undefined : this.options.writeExitCheckpoint;
+		// Do not hide unsaved UI state during teardown and then mistake it for resumable state.
+		const unsupportedInput =
+			writeExitCheckpoint &&
+			(this.getQueuedInputCount() ||
+				this.editor !== this.defaultEditor ||
+				this.renderer.getFocusedComponent() !== this.editor ||
+				this.renderer.hasOverlayEntries ||
+				this.activeSelectorToken ||
+				this.extensionSelector ||
+				this.extensionInput ||
+				this.extensionEditor ||
+				(this.editor.getExpandedText?.() ?? this.editor.getText()).length > 0);
+		let checkpoint: ShutdownCheckpoint | undefined;
+		try {
+			this.themeController.disableAutoSync();
+			await this.ui.terminal.drainInput(1000);
+			this.stop();
+			if (writeExitCheckpoint) {
+				const controller = new AbortController();
+				// A ref'ed budget also prevents an unresolved memory-only callback from causing implicit exit(0).
+				const timeout = setTimeout(
+					() => controller.abort(new Error("Native clean-exit cleanup timed out")),
+					30_000,
+				);
+				try {
+					checkpoint = await this.runtimeHost.disposeWithCheckpoint({
+						signal: controller.signal,
+						waitForHost: async () => {
+							while (this.checkpointUIBusy) {
+								let notify!: () => void;
+								await new Promise<void>((resolve) => {
+									notify = resolve;
+									this.checkpointUIIdleWaiters.add(notify);
+								});
+								this.checkpointUIIdleWaiters.delete(notify);
+							}
+							if (
+								unsupportedInput ||
+								this.getQueuedInputCount() ||
+								(this.editor.getExpandedText?.() ?? this.editor.getText()).length > 0
+							)
+								throw new Error("Unpersisted native UI or input prevents a clean-exit checkpoint");
+							this.checkpointExitSealed = true;
+						},
+					});
+				} finally {
+					clearTimeout(timeout);
+				}
+			} else await this.runtimeHost.dispose();
+			const resumeCommand = formatResumeCommand(this.sessionManager);
+			if (resumeCommand) process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
+			if (checkpoint) {
+				if (this.checkpointExitInterrupted)
+					throw new Error("Clean exit interrupted by signal or late native callback");
+				checkpoint.signal.throwIfAborted();
+				writeExitCheckpoint!(checkpoint.checkpoint);
+			}
+		} catch (error) {
+			if (!writeExitCheckpoint) throw error;
+			console.error(`Clean-exit checkpoint failed: ${error instanceof Error ? error.message : String(error)}`);
+			return process.exit(1);
+		} finally {
+			checkpoint?.release();
 		}
-
 		process.exit(0);
 	}
 

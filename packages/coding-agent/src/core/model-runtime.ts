@@ -153,11 +153,29 @@ export class ModelRuntime implements Models {
 	private availabilityError: string | undefined;
 	private readonly credentialOperations = new Map<string, Promise<unknown>>();
 	private readonly checkpointActivity = new CheckpointActivity();
+	private readonly checkpointPersistenceErrors = new Map<string, unknown>();
+
+	private persistForCheckpoint<T>(key: string, write: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+		return this.checkpointActivity.run(async () => {
+			try {
+				const result = await write();
+				this.checkpointPersistenceErrors.delete(key);
+				return result;
+			} catch (error) {
+				if (!signal?.aborted) this.checkpointPersistenceErrors.set(key, error);
+				throw error;
+			}
+		});
+	}
 
 	/** Join catalog/auth operations and their underlying storage, including cancelled callers' unlock tails. */
-	async flushForCheckpoint(): Promise<void> {
+	async flushForCheckpoint(options?: { requireSuccessfulPersistence: boolean }): Promise<void> {
 		await this.checkpointActivity.flush();
 		await FileAuthStorageBackend.checkpointActivity.flush();
+		if (options?.requireSuccessfulPersistence && this.checkpointPersistenceErrors.size)
+			throw new Error(
+				`Native persistence failed: ${[...this.checkpointPersistenceErrors].map(([key, error]) => `${key}: ${error instanceof Error ? error.message : String(error)}`).join("; ")}`,
+			);
 	}
 
 	/** New native model/auth work invalidates the receipt before it starts. */
@@ -195,13 +213,21 @@ export class ModelRuntime implements Models {
 			credentials: {
 				read: (id, options) => this.checkpointActivity.run(() => credentials.read(id, options)),
 				list: (options) => this.checkpointActivity.run(() => credentials.list(options)),
-				modify: (id, fn, options) => this.checkpointActivity.run(() => credentials.modify(id, fn, options)),
-				delete: (id, options) => this.checkpointActivity.run(() => credentials.delete(id, options)),
+				modify: (id, fn, options) =>
+					this.persistForCheckpoint(
+						`credentials:${id}`,
+						() => credentials.modify(id, fn, options),
+						options?.signal,
+					),
+				delete: (id, options) =>
+					this.persistForCheckpoint(`credentials:${id}`, () => credentials.delete(id, options), options?.signal),
 			},
 			modelsStore: {
 				read: (id, options) => this.checkpointActivity.run(() => modelsStore.read(id, options)),
-				write: (id, entry, options) => this.checkpointActivity.run(() => modelsStore.write(id, entry, options)),
-				delete: (id, options) => this.checkpointActivity.run(() => modelsStore.delete(id, options)),
+				write: (id, entry, options) =>
+					this.persistForCheckpoint(`catalog:${id}`, () => modelsStore.write(id, entry, options), options?.signal),
+				delete: (id, options) =>
+					this.persistForCheckpoint(`catalog:${id}`, () => modelsStore.delete(id, options), options?.signal),
 			},
 		});
 		this.rebuildProviders();

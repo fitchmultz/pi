@@ -95,6 +95,7 @@ export async function startCheckpointControl(options: {
 					);
 					reply({
 						ok: true,
+						pid: process.pid,
 						token,
 						path: request.path,
 						boundary: hold.checkpoint.boundary,

@@ -45,7 +45,12 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
-import { openSessionCheckpoint, readSessionCheckpoint } from "./core/checkpoint.ts";
+import {
+	CHECKPOINT_EXIT_PATH_ENV,
+	openSessionCheckpoint,
+	prepareCheckpointExit,
+	readSessionCheckpoint,
+} from "./core/checkpoint.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
@@ -601,6 +606,18 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
+	const exitCheckpointPath = process.env[CHECKPOINT_EXIT_PATH_ENV];
+	let exitRestoreCheckpoint: ReturnType<typeof readSessionCheckpoint> | undefined;
+	let writeExitCheckpoint: ReturnType<typeof prepareCheckpointExit> | undefined;
+	if (exitCheckpointPath) {
+		// Load a shared restore/output path first, but clear old proof even if another restore input fails.
+		try {
+			const restorePath = parseArgs(args).checkpoint;
+			if (restorePath) exitRestoreCheckpoint = readSessionCheckpoint(resolvePath(restorePath, process.cwd()));
+		} finally {
+			writeExitCheckpoint = prepareCheckpointExit(exitCheckpointPath);
+		}
+	}
 	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	const restart = createManagedRestart(args);
 	const managedInteractive =
@@ -717,7 +734,9 @@ export async function main(args: string[], options?: MainOptions) {
 			"--checkpoint requires interactive mode without startup prompts or session/model/tool selection overrides",
 		);
 	}
-	const checkpoint = parsed.checkpoint ? readSessionCheckpoint(resolvePath(parsed.checkpoint, cwd)) : undefined;
+	const checkpoint =
+		exitRestoreCheckpoint ??
+		(parsed.checkpoint ? readSessionCheckpoint(resolvePath(parsed.checkpoint, cwd)) : undefined);
 
 	validateSessionCwdFlags(parsed);
 	validateForkFlags(parsed);
@@ -1040,6 +1059,7 @@ export async function main(args: string[], options?: MainOptions) {
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
 			onShutdownRequested: restart?.shutdownRequested,
+			writeExitCheckpoint,
 		});
 		if (startupBenchmark) {
 			await interactiveMode.init();

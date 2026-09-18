@@ -71,6 +71,7 @@ import type {
 	CheckpointOptions,
 	SessionCheckpoint,
 	SessionCheckpointQueues,
+	ShutdownCheckpoint,
 } from "./checkpoint.ts";
 import {
 	type CompactionPreparation,
@@ -377,6 +378,7 @@ export class AgentSession {
 	private _checkpointHeld = false;
 	private _checkpointRestored = false;
 	private _checkpointEntryPersistence?: AbortSignal;
+	private readonly _shutdownCheckpointWaiters = new Set<() => void>();
 	private _checkpointRequest?: {
 		boundary: CheckpointBoundary;
 		canQuiesce?: () => boolean;
@@ -942,6 +944,7 @@ export class AgentSession {
 	}
 
 	private _resolveIdleWaitIfIdle(): void {
+		this._notifyShutdownCheckpointWaiters();
 		if (!this.isIdle || !this._resolveIdleWait) {
 			return;
 		}
@@ -2193,6 +2196,108 @@ export class AgentSession {
 		return this._followUpMessages;
 	}
 
+	private async _flushCheckpointSettings(): Promise<void> {
+		await this.settingsManager.flush();
+		const errors = this.settingsManager.drainErrors();
+		if (errors.length)
+			throw new Error(`Settings checkpoint failed: ${errors.map((error) => error.error.message).join("; ")}`);
+	}
+
+	private _captureCheckpoint(boundary: CheckpointBoundary): SessionCheckpoint {
+		const sessionFile = this.sessionFile;
+		const header = this.sessionManager.getHeader();
+		if (!sessionFile || !header) throw new Error("Checkpoint requires a persistent session");
+		const checkpoint: SessionCheckpoint = {
+			version: 1,
+			createdAt: new Date().toISOString(),
+			selection: {
+				sessionFile,
+				sessionId: this.sessionId,
+				cwd: this._cwd,
+				leafId: this.sessionManager.getLeafId(),
+				model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
+				thinkingLevel: this.thinkingLevel,
+				activeTools: this.getActiveToolNames(),
+				knownTools: this.getAllTools().map((tool) => tool.name),
+			},
+			header,
+			entries: this.sessionManager.getEntries(),
+			queues: this.getCheckpointQueues(),
+			scopedModels: this._scopedModels.map(({ model, thinkingLevel }) => ({
+				provider: model.provider,
+				id: model.id,
+				thinkingLevel,
+			})),
+			boundary,
+			settled: boundary === "settled" && this.isIdle,
+		};
+		// Both held and final-exit artifacts use the same native snapshot and JSON validation.
+		return JSON.parse(JSON.stringify(checkpoint)) as SessionCheckpoint;
+	}
+
+	private _notifyShutdownCheckpointWaiters(): void {
+		for (const notify of this._shutdownCheckpointWaiters) notify();
+	}
+
+	/** After shutdown hooks, cancel and join actual native work without consuming accepted remaining queues. */
+	async finishShutdownForCheckpoint(): Promise<void> {
+		if (!this._shutdownAbortController.signal.aborted) throw new Error("Session shutdown has not begun");
+		this.abortBash();
+		await this.abort();
+		while (!this._isShutdownCheckpointSettled()) {
+			let notify!: () => void;
+			await new Promise<void>((resolve) => {
+				notify = resolve;
+				this._shutdownCheckpointWaiters.add(notify);
+			});
+			this._shutdownCheckpointWaiters.delete(notify);
+		}
+	}
+
+	private _isShutdownCheckpointSettled(): boolean {
+		return (
+			this.isIdle &&
+			!this.agent.state.isStreaming &&
+			!this._settling &&
+			!this._pendingInputCount &&
+			!this._activeCommands &&
+			!this.isBashRunning &&
+			!this.isRetrying &&
+			this.agent.state.pendingToolCalls.size === 0 &&
+			!this._extensionRunner.checkpointActivity.busy
+		);
+	}
+
+	/** Caller owns stopped ingress and completed shutdown handlers. Never use this as a live-process sleep receipt. */
+	async captureShutdownCheckpoint(): Promise<ShutdownCheckpoint> {
+		if (!this._shutdownAbortController.signal.aborted) throw new Error("Session shutdown has not begun");
+		this._flushPendingProviderMessages();
+		this._flushPendingBashMessages();
+		this._flushPendingCustomMessages();
+		await this._modelRuntime.flushForCheckpoint({ requireSuccessfulPersistence: true });
+		const controller = new AbortController();
+		const invalidate = () => controller.abort(new Error("Late native activity invalidated clean-exit capture"));
+		const releases: Array<() => void> = [];
+		const release = () => {
+			for (const done of releases.splice(0)) done();
+			controller.abort();
+		};
+		try {
+			releases.push(this._modelRuntime.holdForCheckpoint(invalidate));
+			releases.push(this._extensionRunner.checkpointActivity.hold(invalidate));
+			await this._flushCheckpointSettings();
+			controller.signal.throwIfAborted();
+			if (!this._isShutdownCheckpointSettled() || this.pendingInputCount)
+				throw new Error("Unfinished native callbacks or input prevent a clean-exit checkpoint");
+			if (this.model && this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime")
+				throw new Error("Runtime-only API key cannot be restored from a clean-exit checkpoint");
+			return { checkpoint: this._captureCheckpoint("settled"), signal: controller.signal, release };
+		} catch (error) {
+			release();
+			throw error;
+		}
+	}
+
 	/** Acquire a completed-turn or fully settled native hold. Never call from an awaited run handler. */
 	acquireCheckpoint(options: CheckpointOptions = {}): Promise<CheckpointHold> {
 		if (this._checkpointRequest) return Promise.reject(new Error("Checkpoint already requested"));
@@ -2255,41 +2360,9 @@ export class AgentSession {
 						if (released) return;
 						releaseWriters.push(this._modelRuntime.holdForCheckpoint(cancel));
 						releaseWriters.push(this._extensionRunner.checkpointActivity.hold(cancel));
-						await this.settingsManager.flush();
-						const errors = this.settingsManager.drainErrors();
-						if (errors.length)
-							throw new Error(
-								`Settings checkpoint failed: ${errors.map((error) => error.error.message).join("; ")}`,
-							);
+						await this._flushCheckpointSettings();
 						if (released) return;
-						const sessionFile = this.sessionFile;
-						const header = this.sessionManager.getHeader();
-						if (!sessionFile || !header) throw new Error("Checkpoint requires a persistent session");
-						const checkpoint: SessionCheckpoint = {
-							version: 1,
-							createdAt: new Date().toISOString(),
-							selection: {
-								sessionFile,
-								sessionId: this.sessionId,
-								cwd: this._cwd,
-								leafId: this.sessionManager.getLeafId(),
-								model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
-								thinkingLevel: this.thinkingLevel,
-								activeTools: this.getActiveToolNames(),
-								knownTools: this.getAllTools().map((tool) => tool.name),
-							},
-							header,
-							entries: this.sessionManager.getEntries(),
-							queues: this.getCheckpointQueues(),
-							scopedModels: this._scopedModels.map(({ model, thinkingLevel }) => ({
-								provider: model.provider,
-								id: model.id,
-								thinkingLevel,
-							})),
-							boundary,
-							settled: boundary === "settled" && this.isIdle,
-						};
-						// JSON serialization is intentional: reject cycles/BigInt before reporting success.
+						const checkpoint = this._captureCheckpoint(boundary);
 						if (this.model && this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime")
 							sleepBlockers.push(
 								"Selected provider uses a runtime-only API key; persist native authentication first",
@@ -2297,7 +2370,7 @@ export class AgentSession {
 						if (!options.quiesce) sleepBlockers.push("Host input is not quiesced");
 						if (!checkpoint.settled) sleepBlockers.push("Native run has not settled");
 						resolve({
-							checkpoint: JSON.parse(JSON.stringify(checkpoint)) as SessionCheckpoint,
+							checkpoint,
 							sleepReady: sleepBlockers.length === 0,
 							sleepBlockers,
 							signal: holdController.signal,
@@ -2317,6 +2390,7 @@ export class AgentSession {
 	}
 
 	private async _checkpointSafePoint(boundary: CheckpointBoundary): Promise<void> {
+		this._notifyShutdownCheckpointWaiters();
 		const request = this._checkpointRequest;
 		if (!request || this._checkpointHeld || this._settling || (boundary === "turn" && request.boundary === "settled"))
 			return;
@@ -2337,6 +2411,7 @@ export class AgentSession {
 
 	/** Native host callbacks call this after releasing mode-held input or finishing asynchronous UI work. */
 	notifyCheckpointStateChanged(): void {
+		this._notifyShutdownCheckpointWaiters();
 		if (this._checkpointRequest && !this._checkpointHeld)
 			setImmediate(() => void this._checkpointSafePoint("settled"));
 	}

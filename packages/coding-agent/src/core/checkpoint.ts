@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { RestartCheckpoint } from "../cli/restart-protocol.ts";
 import type { AgentSession } from "./agent-session.ts";
@@ -8,6 +8,7 @@ import type { CustomMessage } from "./messages.ts";
 import { type SessionEntry, type SessionHeader, SessionManager } from "./session-manager.ts";
 
 export type CheckpointBoundary = "turn" | "settled";
+export const CHECKPOINT_EXIT_PATH_ENV = "PI_CHECKPOINT_EXIT_PATH";
 
 /** Native callback ownership, not a registry of arbitrary extension promises or external processes. */
 export class CheckpointActivity {
@@ -79,6 +80,8 @@ export interface SessionCheckpoint {
 	boundary: CheckpointBoundary;
 	/** Native settlement only. The host must still coordinate UI and external writers. */
 	settled: boolean;
+	/** Only deliberate CLI clean exit publishes this marker. Also require observed launcher exit status 0. */
+	completedExit?: { pid: number };
 }
 
 export interface CheckpointHold {
@@ -91,6 +94,9 @@ export interface CheckpointHold {
 	/** Idempotent; release on every failure path. No queue is consumed by capture. */
 	release(): void;
 }
+
+/** Final disposed-session candidate; validity must still be checked immediately before exit publication. */
+export type ShutdownCheckpoint = Pick<CheckpointHold, "checkpoint" | "signal" | "release">;
 
 export interface CheckpointOptions {
 	boundary?: CheckpointBoundary;
@@ -111,6 +117,22 @@ export function writeSessionCheckpoint(path: string, checkpoint: SessionCheckpoi
 	} finally {
 		rmSync(temporary, { force: true });
 	}
+}
+
+/** Opt in at CLI startup, AFTER loading any --checkpoint input (which may use this same path). */
+export function prepareCheckpointExit(path: string): (checkpoint: SessionCheckpoint) => void {
+	if (!isAbsolute(path)) throw new Error(`${CHECKPOINT_EXIT_PATH_ENV} must be absolute`);
+	if (!statSync(dirname(path)).isDirectory()) throw new Error("Checkpoint exit parent must be a directory");
+	// Never clear an unrelated file or native journal merely because an environment variable names it.
+	if (existsSync(path)) readSessionCheckpoint(path);
+	rmSync(path, { force: true });
+	return (checkpoint) => {
+		if (resolve(checkpoint.selection.sessionFile) === resolve(path))
+			throw new Error("Exit checkpoint path must not replace the native journal");
+		if (!checkpoint.settled || checkpoint.boundary !== "settled")
+			throw new Error("Clean exit requires settled native state");
+		writeSessionCheckpoint(path, { ...checkpoint, completedExit: { pid: process.pid } });
+	};
 }
 
 /** Read trusted, owner-private native data; reject malformed selection before touching the journal. */

@@ -73,6 +73,7 @@ describe.skipIf(process.platform === "win32")("native checkpoint local control",
 		const receipt = await f.next();
 		expect(receipt).toMatchObject({
 			ok: true,
+			pid: process.pid,
 			boundary: "settled",
 			settled: true,
 			sleepReady: true,

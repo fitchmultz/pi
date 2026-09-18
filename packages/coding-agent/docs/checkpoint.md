@@ -44,6 +44,7 @@ Version 1 JSON contains:
 - `queues`: full native steering/follow-up messages, including images/custom details; queue modes; next-turn context; cancellation-persistence ownership.
 - `scopedModels`: session-only model cycling selection, including order and thinking levels (optional in older v1 artifacts).
 - `createdAt`, `boundary`, and `settled`.
+- `completedExit: { pid }` only on the opted-in deliberate clean-exit path below. This marker alone is not proof that a process exited.
 
 The artifact is private (0600), atomically replaced, and contains sensitive conversation data. The filesystem archive must also preserve working files, Git, native settings, credentials, extension files, and referenced resources. Serialization does not preserve live tool/dialog/command callbacks, arbitrary memory, shell processes, or shutdown-only extension state. Native settings/authentication and extension files remain in their original locations and must be included in the archive. A selected provider's runtime-only API key keeps sleep readiness false; persist authentication through native login first.
 
@@ -103,8 +104,10 @@ Connect to the Unix socket and send newline-delimited JSON. Keep the same connec
 Success is sent only after the artifact is written while held:
 
 ```json
-{"ok":true,"token":"...","path":"/private/checkpoint.json","boundary":"settled","settled":true,"sleepReady":true,"sleepBlockers":[],"selection":{}}
+{"ok":true,"pid":12345,"token":"...","path":"/private/checkpoint.json","boundary":"settled","settled":true,"sleepReady":true,"sleepBlockers":[],"selection":{}}
 ```
+
+`pid` is the actual Pi worker's `process.pid`, not a supervising launcher's PID. The host verifies its primary terminal/pane ownership using its own process census. Pi does not decide whether other jobs or agents may be stopped.
 
 Use the actual receipt boundary, not the requested one. Periodic `turn` requests obtain intermediate recovery points while active and positive settled receipts once qualified; the host need not implement idle detection. `settled: true` alone is insufficient when `sleepReady` is false. Readiness is connection/hold-scoped, not a reusable permission stored in the artifact.
 
@@ -117,5 +120,27 @@ Release on the same connection:
 Closing the connection cancels pending acquisition or releases its hold. The caller owns the wait timeout. Errors return `{ok:false,message}`; invalidated holds additionally return `invalidated:true` and their token. There is no upload acknowledgement or implicit sleep operation.
 
 The endpoint follows the runtime's current session after replacement. Live selectors/overlays/custom editors, mode-held input, drafts, native preflight, extension commands, and independent user Bash defer capture. Native selector callbacks remain owned even after dismissal; login completion owns its detached catalog/model-selection continuation; keybindings, clipboard reads and external-editor work remain owned until completion. Terminal ingress is paused rather than discarded; a decoder key already in flight invalidates the cut before dispatch. Drafts, including clipboard-image paths, are deliberately not claimed as saved: retain compute until handled. This endpoint is not an account-level security boundary; see [Security](security.md).
+
+## Deliberate clean exit
+
+Opt in independently of the live control socket:
+
+```bash
+PI_CHECKPOINT_EXIT_PATH=/private/pi-control/exit.json pi
+# After restoring the matching filesystem, this may use the SAME input/output path:
+PI_CHECKPOINT_EXIT_PATH=/private/pi-control/exit.json pi --checkpoint /private/pi-control/exit.json
+```
+
+The path must be absolute with an existing parent directory. At CLI startup Pi loads any `--checkpoint` input **before** clearing the previous exit artifact, including when both paths are identical. An existing output must be a valid native checkpoint, not an unrelated file or journal. Old proof is also cleared when another restore input fails. The exit writer refuses to replace the native journal.
+
+On deliberate user `/quit`, Ctrl-D, or double Ctrl-C, Pi stops terminal ingress, awaits ordinary `session_shutdown` handlers, cancels and joins remaining native work, joins native command/UI callback cleanup, flushes native auth/catalog/settings persistence, and captures the complete final native selection/entries/accepted remaining queues/scope. It uses the same v1 snapshot and atomic 0600 writer as held checkpoints. Native cancellation may move cancellation-persistent customs into entries; the artifact records the actual final state, not the pre-exit queue. No continuation or tool/model replay is invented.
+
+Actual shutdown persistence is authoritative here: shutdown-only extensions can persist through their usual `session_shutdown` handlers, rather than needing the live-sleep barrier. As with ordinary extension lifecycle ownership, detached arbitrary work must be cancelled/joined and state persisted by the extension; returning from shutdown does not serialize JavaScript memory. Live native question/command callbacks cannot qualify until they actually finish or cancel. Unpersisted drafts/custom UI/mode-held input fail closed rather than being silently omitted.
+
+Late native UI/model/catalog/extension activity during final flush invalidates the candidate before publication. A ref'ed 30-second cleanup budget prevents an unfinished memory-only callback from producing implicit successful process exit. Shutdown extension errors, native persistence errors, unfinished callbacks, unsupported input, runtime-only selected-provider keys, or artifact-write errors print `Clean-exit checkpoint failed: ...` and exit nonzero without a new completed artifact. The default exit behavior is unchanged when the variable is unset.
+
+Only after successful cleanup/disposal and terminal output does the deliberate user-exit path atomically publish `completedExit: { pid: process.pid }`, immediately before `process.exit(0)`. Signals (including one racing with deliberate shutdown), emergency terminal loss, crashes, extension-requested exits, and managed restarts never publish this marker. A normal loop return or an old periodic checkpoint is not completed-exit proof.
+
+**Host acceptance requires both a fresh marked artifact and observation that the whole expected launcher/worker chain actually exited successfully.** A file write cannot atomically prove OS process exit. Never reuse an old artifact after failure, infer final queues/branch from JSONL, or use this artifact to kill a still-live process. The host still owns other-writer/service quiescence, archive verification, lifecycle policy, and retaining compute/current files when clean capture fails. Ordinary shells and unrelated jobs remain the host's concern.
 
 See [SDK](sdk.md), [Sessions](sessions.md), and [Session Format](session-format.md).
