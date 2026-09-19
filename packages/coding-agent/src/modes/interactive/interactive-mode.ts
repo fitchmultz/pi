@@ -3532,7 +3532,7 @@ export class InteractiveMode {
 						for (const [, component] of this.pendingTools.entries()) {
 							component.setArgsComplete();
 						}
-						this.maybeShowAssistantDiagnostics(this.streamingMessage);
+						this.maybeShowThinkingDropNotice(this.streamingMessage);
 						this.maybeShowCacheMissNotice(this.streamingMessage);
 					}
 					this.streamingComponent = undefined;
@@ -4007,7 +4007,6 @@ export class InteractiveMode {
 					}
 				}
 				if (message.stopReason !== "aborted" && message.stopReason !== "error") {
-					this.maybeShowAssistantDiagnostics(message);
 					const miss = cacheMisses.get(message);
 					if (miss) this.addCacheMissNotice(miss);
 				}
@@ -4086,28 +4085,46 @@ export class InteractiveMode {
 		);
 	}
 
-	private maybeShowAssistantDiagnostics(message: AssistantMessage): void {
-		if (!this.settingsManager.getShowCacheMissNotices()) return;
-
+	private static countDroppedThinkingBlocks(message: AssistantMessage): number {
+		let count = 0;
 		for (const diagnostic of message.diagnostics ?? []) {
 			if (diagnostic.type !== "anthropic_input_transformations") continue;
 			const transformations = diagnostic.details?.transformations;
 			if (!Array.isArray(transformations)) continue;
-
-			const droppedCount = transformations.filter(
+			count += transformations.filter(
 				(transformation) =>
 					typeof transformation === "object" &&
 					transformation !== null &&
 					(transformation as Record<string, unknown>).type === "thinking_dropped",
 			).length;
-			if (droppedCount === 0) continue;
-
-			const noun = droppedCount === 1 ? "1 thinking block" : `${droppedCount} thinking blocks`;
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addActivity(
-				new Text(theme.fg("warning", `Anthropic dropped ${noun} (details in session)`), 1, 0),
-			);
 		}
+		return count;
+	}
+
+	private maybeShowThinkingDropNotice(message: AssistantMessage): void {
+		if (!this.settingsManager.getShowCacheMissNotices()) return;
+
+		const droppedCount = InteractiveMode.countDroppedThinkingBlocks(message);
+		if (droppedCount === 0) return;
+
+		let previousDroppedCount = 0;
+		// message_end reaches the UI before the current message is persisted,
+		// so the branch's last assistant message is the previous response.
+		const branch = this.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				previousDroppedCount = InteractiveMode.countDroppedThinkingBlocks(entry.message);
+				break;
+			}
+		}
+		if (droppedCount <= previousDroppedCount) return;
+
+		const noun = droppedCount === 1 ? "thinking block" : "thinking blocks";
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addActivity(
+			new Text(theme.fg("warning", `Anthropic dropped ${droppedCount} ${noun} (details in session)`), 1, 0),
+		);
 	}
 
 	/**
@@ -6786,7 +6803,7 @@ export class InteractiveMode {
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${externalEditor}\` | Edit message in external editor |
-| \`${copyMessage}\` | Copy last assistant message |
+| \`${copyMessage}\` | Copy selection or last assistant message |
 | \`${followUp}\` | Queue follow-up message |
 | \`${dequeue}\` | Restore queued messages |
 | \`${pasteImage}\` | Paste image or text from clipboard |
