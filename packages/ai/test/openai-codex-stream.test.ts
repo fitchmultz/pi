@@ -1777,10 +1777,15 @@ describe("openai-codex streaming", () => {
 						details: expect.objectContaining({
 							eventsEmitted: afterStart,
 							phase: afterStart ? "after_message_stream_start" : "before_message_stream_start",
-							fallbackTransport: undefined,
 						}),
 					}),
 				]);
+				const failureDetails = first.diagnostics?.find(
+					(entry) => entry.type === "provider_transport_failure",
+				)?.details;
+				expect(failureDetails).not.toHaveProperty("fallbackTransport");
+				expect(failureDetails).not.toHaveProperty("responseId");
+				expect(failureDetails).not.toHaveProperty("socket");
 				expect(fetchMock).not.toHaveBeenCalled();
 				expect(sockets[0].readyState).toBe(3);
 
