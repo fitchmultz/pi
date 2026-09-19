@@ -356,6 +356,8 @@ if (modelAuth) {
 
 Both overloads resolve credentials, refresh expired OAuth when necessary, and may return an auth-derived `apiKey`, `headers`, or `baseUrl`. `getAuth()` resolves `undefined` for unconfigured providers and rejects with `ModelsError` when something is actually broken (`"oauth"`: token refresh failed, credential preserved for re-login; `"auth"`: key resolution or credential store failure). Request paths surface the same failures as stream errors.
 
+`getAvailable()` isolates provider auth-check failures and returns the remaining providers' filtered models. `getAvailable(providerId)` and `checkAuth(providerId)` still reject precisely. For a single-pass observation with diagnostics, the mutable collection returned by `createModels()` exposes `getAvailability()`: `available`, successful `auth` checks, `storedProviders` (IDs only), and per-provider `errors`. Failed checks never invent configured auth. Credential-store failures and cancellation reject the observation rather than being classified as provider failures.
+
 `getAuth()`, `checkAuth()`, `getAvailable()`, login, and logout accept optional caller cancellation through their existing options or interaction objects and remain unbounded when no signal is supplied. Provider `login`, `ApiKeyAuth.check`, `ApiKeyAuth.resolve`, and `OAuthAuth.refresh` implementations always receive a concrete signal and must honor it for blocking work.
 
 ### Transforming Request Headers

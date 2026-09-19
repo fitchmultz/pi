@@ -440,6 +440,8 @@ If no model is provided:
 2. Uses default from settings
 3. Falls back to first available model
 
+A failed availability check is not an unconfigured provider: if a saved/default model still exists, Pi retains its identity and ordinary prompt admission reports the precise auth error. `getAvailable()` returns healthy providers only; `getAuthCheckError(providerId)` exposes the failed observation and `getError()` includes provider-labeled diagnostics. Failed observations have no configured auth type/source or subscription claim. A successful refresh clears the diagnostic, including a successful unconfigured result. Direct `getAvailable(providerId)`, `checkAuth()` and `getAuth()` still reject on provider failure. Cancellation preserves the caller's reason; credential-store failures still reject aggregate availability without replacing its prior snapshot.
+
 Remote catalogs are persisted locally so later runtimes can restore them without a network request. The default file is `~/.pi/agent/models-store.json`; set `modelsStorePath` to choose another location, or inject `modelsStore` to control persistence. Network refreshes are throttled to once per provider every four hours unless forced. To force an immediate refresh, call `await modelRuntime.refresh({ allowNetwork: true, force: true, signal })`. Setting `PI_OFFLINE` disables model network access.
 
 To match CLI model parsing, use the exported resolver helpers:
@@ -466,7 +468,7 @@ for (const diagnostic of diagnostics) {
 }
 ```
 
-`resolveCliModel()` uses all registered models so `--api-key` style first-time setup can resolve a model before stored auth exists. `resolveModelScopeWithDiagnostics()` matches `--models` and `enabledModels` semantics while returning warnings instead of printing them.
+`resolveCliModel()` uses all registered models so `--api-key` style first-time setup can resolve a model before stored auth exists. `resolveModelScopeWithDiagnostics()` matches `--models` and `enabledModels` semantics while returning warnings instead of printing them. Scope matching includes models whose provider check failed, without adding them to configured availability: an explicit scope or matching saved default must not silently switch providers because of a failed check.
 
 > See [examples/sdk/02-custom-model.ts](../examples/sdk/02-custom-model.ts)
 

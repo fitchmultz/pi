@@ -291,9 +291,9 @@ describe("ambient auth composition", () => {
 		let calls = 0;
 		ambientAuth.check.mockImplementation(async () => {
 			const call = ++calls;
-			if (call === 2) olderStarted.resolve();
-			if (call === 4) newerStarted.resolve();
-			await (call <= 2 ? olderRelease.promise : newerRelease.promise);
+			if (call === 1) olderStarted.resolve();
+			if (call === 2) newerStarted.resolve();
+			await (call === 1 ? olderRelease.promise : newerRelease.promise);
 			return { type: "oauth", source: "shared account" };
 		});
 		let olderSettled = false;
@@ -328,10 +328,10 @@ describe("ambient auth composition", () => {
 		let calls = 0;
 		ambientAuth.check.mockImplementation(async ({ signal }) => {
 			const call = ++calls;
-			if (call === 2) olderStarted.resolve();
-			if (call === 4) newerStarted.resolve();
-			if (call === 6) retryStarted.resolve();
-			await (call <= 2 ? olderRelease.promise : call <= 4 ? newerRelease.promise : retryRelease.promise);
+			if (call === 1) olderStarted.resolve();
+			if (call === 2) newerStarted.resolve();
+			if (call === 3) retryStarted.resolve();
+			await (call === 1 ? olderRelease.promise : call === 2 ? newerRelease.promise : retryRelease.promise);
 			signal.throwIfAborted();
 			return { type: "oauth", source: "shared account" };
 		});
@@ -378,7 +378,7 @@ describe("ambient auth composition", () => {
 		}
 	});
 
-	// PR #60: isolate waiter cancellation, but still propagate a real superseding failure.
+	// PR #60: isolate waiter cancellation; a newer provider failure publishes partial results plus diagnostics.
 	it.each(["older cancellation", "newer failure"])("preserves %s while joining availability", async (variant) => {
 		const ambientAuth = sharedAuth();
 		runtime.registerProvider("openai-codex", { ambientAuth });
@@ -391,11 +391,11 @@ describe("ambient auth composition", () => {
 		let calls = 0;
 		ambientAuth.check.mockImplementation(async ({ signal }) => {
 			const call = ++calls;
-			if (call === 2) olderStarted.resolve();
-			if (call === 4) newerStarted.resolve();
-			await (call <= 2 ? olderRelease.promise : newerRelease.promise);
+			if (call === 1) olderStarted.resolve();
+			if (call === 2) newerStarted.resolve();
+			await (call === 1 ? olderRelease.promise : newerRelease.promise);
 			signal.throwIfAborted();
-			if (call > 2 && variant === "newer failure") throw reason;
+			if (call > 1 && variant === "newer failure") throw reason;
 			return { type: "oauth", source: "shared account" };
 		});
 		const olderController = new AbortController();
@@ -421,15 +421,18 @@ describe("ambient auth composition", () => {
 				expect(runtime.getError()).toBeUndefined();
 			} else {
 				newerRelease.resolve();
-				const failure = await newer;
-				expect(failure).toMatchObject({
+				const partial = await newer;
+				expect(partial).toEqual(runtime.getAvailableSnapshot());
+				expect(await older).toBe(partial);
+				expect(runtime.getAuthCheckError("openai-codex")).toMatchObject({
 					name: "ModelsError",
 					message: `API key auth check failed for provider openai-codex: ${reason.message}`,
 				});
-				expect(await older).toBe(failure);
+				expect(runtime.hasConfiguredAuth("openai-codex")).toBe(false);
+				expect(runtime.isUsingSubscription("openai-codex")).toBe(false);
 				expect(runtime.getError()).toContain(reason.message);
 			}
-			expect(calls).toBe(4);
+			expect(calls).toBe(2);
 		} finally {
 			olderRelease.resolve();
 			newerRelease.resolve();
@@ -438,7 +441,7 @@ describe("ambient auth composition", () => {
 	});
 
 	// PR #60: a deadline firing after a real failure must not reclassify that failure.
-	it("preserves a superseding failure when its caller aborts after rejection", async () => {
+	it("preserves a superseding failure diagnostic when its caller aborts after publication", async () => {
 		const ambientAuth = sharedAuth();
 		runtime.registerProvider("openai-codex", { ambientAuth });
 		await runtime.flushForCheckpoint();
@@ -449,11 +452,11 @@ describe("ambient auth composition", () => {
 		let calls = 0;
 		ambientAuth.check.mockImplementation(async ({ signal }) => {
 			const call = ++calls;
-			if (call === 2) olderStarted.resolve();
-			if (call === 4) newerStarted.resolve();
-			if (call <= 4) await (call <= 2 ? olderRelease.promise : newerRelease.promise);
+			if (call === 1) olderStarted.resolve();
+			if (call === 2) newerStarted.resolve();
+			if (call <= 2) await (call === 1 ? olderRelease.promise : newerRelease.promise);
 			signal.throwIfAborted();
-			if (call === 3 || call === 4) throw new Error("real provider failure");
+			if (call === 2) throw new Error("real provider failure");
 			return { type: "oauth", source: "shared account" };
 		});
 		const newerController = new AbortController();
@@ -465,14 +468,15 @@ describe("ambient auth composition", () => {
 		try {
 			await newerStarted.promise;
 			newerRelease.resolve();
-			const failure = await newer;
-			expect(failure).toMatchObject({ name: "ModelsError" });
+			const partial = await newer;
+			expect(partial).toEqual(runtime.getAvailableSnapshot());
+			expect(runtime.getAuthCheckError("openai-codex")).toMatchObject({ name: "ModelsError" });
 			expect(newerController.signal.aborted).toBe(false);
 			expect(runtime.getError()).toContain("real provider failure");
 			newerController.abort(new Error("deadline after failure"));
 			olderRelease.resolve();
-			expect(await older).toBe(failure);
-			expect(calls).toBe(4);
+			expect(await older).toBe(partial);
+			expect(calls).toBe(2);
 			expect(runtime.getError()).toContain("real provider failure");
 		} finally {
 			olderRelease.resolve();
@@ -549,6 +553,319 @@ describe("ambient auth composition", () => {
 		expect(await credentials.list()).toEqual([]);
 	});
 
+	it.each(["openai", "anthropic", "saved", "explicit"])(
+		"isolates cold check failure and preserves %s selection in the native SDK",
+		async (choice) => {
+			const broken = sharedAuth();
+			broken.check.mockRejectedValue(new Error("Reconnect selected account acc_exact"));
+			broken.resolve.mockRejectedValue(new Error("Reconnect selected account acc_exact"));
+			const healthy = sharedAuth("api_key");
+			const provider = choice === "openai" || choice === "saved" ? "openai" : "anthropic";
+			const selected = runtime.getModels(provider)[0];
+			const anthropic = runtime.getModels("anthropic")[0];
+			const openai = runtime.getModels("openai")[0];
+			const services = await createAgentSessionServices({
+				cwd: directory,
+				agentDir: directory,
+				modelRuntime: runtime,
+				settingsManager: SettingsManager.inMemory({ defaultProvider: provider, defaultModel: selected.id }),
+				resourceLoaderOptions: {
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+					extensionFactories: [
+						(pi) => {
+							pi.registerProvider("anthropic", { ambientAuth: broken });
+							pi.registerProvider("openai", { ambientAuth: healthy });
+						},
+					],
+				},
+			});
+			const manager = SessionManager.inMemory(directory);
+			if (choice === "saved") {
+				manager.appendModelChange("anthropic", anthropic.id);
+				manager.appendMessage({ role: "user", content: "never sent", timestamp: Date.now() });
+			}
+			const { session, modelFallbackMessage } = await createAgentSessionFromServices({
+				services,
+				sessionManager: manager,
+				...(choice === "explicit" ? { model: openai } : {}),
+			});
+			try {
+				expect(session.model).toEqual(choice === "openai" || choice === "explicit" ? openai : anthropic);
+				expect(modelFallbackMessage).toBeUndefined();
+				expect(runtime.getAvailableSnapshot().filter((model) => model.provider === "openai")).toEqual(
+					runtime.getModels("openai"),
+				);
+				expect(runtime.getAvailableSnapshot().some((model) => model.provider === "anthropic")).toBe(false);
+				expect(runtime.hasConfiguredAuth("anthropic")).toBe(false);
+				expect(runtime.getProviderAuthStatus("anthropic")).toEqual({ configured: false });
+				expect(runtime.isUsingOAuth("anthropic")).toBe(false);
+				expect(runtime.isUsingSubscription("anthropic")).toBe(false);
+				expect(runtime.getError()).toContain('Provider "anthropic" availability:');
+				if (session.model?.provider === "anthropic") {
+					await expect(session.prompt("Never dispatch")).rejects.toThrow(
+						"API key auth check failed for provider anthropic: Reconnect selected account acc_exact",
+					);
+				}
+				expect(healthy.resolve).not.toHaveBeenCalled();
+				expect(globalThis.fetch).not.toHaveBeenCalled();
+			} finally {
+				session.dispose();
+			}
+		},
+	);
+
+	it("clears stale OAuth metadata on failure, then repairs, clears and honors native credentials", async () => {
+		const ambient = sharedAuth();
+		runtime.registerProvider("anthropic", { ambientAuth: ambient });
+		runtime.registerProvider("openai", { ambientAuth: sharedAuth("api_key") });
+		await runtime.flushForCheckpoint();
+		expect(runtime.isUsingSubscription("anthropic")).toBe(true);
+		ambient.check.mockRejectedValue(new Error("service unavailable"));
+		await runtime.getAvailable();
+		expect(runtime.isUsingSubscription("anthropic")).toBe(false);
+		expect(runtime.getProviderAuthStatus("anthropic")).toEqual({ configured: false });
+		expect(runtime.hasConfiguredAuth("openai")).toBe(true);
+		await runtime.login("anthropic", "api_key", { prompt: async () => "local", notify: () => {} });
+		expect(runtime.getAuthCheckError("anthropic")).toBeUndefined();
+		expect((await runtime.getAuth("anthropic"))?.auth.apiKey).toBe("local");
+		await expect(runtime.logout("anthropic")).rejects.toMatchObject({
+			name: "CredentialSynchronizationError",
+			operation: "logout",
+		});
+		expect(runtime.hasConfiguredAuth("anthropic")).toBe(false);
+		expect(runtime.getAuthCheckError("anthropic")?.message).toContain("service unavailable");
+		ambient.check.mockResolvedValue({ type: "api_key", source: "repaired account" });
+		await runtime.refresh({ providers: ["anthropic"], allowNetwork: false });
+		expect(runtime.getAuthCheckError("anthropic")).toBeUndefined();
+		expect(runtime.getProviderAuthStatus("anthropic").label).toBe("repaired account");
+		ambient.check.mockResolvedValue(undefined);
+		await runtime.getAvailable();
+		expect(runtime.hasConfiguredAuth("anthropic")).toBe(false);
+		expect(runtime.getError()).toBeUndefined();
+		ambient.check.mockRejectedValue(new Error("broken again"));
+		await runtime.getAvailable();
+		runtime.registerProvider("anthropic", { ambientAuth: sharedAuth() });
+		expect(runtime.getAuthCheckError("anthropic")).toBeUndefined();
+		await runtime.flushForCheckpoint();
+		expect(runtime.isUsingSubscription("anthropic")).toBe(true);
+		runtime.unregisterProvider("anthropic");
+		await runtime.flushForCheckpoint();
+		expect(runtime.getError()).toBeUndefined();
+		expect(runtime.hasConfiguredAuth("anthropic")).toBe(false);
+	});
+
+	it.each(["credential", "replacement", "unregister"])(
+		"does not publish stale failures after %s changes",
+		async (change) => {
+			const ambient = sharedAuth();
+			runtime.registerProvider("anthropic", { ambientAuth: ambient });
+			await runtime.flushForCheckpoint();
+			const started = deferred<void>();
+			const release = deferred<void>();
+			ambient.check.mockImplementation(async () => {
+				started.resolve();
+				await release.promise;
+				throw new Error("stale account failure");
+			});
+			const pending = runtime.getAvailable();
+			await started.promise;
+			if (change === "credential") await runtime.setRuntimeApiKey("anthropic", "local override");
+			else {
+				if (change === "replacement") runtime.registerProvider("anthropic", { ambientAuth: sharedAuth("api_key") });
+				else runtime.unregisterProvider("anthropic");
+				await runtime.getAvailable();
+			}
+			let flushed = false;
+			const flush = runtime.flushForCheckpoint().then(() => {
+				flushed = true;
+			});
+			await new Promise<void>((done) => setImmediate(done));
+			expect(flushed).toBe(false);
+			release.resolve();
+			await pending;
+			await flush;
+			expect(runtime.getAuthCheckError("anthropic")).toBeUndefined();
+			expect(runtime.getError()).toBeUndefined();
+			expect(runtime.hasConfiguredAuth("anthropic")).toBe(change !== "unregister");
+		},
+	);
+
+	it("preserves the prior snapshot on whole credential-store failure or cancellation, not provider failure", async () => {
+		const ambient = sharedAuth();
+		runtime.registerProvider("anthropic", { ambientAuth: ambient });
+		await runtime.flushForCheckpoint();
+		ambient.check.mockRejectedValue(new Error("account denied"));
+		await runtime.getAvailable();
+		const previous = runtime.getAvailableSnapshot();
+		const priorError = runtime.getAuthCheckError("anthropic");
+		const read = vi.spyOn(credentials, "read").mockRejectedValue(new Error("disk failed"));
+		await expect(runtime.getAvailable()).rejects.toThrow("Credential store read failed");
+		expect(runtime.getAvailableSnapshot()).toBe(previous);
+		expect(runtime.getAuthCheckError("anthropic")).toBe(priorError);
+		read.mockRestore();
+		const list = vi.spyOn(credentials, "list").mockRejectedValue(new Error("list failed"));
+		await expect(runtime.getAvailable()).rejects.toThrow("list failed");
+		expect(runtime.getAvailableSnapshot()).toBe(previous);
+		list.mockRestore();
+		const controller = new AbortController();
+		const reason = new DOMException("cancelled observation", "AbortError");
+		controller.abort(reason);
+		await expect(runtime.getAvailable(undefined, { signal: controller.signal })).rejects.toBe(reason);
+		expect(runtime.getAvailableSnapshot()).toBe(previous);
+		expect(runtime.getAuthCheckError("anthropic")).toBe(priorError);
+		ambient.check.mockResolvedValue(undefined);
+		await runtime.getAvailable("anthropic");
+		expect(runtime.getAuthCheckError("anthropic")).toBeUndefined();
+		expect(runtime.getError()).toBeUndefined();
+		let invalidated = false;
+		const releaseHold = runtime.holdForCheckpoint(() => {
+			invalidated = true;
+		});
+		try {
+			await runtime.getAvailable();
+			expect(invalidated).toBe(true);
+		} finally {
+			releaseHold();
+		}
+	});
+
+	it("keeps superseded direct-provider failures observable without publishing stale diagnostics", async () => {
+		const ambient = sharedAuth();
+		runtime.registerProvider("anthropic", { ambientAuth: ambient });
+		await runtime.flushForCheckpoint();
+		const started = deferred<void>();
+		const release = deferred<void>();
+		ambient.check.mockImplementationOnce(async () => {
+			started.resolve();
+			await release.promise;
+			throw new Error("older direct failure");
+		});
+		const older = runtime.getAvailable("anthropic");
+		const rejected = expect(older).rejects.toThrow("older direct failure");
+		await started.promise;
+		await runtime.getAvailable("anthropic");
+		release.resolve();
+		await rejected;
+		expect(runtime.getAuthCheckError("anthropic")).toBeUndefined();
+		expect(runtime.getError()).toBeUndefined();
+		expect(runtime.isUsingSubscription("anthropic")).toBe(true);
+	});
+
+	it.each(["default", "saved", "scope", "broken scope", "different scope", "explicit", "list", "prompt"])(
+		"bundled CLI preserves failed selection intent: %s",
+		(variant) => {
+			const agentDir = join(directory, "agent");
+			mkdirSync(agentDir);
+			const anthropic = runtime.getModels("anthropic")[0];
+			const openai = runtime.getModels("openai")[0];
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					defaultProvider: "anthropic",
+					defaultModel: anthropic.id,
+					enabledModels:
+						variant === "scope" ? [`openai/${openai.id}`, `anthropic/${anthropic.id}:high`] : undefined,
+				}),
+			);
+			const sentinel = join(directory, "selection.json");
+			const attempted = join(directory, "network-attempt");
+			const guard = join(directory, "deny-network.mjs");
+			writeFileSync(
+				guard,
+				`import { Socket } from "node:net"; import { writeFileSync } from "node:fs";
+const deny = () => { writeFileSync(${JSON.stringify(attempted)}, "unexpected"); throw new Error("Outbound denied"); };
+globalThis.fetch = deny; Socket.prototype.connect = deny;`,
+			);
+			const extension = join(directory, "selection.ts");
+			writeFileSync(
+				extension,
+				`import { writeFileSync } from "node:fs";
+export default function(pi) {
+  pi.registerProvider("anthropic", { ambientAuth: {
+    async check() { throw new Error("Reconnect selected account acc_exact"); },
+    async resolve() { throw new Error("Reconnect selected account acc_exact"); }
+  } });
+  pi.registerProvider("openai", { ambientAuth: {
+    async check() { return { type: "api_key", source: "healthy shared" }; },
+    async resolve() { throw new Error("Alternative payer must not dispatch"); }
+  } });
+  pi.registerCommand("inspect-selection", { handler: async (_args, ctx) => {
+    writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({ provider: ctx.model?.provider, id: ctx.model?.id, thinking: ctx.thinkingLevel }));
+  } });
+}`,
+			);
+			const args = [
+				"--offline",
+				"--no-extensions",
+				"-e",
+				extension,
+				"--no-skills",
+				"--no-themes",
+				"--no-prompt-templates",
+				"--no-context-files",
+			];
+			if (variant === "saved") {
+				const manager = SessionManager.inMemory(directory);
+				manager.appendModelChange("anthropic", anthropic.id);
+				manager.appendMessage({ role: "user", content: "Never sent", timestamp: Date.now() });
+				const path = join(directory, "saved.jsonl");
+				writeFileSync(
+					path,
+					`${[manager.getHeader(), ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+				);
+				args.push("--session", path);
+			} else args.push("--no-session");
+			if (variant === "explicit") args.push("--model", `openai/${openai.id}`);
+			if (variant === "different scope") args.push("--models", `openai/${openai.id}`);
+			if (variant === "broken scope") args.push("--models", `anthropic/${anthropic.id},openai/${openai.id}`);
+			if (variant === "list") args.push("--list-models");
+			else
+				args.push(
+					"--print",
+					variant === "prompt" ? "Never dispatch: broken selected account" : "/inspect-selection",
+				);
+			const result = spawnSync(
+				process.execPath,
+				["--import", guard, resolve(__dirname, "../dist/bundle/cli.js"), ...args],
+				{
+					cwd: directory,
+					encoding: "utf8",
+					timeout: 20_000,
+					env: {
+						PATH: process.env.PATH,
+						HOME: directory,
+						USERPROFILE: directory,
+						PI_CODING_AGENT_DIR: agentDir,
+						PI_OFFLINE: "1",
+						PI_TELEMETRY: "0",
+						PI_SKIP_VERSION_CHECK: "1",
+					},
+				},
+			);
+			expect(result.status, result.stderr).toBe(variant === "prompt" ? 1 : 0);
+			expect(existsSync(attempted)).toBe(false);
+			if (variant === "prompt") {
+				expect(result.stderr).toContain(
+					"API key auth check failed for provider anthropic: Reconnect selected account acc_exact",
+				);
+				expect(result.stderr).not.toContain("Alternative payer");
+			} else if (variant === "list") {
+				expect(result.stdout).toContain(openai.id);
+				expect(result.stdout).not.toContain(anthropic.id);
+			} else {
+				const expected = variant === "explicit" || variant === "different scope" ? openai : anthropic;
+				expect(JSON.parse(readFileSync(sentinel, "utf8"))).toMatchObject({
+					provider: expected.provider,
+					id: expected.id,
+				});
+			}
+		},
+	);
+
 	it("actual CLI --list-models loads ambient auth and cached-only models before any session_start", () => {
 		const agentDir = join(directory, "agent");
 		mkdirSync(agentDir);
@@ -581,9 +898,7 @@ export default async function(pi) {
 		const result = spawnSync(
 			process.execPath,
 			[
-				"--import",
-				resolve(__dirname, "../src/experimental/source-resolver.ts"),
-				resolve(__dirname, "../src/cli.ts"),
+				resolve(__dirname, "../dist/bundle/cli.js"),
 				"--offline",
 				"--no-session",
 				"--no-extensions",

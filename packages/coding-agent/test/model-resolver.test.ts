@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { getModel, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -15,7 +15,9 @@ import {
 	resolveCliModel,
 	resolveModelScope,
 	resolveModelScopeWithDiagnostics,
+	restoreModelFromSession,
 } from "../src/core/model-resolver.ts";
+import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
@@ -226,6 +228,7 @@ describe("resolveModelScopeWithDiagnostics", () => {
 		try {
 			const registry = {
 				getAvailable: () => allModels,
+				getModels: () => [],
 			} as unknown as Parameters<typeof resolveModelScopeWithDiagnostics>[1];
 
 			const result = await resolveModelScopeWithDiagnostics(["sonnet:high", "gpt-4o:invalid", "missing"], registry);
@@ -258,6 +261,7 @@ describe("resolveModelScopeWithDiagnostics", () => {
 		try {
 			const registry = {
 				getAvailable: () => allModels,
+				getModels: () => [],
 			} as unknown as Parameters<typeof resolveModelScope>[1];
 
 			const scopedModels = await resolveModelScope(["missing"], registry);
@@ -285,6 +289,7 @@ describe("resolveModelScopeWithDiagnostics", () => {
 		};
 		const registry = {
 			getAvailable: () => [...allModels, bracketedModel],
+			getModels: () => [],
 		} as unknown as Parameters<typeof resolveModelScopeWithDiagnostics>[1];
 
 		const result = await resolveModelScopeWithDiagnostics(["custom/bracketed-model[1m]"], registry);
@@ -308,6 +313,7 @@ describe("resolveModelScopeWithDiagnostics", () => {
 		};
 		const registry = {
 			getAvailable: () => [...allModels, bracketedModel],
+			getModels: () => [],
 		} as unknown as Parameters<typeof resolveModelScopeWithDiagnostics>[1];
 
 		const result = await resolveModelScopeWithDiagnostics(["custom/bracketed-model[1m]:high"], registry);
@@ -555,6 +561,7 @@ describe("resolveCliModel", () => {
 		const registry = {
 			getModels: () => [...allModels, commandcodeModel, xiaomiModel],
 			hasConfiguredAuth: (provider: string) => provider === "commandcode",
+			getAuthCheckError: () => undefined,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
 
 		const result = resolveCliModel({
@@ -811,6 +818,7 @@ describe("default model selection", () => {
 					? savedDeepSeekModel
 					: undefined,
 			hasConfiguredAuth: (provider: string) => provider === "spark-two",
+			getAuthCheckError: () => undefined,
 			getAvailableSnapshot: () => [localDeepSeekModel],
 		} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
 
@@ -824,6 +832,62 @@ describe("default model selection", () => {
 
 		expect(result.model?.provider).toBe("spark-two");
 		expect(result.model?.id).toBe("deepseek-v4-flash");
+	});
+
+	test("native failed checks preserve default, restore and scope intent, but not removed models", async () => {
+		const runtime = await ModelRuntime.create({
+			credentials: new InMemoryCredentialStore(),
+			modelsPath: null,
+			refreshOnCreate: false,
+		});
+		for (const provider of runtime.getProviders()) {
+			runtime.registerProvider(provider.id, {
+				ambientAuth: {
+					check: async () => {
+						if (provider.id === "anthropic") throw new Error("Reconnect chosen account");
+						return provider.id === "openai" ? { type: "api_key" } : undefined;
+					},
+					resolve: async () => {
+						throw new Error("must not resolve");
+					},
+				},
+			});
+		}
+		await runtime.flushForCheckpoint();
+		const saved = runtime.getModels("anthropic")[0];
+		const other = runtime.getModels("openai")[0];
+		const options = {
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: saved.provider,
+			defaultModelId: saved.id,
+			modelRuntime: runtime,
+		};
+		expect((await findInitialModel(options)).model).toEqual(saved);
+		expect(await restoreModelFromSession(saved.provider, saved.id, other, false, runtime)).toEqual({
+			model: saved,
+			fallbackMessage: undefined,
+		});
+		expect((await findInitialModel({ ...options, cliProvider: other.provider, cliModel: other.id })).model).toEqual(
+			other,
+		);
+		const scope = await resolveModelScopeWithDiagnostics(
+			[`${saved.provider}/${saved.id}:high`, `${other.provider}/${other.id}`],
+			runtime,
+		);
+		expect(scope.scopedModels).toEqual([
+			{ model: saved, thinkingLevel: "high" },
+			{ model: other, thinkingLevel: undefined },
+		]);
+		expect(runtime.getAvailableSnapshot()).not.toContainEqual(saved);
+		expect((await findInitialModel({ ...options, scopedModels: scope.scopedModels })).model).toEqual(saved);
+		runtime.registerProvider("anthropic", { models: [] });
+		await runtime.flushForCheckpoint();
+		expect(runtime.getModel(saved.provider, saved.id)).toBeUndefined();
+		expect((await findInitialModel(options)).model?.provider).toBe("openai");
+		expect(
+			(await restoreModelFromSession(saved.provider, saved.id, other, false, runtime)).fallbackMessage,
+		).toContain("model no longer exists");
 	});
 
 	describe("persisted default model scoping", () => {

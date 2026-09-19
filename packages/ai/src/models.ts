@@ -186,7 +186,7 @@ export interface Models {
 	/** Check whether a provider has complete auth configuration without refreshing OAuth. */
 	checkAuth(providerId: string, options?: AuthOperationOptions): Promise<AuthCheck | undefined>;
 
-	/** Return models whose providers have complete auth configuration. */
+	/** Return configured models. All-provider enumeration omits failed auth checks; direct provider queries reject. */
 	getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]>;
 
 	/**
@@ -234,7 +234,17 @@ export interface Models {
 	cancelDeferred(model: Model<Api>, handle: DeferredHandle, options?: ModelsDeferredCancelOptions): Promise<void>;
 }
 
+/** One availability observation; failed checks never supply auth metadata or models. */
+export interface ModelsAvailability {
+	available: readonly Model<Api>[];
+	storedProviders: ReadonlySet<string>;
+	auth: ReadonlyMap<string, AuthCheck | undefined>;
+	errors: ReadonlyMap<string, Error>;
+}
+
 export interface MutableModels extends Models {
+	/** Observe auth and filtered models together, without rechecking. Storage failures and cancellation reject. */
+	getAvailability(providerId?: string, options?: AuthOperationOptions): Promise<ModelsAvailability>;
 	/** Upsert/replace by provider.id. Provider ids are unique. */
 	setProvider(provider: Provider): void;
 	deleteProvider(id: string): void;
@@ -516,8 +526,14 @@ class ModelsImpl implements MutableModels {
 			}
 		}
 
-		const resolution = await resolveProviderAuth(provider, this.credentials, this.authContext, { signal });
-		return resolution ? { source: resolution.source, type: "api_key" } : undefined;
+		// Use the credential already read for this observation. A second store read could
+		// disagree with it, or misclassify a storage failure as a provider-check failure.
+		try {
+			const resolution = await apiKey.resolve({ ctx: this.authContext, credential, signal });
+			return resolution ? { source: resolution.source, type: "api_key" } : undefined;
+		} catch (error) {
+			throw new ModelsError("auth", `API key auth failed for provider ${provider.id}`, { cause: error });
+		}
 	}
 
 	checkAuth(providerId: string, options?: AuthOperationOptions): Promise<AuthCheck | undefined> {
@@ -531,26 +547,44 @@ class ModelsImpl implements MutableModels {
 		return raceWithAbortSignal(check, signal);
 	}
 
-	getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]> {
+	async getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]> {
+		const result = await this.getAvailability(providerId, options);
+		if (providerId && result.errors.has(providerId)) throw result.errors.get(providerId);
+		return result.available;
+	}
+
+	getAvailability(providerId?: string, options?: AuthOperationOptions): Promise<ModelsAvailability> {
 		const signal = operationSignal(options?.signal);
-		const available = (async () => {
+		const observation = (async () => {
 			signal.throwIfAborted();
 			const providers = providerId
 				? [this.providers.get(providerId)].filter((entry) => entry !== undefined)
 				: this.getProviders();
-			const checks = await Promise.all(
+			const storedProviders = new Set<string>();
+			const auth = new Map<string, AuthCheck | undefined>();
+			const errors = new Map<string, Error>();
+			const available = await Promise.all(
 				providers.map(async (provider) => {
+					// Storage failures invalidate the whole observation, not just this provider.
 					const credential = await this.readCredential(provider.id, signal);
-					return { provider, credential, auth: await this.checkProviderAuth(provider, credential, signal) };
+					if (credential) storedProviders.add(provider.id);
+					let check: AuthCheck | undefined;
+					try {
+						check = await this.checkProviderAuth(provider, credential, signal);
+					} catch (error) {
+						signal.throwIfAborted();
+						errors.set(provider.id, error instanceof Error ? error : new Error(String(error)));
+						return [];
+					}
+					auth.set(provider.id, check);
+					if (!check) return [];
+					const models = provider.getModels();
+					return provider.filterModels?.(models, credential) ?? models;
 				}),
 			);
-			return checks.flatMap(({ provider, credential, auth }) => {
-				if (!auth) return [];
-				const models = provider.getModels();
-				return provider.filterModels?.(models, credential) ?? models;
-			});
+			return { available: available.flat(), storedProviders, auth, errors };
 		})();
-		return raceWithAbortSignal(available, signal);
+		return raceWithAbortSignal(observation, signal);
 	}
 
 	getAuth(providerId: string, overrides?: AuthResolutionOverrides): Promise<AuthResult | undefined>;

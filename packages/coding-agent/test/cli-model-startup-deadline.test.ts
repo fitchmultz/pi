@@ -157,12 +157,13 @@ describe("CLI model startup deadline ownership (PR #62)", () => {
 			expect(deadlines[1].signal.aborted).toBe(false);
 			deadlines[1].abort(timeoutReason());
 			await startup;
-			expect(requestSignals).toHaveLength(2);
+			// PR #66: one observation supplies both availability and auth classification.
+			expect(requestSignals).toHaveLength(1);
 			expect(requestSignals.every((signal) => signal.aborted)).toBe(true);
 			expect(runtime?.session.model).toBeUndefined();
 			expect(runtime?.services.modelRuntime.hasConfiguredAuth("anthropic")).toBe(false);
 			await runtime?.services.modelRuntime.flushForCheckpoint();
-			expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+			expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 		} finally {
 			for (const deadline of deadlines) deadline.abort();
 			await startup;
@@ -205,7 +206,7 @@ describe("CLI model startup deadline ownership (PR #62)", () => {
 			expect(runtime?.services.modelRuntime.hasConfiguredAuth("anthropic")).toBe(true);
 			expect(runtime?.services.modelRuntime.isUsingSubscription("anthropic")).toBe(true);
 			expect(runtime?.services.modelRuntime.getAvailableSnapshot()).toContainEqual(cached);
-			expect(check).toHaveBeenCalledTimes(2);
+			expect(check).toHaveBeenCalledTimes(1);
 			expect(globalThis.fetch).not.toHaveBeenCalled();
 		},
 	);
