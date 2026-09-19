@@ -148,7 +148,7 @@ export class ModelRuntime implements Models {
 		auth: new Map(),
 	};
 	private availabilityRefreshSeq = 0;
-	private availabilityRefresh: Promise<void> | undefined;
+	private availabilityRefresh: { promise: Promise<void>; signal: AbortSignal } | undefined;
 	private availabilityErrorSeq = 0;
 	private readonly providerAvailabilitySeq = new Map<string, number>();
 	private availabilityError: string | undefined;
@@ -406,17 +406,28 @@ export class ModelRuntime implements Models {
 		}
 		const errorSeq = ++this.availabilityErrorSeq;
 		const effectiveSignal = operationSignal(signal);
-		let refresh = this.runAvailabilityRefresh(seq, errorSeq, effectiveSignal).catch((error) => {
-			if (errorSeq === this.availabilityErrorSeq && !effectiveSignal.aborted) {
-				this.availabilityError = error instanceof Error ? error.message : String(error);
-			}
-			throw error;
-		});
+		let refresh = {
+			signal: effectiveSignal,
+			promise: this.runAvailabilityRefresh(seq, errorSeq, effectiveSignal).catch((error) => {
+				if (errorSeq === this.availabilityErrorSeq && !effectiveSignal.aborted) {
+					this.availabilityError = error instanceof Error ? error.message : String(error);
+				}
+				throw error;
+			}),
+		};
 		this.availabilityRefresh = refresh;
 		// Registration refreshes can overlap the startup barrier. If a newer pass
 		// supersedes this one, its snapshot must land before this caller continues.
 		for (;;) {
-			await raceWithAbortSignal(refresh, effectiveSignal);
+			try {
+				await raceWithAbortSignal(refresh.promise, effectiveSignal);
+			} catch (error) {
+				effectiveSignal.throwIfAborted();
+				if (!refresh.signal.aborted) throw error;
+				// A superseding caller cancelled before publishing a snapshot. Follow a
+				// newer pass if present; otherwise recheck under this caller's signal.
+				if (this.availabilityRefresh === refresh) return this.queueAvailabilityRefresh(effectiveSignal);
+			}
 			if (this.availabilityRefresh === refresh) return;
 			refresh = this.availabilityRefresh;
 		}
@@ -509,7 +520,7 @@ export class ModelRuntime implements Models {
 				throw error;
 			}
 		}
-		await this.queueAvailabilityRefresh(options?.signal);
+		await this.checkpointActivity.run(() => this.queueAvailabilityRefresh(options?.signal));
 		return this.snapshot.available;
 	}
 

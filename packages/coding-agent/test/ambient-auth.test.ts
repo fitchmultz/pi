@@ -305,6 +305,131 @@ describe("ambient auth composition", () => {
 		expect(runtime.isUsingSubscription("openai-codex")).toBe(true);
 	});
 
+	// PR #60: joining a newer pass must not import that caller's cancellation.
+	it("rechecks availability for an uncancelled caller when the superseding caller aborts", async () => {
+		const ambientAuth = sharedAuth();
+		ambientAuth.check.mockResolvedValue(undefined);
+		runtime.registerProvider("openai-codex", { ambientAuth });
+		await runtime.flushForCheckpoint();
+		expect(runtime.hasConfiguredAuth("openai-codex")).toBe(false);
+		const olderStarted = deferred<void>();
+		const newerStarted = deferred<void>();
+		const retryStarted = deferred<void>();
+		const olderRelease = deferred<void>();
+		const newerRelease = deferred<void>();
+		const retryRelease = deferred<void>();
+		let calls = 0;
+		ambientAuth.check.mockImplementation(async ({ signal }) => {
+			const call = ++calls;
+			if (call === 2) olderStarted.resolve();
+			if (call === 4) newerStarted.resolve();
+			if (call === 6) retryStarted.resolve();
+			await (call <= 2 ? olderRelease.promise : call <= 4 ? newerRelease.promise : retryRelease.promise);
+			signal.throwIfAborted();
+			return { type: "oauth", source: "shared account" };
+		});
+		const olderController = new AbortController();
+		const newerController = new AbortController();
+		const older = runtime.getAvailable(undefined, { signal: olderController.signal }).then(
+			(models) => ({ models }),
+			(error: unknown) => ({ error }),
+		);
+		await olderStarted.promise;
+		const newer = runtime
+			.getAvailable(undefined, { signal: newerController.signal })
+			.catch((error: unknown) => error);
+		try {
+			await newerStarted.promise;
+			olderRelease.resolve();
+			await new Promise<void>((done) => setImmediate(done));
+			const reason = new Error("newer caller cancelled");
+			newerController.abort(reason);
+			expect(await newer).toBe(reason);
+			expect(olderController.signal.aborted).toBe(false);
+			expect(await Promise.race([older, retryStarted.promise.then(() => "retry started")])).toBe("retry started");
+			let flushed = false;
+			const checkpoint = runtime.flushForCheckpoint().then(() => {
+				flushed = true;
+			});
+			await new Promise<void>((done) => setImmediate(done));
+			expect(flushed).toBe(false);
+			retryRelease.resolve();
+			const result = await older;
+			expect(result).toEqual({ models: runtime.getAvailableSnapshot() });
+			expect(runtime.getAvailableSnapshot().filter((model) => model.provider === "openai-codex")).toEqual(
+				runtime.getModels("openai-codex"),
+			);
+			expect(runtime.isUsingSubscription("openai-codex")).toBe(true);
+			expect(runtime.getError()).toBeUndefined();
+			await checkpoint;
+			expect(flushed).toBe(true);
+		} finally {
+			olderRelease.resolve();
+			newerRelease.resolve();
+			retryRelease.resolve();
+			await Promise.all([older, newer]);
+		}
+	});
+
+	// PR #60: isolate waiter cancellation, but still propagate a real superseding failure.
+	it.each(["older cancellation", "newer failure"])("preserves %s while joining availability", async (variant) => {
+		const ambientAuth = sharedAuth();
+		runtime.registerProvider("openai-codex", { ambientAuth });
+		await runtime.flushForCheckpoint();
+		const olderStarted = deferred<void>();
+		const newerStarted = deferred<void>();
+		const olderRelease = deferred<void>();
+		const newerRelease = deferred<void>();
+		const reason = new Error(variant);
+		let calls = 0;
+		ambientAuth.check.mockImplementation(async ({ signal }) => {
+			const call = ++calls;
+			if (call === 2) olderStarted.resolve();
+			if (call === 4) newerStarted.resolve();
+			await (call <= 2 ? olderRelease.promise : newerRelease.promise);
+			signal.throwIfAborted();
+			if (call > 2 && variant === "newer failure") throw reason;
+			return { type: "oauth", source: "shared account" };
+		});
+		const olderController = new AbortController();
+		const newerController = new AbortController();
+		const older = runtime
+			.getAvailable(undefined, { signal: olderController.signal })
+			.catch((error: unknown) => error);
+		await olderStarted.promise;
+		const newer = runtime
+			.getAvailable(undefined, { signal: newerController.signal })
+			.catch((error: unknown) => error);
+		try {
+			await newerStarted.promise;
+			olderRelease.resolve();
+			await new Promise<void>((done) => setImmediate(done));
+			if (variant === "older cancellation") {
+				olderController.abort(reason);
+				expect(await older).toBe(reason);
+				expect(newerController.signal.aborted).toBe(false);
+				newerRelease.resolve();
+				expect(await newer).toEqual(runtime.getAvailableSnapshot());
+				expect(runtime.isUsingSubscription("openai-codex")).toBe(true);
+				expect(runtime.getError()).toBeUndefined();
+			} else {
+				newerRelease.resolve();
+				const failure = await newer;
+				expect(failure).toMatchObject({
+					name: "ModelsError",
+					message: `API key auth check failed for provider openai-codex: ${reason.message}`,
+				});
+				expect(await older).toBe(failure);
+				expect(runtime.getError()).toContain(reason.message);
+			}
+			expect(calls).toBe(4);
+		} finally {
+			olderRelease.resolve();
+			newerRelease.resolve();
+			await Promise.all([older, newer]);
+		}
+	});
+
 	it("awaits factory registration and auth checks before settings, scope and saved-model selection, without session_start", async () => {
 		const cached = { ...runtime.getModels("openai-codex")[0], id: "ambient-startup-only" };
 		await modelsStore.write("openai-codex", { models: [cached], lastModified });
