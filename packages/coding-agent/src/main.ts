@@ -835,7 +835,11 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
-			modelRuntimeSignal: AbortSignal.timeout(15_000),
+			// Services reads this separately for initial restoration and the post-extension barrier.
+			// Bound each model/auth phase, not user time at project trust or extension loading.
+			get modelRuntimeSignal() {
+				return AbortSignal.timeout(15_000);
+			},
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderReloadOptions: shouldResolveProjectTrust
 				? {
