@@ -137,6 +137,7 @@ export async function superviseCli(
 					fallback = previous;
 					handoff = {
 						checkpoint: restart.checkpoint,
+						toolConfiguration: restart.toolConfiguration,
 						message: restart.request.message,
 					};
 					console.error("Restarting Pi; resuming the same session.");
@@ -144,6 +145,7 @@ export async function superviseCli(
 					launch = previous;
 					handoff = {
 						checkpoint: restart.checkpoint,
+						toolConfiguration: restart.toolConfiguration,
 						message: restart.request.message,
 						failure: `Could not select the updated runtime: ${error instanceof Error ? error.message : String(error)}`,
 					};

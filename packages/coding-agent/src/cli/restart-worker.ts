@@ -65,6 +65,7 @@ export function createRestartControl(options: {
 	let currentContext: ExtensionContext | undefined;
 	let extensions: string[] = [];
 	let initialProvider: string | undefined;
+	let toolConfiguration: RestartHandoff["toolConfiguration"];
 	let attempt: (() => void) | undefined;
 	let cancelRestart: ((source: "user" | "extension" | "signal") => void) | undefined;
 	const extension: InlineExtension = {
@@ -276,6 +277,7 @@ export function createRestartControl(options: {
 						initialProvider !== undefined && initialProvider === ctx.model?.provider,
 					),
 					extensions,
+					toolConfiguration,
 					checkpoint: {
 						sessionFile,
 						sessionId: ctx.sessionManager.getSessionId(),
@@ -298,6 +300,9 @@ export function createRestartControl(options: {
 		},
 		setInitialProvider(provider: string | undefined) {
 			initialProvider = provider;
+		},
+		setToolConfiguration(configuration: RestartHandoff["toolConfiguration"]) {
+			toolConfiguration = configuration;
 		},
 		shutdownRequested(source: "user" | "extension" | "signal") {
 			closing = true;
