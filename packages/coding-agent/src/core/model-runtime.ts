@@ -147,6 +147,7 @@ export class ModelRuntime implements Models {
 		storedProviders: new Set(),
 		auth: new Map(),
 	};
+	private registrationRefreshPending = false;
 	private availabilityRefreshSeq = 0;
 	private availabilityRefresh: { promise: Promise<void>; cancelled: boolean } | undefined;
 	private availabilityErrorSeq = 0;
@@ -418,6 +419,7 @@ export class ModelRuntime implements Models {
 			}),
 		};
 		let refresh = pass;
+		let failure: { error: unknown } | undefined;
 		this.availabilityRefresh = pass;
 		// Registration refreshes can overlap the startup barrier. If a newer pass
 		// supersedes this one, its snapshot must land before this caller continues.
@@ -426,12 +428,24 @@ export class ModelRuntime implements Models {
 				await raceWithAbortSignal(refresh.promise, effectiveSignal);
 			} catch (error) {
 				effectiveSignal.throwIfAborted();
+				// A superseded failure cannot end the barrier before the current pass publishes.
+				if (this.availabilityRefresh !== refresh) {
+					if (!refresh.cancelled) failure ??= { error };
+					refresh = this.availabilityRefresh;
+					continue;
+				}
 				if (!refresh.cancelled) throw error;
-				// A superseding caller cancelled before publishing a snapshot. Follow a
-				// newer pass if present; otherwise recheck under this caller's signal.
-				if (this.availabilityRefresh === refresh) return this.queueAvailabilityRefresh(effectiveSignal);
+				// The current pass's caller cancelled before publication. Recheck under
+				// this caller's signal without reclassifying an earlier real failure.
+				await this.queueAvailabilityRefresh(effectiveSignal);
+				if (failure) throw failure.error;
+				return;
 			}
-			if (this.availabilityRefresh === refresh) return;
+			if (this.availabilityRefresh === refresh) {
+				// Preserve this caller's real failure, but only after the current snapshot barrier.
+				if (failure) throw failure.error;
+				return;
+			}
 			refresh = this.availabilityRefresh;
 		}
 	}
@@ -825,7 +839,20 @@ export class ModelRuntime implements Models {
 	}
 
 	refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
+		// An explicit full refresh (notably the services startup barrier) covers queued registrations.
+		if (!options.providers) this.registrationRefreshPending = false;
 		return this.checkpointActivity.run(() => this.refreshCatalogs(options));
+	}
+
+	private queueRegistrationRefresh(): void {
+		if (this.registrationRefreshPending) return;
+		this.registrationRefreshPending = true;
+		void this.checkpointActivity.run(async () => {
+			// Composition is synchronous; only the redundant catalog/auth work is coalesced.
+			// Reserve checkpoint activity now, before yielding to the rest of the factory batch.
+			await Promise.resolve();
+			if (this.registrationRefreshPending) await this.refresh({ allowNetwork: false });
+		});
 	}
 
 	private async refreshCatalogs(options: ModelsRefreshOptions): Promise<ModelsRefreshResult> {
@@ -878,7 +905,7 @@ export class ModelRuntime implements Models {
 		this.nativeExtensionProviders.set(provider.id, provider);
 		this.recomposeProvider(provider.id);
 		this.updateModelSnapshot();
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationRefresh();
 	}
 
 	registerProvider(providerId: string, config: ProviderConfigInput): void {
@@ -917,7 +944,7 @@ export class ModelRuntime implements Models {
 				available: this.snapshot.all.filter((model) => configuredProviders.has(model.provider)),
 			};
 		}
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationRefresh();
 	}
 
 	unregisterProvider(providerId: string): void {
@@ -926,6 +953,6 @@ export class ModelRuntime implements Models {
 		this.nativeExtensionProviders.delete(providerId);
 		this.recomposeProvider(providerId);
 		this.updateModelSnapshot();
-		void this.refresh({ allowNetwork: false });
+		this.queueRegistrationRefresh();
 	}
 }
