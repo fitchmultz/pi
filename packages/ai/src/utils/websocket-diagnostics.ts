@@ -2,7 +2,7 @@ import type * as AsyncHooks from "node:async_hooks";
 import type * as DiagnosticsChannel from "node:diagnostics_channel";
 import type { Socket } from "node:net";
 
-export type WebSocketSocketDiagnostics = {
+export interface WebSocketSocketDiagnostics {
 	connectionId: string;
 	bytesRead?: number;
 	bytesWritten?: number;
@@ -15,7 +15,7 @@ export type WebSocketSocketDiagnostics = {
 	hadError?: boolean;
 	localCloseReason?: string;
 	localCloseMs?: number;
-};
+}
 
 const sockets = new WeakMap<object, { socket: Socket; startedAt: number; details: WebSocketSocketDiagnostics }>();
 

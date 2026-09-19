@@ -23,8 +23,8 @@ settings, credentials, skills, extensions, themes, or session journals.
 
 Prepare a separate delivery worktree from the fork's reviewed base. Merge the
 chosen upstream commit normally, preserving ancestry and native fork behavior.
-Resolve conflicts individually. Experimental Pico/micro remain opt-in; normal
-AgentSession extensions continue to use the ordinary host.
+Resolve conflicts individually. AgentSession extensions continue to use the
+ordinary host.
 
 From that worktree, install and validate the complete workspace graph:
 
@@ -37,7 +37,7 @@ npm run check
 ```
 
 Hydration fetches public model metadata without changing tracked catalogs.
-`build:offline` uses that data and includes the durable workspace. Review any
+`build:offline` uses that data without regenerating tracked catalogs. Review any
 intentional catalog regeneration separately. Use `./test.sh`, not ambient
 `npm test`, so provider credentials and personal resources are isolated. Shell
 initialization must not replace the real Node/npm binaries with environment
