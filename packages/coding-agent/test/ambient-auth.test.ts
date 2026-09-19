@@ -437,6 +437,50 @@ describe("ambient auth composition", () => {
 		}
 	});
 
+	// PR #60: a deadline firing after a real failure must not reclassify that failure.
+	it("preserves a superseding failure when its caller aborts after rejection", async () => {
+		const ambientAuth = sharedAuth();
+		runtime.registerProvider("openai-codex", { ambientAuth });
+		await runtime.flushForCheckpoint();
+		const olderStarted = deferred<void>();
+		const newerStarted = deferred<void>();
+		const olderRelease = deferred<void>();
+		const newerRelease = deferred<void>();
+		let calls = 0;
+		ambientAuth.check.mockImplementation(async ({ signal }) => {
+			const call = ++calls;
+			if (call === 2) olderStarted.resolve();
+			if (call === 4) newerStarted.resolve();
+			if (call <= 4) await (call <= 2 ? olderRelease.promise : newerRelease.promise);
+			signal.throwIfAborted();
+			if (call === 3 || call === 4) throw new Error("real provider failure");
+			return { type: "oauth", source: "shared account" };
+		});
+		const newerController = new AbortController();
+		const older = runtime.getAvailable().catch((error: unknown) => error);
+		await olderStarted.promise;
+		const newer = runtime
+			.getAvailable(undefined, { signal: newerController.signal })
+			.catch((error: unknown) => error);
+		try {
+			await newerStarted.promise;
+			newerRelease.resolve();
+			const failure = await newer;
+			expect(failure).toMatchObject({ name: "ModelsError" });
+			expect(newerController.signal.aborted).toBe(false);
+			expect(runtime.getError()).toContain("real provider failure");
+			newerController.abort(new Error("deadline after failure"));
+			olderRelease.resolve();
+			expect(await older).toBe(failure);
+			expect(calls).toBe(4);
+			expect(runtime.getError()).toContain("real provider failure");
+		} finally {
+			olderRelease.resolve();
+			newerRelease.resolve();
+			await Promise.all([older, newer]);
+		}
+	});
+
 	it("awaits factory registration and auth checks before settings, scope and saved-model selection, without session_start", async () => {
 		const cached = { ...runtime.getModels("openai-codex")[0], id: "ambient-startup-only" };
 		await modelsStore.write("openai-codex", { models: [cached], lastModified });

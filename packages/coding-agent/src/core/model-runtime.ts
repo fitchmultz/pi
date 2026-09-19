@@ -148,7 +148,7 @@ export class ModelRuntime implements Models {
 		auth: new Map(),
 	};
 	private availabilityRefreshSeq = 0;
-	private availabilityRefresh: { promise: Promise<void>; signal: AbortSignal } | undefined;
+	private availabilityRefresh: { promise: Promise<void>; cancelled: boolean } | undefined;
 	private availabilityErrorSeq = 0;
 	private readonly providerAvailabilitySeq = new Map<string, number>();
 	private availabilityError: string | undefined;
@@ -406,16 +406,19 @@ export class ModelRuntime implements Models {
 		}
 		const errorSeq = ++this.availabilityErrorSeq;
 		const effectiveSignal = operationSignal(signal);
-		let refresh = {
-			signal: effectiveSignal,
+		const pass: { promise: Promise<void>; cancelled: boolean } = {
+			cancelled: false,
 			promise: this.runAvailabilityRefresh(seq, errorSeq, effectiveSignal).catch((error) => {
+				// Capture at rejection; a later deadline cannot change a real failure into cancellation.
+				pass.cancelled = effectiveSignal.aborted;
 				if (errorSeq === this.availabilityErrorSeq && !effectiveSignal.aborted) {
 					this.availabilityError = error instanceof Error ? error.message : String(error);
 				}
 				throw error;
 			}),
 		};
-		this.availabilityRefresh = refresh;
+		let refresh = pass;
+		this.availabilityRefresh = pass;
 		// Registration refreshes can overlap the startup barrier. If a newer pass
 		// supersedes this one, its snapshot must land before this caller continues.
 		for (;;) {
@@ -423,7 +426,7 @@ export class ModelRuntime implements Models {
 				await raceWithAbortSignal(refresh.promise, effectiveSignal);
 			} catch (error) {
 				effectiveSignal.throwIfAborted();
-				if (!refresh.signal.aborted) throw error;
+				if (!refresh.cancelled) throw error;
 				// A superseding caller cancelled before publishing a snapshot. Follow a
 				// newer pass if present; otherwise recheck under this caller's signal.
 				if (this.availabilityRefresh === refresh) return this.queueAvailabilityRefresh(effectiveSignal);
