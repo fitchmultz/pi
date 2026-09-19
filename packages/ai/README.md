@@ -1650,6 +1650,38 @@ Built-in login and refresh flows are private provider implementations. Use provi
 
 Provider notes:
 
+**Anthropic**: Local CLI login starts a callback listener and races it against the
+`manual_code` prompt by default. A server host that cannot or should not open a
+local listener can opt out per attempt through the same interaction:
+
+```typescript
+const credential = await anthropicProvider().auth.oauth!.login({
+  signal: abortController.signal,
+  localCallbackServer: false,
+  notify: (event) => sendToOwner(event),
+  prompt: (prompt) => askOwner(prompt),
+});
+```
+
+The option also works through `models.login('anthropic', 'oauth', interaction)`.
+It is currently implemented only by Anthropic; other flows ignore it. Omission
+or `true` preserves the default behavior, including listener startup errors.
+There is no automatic fallback or process-wide queue.
+
+Pi still emits its native `auth_url` and `manual_code` prompt and owns PKCE,
+state validation, input parsing, token exchange, credentials and refresh. The
+registered redirect remains `http://localhost:53692/callback`: if that address
+cannot connect in the user's browser, have them copy the final redirect URL
+from the address bar into the prompt. A bare authorization code or `code#state`
+also uses the existing parser. This does not change subscription/request-auth
+or billing behavior.
+
+Keep each attempt's interaction and credential private to its owner. Reject
+pending prompts when the login signal or `prompt.signal` aborts, and abort the
+login when cancelling or replacing an attempt. Losing a server continuation
+requires a new login; this option does not persist or resume pending consent.
+Use a backend for web apps, not frontend credential storage.
+
 **OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options unless `cacheRetention` is `"none"`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity. Call `cleanupSessionResources(sessionId)` when finished so the pooled connection does not keep the process alive.
 
 A transient Codex WebSocket transport failure falls back to SSE only if streaming has not started; otherwise the request fails without replay. The next request tries WebSocket again. Oversized frames (close code `1009`) keep using SSE for that session. Call `cleanupSessionResources(sessionId)` when disposing a session to close its sockets and clear its fallback/debug state.
