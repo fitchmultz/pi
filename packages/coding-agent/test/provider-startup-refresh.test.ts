@@ -116,8 +116,8 @@ describe("provider startup refresh", () => {
 				"factory metadata checks",
 				[...checks.values()].reduce((sum, count) => sum + count, 0),
 			);
-			// Native availability + auth classification each check once per provider, not once per registration.
-			expect([...checks.values()]).toEqual(providers.map(() => 2));
+			// PR #66: availability and auth classification share one observation per provider.
+			expect([...checks.values()]).toEqual(providers.map(() => 1));
 			expect(read).toHaveBeenCalledTimes(providers.length);
 			for (const provider of providers) {
 				expect(runtime.getProvider(provider.id)?.auth.oauth?.login).toBe(provider.auth.oauth?.login);

@@ -151,7 +151,7 @@ export class ModelRuntime implements Models {
 	};
 	private registrationRefreshPending = false;
 	private availabilityRefreshSeq = 0;
-	private availabilityRefresh: { promise: Promise<void>; cancelled: boolean } | undefined;
+	private availabilityRefresh: { seq: number; promise: Promise<void>; cancelled: boolean } | undefined;
 	private availabilityErrorSeq = 0;
 	private readonly providerAvailabilitySeq = new Map<string, number>();
 	private availabilityError: string | undefined;
@@ -397,7 +397,8 @@ export class ModelRuntime implements Models {
 		}
 		const errorSeq = ++this.availabilityErrorSeq;
 		const effectiveSignal = operationSignal(signal);
-		const pass: { promise: Promise<void>; cancelled: boolean } = {
+		const pass: { seq: number; promise: Promise<void>; cancelled: boolean } = {
+			seq,
 			cancelled: false,
 			promise: this.runAvailabilityRefresh(seq, errorSeq, effectiveSignal).catch((error) => {
 				// Capture at rejection; a later deadline cannot change a real failure into cancellation.
@@ -432,6 +433,9 @@ export class ModelRuntime implements Models {
 				return;
 			}
 			if (this.availabilityRefresh === refresh) {
+				// Scoped observations invalidate a full pass without replacing its waiter.
+				// A discarded pass is not a complete snapshot, even if the scoped caller aborted.
+				if (refresh.seq !== this.availabilityRefreshSeq) await this.queueAvailabilityRefresh(effectiveSignal);
 				// Preserve this caller's real failure, but only after the current snapshot barrier.
 				if (failure) throw failure.error;
 				return;
@@ -441,7 +445,7 @@ export class ModelRuntime implements Models {
 	}
 
 	private async refreshProviderAvailability(providerId: string, signal: AbortSignal): Promise<readonly Model<Api>[]> {
-		// Invalidate any full availability pass that started before this credential change.
+		// Invalidate older full observations before this provider-scoped check can publish.
 		++this.availabilityRefreshSeq;
 		const providerSeq = (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1;
 		this.providerAvailabilitySeq.set(providerId, providerSeq);
@@ -870,12 +874,7 @@ export class ModelRuntime implements Models {
 			...options,
 			allowNetwork: options.allowNetwork ?? this.modelNetworkEnabled,
 		};
-		// Published pi-ai builds before ModelsStore returned void and accepted a provider ID.
-		// The fallback keeps source-mode CLI tests working without rebuilding workspace dependencies.
-		const result = ((await this.models.refresh(refreshOptions)) as ModelsRefreshResult | undefined) ?? {
-			aborted: refreshOptions.signal?.aborted ?? false,
-			errors: new Map(),
-		};
+		const result = await this.models.refresh(refreshOptions);
 		const errors = new Map(result.errors);
 		this.updateModelSnapshot();
 		if (options.providers) {

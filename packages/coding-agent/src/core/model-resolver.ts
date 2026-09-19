@@ -682,7 +682,7 @@ export async function findInitialModel(options: {
 		};
 	}
 
-	// 3. Try saved default from settings if auth is configured.
+	// 3. Use the saved default when configured, or retain it when its auth check failed.
 	if (defaultProvider && defaultModelId) {
 		const found = modelRuntime.getModel(defaultProvider, defaultModelId);
 		if (found && (modelRuntime.hasConfiguredAuth(found.provider) || modelRuntime.getAuthCheckError(found.provider))) {
