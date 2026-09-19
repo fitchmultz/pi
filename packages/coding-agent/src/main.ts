@@ -531,7 +531,9 @@ function buildSessionOptions(
 	}
 
 	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
-		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
+		// Scope resolution retains models with failed auth checks (without marking them
+		// configured), so a matching saved default is not replaced by a healthy payer.
+		// A scope excluding that model, or an explicit --model above, still wins.
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
 		const savedModel = savedProvider && savedModelId ? modelRuntime.getModel(savedProvider, savedModelId) : undefined;

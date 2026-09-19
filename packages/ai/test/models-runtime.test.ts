@@ -837,6 +837,52 @@ describe("Models runtime", () => {
 		expect((await models.getAvailable("ambient")).map((model) => model.provider)).toEqual(["ambient"]);
 	});
 
+	it("isolates failed availability checks while retaining native filtering and direct errors", async () => {
+		const credentials = new InMemoryCredentialStore();
+		const models = createModels({ credentials });
+		const healthy = testProvider({
+			id: "healthy",
+			models: [testModel("healthy", "allowed"), testModel("healthy", "hidden")],
+		});
+		healthy.filterModels = (catalog) => catalog.filter((model) => model.id === "allowed");
+		const check = vi.fn(async () => {
+			throw new Error("Reconnect exact account");
+		});
+		models.setProvider(healthy);
+		models.setProvider(testProvider({ id: "broken", auth: { apiKey: { name: "Shared", check, resolve: check } } }));
+		expect(await models.getAvailable()).toEqual([healthy.getModels()[0]]);
+		expect(check).toHaveBeenCalledTimes(1);
+		await expect(models.getAvailable("broken")).rejects.toThrow(
+			"API key auth check failed for provider broken: Reconnect exact account",
+		);
+		await expect(models.checkAuth("broken")).rejects.toThrow("Reconnect exact account");
+		await expect(models.getAuth("broken")).rejects.toThrow("Reconnect exact account");
+		vi.spyOn(credentials, "read").mockRejectedValue(new Error("storage failed"));
+		await expect(models.getAvailable()).rejects.toThrow("Credential store read failed");
+	});
+
+	it("does not swallow the caller's exact cancellation while isolating a failed check", async () => {
+		const models = createModels();
+		const controller = new AbortController();
+		const reason = new DOMException("caller cancelled", "AbortError");
+		models.setProvider(
+			testProvider({
+				id: "broken",
+				auth: {
+					apiKey: {
+						name: "Shared",
+						resolve: async () => undefined,
+						check: async () => {
+							controller.abort(reason);
+							throw new Error("late provider failure");
+						},
+					},
+				},
+			}),
+		);
+		await expect(models.getAvailable(undefined, { signal: controller.signal })).rejects.toBe(reason);
+	});
+
 	it("runs provider login and logout through the credential store", async () => {
 		const credentials = new InMemoryCredentialStore();
 		const apiKey = envKeyAuth(undefined);

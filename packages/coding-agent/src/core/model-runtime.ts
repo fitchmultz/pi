@@ -63,6 +63,7 @@ interface ModelRuntimeSnapshot {
 	configuredProviders: ReadonlySet<string>;
 	storedProviders: ReadonlySet<string>;
 	auth: ReadonlyMap<string, AuthCheck | undefined>;
+	authErrors: ReadonlyMap<string, Error>;
 }
 
 export interface CreateModelRuntimeOptions {
@@ -146,6 +147,7 @@ export class ModelRuntime implements Models {
 		configuredProviders: new Set(),
 		storedProviders: new Set(),
 		auth: new Map(),
+		authErrors: new Map(),
 	};
 	private registrationRefreshPending = false;
 	private availabilityRefreshSeq = 0;
@@ -370,32 +372,20 @@ export class ModelRuntime implements Models {
 	}
 
 	private async runAvailabilityRefresh(seq: number, errorSeq: number, signal: AbortSignal): Promise<void> {
-		const providers = this.models.getProviders();
-		const [available, checks, credentials] = await Promise.all([
-			this.models.getAvailable(undefined, { signal }),
-			Promise.all(
-				providers.map(
-					async (provider): Promise<[string, AuthCheck | undefined]> => [
-						provider.id,
-						await this.models.checkAuth(provider.id, { signal }),
-					],
-				),
-			),
+		const [{ available, auth, errors: authErrors }, credentials] = await Promise.all([
+			this.models.getAvailability(undefined, { signal }),
 			this.credentials.list({ signal }),
 		]);
+		signal.throwIfAborted();
 		if (seq !== this.availabilityRefreshSeq) return;
-		const auth = new Map(checks);
-		const configuredProviders = new Set(
-			checks
-				.filter((entry): entry is [string, AuthCheck] => entry[1] !== undefined)
-				.map(([providerId]) => providerId),
-		);
+		const configuredProviders = new Set([...auth].filter(([, check]) => check !== undefined).map(([id]) => id));
 		this.snapshot = {
 			all: [...this.models.getModels()],
 			available: [...available],
 			configuredProviders,
 			storedProviders: new Set(credentials.map((entry) => entry.providerId)),
 			auth,
+			authErrors,
 		};
 		if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
 	}
@@ -450,23 +440,28 @@ export class ModelRuntime implements Models {
 		}
 	}
 
-	private async refreshProviderAvailability(providerId: string, signal: AbortSignal): Promise<void> {
+	private async refreshProviderAvailability(providerId: string, signal: AbortSignal): Promise<readonly Model<Api>[]> {
 		// Invalidate any full availability pass that started before this credential change.
 		++this.availabilityRefreshSeq;
 		const providerSeq = (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1;
 		this.providerAvailabilitySeq.set(providerId, providerSeq);
 		const errorSeq = ++this.availabilityErrorSeq;
 		try {
-			const [available, auth, credential] = await Promise.all([
-				this.models.getAvailable(providerId, { signal }),
-				this.models.checkAuth(providerId, { signal }),
-				this.credentials.read(providerId, { signal }),
-			]);
+			const observation = await this.models.getAvailability(providerId, { signal });
+			const { available } = observation;
+			const auth = observation.auth.get(providerId);
+			const authError = observation.errors.get(providerId);
 			signal.throwIfAborted();
-			if (this.providerAvailabilitySeq.get(providerId) !== providerSeq) return;
+			if (this.providerAvailabilitySeq.get(providerId) !== providerSeq) {
+				if (authError) throw authError;
+				return available;
+			}
 			const configuredProviders = new Set(this.snapshot.configuredProviders);
 			const storedProviders = new Set(this.snapshot.storedProviders);
 			const authByProvider = new Map(this.snapshot.auth);
+			const authErrors = new Map(this.snapshot.authErrors);
+			if (authError) authErrors.set(providerId, authError);
+			else authErrors.delete(providerId);
 			if (auth) {
 				configuredProviders.add(providerId);
 				authByProvider.set(providerId, auth);
@@ -474,7 +469,7 @@ export class ModelRuntime implements Models {
 				configuredProviders.delete(providerId);
 				authByProvider.delete(providerId);
 			}
-			if (credential) storedProviders.add(providerId);
+			if (observation.storedProviders.has(providerId)) storedProviders.add(providerId);
 			else storedProviders.delete(providerId);
 			const all = [...this.models.getModels()];
 			const availableById = new Map(
@@ -489,13 +484,19 @@ export class ModelRuntime implements Models {
 				configuredProviders,
 				storedProviders,
 				auth: authByProvider,
+				authErrors,
 			};
 			if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
+			// Credential mutation callers still learn that their committed change failed
+			// local verification, but no stale successful auth survives that failure.
+			if (authError) throw authError;
+			return available;
 		} catch (error) {
 			if (
 				this.providerAvailabilitySeq.get(providerId) === providerSeq &&
 				errorSeq === this.availabilityErrorSeq &&
-				!signal.aborted
+				!signal.aborted &&
+				this.snapshot.authErrors.get(providerId) !== error
 			) {
 				this.availabilityError = error instanceof Error ? error.message : String(error);
 			}
@@ -525,17 +526,9 @@ export class ModelRuntime implements Models {
 
 	async getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]> {
 		if (providerId) {
-			const errorSeq = ++this.availabilityErrorSeq;
-			try {
-				const available = await this.models.getAvailable(providerId, options);
-				if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
-				return available;
-			} catch (error) {
-				if (errorSeq === this.availabilityErrorSeq && !options?.signal?.aborted) {
-					this.availabilityError = error instanceof Error ? error.message : String(error);
-				}
-				throw error;
-			}
+			return this.checkpointActivity.run(() =>
+				this.refreshProviderAvailability(providerId, operationSignal(options?.signal)),
+			);
 		}
 		await this.checkpointActivity.run(() => this.queueAvailabilityRefresh(options?.signal));
 		return this.snapshot.available;
@@ -551,6 +544,9 @@ export class ModelRuntime implements Models {
 		if (configError) errors.push(configError);
 		for (const [providerId, error] of this.compositionErrors) {
 			errors.push(`Provider "${providerId}": ${error}`);
+		}
+		for (const [providerId, error] of this.snapshot.authErrors) {
+			errors.push(`Provider "${providerId}" availability: ${error.message}`);
 		}
 		if (this.availabilityError) errors.push(`Availability refresh: ${this.availabilityError}`);
 		return errors.length > 0 ? errors.join("\n\n") : undefined;
@@ -583,6 +579,11 @@ export class ModelRuntime implements Models {
 
 	isUsingSubscription(providerId: string): boolean {
 		return this.isUsingOAuth(providerId) && this.models.getProvider(providerId)?.auth.oauth?.isSubscription === true;
+	}
+
+	/** Failed observation, distinct from a successful unconfigured check. Does not resolve credentials. */
+	getAuthCheckError(providerId: string): Error | undefined {
+		return this.snapshot.authErrors.get(providerId);
 	}
 
 	hasConfiguredAuth(providerId: string): boolean {
@@ -688,6 +689,7 @@ export class ModelRuntime implements Models {
 	}
 
 	getProviderAuthStatus(providerId: string): AuthStatus {
+		if (this.snapshot.authErrors.has(providerId)) return { configured: false };
 		if (this.credentials.hasRuntimeApiKey(providerId)) return { configured: true, source: "runtime" };
 		if (this.snapshot.storedProviders.has(providerId)) return { configured: true, source: "stored" };
 		const configured = configuredRequestAuthStatus(
@@ -898,9 +900,18 @@ export class ModelRuntime implements Models {
 		return { aborted: result.aborted || (options.signal?.aborted ?? false), errors };
 	}
 
+	private invalidateProviderAvailability(providerId: string): void {
+		++this.availabilityRefreshSeq;
+		this.providerAvailabilitySeq.set(providerId, (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1);
+		const authErrors = new Map(this.snapshot.authErrors);
+		authErrors.delete(providerId);
+		this.snapshot = { ...this.snapshot, authErrors };
+	}
+
 	registerNativeProvider(provider: Provider): void {
 		this.checkpointActivity.invalidate();
 		if (!provider.id.trim()) throw new Error("Provider id must not be empty.");
+		this.invalidateProviderAvailability(provider.id);
 		this.extensionProviders.delete(provider.id);
 		this.nativeExtensionProviders.set(provider.id, provider);
 		this.recomposeProvider(provider.id);
@@ -913,6 +924,7 @@ export class ModelRuntime implements Models {
 		// Validate the incoming registration on its own, like the legacy registry:
 		// a broken re-registration must throw without touching the stored config.
 		validateExtensionProvider(providerId, this.builtins.get(providerId), this.config.getProvider(providerId), config);
+		this.invalidateProviderAvailability(providerId);
 		this.nativeExtensionProviders.delete(providerId);
 		// Re-registration merges defined values over the previous registration and
 		// preserves undefined ones, matching the legacy ModelRegistry contract.
@@ -949,6 +961,7 @@ export class ModelRuntime implements Models {
 
 	unregisterProvider(providerId: string): void {
 		this.checkpointActivity.invalidate();
+		this.invalidateProviderAvailability(providerId);
 		this.extensionProviders.delete(providerId);
 		this.nativeExtensionProviders.delete(providerId);
 		this.recomposeProvider(providerId);
