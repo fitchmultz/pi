@@ -6,7 +6,12 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import { getCliWorkerPath, superviseCli } from "../src/cli/launcher.ts";
-import { parseRestartCommand, parseRestartRequest, type RestartCheckpoint } from "../src/cli/restart-protocol.ts";
+import {
+	parseRestartCommand,
+	parseRestartRequest,
+	type RestartCheckpoint,
+	type RestartHandoff,
+} from "../src/cli/restart-protocol.ts";
 import { getRestartArgs } from "../src/cli/restart-worker.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { resolveCliModel } from "../src/core/model-resolver.ts";
@@ -52,8 +57,10 @@ const handoff = process.env.PI_RESTART_HANDOFF ? JSON.parse(process.env.PI_RESTA
 appendFileSync(${JSON.stringify(trace)}, JSON.stringify({name:${JSON.stringify(name)}, pid:process.pid, args:process.argv.slice(2), handoff, socket:process.env.PI_RESTART_SOCKET}) + '\\n');
 `;
 	const worker = join(root, "working.mjs");
+	const toolConfiguration = { allowedToolNames: [], excludedToolNames: ["blocked"], noBuiltinTools: true };
 	const restart = {
 		type: "pi:restart",
+		toolConfiguration,
 		request: { runtime, extensions: [join(root, "v2.ts")], message: "Check the new capability" },
 		checkpoint,
 		args: options.args ?? ["-ne", "--custom-flag", "keep this value"],
@@ -71,6 +78,7 @@ if (!handoff) {
 	return {
 		worker,
 		checkpoint,
+		toolConfiguration,
 		read: () =>
 			readFileSync(trace, "utf8")
 				.trim()
@@ -82,12 +90,7 @@ if (!handoff) {
 							pid: number;
 							args: string[];
 							socket?: string;
-							handoff?: {
-								checkpoint: RestartCheckpoint;
-								message?: string;
-								failure?: string;
-								extensions?: string[];
-							};
+							handoff?: RestartHandoff;
 						},
 				),
 	};
@@ -246,6 +249,7 @@ setInterval(() => {}, 1000);
 		expect(trace.map((entry) => entry.name)).toEqual(["working", "candidate"]);
 		expect(trace[0].pid).not.toBe(trace[1].pid);
 		expect(trace[1].handoff?.checkpoint).toEqual(f.checkpoint);
+		expect(trace[1].handoff?.toolConfiguration).toEqual(f.toolConfiguration);
 		expect(trace[1].handoff?.message).toBe("Check the new capability");
 		expect(trace[1].args).toContain(f.checkpoint.sessionFile);
 		expect(trace[1].args).toContain("faux/faux-1");
@@ -315,6 +319,7 @@ setInterval(() => {}, 1000);
 		expect(trace.map((entry) => entry.name)).toEqual(["working", "candidate", "working"]);
 		expect(trace[2].handoff).toMatchObject({
 			checkpoint: f.checkpoint,
+			toolConfiguration: f.toolConfiguration,
 			message: "Check the new capability",
 			failure: "Updated Pi failed during startup.",
 		});

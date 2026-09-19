@@ -47,7 +47,7 @@ The directory must contain the built `dist/bundle/cli-worker.js`. Runtime and ex
 
 ## Recovery and Session State
 
-The launcher starts the replacement only after the outgoing worker exits successfully. It passes the exact session file, current working directory, branch, model, thinking level and tool selection. Earlier startup prompts and file attachments are not replayed. The session journal remains the source of conversation history; in-memory extension state must still be persisted by the extension. Remaining CLI startup prompts are counted as pending input and run before the restart.
+The launcher starts the replacement only after the outgoing worker exits successfully. It passes the exact session file, current working directory, branch, model, thinking level and tool selection. Newly installed extension tools start enabled unless registry restrictions or their startup handlers disable them; previously known inactive tools stay inactive. Registry allow/exclude restrictions and built-in default suppression survive restart, including when they came only from a cold `--checkpoint` restore rather than CLI flags. Earlier startup prompts and file attachments are not replayed. The session journal remains the source of conversation history; in-memory extension state must still be persisted by the extension. Remaining CLI startup prompts are counted as pending input and run before the restart.
 
 Stored credentials are unchanged. A CLI `--api-key` is forwarded only while its original provider is still selected; after a provider change, Pi uses normal credential resolution rather than sending that key to a different provider.
 

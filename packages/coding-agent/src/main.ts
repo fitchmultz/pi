@@ -916,6 +916,14 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 		}
 
+		// A cold checkpoint's restrictions may never have appeared in argv. Carry the
+		// effective configuration through managed restart and later session replacements.
+		const toolConfiguration = checkpoint?.toolConfiguration ??
+			restart?.handoff?.toolConfiguration ?? {
+				allowedToolNames: sessionOptions.tools ?? (sessionOptions.noTools === "all" ? [] : undefined),
+				excludedToolNames: sessionOptions.excludeTools,
+				noBuiltinTools: sessionOptions.noTools === "builtin" || undefined,
+			};
 		const created = await createAgentSessionFromServices({
 			checkpoint: isInitialRuntime ? checkpoint : undefined,
 			services,
@@ -924,12 +932,23 @@ export async function main(args: string[], options?: MainOptions) {
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
-			// Retain CLI registry restrictions across later native session replacements too.
-			tools: checkpoint?.toolConfiguration?.allowedToolNames ?? sessionOptions.tools,
-			excludeTools: checkpoint?.toolConfiguration?.excludedToolNames ?? sessionOptions.excludeTools,
-			noTools: checkpoint?.toolConfiguration?.noBuiltinTools ? "builtin" : sessionOptions.noTools,
+			tools: toolConfiguration.allowedToolNames,
+			excludeTools: toolConfiguration.excludedToolNames,
+			noTools: toolConfiguration.noBuiltinTools ? "builtin" : undefined,
 			customTools: sessionOptions.customTools,
 		});
+		restart?.setToolConfiguration(toolConfiguration);
+		if (isInitialRuntime && restart?.handoff) {
+			// Transcript restoration cannot know about newly installed extension tools. Admit them
+			// before session_start so extension startup choices still govern restart's new-tool merge.
+			// getAllTools() is registry-filtered; optional built-ins must not become defaults here.
+			const knownTools = new Set(restart.handoff.checkpoint.knownTools);
+			const added = created.session
+				.getAllTools()
+				.filter((tool) => tool.sourceInfo.source !== "builtin" && !knownTools.has(tool.name))
+				.map((tool) => tool.name);
+			created.session.setActiveToolsByName([...new Set([...created.session.getActiveToolNames(), ...added])]);
+		}
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);

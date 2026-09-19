@@ -1,9 +1,20 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { requestRestart } from "../src/cli/restart-protocol.ts";
+import { readSessionCheckpoint } from "../src/core/checkpoint.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 
 const hasTmux = process.platform !== "win32" && spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 const packageDir = resolve(__dirname, "..");
@@ -36,7 +47,7 @@ function terminalFixture() {
 		agentDir,
 		temporary,
 		status,
-		start(args: string[], env: string[] = []) {
+		start(args: string[], env: string[] = [], discoverExtensions = false) {
 			const launch = join(root, "launch.sh");
 			const launcherArgs = process.env.PI_TEST_CLI
 				? [process.env.PI_TEST_CLI]
@@ -56,16 +67,13 @@ function terminalFixture() {
 				process.execPath,
 				...launcherArgs,
 				"--offline",
-				"-ne",
+				...(discoverExtensions ? [] : ["-ne"]),
 				"-ns",
 				"-np",
 				"-nc",
 				"--no-themes",
 				"--no-approve",
-				"--provider",
-				"faux",
-				"--model",
-				"faux-1",
+				...(args.includes("--checkpoint") ? [] : ["--provider", "faux", "--model", "faux-1"]),
 				...args,
 			];
 			writeFileSync(launch, `${command.map(quote).join(" ")}\nprintf '%s\\n' "$?" > ${quote(status)}\nsleep 60\n`);
@@ -286,6 +294,212 @@ export default function(pi) {
 				await vi.waitFor(() => expect(() => process.kill(editorProcess.pid, 0)).toThrow());
 			}
 		},
+	);
+
+	it.each([
+		{ name: "defaults", args: [], initialTools: ["read", "bash", "edit", "write"], todo: true, cold: false },
+		{
+			name: "cold checkpoint without builtin defaults",
+			args: ["--no-builtin-tools"],
+			initialTools: [],
+			todo: true,
+			cold: true,
+		},
+		{
+			name: "cold checkpoint registry restrictions",
+			args: ["--tools", "read,todo,known_disabled", "--exclude-tools", "todo"],
+			initialTools: ["read"],
+			todo: false,
+			cold: true,
+		},
+	])(
+		"activates newly installed tools after restarting a used session ($name)",
+		async ({ args, initialTools, todo, cold }) => {
+			const terminal = terminalFixture();
+			const { root, socket, agentDir, status } = terminal;
+			const trace = join(root, "selection.jsonl");
+			const checkpointPath = join(root, "checkpoint.json");
+			const finalCheckpointPath = join(root, "final-checkpoint.json");
+			const send = (text: string) => execFileSync("tmux", ["-L", socket, "send-keys", "-t", "test", text, "Enter"]);
+			const extension = join(root, "observe-selection.ts");
+			writeFileSync(
+				extension,
+				`
+import { appendFileSync } from "node:fs";
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+export default function(pi) {
+	const faux = fauxProvider();
+	pi.registerProvider("faux", { api: faux.api, baseUrl: faux.getModel().baseUrl, apiKey: "faux-key", models: faux.models, streamSimple: faux.provider.streamSimple });
+	pi.registerTool({ name: "known_disabled", label: "Known disabled", description: "Deliberately inactive", parameters: Type.Object({}), execute: async () => ({ content: [], details: {} }) });
+	let resumed = false;
+	const record = (event, ctx) => appendFileSync(${JSON.stringify(trace)}, JSON.stringify({ event, pid: process.pid, sessionId: ctx.sessionManager.getSessionId(), sessionFile: ctx.sessionManager.getSessionFile(), leafId: ctx.sessionManager.getLeafId(), cwd: ctx.cwd, model: ctx.model.id, active: pi.getActiveTools(), known: pi.getAllTools().map(tool => tool.name) }) + "\\n");
+	pi.on("session_start", (_event, ctx) => {
+		resumed = ctx.sessionManager.getBranch().some(entry => entry.type === "message" && entry.message.role === "system");
+		if (!resumed) pi.setActiveTools(pi.getActiveTools().filter(name => name !== "known_disabled"));
+		record("start", ctx);
+		faux.setResponses(resumed && ${todo} ? [
+			fauxAssistantMessage(fauxToolCall("todo", { action: "add", text: "Native restart works" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("todo", { action: "list" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Todo verified")
+		] : [fauxAssistantMessage("Saved seed response"), fauxAssistantMessage("Unselected branch response")]);
+	});
+	pi.registerCommand("select-seed", { handler: async (_args, ctx) => {
+		const first = ctx.sessionManager.getBranch().find(entry => entry.type === "message" && entry.message.role === "assistant");
+		await ctx.navigateTree(first.id, { summarize: false });
+		record("selected", ctx);
+	} });
+	pi.registerCommand("inspect-selection", { handler: async (_args, ctx) => record("inspect", ctx) });
+	pi.on("before_agent_start", (_event, ctx) => record("prompt", ctx));
+	pi.on("agent_settled", (_event, ctx) => { record("settled", ctx); if (resumed && !${cold}) ctx.shutdown(); });
+}
+`,
+			);
+			terminal.start(
+				[...args, "-e", extension, "Save the initial tool declarations"],
+				cold ? [`PI_CHECKPOINT_EXIT_PATH=${checkpointPath}`] : [],
+				true,
+			);
+			const events = () =>
+				readFileSync(trace, "utf8")
+					.trim()
+					.split("\n")
+					.map(
+						(line) =>
+							JSON.parse(line) as {
+								event: string;
+								pid: number;
+								sessionId: string;
+								sessionFile: string;
+								leafId: string;
+								cwd: string;
+								model: string;
+								active: string[];
+								known: string[];
+							},
+					);
+			try {
+				await vi.waitFor(() => expect(events().some((event) => event.event === "settled")).toBe(true), {
+					timeout: 8_000,
+				});
+			} catch (error) {
+				throw new Error(`Seed session did not settle.\n${terminal.screen()}`, { cause: error });
+			}
+			const initial = events().find((event) => event.event === "settled")!;
+			expect(initial.active).toEqual(initialTools);
+			expect(initial.known).toContain("known_disabled");
+			const saved = SessionManager.open(initial.sessionFile);
+			const declarations = saved.buildSessionContext().messages.find((message) => message.role === "system");
+			expect(declarations?.role).toBe("system");
+			expect(declarations?.role === "system" && (declarations.toolsAdded ?? []).map((tool) => tool.name)).toEqual(
+				initial.active,
+			);
+			if (cold) {
+				send("Create an unselected branch");
+				await vi.waitFor(() => expect(events().filter((event) => event.event === "settled")).toHaveLength(2));
+				send("/select-seed");
+				await vi.waitFor(() => expect(events().at(-1)?.event).toBe("selected"));
+				expect(events().at(-1)?.leafId).toBe(initial.leafId);
+				send("/quit");
+				await vi.waitFor(() => expect(existsSync(status), terminal.screen()).toBe(true));
+				expect(readFileSync(status, "utf8").trim(), terminal.screen()).toBe("0");
+				const checkpoint = readSessionCheckpoint(checkpointPath);
+				expect(checkpoint.selection.leafId).toBe(initial.leafId);
+				expect(checkpoint.entries.at(-1)?.id).not.toBe(initial.leafId);
+				expect(checkpoint.toolConfiguration).toEqual(
+					todo
+						? { noBuiltinTools: true }
+						: {
+								allowedToolNames: ["read", "todo", "known_disabled"],
+								excludedToolNames: ["todo"],
+							},
+				);
+				spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+				rmSync(status);
+				// Cold restore must get configuration ONLY from the native artifact, never CLI tool overrides.
+				terminal.start(
+					["--checkpoint", checkpointPath, "-e", extension],
+					[`PI_CHECKPOINT_EXIT_PATH=${finalCheckpointPath}`],
+					true,
+				);
+				await vi.waitFor(() => expect(events().filter((event) => event.event === "start")).toHaveLength(2), {
+					timeout: 8_000,
+				});
+				send("/inspect-selection");
+				await vi.waitFor(() => expect(events().at(-1)?.event).toBe("inspect"));
+				expect(events().at(-1)).toMatchObject({
+					sessionId: initial.sessionId,
+					leafId: initial.leafId,
+					active: initial.active,
+					known: initial.known,
+				});
+				expect(events().filter((event) => event.event === "prompt")).toHaveLength(2);
+			}
+			const extensionsDir = join(agentDir, "extensions");
+			mkdirSync(extensionsDir);
+			copyFileSync(join(packageDir, "examples/extensions/todo.ts"), join(extensionsDir, "todo.ts"));
+			writeFileSync(
+				join(extensionsDir, "hidden.ts"),
+				`
+import { Type } from "typebox";
+export default function(pi) {
+	pi.registerTool({ name: "new_hidden", label: "Hidden", description: "Startup-disabled tool", parameters: Type.Object({}), execute: async () => ({ content: [], details: {} }) });
+	pi.on("session_start", () => pi.setActiveTools(pi.getActiveTools().filter(name => name !== "new_hidden")));
+}
+`,
+			);
+			send("/restart Use todo to add and list");
+			await vi.waitFor(
+				() => expect(events().filter((event) => event.event === "settled")).toHaveLength(cold ? 3 : 2),
+				{ timeout: 12_000 },
+			);
+			const resumed = events().filter((event) => event.event === "start")[cold ? 2 : 1];
+			expect(resumed).toMatchObject({
+				sessionId: initial.sessionId,
+				sessionFile: initial.sessionFile,
+				leafId: initial.leafId,
+				cwd: initial.cwd,
+				model: initial.model,
+			});
+			expect(resumed.pid).not.toBe(events().filter((event) => event.event === "start")[cold ? 1 : 0].pid);
+			const final = events().at(-1)!;
+			expect(events().filter((event) => event.event === "prompt")).toHaveLength(cold ? 3 : 2);
+			if (todo) {
+				expect(final.known).toEqual(expect.arrayContaining(["todo", "new_hidden", "known_disabled"]));
+			} else {
+				expect.soft(final.known).toEqual(["read", "known_disabled"]);
+			}
+			expect.soft(final.active).toEqual([...initial.active, ...(todo ? ["todo"] : [])]);
+			const results = SessionManager.open(initial.sessionFile)
+				.buildSessionContext()
+				.messages.filter((message) => message.role === "toolResult");
+			expect(results).toHaveLength(todo ? 2 : 0);
+			for (const result of results) {
+				expect.soft(result.isError).toBe(false);
+				expect
+					.soft(result.details)
+					.toMatchObject({ todos: [{ id: 1, text: "Native restart works", done: false }] });
+			}
+			if (cold) {
+				// Defaults must survive not just restart's saved selection, but later native /new too.
+				send("/new");
+				await vi.waitFor(() => expect(events().filter((event) => event.event === "start")).toHaveLength(4));
+				send("/inspect-selection");
+				await vi.waitFor(() => expect(events().at(-1)?.event).toBe("inspect"));
+				expect.soft(events().at(-1)?.active).toEqual(todo ? ["todo"] : ["read"]);
+				send("/quit");
+			}
+			await vi.waitFor(() => expect(existsSync(status), terminal.screen()).toBe(true));
+			expect
+				.soft(readFileSync(status, "utf8").trim(), `${terminal.screen()}\n${readFileSync(trace, "utf8")}`)
+				.toBe("0");
+			if (cold) {
+				expect
+					.soft(readSessionCheckpoint(finalCheckpointPath).toolConfiguration)
+					.toEqual(readSessionCheckpoint(checkpointPath).toolConfiguration);
+			}
+		},
+		25_000,
 	);
 
 	it.each([false, true])(

@@ -1,6 +1,7 @@
 import { connect } from "node:net";
 import { isAbsolute, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { SessionCheckpoint } from "../core/checkpoint.ts";
 
 export const RESTART_SOCKET_ENV = "PI_RESTART_SOCKET";
 export const RESTART_HANDOFF_ENV = "PI_RESTART_HANDOFF";
@@ -29,6 +30,8 @@ export interface RestartCheckpoint {
 
 export interface RestartHandoff {
 	checkpoint: RestartCheckpoint;
+	/** Effective registry configuration, including restrictions restored only from a working-session artifact. */
+	toolConfiguration?: SessionCheckpoint["toolConfiguration"];
 	message?: string;
 	failure?: string;
 }
@@ -39,6 +42,7 @@ export type RestartWorkerMessage =
 			type: "pi:restart";
 			request: RestartRequest;
 			checkpoint: RestartCheckpoint;
+			toolConfiguration?: SessionCheckpoint["toolConfiguration"];
 			args: string[];
 			extensions: string[];
 	  };
