@@ -32,8 +32,6 @@ import type {
 	AssistantMessage,
 	CacheRetention,
 	ImageContent,
-	JsonObject,
-	JsonValue,
 	Model,
 	ProviderEnv,
 	ProviderResponse,
@@ -439,7 +437,7 @@ function appendBedrockFailureDiagnostic(
 	fallbackRequestId: string | undefined,
 ): void {
 	const metadata = (error as SdkErrorMetadata)?.$metadata;
-	const details: JsonObject = {};
+	const details: Record<string, unknown> = {};
 
 	if (typeof metadata?.httpStatusCode === "number") details.status = metadata.httpStatusCode;
 
@@ -918,7 +916,7 @@ function createRequiredTextBlock(text: string): ContentBlock.TextMember {
 	return createNonBlankTextBlock(text) ?? { text: EMPTY_TEXT_PLACEHOLDER };
 }
 
-function sanitizeBedrockDocument(value: JsonValue): DocumentType {
+function sanitizeBedrockDocument(value: DocumentType): DocumentType {
 	if (Array.isArray(value)) {
 		return value.map(sanitizeBedrockDocument);
 	}

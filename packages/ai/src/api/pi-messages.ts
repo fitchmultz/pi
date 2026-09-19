@@ -13,8 +13,6 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	CacheRetention,
-	JsonObject,
-	JsonValue,
 	Model,
 	ProviderEnv,
 	SimpleStreamOptions,
@@ -97,9 +95,9 @@ type PiMessagesErrorBody = {
 
 export class PiMessagesResponseError extends Error {
 	code?: string;
-	readonly diagnosticDetails: JsonObject;
+	readonly diagnosticDetails: Record<string, unknown>;
 
-	constructor(message: string, code: string | undefined, diagnosticDetails: JsonObject) {
+	constructor(message: string, code: string | undefined, diagnosticDetails: Record<string, unknown>) {
 		super(message);
 		this.name = "PiMessagesResponseError";
 		this.code = code;
@@ -149,8 +147,8 @@ function createPiMessagesResponseError(
 		url: url.toString(),
 		status: response.status,
 		statusText: response.statusText,
-		...(errorBody?.error === undefined ? {} : { error: errorBody.error as JsonValue }),
-		...(errorBody ? {} : { body: truncateDiagnosticString(body) }),
+		error: errorBody?.error,
+		body: errorBody ? undefined : truncateDiagnosticString(body),
 		timestampMs: Date.now(),
 	});
 }

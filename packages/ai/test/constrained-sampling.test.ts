@@ -227,8 +227,7 @@ describe("constrained tool sampling", () => {
 				},
 			],
 		});
-		const invalidArgumentsList: ToolCall["arguments"][] = [{}, { payload: 42 }];
-		for (const invalidArguments of invalidArgumentsList) {
+		for (const invalidArguments of [{}, { payload: 42 }]) {
 			replayedToolCall.arguments = invalidArguments;
 			expect(() =>
 				convertResponsesMessages(makeModel(), context, new Set(["openai"]), {

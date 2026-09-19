@@ -352,7 +352,7 @@ describe("bedrock convertMessages skips unknown content types", () => {
 	});
 
 	it("removes empty property names only from replayed Bedrock input", async () => {
-		const toolArguments: { path: string; edits: Array<Record<string, string>> } = {
+		const toolArguments = {
 			path: "/workspace/foobar/file.js",
 			edits: [
 				{ oldText: "first", newText: "updated first" },
