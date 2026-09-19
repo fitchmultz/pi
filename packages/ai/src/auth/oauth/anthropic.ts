@@ -1,8 +1,8 @@
 /**
  * Anthropic OAuth flow (Claude Pro/Max)
  *
- * NOTE: This module uses Node.js http.createServer for the OAuth callback server.
- * It is only intended for CLI use, not browser environments.
+ * Uses a local Node.js callback server by default. Server hosts can disable
+ * the listener via the interaction and use the same native manual-code flow.
  */
 
 import type { Server } from "node:http";
@@ -232,10 +232,15 @@ async function exchangeAuthorizationCode(
 }
 
 async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAuthCredential> {
+	interaction.signal.throwIfAborted();
 	const { verifier, challenge } = await generatePKCE();
-	const server = await startCallbackServer(verifier);
+	interaction.signal.throwIfAborted();
+	const server = interaction.localCallbackServer === false ? undefined : await startCallbackServer(verifier);
 	const manualAbort = new AbortController();
-	const onAbort = () => server.cancelWait();
+	const onAbort = () => {
+		manualAbort.abort(interaction.signal.reason);
+		server?.cancelWait();
+	};
 	interaction.signal.addEventListener("abort", onAbort, { once: true });
 	if (interaction.signal.aborted) onAbort();
 	let code: string | undefined;
@@ -244,6 +249,7 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 	let manualError: Error | undefined;
 
 	try {
+		interaction.signal.throwIfAborted();
 		const authParams = new URLSearchParams({
 			code: "true",
 			client_id: CLIENT_ID,
@@ -270,14 +276,15 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 			})
 			.then((input) => {
 				manualInput = input;
-				server.cancelWait();
+				server?.cancelWait();
 			})
 			.catch((error) => {
 				manualError = error instanceof Error ? error : new Error(String(error));
-				server.cancelWait();
+				server?.cancelWait();
 			});
 
-		const result = await server.waitForCode();
+		const result = server ? await server.waitForCode() : await manualPromise;
+		interaction.signal.throwIfAborted();
 		if (manualError) throw manualError;
 		if (result?.code) {
 			code = result.code;
@@ -300,6 +307,7 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 			}
 		}
 
+		interaction.signal.throwIfAborted();
 		if (!code) throw new Error("Missing authorization code");
 		if (!state) throw new Error("Missing OAuth state");
 		interaction.notify({ type: "progress", message: "Exchanging authorization code for tokens..." });
@@ -307,7 +315,7 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 	} finally {
 		interaction.signal.removeEventListener("abort", onAbort);
 		manualAbort.abort();
-		server.server.close();
+		server?.server.close();
 	}
 }
 

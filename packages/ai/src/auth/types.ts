@@ -156,6 +156,13 @@ export type AuthEvent =
 export interface AuthInteraction {
 	signal?: AbortSignal;
 
+	/**
+	 * Anthropic OAuth: set false on server hosts to use only the existing
+	 * manual_code prompt, without opening a local callback listener. Omitted
+	 * or true preserves the local CLI callback race. Other flows ignore this.
+	 */
+	localCallbackServer?: boolean;
+
 	prompt(prompt: AuthPrompt): Promise<string>;
 	notify(event: AuthEvent): void;
 }
