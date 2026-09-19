@@ -1870,7 +1870,7 @@ pi.events.emit("my:event", { ... });
 
 Register or override a model provider dynamically. Useful for proxies, custom endpoints, or team-wide model configurations.
 
-Calls made during the extension factory function are queued and applied once the runner initialises. Calls made after that — for example from a command handler following a user setup flow — take effect immediately without requiring a `/reload`.
+Calls made during the extension factory function are queued. CLI startup and SDK `createAgentSessionServices()` apply them and await local availability refresh before initial model selection; otherwise they are applied when the runner binds. Calls made after binding — for example from a command handler following a user setup flow — take effect immediately without requiring a `/reload`.
 
 Dynamic providers can implement `refreshModels`. Pi calls it during model refresh, publishes the returned list synchronously through the provider, and passes the canonical credential/stored-catalog/network/signal context. The extension decides whether to persist catalog metadata through generation-checked `context.publish({ persist: entry })`; live servers such as llama.cpp can return models without persisting them.
 
@@ -1983,6 +1983,7 @@ The object form accepts a complete pi-ai `Provider`, including native `auth`, `g
 - `baseUrl` - API endpoint URL. Required when defining models.
 - `apiKey` - API key literal, environment interpolation (`$ENV_VAR` or `${ENV_VAR}`), or leading `!command`. Required when defining models (unless `oauth` provided). `$$` escapes `$`, and `$!` escapes a literal `!` without triggering command execution.
 - `api` - API type: `"anthropic-messages"`, `"openai-completions"`, `"openai-responses"`, etc.
+- `ambientAuth` - Required native `ApiKeyAuth.check` and `ApiKeyAuth.resolve` callbacks for ambient-only auth. Preserves native login, catalogs, and transports; local/configured credentials win. An installed resolver never falls through to native ambient auth. Register in the factory for early CLI availability. See [Ambient Authentication](custom-provider.md#ambient-authentication).
 - `headers` - Custom headers to include in requests.
 - `authHeader` - If true, adds `Authorization: Bearer` header automatically.
 - `models` - Array of model definitions. If provided, replaces all existing models for this provider. Model definitions can set `baseUrl` to override the provider endpoint for that model.
