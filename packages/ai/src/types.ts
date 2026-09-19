@@ -381,7 +381,7 @@ export interface ToolCall {
 	type: "toolCall";
 	id: string;
 	name: string;
-	arguments: JsonObject;
+	arguments: Record<string, any>;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
 	/** OpenAI Responses namespace for calls to dynamically loaded or namespaced tools. */
 	namespace?: string;
@@ -412,46 +412,7 @@ export interface Usage {
 
 export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted" | "deferred";
 
-export type JsonValue = null | boolean | number | string | readonly JsonValue[] | JsonObject;
-export type JsonObject = { [key: string]: JsonValue };
-
-type IsAny<T> = 0 extends 1 & T ? true : false;
-type IsExactlyJsonValue<T> = [T] extends [JsonValue] ? ([JsonValue] extends [T] ? true : false) : false;
-// Build a lazy structural shape rather than recursively reducing each property
-// to a boolean. TypeScript can compare recursive shapes (including interfaces)
-// to JsonValue without circular mapped-property evaluation. Invalid leaves stay
-// non-JSON; using never would silently erase them from unions.
-type JsonCompatibilityShape<T> = IsAny<T> extends true
-	? symbol
-	: unknown extends T
-		? symbol
-		: IsExactlyJsonValue<T> extends true
-			? JsonValue
-			: T extends null | boolean | number | string
-				? T
-				: T extends readonly unknown[]
-					? { [K in keyof T]: JsonCompatibilityShape<T[K]> }
-					: T extends (...args: never[]) => unknown
-						? symbol
-						: T extends object
-							? Extract<keyof T, symbol> extends never
-								? { [K in keyof T]: JsonCompatibilityShape<Exclude<T[K], undefined>> }
-								: symbol
-							: symbol;
-type IsJsonCompatible<T> = [JsonCompatibilityShape<T>] extends [JsonValue] ? true : false;
-
-/** The JSON representation of a typed in-memory value. Optional object properties remain optional. */
-export type JsonRepresentation<T> = IsAny<T> extends true
-	? JsonValue
-	: unknown extends T
-		? JsonValue
-		: [T] extends [JsonValue]
-			? T
-			: T extends readonly unknown[]
-				? { [TKey in keyof T]: JsonRepresentation<Exclude<T[TKey], undefined>> }
-				: T extends object
-					? { [TKey in keyof T]: JsonRepresentation<Exclude<T[TKey], undefined>> }
-					: never;
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export interface DeferredHandle {
 	provider: string;
@@ -543,19 +504,17 @@ export interface AssistantMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
-export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails> extends true
-	? {
-			role: "toolResult";
-			toolCallId: string;
-			toolName: string;
-			content: (TextContent | ImageContent)[]; // Supports text and images
-			details?: JsonRepresentation<TDetails>;
-			/** Usage from the tool execution itself, if available. Not part of main LLM context accounting. */
-			usage?: Usage;
-			isError: boolean;
-			timestamp: number; // Unix timestamp in milliseconds
-		}
-	: never;
+export interface ToolResultMessage<TDetails = any> {
+	role: "toolResult";
+	toolCallId: string;
+	toolName: string;
+	content: (TextContent | ImageContent)[]; // Supports text and images
+	details?: TDetails;
+	/** Usage from the tool execution itself, if available. Not part of main LLM context accounting. */
+	usage?: Usage;
+	isError: boolean;
+	timestamp: number; // Unix timestamp in milliseconds
+}
 
 export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;
 

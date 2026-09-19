@@ -1,5 +1,4 @@
 import { stripVTControlCharacters } from "node:util";
-import type { JsonObject } from "@earendil-works/pi-ai";
 import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
@@ -64,7 +63,7 @@ function assistantMessage(id: string, parentId: string | null, text: string): Se
 function toolCallOnlyAssistant(
 	id: string,
 	parentId: string | null,
-	args: JsonObject = { path: "test.ts" },
+	args: Record<string, unknown> = { path: "test.ts" },
 ): SessionMessageEntry {
 	return {
 		type: "message",
@@ -142,7 +141,7 @@ describe("TreeSelectorComponent", () => {
 		test(`renders the selected read label as ${scenario.expected}`, () => {
 			const call = toolCallOnlyAssistant("read-call", null, {
 				path: "report.txt",
-				...(scenario.json === undefined ? {} : { json: scenario.json }),
+				json: scenario.json,
 				offset: 2,
 				limit: 3,
 			});

@@ -17,7 +17,6 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
-	JsonObject,
 	Model,
 	SimpleStreamOptions,
 	StopReason,
@@ -69,7 +68,7 @@ export interface FauxResponse {
 	/** Text content blocks. String shorthand becomes a single text block. */
 	text?: string;
 	/** Tool calls to include in the response. */
-	toolCalls?: Array<{ id?: string; name: string; args: JsonObject }>;
+	toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown> }>;
 	/** Thinking content. */
 	thinking?: string;
 	/** Stop reason. Defaults to "stop", or "toolUse" if toolCalls are present, or "error" if error is set. */

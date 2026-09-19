@@ -15,7 +15,6 @@ import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	AssistantMessage,
 	ImageContent,
-	JsonObject,
 	Model,
 	StopReason,
 	StreamOptions,
@@ -637,8 +636,7 @@ export async function decodeGoogleStream(
 						type: "toolCall",
 						id: toolCallId,
 						name: part.functionCall.name || "",
-						// The SDK decodes these arguments from the provider's JSON response.
-						arguments: (part.functionCall.args ?? {}) as JsonObject,
+						arguments: part.functionCall.args ?? {},
 						...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
 					};
 
