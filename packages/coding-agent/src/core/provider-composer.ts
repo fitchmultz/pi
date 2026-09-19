@@ -47,6 +47,10 @@ export interface ProviderConfigInput {
 	name?: string;
 	baseUrl?: string;
 	apiKey?: string;
+	ambientAuth?: {
+		check: NonNullable<ApiKeyAuth["check"]>;
+		resolve: ApiKeyAuth["resolve"];
+	};
 	api?: Api;
 	streamSimple?: (
 		model: Model<Api>,
@@ -320,18 +324,22 @@ function composeApiKeyAuth(
 	const inherited = base?.auth.apiKey;
 	const rawKey = configuredApiKey(config, extension);
 	const oauth = extension?.oauth ?? base?.auth.oauth;
-	// OAuth-only providers get no fabricated API-key login method.
-	if (!inherited && rawKey === undefined && oauth) return undefined;
+	const ambient = extension?.ambientAuth;
+	// Ambient resolution does not introduce API-key login on OAuth-only providers.
+	const oauthOnly = !inherited && rawKey === undefined && oauth;
+	if (oauthOnly && !ambient) return undefined;
 	const rawHeaders = configuredHeaders(config, extension);
 	const authHeader = extension?.authHeader ?? config?.authHeader ?? false;
 	return {
 		name: inherited?.name ?? "API key",
 		login:
 			inherited?.login ??
-			(async (interaction: AuthInteraction) => ({
-				type: "api_key",
-				key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
-			})),
+			(oauthOnly
+				? undefined
+				: async (interaction: AuthInteraction) => ({
+						type: "api_key",
+						key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
+					})),
 		check: async (input) => {
 			if (input.credential) {
 				if (inherited?.check) return inherited.check(input);
@@ -347,6 +355,7 @@ function composeApiKeyAuth(
 				}
 				return { type: "api_key", source: "configured API key" };
 			}
+			if (ambient) return ambient.check(input);
 			if (inherited?.check) return inherited.check(input);
 			const resolved = await inherited?.resolve(input);
 			return resolved ? { type: "api_key", source: resolved.source } : undefined;
@@ -366,7 +375,8 @@ function composeApiKeyAuth(
 					? await inherited.resolve({ ...input, credential: { type: "api_key", key } })
 					: { auth: { apiKey: key }, source: "configured API key" };
 			} else {
-				result = await inherited?.resolve(input);
+				// An installed resolver owns ambient auth, including an unconfigured result.
+				result = ambient ? await ambient.resolve(input) : await inherited?.resolve(input);
 			}
 			if (!result) return undefined;
 			const explicitEnv = { ...(input.credential?.env ?? {}), ...(result.env ?? {}) };

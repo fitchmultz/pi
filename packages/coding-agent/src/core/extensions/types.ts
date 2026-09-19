@@ -18,6 +18,7 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import type {
 	Api,
+	ApiKeyAuth,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	ConstrainedSamplingConfig,
@@ -1566,8 +1567,9 @@ export interface ExtensionAPI {
 	 * If `oauth` is provided: registers OAuth provider for /login support.
 	 * If `streamSimple` is provided: registers a custom API stream handler.
 	 *
-	 * During initial extension load this call is queued and applied once the
-	 * runner has bound its context. After that it takes effect immediately, so
+	 * During initial extension load this call is queued. CLI startup and
+	 * createAgentSessionServices apply it before initial model selection;
+	 * otherwise it is applied when the runner binds. After that it takes effect immediately, so
 	 * it is safe to call from command handlers or event callbacks without
 	 * requiring a `/reload`.
 	 *
@@ -1644,6 +1646,16 @@ export interface ProviderConfig {
 	baseUrl?: string;
 	/** API key literal, env interpolation ($ENV_VAR or ${ENV_VAR}), or leading !command. Required when defining models (unless oauth provided). */
 	apiKey?: string;
+	/**
+	 * Override ambient auth without replacing native login, catalogs, or transports.
+	 * Called only without a stored/runtime credential or configured apiKey; receives no credential.
+	 * Both callbacks must honor signal. check reports the actual auth type (including OAuth).
+	 * resolve returns the full native AuthResult; undefined does not fall back to native ambient auth.
+	 */
+	ambientAuth?: {
+		check: NonNullable<ApiKeyAuth["check"]>;
+		resolve: ApiKeyAuth["resolve"];
+	};
 	/** API type. Required at provider or model level when defining models. */
 	api?: Api;
 	/**

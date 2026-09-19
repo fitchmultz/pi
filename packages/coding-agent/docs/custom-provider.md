@@ -19,6 +19,7 @@ See these complete provider examples:
 - [Example Extensions](#example-extensions)
 - [Quick Reference](#quick-reference)
 - [Override Existing Provider](#override-existing-provider)
+- [Ambient Authentication](#ambient-authentication)
 - [Register New Provider](#register-new-provider)
 - [Unregister Provider](#unregister-provider)
 - [OAuth Support](#oauth-support)
@@ -30,7 +31,7 @@ See these complete provider examples:
 
 ## Quick Reference
 
-Extensions can register either a complete pi-ai `Provider` or use the legacy provider-config form. Prefer a complete provider when custom authentication, filtering, refresh, or streaming behavior is required. Pi composes `models.json` overrides above registered native providers.
+Extensions can register either a complete pi-ai `Provider` or use the legacy provider-config form. Prefer a complete provider when replacing authentication, filtering, refresh, or streaming behavior. To add shared-account authentication to a built-in provider while retaining its native catalogs and transports, use `ambientAuth` in the config form below. Pi composes `models.json` overrides above registered native providers.
 
 ```typescript
 import { createProvider, openAICompletionsApi } from "@earendil-works/pi-ai";
@@ -117,6 +118,37 @@ pi.registerProvider("google", {
 ```
 
 When only `baseUrl` and/or `headers` are provided (no `models`), all existing models for that provider are preserved with the new endpoint.
+
+## Ambient Authentication
+
+Register `ambientAuth` in the extension factory, not `session_start`, to supply shared-account auth before CLI initial model selection and `--list-models`. It composes with the existing provider: native login, subscription metadata, direct transports, and cached/automatically refreshed catalogs remain intact. Do not supply `models` or a replacement native provider just to add ambient auth.
+
+```typescript
+import type { ApiKeyAuth } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+// Your integration supplies callbacks backed by its existing saved-account owner.
+export function sharedAccountExtension(accounts: Record<string, {
+  check: NonNullable<ApiKeyAuth["check"]>;
+  resolve: ApiKeyAuth["resolve"];
+}>) {
+  return (pi: ExtensionAPI) => {
+    for (const provider of ["anthropic", "openai-codex"]) {
+      if (accounts[provider]) pi.registerProvider(provider, { ambientAuth: accounts[provider] });
+    }
+  };
+}
+```
+
+Both callbacks receive the native `{ ctx, signal, credential? }` input, with `credential` undefined. Honor `signal` and pass it to blocking I/O. `check` is required and should be side-effect-free: return `{ type: "oauth", source: "Shared subscription" }` for a subscription, `{ type: "api_key", source: "Shared API key" }` for a key, or `undefined` when unconfigured. Subscription labeling also requires the retained provider's native `oauth.isSubscription` flag.
+
+`resolve` returns a fresh native `AuthResult` atomically: `{ auth: { apiKey?, headers?, baseUrl? }, env?, source? }`. Pi does not persist it as a local credential. Return the entire envelope from the account owner, not just its token. Existing configured headers and `authHeader` still compose over this result.
+
+Priority is explicit request/CLI key, stored local credential, configured `apiKey`, then `ambientAuth`. Native `/login` remains a deliberate local override; `/logout` reveals ambient auth again. Failed local OAuth refresh never falls through to ambient auth. OAuth-only providers such as Codex do not gain an API-key login method from this option.
+
+An installed ambient resolver owns that provider's ambient policy: returning `undefined` does **not** try native environment credentials or another payer. Throw a sanitized reconnect error for a selected-but-broken account; do not silently switch accounts. Without this option, native ambient resolution is unchanged. Unregistering restores built-in behavior.
+
+This is an extension-only function capability, not a `models.json` field. SDK hosts needing early selection should use `createAgentSessionServices()` before `createAgentSessionFromServices()` (see [sdk.md](sdk.md)); bare `createAgentSession()` does not flush factory registrations before selection. Standalone `pi update --models` does not discover session extensions.
 
 ## Register New Provider
 
@@ -670,6 +702,12 @@ interface ProviderConfig {
 
   /** API key literal, env interpolation ($ENV_VAR or ${ENV_VAR}), or !command. Required when defining models (unless oauth). */
   apiKey?: string;
+
+  /** Ambient-only native auth callbacks; local/configured credentials take priority. */
+  ambientAuth?: {
+    check: NonNullable<ApiKeyAuth["check"]>;
+    resolve: ApiKeyAuth["resolve"];
+  };
 
   /** API type for streaming. Required at provider or model level when defining models. */
   api?: Api;
