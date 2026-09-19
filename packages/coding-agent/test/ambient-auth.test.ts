@@ -274,6 +274,13 @@ describe("ambient auth composition", () => {
 	});
 
 	it("joins a superseding availability pass instead of returning an empty startup snapshot", async () => {
+		// Keep unrelated providers entirely in memory: native profile/file checks can
+		// otherwise keep the older pass pending after the next event-loop turn.
+		for (const provider of runtime.getProviders()) {
+			runtime.registerProvider(provider.id, {
+				ambientAuth: { check: async () => undefined, resolve: async () => undefined },
+			});
+		}
 		const ambientAuth = sharedAuth();
 		runtime.registerProvider("openai-codex", { ambientAuth });
 		await runtime.flushForCheckpoint();
