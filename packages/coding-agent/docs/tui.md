@@ -121,6 +121,8 @@ async execute(toolCallId, params, signal, onUpdate, ctx) {
 }
 ```
 
+A blocking custom UI owns keyboard focus before its factory runs, including while an async factory is pending. Calling `done()` releases that UI's input ownership immediately; it does not make unfinished factory work checkpoint-safe. A component returned after `done()` is disposed without being mounted.
+
 ## Overlays
 
 Overlays render components on top of existing content without clearing the screen. Pass `{ overlay: true }` to `ctx.ui.custom()`:
@@ -173,6 +175,8 @@ const result = await ctx.ui.custom<string | null>(
 ```
 
 ### Overlay Focus
+
+Overlay options (including an `overlayOptions` function) are resolved when the request starts, before the component factory runs. `nonCapturing: true` and responsive `visible` predicates retain their normal input behavior during factory work. `onHandle` runs after the component is ready. Closing a custom overlay removes its own stack entry, not another overlay opened above it.
 
 A focused visible overlay keeps input ownership across temporary non-overlay UI. If an overlay opens another `ctx.ui.custom()` component without `{ overlay: true }`, that replacement UI receives input while it is active; when it closes, the focused overlay can reclaim input.
 

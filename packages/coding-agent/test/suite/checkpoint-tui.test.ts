@@ -3,7 +3,7 @@ import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { Text } from "@earendil-works/pi-tui";
+import { type OverlayHandle, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
@@ -12,6 +12,7 @@ import { createAgentSessionRuntime } from "../../src/core/agent-session-runtime.
 import { readSessionCheckpoint } from "../../src/core/checkpoint.ts";
 import type { ExtensionAPI, ExtensionContext } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import { BorderedLoader } from "../../src/modes/interactive/components/bordered-loader.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
@@ -304,6 +305,310 @@ describe("native checkpoint TUI boundary", () => {
 		expect(hold.sleepReady).toBe(true);
 		hold.release();
 		await running;
+	});
+
+	it.each([false, true])("reserves custom UI input before awaiting the factory (overlay: %s)", async (overlay) => {
+		const factory = deferred();
+		let shortcuts = 0;
+		const f = await setup({
+			extensionFactories: [
+				(pi) =>
+					pi.registerShortcut("ctrl+shift+e", {
+						handler: (ctx) => {
+							shortcuts++;
+							ctx.ui.setEditorText("");
+						},
+					}),
+			],
+		});
+		const ui = f.mode.getExtensionUIContext();
+		ui.setEditorText("pending draft");
+		let close!: () => void;
+		const dialog = ui.custom(
+			async (_tui, _theme, _keys, done) => {
+				close = () => done(undefined);
+				await factory.promise;
+				return new Text("Pending factory mounted");
+			},
+			{ overlay },
+		);
+		f.terminal.sendInput("\x1b[101;6u");
+		f.terminal.sendInput("x");
+		expect(shortcuts).toBe(0);
+		expect(ui.getEditorText()).toBe("pending draft");
+		expect(f.mode.canQuiesceForCheckpoint()).toBe(false);
+		factory.resolve();
+		await f.terminal.waitForRender();
+		f.terminal.sendInput("\x1b[101;6u");
+		expect(shortcuts).toBe(0);
+		close();
+		await dialog;
+		expect(ui.getEditorText()).toBe("pending draft");
+		ui.setEditorText("");
+		const hold = await f.acquire();
+		expect(hold.sleepReady).toBe(true);
+		hold.release();
+		f.terminal.sendInput("\x1b[101;6u");
+		await vi.waitFor(() => expect(shortcuts).toBe(1));
+	});
+
+	it.each(["passive", "invisible", "dynamic-passive"])(
+		"preserves %s overlay input semantics while pending",
+		async (kind) => {
+			const f = await setup();
+			const ui = f.mode.getExtensionUIContext();
+			const factory = deferred();
+			let close!: () => void;
+			let handle!: OverlayHandle;
+			const component = {
+				focused: false,
+				inputs: [] as string[],
+				render: () => ["NONMODAL"],
+				invalidate() {},
+				handleInput(data: string) {
+					this.inputs.push(data);
+				},
+			};
+			const opts = kind === "invisible" ? { visible: () => false } : { nonCapturing: true };
+			const dialog = ui.custom(
+				async (_tui, _theme, _keys, done) => {
+					close = () => done(undefined);
+					await factory.promise;
+					return component;
+				},
+				{
+					overlay: true,
+					overlayOptions: kind === "dynamic-passive" ? () => opts : opts,
+					onHandle: (h) => {
+						handle = h;
+					},
+				},
+			);
+			f.terminal.sendInput("x");
+			expect(ui.getEditorText()).toBe("x");
+			factory.resolve();
+			await vi.waitFor(() => expect(handle).toBeDefined());
+			f.terminal.sendInput("y");
+			expect(ui.getEditorText()).toBe("xy");
+			if (kind !== "invisible") {
+				handle.focus();
+				f.terminal.sendInput("z");
+				expect(component.focused).toBe(true);
+				expect(component.inputs).toEqual(["z"]);
+				handle.unfocus();
+				f.terminal.sendInput("w");
+				expect(ui.getEditorText()).toBe("xyw");
+			}
+			close();
+			await dialog;
+		},
+	);
+
+	it.each([false, true])("releases rejected factories and ignores late done (overlay: %s)", async (overlay) => {
+		const f = await setup();
+		const ui = f.mode.getExtensionUIContext();
+		const factory = deferred();
+		let close!: () => void;
+		const dialog = ui.custom(
+			async (_tui, _theme, _keys, done) => {
+				close = () => done(undefined);
+				await factory.promise;
+				throw new Error("factory failed");
+			},
+			{ overlay },
+		);
+		const rejection = expect(dialog).rejects.toThrow("factory failed");
+		f.terminal.sendInput("lost");
+		expect(ui.getEditorText()).toBe("");
+		factory.resolve();
+		await rejection;
+		f.terminal.sendInput("restored");
+		close();
+		expect(ui.getEditorText()).toBe("restored");
+		ui.setEditorText("");
+		const hold = await f.acquire();
+		expect(hold.sleepReady).toBe(true);
+		hold.release();
+	});
+
+	it.each([false, true])(
+		"early done releases input, not unfinished factory ownership (overlay: %s)",
+		async (overlay) => {
+			const f = await setup();
+			const ui = f.mode.getExtensionUIContext();
+			const factory = deferred();
+			const dispose = vi.fn();
+			await ui.custom(
+				async (_tui, _theme, _keys, done) => {
+					done(undefined);
+					await factory.promise;
+					return { render: () => ["must never mount"], invalidate() {}, dispose };
+				},
+				{ overlay },
+			);
+			f.terminal.sendInput("ordinary input");
+			expect(ui.getEditorText()).toBe("ordinary input");
+			ui.setEditorText("");
+			let ready = false;
+			const acquisition = f.acquire().then((hold) => {
+				ready = true;
+				return hold;
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(ready).toBe(false);
+			expect(f.mode.canQuiesceForCheckpoint()).toBe(false);
+			factory.resolve();
+			const hold = await acquisition;
+			expect(dispose).toHaveBeenCalledTimes(1);
+			expect(hold.sleepReady).toBe(true);
+			hold.release();
+		},
+	);
+
+	it.each([false, true])("keeps nested overlay ownership (close parent first: %s)", async (parentFirst) => {
+		const f = await setup();
+		const ui = f.mode.getExtensionUIContext();
+		const factory = deferred();
+		let closeParent!: () => void;
+		let closeChild!: () => void;
+		let child!: Promise<void>;
+		const parentInputs: string[] = [];
+		const childInputs: string[] = [];
+		const parent = ui.custom(
+			async (_tui, _theme, _keys, done) => {
+				closeParent = () => done(undefined);
+				child = ui.custom(
+					(_a, _b, _c, doneChild) => {
+						closeChild = () => doneChild(undefined);
+						return { render: () => ["CHILD"], invalidate() {}, handleInput: (data) => childInputs.push(data) };
+					},
+					{ overlay: true },
+				);
+				await factory.promise;
+				return { render: () => ["PARENT"], invalidate() {}, handleInput: (data) => parentInputs.push(data) };
+			},
+			{ overlay: true },
+		);
+		await f.terminal.waitForRender();
+		f.terminal.sendInput("a");
+		factory.resolve();
+		await f.terminal.waitForRender();
+		f.terminal.sendInput("b");
+		expect(parentInputs).toEqual([]);
+		expect(childInputs).toEqual(["a", "b"]);
+		if (parentFirst) {
+			closeParent();
+			await parent;
+			f.terminal.sendInput("c");
+			expect(childInputs).toEqual(["a", "b", "c"]);
+		} else {
+			closeChild();
+			await child;
+			f.terminal.sendInput("c");
+			expect(parentInputs).toEqual(["c"]);
+		}
+		expect(f.mode.canQuiesceForCheckpoint()).toBe(false);
+		closeParent();
+		closeChild();
+		await Promise.all([parent, child]);
+		f.terminal.sendInput("d");
+		expect(ui.getEditorText()).toBe("d");
+	});
+
+	it("restores a visible overlay after a pending replacement rejects", async () => {
+		const f = await setup();
+		const ui = f.mode.getExtensionUIContext();
+		const factory = deferred();
+		const inputs: string[] = [];
+		let close!: () => void;
+		const overlay = ui.custom(
+			(_a, _b, _c, done) => {
+				close = () => done(undefined);
+				return { render: () => ["OVERLAY"], invalidate() {}, handleInput: (data) => inputs.push(data) };
+			},
+			{ overlay: true },
+		);
+		await f.terminal.waitForRender();
+		const replacement = ui.custom(async () => {
+			await factory.promise;
+			throw new Error("cancelled");
+		});
+		const rejection = expect(replacement).rejects.toThrow("cancelled");
+		f.terminal.sendInput("blocked");
+		expect(inputs).toEqual([]);
+		factory.resolve();
+		await rejection;
+		f.terminal.sendInput("resumed");
+		expect(inputs).toEqual(["resumed"]);
+		close();
+		await overlay;
+	});
+
+	it("pending cancellation releases focus while a rejected cleanup tail still blocks capture", async () => {
+		const f = await setup();
+		const ui = f.mode.getExtensionUIContext();
+		const finish = deferred();
+		let cancel!: () => void;
+		const dialog = ui.custom(
+			async (_a, _b, _c, done) => {
+				cancel = () => done(null);
+				await finish.promise;
+				throw new Error("cancelled cleanup");
+			},
+			{ overlay: true },
+		);
+		f.terminal.sendInput("blocked");
+		expect(ui.getEditorText()).toBe("");
+		cancel();
+		expect(await dialog).toBe(null);
+		f.terminal.sendInput("released");
+		expect(ui.getEditorText()).toBe("released");
+		ui.setEditorText("");
+		let ready = false;
+		const acquisition = f.acquire().then((hold) => {
+			ready = true;
+			return hold;
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(ready).toBe(false);
+		finish.resolve();
+		const hold = await acquisition;
+		expect(hold.sleepReady).toBe(true);
+		hold.release();
+	});
+
+	it("cleans up when the overlay handle callback throws", async () => {
+		const f = await setup();
+		const dispose = vi.fn();
+		const ui = f.mode.getExtensionUIContext();
+		await expect(
+			ui.custom(() => ({ render: () => ["UI"], invalidate() {}, dispose }), {
+				overlay: true,
+				onHandle: () => {
+					throw new Error("handle failed");
+				},
+			}),
+		).rejects.toThrow("handle failed");
+		expect(dispose).toHaveBeenCalledTimes(1);
+		f.terminal.sendInput("restored");
+		expect(ui.getEditorText()).toBe("restored");
+	});
+
+	it("ordinary loader cancellation transfers input immediately", async () => {
+		const f = await setup();
+		const ui = f.mode.getExtensionUIContext();
+		let loader!: BorderedLoader;
+		const dialog = ui.custom((_tui, theme, _keys, done) => {
+			loader = new BorderedLoader(_tui, theme, "Cancellable work");
+			loader.onAbort = () => done(null);
+			return loader;
+		});
+		await f.terminal.waitForRender();
+		f.terminal.sendInput("\x1b");
+		expect(await dialog).toBe(null);
+		expect(loader.signal.aborted).toBe(true);
+		f.terminal.sendInput("after cancellation");
+		expect(ui.getEditorText()).toBe("after cancellation");
 	});
 
 	it("joins an async custom UI factory even when it calls done before its final write", async () => {

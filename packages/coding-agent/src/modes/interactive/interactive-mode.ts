@@ -30,6 +30,7 @@ import {
 	fuzzyFilter,
 	getCapabilities,
 	hyperlink,
+	isFocusable,
 	Markdown,
 	matchesKey,
 	Spacer,
@@ -3015,55 +3016,88 @@ export class InteractiveMode {
 		};
 
 		return new Promise((resolve, reject) => {
-			let component: Component & { dispose?(): void };
+			let component: (Component & { dispose?(): void }) | undefined;
 			let closed = false;
-
-			const close = (result: T) => {
-				if (closed) return;
-				closed = true;
-				if (isOverlay) this.ui.hideOverlay();
-				else restoreEditor();
-				// Note: both branches above already call requestRender
-				resolve(result);
+			let focused = false;
+			let handle: OverlayHandle | undefined;
+			// Keep one focus/overlay identity from acceptance through mounting. Replacing
+			// an overlay after awaiting would put it above a child opened by its factory.
+			const host = new (class extends Container {
+				get focused() {
+					return focused;
+				}
+				set focused(value: boolean) {
+					focused = value;
+					if (component && isFocusable(component)) component.focused = value;
+				}
+				get wantsKeyRelease() {
+					return component?.wantsKeyRelease;
+				}
+				handleInput(data: string) {
+					component?.handleInput?.(data);
+				}
+			})();
+			const dispose = () => {
+				const current = component;
+				component = undefined;
+				host.clear();
 				try {
-					component?.dispose?.();
+					current?.dispose?.();
 				} catch {
 					/* ignore dispose errors */
 				}
 			};
+			const unmount = () => {
+				if (isOverlay) handle?.hide();
+				else restoreEditor();
+			};
+			const close = (result: T) => {
+				if (closed) return;
+				closed = true;
+				unmount();
+				resolve(result);
+				dispose();
+			};
+
+			const overlayOptions = isOverlay
+				? typeof options?.overlayOptions === "function"
+					? options.overlayOptions()
+					: options?.overlayOptions
+				: undefined;
+			if (isOverlay) {
+				handle = this.ui.showOverlay(
+					host,
+					overlayOptions ?? {
+						get width() {
+							return (component as { width?: number } | undefined)?.width || undefined;
+						},
+					},
+				);
+			} else {
+				this.disposeActiveSelector();
+				this.editorContainer.clear();
+				this.editorContainer.addChild(host);
+				this.ui.setFocus(host);
+				this.ui.requestRender();
+			}
 
 			this.checkpointCallback(factory)(this.ui, theme, this.keybindings, close)
 				.then((c) => {
-					if (closed) return;
 					component = c;
-					if (isOverlay) {
-						// Resolve overlay options - can be static or dynamic function
-						const resolveOptions = (): OverlayOptions | undefined => {
-							if (options?.overlayOptions) {
-								const opts =
-									typeof options.overlayOptions === "function"
-										? options.overlayOptions()
-										: options.overlayOptions;
-								return opts;
-							}
-							// Fallback: use component's width property if available
-							const w = (component as { width?: number }).width;
-							return w ? { width: w } : undefined;
-						};
-						const handle = this.ui.showOverlay(component, resolveOptions());
-						// Expose handle to caller for visibility control
-						options?.onHandle?.(handle);
-					} else {
-						this.disposeActiveSelector();
-						this.editorContainer.clear();
-						this.editorContainer.addChild(component);
-						this.ui.setFocus(component);
-						this.ui.requestRender();
+					if (closed) {
+						dispose();
+						return;
 					}
+					host.addChild(c);
+					host.focused = focused;
+					this.ui.requestRender();
+					if (handle) options?.onHandle?.(handle);
 				})
 				.catch((err) => {
 					if (closed) return;
-					if (!isOverlay) restoreEditor();
+					closed = true;
+					unmount();
+					dispose();
 					reject(err);
 				});
 		});
