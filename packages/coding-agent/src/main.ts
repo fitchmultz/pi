@@ -218,7 +218,6 @@ async function runAuthCommand(args: string[]): Promise<boolean> {
 
 async function prepareInitialMessage(
 	parsed: Args,
-	autoResizeImages: boolean,
 	stdinContent?: string,
 ): Promise<{
 	initialMessage?: string;
@@ -228,7 +227,8 @@ async function prepareInitialMessage(
 		return buildInitialMessage({ parsed, stdinContent });
 	}
 
-	const { text, images } = await processFileArguments(parsed.fileArgs, { autoResizeImages });
+	// AgentSession resizes these after extension hooks select the request model.
+	const { text, images } = await processFileArguments(parsed.fileArgs, { autoResizeImages: false });
 	return buildInitialMessage({
 		parsed,
 		fileText: text,
@@ -1011,11 +1011,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("readPipedStdin");
 
-	const { initialMessage, initialImages } = await prepareInitialMessage(
-		parsed,
-		settingsManager.getImageAutoResize(),
-		stdinContent,
-	);
+	const { initialMessage, initialImages } = await prepareInitialMessage(parsed, stdinContent);
 	time("prepareInitialMessage");
 	// pi reads user-authored themes, so it opts into full validation before any theme loads.
 	setThemeJsonValidator(validateThemeJson);
