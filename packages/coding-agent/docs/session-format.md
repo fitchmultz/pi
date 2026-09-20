@@ -465,6 +465,12 @@ Key methods for working with sessions programmatically.
 - `setSessionFile(path)` - Switch to a different session file
 - `createBranchedSession(leafId)` - Extract branch to new session file
 
+### Persistence Failures
+
+Appends accept the entry into memory before synchronous journal I/O. If I/O throws, the entry, ID, parent, leaf, revision and label indexes remain accepted; do not repeat the append to retry saving it. `flush()` retries failed persistence using the complete native entry list, including repair of partial writes. Later appends also reconcile a prior failure before returning successfully. Errors continue to propagate until persistence succeeds.
+
+`flush()` does not change entries, revisions or the selected leaf, and emits no events. It is a no-op for in-memory sessions and ordinary pre-first-assistant deferred journals. Replacing a manager's session via `newSession`, `setSessionFile` or `createBranchedSession` first retries failed persistence so replacement cannot forget unsaved entries. This is not a filesystem freeze or a crash-durability guarantee; retain the live process after a failed save.
+
 ### Instance Methods - Appending (all return entry ID)
 - `appendMessage(message)` - Add message
 - `appendThinkingLevelChange(level)` - Record thinking change

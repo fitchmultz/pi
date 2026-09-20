@@ -946,6 +946,8 @@ export class SessionManager {
 	private cwd: string;
 	private persist: boolean;
 	private flushed: boolean = false;
+	/** A failed write may have left missing entries or a partial JSONL record. */
+	private needsRewrite = false;
 	private fileEntries: FileEntry[] = [];
 	private entriesRevision = 0;
 	private byId: Map<string, SessionEntry> = new Map();
@@ -979,6 +981,7 @@ export class SessionManager {
 
 	/** Switch to a different session file (used for resume and branching) */
 	setSessionFile(sessionFile: string): void {
+		this.flush();
 		this._setSessionFile(sessionFile);
 	}
 
@@ -1013,6 +1016,7 @@ export class SessionManager {
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
+		this.flush();
 		this.sessionId = options?.id ?? createSessionId();
 		const timestamp = new Date().toISOString();
 		const header: SessionHeader = {
@@ -1078,9 +1082,13 @@ export class SessionManager {
 		}
 	}
 
-	private _rewriteFile(): void {
+	private _rewriteFile(flag: "w" | "wx" = "w"): void {
 		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
+		this.needsRewrite = true;
+		const fd = openSync(this.sessionFile, flag);
+		// Once opened, retries must repair this file even if writing or closing fails.
+		// A failed exclusive open never authorizes overwriting an existing file.
+		this.flushed = true;
 		try {
 			for (const entry of this.fileEntries) {
 				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
@@ -1088,6 +1096,16 @@ export class SessionManager {
 		} finally {
 			closeSync(fd);
 		}
+		this.needsRewrite = false;
+	}
+
+	/**
+	 * Retry failed journal persistence without appending entries or moving the leaf.
+	 * Throws while persistence still fails. In-memory sessions and journals deferred
+	 * until the first assistant response remain untouched.
+	 */
+	flush(): void {
+		if (this.needsRewrite) this._rewriteFile(this.flushed ? "w" : "wx");
 	}
 
 	isPersisted(): boolean {
@@ -1117,29 +1135,19 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) {
-			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-			} else {
-				// Mark as not flushed so when assistant arrives, all entries get written
-				this.flushed = false;
-			}
+		if (this.needsRewrite) {
+			// The newly accepted entry is already in fileEntries; repair all entries once.
+			this.flush();
 			return;
 		}
 
 		if (!this.flushed) {
-			const fd = openSync(this.sessionFile, "wx");
-			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
-				}
-			} finally {
-				closeSync(fd);
-			}
-			this.flushed = true;
+			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
+			if (hasAssistant) this._rewriteFile("wx");
 		} else {
+			this.needsRewrite = true;
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			this.needsRewrite = false;
 		}
 	}
 
@@ -1148,6 +1156,17 @@ export class SessionManager {
 		this.entriesRevision++;
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
+		if (entry.type === "label") {
+			if (entry.label) {
+				this.labelsById.set(entry.targetId, entry.label);
+				this.labelTimestampsById.set(entry.targetId, entry.timestamp);
+			} else {
+				this.labelsById.delete(entry.targetId);
+				this.labelTimestampsById.delete(entry.targetId);
+			}
+		}
+		// Accepted entries (including label indexes) survive I/O failure. Retry persistence,
+		// not the append, to avoid duplicating native conversation or extension state.
 		this._persist(entry);
 	}
 
@@ -1381,13 +1400,6 @@ export class SessionManager {
 			label,
 		};
 		this._appendEntry(entry);
-		if (label) {
-			this.labelsById.set(targetId, label);
-			this.labelTimestampsById.set(targetId, entry.timestamp);
-		} else {
-			this.labelsById.delete(targetId);
-			this.labelTimestampsById.delete(targetId);
-		}
 		return entry.id;
 	}
 
@@ -1555,6 +1567,7 @@ export class SessionManager {
 	 * Returns the new session file path, or undefined if not persisting.
 	 */
 	createBranchedSession(leafId: string): string | undefined {
+		this.flush();
 		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
@@ -1634,6 +1647,7 @@ export class SessionManager {
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
+			this.flushed = false;
 			this._buildIndex();
 
 			// Only write the file now if it contains an assistant message.
