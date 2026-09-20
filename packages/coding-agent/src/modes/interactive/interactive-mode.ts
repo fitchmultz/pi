@@ -513,6 +513,8 @@ export class InteractiveMode {
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
 	private extensionInput: ExtensionInputComponent | undefined = undefined;
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
+	// Only unfinished non-overlay factories, never completed or closed hosts.
+	private readonly pendingCustomFocus = new WeakMap<Component, Component | null>();
 	private extensionTerminalInputSubscriptions = new Set<{
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
 		unsubscribe: () => void;
@@ -3007,7 +3009,12 @@ export class InteractiveMode {
 		},
 	): Promise<T> {
 		const savedText = this.editor.getText();
-		const savedFocus = this.renderer.getFocusedComponent();
+		let savedFocus = this.renderer.getFocusedComponent();
+		// Pending replacements share the fallback TUI restores when an awaited dialog closes.
+		// Inherit it now, rather than remembering a parent host that the dialog will unmount.
+		if (savedFocus && this.pendingCustomFocus.has(savedFocus)) {
+			savedFocus = this.pendingCustomFocus.get(savedFocus)!;
+		}
 		const isOverlay = options?.overlay ?? false;
 
 		const restoreEditor = () => {
@@ -3051,6 +3058,7 @@ export class InteractiveMode {
 				}
 			};
 			const unmount = () => {
+				this.pendingCustomFocus.delete(host);
 				if (isOverlay) handle?.hide();
 				else restoreEditor();
 			};
@@ -3070,6 +3078,7 @@ export class InteractiveMode {
 					typeof options?.overlayOptions === "function" ? undefined : options?.overlayOptions,
 				);
 			} else {
+				this.pendingCustomFocus.set(host, savedFocus);
 				this.disposeActiveSelector();
 				this.ui.setFocus(host);
 				this.editorContainer.clear();
@@ -3079,6 +3088,7 @@ export class InteractiveMode {
 
 			this.checkpointCallback(factory)(this.ui, theme, this.keybindings, close)
 				.then((c) => {
+					this.pendingCustomFocus.delete(host);
 					component = c;
 					if (closed) {
 						dispose();

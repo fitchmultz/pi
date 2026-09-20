@@ -761,6 +761,172 @@ describe("native checkpoint TUI boundary", () => {
 		},
 	);
 
+	// PR #68: a nested pending host must inherit the overlay fallback, not its pending parent host.
+	it.each(["selection", "input"])("unwinds pending custom ancestry after an awaited %s", async (kind) => {
+		const f = await setup();
+		const ui = f.mode.getExtensionUIContext();
+		const overlayInputs: string[] = [];
+		const childInputs: string[] = [];
+		const parentInputs: string[] = [];
+		let closeOverlay!: () => void;
+		let closeChild = () => {};
+		let closeParent = () => {};
+		const abort = new AbortController();
+		const overlay = ui.custom(
+			(_a, _b, _c, done) => {
+				closeOverlay = () => done(undefined);
+				return {
+					render: () => ["OLDER OVERLAY"],
+					invalidate() {},
+					handleInput: (data) => overlayInputs.push(data),
+				};
+			},
+			{ overlay: true },
+		);
+		await f.terminal.waitForRender();
+		let selected: string | undefined;
+		let childResolved = false;
+		const parent = ui.custom(async (_a, _b, _c, done) => {
+			closeParent = () => done(undefined);
+			await ui.custom(async (_d, _e, _f, doneChild) => {
+				closeChild = () => doneChild(undefined);
+				selected =
+					kind === "selection"
+						? await ui.select("NESTED DIALOG", ["Continue"], { signal: abort.signal })
+						: await ui.input("NESTED DIALOG", undefined, { signal: abort.signal });
+				return {
+					render: () => ["CHILD CUSTOM"],
+					invalidate() {},
+					handleInput(data: string) {
+						childInputs.push(data);
+						doneChild(undefined);
+					},
+				};
+			});
+			childResolved = true;
+			return {
+				render: () => ["FINAL PARENT"],
+				invalidate() {},
+				handleInput(data: string) {
+					parentInputs.push(data);
+					done(undefined);
+				},
+			};
+		});
+		try {
+			await f.terminal.waitForRender();
+			expect(f.terminal.getViewport().join("\n")).toContain("NESTED DIALOG");
+			expect(f.mode.canQuiesceForCheckpoint()).toBe(false);
+			if (kind === "input") f.terminal.sendInput("Continue");
+			f.terminal.sendInput("\r");
+			await f.terminal.waitForRender();
+			expect(selected).toBe("Continue");
+			expect(f.terminal.getViewport().join("\n")).toContain("CHILD CUSTOM");
+			expect(f.mode.canQuiesceForCheckpoint()).toBe(false);
+			f.terminal.sendInput("c");
+			await f.terminal.waitForRender();
+			expect(childResolved).toBe(true);
+			expect(f.terminal.getViewport().join("\n")).toContain("FINAL PARENT");
+			expect(f.mode.canQuiesceForCheckpoint()).toBe(false);
+			f.terminal.sendInput("p");
+			await parent;
+			expect(childInputs).toEqual(["c"]);
+			expect(parentInputs).toEqual(["p"]);
+			expect(overlayInputs).toEqual([]);
+			f.terminal.sendInput("restored");
+			expect(overlayInputs).toEqual(["restored"]);
+			expect(ui.getEditorText()).toBe("");
+			expect(f.mode.canQuiesceForCheckpoint()).toBe(false);
+			closeOverlay();
+			await overlay;
+			const hold = await f.acquire();
+			expect(hold.sleepReady).toBe(true);
+			hold.release();
+		} finally {
+			abort.abort();
+			closeChild();
+			closeParent();
+			closeOverlay();
+			await Promise.all([parent, overlay]);
+		}
+	});
+
+	it.each(["newer overlay", "explicit focus target"])(
+		"does not reclaim pending custom ancestry after %s takes focus",
+		async (kind) => {
+			const f = await setup();
+			const ui = f.mode.getExtensionUIContext();
+			const finish = deferred();
+			const abort = new AbortController();
+			const inputs: string[] = [];
+			const childInputs: string[] = [];
+			let closeOverlay!: () => void;
+			let closeParent = () => {};
+			let closeChild = () => {};
+			let moveFocus!: () => void;
+			let other: OverlayHandle | undefined;
+			let older!: OverlayHandle;
+			const overlay = ui.custom(
+				(tui, _b, _c, done) => {
+					closeOverlay = () => done(undefined);
+					moveFocus = () => {
+						const target = {
+							render: () => ["OTHER"],
+							invalidate() {},
+							handleInput: (data: string) => inputs.push(data),
+						};
+						if (kind === "newer overlay") other = tui.showOverlay(target);
+						else older.unfocus({ target });
+					};
+					return new Text("OLDER");
+				},
+				{
+					overlay: true,
+					onHandle: (handle) => {
+						older = handle;
+					},
+				},
+			);
+			await f.terminal.waitForRender();
+			const parent = ui.custom(async (_a, _b, _c, done) => {
+				closeParent = () => done(undefined);
+				await ui.custom(async (_d, _e, _f, doneChild) => {
+					closeChild = () => doneChild(undefined);
+					await ui.select("NESTED DIALOG", ["Continue"], { signal: abort.signal });
+					await finish.promise;
+					return {
+						render: () => ["CHILD CUSTOM"],
+						invalidate() {},
+						handleInput: (data) => childInputs.push(data),
+					};
+				});
+				return new Text("PARENT");
+			});
+			try {
+				await f.terminal.waitForRender();
+				f.terminal.sendInput("\r");
+				await f.terminal.waitForRender();
+				moveFocus();
+				finish.resolve();
+				await f.terminal.waitForRender();
+				f.terminal.sendInput("other");
+				expect(inputs).toEqual(["other"]);
+				expect(childInputs).toEqual([]);
+				expect(f.terminal.getViewport().join("\n")).not.toContain("CHILD CUSTOM");
+				expect(ui.getEditorText()).toBe("");
+				expect(f.mode.canQuiesceForCheckpoint()).toBe(false);
+			} finally {
+				abort.abort();
+				finish.resolve();
+				closeChild();
+				closeParent();
+				other?.hide();
+				closeOverlay();
+				await Promise.all([parent, overlay]);
+			}
+		},
+	);
+
 	it.each([false, true])("reserves custom UI input before awaiting the factory (overlay: %s)", async (overlay) => {
 		const factory = deferred();
 		let shortcuts = 0;
