@@ -10,14 +10,19 @@ import {
 } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
+	accessSync,
 	appendFileSync,
 	closeSync,
+	constants,
 	createReadStream,
 	existsSync,
+	fchmodSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readSync,
+	renameSync,
+	rmSync,
 	type Stats,
 	statSync,
 	writeFileSync,
@@ -1085,18 +1090,33 @@ export class SessionManager {
 	private _rewriteFile(flag: "w" | "wx" = "w"): void {
 		if (!this.persist || !this.sessionFile) return;
 		this.needsRewrite = true;
-		const fd = openSync(this.sessionFile, flag);
-		// Once opened, retries must repair this file even if writing or closing fails.
-		// A failed exclusive open never authorizes overwriting an existing file.
-		this.flushed = true;
-		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
-			}
-		} finally {
-			closeSync(fd);
+		const temporary = flag === "w" ? `${this.sessionFile}.${randomUUID()}.tmp` : undefined;
+		let mode: number | undefined;
+		if (temporary && existsSync(this.sessionFile)) {
+			// Rename alone could bypass a read-only journal's write permissions.
+			accessSync(this.sessionFile, constants.W_OK);
+			mode = statSync(this.sessionFile).mode & 0o777;
 		}
-		this.needsRewrite = false;
+		const fd = openSync(temporary ?? this.sessionFile, "wx", mode);
+		// Only a successful exclusive creation authorizes repairing an initial file.
+		// Keep open outside cleanup so a collision never removes someone else's file.
+		if (!temporary) this.flushed = true;
+		try {
+			try {
+				if (mode !== undefined) fchmodSync(fd, mode); // Preserve mode despite the current umask.
+				for (const entry of this.fileEntries) {
+					writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+				}
+			} finally {
+				closeSync(fd);
+			}
+			// Never truncate prior journal bytes when a repair write or close fails.
+			if (temporary) renameSync(temporary, this.sessionFile);
+			this.flushed = true;
+			this.needsRewrite = false;
+		} finally {
+			if (temporary) rmSync(temporary, { force: true });
+		}
 	}
 
 	/**

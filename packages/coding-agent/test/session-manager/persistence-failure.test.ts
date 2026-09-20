@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +14,12 @@ vi.mock("fs", async (importOriginal) => {
 		appendFileSync: vi.fn(actual.appendFileSync),
 		writeFileSync: vi.fn(actual.writeFileSync),
 		closeSync: vi.fn(actual.closeSync),
+		renameSync: vi.fn(actual.renameSync),
 	};
+});
+vi.mock("crypto", async (importOriginal) => {
+	const actual = await importOriginal<typeof crypto>();
+	return { ...actual, randomUUID: vi.fn(actual.randomUUID) };
 });
 
 let directory: string;
@@ -24,6 +30,8 @@ afterEach(() => {
 	vi.mocked(fs.appendFileSync).mockRestore();
 	vi.mocked(fs.writeFileSync).mockRestore();
 	vi.mocked(fs.closeSync).mockRestore();
+	vi.mocked(fs.renameSync).mockRestore();
+	vi.mocked(crypto.randomUUID).mockRestore();
 	fs.rmSync(directory, { recursive: true, force: true });
 });
 
@@ -111,14 +119,28 @@ it.each(["initial", "append", "close"] as const)(
 		expect(() => sm.appendMessage(fauxAssistantMessage("retained failed response"))).toThrow(failure);
 		const entries = sm.getEntries();
 		const revision = sm.getEntriesRevision();
+		const file = sm.getSessionFile()!;
+		const priorBytes = fs.readFileSync(file);
+		const priorFiles = fs.readdirSync(directory);
+		// PR68: a failed repair must not truncate even a partially written journal.
+		vi.mocked(fs.writeFileSync).mockImplementationOnce((fd, data) => {
+			actual.writeFileSync(fd, String(data).slice(0, 20));
+			throw failure;
+		});
+		expect(() => sm.flush()).toThrow(failure);
+		expect(fs.readFileSync(file)).toEqual(priorBytes);
+		expect(fs.readdirSync(directory)).toEqual(priorFiles);
 		if (kind === "close") {
 			vi.mocked(fs.closeSync).mockImplementationOnce((fd) => {
 				actual.closeSync(fd);
 				throw failure;
 			});
 			expect(() => sm.flush()).toThrow(failure);
+			expect(fs.readFileSync(file)).toEqual(priorBytes);
+			expect(fs.readdirSync(directory)).toEqual(priorFiles);
 		}
 		sm.flush();
+		expect(fs.readdirSync(directory)).toEqual(priorFiles);
 		expect(sm.getEntriesRevision()).toBe(revision);
 		expect(sm.getEntries()).toEqual(entries);
 		expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual(entries);
@@ -135,6 +157,56 @@ it("does not overwrite a collided initial journal on retry", () => {
 	expect(() => sm.flush()).toThrow(/EEXIST/);
 	expect(() => sm.appendCustomEntry("later", {})).toThrow(/EEXIST/);
 	expect(fs.readFileSync(file, "utf8")).toBe("unrelated file\n");
+	expect(fs.readdirSync(directory)).toEqual([file.slice(directory.length + 1)]);
+});
+
+it.each(["collision", "rename"] as const)("preserves the journal on temporary-file %s failure", (kind) => {
+	const sm = SessionManager.create(directory, directory);
+	sm.appendMessage(fauxAssistantMessage("persisted response"));
+	const file = sm.getSessionFile()!;
+	const before = fs.readFileSync(file);
+	const failure = new Error("controlled persistence failure");
+	vi.mocked(fs.appendFileSync).mockImplementationOnce(() => {
+		throw failure;
+	});
+	expect(() => sm.appendCustomEntry("retained", {})).toThrow(failure);
+	const uuid = "00000000-0000-4000-8000-000000000000";
+	const temporary = `${file}.${uuid}.tmp`;
+	vi.mocked(crypto.randomUUID).mockReturnValueOnce(uuid);
+	if (kind === "collision") fs.writeFileSync(temporary, "unrelated temporary file\n");
+	else {
+		vi.mocked(fs.renameSync).mockImplementationOnce(() => {
+			throw failure;
+		});
+	}
+	const files = fs.readdirSync(directory);
+	expect(() => sm.flush()).toThrow(kind === "collision" ? /EEXIST/ : failure);
+	expect(fs.readFileSync(file)).toEqual(before);
+	expect(fs.readdirSync(directory)).toEqual(files);
+	if (kind === "collision") {
+		expect(fs.readFileSync(temporary, "utf8")).toBe("unrelated temporary file\n");
+		fs.unlinkSync(temporary);
+	}
+	sm.flush();
+	expect(SessionManager.open(file).getEntries()).toEqual(sm.getEntries());
+	expect(fs.readdirSync(directory)).toEqual([file.slice(directory.length + 1)]);
+});
+
+permissionTest.each([0o600, 0o640])("preserves journal mode %s through repair", (mode) => {
+	const sm = SessionManager.create(directory, directory);
+	sm.appendMessage(fauxAssistantMessage("persisted response"));
+	const file = sm.getSessionFile()!;
+	fs.chmodSync(file, 0o400);
+	expect(() => sm.appendCustomEntry("retained", {})).toThrow(/EACCES/);
+	fs.chmodSync(file, mode);
+	const previousUmask = process.umask(0o077);
+	try {
+		sm.flush();
+	} finally {
+		process.umask(previousUmask);
+	}
+	expect(fs.statSync(file).mode & 0o777).toBe(mode);
+	expect(SessionManager.open(file).getEntries()).toEqual(sm.getEntries());
 });
 
 permissionTest.each(["new", "switch", "branch"] as const)(
