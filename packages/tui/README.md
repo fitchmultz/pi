@@ -178,6 +178,7 @@ handle.unfocus({ target: baseComponent }); // Release this overlay to a specific
 handle.unfocus({ target: null });   // Release this overlay and leave focus empty
 handle.isFocused();         // Check if overlay has focus
 handle.getBounds();         // Get last rendered terminal-relative bounds
+handle.updateOptions(options); // Replace options by reference, keeping stack order
 
 handle.unfocus();
 // Overlay loses focus; TUI falls back to another visible capturing overlay or the previous focus target.
@@ -195,6 +196,8 @@ tui.hideOverlay();
 // Check if any visible overlay is active
 tui.hasOverlay();
 ```
+
+`handle.updateOptions(options)` retains the supplied object (including getters) without changing visual order. A non-capturing or currently invisible result releases this overlay's focus and retargets other overlays' saved focus to its previous target. A newly capturing result acquires focus only if that previous target is still active, not a child overlay or replacement UI. It does nothing after `hide()`. Use `focus()` for an explicit focus transfer.
 
 **Anchor values**: `'center'`, `'top-left'`, `'top-right'`, `'bottom-left'`, `'bottom-right'`, `'top-center'`, `'bottom-center'`, `'left-center'`, `'right-center'`
 

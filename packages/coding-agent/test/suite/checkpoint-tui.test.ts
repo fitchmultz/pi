@@ -307,6 +307,207 @@ describe("native checkpoint TUI boundary", () => {
 		await running;
 	});
 
+	it("resolves overlay options after the async factory initializes its component", async () => {
+		const f = await setup();
+		let component!: Text & { width: number };
+		let close!: () => void;
+		const overlayOptions = vi.fn(() => ({ width: component.width }));
+		await expect(
+			f.mode.getExtensionUIContext().custom(
+				async (_tui, _theme, _keys, done) => {
+					close = () => done(undefined);
+					await Promise.resolve();
+					component = Object.assign(new Text("Factory initialized"), { width: 37 });
+					return component;
+				},
+				{ overlay: true, overlayOptions, onHandle: () => close() },
+			),
+		).resolves.toBeUndefined();
+		expect(overlayOptions).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not focus a resolved passive parent after its child closes", async () => {
+		const f = await setup();
+		const ui = f.mode.getExtensionUIContext();
+		const factory = deferred();
+		const parentInputs: string[] = [];
+		let closeParent!: () => void;
+		let child!: OverlayHandle;
+		let ready!: OverlayHandle;
+		const parent = ui.custom(
+			async (tui, _theme, _keys, done) => {
+				closeParent = () => done(undefined);
+				child = tui.showOverlay(new Text("Child"));
+				await factory.promise;
+				return {
+					render: () => ["Passive parent"],
+					invalidate() {},
+					handleInput: (data) => parentInputs.push(data),
+				};
+			},
+			{
+				overlay: true,
+				overlayOptions: () => ({ nonCapturing: true }),
+				onHandle: (h) => {
+					ready = h;
+				},
+			},
+		);
+		await f.terminal.waitForRender();
+		factory.resolve();
+		await vi.waitFor(() => expect(ready).toBeDefined());
+		child.hide();
+		f.terminal.sendInput("x");
+		closeParent();
+		await parent;
+		expect(parentInputs).toEqual([]);
+		expect(ui.getEditorText()).toBe("x");
+	});
+
+	it("preserves the resolved options getter receiver", async () => {
+		const f = await setup();
+		class Options {
+			#width = 37;
+			get width() {
+				return this.#width;
+			}
+		}
+		let render!: () => void;
+		let close!: () => void;
+		await expect(
+			f.mode.getExtensionUIContext().custom(
+				(tui, _theme, _keys, done) => {
+					render = () => tui.renderNow();
+					close = () => done(undefined);
+					return new Text("Getter receiver");
+				},
+				{
+					overlay: true,
+					overlayOptions: () => new Options(),
+					onHandle: () => {
+						render();
+						close();
+					},
+				},
+			),
+		).resolves.toBeUndefined();
+	});
+
+	it("keeps resolved overlay option getters and later mutations live", async () => {
+		const f = await setup();
+		let close!: () => void;
+		let handle!: OverlayHandle;
+		let width = 37;
+		let height = 2;
+		const options = {
+			get width() {
+				return width;
+			},
+			get maxHeight() {
+				return height;
+			},
+			col: 3,
+		};
+		const resolveOptions = vi.fn(() => options);
+		const dialog = f.mode.getExtensionUIContext().custom(
+			(_tui, _theme, _keys, done) => {
+				close = () => done(undefined);
+				return new Text("one\ntwo\nthree", 0, 0);
+			},
+			{
+				overlay: true,
+				overlayOptions: resolveOptions,
+				onHandle: (h) => {
+					handle = h;
+				},
+			},
+		);
+		await f.terminal.waitForRender();
+		expect(handle.getBounds()).toMatchObject({ width: 37, height: 2, col: 3 });
+		width = 49;
+		height = 3;
+		options.col = 7;
+		f.terminal.sendInput("redraw");
+		await f.terminal.waitForRender();
+		expect(handle.getBounds()).toMatchObject({ width: 49, height: 3, col: 7 });
+		expect(resolveOptions).toHaveBeenCalledTimes(1);
+		close();
+		await dialog;
+	});
+
+	it.each([false, true])(
+		"focuses static options made visible by factory completion without stealing child focus: %s",
+		async (withChild) => {
+			const f = await setup();
+			let visible = false;
+			let close!: () => void;
+			let handle!: OverlayHandle;
+			let child: OverlayHandle | undefined;
+			const inputs: string[] = [];
+			const dialog = f.mode.getExtensionUIContext().custom(
+				async (tui, _theme, _keys, done) => {
+					close = () => done(undefined);
+					if (withChild) child = tui.showOverlay(new Text("Child"));
+					await Promise.resolve();
+					visible = true;
+					return { render: () => ["Visible"], invalidate() {}, handleInput: (data) => inputs.push(data) };
+				},
+				{
+					overlay: true,
+					overlayOptions: { visible: () => visible },
+					onHandle: (h) => {
+						handle = h;
+					},
+				},
+			);
+			await f.terminal.waitForRender();
+			expect(handle.isFocused()).toBe(!withChild);
+			if (child) {
+				expect(child.isFocused()).toBe(true);
+				f.terminal.sendInput("child input");
+				expect(inputs).toEqual([]);
+				child.hide();
+			}
+			f.terminal.sendInput("x");
+			expect(handle.isFocused()).toBe(true);
+			expect(inputs).toEqual(["x"]);
+			expect(f.mode.getExtensionUIContext().getEditorText()).toBe("");
+			close();
+			await dialog;
+		},
+	);
+
+	it("snapshots the default overlay width after factory completion", async () => {
+		const f = await setup();
+		const factory = deferred();
+		const component = Object.assign(new Text("Default width"), { width: 17 });
+		let close!: () => void;
+		let handle!: OverlayHandle;
+		const dialog = f.mode.getExtensionUIContext().custom(
+			async (_tui, _theme, _keys, done) => {
+				close = () => done(undefined);
+				await factory.promise;
+				component.width = 37;
+				return component;
+			},
+			{
+				overlay: true,
+				onHandle: (h) => {
+					handle = h;
+				},
+			},
+		);
+		factory.resolve();
+		await f.terminal.waitForRender();
+		expect(handle.getBounds()?.width).toBe(37);
+		component.width = 49;
+		f.terminal.sendInput("redraw");
+		await f.terminal.waitForRender();
+		expect(handle.getBounds()?.width).toBe(37);
+		close();
+		await dialog;
+	});
+
 	it.each([false, true])("reserves custom UI input before awaiting the factory (overlay: %s)", async (overlay) => {
 		const factory = deferred();
 		let shortcuts = 0;
@@ -352,8 +553,8 @@ describe("native checkpoint TUI boundary", () => {
 		await vi.waitFor(() => expect(shortcuts).toBe(1));
 	});
 
-	it.each(["passive", "invisible", "dynamic-passive"])(
-		"preserves %s overlay input semantics while pending",
+	it.each(["passive", "invisible", "dynamic-passive", "dynamic-invisible"])(
+		"preserves %s overlay input semantics after provisional ownership",
 		async (kind) => {
 			const f = await setup();
 			const ui = f.mode.getExtensionUIContext();
@@ -369,7 +570,9 @@ describe("native checkpoint TUI boundary", () => {
 					this.inputs.push(data);
 				},
 			};
-			const opts = kind === "invisible" ? { visible: () => false } : { nonCapturing: true };
+			const dynamic = kind.startsWith("dynamic-");
+			const invisible = kind.endsWith("invisible");
+			const opts = invisible ? { visible: () => false } : { nonCapturing: true };
 			const dialog = ui.custom(
 				async (_tui, _theme, _keys, done) => {
 					close = () => done(undefined);
@@ -378,26 +581,29 @@ describe("native checkpoint TUI boundary", () => {
 				},
 				{
 					overlay: true,
-					overlayOptions: kind === "dynamic-passive" ? () => opts : opts,
+					overlayOptions: dynamic ? () => opts : opts,
 					onHandle: (h) => {
 						handle = h;
 					},
 				},
 			);
 			f.terminal.sendInput("x");
-			expect(ui.getEditorText()).toBe("x");
+			expect(ui.getEditorText()).toBe(dynamic ? "" : "x");
+			ui.setEditorText("");
 			factory.resolve();
 			await vi.waitFor(() => expect(handle).toBeDefined());
+			handle.setHidden(true);
+			handle.setHidden(false);
 			f.terminal.sendInput("y");
-			expect(ui.getEditorText()).toBe("xy");
-			if (kind !== "invisible") {
+			expect(ui.getEditorText()).toBe("y");
+			if (!invisible) {
 				handle.focus();
 				f.terminal.sendInput("z");
 				expect(component.focused).toBe(true);
 				expect(component.inputs).toEqual(["z"]);
 				handle.unfocus();
 				f.terminal.sendInput("w");
-				expect(ui.getEditorText()).toBe("xyw");
+				expect(ui.getEditorText()).toBe("yw");
 			}
 			close();
 			await dialog;
@@ -438,13 +644,14 @@ describe("native checkpoint TUI boundary", () => {
 			const ui = f.mode.getExtensionUIContext();
 			const factory = deferred();
 			const dispose = vi.fn();
+			const overlayOptions = vi.fn(() => ({ width: 37 }));
 			await ui.custom(
 				async (_tui, _theme, _keys, done) => {
 					done(undefined);
 					await factory.promise;
 					return { render: () => ["must never mount"], invalidate() {}, dispose };
 				},
-				{ overlay },
+				{ overlay, overlayOptions },
 			);
 			f.terminal.sendInput("ordinary input");
 			expect(ui.getEditorText()).toBe("ordinary input");
@@ -460,6 +667,7 @@ describe("native checkpoint TUI boundary", () => {
 			factory.resolve();
 			const hold = await acquisition;
 			expect(dispose).toHaveBeenCalledTimes(1);
+			expect(overlayOptions).not.toHaveBeenCalled();
 			expect(hold.sleepReady).toBe(true);
 			hold.release();
 		},
@@ -487,7 +695,7 @@ describe("native checkpoint TUI boundary", () => {
 				await factory.promise;
 				return { render: () => ["PARENT"], invalidate() {}, handleInput: (data) => parentInputs.push(data) };
 			},
-			{ overlay: true },
+			{ overlay: true, overlayOptions: () => ({ width: 50 }) },
 		);
 		await f.terminal.waitForRender();
 		f.terminal.sendInput("a");
@@ -577,18 +785,22 @@ describe("native checkpoint TUI boundary", () => {
 		hold.release();
 	});
 
-	it("cleans up when the overlay handle callback throws", async () => {
+	it.each(["options", "handle"])("cleans up when the overlay %s callback throws", async (kind) => {
 		const f = await setup();
 		const dispose = vi.fn();
 		const ui = f.mode.getExtensionUIContext();
 		await expect(
 			ui.custom(() => ({ render: () => ["UI"], invalidate() {}, dispose }), {
 				overlay: true,
+				overlayOptions: () => {
+					if (kind === "options") throw new Error("options failed");
+					return {};
+				},
 				onHandle: () => {
 					throw new Error("handle failed");
 				},
 			}),
-		).rejects.toThrow("handle failed");
+		).rejects.toThrow(`${kind} failed`);
 		expect(dispose).toHaveBeenCalledTimes(1);
 		f.terminal.sendInput("restored");
 		expect(ui.getEditorText()).toBe("restored");

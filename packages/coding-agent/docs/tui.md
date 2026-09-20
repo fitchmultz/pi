@@ -176,7 +176,7 @@ const result = await ctx.ui.custom<string | null>(
 
 ### Overlay Focus
 
-Overlay options (including an `overlayOptions` function) are resolved when the request starts, before the component factory runs. `nonCapturing: true` and responsive `visible` predicates retain their normal input behavior during factory work. `onHandle` runs after the component is ready. Closing a custom overlay removes its own stack entry, not another overlay opened above it.
+Static overlay options retain their `nonCapturing` and responsive `visible` behavior during factory work. An `overlayOptions` function runs once after the factory completes, so it can use factory-initialized state. Until then, the pending overlay provisionally owns input. Completion retains the same stack entry and options object, preserving getters and later mutations; passive or invisible results release provisional focus without taking focus from a child. Without explicit options, the component's width is captured after factory completion. `onHandle` runs after completion. Closing a custom overlay removes its own stack entry, not another overlay opened above it.
 
 A focused visible overlay keeps input ownership across temporary non-overlay UI. If an overlay opens another `ctx.ui.custom()` component without `{ overlay: true }`, that replacement UI receives input while it is active; when it closes, the focused overlay can reclaim input.
 

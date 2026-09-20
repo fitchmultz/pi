@@ -3059,19 +3059,12 @@ export class InteractiveMode {
 				dispose();
 			};
 
-			const overlayOptions = isOverlay
-				? typeof options?.overlayOptions === "function"
-					? options.overlayOptions()
-					: options?.overlayOptions
-				: undefined;
 			if (isOverlay) {
+				// Static options retain their pending visibility/focus behavior. A thunk may
+				// depend on factory initialization, so reserve modal focus until it resolves.
 				handle = this.ui.showOverlay(
 					host,
-					overlayOptions ?? {
-						get width() {
-							return (component as { width?: number } | undefined)?.width || undefined;
-						},
-					},
+					typeof options?.overlayOptions === "function" ? undefined : options?.overlayOptions,
 				);
 			} else {
 				this.disposeActiveSelector();
@@ -3087,6 +3080,16 @@ export class InteractiveMode {
 					if (closed) {
 						dispose();
 						return;
+					}
+					if (handle) {
+						let overlayOptions =
+							typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
+						if (!overlayOptions) {
+							// Match the ordinary post-factory component-width snapshot.
+							const width = (c as { width?: number }).width;
+							overlayOptions = width ? { width } : undefined;
+						}
+						handle.updateOptions(overlayOptions);
 					}
 					host.addChild(c);
 					host.focused = focused;
