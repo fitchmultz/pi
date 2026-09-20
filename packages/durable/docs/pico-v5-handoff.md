@@ -17,7 +17,7 @@ facades, membranes, document routing, view projection, events, or clone chains.
 
 Implement IDs, sequences, reserved root conversation ID `1`,
 `ConversationRecord`, `EntryRecord`, tagged inputs, live/terminal `TaskRecord`
-values, document metadata, storage writes, backend-opaque JSON cursors, and
+values, document lifecycle records, storage writes, backend-opaque JSON cursors, and
 detached `MemoryStorage` tables.
 Reserve `Conversation` for the public conversation object, `Entry` for the typed
 entry definition, and `Task` for the typed executable definition returned by
@@ -30,11 +30,15 @@ entry-to-commit lookup, and full task replacement.
 
 ## 2. Memory document records
 
-Add document creation bases, deltas, required/checkpoint bases, retirement,
-reincarnation, current/as-of membership, and base-plus-tail reconstruction.
+Add selected document base/delta writes, retirement, reincarnation,
+current/as-of membership, exact logical-address lookup, scoped scans, and
+base-plus-tail reconstruction. Storage receives no definition callbacks or
+unused candidate values.
 
-Test Session-, conversation-, and task-scoped documents, retired historical
-membership, family queries, and no scans of unrelated document records.
+Test Session-, conversation-, and task-scoped documents, half-open lifetimes,
+create-plus-retire, retired historical membership, family queries, current-only
+reclamation, version boundaries, detached ownership, and no scans of unrelated
+document records.
 
 ## 3. SQLite backend
 
@@ -49,7 +53,9 @@ deleted-page reuse, and representative storage sizes.
 
 Implement table writes in `main.jsonl`, one document sidecar per incarnation,
 one sidecar per live task, and one main marker per commit. Do not add a
-standalone-sidecar protocol.
+standalone-sidecar protocol. Serialization must also provide the storage ownership
+boundary: retained indexes/materializations are detached from write arguments,
+and reads never expose backend-owned cached objects.
 
 Fault-test torn/short sidecar writes, failures between sidecars, every marker
 boundary, unconfirmed tails, missing confirmed data, and poisoned writes.
@@ -77,8 +83,11 @@ unload/reload.
 
 ## 7. Document definitions and access
 
-Implement `defineDoc`, `defineDocFamily`, identity validation, the three direct
-scopes, and get-or-create `tx.doc`, `snapshot`, and `documentSource` acquisition.
+Implement `defineDoc`, `defineDocFamily`, document kind/key validation, the three
+direct scopes, and get-or-create `tx.doc`, `snapshot`, and `documentSource`
+acquisition. Definitions are explicit typed arguments, not registered declarations;
+conflicting definitions that claim one persisted kind are unsupported caller
+misuse.
 
 Test concurrent initialization once, initial bases, detached snapshots, family
 initializer use only on first creation, scope/target mismatch, terminal-task
@@ -90,21 +99,25 @@ in one transaction; internal candidate validation must not trigger
 
 ## 8. Checkpoints and migration
 
-Inside `Storage.commit()`, evaluate `checkpointWhen(value, ops)` exactly once
-for ordinary mutations. Implement required creation/version bases and
-all-older-version migration.
+After tracker flush, Session evaluates `checkpointWhen(value, ops)` exactly once
+for ordinary mutations and sends Storage only the selected base or delta.
+Implement required creation/version bases and lazy all-older-version migration
+on typed access; Harness open does not scan ordinary documents.
 
-Test latest migration persistence, rewindable migration on current/historical
-read, first post-migration mutation base, newer-version rejection, absent plugin
-preservation, and checkpoint starvation without backend heuristics.
+Test latest migration persistence, `tx.doc()` migration rollback and coalescing
+with later edits, rewindable migration on current/historical read, first
+post-migration mutation base, newer-version rejection, unaccessed and unavailable-definition
+preservation, predicate failure poisoning, and checkpoint starvation without
+backend heuristics.
 
 ## 9. Conversation document forks
 
 Using fixture conversations and entry-to-commit mappings, implement the `asOf`,
 `current`, and `initial` settings for singleton and family documents.
 
-Test unknown definitions, retired membership, new child incarnations, lazy
-`initial` creation, and exclusion of task- and Session-scoped documents.
+Test opaque stored-version copying without definitions, retired membership, new
+child incarnations, later lazy migration, lazy `initial` creation, and exclusion
+of task- and Session-scoped documents.
 
 ## 10. Chord structural array operations
 
@@ -229,10 +242,10 @@ terminal details, or bounded document state.
 
 ## 20. Registries, hooks, and sections
 
-Implement task/tool/entry/section registries, Session and owned-subtree hooks,
+Implement task/tool/section registries, Session and owned-subtree hooks,
 positional PR #9548 section/tool updates, complete baselines after a head cut,
 and preparation revision checks. Do not add a Session-kernel semantic event
-journal or plugin-state router; package 25 adds the thin product notification
+journal or extension-state router; package 24 adds the thin product notification
 adapter from specification §9.4.
 
 Test registration lifetimes, hook replay with memos, exact persisted rendered
@@ -243,7 +256,7 @@ including retained `content`, section order, and tool changes. Include a retaine
 delta whose ID precedes the head-carrying entry: select omissions by retained
 context membership, not an ID comparison with the head entry. Test tool loadout
 additions/removals and preparation retry after registry movement. Do
-not implement in-process replacement of Session-side plugin code; a host plugin
+not implement in-process replacement of Session-side extension code; a host extension
 change uses the Harness close/reopen boundary.
 
 ## 21. Tool and post-tools tasks
@@ -279,22 +292,13 @@ Test context before/after collapse, provider failure, declined/stale work, and
 reopen from every phase. Replace generation's fake overflow target and rerun its
 overflow integration test.
 
-## 24. Job and plugin tasks
-
-Implement process jobs with bounded durable output, interruption recovery,
-rescheduling, and registered plugin handlers.
-
-Test process exit/error/abort/reopen, background idle behavior, notifications as
-state or entries, and plugin handler recovery.
-
-## 25. Harness integration
+## 24. Harness integration
 
 Implement the exact Pico3-shaped public surface in specification §2.2:
 `Harness.open/resume/suspend/close`, lifecycle gates, root/create/lookup
 `Conversation` objects, ordered `write` handles, send/input handles,
 conversation-bound commits and history pagination, fork/collapse/reset/abort/idle,
-typed task wait/abort, generic document access,
-registries, and structural conversation watches. Do not restore Pico3's
+typed task wait/abort, generic document access, task/tool/section registries, and structural conversation watches. Do not restore Pico3's
 namespace router, fixed document accessors, semantic view events, or manual Chord
 view bridge.
 
@@ -308,14 +312,15 @@ clients use structural hydration rather than event replay, progress notification
 reflect durable throttled state rather than every provider frame, and stdout
 backpressure/disconnect policy stays in the mode adapter.
 
-Implement the v1 host-plugin reload path as stop admission, close/join, dispose,
-rebuild with all new definitions, reopen/migrate, and resume. Test that closing seals commit and
+Implement the v1 host-extension reload path as stop admission, close/join, dispose,
+rebuild with new document tokens and registered task/tool/section definitions, reopen/migrate live tasks, and resume. Ordinary documents migrate
+on later typed access. Test that closing seals commit and
 get-or-create admission, lets storage settlement for already-flushed admitted
 commits finish despite caller cancellation, stops watches, joins in-flight watch
 callbacks and task/tool/hook invocations outside the Session line, writes no abort
 or terminal outcome, starts no fresh abort invocation, and does not run old and
 new generations concurrently. Include cancellation during watch acquisition and
-a non-cooperative watch callback in shutdown/plugin-reload quiescence tests.
+a non-cooperative watch callback in shutdown/extension-reload quiescence tests.
 
 Test stable persisted root identity; atomic conversation/config/section/input
 creation; default `"off"` thinking; every configuration getter/setter; explicit

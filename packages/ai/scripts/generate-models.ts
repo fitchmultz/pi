@@ -20,6 +20,7 @@ import type {
 	KnownProvider,
 	Model,
 	ModelCost,
+	ModelPromptCache,
 	OpenAICompletionsCompat,
 	OpenAIResponsesCompat,
 } from "../src/types.ts";
@@ -32,6 +33,11 @@ import {
 	validateGeneratedModelData,
 	validateModelDataDirectory,
 } from "./model-data.ts";
+import {
+	DEFAULT_RADIUS_GATEWAY,
+	getRadiusModelsFromConfig,
+	loadRadiusGatewayConfig,
+} from "../src/providers/radius-config.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -926,6 +932,21 @@ function applyOpenAIExplicitPromptCacheMetadata(model: Model<Api>): void {
 	};
 }
 
+// Anthropic ephemeral entries have a hard five-minute lifetime; `ttl: "1h"`
+// extends it to one hour. Only direct Anthropic is annotated so cache warming
+// does not assume equivalent behavior through proxies.
+// https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+const ANTHROPIC_PROMPT_CACHE: ModelPromptCache = { short: 300, long: 3600 };
+
+function applyPromptCacheMetadata(model: Model<Api>): void {
+	if (model.provider === "anthropic" && model.api === "anthropic-messages") {
+		model.promptCache = ANTHROPIC_PROMPT_CACHE;
+	}
+	// Do not add OpenAI lifetimes yet. Before enabling warming for explicit
+	// OpenAI caches, re-evaluate it using observed expiry, replay, and billing
+	// behavior; a documented TTL alone does not establish full cache loss.
+}
+
 function isGemma4Model(modelId: string): boolean {
 	return /gemma-?4/.test(modelId.toLowerCase());
 }
@@ -1265,6 +1286,21 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 		return models;
 	} catch (error) {
 		console.error("Failed to fetch OpenRouter models:", error);
+		if (generatorOptions.strict) throw error;
+		return [];
+	}
+}
+
+async function fetchRadiusModels(): Promise<Model<"pi-messages">[]> {
+	try {
+		console.log("Fetching models from Radius API...");
+		const config = await loadRadiusGatewayConfig(DEFAULT_RADIUS_GATEWAY);
+		const models = getRadiusModelsFromConfig("radius", config);
+		if (models.length === 0) throw new Error("Radius API returned no models");
+		console.log(`Fetched ${models.length} models from Radius`);
+		return models;
+	} catch (error) {
+		console.error("Failed to fetch Radius models:", error);
 		if (generatorOptions.strict) throw error;
 		return [];
 	}
@@ -2548,16 +2584,18 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 }
 
 async function generateModels() {
-	// Fetch models from both sources
-	// models.dev: Anthropic, Google, OpenAI, Groq, Cerebras
-	// OpenRouter: xAI and other providers (excluding Anthropic, Google, OpenAI)
+	// Fetch models from all upstream catalogs.
+	// models.dev: Anthropic, Google, OpenAI, Groq, Cerebras, and others
+	// OpenRouter: its tool-capable routed catalog
 	// AI Gateway: OpenAI-compatible catalog with tool-capable models
+	// Radius: its unauthenticated public catalog; authenticated clients overlay it at runtime
 	const modelsDevModels = await loadModelsDevData();
 	const openRouterModels = await fetchOpenRouterModels();
 	const aiGatewayModels = await fetchAiGatewayModels();
+	const radiusModels = await fetchRadiusModels();
 
-	// Combine models (models.dev has priority)
-	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels].filter(
+	// Combine models (models.dev has priority where sources overlap).
+	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels, ...radiusModels].filter(
 		(model) =>
 			!(model.provider === "xai" && XAI_BUILTIN_EXCLUDED_MODEL_IDS.has(model.id)) &&
 			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),
@@ -3033,6 +3071,7 @@ async function generateModels() {
 		applyOpenAICompletionsTranscriptMetadata(model);
 		applyOpenAIResponsesTranscriptMetadata(model);
 		applyOpenAIExplicitPromptCacheMetadata(model);
+		applyPromptCacheMetadata(model);
 	}
 	applyAnthropicAllowedFallbackModelMetadata(allModels.filter(isAnthropicFallbackMetadataModel));
 

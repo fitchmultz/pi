@@ -103,9 +103,10 @@ order yields the effective prompt and tool set.
 ```ts
 type ContextEdit = {
   readonly target: Id;
-  readonly action: "omit" | "replace";
-  readonly messages?: readonly Message[];
-};
+} & (
+  | { readonly action: "omit"; readonly messages?: never }
+  | { readonly action: "replace"; readonly messages: readonly Message[] }
+);
 
 type EntryRecord = {
   readonly id: Id;
@@ -143,6 +144,12 @@ type Input = InputBase & (
       readonly detail?: JsonValue;
     }
 );
+
+type InputCreate = Input extends infer Record
+  ? Record extends Input
+    ? Omit<Record, "id">
+    : never
+  : never;
 ```
 
 Conversation history parenting and task ownership are separate:
@@ -186,7 +193,7 @@ separate consumers. Older stored history is available through the owning
 
 This is the v1 host-facing API. Pico5 is not implemented yet, but implementations
 must expose this shape rather than inventing a different facade during package
-25.
+24.
 
 ```ts
 type ModelRef = {
@@ -229,10 +236,7 @@ type HarnessOptions = {
   readonly models: Models; // the pi-ai Models interface
   readonly tools?: readonly ToolRegistration[];
   readonly taskKinds?: readonly AnyTask[];
-  readonly documents?: readonly AnyDocToken[];
   readonly sections?: readonly SystemSection<JsonValue>[];
-  readonly plugins?: Readonly<Record<string, PluginHandler>>;
-  readonly processHost?: ProcessHost;
   readonly now?: () => number;
   readonly root?: Omit<ConversationSpec, "parent">;
   readonly onReport?: (error: unknown) => void;
@@ -265,7 +269,7 @@ interface InputHandle {
 }
 
 type SettledTask<R> = TaskRecord<JsonValue, JsonValue, R> & {
-  readonly state: TerminalTask<R>;
+  readonly state: Extract<TaskState<JsonValue, R>, { status: "terminal" }>;
 };
 
 type ConversationWatch = WatchHandle<ConversationView>;
@@ -330,11 +334,9 @@ interface Harness extends Session {
   quiescent(): boolean;
   hold(): () => void;
 
-  registerDocument(token: AnyDocToken): () => void;
   registerTaskKind(task: AnyTask): () => void;
   registerTool(tool: ToolRegistration): () => void;
   registerSection(section: SystemSection<JsonValue>): () => void;
-  registerEntryKind(entry: Entry): () => void;
   hooks<K extends AnyTask>(
     owner: string,
     task: K,
@@ -377,12 +379,14 @@ conversation watch replace those surfaces. `write()` now returns an
 `InputHandle`, because a busy passive write may remain queued before it receives
 an entry ID.
 
-`Harness.open()` installs built-in definitions followed by supplied documents,
-task kinds, tools, sections, and plugins. It then completes document migration,
-changes surviving `running` tasks to `pending`, migrates task records, and
-settles unknown or unmigratable live kinds as `orphaned` before resolving. IDs
-and names must be unique. No handler dispatches during open. Dynamic registration is available
-after open and does not resurrect a task already settled by that pass.
+`Harness.open()` installs built-in task, tool, and section definitions followed
+by supplied task kinds, tools, and sections. It changes
+surviving `running` tasks to `pending`, migrates task records, and settles unknown
+or unmigratable live task kinds as `orphaned` before resolving. Any built-in
+document touched by that recovery migrates through its ordinary typed access
+path. Open does not scan or migrate other documents. IDs and names in registries must be unique. No
+handler dispatches during open. Dynamic registration is available after open and
+does not resurrect a task already settled by that pass.
 
 The root conversation always has reserved ID `ROOT_CONVERSATION_ID` (`1`). Empty
 storage creates that conversation from `options.root`; reopen looks it up by the
@@ -399,7 +403,7 @@ quiescent and pauses reservation until its idempotent release function runs.
 
 Runtime registration rejects duplicate IDs/names and returns an idempotent
 function that unregisters only that exact token. It supports declaration
-movement during normal operation, not replacement of executing plugin code;
+movement during normal operation, not replacement of executing extension code;
 section 7.4 governs code reload.
 
 Conversation creation atomically commits the conversation, built-in
@@ -531,7 +535,7 @@ type DocumentSemantics =
   | { readonly scope: "task" };
 
 type CommonDocDefinition<T extends JsonObject> = {
-  readonly id: string;
+  readonly kind: string;
   readonly version: number;
   initial(): T;
   migrate?(value: JsonObject, fromVersion: number): T;
@@ -583,13 +587,14 @@ interface RewindableDocFamilyToken<T extends JsonObject, I extends JsonValue>
       initial(input: I): T;
     };
 }
-type AnyDocToken = DocToken<JsonObject> | DocFamilyToken<JsonObject, JsonValue>;
 ```
 
 Validation rules:
 
-- Definition IDs are unique among loaded definitions.
 - Versions are positive integers.
+- Typed access rejects when the token's scope or conversation history/fork policy
+  disagrees with the persisted incarnation. A migration cannot reinterpret those
+  lifetime semantics.
 - Session documents are current-only and belong to the Session. Closing and
   reopening the Session does not retire them.
 - Conversation documents declare `history` and `fork`; `fork: "asOf"` requires
@@ -605,16 +610,17 @@ Concrete built-in document grouping and semantics are declared when the built-in
 definitions are implemented. The generic document mechanism does not special
 case model, tool, inbox, or presentation state.
 
-### 3.2 Identity
+### 3.2 Records and lifetimes
 
-A persisted document instance has:
+A persisted document instance has one lifecycle record:
 
 ```ts
-type DocumentIdentity = {
-  readonly id: Id;                 // unique incarnation
-  readonly definitionId: string;
-  readonly definitionVersion: number;
-  readonly instanceId?: string;    // families only
+type DocumentRecord = {
+  readonly id: Id;              // unique incarnation
+  readonly kind: string;        // stable definition kind
+  readonly key?: string;        // families only
+  readonly createdAt: Seq;      // stamped by the committing storage
+  readonly retiredAt?: Seq;
 } & (
   | { readonly scope: { readonly kind: "session" } }
   | ({ readonly scope: { readonly kind: "conversation"; readonly conversationId: Id } } & (
@@ -627,19 +633,25 @@ type DocumentIdentity = {
   | { readonly scope: { readonly kind: "task"; readonly taskId: Id } }
 );
 
-type DocumentMetadata = DocumentIdentity & {
-  readonly createdAt: Seq;         // stamped by the committing storage
-  readonly retiredAt?: Seq;
-};
+type DocumentCreate = DocumentRecord extends infer Record
+  ? Record extends DocumentRecord
+    ? Omit<Record, "createdAt" | "retiredAt">
+    : never
+  : never;
 ```
 
-`id` is never reused. Retiring and recreating the same logical definition,
-scope, and instance ID creates a new incarnation.
+`id` is never reused. Retiring and recreating the same logical kind, scope, and
+family key creates a new incarnation. Membership is the half-open interval
+`createdAt <= at < retiredAt`; an unretired incarnation has no upper bound. A
+creation retired in the same commit has an empty lifetime.
 
-A singleton is identified logically by definition and scope. A family is
-identified logically by definition, scope, and `instanceId`. Persisted metadata
-records the scope and conversation history/fork semantics so absent plugin code
-does not make existing data disappear.
+A singleton is identified logically by kind and scope. A family is identified
+logically by kind, scope, and `key`. The record preserves scope and conversation
+history/fork semantics so unavailable extension code does not make existing data
+disappear. Definition versions belong to stored bases and deltas because one
+incarnation may contain records written by multiple definition versions.
+`DocumentCreate` is not another persisted record; it is the same scoped union
+without storage-assigned lifetime fields.
 
 ### 3.3 Access and creation
 
@@ -703,7 +715,7 @@ interface Tx {
 
   createConversation(value: Omit<ConversationRecord, "id">): ConversationRecord;
   appendEntry(conversationId: Id, value: EntryDraft): EntryRecord;
-  createInput(value: Omit<Input, "id">): Input;
+  createInput(value: InputCreate): Input;
   setInput(value: Input): void;
   createTask<I, S extends { phase: string }, R, H extends object>(
     task: Task<I, S, R, H>, input: I, options?: TaskOptions,
@@ -721,20 +733,25 @@ type DocTarget =
   | { readonly scope: "conversation"; readonly conversationId: Id }
   | { readonly scope: "task"; readonly taskId: Id };
 
-type FamilyKey = DocTarget & { readonly instanceId: string };
+type FamilyKey = DocTarget & { readonly key: string };
 
 type FamilyTarget<I> = FamilyKey & { readonly initial: I };
 
 type HistoricalFamilyTarget = {
   readonly scope: "conversation";
   readonly conversationId: Id;
-  readonly instanceId: string;
+  readonly key: string;
 };
 ```
 
-Every normal access is get-or-create:
+Every normal access is get-or-create and receives the definition token that
+supplies its static type, initializer, migration, and checkpoint policy. Ordinary
+document definitions are not registered and ordinary documents are not scanned
+at open.
 
-- Existing instances are loaded without rewriting them.
+- Existing instances are reconstructed and migrated lazily according to section
+  3.6. Standalone access may commit a required current-only migration before its
+  method returns. `tx.doc()` instead stages that base in its enclosing transaction.
 - Missing instances are created in a serialized commit with an initial base.
 - Concurrent acquisition initializes once.
 - The target scope must match the token's declared scope.
@@ -780,8 +797,9 @@ callback fails
   restore each changed tracker from its unchanged baseline
 callback succeeds
   flush each changed tracker -> incremental ops + candidate value
-  Storage.commit evaluates each ordinary mutation's checkpoint predicate exactly once
-  and persists the selected representation while the Session line remains held
+  Session evaluates each ordinary mutation's checkpoint predicate exactly once
+  and gives Storage only the selected base or delta representation
+  Storage.commit persists it while the Session line remains held
 storage succeeds
   materialize each changed immutable published value with applyImmutable(previous, ops)
   adopt committed baselines and enqueue value/ops publication while holding the line
@@ -823,15 +841,18 @@ storage record is a base:
 const useBase = definition.checkpointWhen?.(candidateValue, ops) ?? false;
 ```
 
-Storage evaluates this predicate exactly once. The write carries
-`base: "checkpoint"`. Creation and version transitions carry `base: "required"` and
-do not call the predicate. Storage receives the incremental ops and borrowed
-candidate value, then serializes only the selected representation:
+The Session evaluates this predicate exactly once after tracker flush. Creation
+and version transitions require bases and do not call it. The Session then gives
+Storage only the selected representation:
 
 ```text
-required or predicate true -> persist complete value as a base
-otherwise                  -> persist ops
+required or predicate true -> base with complete value
+otherwise                  -> delta with incremental ops
 ```
+
+A predicate failure occurs after flush and therefore poisons the open Session as
+described in section 1. Storage executes no definition code and never receives
+an unused complete candidate with a selected delta.
 
 - For Session, task, and latest conversation documents, a committed base permits
   physical reclamation of older records.
@@ -861,16 +882,23 @@ stored > token  -> reject typed access
 no migrate      -> reject older stored version
 ```
 
-`migrate()` is pure and returns a complete current-version value.
+`migrate()` is pure and returns a complete current-version value. Migration is
+access-driven: `tx.doc()`, `snapshot()`, `snapshotAsOf()`, `documentSource()`, and
+`watchDoc()` reconstruct and migrate through the token supplied to that call.
+Harness open does not sweep ordinary documents.
 
-- A current-only document persists the migrated value as a required
-  current-version base.
+- A standalone current-only acquisition persists the migrated value as a required
+  current-version base before its method returns. `tx.doc()` stages the migration
+  in the enclosing transaction; callback failure persists nothing, and later
+  draft edits coalesce into one final required base.
 - Rewindable history is not rewritten. Current and historical reconstructed
   values are migrated after replay.
 - The first mutation of a migrated rewindable value stores a required
   current-version base before subsequent current-version deltas.
-- A fork stores the migrated value as the child's initial current-version base.
-- Missing plugin definitions preserve stored instances and bytes.
+- A fork copies the selected stored value and version. Typed access in the child
+  migrates it later when necessary.
+- Unaccessed documents and documents with unavailable definitions preserve their stored instances,
+  versions, and bytes.
 
 ### 3.7 Forks
 
@@ -880,7 +908,8 @@ The child transcript includes entries through `E`, even if the same commit also
 appended later entries. Document state at `E` is the final state of the commit
 containing `E`. Different document states require separate commits.
 
-Each conversation document follows its definition:
+Each conversation document follows the history/fork policy persisted in its
+lifecycle record:
 
 | conversation setting | child value |
 |---|---|
@@ -892,7 +921,7 @@ Each conversation document follows its definition:
 instances, preserving unknown definitions and their stored versions. Copied
 values become independent child instances with new IDs and initial bases.
 `initial` copies no instance; first access in the child creates it from the
-loaded definition. Task documents and tasks are never copied. Session documents
+supplied definition. Task documents and tasks are never copied. Session documents
 remain shared and are not rewindable.
 
 ## 4. Transactions and storage ownership
@@ -941,11 +970,6 @@ Storage ownership:
 ### 5.1 Definition
 
 ```ts
-type LiveTask<S> = {
-  readonly status: "pending" | "running";
-  readonly checkpoint: S;
-};
-
 type TaskOutcome<R> =
   | { readonly status: "completed"; readonly result: R }
   | { readonly status: "failed"; readonly error: StoredError; readonly result?: R }
@@ -953,10 +977,10 @@ type TaskOutcome<R> =
   | { readonly status: "orphaned"; readonly reason: string }
   | { readonly status: "faulted"; readonly error: StoredError };
 
-type TerminalTask<R> = {
-  readonly status: "terminal";
-  readonly outcome: TaskOutcome<R>;
-};
+type TaskState<S, R> =
+  | { readonly status: "pending"; readonly checkpoint: S }
+  | { readonly status: "running"; readonly checkpoint: S }
+  | { readonly status: "terminal"; readonly outcome: TaskOutcome<R> };
 
 type TaskRecord<I, S, R> = {
   readonly id: Id;
@@ -964,15 +988,22 @@ type TaskRecord<I, S, R> = {
   readonly kind: string;
   readonly version: number;
   readonly input: I;
-  readonly state: LiveTask<S> | TerminalTask<R>;
   readonly after: readonly Id[];
   readonly background: boolean;
   readonly abortRequested: boolean;
-  readonly memos?: Readonly<Record<string, JsonValue>>; // live tasks only
-};
+} & (
+  | {
+      readonly state: Extract<TaskState<S, R>, { status: "pending" | "running" }>;
+      readonly memos?: Readonly<Record<string, JsonValue>>;
+    }
+  | {
+      readonly state: Extract<TaskState<S, R>, { status: "terminal" }>;
+      readonly memos?: never;
+    }
+);
 
 type RunningTask<I, S, R> = TaskRecord<I, S, R> & {
-  readonly state: LiveTask<S> & { readonly status: "running" };
+  readonly state: Extract<TaskState<S, R>, { status: "running" }>;
 };
 
 interface HookRunner<H extends object> {
@@ -1134,9 +1165,10 @@ conversation ownership tree. History parents are irrelevant to this traversal.
 Background tasks do not block ordinary idle waits and survive ordinary
 conversation abort unless explicitly included.
 
-Initial task/document/entry definitions are registered before open performs
-migration or orphan reconciliation. Dynamic registration begins only after that
-pass. Unknown or unmigratable live task kinds become terminal `orphaned`;
+Initial task definitions are registered before open performs live-task migration
+and orphan reconciliation. Dynamic registration begins only after that pass.
+Document migration remains access-driven. Unknown or unmigratable live task kinds
+become terminal `orphaned`;
 affected inputs become unanswered, any matching active turn control is cleared,
 task-scoped documents retire, and a visible notice entry is appended in one
 commit. Faulting a turn task performs the same control/input cleanup with a
@@ -1275,12 +1307,6 @@ interface ToolExecutionApi extends DocumentObserver {
   ): Promise<OwnedConversation>;
 }
 
-type PluginHandler = (
-  input: JsonValue,
-  api: ToolExecutionApi,
-  context: Context,
-) => Promise<JsonValue>;
-
 type ToolRegistration = Tool & {
   readonly replay?: "safe" | "unsafe";
   readonly output?: {
@@ -1333,7 +1359,7 @@ A tool executes in a durable task. It may:
 - mutate authorized documents through `commit()`;
 - return bounded model content and separate diagnostic details.
 
-Tool and plugin operations use the invoking task's admission and
+Tool operations use the invoking task's admission and
 invocation-lifetime gates. Task creation defaults to that task's conversation.
 Trusted document access follows sections 3.3 and 9.2; there is no additional
 document subtree authorization layer. `createConversation()` records the
@@ -1346,8 +1372,7 @@ parent, documents initialize normally. That handle's
 operations reject after the invocation ends. An `InputHandle` returned by its
 `send()` is invocation-bound in the same way; the admitted input itself remains
 durable after those methods reject. Invocation-owned document watches stop when
-the invocation ends. A
-plugin handler receives the same API; `callId` is its durable invocation key.
+the invocation ends.
 
 A tool result may request `addTools`, `terminate`, or `handoff`. Post-tools
 applies added tool names to configured loadout, uses a final boundary for
@@ -1443,23 +1468,26 @@ changes. Pi-ai decides whether to send the messages positionally to a capable
 provider or fold them into one leading system message; Pico does not rewrite its
 stored transcript for provider compatibility.
 
-### 7.4 Host plugin reload
+### 7.4 Host extension reload
 
-A host plugin generation is the Session-side code implementing its task kinds,
-hooks, tools, entry kinds, sections, and document definitions. Registration APIs
-may change declarations during normal product operation, but they do not make
-replacement of that implementation code safe while its callbacks are running.
+A host extension generation is the Session-side code implementing its task kinds,
+hooks, tools, sections, and document definitions. Registry APIs may
+change registered declarations during normal product operation, but they do not
+make replacement of that implementation code safe while its callbacks are
+running. Document definitions are passed explicitly to typed access rather than
+registered.
 
-In v1, changing host plugin code is a Harness generation boundary:
+In v1, changing host extension code is a Harness generation boundary:
 
 1. Stop new admission and task reservation.
 2. Close the Harness, signalling and joining its active task, tool, and hook
    invocations plus in-flight watch callbacks without writing abort marks or
    terminal outcomes.
 3. Dispose the old facets and registrations.
-4. Construct a new Harness over the same storage.
-5. Register the complete new definition set before open performs task/document
-   migration and orphan reconciliation.
+4. Construct a new Harness over the same storage and new document tokens.
+5. Register the complete task definition set before open performs live-task
+   migration and orphan reconciliation. Ordinary documents migrate on later
+   typed access.
 6. Resume scheduling from the durable checkpoints.
 
 A durable task does not need to become terminal before this restart; only its
@@ -1468,7 +1496,7 @@ the meaning of persisted input or checkpoint state changes and migrate supported
 older state. Uncommitted hook work may rerun under the new generation; committed
 memos remain part of the live task.
 
-If old plugin code ignores cancellation and never settles, graceful in-process
+If old extension code ignores cancellation and never settles, graceful in-process
 reload cannot complete. The host must terminate that isolated worker/process
 before opening the Session under the new generation. Old and new generations
 must never own the same Session concurrently.
@@ -1480,43 +1508,6 @@ isolation and is not a v1 promise.
 
 ## 8. Built-in tasks
 
-```ts
-type ProcessSpec = {
-  readonly command: string;
-  readonly args: readonly string[];
-  readonly cwd: string;
-  readonly env?: Readonly<Record<string, string>>;
-};
-
-type ProcessStatus =
-  | {
-      readonly status: "running";
-      readonly stdout: string;
-      readonly stderr: string;
-      readonly droppedStdout: number;
-      readonly droppedStderr: number;
-    }
-  | {
-      readonly status: "exited";
-      readonly exitCode: number;
-      readonly stdout: string;
-      readonly stderr: string;
-      readonly droppedStdout: number;
-      readonly droppedStderr: number;
-    }
-  | { readonly status: "unknown" };
-
-interface ProcessHost {
-  start(key: string, spec: ProcessSpec, context: Context): Promise<void>;
-  status(key: string, context: Context): Promise<ProcessStatus>;
-  kill(
-    key: string,
-    signal: "SIGTERM" | "SIGKILL",
-    context: Context,
-  ): Promise<void>;
-}
-```
-
 The initial implementation provides:
 
 | kind | responsibility |
@@ -1525,8 +1516,6 @@ The initial implementation provides:
 | tool | validate, hook, execute, persist progress, append result |
 | post-tools | wait for tools, apply controls, run boundary, continue generation |
 | collapse | select a transcript range, summarize, append a headed summary |
-| job | run a process, persist bounded output, delay or reschedule |
-| plugin | run a registered durable handler when needed |
 
 Generation uses `HarnessOptions.models` without a Pico-specific model adapter. It
 resolves `models.getModel(ref.provider, ref.modelId)`, builds a pi-ai `Context`
@@ -1547,11 +1536,6 @@ Bounded output records whether content was truncated and any retained file path.
 Compaction changes model context by appending a summary entry with a head. It
 does not delete transcript history.
 
-The initial job implementation does not promise process reattachment after a
-harness crash. It preserves checkpointed output, records interruption, and may
-rerun only when its explicit job policy allows it. Delayed and recurring jobs
-use durable deadlines and create/transition tasks; they do not rely on timers
-surviving process death.
 
 ## 9. Document observation and Chord
 
@@ -1782,9 +1766,8 @@ type Cursor = Readonly<Record<string, JsonValue>>;
 
 type EntryQuery = {
   readonly conversationId: Id;
-  readonly before?: Id;       // strict semantic cutoff, independent of page cursor
-  readonly kind?: string;
-  readonly withHead?: boolean;
+  readonly minEntryId?: Id; // inclusive
+  readonly maxEntryId?: Id; // inclusive
 };
 
 type TaskQuery = {
@@ -1795,20 +1778,30 @@ type TaskQuery = {
   readonly background?: boolean;
 };
 
-type DocumentQuery = {
-  readonly definitionId?: string;
-  readonly scope?: DocumentIdentity["scope"];
-  readonly instanceId?: string;
-  readonly at?: Seq | "current";
-  readonly includeRetired?: boolean;
+type DocumentPoint = Seq | "current";
+
+type DocumentAddress = {
+  readonly kind: string;
+  readonly scope: DocumentRecord["scope"];
+  readonly key?: string;
 };
+
+type DocumentQuery = {
+  readonly scope: DocumentRecord["scope"];
+  readonly at: DocumentPoint;
+  readonly kind?: string;
+};
+
+type DocumentContent =
+  | { readonly version: number; readonly kind: "base"; readonly value: JsonObject }
+  | { readonly version: number; readonly kind: "delta"; readonly ops: readonly Op[] };
 
 type StoredDocumentRecord =
   | { readonly seq: Seq; readonly version: number; readonly kind: "base"; readonly value: JsonObject }
   | { readonly seq: Seq; readonly version: number; readonly kind: "delta"; readonly ops: readonly Op[] };
 
 type StoredDocument = {
-  readonly metadata: DocumentMetadata;
+  readonly record: DocumentRecord;
   readonly records: readonly [
     Extract<StoredDocumentRecord, { kind: "base" }>,
     ...Extract<StoredDocumentRecord, { kind: "delta" }>[],
@@ -1822,30 +1815,32 @@ type StorageWrite =
   | { readonly type: "input"; readonly value: Input }
   | {
       readonly type: "document.create";
-      readonly identity: DocumentIdentity;
-      readonly value: JsonObject; // always a base; storage stamps createdAt
+      readonly record: DocumentCreate;
+      readonly content: Extract<DocumentContent, { kind: "base" }>;
     }
   | {
       readonly type: "document.change";
-      readonly metadata: DocumentMetadata;
-      readonly definition: AnyDocToken;
-      readonly ops: readonly Op[];
-      readonly value: JsonObject;
-      readonly base: "checkpoint" | "required";
+      readonly id: Id;
+      readonly content: DocumentContent;
     }
   | { readonly type: "document.retire"; readonly id: Id };
 
+/**
+ * Trusts the owning Session to supply semantically valid records, references,
+ * ancestry, and transitions. Enforces atomicity, global ID ownership, immutable
+ * conversation/entry creation, document lifecycle consistency, and detached
+ * values; Session serializes commits.
+ */
 interface Storage {
-  /** The owning Session serializes calls on its mutation line. */
   commit(writes: readonly StorageWrite[], context: Context): Promise<Seq>;
   mintId(): Id;
 
   conversation(id: Id, context: Context): Promise<ConversationRecord | undefined>;
   scanConversations(cursor: Cursor | undefined, limit: number, context: Context): Promise<Page<ConversationRecord, Cursor>>;
 
-  entries(ids: readonly Id[], context: Context): Promise<ReadonlyMap<Id, EntryRecord>>;
+  entry(id: Id, context: Context): Promise<{ readonly entry: EntryRecord; readonly commitSeq: Seq } | undefined>;
+  findLatestHeadMarker(conversationId: Id, atOrBeforeEntryId: Id | undefined, context: Context): Promise<(EntryRecord & { readonly head: Id }) | undefined>;
   scanEntries(query: EntryQuery, cursor: Cursor | undefined, limit: number, context: Context): Promise<Page<EntryRecord, Cursor>>;
-  entryCommit(id: Id, context: Context): Promise<Seq | undefined>;
 
   task(id: Id, context: Context): Promise<TaskRecord<JsonValue, JsonValue, JsonValue> | undefined>;
   scanTasks(query: TaskQuery, cursor: Cursor | undefined, limit: number, context: Context): Promise<Page<TaskRecord<JsonValue, JsonValue, JsonValue>, Cursor>>;
@@ -1853,8 +1848,9 @@ interface Storage {
   input(id: Id, context: Context): Promise<Input | undefined>;
   inputByRequest(conversationId: Id, requestId: string, context: Context): Promise<Input | undefined>;
 
-  document(id: Id, at: Seq | "current", context: Context): Promise<StoredDocument | undefined>;
-  scanDocuments(query: DocumentQuery, cursor: Cursor | undefined, limit: number, context: Context): Promise<Page<DocumentMetadata, Cursor>>;
+  findDocument(address: DocumentAddress, at: DocumentPoint, context: Context): Promise<DocumentRecord | undefined>;
+  document(id: Id, at: DocumentPoint, context: Context): Promise<StoredDocument | undefined>;
+  scanDocuments(query: DocumentQuery, cursor: Cursor | undefined, limit: number, context: Context): Promise<Page<DocumentRecord, Cursor>>;
 
   close(context: Context): Promise<void>;
 }
@@ -1865,14 +1861,39 @@ scan on the same storage; cross-storage or cross-query use is unsupported. The
 Session owns the mutation line, so storage implementations do not add a second
 caller-facing commit mutex. Each backend still makes one admitted batch atomic.
 
-`EntryQuery` supports conversation ancestry, a strict `before` entry cursor,
-kind filtering, and `withHead`. Document queries support definition, scope,
-instance, current/as-of membership, and retired membership. Task queries support
-conversation, kind, live/terminal
-status, abort mark, and background status.
+`findLatestHeadMarker()` returns the newest visible entry carrying `head` at or
+below its optional inclusive cutoff. The returned entry is the marker; its
+`head` value is the actual lower bound for context. `scanEntries()` pages the
+inclusive ID range in newest-first order while applying every conversation
+ancestry cap. With no bounds it pages complete visible history. To read context
+through entry `E`, find the marker at or before `E`, then scan from
+`marker?.head` through `E`. For current context the upper bound is omitted.
+`entry()` combines exact global lookup with the commit sequence required by
+historical document reads. `limit` is always the maximum page size.
+`findDocument()` resolves one exact logical kind/scope/key address at current or
+historical membership. A missing key means the singleton, not every family
+member. `scanDocuments()` enumerates only the incarnations alive in one exact
+scope at its selected point and may restrict one family/singleton kind. It uses
+ascending incarnation IDs. There is no ordinary open-time all-document scan.
+Task queries support conversation, kind, live/terminal status, abort mark, and
+background status.
 
 `document(id, at)` returns the newest applicable base plus its ordered delta tail
-or an equivalent detached materialization. It never scans unrelated documents.
+and never scans unrelated documents. An unknown ID returns `undefined`. At
+`"current"`, a retired incarnation returns `undefined`. A numeric lookup of a
+rewindable conversation incarnation returns `undefined` outside its half-open
+lifetime and reconstructs the selected value inside it. A numeric lookup of a
+known current-only incarnation rejects rather than depending on content that
+reclamation may have removed. Metadata membership remains queryable historically.
+A missing required base inside an addressable rewindable lifetime is storage
+corruption, not absence.
+
+One normalized batch contains at most one create/change content command per
+incarnation and may also retire that incarnation. Storage applies content before
+retirement independent of write-array order. Create plus retire stamps both
+lifetime bounds with the batch sequence. Retire plus create at one logical
+address makes the new incarnation current at that sequence. Deltas cannot cross
+a stored version boundary; a version transition must be a base.
 
 The semantic conformance suite covers memory, SQLite, and JSONL.
 
@@ -1881,15 +1902,17 @@ The semantic conformance suite covers memory, SQLite, and JSONL.
 ### 11.1 Memory
 
 Memory storage is the reference semantics. It copies retained write values and
-all read results. It preserves rewindable records and reclaims latest records
-only after a committed base or retirement.
+all read results. This deliberately simulates the ownership boundary naturally
+created by SQLite encoding/decoding and JSONL serialization; it is not defensive
+validation. It preserves rewindable records and reclaims latest records only
+after a committed base or retirement.
 
 ### 11.2 SQLite
 
 One SQL transaction is one Session commit. SQLite stores:
 
 - conversation, entry, task, and input records;
-- document metadata;
+- document lifecycle records;
 - indexed document bases/deltas by document and commit sequence.
 
 Live task transitions replace one row. Terminal tasks remain as small records.
@@ -1903,7 +1926,11 @@ benchmarks.
 
 ### 11.3 JSONL
 
-JSONL uses reclaimable sidecars without exposing them to the harness:
+JSONL uses reclaimable sidecars without exposing them to the harness. Persistence
+alone does not provide the ownership boundary: any decoded indexes, materialized
+values, or caches retained in memory must be detached from commit arguments and
+must not be exposed directly by reads. A JSONL backend cannot simply add file
+appends around aliasing memory tables.
 
 ```text
 main.jsonl       table writes, lifecycle, and one marker per commit
@@ -1959,9 +1986,11 @@ These are contracts, not invitations to add defensive machinery:
   live.
 - **Wrong fork setting:** `current`, `initial`, and `asOf` are product semantics,
   not optimizations. Changing one changes child conversation behavior.
-- **Schema stability:** definition IDs, mounted document IDs, and visible paths
-  are persisted/public protocol. Value migration cannot rename an ID; an ID
-  change requires explicit copy and retirement.
+- **Schema stability:** document kinds and visible mount paths are
+  persisted/public protocol. Value migration cannot rename a kind; a kind
+  change requires explicit copy and retirement. Passing incompatible definition
+  tokens that claim the same kind is unsupported caller misuse; Session does not
+  maintain a document-definition registry to detect it.
 - **Watch activation:** `watch.value` is the immutable acquisition snapshot.
   Initialize the consumer from it before `start()`; queued operations are based
   on exactly that value.
@@ -1999,4 +2028,4 @@ Pico5 initially has no:
 - SQL translation of arbitrary Chord operations;
 - JSONL global compaction or automatic corruption repair;
 - compatibility layer for removed Pico prototypes;
-- in-process hot replacement of Session-side plugin implementations.
+- in-process hot replacement of Session-side extension implementations.

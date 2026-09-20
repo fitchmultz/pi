@@ -334,6 +334,29 @@ Tracked state must be a mutable JSON tree:
 - no sparse arrays, accessors, frozen objects, symbols, classes, functions,
   `Map`, or `Set`.
 
+## Proxy lifetime and large reads
+
+Proxy caches are weak. Reading a subtree does not permanently retain its proxies
+just because the underlying plain objects remain in the document. A proxy still
+held by application code keeps its identity; held descendants retain the ancestor
+tracking metadata needed to follow array reindexing. Explicit alias locations are
+remembered separately from the lifetime of their public proxies.
+
+Collection is automatic, not a `flush()` side effect. JavaScript keeps newly
+created or dereferenced `WeakRef` targets alive until the current job ends, and
+finalizer cleanup can run later. A synchronous traversal can therefore still have
+a substantial allocation peak. Retained-memory measurements must allow event-loop
+turns as well as GC; a synchronous `gc()` immediately after the traversal is not
+sufficient to measure weak-cache reclamation.
+
+This does not eliminate proxy construction/trap costs or full comparisons on
+container assignment. `tracker.target` is available for read-only bulk inspection
+without creating proxies. Never mutate through it; all tracked mutations must go
+through `tracker.state` or a proxy obtained from it.
+
+See the [delta investigation findings](../../../durable/docs/chord-delta-findings.md)
+for the full-traversal regression, measured trade-offs, and reproduction commands.
+
 ## Tracker lifecycle
 
 ```ts

@@ -65,6 +65,8 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { generateBugReportSummary } from "./bug-report.ts";
+import type { CacheWarmer, CacheWarmingStatus } from "./cache-warmer.ts";
 import type {
 	CheckpointBoundary,
 	CheckpointHold,
@@ -128,7 +130,7 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.t
 import { exportSessionToJsonl } from "./session-export.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
 import { getLatestCompactionEntry, sessionEntryToContextMessages } from "./session-manager.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type { CacheWarmingMode, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import {
@@ -247,6 +249,8 @@ export interface AgentSessionConfig {
 	customTools?: ToolDefinition[];
 	/** Canonical model/auth runtime used by coding-agent internals. */
 	modelRuntime: ModelRuntime;
+	/** Keeps the prompt cache entry of the last session request warm. */
+	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: string[];
 	/** Suppress default built-ins, retaining extension tools and explicit selection. */
@@ -358,6 +362,7 @@ export class AgentSession {
 	private _isAgentRunActive = false;
 	private _promptAbortController: AbortController | undefined;
 	private readonly _shutdownAbortController = new AbortController();
+	private _agentRunAbortRequested = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -435,6 +440,7 @@ export class AgentSession {
 	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
+	private _cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -460,6 +466,10 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRuntime = config.modelRuntime;
+		this._cacheWarmer = config.cacheWarmer;
+		if (this._cacheWarmer) {
+			this._cacheWarmer.onWarmed = (entry) => this._emit({ type: "entry_appended", entry });
+		}
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._noBuiltinTools = config.noBuiltinTools ?? false;
@@ -505,7 +515,10 @@ export class AgentSession {
 		return this._modelRuntime;
 	}
 
-	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
+	private async _getRequiredRequestAuth(
+		model: Model<any>,
+		signal?: AbortSignal,
+	): Promise<{
 		model: Model<any>;
 		apiKey?: string;
 		headers?: Record<string, string>;
@@ -513,7 +526,7 @@ export class AgentSession {
 	}> {
 		let result: AuthResult | undefined;
 		try {
-			result = await this._modelRuntime.getAuth(model);
+			result = await this._modelRuntime.getAuth(model, { signal });
 		} catch (error) {
 			const cause = error instanceof Error ? error.cause : undefined;
 			if (cause instanceof Error && cause.message === "authHeader requires a resolved API key") {
@@ -542,7 +555,10 @@ export class AgentSession {
 		throw new Error(formatNoApiKeyFoundMessage(model.provider));
 	}
 
-	private async _getSummarizationRequestAuth(model: Model<any>): Promise<{
+	private async _getSummarizationRequestAuth(
+		model: Model<any>,
+		signal?: AbortSignal,
+	): Promise<{
 		model: Model<any>;
 		apiKey?: string;
 		headers?: Record<string, string>;
@@ -550,11 +566,11 @@ export class AgentSession {
 	}> {
 		this._shutdownAbortController.signal.throwIfAborted();
 		if (this.agent.streamFunction === streamSimple) {
-			return this._getRequiredRequestAuth(model);
+			return this._getRequiredRequestAuth(model, signal);
 		}
 
 		try {
-			const result = await this._modelRuntime.getAuth(model);
+			const result = await this._modelRuntime.getAuth(model, { signal });
 			if (!result) return { model };
 			const requestModel = result.auth.baseUrl ? { ...model, baseUrl: result.auth.baseUrl } : model;
 			return {
@@ -563,7 +579,8 @@ export class AgentSession {
 				headers: withoutDeletedHeaders(result.auth.headers),
 				env: result.env,
 			};
-		} catch {
+		} catch (error) {
+			if (signal?.aborted) throw error;
 			return { model };
 		}
 	}
@@ -960,6 +977,7 @@ export class AgentSession {
 	}
 
 	private async _emitAgentSettled(): Promise<void> {
+		this._cacheWarmer?.onAgentSettled();
 		this._isAgentRunActive = false;
 		this._settling++;
 		try {
@@ -1071,6 +1089,7 @@ export class AgentSession {
 	};
 
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
+		if (this._agentRunAbortRequested) return false;
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled || this._retryAttempt >= settings.maxRetries) {
 			return false;
@@ -1224,6 +1243,7 @@ export class AgentSession {
 
 	/** Close admission before host cleanup yields. Active responses are aborted only at final disposal. */
 	beginShutdown(): void {
+		this._cacheWarmer?.cancel();
 		this._checkpointRequest?.cancel();
 		this._shutdownAbortController.abort();
 		this._promptAbortController?.abort();
@@ -1252,6 +1272,10 @@ export class AgentSession {
 		);
 		this._disconnectFromAgent();
 		this._eventListeners = [];
+		if (this._cacheWarmer) {
+			this._cacheWarmer.onWarmed = undefined;
+			this._cacheWarmer.cancel();
+		}
 		cleanupSessionResources(this.sessionId);
 	}
 
@@ -1262,6 +1286,18 @@ export class AgentSession {
 	/** Full agent state */
 	get state(): AgentState {
 		return this.agent.state;
+	}
+
+	/** Current cache-warming state and the policy inputs that produced it. */
+	get cacheWarmingStatus(): CacheWarmingStatus | undefined {
+		return this._cacheWarmer?.status;
+	}
+
+	/** Persist the cache-warming mode and immediately reconcile active warming. */
+	setCacheWarmingMode(mode: CacheWarmingMode): void {
+		this._assertNotCheckpointHeld();
+		this.settingsManager.setCacheWarmingMode(mode);
+		this._cacheWarmer?.onModeChanged();
 	}
 
 	/** Current model (may be undefined if not yet selected) */
@@ -1551,6 +1587,7 @@ export class AgentSession {
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
 		}
+		this._agentRunAbortRequested = false;
 		this._isAgentRunActive = true;
 		const controller = new AbortController();
 		this._promptAbortController = controller;
@@ -1578,6 +1615,7 @@ export class AgentSession {
 			this._promptAbortController = undefined;
 			if (controller.signal.aborted) this._pendingNewContext = undefined;
 			this._skipNextProviderRequestPreflight = false;
+			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
 			this._runSystemPromptOptions = undefined;
 			if (!started) this._baseSystemPromptBaseline = previousBaseSystemPromptBaseline;
 			// No further retry or continuation can deliver these messages. Recover both queued
@@ -1620,8 +1658,14 @@ export class AgentSession {
 	private async _handlePostAgentRun(signal: AbortSignal | undefined): Promise<boolean> {
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
-		if (this._shutdownAbortController.signal.aborted || signal?.aborted || msg?.stopReason === "aborted") {
+		if (
+			this._agentRunAbortRequested ||
+			this._shutdownAbortController.signal.aborted ||
+			signal?.aborted ||
+			msg?.stopReason === "aborted"
+		) {
 			this._pendingNewContext = undefined;
+			await this._finishCancelledRetry();
 			return false;
 		}
 		if (!msg) {
@@ -1633,7 +1677,12 @@ export class AgentSession {
 		}
 
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
-			return true;
+			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
+			return !this._agentRunAbortRequested;
+		}
+		if (this._agentRunAbortRequested) {
+			await this._finishCancelledRetry();
+			return false;
 		}
 
 		if (msg.stopReason === "error" && this._retryAttempt > 0) {
@@ -1647,6 +1696,7 @@ export class AgentSession {
 		}
 
 		const compacted = await this._checkCompaction(msg);
+		if (this._agentRunAbortRequested) return false;
 		if (this._consumeNewContext()) {
 			return msg.stopReason !== "stop" || this.agent.hasQueuedMessages();
 		}
@@ -1654,7 +1704,7 @@ export class AgentSession {
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
-		return this.agent.hasQueuedMessages();
+		return !this._agentRunAbortRequested && this.agent.hasQueuedMessages();
 	}
 
 	private async _runInputHandlers(
@@ -2346,6 +2396,7 @@ export class AgentSession {
 				run: async (boundary) => {
 					if (released) return;
 					this._checkpointHeld = true;
+					this._cacheWarmer?.cancel();
 					const held = new Promise<void>((done) => {
 						resume = done;
 					});
@@ -2519,6 +2570,9 @@ export class AgentSession {
 	async abort(): Promise<void> {
 		this._checkpointRequest?.cancel();
 		this._promptAbortController?.abort();
+		if (this._isAgentRunActive) {
+			this._agentRunAbortRequested = true;
+		}
 		this.abortRetry();
 		this.abortCompaction();
 		this.abortBranchSummary();
@@ -2858,6 +2912,7 @@ export class AgentSession {
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;
+		let cancelledByExtension = false;
 
 		try {
 			const model = this.model;
@@ -2866,7 +2921,12 @@ export class AgentSession {
 			}
 
 			const settings = this.settingsManager.getCompactionSettings(model);
-			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
+			const {
+				model: requestModel,
+				apiKey,
+				headers,
+				env,
+			} = await this._getSummarizationRequestAuth(model, this._compactionAbortController.signal);
 
 			const pathEntries = this.sessionManager.getBranch();
 
@@ -2894,6 +2954,7 @@ export class AgentSession {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (result?.cancel) {
+					cancelledByExtension = true;
 					throw new Error("Compaction cancelled");
 				}
 
@@ -2983,7 +3044,7 @@ export class AgentSession {
 			return compactionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+			const aborted = this._compactionAbortController.signal.aborted || cancelledByExtension;
 			const errorMessage = aborted ? undefined : `Compaction failed: ${message}`;
 			this._clearManualCompactionState();
 			this._emit({
@@ -3146,9 +3207,11 @@ export class AgentSession {
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
+		let abortController: AbortController | undefined;
 		let started = false;
 		let fromExtension = false;
 		let signal: AbortSignal | undefined;
+		let cancelledByExtension = false;
 
 		try {
 			if (!model) {
@@ -3156,10 +3219,14 @@ export class AgentSession {
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
-			this._autoCompactionAbortController = new AbortController();
-			signal = this.agent.signal
-				? AbortSignal.any([this.agent.signal, this._autoCompactionAbortController.signal])
-				: this._autoCompactionAbortController.signal;
+			abortController = new AbortController();
+			this._autoCompactionAbortController = abortController;
+			signal = AbortSignal.any([
+				abortController.signal,
+				this._shutdownAbortController.signal,
+				...(this.agent.signal ? [this.agent.signal] : []),
+				...(this._promptAbortController ? [this._promptAbortController.signal] : []),
+			]);
 			started = true;
 			this._emit({ type: "compaction_start", reason });
 			signal.throwIfAborted();
@@ -3192,14 +3259,14 @@ export class AgentSession {
 				}
 			}
 
-			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
-			signal.throwIfAborted();
-
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
 				this._emit({ type: "compaction_end", reason, result: undefined, aborted: false, willRetry: false });
 				return false;
 			}
+
+			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model, signal);
+			signal.throwIfAborted();
 
 			let extensionCompaction: CompactionResult | undefined;
 
@@ -3214,22 +3281,11 @@ export class AgentSession {
 					signal,
 				})) as SessionBeforeCompactResult | undefined;
 
-				if (extensionResult?.cancel || signal.aborted) {
-					this._emit({
-						type: "compaction_end",
-						reason,
-						result: undefined,
-						aborted: true,
-						willRetry: false,
-					});
-					await this._emitSessionCompactFailed({
-						reason,
-						aborted: true,
-						willRetry: false,
-						fromExtension: false,
-					});
-					return false;
+				if (extensionResult?.cancel) {
+					cancelledByExtension = true;
+					throw new Error("Compaction cancelled");
 				}
+				signal.throwIfAborted();
 
 				if (extensionResult?.newContext) {
 					const contextWindowStarted = !!this._consumeNewContext(extensionResult.newContext);
@@ -3250,6 +3306,7 @@ export class AgentSession {
 					fromExtension = true;
 				}
 			}
+			signal.throwIfAborted();
 
 			let summary: string;
 			let firstKeptEntryId: string;
@@ -3282,23 +3339,7 @@ export class AgentSession {
 				usage = compactResult.usage;
 				details = compactResult.details;
 			}
-
-			if (signal.aborted) {
-				this._emit({
-					type: "compaction_end",
-					reason,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
-				await this._emitSessionCompactFailed({
-					reason,
-					aborted: true,
-					willRetry: false,
-					fromExtension,
-				});
-				return false;
-			}
+			signal.throwIfAborted();
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			this._reportedUsagePrefix = null;
@@ -3358,25 +3399,25 @@ export class AgentSession {
 			// Continue once so queued messages are delivered.
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			const message = error instanceof Error ? error.message : "compaction failed";
+			const aborted = signal?.aborted === true || cancelledByExtension;
 			if (started) {
-				const aborted = signal?.aborted ?? false;
-				const formattedErrorMessage = aborted
+				const errorMessage = aborted
 					? undefined
 					: reason === "overflow"
-						? `Context overflow recovery failed: ${errorMessage}`
-						: `Auto-compaction failed: ${errorMessage}`;
+						? `Context overflow recovery failed: ${message}`
+						: `Auto-compaction failed: ${message}`;
 				this._emit({
 					type: "compaction_end",
 					reason,
 					result: undefined,
 					aborted,
 					willRetry: false,
-					errorMessage: formattedErrorMessage,
+					errorMessage,
 				});
 				await this._emitSessionCompactFailed({
 					reason,
-					errorMessage: formattedErrorMessage,
+					errorMessage,
 					aborted,
 					willRetry: false,
 					fromExtension,
@@ -3385,7 +3426,9 @@ export class AgentSession {
 			return false;
 		} finally {
 			if (signal?.aborted) this._pendingNewContext = undefined;
-			this._autoCompactionAbortController = undefined;
+			if (this._autoCompactionAbortController === abortController) {
+				this._autoCompactionAbortController = undefined;
+			}
 			this._resolveIdleWaitIfIdle();
 		}
 	}
@@ -3893,6 +3936,18 @@ export class AgentSession {
 		};
 	}
 
+	private async _finishCancelledRetry(): Promise<void> {
+		if (this._retryAttempt === 0) return;
+		const attempt = this._retryAttempt;
+		this._retryAttempt = 0;
+		await this._emitRetryEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt,
+			finalError: "Retry cancelled",
+		});
+	}
+
 	/**
 	 * Prepare a retryable error for continuation with exponential backoff.
 	 * @returns true if the caller should continue the agent, false otherwise
@@ -3934,15 +3989,7 @@ export class AgentSession {
 			this._retryAbortController.signal.throwIfAborted();
 		} catch (error) {
 			if (!this._retryAbortController.signal.aborted) throw error;
-			// Aborted during dispatch or sleep - notify extensions and listeners.
-			const attempt = this._retryAttempt;
-			this._retryAttempt = 0;
-			await this._emitRetryEvent({
-				type: "auto_retry_end",
-				success: false,
-				attempt,
-				finalError: "Retry cancelled",
-			});
+			await this._finishCancelledRetry();
 			return false;
 		} finally {
 			this._retryAbortController = undefined;
@@ -4371,7 +4418,9 @@ export class AgentSession {
 		const usageTotals = createUsageTotals();
 
 		for (const entry of this.sessionManager.getEntries()) {
-			if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
+			if (entry.type === "usage") {
+				addUsageToTotals(usageTotals, entry.usage);
+			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 				addUsageToTotals(usageTotals, entry.usage);
 			}
 			if (entry.type !== "message") continue;
@@ -4470,6 +4519,31 @@ export class AgentSession {
 	 */
 	exportToJsonl(outputPath?: string): string {
 		return exportSessionToJsonl(this.sessionManager, outputPath);
+	}
+
+	/**
+	 * Ask the current model to describe what went wrong in this session for a bug report.
+	 * Used when the user declines to share the transcript itself.
+	 */
+	async summarizeForBugReport(options: { hint?: string; signal: AbortSignal }): Promise<string> {
+		const model = this.model;
+		if (!model) {
+			throw new Error("No model selected");
+		}
+		const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
+		return generateBugReportSummary({
+			messages: this.messages,
+			hint: options.hint,
+			model: requestModel,
+			apiKey,
+			headers,
+			env,
+			signal: options.signal,
+			thinkingLevel: this.thinkingLevel,
+			streamFn: this.agent.streamFunction,
+			retry: this.settingsManager.getRetrySettings(),
+			sessionId: this.sessionId,
+		});
 	}
 
 	// =========================================================================

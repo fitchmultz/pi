@@ -24,6 +24,7 @@ export {
 	type SessionStats,
 } from "./core/agent-session.ts";
 export { readStoredCredential } from "./core/auth-storage.ts";
+export type { CacheWarmingDecision, CacheWarmingStatus } from "./core/cache-warmer.ts";
 export {
 	type CheckpointBoundary,
 	type CheckpointHold,
@@ -80,6 +81,8 @@ export type {
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	BuildSystemPromptOptions,
+	CacheWarmingDecisionEvent,
+	CacheWarmingDecisionEventResult,
 	CompactOptions,
 	ContextEvent,
 	ContextEventResult,
@@ -293,6 +296,7 @@ export {
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
 export {
+	type CacheWarmingMode,
 	type CompactionModelOverride,
 	type CompactionSettings,
 	type DefaultProjectTrust,
