@@ -1,7 +1,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -76,6 +76,82 @@ permissionTest.each([false, true])(
 		expect(sm.getLeafId()).toBe(selected);
 	},
 );
+
+permissionTest.each(["relative", "absolute"] as const)(
+	"repairs through an existing %s journal symlink without replacing the alias",
+	async (kind) => {
+		const actual = await vi.importActual<typeof fs>("node:fs");
+		const targetDir = join(directory, "target");
+		const seed = SessionManager.create(directory, targetDir);
+		const selected = seed.appendMessage(fauxAssistantMessage("persisted response"));
+		const target = seed.getSessionFile()!;
+		const alias = join(directory, "alias.jsonl");
+		const link = kind === "relative" ? relative(directory, target) : target;
+		fs.symlinkSync(link, alias);
+		const sm = SessionManager.open(alias);
+		const before = fs.readFileSync(target);
+		const files = fs.readdirSync(targetDir);
+		fs.chmodSync(target, 0o400);
+		try {
+			expect(() => sm.appendLabelChange(selected, "retained label")).toThrow(/EACCES/);
+			expect(() => sm.flush()).toThrow(/EACCES/);
+			expect(fs.readFileSync(target)).toEqual(before);
+		} finally {
+			fs.chmodSync(target, 0o640);
+		}
+		sm.branch(selected);
+		const entries = sm.getEntries();
+		const revision = sm.getEntriesRevision();
+		const failure = new Error("controlled partial repair failure");
+		vi.mocked(fs.writeFileSync).mockImplementationOnce((fd, data) => {
+			actual.writeFileSync(fd, String(data).slice(0, 20));
+			throw failure;
+		});
+		expect(() => sm.flush()).toThrow(failure);
+		expect(fs.readFileSync(target)).toEqual(before);
+		expect(fs.readlinkSync(alias)).toBe(link);
+		expect(fs.readdirSync(targetDir)).toEqual(files);
+		const previousUmask = process.umask(0o077);
+		try {
+			sm.flush();
+		} finally {
+			process.umask(previousUmask);
+		}
+		expect(fs.lstatSync(alias).isSymbolicLink()).toBe(true);
+		expect(fs.readlinkSync(alias)).toBe(link);
+		expect(fs.statSync(target).mode & 0o777).toBe(0o640);
+		expect(fs.readdirSync(targetDir)).toEqual(files);
+		expect(fs.readdirSync(directory).sort()).toEqual(["alias.jsonl", "target"]);
+		expect(sm.getSessionFile()).toBe(alias);
+		expect(sm.getSessionId()).toBe(seed.getSessionId());
+		expect(sm.getEntries()).toEqual(entries);
+		expect(sm.getEntriesRevision()).toBe(revision);
+		expect(sm.getLeafId()).toBe(selected);
+		expect(sm.getLabel(selected)).toBe("retained label");
+		for (const file of [alias, target]) {
+			const reopened = SessionManager.open(file);
+			expect(reopened.getEntries()).toEqual(entries);
+			expect(reopened.getSessionId()).toBe(sm.getSessionId());
+			expect(reopened.getLabel(selected)).toBe("retained label");
+		}
+		sm.appendCustomEntry("normal-append", {});
+		expect(SessionManager.open(target).getEntries()).toEqual(sm.getEntries());
+	},
+);
+
+permissionTest.each([false, true])("does not own an initial symlink collision (dangling: %s)", (dangling) => {
+	const sm = SessionManager.create(directory, directory);
+	const file = sm.getSessionFile()!;
+	const target = join(directory, "unowned.jsonl");
+	if (!dangling) fs.writeFileSync(target, "unrelated file\n");
+	fs.symlinkSync(target, file);
+	expect(() => sm.appendMessage(fauxAssistantMessage("retained response"))).toThrow(/EEXIST/);
+	expect(() => sm.flush()).toThrow(/EEXIST/);
+	expect(() => sm.appendCustomEntry("later", {})).toThrow(/EEXIST/);
+	expect(fs.readlinkSync(file)).toBe(target);
+	if (dangling) expect(fs.existsSync(target)).toBe(false);
+	else expect(fs.readFileSync(target, "utf8")).toBe("unrelated file\n");
+});
 
 permissionTest("retries initial creation after a real directory permission failure", () => {
 	const sm = SessionManager.create(directory, directory);

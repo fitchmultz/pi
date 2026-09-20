@@ -21,6 +21,7 @@ import {
 	openSync,
 	readdirSync,
 	readSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	type Stats,
@@ -1090,14 +1091,17 @@ export class SessionManager {
 	private _rewriteFile(flag: "w" | "wx" = "w"): void {
 		if (!this.persist || !this.sessionFile) return;
 		this.needsRewrite = true;
-		const temporary = flag === "w" ? `${this.sessionFile}.${randomUUID()}.tmp` : undefined;
+		let destination = this.sessionFile;
 		let mode: number | undefined;
-		if (temporary && existsSync(this.sessionFile)) {
+		if (flag === "w" && existsSync(destination)) {
+			// Like append, repair writes through existing aliases instead of replacing them.
+			destination = realpathSync(destination);
 			// Rename alone could bypass a read-only journal's write permissions.
-			accessSync(this.sessionFile, constants.W_OK);
-			mode = statSync(this.sessionFile).mode & 0o777;
+			accessSync(destination, constants.W_OK);
+			mode = statSync(destination).mode & 0o777;
 		}
-		const fd = openSync(temporary ?? this.sessionFile, "wx", mode);
+		const temporary = flag === "w" ? `${destination}.${randomUUID()}.tmp` : undefined;
+		const fd = openSync(temporary ?? destination, "wx", mode);
 		// Only a successful exclusive creation authorizes repairing an initial file.
 		// Keep open outside cleanup so a collision never removes someone else's file.
 		if (!temporary) this.flushed = true;
@@ -1111,7 +1115,7 @@ export class SessionManager {
 				closeSync(fd);
 			}
 			// Never truncate prior journal bytes when a repair write or close fails.
-			if (temporary) renameSync(temporary, this.sessionFile);
+			if (temporary) renameSync(temporary, destination);
 			this.flushed = true;
 			this.needsRewrite = false;
 		} finally {
