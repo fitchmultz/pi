@@ -72,7 +72,7 @@ type Stroke = { color: string; points: { x: number; y: number }[] };
 type CanvasState = { strokes: Stroke[] };
 
 const CanvasDoc = defineDoc<CanvasState>({
-  id: "app.canvas", version: 1, scope: "session",
+  kind: "app.canvas", version: 1, scope: "session",
   initial: () => ({ strokes: [] }),
   // This append-only example adds one stroke per commit.
   checkpointWhen: value => value.strokes.length % 100 === 0,
@@ -136,8 +136,8 @@ The application owns the open Session. Acquire state **before** synchronous
 `setup`; `env.provide` cannot run in `onActivate`. Install one provider per
 Session host. Chord may reload presentation facets independently, but v1 does
 not use facet reload to replace Session-side task or hook implementations. A
-host plugin code change closes and reopens the Harness with the new definition
-set.
+host extension code change closes and reopens the Harness with the new
+definition set.
 
 Remote clients supply a `RemoteServiceTransport` connected to the host's `services`
 provider; Chord prescribes no socket protocol. `CanvasConsumer` also works unchanged
@@ -179,29 +179,29 @@ A method's successful commit does not promise every remote callback has run yet.
 ## 2. Conversation-scoped diff reviews
 
 A **document family** uses one definition for many instances. The logical key is
-`(definition, conversationId, instanceId)`; the persisted numeric document ID
-identifies an incarnation and is never reused. Initializer input is not identity.
+`(kind, conversationId, key)`; the persisted numeric document ID identifies an
+incarnation and is never reused. Initializer input is not part of the key.
 
 ```ts
 type ReviewInput = { path: string; patch: string };
 type ReviewComment = { id: string; line: number; text: string };
 type ReviewState = ReviewInput & { comments: ReviewComment[] };
 const ReviewDoc = defineDocFamily<ReviewState, ReviewInput>({
-  id: "app.diff-review", version: 1, family: true, scope: "conversation",
+  kind: "app.diff-review", version: 1, family: true, scope: "conversation",
   history: "latest", fork: "current",
   initial: input => ({ path: input.path, patch: input.patch, comments: [] }),
   checkpointWhen: value => value.comments.length % 50 === 0,
 });
 interface DiffReviewService {
   readonly state: ReplicatedState<ReviewState | null>;
-  identity(context: Context): Promise<{ conversationId: Id; instanceId: string }>;
+  identity(context: Context): Promise<{ conversationId: Id; key: string }>;
   addComment(comment: ReviewComment, context: Context): Promise<void>;
 }
 const DiffReviews = defineService<DiffReviewService>("app.diff-reviews");
 
 function reviewFacet(
   session: Session, conversationId: Id,
-  reviews: readonly { instanceId: string; initial: ReviewInput }[], context: Context,
+  reviews: readonly { key: string; initial: ReviewInput }[], context: Context,
 ): Facet {
   return defineFacet({
     id: "app.diff-reviews/session",
@@ -213,10 +213,10 @@ function reviewFacet(
           const source = await session.documentSource(ReviewDoc, target, context);
           const replica = await documentReplicatedState(source, context);
           env.own(() => replica.dispose());
-          // Chord instance keys route services; they are not persisted document IDs.
-          instances.spawn(JSON.stringify([conversationId, review.instanceId]), {
+          // Chord instance keys route services; they are not numeric document incarnation IDs.
+          instances.spawn(JSON.stringify([conversationId, review.key]), {
             state: replica.state,
-            async identity() { return { conversationId, instanceId: review.instanceId }; },
+            async identity() { return { conversationId, key: review.key }; },
             async addComment(comment, context) {
               await session.commit(async tx => {
                 const draft = await tx.doc(ReviewDoc, target);
@@ -231,8 +231,8 @@ function reviewFacet(
 }
 ```
 
-Example input: `[{ instanceId: "review-7", initial: { path: "a.ts", patch: "-old\n+new" } }]`.
-Pass distinct instance IDs and a real conversation ID; install the facet as above.
+Example input: `[{ key: "review-7", initial: { path: "a.ts", patch: "-old\n+new" } }]`.
+Pass distinct family keys and a real conversation ID; install the facet as above.
 Keyed consumers use `env.observe(DiffReviews, handler)`, not `env.use`. The handler
 receives `(review, context)`; call `review.identity(context)` to identify it and
 `review.state.subscribe` to observe comments.
@@ -240,7 +240,7 @@ receives `(review, context)`; call `review.identity(context)` to identify it and
 These comments are conversation-scoped: ending the generating task or unloading
 the facet does not retire them. `current` copies every logically
 present review at fork-commit time into independent child instances with new
-numeric IDs, retaining family instance IDs. Parent and child then diverge.
+numeric IDs, retaining family keys. Parent and child then diverge.
 
 ```text
 parent review-7: comment A -> transcript entry E -> comment B
@@ -251,7 +251,7 @@ child adds C: parent still contains only A and B
 With `fork: "initial"`, no instance copies; first child access uses supplied input.
 `latest` cannot read history or fork `asOf`; use `history: "rewindable"` with `asOf`
 to reflect E's commit. Reaccess ignores `initial`; updating the patch requires
-an explicit mutation or a distinct review instance ID.
+an explicit mutation or a distinct review key.
 
 ## 3. Task-scoped output and a tool/task watch
 
@@ -262,7 +262,7 @@ it task lifetime; no history, fork, owner, or conversation setting is needed.
 type JobInput = { command: string };
 type JobOutput = { stdout: string; chunks: number };
 const JobOutputDoc = defineDoc<JobOutput>({
-  id: "app.job-output", version: 1, scope: "task",
+  kind: "app.job-output", version: 1, scope: "task",
   initial: () => ({ stdout: "", chunks: 0 }),
   checkpointWhen: value => value.chunks % 100 === 0,
 });
@@ -331,7 +331,7 @@ task-scoped family only when one task needs several independently keyed document
 
 `ConversationView` contains `conversation`, raw transcript `entries`, and
 `docs: Readonly<Record<string, JsonObject>>`. Selected built-in singletons mount
-under `docs` by stable definition ID, not numeric incarnation ID. The spec's
+under `docs` by stable document kind, not numeric incarnation ID. The spec's
 illustrative path mapping is:
 
 ```text
@@ -339,7 +339,7 @@ document ["s", ["message"], value]
  -> view ["s", ["docs", "pi.live", "message"], value]
 ```
 
-Built-in IDs/fields await approval; `pi.live` is illustrative, not an available API.
+Built-in kinds and fields await approval; `pi.live` is illustrative, not an available API.
 The mount publishes one batch per complete Session commit: entry/head changes and
 changed mounted documents together, without a tracker or semantic projection.
 Third-party documents are **not automatically mounted**; use their own Chord
@@ -349,7 +349,8 @@ dynamic service should then withdraw its instance rather than expose stale data.
 ```text
 addStroke -> hold Session mutation line -> await tx.doc -> mutate tracked draft
 callback succeeds -> tracker flush: incremental ops + candidate value
-atomic storage commit: all document and record writes; checkpoint predicate selects ops or base
+Session checkpoint predicate selects a base or delta exactly once
+atomic storage commit: persist selected document and record writes
 storage succeeds -> materialize immutable published value + enqueue value/ops, still on line
 release line -> deliver committed source ops -> adapter -> local/remote Chord consumers
 late subscriber -> atomically capture committed value + adapter sequence + subscription
@@ -365,8 +366,9 @@ nothing and poisons the open Session; close and reopen it instead of continuing.
   Never mutate inserted aliases or insert one mutable object at multiple paths.
 - Async commit holds the line through storage settlement and baseline adoption.
   Await document access there, not models, processes, network calls, or humans.
-- Normal `snapshot`, `documentSource`, and `watchDoc` reads are get-or-create.
-  Family `initial` is first-creation input, not an update.
+- Normal `snapshot`, `documentSource`, and `watchDoc` reads are get-or-create and
+  lazily migrate through the supplied token. Harness open does not scan ordinary
+  documents. Family `initial` is first-creation input, not an update.
 - Initialize from the fixed `watch.value` before `start()`. Slow or unstarted
   delivery may coalesce an undelivered suffix into a root replacement when its
   operation count exceeds the limit, omitting intermediate states. Queue
@@ -374,8 +376,8 @@ nothing and poisons the open Session; close and reopen it instead of continuing.
   as an audit log.
 - A listener may call `stop()`, but must not await its own `closed` promise.
 - Definitions own checkpoints, not storage heuristics. Revise the counting predicates
-  above if mutations change. Keep schema IDs, versions, fork policies, and public
-  paths stable; schema changes require migration, not a source-only rename.
+  above if mutations change. Keep document kinds, versions, fork policies, and
+  public paths stable; schema changes require migration, not a source-only rename.
 
 Chord sources: [types](../../chord/src/types.ts), [facet examples](../../chord/test/facets.test.ts),
 [state](../../chord/src/services/state.ts), [provider](../../chord/src/services/provider.ts),

@@ -91,6 +91,42 @@ describe("native working-session checkpoint", () => {
 		hold.release();
 	});
 
+	it("joins idle cache-warming decision handlers before capturing", async () => {
+		const entered = deferred();
+		const finish = deferred();
+		const h = await setup({
+			extensionFactories: [
+				(pi) => {
+					pi.on("cache_warming_decision", async () => {
+						entered.resolve();
+						await finish.promise;
+						pi.appendEntry("warming-tail", { saved: true });
+					});
+				},
+			],
+		});
+		const decision = h.session.extensionRunner.emitCacheWarmingDecision({
+			type: "cache_warming_decision",
+			action: "warm",
+			warmCost: 0.01,
+			missCost: 1,
+			continuationProbability: 0.15,
+		});
+		await entered.promise;
+		let ready = false;
+		const pending = h.session.acquireCheckpoint({ quiesce: () => () => {} }).then((hold) => {
+			ready = true;
+			return hold;
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(ready).toBe(false);
+		finish.resolve();
+		await decision;
+		const hold = await pending;
+		expect(JSON.stringify(hold.checkpoint.entries)).toContain("warming-tail");
+		hold.release();
+	});
+
 	it("owns native pi.exec even when the extension does not await its returned promise", async () => {
 		let api!: ExtensionAPI;
 		const h = await setup({

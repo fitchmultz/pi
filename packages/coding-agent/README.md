@@ -196,6 +196,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/export [file]` | Export session to HTML or JSONL file |
 | `/import <file>` | Import and resume a session from a JSONL file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
+| `/bug [description]` | Report a bug to the Pi developers; see [Sessions](docs/sessions.md#reporting-bugs) |
 | `/reload` | Reload settings and resources; extension code changes require a full restart |
 | `/restart [text]` | Restart the Node CLI worker and resume this session; optional text continues the agent |
 | `/hotkeys` | Show all keyboard shortcuts |

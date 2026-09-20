@@ -56,6 +56,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/export [file]` | Export session to HTML or JSONL |
 | `/import <file>` | Import and resume a session from a JSONL file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
+| `/bug [description]` | Report a bug to the Pi developers; see [Sessions](sessions.md#reporting-bugs) |
 | `/reload` | Refresh settings/resources and reinitialize cached extension code |
 | `/restart [text]` | Restart the Node CLI worker and resume this session; optional text continues the agent |
 | `/hotkeys` | Show all keyboard shortcuts |
