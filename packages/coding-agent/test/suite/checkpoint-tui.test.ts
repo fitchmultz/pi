@@ -508,6 +508,113 @@ describe("native checkpoint TUI boundary", () => {
 		await dialog;
 	});
 
+	// PR #68: retain the reviewer's public-UI nested-selector regression.
+	it.each(["selection", "custom child"])(
+		"mounts the final replacement after its async factory awaits a native %s",
+		async (kind) => {
+			const f = await setup();
+			const ui = f.mode.getExtensionUIContext();
+			const inputs: string[] = [];
+			let close!: () => void;
+			let factoryFinished = false;
+			const dialog = ui.custom(async (_tui, _theme, _keys, done) => {
+				close = () => done(undefined);
+				if (kind === "selection") await ui.select("Choose replacement contents", ["Continue"]);
+				else
+					await ui.custom((_a, _b, _c, doneChild) => ({
+						render: () => ["Choose replacement contents"],
+						invalidate() {},
+						handleInput: () => doneChild(undefined),
+					}));
+				factoryFinished = true;
+				return {
+					render: () => ["FINAL REPLACEMENT"],
+					invalidate() {},
+					handleInput(data: string) {
+						inputs.push(data);
+						done(undefined);
+					},
+				};
+			});
+			try {
+				await f.terminal.waitForRender();
+				expect(f.terminal.getViewport().join("\n")).toContain("Choose replacement contents");
+				f.terminal.sendInput("\r");
+				await vi.waitFor(() => expect(factoryFinished).toBe(true));
+				await f.terminal.waitForRender();
+				const visible = f.terminal.getViewport().join("\n").includes("FINAL REPLACEMENT");
+				f.terminal.sendInput("x");
+				expect(visible).toBe(true);
+				expect(inputs).toEqual(["x"]);
+				expect(ui.getEditorText()).toBe("");
+				await dialog;
+				const hold = await f.acquire();
+				expect(hold.sleepReady).toBe(true);
+				hold.release();
+			} finally {
+				close();
+				await dialog;
+			}
+		},
+	);
+
+	it.each(["selection", "custom", "overlay"])(
+		"does not displace a still-live %s child when a replacement factory completes",
+		async (kind) => {
+			const f = await setup();
+			const ui = f.mode.getExtensionUIContext();
+			const factory = deferred();
+			const parentInputs: string[] = [];
+			let close!: () => void;
+			let child!: Promise<unknown>;
+			const abort = new AbortController();
+			let closeChild = () => abort.abort();
+			const parent = ui.custom(async (_tui, _theme, _keys, done) => {
+				close = () => done(undefined);
+				// Leave the editor mounted beneath a live overlay to exercise the focus guard.
+				if (kind === "overlay") await ui.select("Prepare overlay", ["Continue"]);
+				child =
+					kind === "selection"
+						? ui.select("LIVE CHILD", ["Continue"], { signal: abort.signal })
+						: ui.custom(
+								(_a, _b, _c, doneChild) => {
+									closeChild = () => doneChild(undefined);
+									return {
+										render: () => ["LIVE CHILD"],
+										invalidate() {},
+										handleInput: closeChild,
+									};
+								},
+								{ overlay: kind === "overlay" },
+							);
+				await factory.promise;
+				return {
+					render: () => ["PARENT"],
+					invalidate() {},
+					handleInput: (data) => parentInputs.push(data),
+				};
+			});
+			try {
+				await f.terminal.waitForRender();
+				if (kind === "overlay") {
+					f.terminal.sendInput("\r");
+					await f.terminal.waitForRender();
+				}
+				factory.resolve();
+				await f.terminal.waitForRender();
+				expect(f.terminal.getViewport().join("\n")).toContain("LIVE CHILD");
+				f.terminal.sendInput("\r");
+				expect(parentInputs).toEqual([]);
+				expect(ui.getEditorText()).toBe("");
+				await child;
+			} finally {
+				closeChild();
+				close();
+				await Promise.all([parent, child]);
+			}
+		},
+	);
+
 	it.each([false, true])("reserves custom UI input before awaiting the factory (overlay: %s)", async (overlay) => {
 		const factory = deferred();
 		let shortcuts = 0;

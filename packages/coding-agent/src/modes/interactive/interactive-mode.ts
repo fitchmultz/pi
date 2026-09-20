@@ -3092,6 +3092,17 @@ export class InteractiveMode {
 						handle.updateOptions(overlayOptions);
 					}
 					host.addChild(c);
+					// An awaited native dialog replaces the reserved host and restores the editor.
+					// Reclaim that slot, but never displace a child that still owns the UI.
+					if (
+						!isOverlay &&
+						this.editorContainer.children.includes(this.editor) &&
+						this.renderer.getFocusedComponent() === this.editor
+					) {
+						this.editorContainer.clear();
+						this.editorContainer.addChild(host);
+						this.ui.setFocus(host);
+					}
 					host.focused = focused;
 					this.ui.requestRender();
 					if (handle) options?.onHandle?.(handle);
