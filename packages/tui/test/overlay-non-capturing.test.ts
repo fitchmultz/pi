@@ -873,6 +873,61 @@ describe("TUI overlay non-capturing", () => {
 		});
 	});
 
+	describe("option replacement", () => {
+		it("keeps the same entry behind a focused child", async () => {
+			const terminal = new VirtualTerminal(80, 24);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const editor = new FocusableOverlay(["EDITOR"]);
+			const parent = new FocusableOverlay(["PARENT"]);
+			const child = new FocusableOverlay(["CHILD"]);
+			tui.addChild(new EmptyContent());
+			tui.setFocus(editor);
+			tui.start();
+			try {
+				const handle = tui.showOverlay(parent);
+				const childHandle = tui.showOverlay(child, { row: 0, col: 0, width: 10 });
+				handle.updateOptions({ row: 0, col: 0, width: 10 });
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(terminal.getViewport()[0]?.trim(), "CHILD");
+				terminal.sendInput("x");
+				assert.deepStrictEqual(child.inputs, ["x"]);
+				handle.hide();
+				handle.updateOptions({ nonCapturing: true });
+				childHandle.hide();
+				terminal.sendInput("y");
+				assert.deepStrictEqual(editor.inputs, ["y"]);
+				assert.deepStrictEqual(parent.inputs, []);
+				assert.strictEqual(tui.hasOverlay(), false);
+			} finally {
+				tui.stop();
+			}
+		});
+
+		it("releases a provisional overlay's blocked restore without interrupting replacement input", () => {
+			const terminal = new VirtualTerminal(80, 24);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const editor = new FocusableOverlay(["EDITOR"]);
+			const overlay = new FocusableOverlay(["OVERLAY"]);
+			const replacement = new FocusableOverlay(["REPLACEMENT"]);
+			tui.addChild(editor);
+			tui.setFocus(editor);
+			tui.start();
+			try {
+				const handle = tui.showOverlay(overlay);
+				tui.setFocus(replacement);
+				handle.updateOptions({ nonCapturing: true });
+				terminal.sendInput("x");
+				assert.deepStrictEqual(replacement.inputs, ["x"]);
+				tui.setFocus(editor);
+				terminal.sendInput("y");
+				assert.deepStrictEqual(editor.inputs, ["y"]);
+				assert.deepStrictEqual(overlay.inputs, []);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
 	describe("no-op guards", () => {
 		it("focus() on hidden overlay is a no-op", async () => {
 			const terminal = new VirtualTerminal(80, 24);

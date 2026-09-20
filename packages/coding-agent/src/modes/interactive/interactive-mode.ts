@@ -30,6 +30,7 @@ import {
 	fuzzyFilter,
 	getCapabilities,
 	hyperlink,
+	isFocusable,
 	Markdown,
 	matchesKey,
 	Spacer,
@@ -512,6 +513,8 @@ export class InteractiveMode {
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
 	private extensionInput: ExtensionInputComponent | undefined = undefined;
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
+	// Only unfinished non-overlay factories, never completed or closed hosts.
+	private readonly pendingCustomFocus = new WeakMap<Component, Component | null>();
 	private extensionTerminalInputSubscriptions = new Set<{
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
 		unsubscribe: () => void;
@@ -2743,9 +2746,11 @@ export class InteractiveMode {
 			);
 
 			this.disposeActiveSelector();
+			// Transfer ownership while the previous replacement is still mounted.
+			// Removing it first would tell TUI to resume an older overlay instead.
+			this.ui.setFocus(this.extensionSelector);
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionSelector);
-			this.ui.setFocus(this.extensionSelector);
 			this.ui.requestRender();
 		});
 	}
@@ -2819,9 +2824,9 @@ export class InteractiveMode {
 			);
 
 			this.disposeActiveSelector();
+			this.ui.setFocus(this.extensionInput);
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionInput);
-			this.ui.setFocus(this.extensionInput);
 			this.ui.requestRender();
 		});
 	}
@@ -2877,9 +2882,9 @@ export class InteractiveMode {
 			);
 
 			this.disposeActiveSelector();
+			this.ui.setFocus(this.extensionEditor);
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionEditor);
-			this.ui.setFocus(this.extensionEditor);
 			this.ui.requestRender();
 		});
 	}
@@ -3004,6 +3009,12 @@ export class InteractiveMode {
 		},
 	): Promise<T> {
 		const savedText = this.editor.getText();
+		let savedFocus = this.renderer.getFocusedComponent();
+		// Pending replacements share the fallback TUI restores when an awaited dialog closes.
+		// Inherit it now, rather than remembering a parent host that the dialog will unmount.
+		if (savedFocus && this.pendingCustomFocus.has(savedFocus)) {
+			savedFocus = this.pendingCustomFocus.get(savedFocus)!;
+		}
 		const isOverlay = options?.overlay ?? false;
 
 		const restoreEditor = () => {
@@ -3015,55 +3026,107 @@ export class InteractiveMode {
 		};
 
 		return new Promise((resolve, reject) => {
-			let component: Component & { dispose?(): void };
+			let component: (Component & { dispose?(): void }) | undefined;
 			let closed = false;
-
-			const close = (result: T) => {
-				if (closed) return;
-				closed = true;
-				if (isOverlay) this.ui.hideOverlay();
-				else restoreEditor();
-				// Note: both branches above already call requestRender
-				resolve(result);
+			let focused = false;
+			let handle: OverlayHandle | undefined;
+			// Keep one focus/overlay identity from acceptance through mounting. Replacing
+			// an overlay after awaiting would put it above a child opened by its factory.
+			const host = new (class extends Container {
+				get focused() {
+					return focused;
+				}
+				set focused(value: boolean) {
+					focused = value;
+					if (component && isFocusable(component)) component.focused = value;
+				}
+				get wantsKeyRelease() {
+					return component?.wantsKeyRelease;
+				}
+				handleInput(data: string) {
+					component?.handleInput?.(data);
+				}
+			})();
+			const dispose = () => {
+				const current = component;
+				component = undefined;
+				host.clear();
 				try {
-					component?.dispose?.();
+					current?.dispose?.();
 				} catch {
 					/* ignore dispose errors */
 				}
 			};
+			const unmount = () => {
+				this.pendingCustomFocus.delete(host);
+				if (isOverlay) handle?.hide();
+				else restoreEditor();
+			};
+			const close = (result: T) => {
+				if (closed) return;
+				closed = true;
+				unmount();
+				resolve(result);
+				dispose();
+			};
+
+			if (isOverlay) {
+				// Static options retain their pending visibility/focus behavior. A thunk may
+				// depend on factory initialization, so reserve modal focus until it resolves.
+				handle = this.ui.showOverlay(
+					host,
+					typeof options?.overlayOptions === "function" ? undefined : options?.overlayOptions,
+				);
+			} else {
+				this.pendingCustomFocus.set(host, savedFocus);
+				this.disposeActiveSelector();
+				this.ui.setFocus(host);
+				this.editorContainer.clear();
+				this.editorContainer.addChild(host);
+				this.ui.requestRender();
+			}
 
 			this.checkpointCallback(factory)(this.ui, theme, this.keybindings, close)
 				.then((c) => {
-					if (closed) return;
+					this.pendingCustomFocus.delete(host);
 					component = c;
-					if (isOverlay) {
-						// Resolve overlay options - can be static or dynamic function
-						const resolveOptions = (): OverlayOptions | undefined => {
-							if (options?.overlayOptions) {
-								const opts =
-									typeof options.overlayOptions === "function"
-										? options.overlayOptions()
-										: options.overlayOptions;
-								return opts;
-							}
-							// Fallback: use component's width property if available
-							const w = (component as { width?: number }).width;
-							return w ? { width: w } : undefined;
-						};
-						const handle = this.ui.showOverlay(component, resolveOptions());
-						// Expose handle to caller for visibility control
-						options?.onHandle?.(handle);
-					} else {
-						this.disposeActiveSelector();
-						this.editorContainer.clear();
-						this.editorContainer.addChild(component);
-						this.ui.setFocus(component);
-						this.ui.requestRender();
+					if (closed) {
+						dispose();
+						return;
 					}
+					if (handle) {
+						let overlayOptions =
+							typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
+						if (!overlayOptions) {
+							// Match the ordinary post-factory component-width snapshot.
+							const width = (c as { width?: number }).width;
+							overlayOptions = width ? { width } : undefined;
+						}
+						handle.updateOptions(overlayOptions);
+					}
+					host.addChild(c);
+					// An awaited native dialog replaces the reserved host and restores the editor.
+					// It may also resume the overlay that preceded this replacement. Reclaim
+					// either fallback, but never displace a child that still owns the UI.
+					const currentFocus = this.renderer.getFocusedComponent();
+					if (
+						!isOverlay &&
+						this.editorContainer.children.includes(this.editor) &&
+						(currentFocus === this.editor || (savedFocus !== null && currentFocus === savedFocus))
+					) {
+						this.ui.setFocus(host);
+						this.editorContainer.clear();
+						this.editorContainer.addChild(host);
+					}
+					host.focused = focused;
+					this.ui.requestRender();
+					if (handle) options?.onHandle?.(handle);
 				})
 				.catch((err) => {
 					if (closed) return;
-					if (!isOverlay) restoreEditor();
+					closed = true;
+					unmount();
+					dispose();
 					reject(err);
 				});
 		});

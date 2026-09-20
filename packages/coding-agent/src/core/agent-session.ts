@@ -2264,6 +2264,8 @@ export class AgentSession {
 		const sessionFile = this.sessionFile;
 		const header = this.sessionManager.getHeader();
 		if (!sessionFile || !header) throw new Error("Checkpoint requires a persistent session");
+		// Both live and clean-exit capture must reconcile accepted entries after failed I/O.
+		this.sessionManager.flush();
 		const checkpoint: SessionCheckpoint = {
 			version: 1,
 			createdAt: new Date().toISOString(),

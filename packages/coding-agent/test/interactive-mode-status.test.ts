@@ -269,6 +269,8 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			editorContainer,
 			keybindings: {},
 			ui,
+			renderer: ui,
+			pendingCustomFocus: new WeakMap<Component, Component | null>(),
 			disposeActiveSelector: vi.fn(),
 		};
 		const showExtensionCustom = <T>(
