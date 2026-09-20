@@ -269,6 +269,7 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			editorContainer,
 			keybindings: {},
 			ui,
+			renderer: ui,
 			disposeActiveSelector: vi.fn(),
 		};
 		const showExtensionCustom = <T>(

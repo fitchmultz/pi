@@ -2744,9 +2744,11 @@ export class InteractiveMode {
 			);
 
 			this.disposeActiveSelector();
+			// Transfer ownership while the previous replacement is still mounted.
+			// Removing it first would tell TUI to resume an older overlay instead.
+			this.ui.setFocus(this.extensionSelector);
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionSelector);
-			this.ui.setFocus(this.extensionSelector);
 			this.ui.requestRender();
 		});
 	}
@@ -2820,9 +2822,9 @@ export class InteractiveMode {
 			);
 
 			this.disposeActiveSelector();
+			this.ui.setFocus(this.extensionInput);
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionInput);
-			this.ui.setFocus(this.extensionInput);
 			this.ui.requestRender();
 		});
 	}
@@ -2878,9 +2880,9 @@ export class InteractiveMode {
 			);
 
 			this.disposeActiveSelector();
+			this.ui.setFocus(this.extensionEditor);
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.extensionEditor);
-			this.ui.setFocus(this.extensionEditor);
 			this.ui.requestRender();
 		});
 	}
@@ -3005,6 +3007,7 @@ export class InteractiveMode {
 		},
 	): Promise<T> {
 		const savedText = this.editor.getText();
+		const savedFocus = this.renderer.getFocusedComponent();
 		const isOverlay = options?.overlay ?? false;
 
 		const restoreEditor = () => {
@@ -3068,9 +3071,9 @@ export class InteractiveMode {
 				);
 			} else {
 				this.disposeActiveSelector();
+				this.ui.setFocus(host);
 				this.editorContainer.clear();
 				this.editorContainer.addChild(host);
-				this.ui.setFocus(host);
 				this.ui.requestRender();
 			}
 
@@ -3093,15 +3096,17 @@ export class InteractiveMode {
 					}
 					host.addChild(c);
 					// An awaited native dialog replaces the reserved host and restores the editor.
-					// Reclaim that slot, but never displace a child that still owns the UI.
+					// It may also resume the overlay that preceded this replacement. Reclaim
+					// either fallback, but never displace a child that still owns the UI.
+					const currentFocus = this.renderer.getFocusedComponent();
 					if (
 						!isOverlay &&
 						this.editorContainer.children.includes(this.editor) &&
-						this.renderer.getFocusedComponent() === this.editor
+						(currentFocus === this.editor || (savedFocus !== null && currentFocus === savedFocus))
 					) {
+						this.ui.setFocus(host);
 						this.editorContainer.clear();
 						this.editorContainer.addChild(host);
-						this.ui.setFocus(host);
 					}
 					host.focused = focused;
 					this.ui.requestRender();
