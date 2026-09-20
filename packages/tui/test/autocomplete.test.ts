@@ -294,12 +294,12 @@ describe("CombinedAutocompleteProvider", () => {
 			const line = "@report";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 			assert.ok(result);
-			const item = result.items.find((entry) => entry.value === "@reportA\r");
+			const item = result.items.find((entry) => entry.value === '@"reportA\r"');
 			assert.ok(item);
 			assert.strictEqual(item.description, "reportA\r");
 			assert.ok(existsSync(join(baseDir, item.description)));
 			const applied = provider.applyCompletion([line], 0, line.length, item, result.prefix);
-			assert.strictEqual(applied.lines[0], "@reportA\r ");
+			assert.strictEqual(applied.lines[0], '@"reportA\r" ');
 		});
 
 		test("filters are case insensitive", async () => {
