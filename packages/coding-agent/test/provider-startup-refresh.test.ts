@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AuthCheck, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
-import { getBuiltinModelDataGeneratedAt } from "@earendil-works/pi-ai/providers/all";
+import { builtinProviders, getBuiltinModelDataGeneratedAt } from "@earendil-works/pi-ai/providers/all";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
@@ -66,9 +66,13 @@ describe("provider startup refresh", () => {
 		});
 	}
 
-	it("refreshes forty factory compositions once, restoring native cached models before returning", async () => {
+	it("refreshes all factory compositions once, restoring native cached models before returning", async () => {
 		const providers = runtime.getProviders();
-		expect(providers).toHaveLength(40);
+		expect(providers.map((provider) => provider.id).sort()).toEqual(
+			builtinProviders()
+				.map((provider) => provider.id)
+				.sort(),
+		);
 		const cached = { ...runtime.getModels("anthropic")[0], id: "startup-cached-only" };
 		await store.write("anthropic", {
 			models: [cached],
@@ -112,10 +116,6 @@ describe("provider startup refresh", () => {
 			// Drain only after checking the public startup boundary; include any late work in counts.
 			await runtime.flushForCheckpoint();
 			expect(resolve).not.toHaveBeenCalled();
-			console.log(
-				"factory metadata checks",
-				[...checks.values()].reduce((sum, count) => sum + count, 0),
-			);
 			// PR #66: availability and auth classification share one observation per provider.
 			expect([...checks.values()]).toEqual(providers.map(() => 1));
 			expect(read).toHaveBeenCalledTimes(providers.length);
@@ -262,7 +262,6 @@ describe("provider startup refresh", () => {
 			await newerStarted.promise;
 			olderRelease.resolve();
 			await nextTurn();
-			console.log("services after stale failure", { settled, configured: runtime.hasConfiguredAuth("anthropic") });
 			expect(settled).toBe(false);
 			newerRelease.resolve();
 			await startup;
