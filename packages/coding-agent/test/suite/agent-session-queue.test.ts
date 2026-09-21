@@ -722,10 +722,10 @@ describe("AgentSession queue characterization", () => {
 			],
 		});
 		harnesses.push(harness);
-		const prepare = harness.session.agent.prepareProviderRequest;
+		const prepare = harness.session.agent.prepareRequest;
 		let cancelled = false;
-		harness.session.agent.prepareProviderRequest = async (context, signal) => {
-			if (context.messages.some((message) => getMessageText(message) === "delivered")) {
+		harness.session.agent.prepareRequest = async (request, signal) => {
+			if (request.context.messages.some((message) => getMessageText(message) === "delivered")) {
 				cancelled = true;
 				expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "custom_message")).toHaveLength(
 					0,
@@ -733,7 +733,7 @@ describe("AgentSession queue characterization", () => {
 				harness.session.agent.abort();
 				signal?.throwIfAborted();
 			}
-			return prepare?.(context, signal);
+			return (await prepare?.(request, signal)) ?? undefined;
 		};
 		harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("must not run")]);
 		await harness.session.prompt("start");

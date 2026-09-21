@@ -88,11 +88,21 @@ it("replays only the active checkpoint when repeated compaction splits a previou
 	expect(getCurrentSystemPrompt(messages)).toBe("BASE PROMPT\n\nADDED GUIDANCE\n\nUpdated rules");
 	expect(getCurrentTools(messages)).toEqual([chosen]);
 	expect(messages.filter((message) => message.role === "system")).toHaveLength(1);
-	expect(messages.filter((message) => message.role === "compactionSummary")).toHaveLength(2);
-	expect(manager.buildContextEntries().find((entry) => entry.id === firstCompaction)).toMatchObject({
+	// Canonical projection sends only the newest summary. Older checkpoints remain
+	// unchanged in raw history and are restored when navigating back to that branch point.
+	expect(messages.filter((message) => message.role === "compactionSummary")).toEqual([
+		expect.objectContaining({ summary: "summary two" }),
+	]);
+	const rawFirstCompaction = manager.getEntry(firstCompaction);
+	expect(manager.buildContextEntries().find((entry) => entry.id === firstCompaction)).toBe(rawFirstCompaction);
+	expect(manager.buildSessionProjection().entries.find((entry) => entry.sourceEntry.id === firstCompaction)).toEqual({
+		sourceEntry: rawFirstCompaction,
+		messages: [],
+	});
+	expect(rawFirstCompaction).toMatchObject({
 		type: "compaction",
 		summary: "summary one",
-		systemMessage: undefined,
+		systemMessage: { toolsAdded: [original] },
 	});
 	expect(JSON.stringify(manager.getEntries())).toBe(entriesBeforeProjection);
 

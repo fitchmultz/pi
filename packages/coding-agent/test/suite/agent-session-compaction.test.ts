@@ -496,7 +496,8 @@ describe("AgentSession compaction characterization", () => {
 
 	it("compacts and resumes after a length stop below the desired output limit", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			// Leave room for the real prompt/tool checkpoint after the oversized input is compacted.
+			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -517,7 +518,7 @@ describe("AgentSession compaction characterization", () => {
 			fauxAssistantMessage("completed response"),
 		]);
 
-		await harness.session.prompt("x".repeat(5000));
+		await harness.session.prompt("x".repeat(45_000));
 
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(harness.eventsOfType("compaction_end")).toEqual([
@@ -527,7 +528,6 @@ describe("AgentSession compaction characterization", () => {
 				aborted: false,
 				willRetry: true,
 			}),
-			{ type: "compaction_end", reason: "threshold", result: undefined, aborted: false, willRetry: false },
 		]);
 		expect(harness.session.getLastAssistantText()).toBe("completed response");
 	});
@@ -717,6 +717,19 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.eventsOfType("compaction_start")).toEqual([]);
 		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(0);
+
+		// The result is still budgeted before the next actual request, not discarded or ignored.
+		let nextRequest = "";
+		harness.setResponses([
+			(context) => {
+				expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
+				nextRequest = JSON.stringify(context.messages);
+				return fauxAssistantMessage("continued after compaction");
+			},
+		]);
+		await harness.session.prompt("continue now");
+		expect(nextRequest).toContain("continue now");
+		expect(nextRequest).toContain("large-tool-result");
 	});
 
 	it("does not compact when a length stop reaches the desired output limit", async () => {
@@ -766,28 +779,35 @@ describe("AgentSession compaction characterization", () => {
 
 	it("keeps overflow wording when a repeated length stop fills the context window", async () => {
 		const harness = await createHarness({
+			// Deliberately too small even after compaction: the second real request still overflows.
 			models: [{ id: "faux-1", contextWindow: 100, maxTokens: 100 }],
+			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
 		});
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
-		const lengthOverflowMessage = createAssistant(harness, {
-			stopReason: "length",
-			totalTokens: 100,
-			timestamp: Date.now(),
-		});
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
-		const compactionErrors: string[] = [];
-		harness.session.subscribe((event) => {
-			if (event.type === "compaction_end" && event.errorMessage) {
-				compactionErrors.push(event.errorMessage);
-			}
-		});
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction");
+		// A context-filling length stop has zero output (the provider has no room to generate).
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "length" }),
+			fauxAssistantMessage("", { stopReason: "length" }),
+		]);
 
-		await sessionInternals._checkCompaction(lengthOverflowMessage);
-		await sessionInternals._checkCompaction({ ...lengthOverflowMessage, timestamp: Date.now() + 1 });
+		await harness.session.prompt("x".repeat(5000));
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledTimes(1);
-		expect(compactionErrors).toContain(
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(runAutoCompactionSpy.mock.calls.filter(([reason]) => reason === "overflow")).toHaveLength(1);
+		expect(harness.eventsOfType("compaction_end").at(-1)?.errorMessage).toBe(
 			"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
 		);
 	});
@@ -971,12 +991,11 @@ describe("AgentSession compaction characterization", () => {
 			errorMessage: "529 overloaded",
 			timestamp: Date.now() + 1000,
 		});
-		harness.session.agent.state.messages = [
-			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
-			successfulAssistant,
-			{ role: "user", content: [{ type: "text", text: "retry" }], timestamp: Date.now() + 500 },
-			errorAssistant,
-		];
+		harness.sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1000 });
+		harness.sessionManager.appendMessage(successfulAssistant);
+		harness.sessionManager.appendMessage({ role: "user", content: "retry", timestamp: Date.now() + 500 });
+		harness.sessionManager.appendMessage(errorAssistant);
+		harness.session.refreshContext();
 
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
@@ -994,10 +1013,9 @@ describe("AgentSession compaction characterization", () => {
 			errorMessage: "529 overloaded",
 			timestamp: Date.now(),
 		});
-		harness.session.agent.state.messages = [
-			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
-			errorAssistant,
-		];
+		harness.sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1000 });
+		harness.sessionManager.appendMessage(errorAssistant);
+		harness.session.refreshContext();
 
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
@@ -1037,12 +1055,9 @@ describe("AgentSession compaction characterization", () => {
 			errorMessage: "529 overloaded",
 			timestamp: Date.now(),
 		});
-		harness.session.agent.state.messages = [
-			{ role: "user", content: [{ type: "text", text: "kept user" }], timestamp: preCompactionTimestamp - 1000 },
-			keptAssistant,
-			{ role: "user", content: [{ type: "text", text: "new prompt" }], timestamp: Date.now() - 500 },
-			errorAssistant,
-		];
+		harness.sessionManager.appendMessage({ role: "user", content: "new prompt", timestamp: Date.now() - 500 });
+		harness.sessionManager.appendMessage(errorAssistant);
+		harness.session.refreshContext();
 
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 

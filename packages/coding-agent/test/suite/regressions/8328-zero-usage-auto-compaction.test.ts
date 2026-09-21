@@ -48,13 +48,13 @@ describe("issue #8328 zero-usage auto-compaction", () => {
 		return harness;
 	}
 
+	// Regression #8328: zero usage must fall back to the canonical message-size estimate.
 	it("uses the message estimate when no assistant has reported usage", async () => {
 		const harness = await createCompactionHarness();
 		const assistant = createZeroUsageAssistant(harness);
-		harness.session.agent.state.messages = [
-			{ role: "user", content: [{ type: "text", text: "x".repeat(40_000) }], timestamp: Date.now() - 1 },
-			assistant,
-		];
+		harness.sessionManager.appendMessage({ role: "user", content: "x".repeat(40_000), timestamp: Date.now() - 1 });
+		harness.sessionManager.appendMessage(assistant);
+		harness.session.refreshContext();
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
@@ -67,10 +67,9 @@ describe("issue #8328 zero-usage auto-compaction", () => {
 	it("does not compact when the zero-usage message estimate is below the threshold", async () => {
 		const harness = await createCompactionHarness();
 		const assistant = createZeroUsageAssistant(harness);
-		harness.session.agent.state.messages = [
-			{ role: "user", content: [{ type: "text", text: "short" }], timestamp: Date.now() - 1 },
-			assistant,
-		];
+		harness.sessionManager.appendMessage({ role: "user", content: "short", timestamp: Date.now() - 1 });
+		harness.sessionManager.appendMessage(assistant);
+		harness.session.refreshContext();
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 

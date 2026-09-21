@@ -156,6 +156,13 @@ function createAgentStream(
 			model = update?.model ?? model;
 			return update;
 		},
+		prepareRequest: config.prepareRequest
+			? async (request, signal) => {
+					const update = await config.prepareRequest?.(request, signal);
+					model = update?.model ?? model;
+					return update ?? undefined;
+				}
+			: undefined,
 	}).then(
 		(messages) => stream.end(messages),
 		(error: unknown) => {
@@ -195,6 +202,7 @@ async function runLoop(
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
+	let explicitContinuation = false;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -242,9 +250,29 @@ async function runLoop(
 				preparedMessages = [];
 				pendingMessages = [];
 
-				currentContext = (await config.prepareProviderRequest?.(currentContext)) ?? currentContext;
+				const requestUpdate = await config.prepareRequest?.(
+					{
+						context: currentContext,
+						model: config.model,
+						thinkingLevel: config.reasoning ?? "off",
+					},
+					signal,
+				);
+				if (requestUpdate) {
+					currentContext = requestUpdate.context ?? currentContext;
+					config = {
+						...config,
+						model: requestUpdate.model ?? config.model,
+						reasoning:
+							requestUpdate.thinkingLevel === undefined
+								? config.reasoning
+								: requestUpdate.thinkingLevel === "off"
+									? undefined
+									: requestUpdate.thinkingLevel,
+					};
+				}
 				signal?.throwIfAborted();
-				if (!config.prepareProviderRequest || !pollAfterRequestPreparation) break;
+				if (!config.prepareRequest || !pollAfterRequestPreparation) break;
 
 				// Pick up one steering drain that arrived during long request preparation, then
 				// prepare again with those messages included.
@@ -267,6 +295,13 @@ async function runLoop(
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				lastCompletedTurn = {
+					message,
+					toolResults: [],
+					context: currentContext,
+					newMessages,
+				};
+				await config.finishTurn?.(lastCompletedTurn, signal);
 				await emit({ type: "turn_end", message, toolResults: [] });
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -296,8 +331,6 @@ async function runLoop(
 				}
 			}
 
-			await emit({ type: "turn_end", message, toolResults });
-
 			lastCompletedTurn = {
 				message,
 				toolResults,
@@ -305,20 +338,33 @@ async function runLoop(
 				newMessages,
 				newContext,
 			};
+			const decision = await config.finishTurn?.(lastCompletedTurn, signal);
+			await emit({ type: "turn_end", message, toolResults });
 
-			if (((await config.shouldStopAfterTurn?.(lastCompletedTurn)) && !newContext) || signal?.aborted) {
+			if ((decision?.action === "end" && !newContext) || signal?.aborted) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
 
+			explicitContinuation = decision?.action === "continue";
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
+			if (hasMoreToolCalls || pendingMessages.length > 0) {
+				explicitContinuation = false;
+			}
 		}
 
 		// Agent would stop here. Check for follow-up messages.
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
+			explicitContinuation = false;
 			pendingMessages = followUpMessages;
+			continue;
+		}
+
+		// No natural request was selected, so fulfill the continuation decision with one context-only turn.
+		if (explicitContinuation) {
+			explicitContinuation = false;
 			continue;
 		}
 

@@ -7,24 +7,26 @@ type Item = { children: number[]; text: string };
 type State = { a: Item[]; b: Item[] | null };
 
 describe("aliased operation payload ownership", () => {
-	it("publishes a nested push once per path within the same publication", () => {
+	it("publishes a nested push without mutating copied siblings or prior revisions", () => {
 		const state = replicatedState<State>({ a: [], b: null });
 		const deliveries: State[] = [];
 		state.subscribe((value) => deliveries.push(value));
-		state.state.b = state.state.a;
-		state.publish(BACKGROUND_CONTEXT);
+		state.change(BACKGROUND_CONTEXT, (draft) => {
+			draft.b = draft.a;
+		});
 		const previous = state.value;
 
-		state.state.a.push({ children: [], text: "x" });
-		state.state.a[0]!.children.push(1);
-		state.publish(BACKGROUND_CONTEXT);
+		state.change(BACKGROUND_CONTEXT, (draft) => {
+			draft.a.push({ children: [], text: "x" });
+			draft.a[0]!.children.push(1);
+		});
 
-		expect(state.state.a).toBe(state.state.b);
+		expect(state.value.a).not.toBe(state.value.b);
 		expect(state.value).toEqual({
 			a: [{ children: [1], text: "x" }],
-			b: [{ children: [1], text: "x" }],
+			b: [],
 		});
-		expect(state.value).toEqual(state.state);
+		expect(deliveries).toHaveLength(3);
 		expect(deliveries.at(-1)).toBe(state.value);
 		expect(previous).toEqual({ a: [], b: [] });
 	});

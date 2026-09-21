@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BACKGROUND_CONTEXT } from "../src/context/index.ts";
-import { apply, track } from "../src/delta/index.ts";
-import { replicatedState } from "../src/index.ts";
+import { apply, applyImmutable, track } from "../src/delta/index.ts";
 
 type Item = { nested: { x: number }; text: string };
 const item = (x: number): Item => ({ nested: { x }, text: "start" });
@@ -29,32 +27,34 @@ describe("tracked reference positions", () => {
 
 	for (const readBeforeAlias of [false, true]) {
 		it(`publishes nested aliases with descendants read before alias: ${readBeforeAlias}`, () => {
-			const state = replicatedState<{ a: Item; b: Item | null }>({ a: item(1), b: null });
-			const oldRevision = state.value;
+			const state = track<{ a: Item; b: Item | null }>({ a: item(1), b: null });
+			let replica = applyImmutable<typeof state.state>(undefined, state.flush());
+			const oldRevision = replica;
 			const nested = readBeforeAlias ? state.state.a.nested : undefined;
 			state.state.b = state.state.a;
 			(nested ?? state.state.a.nested).x = 2;
-			state.publish(BACKGROUND_CONTEXT);
-			expect(state.value).toEqual(state.state);
+			replica = applyImmutable(replica, state.flush());
+			expect(replica).toEqual(state.state);
 			expect(oldRevision).toEqual({ a: item(1), b: null });
 			expect(state.state.a).toBe(state.state.b);
 			const held = state.state.a;
 			state.state.a = item(10);
 			held.nested.x = 3;
 			held.text += " aliased";
-			state.publish(BACKGROUND_CONTEXT);
-			expect(state.value).toEqual({ a: item(10), b: { nested: { x: 3 }, text: "start aliased" } });
+			replica = applyImmutable(replica, state.flush());
+			expect(replica).toEqual({ a: item(10), b: { nested: { x: 3 }, text: "start aliased" } });
 			state.state.b = null;
-			state.publish(BACKGROUND_CONTEXT);
+			replica = applyImmutable(replica, state.flush());
 			held.nested.x = 4;
-			state.publish(BACKGROUND_CONTEXT);
-			expect(state.value).toEqual(state.state);
+			replica = applyImmutable(replica, state.flush());
+			expect(replica).toEqual(state.state);
 		});
 	}
 
 	for (const method of ["fill", "copyWithin", "push", "unshift", "splice"] as const) {
 		it(`maintains nested array aliases through ${method}, reorder and removal`, () => {
-			const state = replicatedState({ items: [item(1), item(2), item(3)] });
+			const state = track({ items: [item(1), item(2), item(3)] });
+			let replica = applyImmutable<typeof state.state>(undefined, state.flush());
 			const held = state.state.items[0]!;
 			const nested = held.nested;
 			if (method === "fill") state.state.items.fill(held);
@@ -62,40 +62,42 @@ describe("tracked reference positions", () => {
 			if (method === "push") state.state.items.push(held);
 			if (method === "unshift") state.state.items.unshift(held);
 			if (method === "splice") state.state.items.splice(1, 0, held);
-			state.publish(BACKGROUND_CONTEXT);
+			replica = applyImmutable(replica, state.flush());
 			nested.x = 4;
-			state.publish(BACKGROUND_CONTEXT);
-			expect(state.value).toEqual(state.state);
+			replica = applyImmutable(replica, state.flush());
+			expect(replica).toEqual(state.state);
 			state.state.items.reverse();
 			state.state.items.shift();
 			nested.x = 5;
-			state.publish(BACKGROUND_CONTEXT);
-			expect(state.value).toEqual(state.state);
+			replica = applyImmutable(replica, state.flush());
+			expect(replica).toEqual(state.state);
 			state.state.items.length = 0;
-			state.publish(BACKGROUND_CONTEXT);
+			replica = applyImmutable(replica, state.flush());
 			nested.x = 6;
-			state.publish(BACKGROUND_CONTEXT);
-			expect(state.value).toEqual({ items: [] });
+			replica = applyImmutable(replica, state.flush());
+			expect(replica).toEqual({ items: [] });
 		});
 	}
 
 	it("tracks a fresh fill value at every position without cloning its identity", () => {
-		const state = replicatedState({ items: [item(1), item(2)] });
+		const state = track({ items: [item(1), item(2)] });
+		let replica = applyImmutable<typeof state.state>(undefined, state.flush());
 		state.state.items.fill(item(3));
-		state.publish(BACKGROUND_CONTEXT);
+		replica = applyImmutable(replica, state.flush());
 		expect(state.state.items[0]).toBe(state.state.items[1]);
 		state.state.items[0]!.nested.x = 4;
-		state.publish(BACKGROUND_CONTEXT);
-		expect(state.value).toEqual(state.state);
+		replica = applyImmutable(replica, state.flush());
+		expect(replica).toEqual(state.state);
 	});
 
 	it("publishes container replacements beneath aliased parents", () => {
-		const state = replicatedState<{ a: Item; b: Item | null }>({ a: item(1), b: null });
+		const state = track<{ a: Item; b: Item | null }>({ a: item(1), b: null });
+		let replica = applyImmutable<typeof state.state>(undefined, state.flush());
 		state.state.b = state.state.a;
-		state.publish(BACKGROUND_CONTEXT);
+		replica = applyImmutable(replica, state.flush());
 		state.state.a.nested = { x: 2 };
-		state.publish(BACKGROUND_CONTEXT);
-		expect(state.value).toEqual(state.state);
+		replica = applyImmutable(replica, state.flush());
+		expect(replica).toEqual(state.state);
 	});
 
 	it("reattaches held descendants after local edits to a detached object", () => {
@@ -166,11 +168,12 @@ describe("tracked reference positions", () => {
 	});
 
 	it("coalesces fill and subsequent nested edits in one publication", () => {
-		const state = replicatedState({ items: [item(1), item(2)] });
+		const state = track({ items: [item(1), item(2)] });
+		const previous = applyImmutable<typeof state.state>(undefined, state.flush());
 		state.state.items.fill(state.state.items[0]!);
 		state.state.items[1]!.nested.x = 3;
-		state.publish(BACKGROUND_CONTEXT);
-		expect(state.value).toEqual({ items: [item(3), item(3)] });
+		const replica = applyImmutable(previous, state.flush());
+		expect(replica).toEqual({ items: [item(3), item(3)] });
 	});
 
 	it("reuses positions after renumbering children first read out of index order", () => {
@@ -200,12 +203,13 @@ describe("tracked reference positions", () => {
 		expect(replica.a[1]).toEqual(item(5));
 	});
 
-	it("detaches public replicated-state references on replacement", () => {
-		const state = replicatedState({ a: item(1) });
+	it("detaches tracked references on replacement within one publication", () => {
+		const state = track({ a: item(1) });
+		const previous = applyImmutable<typeof state.state>(undefined, state.flush());
 		const held = state.state.a;
 		state.state.a = item(2);
 		held.nested.x = 3;
-		state.publish(BACKGROUND_CONTEXT);
-		expect(state.value).toEqual({ a: item(2) });
+		const replica = applyImmutable(previous, state.flush());
+		expect(replica).toEqual({ a: item(2) });
 	});
 });

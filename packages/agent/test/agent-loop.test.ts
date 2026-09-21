@@ -119,7 +119,7 @@ describe("default stream function compatibility", () => {
 });
 
 describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (mode) => {
-	it.each(["transformContext", "getApiKey", "streamFn"] as const)(
+	it.each(["prepareRequest", "transformContext", "getApiKey", "streamFn"] as const)(
 		"settles iteration and result when %s throws",
 		async (callback) => {
 			const prompt = createUserMessage("Hello");
@@ -129,6 +129,7 @@ describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (
 				throw failure;
 			};
 			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+			if (callback === "prepareRequest") config.prepareRequest = async () => fail();
 			if (callback === "transformContext") config.transformContext = async () => fail();
 			if (callback === "getApiKey") config.getApiKey = async () => fail();
 			const streamFn = () => {
@@ -175,10 +176,10 @@ describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
-			prepareProviderRequest: async (current) => {
+			prepareRequest: async ({ context }) => {
 				await Promise.resolve();
 				controller.abort();
-				return current;
+				return { context };
 			},
 		};
 		let requests = 0;
@@ -255,6 +256,69 @@ describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (
 		expect(config.model).toBe(model);
 		expect(config.prepareNextTurn).toBe(prepareNextTurn);
 	});
+
+	it.each(["transformContext", "getApiKey", "streamFn"] as const)(
+		"reports the prepared model when %s fails without changing caller config",
+		async (callback) => {
+			const prompt = createUserMessage("Hello");
+			const model = createModel();
+			const nextModel = {
+				...model,
+				api: "anthropic-messages" as const,
+				provider: "anthropic",
+				id: "prepared-model",
+			};
+			const failure = new Error(`${callback} failed after preparation`);
+			const fail = () => {
+				throw failure;
+			};
+			let preparations = 0;
+			const prepareRequest: NonNullable<AgentLoopConfig["prepareRequest"]> = async (request) => {
+				preparations++;
+				expect(request.model).toBe(model);
+				return { model: nextModel };
+			};
+			const config: AgentLoopConfig = { model, convertToLlm: identityConverter, prepareRequest };
+			if (callback === "transformContext") config.transformContext = async () => fail();
+			if (callback === "getApiKey") {
+				config.getApiKey = (provider) => {
+					expect(provider).toBe(nextModel.provider);
+					return fail();
+				};
+			}
+			Object.freeze(config);
+			const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
+			const streamFn = (requestedModel: AgentLoopConfig["model"]) => {
+				expect(requestedModel).toBe(nextModel);
+				if (callback === "streamFn") fail();
+				throw new Error("Provider must not be reached");
+			};
+			const stream =
+				mode === "prompt"
+					? agentLoop([prompt], context, config, undefined, streamFn)
+					: agentLoopContinue(context, config, undefined, streamFn);
+			const events: AgentEvent[] = [];
+			for await (const event of stream) events.push(event);
+			const messages = await stream.result();
+			const errorMessage = messages.at(-1);
+			expect(preparations).toBe(1);
+			expect(errorMessage).toMatchObject({
+				role: "assistant",
+				api: nextModel.api,
+				provider: nextModel.provider,
+				model: nextModel.id,
+				stopReason: "error",
+				errorMessage: failure.message,
+			});
+			expect(messages).toEqual(mode === "prompt" ? [prompt, errorMessage] : [errorMessage]);
+			expect(events.filter((event) => event.type === "turn_end")).toEqual([
+				{ type: "turn_end", message: errorMessage, toolResults: [] },
+			]);
+			expect(events.filter((event) => event.type === "agent_end")).toEqual([{ type: "agent_end", messages }]);
+			expect(config.model).toBe(model);
+			expect(config.prepareRequest).toBe(prepareRequest);
+		},
+	);
 
 	it("leaves direct runner rejection catchable", async () => {
 		const prompt = createUserMessage("Hello");
@@ -1301,6 +1365,405 @@ describe("agentLoop with AgentMessage", () => {
 		expect(parallelObserved).toBe(true);
 	});
 
+	it("runs finishTurn after tool-result messages and before turn_end", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: { value: params.value },
+					terminate: true,
+				};
+			},
+		};
+		const ordering: string[] = [];
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			finishTurn: ({ context, toolResults }) => {
+				ordering.push("finishTurn");
+				expect(toolResults).toHaveLength(1);
+				expect(context.messages.at(-1)?.role).toBe("toolResult");
+			},
+		};
+
+		await runAgentLoop(
+			[createUserMessage("echo")],
+			{ messages: [], tools: [tool] },
+			config,
+			(event) => {
+				if (event.type === "message_end") ordering.push(`message_end:${event.message.role}`);
+				if (event.type === "turn_end") ordering.push("turn_end");
+			},
+			undefined,
+			() => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+							"toolUse",
+						),
+					});
+				});
+				return stream;
+			},
+		);
+
+		expect(ordering.slice(-3)).toEqual(["message_end:toolResult", "finishTurn", "turn_end"]);
+	});
+
+	it.each(["error", "aborted"] as const)(
+		"runs finishTurn for a %s assistant before turn_end without changing the hard exit",
+		async (reason) => {
+			const ordering: string[] = [];
+			let providerCalls = 0;
+			let steeringPolls = 0;
+			let followUpPolls = 0;
+			await runAgentLoop(
+				[createUserMessage("run")],
+				{ messages: [], tools: [] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					finishTurn: ({ message }) => {
+						expect(message.stopReason).toBe(reason);
+						ordering.push("finishTurn");
+						return { action: "continue" };
+					},
+					getSteeringMessages: async () => {
+						steeringPolls++;
+						return [];
+					},
+					getFollowUpMessages: async () => {
+						followUpPolls++;
+						return [createUserMessage("queued")];
+					},
+				},
+				(event) => {
+					if (event.type === "turn_end") ordering.push("turn_end");
+				},
+				undefined,
+				() => {
+					providerCalls++;
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						stream.push({
+							type: "error",
+							reason,
+							error: {
+								...createAssistantMessage([], reason),
+								errorMessage: reason,
+							},
+						});
+					});
+					return stream;
+				},
+			);
+
+			expect(ordering).toEqual(["finishTurn", "turn_end"]);
+			expect(providerCalls).toBe(1);
+			expect(steeringPolls).toBe(1);
+			expect(followUpPolls).toBe(0);
+		},
+	);
+
+	it("action:end skips queue polling and next-turn preparation", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "noop",
+			label: "Noop",
+			description: "Noop tool",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "done" }], details: undefined };
+			},
+		};
+		let providerCalls = 0;
+		let steeringPolls = 0;
+		let followUpPolls = 0;
+		let prepareNextTurnCalls = 0;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			finishTurn: () => ({ action: "end" }),
+			prepareNextTurn: () => {
+				prepareNextTurnCalls++;
+				return undefined;
+			},
+			getSteeringMessages: async () => {
+				steeringPolls++;
+				return [];
+			},
+			getFollowUpMessages: async () => {
+				followUpPolls++;
+				return [createUserMessage("queued")];
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("run")], { messages: [], tools: [tool] }, config, undefined, () => {
+			providerCalls++;
+			const response = new MockAssistantStream();
+			queueMicrotask(() => {
+				response.push({
+					type: "done",
+					reason: "toolUse",
+					message: createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "noop", arguments: {} }],
+						"toolUse",
+					),
+				});
+			});
+			return response;
+		});
+		await stream.result();
+
+		expect(providerCalls).toBe(1);
+		expect(steeringPolls).toBe(1);
+		expect(followUpPolls).toBe(0);
+		expect(prepareNextTurnCalls).toBe(0);
+	});
+
+	it("makes exactly one context-only request when no natural request satisfies continuation", async () => {
+		let providerCalls = 0;
+		let finishCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("run")],
+			{ messages: [], tools: [] },
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				finishTurn: () => {
+					finishCalls++;
+					return finishCalls === 1 ? { action: "continue" } : undefined;
+				},
+			},
+			undefined,
+			() => {
+				providerCalls++;
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					response.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: `response ${providerCalls}` }]),
+					});
+				});
+				return response;
+			},
+		);
+		await stream.result();
+
+		expect(providerCalls).toBe(2);
+		expect(finishCalls).toBe(2);
+	});
+
+	it("lets a natural tool-result request satisfy continuation", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "noop",
+			label: "Noop",
+			description: "Noop tool",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "done" }], details: undefined };
+			},
+		};
+		let providerCalls = 0;
+		let finishCalls = 0;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			finishTurn: () => {
+				finishCalls++;
+				return finishCalls === 1 ? { action: "continue" } : undefined;
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("run")], { messages: [], tools: [tool] }, config, undefined, () => {
+			providerCalls++;
+			const response = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message =
+					providerCalls === 1
+						? createAssistantMessage([{ type: "toolCall", id: "tool-1", name: "noop", arguments: {} }], "toolUse")
+						: createAssistantMessage([{ type: "text", text: "done" }]);
+				response.push({ type: "done", reason: providerCalls === 1 ? "toolUse" : "stop", message });
+			});
+			return response;
+		});
+		await stream.result();
+
+		expect(providerCalls).toBe(2);
+		expect(finishCalls).toBe(2);
+	});
+
+	it.each(["steering", "follow-up"] as const)("lets a natural %s request satisfy continuation", async (queueKind) => {
+		const queuedMessage = createUserMessage(queueKind);
+		let providerCalls = 0;
+		let finishCalls = 0;
+		let steeringPolls = 0;
+		let followUpDelivered = false;
+		const secondRequestUsers: string[] = [];
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			finishTurn: () => {
+				finishCalls++;
+				return finishCalls === 1 ? { action: "continue" } : undefined;
+			},
+			getSteeringMessages: async () => {
+				steeringPolls++;
+				return queueKind === "steering" && steeringPolls === 2 ? [queuedMessage] : [];
+			},
+			getFollowUpMessages: async () => {
+				if (queueKind !== "follow-up" || followUpDelivered) return [];
+				followUpDelivered = true;
+				return [queuedMessage];
+			},
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("run")],
+			{ messages: [], tools: [] },
+			config,
+			undefined,
+			(_model, context) => {
+				providerCalls++;
+				if (providerCalls === 2) {
+					secondRequestUsers.push(
+						...context.messages.flatMap((message) =>
+							message.role === "user" && typeof message.content === "string" ? [message.content] : [],
+						),
+					);
+				}
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					response.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return response;
+			},
+		);
+		await stream.result();
+
+		expect(providerCalls).toBe(2);
+		expect(finishCalls).toBe(2);
+		expect(secondRequestUsers).toContain(queueKind);
+	});
+
+	it("prepares the initial request after pending messages and can replace request state", async () => {
+		const replacementModel = { ...createModel(), id: "replacement", name: "replacement" };
+		const canonicalMessage = createUserMessage("canonical projection");
+		const steeringMessage = createUserMessage("steering");
+		const completedMessages: AgentMessage[] = [];
+		let steeringDelivered = false;
+		let prepareCalls = 0;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			getSteeringMessages: async () => {
+				if (steeringDelivered) return [];
+				steeringDelivered = true;
+				return [steeringMessage];
+			},
+			prepareRequest: ({ context }) => {
+				prepareCalls++;
+				expect(completedMessages).toContain(steeringMessage);
+				expect(context.messages).toContain(steeringMessage);
+				return {
+					context: { ...context, messages: [canonicalMessage] },
+					model: replacementModel,
+					thinkingLevel: "high",
+				};
+			},
+		};
+
+		await runAgentLoop(
+			[createUserMessage("prompt")],
+			{ messages: [], tools: [] },
+			config,
+			(event) => {
+				if (event.type === "message_end") completedMessages.push(event.message);
+			},
+			undefined,
+			(model, context, options) => {
+				expect(model).toBe(replacementModel);
+				expect(context.messages).toEqual([canonicalMessage]);
+				expect(options?.reasoning).toBe("high");
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					response.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return response;
+			},
+		);
+
+		expect(prepareCalls).toBe(1);
+	});
+
+	it("admits steering queued during prepareRequest and prepares it before the request", async () => {
+		const queued: AgentMessage[] = [];
+		const lateSteering = createUserMessage("late steering");
+		const requestIncludedSteering: boolean[] = [];
+		const preparedMessages: AgentMessage[][] = [];
+		let requestPreparations = 0;
+		let steeringPolls = 0;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			getSteeringMessages: async () => {
+				steeringPolls++;
+				return queued.splice(0);
+			},
+			prepareRequest: ({ context }) => {
+				preparedMessages.push(context.messages.slice());
+				requestPreparations++;
+				if (requestPreparations === 1) queued.push(lateSteering);
+			},
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("run")],
+			{ messages: [], tools: [] },
+			config,
+			undefined,
+			(_model, context) => {
+				requestIncludedSteering.push(context.messages.includes(lateSteering));
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					response.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return response;
+			},
+		);
+		await stream.result();
+
+		expect(requestIncludedSteering).toEqual([true]);
+		expect(requestPreparations).toBe(2);
+		expect(preparedMessages[0]).not.toContain(lateSteering);
+		expect(preparedMessages[1]).toContain(lateSteering);
+		// Startup, late admission after preparation, then the final natural-stop check.
+		expect(steeringPolls).toBe(3);
+	});
+
 	it("should use prepareNextTurn snapshot before continuing", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -1378,7 +1841,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(convertedSecondTurnHasUpdate).toBe(true);
 	});
 
-	it("forwards a successful new-context request after the full tool batch", async () => {
+	it("forwards a successful new-context request after the full tool batch despite action:end", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const completed: string[] = [];
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -1406,7 +1869,7 @@ describe("agentLoop with AgentMessage", () => {
 				receivedHandoff = newContext?.handoff;
 				return undefined;
 			},
-			shouldStopAfterTurn: () => true,
+			finishTurn: () => ({ action: "end" }),
 		};
 
 		let llmCalls = 0;
@@ -1463,9 +1926,9 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
-			shouldStopAfterTurn: ({ newContext }) => {
+			finishTurn: ({ newContext }) => {
 				requestSeen = newContext !== undefined;
-				return true;
+				return { action: "end" };
 			},
 		};
 		const stream = agentLoop(
@@ -1551,7 +2014,60 @@ describe("agentLoop with AgentMessage", () => {
 		expect(requestSeen).toBe(false);
 	});
 
-	it("should stop after the current turn when shouldStopAfterTurn returns true", async () => {
+	it("picks up steering queued during prepareNextTurn before the next request", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "noop",
+			label: "Noop",
+			description: "Noop tool",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "done" }], details: undefined };
+			},
+		};
+		const queued: AgentMessage[] = [];
+		const lateSteering = createUserMessage("late steering");
+		let providerCalls = 0;
+		let secondRequestIncludedSteering = false;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareNextTurn: () => {
+				queued.push(lateSteering);
+				return undefined;
+			},
+			getSteeringMessages: async () => queued.splice(0),
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("run")],
+			{ messages: [], tools: [tool] },
+			config,
+			undefined,
+			(_model, context) => {
+				providerCalls++;
+				if (providerCalls === 2) secondRequestIncludedSteering = context.messages.includes(lateSteering);
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message =
+						providerCalls === 1
+							? createAssistantMessage(
+									[{ type: "toolCall", id: "tool-1", name: "noop", arguments: {} }],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]);
+					response.push({ type: "done", reason: providerCalls === 1 ? "toolUse" : "stop", message });
+				});
+				return response;
+			},
+		);
+		await stream.result();
+
+		expect(providerCalls).toBe(2);
+		expect(secondRequestIncludedSteering).toBe(true);
+	});
+
+	it("action:end receives finalized turn context and stops before queue polling", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -1580,6 +2096,12 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
+			finishTurn: async ({ message, toolResults, context }) => {
+				expect(message.role).toBe("assistant");
+				callbackToolResultIds = toolResults.map((toolResult) => toolResult.toolCallId);
+				callbackContextRoles = context.messages.map((contextMessage) => contextMessage.role);
+				return { action: "end" };
+			},
 			getSteeringMessages: async () => {
 				steeringPolls++;
 				return [];
@@ -1587,12 +2109,6 @@ describe("agentLoop with AgentMessage", () => {
 			getFollowUpMessages: async () => {
 				followUpPolls++;
 				return [createUserMessage("follow up should stay queued")];
-			},
-			shouldStopAfterTurn: async ({ message, toolResults, context }) => {
-				expect(message.role).toBe("assistant");
-				callbackToolResultIds = toolResults.map((toolResult) => toolResult.toolCallId);
-				callbackContextRoles = context.messages.map((contextMessage) => contextMessage.role);
-				return true;
 			},
 		};
 
@@ -1947,8 +2463,8 @@ describe("transcript request preparation", () => {
 			{
 				model: createModel(),
 				convertToLlm: identityConverter,
-				prepareProviderRequest: async (context) => {
-					if (replace) return { messages: context.messages.slice(), tools: [tool] };
+				prepareRequest: async ({ context }) => {
+					if (replace) return { context: { messages: context.messages.slice(), tools: [tool] } };
 					context.tools = [tool];
 					return undefined;
 				},

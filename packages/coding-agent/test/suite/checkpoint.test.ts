@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type ImageContent, Type } from "@earendil-works/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.ts";
 import { openSessionCheckpoint, readSessionCheckpoint, writeSessionCheckpoint } from "../../src/core/checkpoint.ts";
@@ -243,13 +243,17 @@ describe("native working-session checkpoint", () => {
 				{
 					name: "late-writer",
 					factory(pi) {
-						pi.on("turn_end", async () => {
+						pi.on("turn_end", async (event, ctx) => {
 							await Promise.resolve();
+							expect(ctx.sessionManager.getEntry(event.messageEntryId)).toMatchObject({ type: "message" });
 							pi.appendEntry("extension-state", { saved: true });
 							pi.sendMessage(
 								{ customType: "aside", content: "turn aside", display: true },
 								{ triggerTurn: false },
 							);
+							return {
+								entries: [...event.entries, { type: "custom", customType: "boundary-draft", data: true }],
+							};
 						});
 					},
 				},
@@ -301,6 +305,7 @@ describe("native working-session checkpoint", () => {
 		});
 		expect(JSON.stringify(hold.checkpoint.entries)).toContain("later-native");
 		expect(JSON.stringify(hold.checkpoint.entries)).toContain("extension-state");
+		expect(JSON.stringify(hold.checkpoint.entries)).toContain("boundary-draft");
 		expect(JSON.stringify(hold.checkpoint.entries)).toContain("turn aside");
 		expect(hold.checkpoint.queues.steering).toHaveLength(2);
 		expect(hold.checkpoint.queues.followUp).toHaveLength(1);
@@ -416,24 +421,37 @@ describe("native working-session checkpoint", () => {
 		expect(readFileSync(h.session.sessionFile!, "utf8")).toBe("");
 	});
 
-	it("does not capture between awaited settlement handlers even though isIdle is true", async () => {
+	it("waits for settlement handlers and their deferred run before capturing", async () => {
 		const entered = deferred();
 		const release = deferred();
+		const deferredEntered = deferred();
+		const deferredRelease = deferred();
+		let submitted = false;
 		const h = await setup({
 			extensionFactories: [
 				{
 					name: "settlement",
 					factory(pi) {
 						pi.on("agent_settled", async () => {
+							if (submitted) return;
+							submitted = true;
 							entered.resolve();
 							await release.promise;
 							pi.appendEntry("settled-write", { done: true });
+							pi.sendUserMessage("accepted deferred run");
 						});
 					},
 				},
 			],
 		});
-		h.setResponses([fauxAssistantMessage("done")]);
+		h.setResponses([
+			fauxAssistantMessage("done"),
+			async () => {
+				deferredEntered.resolve();
+				await deferredRelease.promise;
+				return fauxAssistantMessage("deferred answer");
+			},
+		]);
 		const running = h.session.prompt("start");
 		await entered.promise;
 		expect(h.session.isIdle).toBe(true);
@@ -445,11 +463,75 @@ describe("native working-session checkpoint", () => {
 		await Promise.resolve();
 		expect(captured).toBe(false);
 		release.resolve();
+		await deferredEntered.promise;
+		expect(captured).toBe(false);
+		deferredRelease.resolve();
 		const hold = await pending;
 		expect(hold.checkpoint.settled).toBe(true);
 		expect(JSON.stringify(hold.checkpoint.entries)).toContain("settled-write");
+		expect(JSON.stringify(hold.checkpoint.entries)).toContain("deferred answer");
+		expect(h.faux.state.callCount).toBe(2);
 		hold.release();
 		await running;
+	});
+
+	it.each([1, 2])("allows a turn hold after admitting the last of %i deferred runs", async (count) => {
+		const entered = Array.from({ length: count }, deferred);
+		const release = Array.from({ length: count }, deferred);
+		let submitted = false;
+		const h = await setup({
+			extensionFactories: [
+				(pi) => {
+					pi.registerTool({
+						name: "noop",
+						label: "Noop",
+						description: "Checkpoint boundary",
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
+					});
+					pi.on("agent_settled", () => {
+						if (submitted) return;
+						submitted = true;
+						for (let index = 0; index < count; index++) pi.sendUserMessage(`deferred ${index}`);
+					});
+				},
+			],
+		});
+		h.setResponses([
+			fauxAssistantMessage("initial answer"),
+			...entered.map((gate, index) => async () => {
+				gate.resolve();
+				await release[index].promise;
+				return index === count - 1
+					? fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })
+					: fauxAssistantMessage("earlier deferred answer");
+			}),
+			fauxAssistantMessage("final answer"),
+		]);
+		const running = h.session.prompt("start");
+		await entered[0].promise;
+		let captured = false;
+		const pending = h.session.acquireCheckpoint({ boundary: "turn" }).then((hold) => {
+			captured = true;
+			return hold;
+		});
+		for (let index = 0; index < count - 1; index++) {
+			release[index].resolve();
+			await entered[index + 1].promise;
+			expect(captured).toBe(false);
+		}
+		release[count - 1].resolve();
+		const hold = await pending;
+		try {
+			expect(hold.checkpoint.boundary).toBe("turn");
+			expect(hold.checkpoint.settled).toBe(false);
+			expect(h.faux.state.callCount).toBe(count + 1);
+			expect(h.getPendingResponseCount()).toBe(1);
+		} finally {
+			hold.release();
+			await running;
+		}
+		expect(h.session.getLastAssistantText()).toBe("final answer");
 	});
 
 	it("settings/capture failures release ingress without clearing accepted queues", async () => {

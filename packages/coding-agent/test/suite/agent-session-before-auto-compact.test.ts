@@ -132,15 +132,15 @@ describe("session_before_auto_compact", () => {
 			extensionFactories: [claimRollover(seen)],
 		});
 		harnesses.push(harness);
-		const prepare = harness.session.agent.prepareProviderRequest!;
+		const prepare = harness.session.agent.prepareRequest!;
 		let queued = false;
-		harness.session.agent.prepareProviderRequest = async (context, signal) => {
-			const prepared = await prepare(context, signal);
+		harness.session.agent.prepareRequest = async (request, signal) => {
+			const prepared = await prepare(request, signal);
 			if (!queued) {
 				queued = true;
 				await harness.session.steer("late steering");
 			}
-			return prepared;
+			return prepared ?? undefined;
 		};
 		let hookCallsAtRequest = -1;
 		let requestTexts: string[] = [];
