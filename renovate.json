@@ -1,0 +1,11 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>fitchmultz/.github:pi-extensions"],
+  "packageRules": [
+    {
+      "description": "Fork runtime dependencies follow reviewed upstream integration; this preset maintains CI references only.",
+      "matchManagers": ["npm"],
+      "enabled": false
+    }
+  ]
+}
