@@ -44,6 +44,7 @@ import type {
 	SystemMessage,
 	TextContent,
 	Tool,
+	ToolResultMessage,
 	Usage,
 	UserMessage,
 } from "@earendil-works/pi-ai/compat";
@@ -84,7 +85,9 @@ import {
 	collectEntriesForBranchSummary,
 	compact,
 	estimateContextTokens,
+	estimateProjectedContextTokens,
 	generateBranchSummary,
+	isContextUsageInvalidatingEntry,
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
@@ -92,8 +95,10 @@ import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
+	type AgentActivityOutcome,
 	type AutoRetryEndEvent,
 	type AutoRetryStartEvent,
+	type BoundaryContextPreview,
 	type ContextUsage,
 	type ExtensionCommandContextActions,
 	type ExtensionErrorListener,
@@ -107,6 +112,7 @@ import {
 	type ReplacedSessionContext,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
+	type SessionBoundaryDraft,
 	type SessionCompactFailedEvent,
 	type SessionStartEvent,
 	type ShutdownHandler,
@@ -119,19 +125,24 @@ import {
 	type ToolExecutionUpdateEvent,
 	type ToolInfo,
 	type TreePreparation,
-	type TurnEndEvent,
 	type TurnStartEvent,
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
-import { getLatestCompactionEntry, sessionEntryToContextMessages } from "./session-manager.ts";
+import {
+	type BranchSummaryEntry,
+	type CompactionEntry,
+	type ContextEditEntry,
+	type SessionEntry,
+	SessionManager,
+	sessionEntryToContextMessages,
+} from "./session-manager.ts";
 import type { CacheWarmingMode, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -422,6 +433,15 @@ export class AgentSession {
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
 	private _turnIndex = 0;
+	private readonly _entryIdsByMessage = new WeakMap<object, string>();
+	private readonly _boundaryDispatchedMessages = new WeakSet<object>();
+	private _lastAssistantMessage: AssistantMessage | undefined;
+	private _lastAssistantToolResults: AgentMessage[] = [];
+	private _lastActivityOutcome: AgentActivityOutcome = "completed";
+	private _isBeforeSettle = false;
+	private _abortDuringBeforeSettle = false;
+	private _isEmittingAgentSettled = false;
+	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
@@ -492,12 +512,9 @@ export class AgentSession {
 		};
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
-		this._installAgentRequestPreflight();
-		this._installAgentContextPersistence();
+		this._installAgentRequestProjection();
+		this._installAgentBoundaryHooks();
 		this._installAgentForcedPromptProjection();
-		const shouldStopAfterTurn = this.agent.shouldStopAfterTurn;
-		this.agent.shouldStopAfterTurn = (context, signal) =>
-			this._shutdownAbortController.signal.aborted || shouldStopAfterTurn?.(context, signal) || false;
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -658,14 +675,20 @@ export class AgentSession {
 	private _consumeNewContext(request?: NewContextRequest): AgentContext | undefined {
 		const next = request ?? this._pendingNewContext;
 		this._pendingNewContext = undefined;
-		if (!next || this.agent.signal?.aborted || this._autoCompactionAbortController?.signal.aborted) return undefined;
+		if (
+			!next ||
+			this._shutdownAbortController.signal.aborted ||
+			this.agent.signal?.aborted ||
+			this._autoCompactionAbortController?.signal.aborted
+		)
+			return undefined;
 
 		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
 		const usage = this.getContextUsage();
 		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null);
 		this._reportedUsagePrefix = null;
-		const messages = this.sessionManager.buildSessionContext().messages;
-		this.agent.state.messages = messages;
+		this._refreshFinalizedContext();
+		const messages = this.agent.state.messages;
 
 		const marker = messages.find((message) => message.role === "custom" && message.customType === "context-window")!;
 		this._emit({ type: "message_start", message: marker });
@@ -692,7 +715,6 @@ export class AgentSession {
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
-
 		if (
 			!model ||
 			model.contextWindow <= 0 ||
@@ -702,9 +724,117 @@ export class AgentSession {
 		}
 
 		await this._runAutoCompaction("threshold", false);
-		return {
+		return this._restorePendingProviderMessages({
 			...context,
-			messages: this.agent.state.messages.slice(),
+			messages: this.sessionManager.buildSessionProjection().messages,
+		});
+	}
+
+	private _installAgentRequestProjection(): void {
+		const previousPrepareRequest = this.agent.prepareRequest;
+		this.agent.prepareRequest = async (request, signal) => {
+			this._shutdownAbortController.signal.throwIfAborted();
+			const canonicalContext = this._restorePendingProviderMessages({
+				...request.context,
+				messages: this.sessionManager.buildSessionProjection().messages,
+				// Transcript declarations and executable implementations share the same loadout.
+				tools: this.agent.state.tools.slice(),
+			});
+			const previous = await previousPrepareRequest?.(
+				{
+					...request,
+					context: canonicalContext,
+					model: this.agent.state.model,
+					thinkingLevel: this.agent.state.thinkingLevel,
+				},
+				signal,
+			);
+			let prepared = previous?.context ?? canonicalContext;
+			if (!this._skipNextProviderRequestPreflight) {
+				prepared = await this._compactBeforeNextAssistantResponse(prepared);
+			}
+			prepared = this._restorePendingProviderMessages(this._consumeNewContext() ?? prepared);
+			return {
+				...previous,
+				context: prepared,
+				model: previous?.model ?? this.agent.state.model,
+				thinkingLevel: previous?.thinkingLevel ?? this.agent.state.thinkingLevel,
+			};
+		};
+
+		const previousTransform = this.agent.transformContext;
+		this.agent.transformContext = async (_messages, signal) => {
+			// prepareRequest can run again after the bounded late-steering drain. Only now
+			// can no further preflight boundary precede these inputs. Final tool declarations
+			// have also arrived: persist once, assign IDs, then take the authoritative projection.
+			this._flushPendingProviderMessages();
+			this._refreshFinalizedContext();
+			const messages = this.agent.state.messages;
+			const model = this.model;
+			const systemPrompt = getCurrentSystemPrompt(messages);
+			this._providerRequestPrefix = model
+				? {
+						provider: model.provider,
+						model: model.id,
+						systemPrompt,
+						transcriptSystemPrompt: systemPrompt,
+						toolKeys: this.agent.state.tools.map((tool) => this._captureToolPrefix(tool)),
+					}
+				: undefined;
+			return previousTransform ? await previousTransform(messages, signal) : messages;
+		};
+	}
+
+	private async _dispatchTurnEndBoundary(
+		message: AssistantMessage,
+		toolResults: ToolResultMessage[],
+	): Promise<boolean> {
+		this._lastActivityOutcome =
+			message.stopReason === "aborted" ? "aborted" : message.stopReason === "error" ? "error" : "completed";
+		const messageEntryId = this._findPersistedMessageEntryId(message);
+		if (!this._extensionRunner.hasHandlers("turn_end")) return false;
+		if (!messageEntryId) {
+			this._extensionRunner.emitError({
+				extensionPath: "<boundary>",
+				event: "turn_end",
+				error: "turn_end could not resolve the persisted assistant entry ID",
+			});
+			return false;
+		}
+		const toolResultEntryIds = toolResults.flatMap((result) => {
+			const entryId = this._findPersistedMessageEntryId(result);
+			return entryId ? [entryId] : [];
+		});
+		const boundary = await this._extensionRunner.emitBoundary(
+			{
+				type: "turn_end",
+				turnIndex: this._turnIndex,
+				message,
+				toolResults,
+				messageEntryId,
+				toolResultEntryIds,
+				outcome: this._lastActivityOutcome,
+			},
+			(entries) => this._buildBoundaryContext(entries, "turn_end"),
+		);
+		this._commitBoundaryDrafts(boundary.entries);
+		if (boundary.continue && !this._buildBoundaryContext([], "turn_end").canContinue) {
+			this._reportInvalidBoundaryContinuation("turn_end");
+			return false;
+		}
+		return boundary.continue;
+	}
+
+	private _installAgentBoundaryHooks(): void {
+		const previousFinishTurn = this.agent.finishTurn;
+		this.agent.finishTurn = async (turn, signal) => {
+			this._boundaryDispatchedMessages.add(turn.message);
+			const extensionContinue = await this._dispatchTurnEndBoundary(turn.message, turn.toolResults);
+			const previousDecision = await previousFinishTurn?.(turn, signal);
+			if (this._shutdownAbortController.signal.aborted) return { action: "end" };
+			if (previousDecision?.action === "end") return previousDecision;
+			if (extensionContinue || previousDecision?.action === "continue") return { action: "continue" };
+			return undefined;
 		};
 	}
 
@@ -712,9 +842,12 @@ export class AgentSession {
 	 * Best available native estimate of the active context. Exact-prefix usage wins; an unknown
 	 * legacy prefix uses the larger of matching-model usage and the full prompt/tool/message estimate.
 	 */
-	private _estimateContextTokens(context: AgentContext = this.agent.state) {
-		const options = { model: this.model };
-		if (this._reportedUsageApplies(context)) {
+	private _estimateContextTokens(
+		context: AgentContext = this.agent.state,
+		usageState = this._getContextUsageState(context.messages),
+	) {
+		const options = { model: this.model, useReportedUsage: usageState.useReportedUsage };
+		if (options.useReportedUsage && this._reportedUsageApplies(context)) {
 			const messages =
 				this._runSystemPromptOptions?.forceSystemPrompt === undefined
 					? context.messages
@@ -754,11 +887,7 @@ export class AgentSession {
 				? [getCurrentSystemMessage(messages)!, ...messages.filter((message) => message.role !== "system")]
 				: messages;
 		const fullEstimate = estimateContextTokens(estimatedMessages, { ...options, useReportedUsage: false });
-		if (
-			forced !== undefined ||
-			this._reportedUsagePrefix !== undefined ||
-			!this._hasCurrentModelUsageAfterActiveCompaction()
-		) {
+		if (forced !== undefined || this._reportedUsagePrefix !== undefined || !usageState.hasPostCompactionUsage) {
 			return fullEstimate;
 		}
 
@@ -800,28 +929,37 @@ export class AgentSession {
 		);
 	}
 
-	private _hasCurrentModelUsageAfterActiveCompaction(): boolean {
+	private _getContextUsageState(messages: AgentMessage[]): {
+		hasPostCompactionUsage: boolean;
+		useReportedUsage: boolean;
+	} {
 		const model = this.model;
+		let invalidated = false;
 		let entry = this.sessionManager.getLeafEntry();
+		// Walk only to the latest relevant response or boundary. The context meter must
+		// not materialize all history on each render, even after many native windows.
 		while (entry) {
-			if (entry.type === "compaction") return false;
-			if (entry.type === "context_window") return true;
+			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
+			if (entry.type === "context_window") return { hasPostCompactionUsage: true, useReportedUsage: false };
+			if (isContextUsageInvalidatingEntry(entry)) invalidated = true;
 			if (model && entry.type === "message" && entry.message.role === "assistant") {
 				const message = entry.message;
+				const entryId = entry.id;
 				if (
 					message.provider === model.provider &&
 					message.model === model.id &&
 					message.stopReason !== "aborted" &&
 					message.stopReason !== "error" &&
 					message.usage &&
-					calculateContextTokens(message.usage) > 0
+					calculateContextTokens(message.usage) > 0 &&
+					messages.some((projected) => projected === message || this._entryIdsByMessage.get(projected) === entryId)
 				) {
-					return true;
+					return { hasPostCompactionUsage: true, useReportedUsage: !invalidated };
 				}
 			}
 			entry = entry.parentId ? this.sessionManager.getEntry(entry.parentId) : undefined;
 		}
-		return true;
+		return { hasPostCompactionUsage: true, useReportedUsage: false };
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -831,7 +969,10 @@ export class AgentSession {
 				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
-			const context = this._consumeNewContext(turn.newContext) ?? turn.context;
+			const context = this._consumeNewContext(turn.newContext) ?? {
+				...turn.context,
+				messages: this.sessionManager.buildSessionProjection().messages,
+			};
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
@@ -869,8 +1010,9 @@ export class AgentSession {
 	}
 
 	private _persistMessage(message: AgentMessage): void {
+		let entryId: string | undefined;
 		if (message.role === "custom") {
-			this.sessionManager.appendCustomMessageEntry(
+			entryId = this.sessionManager.appendCustomMessageEntry(
 				message.customType,
 				message.content,
 				message.display,
@@ -882,8 +1024,9 @@ export class AgentSession {
 			message.role === "assistant" ||
 			message.role === "toolResult"
 		) {
-			this.sessionManager.appendMessage(message);
+			entryId = this.sessionManager.appendMessage(message);
 		}
+		if (entryId) this._entryIdsByMessage.set(message, entryId);
 	}
 
 	private _flushPendingProviderMessages(): void {
@@ -893,41 +1036,109 @@ export class AgentSession {
 		}
 	}
 
-	private _installAgentRequestPreflight(): void {
-		const previousPreparation = this.agent.prepareProviderRequest;
-		this.agent.prepareProviderRequest = async (context, signal) => {
-			this._shutdownAbortController.signal.throwIfAborted();
-			let prepared = (await previousPreparation?.(context, signal)) ?? context;
-			if (!this._skipNextProviderRequestPreflight) {
-				prepared = await this._compactBeforeNextAssistantResponse(prepared);
-			}
-			prepared = this._restorePendingProviderMessages(this._consumeNewContext() ?? prepared);
-			const model = this.model;
-			const systemPrompt = getCurrentSystemPrompt(prepared.messages);
-			this._providerRequestPrefix = model
-				? {
-						provider: model.provider,
-						model: model.id,
-						systemPrompt,
-						transcriptSystemPrompt: systemPrompt,
-						toolKeys: prepared.tools?.map((tool) => this._captureToolPrefix(tool)) ?? [],
-					}
-				: undefined;
-			return prepared;
-		};
-	}
-
-	private _installAgentContextPersistence(): void {
-		const previousTransform = this.agent.transformContext;
-		this.agent.transformContext = async (messages, signal) => {
-			this._flushPendingProviderMessages();
-			return previousTransform ? await previousTransform(messages, signal) : messages;
-		};
-	}
-
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================
+
+	private _refreshFinalizedContext(): void {
+		const projection = this.sessionManager.buildSessionProjection();
+		for (const entry of projection.entries) {
+			for (const message of entry.messages) this._entryIdsByMessage.set(message, entry.sourceEntry.id);
+		}
+		this.agent.state.messages = projection.messages;
+	}
+
+	private _applyBoundaryDrafts(manager: SessionManager, drafts: SessionBoundaryDraft[]): SessionEntry[] {
+		const appended: SessionEntry[] = [];
+		for (const draft of drafts) {
+			let entryId: string;
+			switch (draft.type) {
+				case "custom":
+					entryId = manager.appendCustomEntry(draft.customType, draft.data);
+					break;
+				case "custom_message":
+					entryId = manager.appendCustomMessageEntry(
+						draft.customType,
+						draft.content,
+						draft.display,
+						draft.details,
+					);
+					break;
+				case "context_edit":
+					entryId = manager.appendContextEdit(draft.targetId, draft.replacement);
+					break;
+				case "compaction": {
+					const tokensBefore = estimateProjectedContextTokens(
+						manager.buildSessionProjection(),
+						manager.getBranch(),
+					).tokens;
+					entryId = manager.appendCompaction(
+						draft.summary,
+						draft.firstKeptEntryId,
+						tokensBefore,
+						draft.details,
+						true,
+						draft.usage,
+					);
+					break;
+				}
+			}
+			const entry = manager.getEntry(entryId);
+			if (entry) appended.push(entry);
+		}
+		return appended;
+	}
+
+	private _createBoundaryPreviewManager(drafts: SessionBoundaryDraft[]): SessionManager {
+		const header = this.sessionManager.getHeader();
+		if (!header) throw new Error("Session header is missing");
+		const manager = SessionManager.inMemory(this._cwd, undefined, [header, ...this.sessionManager.getBranch()]);
+		this._applyBoundaryDrafts(manager, drafts);
+		return manager;
+	}
+
+	private _getPendingBoundaryMessages(): AgentMessage[] {
+		return [...this.agent.peekQueuedMessages(), ...this._pendingCustomMessages];
+	}
+
+	private _buildBoundaryContext(
+		drafts: SessionBoundaryDraft[],
+		boundary: "turn_end" | "agent_before_settle",
+	): BoundaryContextPreview {
+		const projection = this._createBoundaryPreviewManager(drafts).buildSessionProjection();
+		const pendingMessages = this._getPendingBoundaryMessages();
+		const llmMessages = convertToLlm(projection.messages);
+		const finalRole = llmMessages[llmMessages.length - 1]?.role;
+		const hasNonSystemContext = llmMessages.some((message) => message.role !== "system");
+		const contextCanContinue = hasNonSystemContext && finalRole !== "assistant";
+		const pendingCustomContext = this._pendingCustomMessages.length > 0;
+		return {
+			contextEntries: projection.entries,
+			contextMessages: projection.messages,
+			llmMessages,
+			pendingMessages,
+			canContinue:
+				contextCanContinue ||
+				pendingCustomContext ||
+				(boundary === "turn_end"
+					? this.agent.hasQueuedMessages()
+					: finalRole === "assistant" && this.agent.hasQueuedMessages()),
+		};
+	}
+
+	private _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): void {
+		const appended = this._applyBoundaryDrafts(this.sessionManager, drafts);
+		this._refreshFinalizedContext();
+		for (const entry of appended) this._emit({ type: "entry_appended", entry });
+	}
+
+	private _reportInvalidBoundaryContinuation(event: "turn_end" | "agent_before_settle"): void {
+		this._extensionRunner.emitError({
+			extensionPath: "<boundary>",
+			event,
+			error: `${event} requested continuation without runnable model context`,
+		});
+	}
 
 	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
@@ -973,7 +1184,7 @@ export class AgentSession {
 
 	private _resolveIdleWaitIfIdle(): void {
 		this.notifyCheckpointStateChanged();
-		if (!this.isIdle || !this._resolveIdleWait) {
+		if (!this.isIdle || this._settling || !this._resolveIdleWait) {
 			return;
 		}
 		const resolve = this._resolveIdleWait;
@@ -986,18 +1197,24 @@ export class AgentSession {
 		this._cacheWarmer?.onAgentSettled();
 		this._isAgentRunActive = false;
 		this._settling++;
+		this._isEmittingAgentSettled = true;
 		try {
-			await this._extensionRunner.emit({ type: "agent_settled" });
-			this._emit({ type: "agent_settled" });
+			try {
+				await this._extensionRunner.emit({ type: "agent_settled" });
+				this._emit({ type: "agent_settled" });
+			} finally {
+				this._isEmittingAgentSettled = false;
+			}
+			// Keep the checkpoint barrier across all accepted deferred work, including
+			// the idle intervals between runs. Settled observers never re-enter dispatch.
+			const deferred = this._deferredSettledActions.splice(0);
+			for (const action of deferred) await action();
 		} finally {
 			this._settling--;
 			await this._checkpointSafePoint("settled");
 			this._resolveIdleWaitIfIdle();
 		}
 	}
-
-	// Track last assistant message for auto-compaction check
-	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
@@ -1039,11 +1256,11 @@ export class AgentSession {
 			await this._normalizeUserMessageImages(event.message);
 		}
 
-		// Emit to extensions first
+		// Emit to extensions first, then notify public listeners.
 		await this._emitExtensionEvent(event);
 
 		if (requestPrefix && event.type === "message_end" && event.message.role === "assistant") {
-			const message = event.message as AssistantMessage;
+			const message = event.message;
 			if (
 				requestPrefix.provider === message.provider &&
 				requestPrefix.model === message.model &&
@@ -1055,7 +1272,6 @@ export class AgentSession {
 			}
 		}
 
-		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 
 		// Handle session persistence
@@ -1071,11 +1287,9 @@ export class AgentSession {
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
-			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
-				this._lastAssistantMessage = event.message;
-
 				const assistantMsg = event.message as AssistantMessage;
+				this._lastAssistantMessage = assistantMsg;
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
 					this._overflowRecoveryAttempted = false;
 				}
@@ -1099,6 +1313,7 @@ export class AgentSession {
 		// extension and listener dispatch above also picks up messages that turn_end
 		// handlers queued.
 		if (event.type === "turn_end") {
+			this._lastAssistantToolResults = event.toolResults;
 			this._flushPendingCustomMessages();
 		}
 	};
@@ -1117,6 +1332,47 @@ export class AgentSession {
 			}
 		}
 		return false;
+	}
+
+	private _findPersistedMessageEntryId(message: AgentMessage): string | undefined {
+		const mapped = this._entryIdsByMessage.get(message);
+		if (mapped) return mapped;
+		for (const entry of [...this.sessionManager.getBranch()].reverse()) {
+			if (entry.type === "message" && entry.message === message) return entry.id;
+		}
+
+		const messageIndex = this.agent.state.messages.indexOf(message);
+		if (messageIndex < 0) return undefined;
+		const projection = this.sessionManager.buildSessionProjection();
+		let projectedIndex = 0;
+		for (const entry of projection.entries) {
+			for (let i = 0; i < entry.messages.length; i++) {
+				if (projectedIndex === messageIndex) {
+					this._entryIdsByMessage.set(message, entry.sourceEntry.id);
+					return entry.sourceEntry.id;
+				}
+				projectedIndex++;
+			}
+		}
+		return undefined;
+	}
+
+	private _omitRecoveryAttempt(message: AssistantMessage, toolResults: AgentMessage[] = []): void {
+		const targets = [message, ...toolResults];
+		const targetIds = targets.map((target) => this._findPersistedMessageEntryId(target));
+		const unresolvedProjectedTarget = targets.some(
+			(target, index) => targetIds[index] === undefined && this.agent.state.messages.includes(target),
+		);
+		if (unresolvedProjectedTarget) {
+			throw new Error("Cannot persist recovery omission because a projected message has no source entry");
+		}
+		for (const targetId of targetIds) {
+			if (!targetId) continue;
+			const editId = this.sessionManager.appendContextEdit(targetId, null);
+			const entry = this.sessionManager.getEntry(editId);
+			if (entry) this._emit({ type: "entry_appended", entry });
+		}
+		this._refreshFinalizedContext();
 	}
 
 	/** Find the last assistant message in agent state (including aborted ones) */
@@ -1162,13 +1418,9 @@ export class AgentSession {
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "turn_end") {
-			const extensionEvent: TurnEndEvent = {
-				type: "turn_end",
-				turnIndex: this._turnIndex,
-				message: event.message,
-				toolResults: event.toolResults,
-			};
-			await this._extensionRunner.emit(extensionEvent);
+			if (event.message.role === "assistant" && !this._boundaryDispatchedMessages.delete(event.message)) {
+				await this._dispatchTurnEndBoundary(event.message, event.toolResults);
+			}
 			this._turnIndex++;
 		} else if (event.type === "message_start") {
 			const extensionEvent: MessageStartEvent = {
@@ -1297,6 +1549,12 @@ export class AgentSession {
 	// =========================================================================
 	// Read-only State Access
 	// =========================================================================
+
+	/** Refresh the public finalized transcript from the canonical session projection. */
+	refreshContext(): void {
+		this._assertNotCheckpointHeld();
+		this._refreshFinalizedContext();
+	}
 
 	/** Full agent state */
 	get state(): AgentState {
@@ -1617,10 +1875,13 @@ export class AgentSession {
 			started = true;
 			let run = this.agent.prompt(messages);
 			while (true) {
-				// Agent clears its signal on settlement; keep it for the post-run cancellation check.
+				// Agent clears its signal on settlement; retain it through recovery and the boundary.
 				const signal = this.agent.signal;
 				await run;
-				if (!(await this._handlePostAgentRun(signal)) || this._shutdownAbortController.signal.aborted) break;
+				const continueRun = await this._handlePostAgentRun(signal);
+				if (this._agentRunAbortRequested || signal?.aborted || this._shutdownAbortController.signal.aborted) break;
+				if (!continueRun && !(await this._runBeforeSettleBoundary())) break;
+				if (this._agentRunAbortRequested || this._shutdownAbortController.signal.aborted) break;
 				run = this.agent.continue();
 			}
 		} catch (error) {
@@ -1671,27 +1932,27 @@ export class AgentSession {
 	}
 
 	private async _handlePostAgentRun(signal: AbortSignal | undefined): Promise<boolean> {
-		const msg = this._lastAssistantMessage;
+		const message = this._lastAssistantMessage;
+		const toolResults = this._lastAssistantToolResults;
 		this._lastAssistantMessage = undefined;
+		this._lastAssistantToolResults = [];
 		if (
 			this._agentRunAbortRequested ||
 			this._shutdownAbortController.signal.aborted ||
 			signal?.aborted ||
-			msg?.stopReason === "aborted"
+			message?.stopReason === "aborted"
 		) {
 			this._pendingNewContext = undefined;
 			await this._finishCancelledRetry();
 			return false;
 		}
-		if (!msg) {
-			return false;
-		}
+		if (!message) return this.agent.hasQueuedMessages();
 
 		if (this._consumeNewContext()) {
-			return msg.stopReason !== "stop" || this.agent.hasQueuedMessages();
+			return message.stopReason !== "stop" || this.agent.hasQueuedMessages();
 		}
 
-		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
+		if (this._isRetryableError(message) && (await this._prepareRetry(message))) {
 			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
 			return !this._agentRunAbortRequested;
 		}
@@ -1700,26 +1961,50 @@ export class AgentSession {
 			return false;
 		}
 
-		if (msg.stopReason === "error" && this._retryAttempt > 0) {
+		if (message.stopReason === "error" && this._retryAttempt > 0) {
 			await this._emitRetryEvent({
 				type: "auto_retry_end",
 				success: false,
 				attempt: this._retryAttempt,
-				finalError: msg.errorMessage,
+				finalError: message.errorMessage,
 			});
 			this._retryAttempt = 0;
 		}
 
-		const compacted = await this._checkCompaction(msg);
-		if (this._agentRunAbortRequested) return false;
+		const compacted = await this._checkCompaction(message, true, toolResults);
+		if (this._agentRunAbortRequested || this._shutdownAbortController.signal.aborted) return false;
 		if (this._consumeNewContext()) {
-			return msg.stopReason !== "stop" || this.agent.hasQueuedMessages();
+			return message.stopReason !== "stop" || this.agent.hasQueuedMessages();
 		}
 		if (compacted) return true;
 
-		// The agent loop drains both queues before emitting agent_end. Any messages
-		// here were queued by agent_end extension handlers and need a continuation.
+		// The low-level loop drains both queues before agent_end. Messages queued by
+		// agent_end handlers require a fresh run before pre-settlement handlers fire.
 		return !this._agentRunAbortRequested && this.agent.hasQueuedMessages();
+	}
+
+	private async _runBeforeSettleBoundary(): Promise<boolean> {
+		if (!this._extensionRunner.hasHandlers("agent_before_settle")) return this.agent.hasQueuedMessages();
+		this._isBeforeSettle = true;
+		this._abortDuringBeforeSettle = false;
+		try {
+			const result = await this._extensionRunner.emitBoundary(
+				{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
+				(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
+			);
+			this._commitBoundaryDrafts(result.entries);
+			this._flushPendingCustomMessages();
+			const finalContext = this._buildBoundaryContext([], "agent_before_settle");
+			if (this._abortDuringBeforeSettle) return false;
+			const shouldContinue = result.continue || this.agent.hasQueuedMessages();
+			if (shouldContinue && !finalContext.canContinue) {
+				if (result.continue) this._reportInvalidBoundaryContinuation("agent_before_settle");
+				return false;
+			}
+			return shouldContinue;
+		} finally {
+			this._isBeforeSettle = false;
+		}
 	}
 
 	private async _runInputHandlers(
@@ -1788,6 +2073,11 @@ export class AgentSession {
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		this._assertNotCheckpointHeld();
+		this._shutdownAbortController.signal.throwIfAborted();
+		if (this._isEmittingAgentSettled) {
+			this._deferredSettledActions.push(async () => await this.prompt(text, options));
+			return;
+		}
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		let preflightComplete = false;
 		let pendingInput = false;
@@ -2084,11 +2374,7 @@ export class AgentSession {
 		if (images) {
 			content.push(...images);
 		}
-		this.agent.followUp({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
+		this.agent.followUp({ role: "user", content, timestamp: Date.now() });
 	}
 
 	/**
@@ -2148,6 +2434,10 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
+			if (this._isEmittingAgentSettled) {
+				this._deferredSettledActions.push(async () => await this.sendCustomMessage(appMessage, options));
+				return;
+			}
 			await this._runAgentPrompt(async () => {
 				const startupMessages = await this._prepareAgentStart("");
 				const messages = [
@@ -2183,13 +2473,18 @@ export class AgentSession {
 	}
 
 	private _appendCustomMessage(appMessage: CustomMessage): void {
-		this.agent.state.messages.push(appMessage);
-		this.sessionManager.appendCustomMessageEntry(
-			appMessage.customType,
-			appMessage.content,
-			appMessage.display,
-			appMessage.details,
-		);
+		try {
+			this.sessionManager.appendCustomMessageEntry(
+				appMessage.customType,
+				appMessage.content,
+				appMessage.display,
+				appMessage.details,
+			);
+		} finally {
+			// The journal accepts entries before I/O. Even a failed append must leave
+			// the inspection cache consistent with that accepted, retryable history.
+			this._refreshFinalizedContext();
+		}
 		this._emit({ type: "message_start", message: appMessage });
 		this._emit({ type: "message_end", message: appMessage });
 	}
@@ -2631,6 +2926,7 @@ export class AgentSession {
 		this.abortRetry();
 		this.abortCompaction();
 		this.abortBranchSummary();
+		if (this._isBeforeSettle) this._abortDuringBeforeSettle = true;
 		this.agent.abort();
 		await this.waitForIdle();
 	}
@@ -3058,11 +3354,12 @@ export class AgentSession {
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			this._reportedUsagePrefix = null;
 			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-			const estimatedTokensAfter = estimateContextTokens(sessionContext.messages, {
-				useReportedUsage: false,
-			}).tokens;
+			this._refreshFinalizedContext();
+			const estimatedTokensAfter = estimateProjectedContextTokens(
+				this.sessionManager.buildSessionProjection(),
+				this.sessionManager.getBranch(),
+				{ model: this.model, useReportedUsage: false },
+			).tokens;
 
 			// Get the saved compaction entry for the extension event
 			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
@@ -3159,7 +3456,11 @@ export class AgentSession {
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private async _checkCompaction(
+		assistantMessage: AssistantMessage,
+		skipAbortedCheck = true,
+		toolResults: AgentMessage[] = [],
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings(this.model);
 		if (!settings.enabled) return false;
 
@@ -3175,21 +3476,43 @@ export class AgentSession {
 		const sameModel =
 			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
 
-		// Skip compaction checks if this assistant message is older than the latest
-		// compaction boundary. This prevents a stale pre-compaction usage/error
-		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const assistantIsFromBeforeCompaction =
-			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
-		if (assistantIsFromBeforeCompaction) {
-			return false;
-		}
-
 		// Automatic cases 1 and 2: context overflow.
 		// A length stop is recoverable when output ended below the model's original desired limit,
 		// independent of the configured context size or any context-clamped provider request limit.
-		const contextOverflow = sameModel && isContextOverflow(assistantMessage, contextWindow);
-		const recoverableLength = sameModel && isRecoverableLength(assistantMessage, this.model?.maxTokens ?? 0);
+		const currentProjection = this.sessionManager.buildSessionProjection();
+		const assistantEntryId = this._findPersistedMessageEntryId(assistantMessage);
+		const assistantIsProjected =
+			assistantEntryId === undefined ||
+			currentProjection.entries.some(
+				(entry) =>
+					entry.sourceEntry.id === assistantEntryId &&
+					entry.messages.some((message) => message.role === "assistant"),
+			);
+		const branch = this.sessionManager.getBranch();
+		const assistantIndex = assistantEntryId ? branch.findIndex((entry) => entry.id === assistantEntryId) : -1;
+		const entriesAfterAssistant = assistantIndex >= 0 ? branch.slice(assistantIndex + 1) : [];
+		// Raw branch order, not provider timestamps, determines whether this attempt
+		// predates a completed compaction/window. Kept usage cannot retrigger recovery.
+		if (entriesAfterAssistant.some((entry) => entry.type === "compaction" || entry.type === "context_window")) {
+			return false;
+		}
+		const hasPostAssistantContextEdit = entriesAfterAssistant.some((entry) => entry.type === "context_edit");
+		const latestAssistantEdit = entriesAfterAssistant
+			.filter(
+				(entry): entry is ContextEditEntry => entry.type === "context_edit" && entry.targetId === assistantEntryId,
+			)
+			.at(-1);
+		const assistantRetainedForExplicitRecovery =
+			assistantEntryId === undefined || latestAssistantEdit?.replacement !== null;
+		const assistantUsageMatchesProjection =
+			assistantIsProjected && !hasPostAssistantContextEdit && this._reportedUsageApplies(this.agent.state);
+		const explicitOverflow = assistantMessage.stopReason === "error" && isContextOverflow(assistantMessage);
+		const contextOverflow =
+			sameModel &&
+			((explicitOverflow && assistantRetainedForExplicitRecovery) ||
+				(assistantUsageMatchesProjection && isContextOverflow(assistantMessage, contextWindow)));
+		const recoverableLength =
+			sameModel && assistantIsProjected && isRecoverableLength(assistantMessage, this.model?.maxTokens ?? 0);
 		if (contextOverflow || recoverableLength) {
 			const willRetry = assistantMessage.stopReason !== "stop";
 
@@ -3221,13 +3544,9 @@ export class AgentSession {
 				return false;
 			}
 
-			// Case 1: remove the failed or truncated message from agent state, compact, and
-			// retry once. The message remains in session history but is excluded from retry context.
+			// Persistently omit the selected final attempt before post-run recovery compaction.
 			this._overflowRecoveryAttempted = true;
-			const messages = this.agent.state.messages;
-			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.agent.state.messages = messages.slice(0, -1);
-			}
+			this._omitRecoveryAttempt(assistantMessage, toolResults);
 			return await this._runAutoCompaction("overflow", willRetry);
 		}
 
@@ -3235,14 +3554,22 @@ export class AgentSession {
 		// For error messages or all-zero usage messages, estimate from the last valid response.
 		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
 		// responses can still compact and do not reset context accounting.
+		// At settlement, valid usage describes the completed request. Trailing tool
+		// results need a budget check only if another request is actually admitted;
+		// request preflight already owns that check (including terminating batches).
 		const directContextTokens =
-			sameModel && this._reportedUsageApplies(this.agent.state) && assistantMessage.usage
+			sameModel &&
+			assistantUsageMatchesProjection &&
+			assistantMessage.stopReason !== "error" &&
+			assistantMessage.stopReason !== "aborted"
 				? calculateContextTokens(assistantMessage.usage)
 				: 0;
 		const contextTokens =
-			assistantMessage.stopReason === "error" || directContextTokens === 0
-				? this._estimateContextTokens().tokens
-				: directContextTokens;
+			directContextTokens ||
+			this._estimateContextTokens({
+				...this.agent.state,
+				messages: currentProjection.messages,
+			}).tokens;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			return await this._runAutoCompaction("threshold", false);
 		}
@@ -3399,11 +3726,12 @@ export class AgentSession {
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			this._reportedUsagePrefix = null;
 			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-			const estimatedTokensAfter = estimateContextTokens(sessionContext.messages, {
-				useReportedUsage: false,
-			}).tokens;
+			this._refreshFinalizedContext();
+			const estimatedTokensAfter = estimateProjectedContextTokens(
+				this.sessionManager.buildSessionProjection(),
+				this.sessionManager.getBranch(),
+				{ model: this.model, useReportedUsage: false },
+			).tokens;
 
 			// Get the saved compaction entry for the extension event
 			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
@@ -3437,18 +3765,7 @@ export class AgentSession {
 				pendingMessages: this._pendingProviderMessages.slice(),
 			});
 
-			if (willRetry) {
-				const messages = this.agent.state.messages;
-				const lastMsg = messages[messages.length - 1];
-				// The overflow response was persisted on message_end before _checkCompaction() removed it
-				// from agent state. Rebuilding state from the new compaction can restore that kept entry,
-				// leaving an assistant as the final message. agent.continue() rejects that state, so remove
-				// the retriable error or truncated-length response again before continuing the interrupted turn.
-				if (lastMsg?.role === "assistant" && (lastMsg.stopReason === "error" || lastMsg.stopReason === "length")) {
-					this.agent.state.messages = messages.slice(0, -1);
-				}
-				return true;
-			}
+			if (willRetry) return true;
 
 			// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
 			// Continue once so queued messages are delivered.
@@ -4034,11 +4351,8 @@ export class AgentSession {
 				errorMessage: message.errorMessage || "Unknown error",
 			});
 
-			// Remove error message from agent state (keep in session for history)
-			const messages = this.agent.state.messages;
-			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.agent.state.messages = messages.slice(0, -1);
-			}
+			// Keep raw history while durably omitting the selected attempt from future requests.
+			this._omitRecoveryAttempt(message);
 
 			await sleep(delayMs, this._retryAbortController.signal);
 			this._retryAbortController.signal.throwIfAborted();
@@ -4163,11 +4477,8 @@ export class AgentSession {
 			// Queue for later - will be flushed on agent_end
 			this._pendingBashMessages.push(bashMessage);
 		} else {
-			// Add to agent state immediately
-			this.agent.state.messages.push(bashMessage);
-
-			// Save to session
 			this.sessionManager.appendMessage(bashMessage);
+			this._refreshFinalizedContext();
 		}
 	}
 
@@ -4198,14 +4509,10 @@ export class AgentSession {
 		if (this._pendingBashMessages.length === 0) return;
 
 		for (const bashMessage of this._pendingBashMessages) {
-			// Add to agent state
-			this.agent.state.messages.push(bashMessage);
-
-			// Save to session
 			this.sessionManager.appendMessage(bashMessage);
 		}
-
 		this._pendingBashMessages = [];
+		this._refreshFinalizedContext();
 	}
 
 	// =========================================================================
@@ -4415,9 +4722,7 @@ export class AgentSession {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			// Update agent state
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
+			this._refreshFinalizedContext();
 			this._reportedUsagePrefix = undefined;
 			this._restoreToolsFromTranscript();
 
@@ -4525,13 +4830,13 @@ export class AgentSession {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return undefined;
 
-		// Kept assistant messages precede the active compaction even though they appear after its
-		// summary in the projected context. Their provider usage does not describe the new context.
-		if (!this._hasCurrentModelUsageAfterActiveCompaction()) {
+		// Retained pre-compaction usage is unknown until a matching projected response arrives.
+		const usageState = this._getContextUsageState(this.messages);
+		if (!usageState.hasPostCompactionUsage) {
 			return { tokens: null, contextWindow, percent: null };
 		}
 
-		const estimate = this._estimateContextTokens();
+		const estimate = this._estimateContextTokens(this.agent.state, usageState);
 		const percent = (estimate.tokens / contextWindow) * 100;
 
 		return {

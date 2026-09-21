@@ -23,6 +23,7 @@ import type {
 	AssistantMessageEventStream,
 	ConstrainedSamplingConfig,
 	ImageContent,
+	Message,
 	Model,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
@@ -63,7 +64,9 @@ import type { ScopedModel } from "../model-resolver.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
+	ContextEditEntry,
 	CustomEntry,
+	ProjectedSessionEntry,
 	ReadonlySessionManager,
 	SessionEntry,
 	SessionManager,
@@ -742,9 +745,25 @@ export type SessionEvent =
 // Agent Events
 // ============================================================================
 
-/** Fired before each LLM call. Can modify messages. */
+/**
+ * Fired before each LLM call. Can modify messages.
+ *
+ * `messages` holds the conversation without system messages. The prompt and tool state
+ * belong to Pi: it restores them after the handler returns, so a handler cannot drop
+ * them and does not need to preserve them.
+ */
 export interface ContextEvent {
 	type: "context";
+	messages: AgentMessage[];
+}
+
+/**
+ * Fired before each LLM call, after every `context` handler has run and Pi has restored
+ * the prompt and tool state. `messages` is the full transcript including system messages,
+ * and the result is sent as returned: the handler owns the prompt and tool declarations.
+ */
+export interface ContextWithSystemEvent {
+	type: "context_with_system";
 	messages: AgentMessage[];
 }
 
@@ -795,6 +814,68 @@ export interface AgentEndEvent {
 	messages: AgentMessage[];
 }
 
+export type AgentActivityOutcome = "completed" | "aborted" | "error";
+
+export interface CustomEntryDraft {
+	type: "custom";
+	customType: string;
+	data?: unknown;
+}
+
+export interface CustomMessageEntryDraft {
+	type: "custom_message";
+	customType: string;
+	content: string | (TextContent | ImageContent)[];
+	display: boolean;
+	details?: unknown;
+}
+
+export interface ContextEditEntryDraft {
+	type: "context_edit";
+	targetId: string;
+	replacement: ContextEditEntry["replacement"];
+}
+
+export interface CompactionEntryDraft {
+	type: "compaction";
+	summary: string;
+	/** Null creates a self-retaining compaction that keeps no preceding entries. */
+	firstKeptEntryId: string | null;
+	details?: unknown;
+	usage?: Usage;
+}
+
+export type SessionBoundaryDraft =
+	| CustomEntryDraft
+	| CustomMessageEntryDraft
+	| ContextEditEntryDraft
+	| CompactionEntryDraft;
+
+export interface BoundaryContextPreview {
+	contextEntries: ProjectedSessionEntry[];
+	contextMessages: AgentMessage[];
+	llmMessages: Message[];
+	pendingMessages: AgentMessage[];
+	canContinue: boolean;
+}
+
+export interface BoundaryState {
+	entries: SessionBoundaryDraft[];
+	continue: boolean;
+	context: BoundaryContextPreview;
+	outcome: AgentActivityOutcome;
+}
+
+export interface BoundaryResult {
+	entries?: SessionBoundaryDraft[];
+	continue?: boolean;
+}
+
+/** Fired before final settlement. May append entries and ensure one next provider request. */
+export interface AgentBeforeSettleEvent extends BoundaryState {
+	type: "agent_before_settle";
+}
+
 /** Fired after an agent run has fully settled and no automatic retry, compaction, or queued continuation will run. */
 export interface AgentSettledEvent {
 	type: "agent_settled";
@@ -836,11 +917,13 @@ export interface TurnStartEvent {
 }
 
 /** Fired at the end of each turn */
-export interface TurnEndEvent {
+export interface TurnEndEvent extends BoundaryState {
 	type: "turn_end";
 	turnIndex: number;
 	message: AgentMessage;
 	toolResults: ToolResultMessage[];
+	messageEntryId: string;
+	toolResultEntryIds: string[];
 }
 
 /** Fired when a message starts (user, assistant, or toolResult) */
@@ -1159,6 +1242,7 @@ export type ExtensionEvent =
 	| ResourcesDiscoverEvent
 	| SessionEvent
 	| ContextEvent
+	| ContextWithSystemEvent
 	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
@@ -1166,6 +1250,7 @@ export type ExtensionEvent =
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
+	| AgentBeforeSettleEvent
 	| AgentSettledEvent
 	| AutoRetryStartEvent
 	| AutoRetryEndEvent
@@ -1196,6 +1281,9 @@ export type ExtensionEvent =
 export interface ContextEventResult {
 	messages?: AgentMessage[];
 }
+
+export type TurnEndEventResult = BoundaryResult;
+export type AgentBeforeSettleEventResult = BoundaryResult;
 
 export type BeforeProviderRequestEventResult = unknown;
 
@@ -1383,6 +1471,7 @@ export interface ExtensionAPI {
 	): () => void;
 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): () => void;
 	on(event: "context", handler: ExtensionHandler<ContextEvent, ContextEventResult>): () => void;
+	on(event: "context_with_system", handler: ExtensionHandler<ContextWithSystemEvent, ContextEventResult>): () => void;
 	on(
 		event: "cache_warming_decision",
 		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
@@ -1399,6 +1488,10 @@ export interface ExtensionAPI {
 	): () => void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): () => void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): () => void;
+	on(
+		event: "agent_before_settle",
+		handler: ExtensionHandler<AgentBeforeSettleEvent, AgentBeforeSettleEventResult>,
+	): () => void;
 	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): () => void;
 	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>): () => void;
 	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): () => void;
@@ -1411,7 +1504,7 @@ export interface ExtensionAPI {
 	on(event: "ui_prompt_start", handler: ExtensionHandler<UIPromptStartEvent>): () => void;
 	on(event: "ui_prompt_end", handler: ExtensionHandler<UIPromptEndEvent>): () => void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): () => void;
-	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): () => void;
+	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent, TurnEndEventResult>): () => void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): () => void;
 	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): () => void;
 	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent, MessageEndEventResult>): () => void;

@@ -25,7 +25,8 @@ describe("pre-prompt compaction regression", () => {
 
 	it("compacts length-stop overflow before a new prompt without continuing from an assistant message", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 100, maxTokens: 100 }],
+			// The fresh system/tool checkpoint and next prompt must fit after recovery.
+			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -54,11 +55,17 @@ describe("pre-prompt compaction regression", () => {
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
-			usage: createUsage(100),
+			usage: createUsage(10_000),
 		};
 		harness.sessionManager.appendMessage(lengthStopAssistant);
-		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-		harness.setResponses([fauxAssistantMessage("answered next prompt")]);
+		harness.session.refreshContext();
+		let nextRequest = "";
+		harness.setResponses([
+			(context) => {
+				nextRequest = JSON.stringify(context.messages);
+				return fauxAssistantMessage("answered next prompt");
+			},
+		]);
 		const continueSpy = vi.spyOn(harness.session.agent, "continue");
 
 		await expect(harness.session.prompt("next prompt")).resolves.toBeUndefined();
@@ -67,6 +74,8 @@ describe("pre-prompt compaction regression", () => {
 		expect(harness.eventsOfType("compaction_end")).toContainEqual(
 			expect.objectContaining({ reason: "overflow", aborted: false, willRetry: true }),
 		);
+		expect(nextRequest).toContain("next prompt");
+		expect(nextRequest).not.toContain("length-stop assistant response");
 		expect(getUserTexts(harness)).toContain("next prompt");
 		expect(harness.faux.state.callCount).toBe(1);
 	});

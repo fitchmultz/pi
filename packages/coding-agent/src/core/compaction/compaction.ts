@@ -21,6 +21,7 @@ import {
 } from "@earendil-works/pi-agent-core";
 import {
 	contentText,
+	getCurrentSystemMessage,
 	normalizeContext,
 	type RetryCallbacks,
 	type RetryPolicy,
@@ -37,9 +38,11 @@ import type {
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
 import {
-	buildSessionContext,
+	buildSessionProjection,
 	type CompactionEntry,
+	type ProjectedSessionEntry,
 	type SessionEntry,
+	type SessionProjection,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
 import {
@@ -103,12 +106,10 @@ function extractFileOperations(
  * Extract AgentMessage from an entry if it produces one.
  * Returns undefined for entries that don't contribute to LLM context.
  */
-function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | undefined {
-	if (entry.type === "compaction") {
-		return undefined;
-	}
+function getMessagesFromProjectedEntryForCompaction(entry: ProjectedSessionEntry): AgentMessage[] {
+	if (entry.sourceEntry.type === "compaction") return [];
 	// System messages are prompt state, not conversation; the compaction entry carries their replay.
-	return sessionEntryToContextMessages(entry).find((message) => message.role !== "system");
+	return entry.messages.filter((message) => message.role !== "system");
 }
 
 /** Result from compact() - SessionManager adds uuid/parentUuid when saving */
@@ -161,6 +162,52 @@ export {
 	type ContextEstimateOptions,
 	type ContextUsageEstimate,
 };
+
+/** Structural changes after a response invalidate that response's reported context usage. */
+export function isContextUsageInvalidatingEntry(entry: SessionEntry): boolean {
+	return entry.type === "context_edit" || entry.type === "compaction" || entry.type === "context_window";
+}
+
+/** Estimate canonical context using shared token accounting and branch-local usage validity. */
+export function estimateProjectedContextTokens(
+	projection: SessionProjection,
+	branchEntries: SessionEntry[],
+	options: ContextEstimateOptions = {},
+): ContextUsageEstimate {
+	const estimate = estimateContextTokens(projection.messages, options);
+	if (estimate.lastUsageIndex !== null) {
+		let projectedMessageIndex = 0;
+		let usageEntryId: string | undefined;
+		for (const entry of projection.entries) {
+			const nextMessageIndex = projectedMessageIndex + entry.messages.length;
+			if (estimate.lastUsageIndex < nextMessageIndex) {
+				usageEntryId = entry.sourceEntry.id;
+				break;
+			}
+			projectedMessageIndex = nextMessageIndex;
+		}
+
+		const usageEntryIndex = usageEntryId ? branchEntries.findIndex((entry) => entry.id === usageEntryId) : -1;
+		let latestInvalidatingEntryIndex = -1;
+		for (let i = branchEntries.length - 1; i >= 0; i--) {
+			const entry = branchEntries[i];
+			if (isContextUsageInvalidatingEntry(entry)) {
+				latestInvalidatingEntryIndex = i;
+				break;
+			}
+		}
+		if (usageEntryIndex > latestInvalidatingEntryIndex) return estimate;
+	}
+
+	const currentSystem = getCurrentSystemMessage(projection.messages);
+	return estimateContextTokens(
+		[
+			...(currentSystem ? [currentSystem] : []),
+			...projection.messages.filter((message) => message.role !== "system"),
+		],
+		{ ...options, useReportedUsage: false },
+	);
+}
 
 function isCutPointMessage(message: AgentMessage): boolean {
 	switch (message.role) {
@@ -601,74 +648,137 @@ export interface CompactionPreparation {
 	settings: CompactionSettings;
 }
 
+function isProjectedTurnStart(entry: ProjectedSessionEntry): boolean {
+	if (entry.sourceEntry.type === "compaction") return false;
+	return entry.messages.some(isTurnStartMessage);
+}
+
+function findProjectedTurnStartIndex(entries: ProjectedSessionEntry[], entryIndex: number, startIndex: number): number {
+	for (let i = entryIndex; i >= startIndex; i--) {
+		if (isProjectedTurnStart(entries[i])) return i;
+	}
+	return -1;
+}
+
+function findProjectedCutPoint(
+	entries: ProjectedSessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	keepRecentTokens: number,
+): CutPointResult {
+	const cutPoints: number[] = [];
+	for (let i = startIndex; i < endIndex; i++) {
+		const entry = entries[i];
+		if (entry.sourceEntry.type !== "compaction" && entry.messages.some(isCutPointMessage)) cutPoints.push(i);
+	}
+	if (cutPoints.length === 0) {
+		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
+	}
+
+	let accumulatedTokens = 0;
+	let exceededBudget = false;
+	let cutIndex = cutPoints[0];
+	for (let i = endIndex - 1; i >= startIndex; i--) {
+		const messageTokens = entries[i].messages.reduce(
+			(sum, message) => sum + (message.role === "system" ? 0 : estimateTokens(message)),
+			0,
+		);
+		if (messageTokens === 0) continue;
+		accumulatedTokens += messageTokens;
+		if (accumulatedTokens >= keepRecentTokens) {
+			exceededBudget = true;
+			cutIndex = cutPoints.find((candidate) => candidate >= i) ?? cutPoints[cutPoints.length - 1];
+			break;
+		}
+	}
+
+	// A recovery attempt and its omission edits are context-invisible after the last
+	// visible input. Advance only for a closed suffix containing an omitted assistant
+	// attempt; arbitrary metadata must not move the cut past unsent input.
+	const suffix = entries.slice(cutIndex + 1, endIndex);
+	const isIntrinsicallyVisible = (entry: ProjectedSessionEntry): boolean =>
+		entry.sourceEntry.type !== "context_edit" && sessionEntryToContextMessages(entry.sourceEntry).length > 0;
+	const isOmitted = (entry: ProjectedSessionEntry): boolean =>
+		isIntrinsicallyVisible(entry) && entry.messages.length === 0;
+	const omittedSuffixIds = new Set(suffix.filter(isOmitted).map((entry) => entry.sourceEntry.id));
+	const hasExternalReplacement = suffix.some(
+		(entry) =>
+			entry.sourceEntry.type === "context_edit" &&
+			entry.sourceEntry.replacement !== null &&
+			!omittedSuffixIds.has(entry.sourceEntry.targetId),
+	);
+	const isRecoveryOmissionSuffix =
+		exceededBudget &&
+		!hasExternalReplacement &&
+		suffix.some(
+			(entry) =>
+				entry.sourceEntry.type === "message" && entry.sourceEntry.message.role === "assistant" && isOmitted(entry),
+		) &&
+		suffix.every(
+			(entry) => entry.sourceEntry.type !== "compaction" && (!isIntrinsicallyVisible(entry) || isOmitted(entry)),
+		);
+	if (isRecoveryOmissionSuffix) cutIndex++;
+
+	while (cutIndex > startIndex) {
+		const previous = entries[cutIndex - 1];
+		if (previous.sourceEntry.type === "compaction" || previous.messages.length > 0) break;
+		cutIndex--;
+	}
+	const startsTurn = isProjectedTurnStart(entries[cutIndex]);
+	const turnStartIndex = startsTurn ? -1 : findProjectedTurnStartIndex(entries, cutIndex, startIndex);
+	return {
+		firstKeptEntryIndex: cutIndex,
+		turnStartIndex,
+		isSplitTurn: !startsTurn && turnStartIndex !== -1,
+	};
+}
+
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
-	for (let i = pathEntries.length - 1; i >= 0; i--) {
-		if (pathEntries[i].type === "context_window") {
-			pathEntries = pathEntries.slice(i);
-			break;
-		}
-	}
-
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
 
-	let prevCompactionIndex = -1;
-	for (let i = pathEntries.length - 1; i >= 0; i--) {
-		if (pathEntries[i].type === "compaction") {
-			prevCompactionIndex = i;
-			break;
-		}
-	}
+	const projection = buildSessionProjection(pathEntries);
+	const projectedEntries = projection.entries;
+	const sourceEntries = projectedEntries.map((entry) => entry.sourceEntry);
+	// The newest compaction is projected first. Older compaction entries can still
+	// occur in its retained raw range, but their projected contribution is empty.
+	const prevCompactionIndex = projectedEntries.findIndex(
+		(entry) => entry.sourceEntry.type === "compaction" && entry.messages.length > 0,
+	);
 
 	let previousSummary: string | undefined;
 	let boundaryStart = 0;
 	if (prevCompactionIndex >= 0) {
-		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
-		previousSummary = prevCompaction.summary;
-		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
-		boundaryStart = firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
+		previousSummary = (projectedEntries[prevCompactionIndex].sourceEntry as CompactionEntry).summary;
+		// The canonical projection has already selected the previous compaction's retained tail.
+		boundaryStart = prevCompactionIndex + 1;
 	}
-	const boundaryEnd = pathEntries.length;
+	const boundaryEnd = projectedEntries.length;
+	const tokensBefore = estimateProjectedContextTokens(projection, pathEntries).tokens;
+	const cutPoint = findProjectedCutPoint(projectedEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
 
-	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
-
-	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
-
-	// Get UUID of first kept entry
-	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
-	if (!firstKeptEntry?.id) {
-		return undefined; // Session needs migration
-	}
+	const firstKeptEntry = projectedEntries[cutPoint.firstKeptEntryIndex]?.sourceEntry;
+	if (!firstKeptEntry?.id) return undefined;
 	const firstKeptEntryId = firstKeptEntry.id;
-
 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
 
-	// Messages to summarize (will be discarded after summary)
-	const messagesToSummarize: AgentMessage[] = [];
-	for (let i = boundaryStart; i < historyEnd; i++) {
-		const msg = getMessageFromEntryForCompaction(pathEntries[i]);
-		if (msg) messagesToSummarize.push(msg);
-	}
+	const messagesToSummarize = projectedEntries
+		.slice(boundaryStart, historyEnd)
+		.flatMap(getMessagesFromProjectedEntryForCompaction);
+	const turnPrefixMessages = cutPoint.isSplitTurn
+		? projectedEntries
+				.slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
+				.flatMap(getMessagesFromProjectedEntryForCompaction)
+		: [];
 
-	// Messages for turn prefix summary (if splitting a turn)
-	const turnPrefixMessages: AgentMessage[] = [];
-	if (cutPoint.isSplitTurn) {
-		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
-			const msg = getMessageFromEntryForCompaction(pathEntries[i]);
-			if (msg) turnPrefixMessages.push(msg);
-		}
-	}
+	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) return undefined;
 
-	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) {
-		return undefined;
-	}
-
-	// Extract file operations from messages and previous compaction
-	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
+	// Extract file operations from edited model-visible messages and the previous compaction.
+	const fileOps = extractFileOperations(messagesToSummarize, sourceEntries, prevCompactionIndex);
 
 	// Also extract file ops from turn prefix if splitting
 	if (cutPoint.isSplitTurn) {

@@ -243,13 +243,17 @@ describe("native working-session checkpoint", () => {
 				{
 					name: "late-writer",
 					factory(pi) {
-						pi.on("turn_end", async () => {
+						pi.on("turn_end", async (event, ctx) => {
 							await Promise.resolve();
+							expect(ctx.sessionManager.getEntry(event.messageEntryId)).toMatchObject({ type: "message" });
 							pi.appendEntry("extension-state", { saved: true });
 							pi.sendMessage(
 								{ customType: "aside", content: "turn aside", display: true },
 								{ triggerTurn: false },
 							);
+							return {
+								entries: [...event.entries, { type: "custom", customType: "boundary-draft", data: true }],
+							};
 						});
 					},
 				},
@@ -301,6 +305,7 @@ describe("native working-session checkpoint", () => {
 		});
 		expect(JSON.stringify(hold.checkpoint.entries)).toContain("later-native");
 		expect(JSON.stringify(hold.checkpoint.entries)).toContain("extension-state");
+		expect(JSON.stringify(hold.checkpoint.entries)).toContain("boundary-draft");
 		expect(JSON.stringify(hold.checkpoint.entries)).toContain("turn aside");
 		expect(hold.checkpoint.queues.steering).toHaveLength(2);
 		expect(hold.checkpoint.queues.followUp).toHaveLength(1);
@@ -416,24 +421,37 @@ describe("native working-session checkpoint", () => {
 		expect(readFileSync(h.session.sessionFile!, "utf8")).toBe("");
 	});
 
-	it("does not capture between awaited settlement handlers even though isIdle is true", async () => {
+	it("waits for settlement handlers and their deferred run before capturing", async () => {
 		const entered = deferred();
 		const release = deferred();
+		const deferredEntered = deferred();
+		const deferredRelease = deferred();
+		let submitted = false;
 		const h = await setup({
 			extensionFactories: [
 				{
 					name: "settlement",
 					factory(pi) {
 						pi.on("agent_settled", async () => {
+							if (submitted) return;
+							submitted = true;
 							entered.resolve();
 							await release.promise;
 							pi.appendEntry("settled-write", { done: true });
+							pi.sendUserMessage("accepted deferred run");
 						});
 					},
 				},
 			],
 		});
-		h.setResponses([fauxAssistantMessage("done")]);
+		h.setResponses([
+			fauxAssistantMessage("done"),
+			async () => {
+				deferredEntered.resolve();
+				await deferredRelease.promise;
+				return fauxAssistantMessage("deferred answer");
+			},
+		]);
 		const running = h.session.prompt("start");
 		await entered.promise;
 		expect(h.session.isIdle).toBe(true);
@@ -445,9 +463,14 @@ describe("native working-session checkpoint", () => {
 		await Promise.resolve();
 		expect(captured).toBe(false);
 		release.resolve();
+		await deferredEntered.promise;
+		expect(captured).toBe(false);
+		deferredRelease.resolve();
 		const hold = await pending;
 		expect(hold.checkpoint.settled).toBe(true);
 		expect(JSON.stringify(hold.checkpoint.entries)).toContain("settled-write");
+		expect(JSON.stringify(hold.checkpoint.entries)).toContain("deferred answer");
+		expect(h.faux.state.callCount).toBe(2);
 		hold.release();
 		await running;
 	});

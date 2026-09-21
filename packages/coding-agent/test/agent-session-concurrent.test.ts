@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
+import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -504,6 +505,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 	it("should persist message_end events in order with slow extension handlers", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const requests: Array<{ prompt: string; tools: string[] }> = [];
 		const tool = {
 			name: "dummy",
 			description: "Dummy tool",
@@ -529,6 +531,10 @@ describe("AgentSession concurrent prompt guard", () => {
 				tools: [tool],
 			},
 			streamFn: async (_model, context) => {
+				requests.push({
+					prompt: getCurrentSystemPrompt(context.messages),
+					tools: getCurrentTools(context.messages).map((tool) => tool.name),
+				});
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					const hasToolResult = context.messages.some((message) => message.role === "toolResult");
@@ -641,6 +647,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		await new Promise((resolve) => setTimeout(resolve, 100));
 
 		const messageEntries = sessionManager.getEntries().filter((entry) => entry.type === "message");
+		// A stable prompt/loadout needs no second system entry between the ordered results.
 		expect(messageEntries.map((entry) => entry.message.role)).toEqual([
 			"system",
 			"user",
@@ -648,5 +655,8 @@ describe("AgentSession concurrent prompt guard", () => {
 			"toolResult",
 			"assistant",
 		]);
+		expect(requests.map((request) => request.tools)).toEqual([["dummy"], ["dummy"]]);
+		expect(requests[0].prompt).not.toBe("");
+		expect(requests[1].prompt).toBe(requests[0].prompt);
 	});
 });

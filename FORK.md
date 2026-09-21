@@ -60,9 +60,11 @@ is the explicit formatting command; hooks never format or restage files.
 
 CI hydrates once and freezes the commit plus ignored model data using the existing
 source archive helper. Linux Node 22.19 full validation and macOS Node 24 runtime
-validation consume that same archive. The required `build-check-test` aggregates
-both lanes. The `fork-source-<commit>` artifact retains `source.tar.gz` and
-`source.commit` for 30 days. Intentional generator changes belong in the reviewed
+validation consume that same archive. Extension compatibility checks also use
+that frozen fork source. The required `build-check-test` aggregates the source
+snapshot, both validation lanes, and extension compatibility. The
+`fork-source-<commit>` artifact retains `source.tar.gz` and `source.commit` for
+30 days. Intentional generator changes belong in the reviewed
 Git diff; validation must not regenerate tracked inputs.
 
 ## Immutable installation and activation

@@ -325,13 +325,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now() + 1000,
 		};
 
-		// Put both messages into agent state so estimateContextTokens can find the successful one
-		session.agent.state.messages = [
-			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
-			successfulAssistant,
-			{ role: "user", content: [{ type: "text", text: "another prompt" }], timestamp: Date.now() + 500 },
-			errorAssistant,
-		];
+		// Restore canonical history; agent.state.messages is only its inspection cache.
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1000 });
+		sessionManager.appendMessage(successfulAssistant);
+		sessionManager.appendMessage({ role: "user", content: "another prompt", timestamp: Date.now() + 500 });
+		sessionManager.appendMessage(errorAssistant);
+		session.refreshContext();
 
 		const runAutoCompactionSpy = vi
 			.spyOn(
@@ -376,10 +375,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now(),
 		};
 
-		session.agent.state.messages = [
-			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
-			errorAssistant,
-		];
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1000 });
+		sessionManager.appendMessage(errorAssistant);
+		session.refreshContext();
 
 		const runAutoCompactionSpy = vi
 			.spyOn(
@@ -454,13 +452,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now(),
 		};
 
-		// Agent state has the kept assistant (pre-compaction) and the error (post-compaction)
-		session.agent.state.messages = [
-			{ role: "user", content: [{ type: "text", text: "kept user msg" }], timestamp: preCompactionTimestamp - 1000 },
-			keptAssistant,
-			{ role: "user", content: [{ type: "text", text: "new prompt" }], timestamp: Date.now() - 500 },
-			errorAssistant,
-		];
+		// Retained usage stays before the native compaction; the new error has no useful usage.
+		sessionManager.appendMessage({ role: "user", content: "new prompt", timestamp: Date.now() - 500 });
+		sessionManager.appendMessage(errorAssistant);
+		session.refreshContext();
 
 		const runAutoCompactionSpy = vi
 			.spyOn(
