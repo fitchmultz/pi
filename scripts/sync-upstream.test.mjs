@@ -112,7 +112,7 @@ test("prepared merge preserves native state on failed verification; successful i
 	assert.equal(git(f.repo, "rev-parse", "main"), f.main);
 });
 
-test("verified upstream dependency updates pass the repository's lockfile commit policy", (t) => {
+test("commits verified upstream dependency updates with explicit lockfile authorization", (t) => {
 	const f = fixture(t, false);
 	const target = commit(f.upstream, "package-lock.json", JSON.stringify({
 		lockfileVersion: 3, packages: { "node_modules/example": { version: "1.0.0" } },

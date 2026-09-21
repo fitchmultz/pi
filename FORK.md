@@ -76,8 +76,10 @@ npm run install:fork -- --ref <merged-commit> \
   --source-archive /path/to/frozen-source/source.tar.gz --stage
 ```
 
-The installer checks the adjacent `source.commit`, validates model data, builds
-in a temporary source directory, packs native workspace tarballs, and installs a
+The installer checks the adjacent `source.commit` and compares the extracted
+source against that Git tree using a temporary index, allowing only the frozen
+model-data files in addition. It validates that data, builds in a temporary source
+directory, packs native workspace tarballs, and installs a
 production npm consumer into a new release. Installed SDK, CLI, extension imports,
 native checkpoint restore and real-terminal restart tests must pass before the
 release receives a validation receipt. It retains the archive, commit, tarballs

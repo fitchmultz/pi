@@ -292,6 +292,20 @@ export async function main(args = process.argv.slice(2)) {
 		}
 		run("tar", ["-xzf", archive, "-C", root], { env });
 		const source = join(root, `pi-${version}`);
+		if (options["source-archive"]) {
+			// Use Git's tree comparison without touching the checkout or its real index.
+			const sourceEnv = { ...env, GIT_INDEX_FILE: join(root, "source.index"), GIT_WORK_TREE: source };
+			const sourceGit = (args) => run("git", args, { cwd: repoRoot, env: sourceEnv, stdio: "pipe" });
+			sourceGit(["read-tree", commit]);
+			try {
+				sourceGit(["diff", "--quiet", "--no-ext-diff", commit, "--"]);
+				if (sourceGit(["ls-files", "--others", "--", ":(exclude)packages/ai/src/providers/data"])) {
+					throw new Error("Unexpected source files");
+				}
+			} catch {
+				throw new Error(`Source archive differs from selected commit ${commit}`);
+			}
+		}
 		run(tools.node, [join(source, "packages/ai/scripts/check-model-data.ts")], { cwd: source, env });
 		const receipt = {
 			commit,
@@ -305,12 +319,7 @@ export async function main(args = process.argv.slice(2)) {
 			run("tmux", ["-V"], { env }); // Missing tmux must fail, not silently skip the acceptance tests.
 			run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: source, env });
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
-			const originalCwd = process.cwd();
-			let packages;
-			try {
-				process.chdir(source);
-				packages = getPublicWorkspacePackages().map((pkg) => ({ ...pkg, directory: resolve(pkg.directory) }));
-			} finally { process.chdir(originalCwd); }
+			const packages = getPublicWorkspacePackages(join(source, "packages"));
 			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { npm: tools.npm, env });
 			installCodingAgentConsumer(directory, tarballs, tools.npm, { env });
 			smokeTestInstalledRuntime(directory, tools, env);

@@ -5,7 +5,8 @@ import {
 	readdirSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { installCodingAgentConsumer, packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import { activateRelease, installRelease, isolatedEnvironment, main, releaseIdentity, resolveBuildTools } from "./install-fork.mjs";
@@ -123,6 +124,33 @@ test("rejects a CI archive for another commit before building or changing the se
 		"--releases", f.releases, "--selector", f.selector]), /Source archive commit .* does not match selected commit/);
 	assertPreserved(f);
 	assert.equal(existsSync(f.releases), false);
+});
+
+test("rejects changed or extra archive source despite a matching companion commit", async (t) => {
+	const f = fixture(t);
+	const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+	const git = (args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+	const commit = git(["rev-parse", "HEAD"]);
+	const version = JSON.parse(git(["show", `${commit}:packages/coding-agent/package.json`])).version;
+	const archive = join(f.root, "source.tar.gz");
+	git(["archive", "--format=tar.gz", `--prefix=pi-${version}/`, "--output", archive, commit]);
+	execFileSync("tar", ["-xzf", archive, "-C", f.root]);
+	writeFileSync(join(f.root, "source.commit"), `${commit}\n`);
+	const source = join(f.root, `pi-${version}`);
+	const file = join(source, "package.json");
+	const original = readFileSync(file);
+	const inputs = ["--ref", commit, "--source-archive", archive, "--releases", f.releases, "--selector", f.selector];
+	for (const change of ["tracked", "extra"]) {
+		if (change === "tracked") writeFileSync(file, `${original}\n`);
+		else {
+			writeFileSync(file, original);
+			writeFileSync(join(source, "extra-source.mjs"), "export const unexpected = true;\n");
+		}
+		execFileSync("tar", ["-czf", archive, "-C", f.root, `pi-${version}`]);
+		await assert.rejects(main(inputs), /Source archive differs from selected commit/);
+		assertPreserved(f);
+		assert.equal(existsSync(f.releases), false);
+	}
 });
 
 test("a real child build failure cannot select or leave a reusable success receipt", async (t) => {
