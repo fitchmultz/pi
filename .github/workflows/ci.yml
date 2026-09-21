@@ -6,39 +6,99 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-check-test:
+  source-snapshot:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: 22.19.0
           cache: npm
-
-      - name: Install system dependencies
+      - run: npm ci --ignore-scripts
+      - name: Hydrate once and freeze source plus model data
         run: |
-          # Chrome is preinstalled; its update repository is not needed for these Ubuntu packages.
+          npm run hydrate:model-data
+          mkdir -p .artifacts
+          git rev-parse HEAD > .artifacts/source.commit
+          version=$(node -p 'require("./packages/coding-agent/package.json").version')
+          bash scripts/create-source-archive.sh --version "$version" --ref HEAD --out .artifacts/source.tar.gz
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Retain reviewed build input for validation and local installation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fork-source-${{ github.sha }}
+          path: |
+            .artifacts/source.tar.gz
+            .artifacts/source.commit
+          if-no-files-found: error
+          retention-days: 30
+
+  validate:
+    needs: source-snapshot
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: 22.19.0
+            suite: full
+          - os: macos-latest
+            node: 24
+            suite: runtime
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fork-source-${{ github.sha }}
+          path: .artifacts
+      - name: Use the shared source and model snapshot
+        run: |
+          test "$(git rev-parse HEAD)" = "$(tr -d '\n' < .artifacts/source.commit)"
+          tar -xzf .artifacts/source.tar.gz --strip-components=1
+      - name: Install Linux terminal and test prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          # Chrome is preinstalled; its update repository is unnecessary here.
           sudo rm -f /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
-          sudo ln -s $(which fdfind) /usr/local/bin/fd
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep tmux
+          sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+      - name: Install macOS terminal and test prerequisites
+        if: runner.os == 'macOS'
+        run: |
+          for tool in tmux fd ripgrep; do
+            brew list "$tool" >/dev/null 2>&1 || brew install "$tool"
+          done
+      - run: npm ci --ignore-scripts
+      - name: Offline build, nonmutating checks and isolated bundled tests
+        run: npm run verify:fork -- --suite ${{ matrix.suite }}
+      - name: Verification must not regenerate tracked inputs
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
 
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Build
-        run: npm run build
-
-      - name: Check
-        run: npm run check
-
-      - name: Test
-        run: npm test
+  # Stable required-check name for native main protection, including every lane.
+  build-check-test:
+    if: always()
+    needs: [source-snapshot, validate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require snapshot and both validation lanes
+        env:
+          SNAPSHOT_RESULT: ${{ needs.source-snapshot.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+        run: test "$SNAPSHOT_RESULT" = success && test "$VALIDATE_RESULT" = success

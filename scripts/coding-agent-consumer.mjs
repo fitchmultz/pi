@@ -24,13 +24,13 @@ function run(command, args, options = {}) {
 	return result.stdout;
 }
 
-export function packReleasePackages(packages, tarballDirectory) {
+export function packReleasePackages(packages, tarballDirectory, { npm = "npm", env = process.env } = {}) {
 	mkdirSync(tarballDirectory, { recursive: true });
 	const tarballs = new Map();
 	for (const pkg of packages) {
 		const manifest = JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"));
 		if (manifest.name !== pkg.name) throw new Error(`Unexpected package name in ${pkg.directory}`);
-		const output = run("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory], { cwd: pkg.directory });
+		const output = run(npm, ["pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory], { cwd: pkg.directory, env });
 		// npm <11.6 returns an array; newer npm can return an object keyed by package name.
 		const parsed = JSON.parse(output);
 		const packed = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
@@ -39,7 +39,7 @@ export function packReleasePackages(packages, tarballDirectory) {
 	return tarballs;
 }
 
-export function installCodingAgentConsumer(directory, tarballs, packageManager = "npm") {
+export function installCodingAgentConsumer(directory, tarballs, packageManager = "npm", { env = process.env } = {}) {
 	mkdirSync(directory, { recursive: true });
 	const overrides = Object.fromEntries([...tarballs].map(([name, path]) => [
 		name, `file:./${relative(directory, path).replaceAll("\\", "/")}`,
@@ -54,7 +54,7 @@ export function installCodingAgentConsumer(directory, tarballs, packageManager =
 	};
 	writeFileSync(join(directory, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 	const installArgs = packageManager === "bun" ? ["--production"] : ["--omit=dev", "--no-audit", "--no-fund"];
-	run(packageManager, ["install", "--ignore-scripts", ...installArgs], { cwd: directory });
+	run(packageManager, ["install", "--ignore-scripts", ...installArgs], { cwd: directory, env });
 }
 
 function checkInstalledPackages(nodeModules, seen = new Set()) {
@@ -75,7 +75,7 @@ function checkInstalledPackages(nodeModules, seen = new Set()) {
 	}
 }
 
-export function smokeTestCodingAgentConsumer(directory, runtime = process.execPath) {
+export function smokeTestCodingAgentConsumer(directory, runtime = process.execPath, { path = process.env.PATH } = {}) {
 	checkInstalledPackages(join(directory, "node_modules"));
 	const packageDir = join(directory, "node_modules", codingAgentName);
 	const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
@@ -85,7 +85,7 @@ export function smokeTestCodingAgentConsumer(directory, runtime = process.execPa
 	const home = mkdtempSync(join(directory, "smoke-home-"));
 	const entry = join(directory, "smoke-sdk.mjs");
 	const env = {
-		PATH: process.env.PATH,
+		PATH: path,
 		HOME: home,
 		USERPROFILE: home,
 		APPDATA: home,
