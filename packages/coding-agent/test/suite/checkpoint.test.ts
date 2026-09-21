@@ -2,18 +2,30 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.ts";
 import { openSessionCheckpoint, readSessionCheckpoint, writeSessionCheckpoint } from "../../src/core/checkpoint.ts";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import { loadPhoton } from "../../src/utils/photon.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 const harnesses: Harness[] = [];
 const restored: AgentSession[] = [];
 const directories: string[] = [];
+let image: ImageContent;
+beforeAll(async () => {
+	const photon = await loadPhoton();
+	if (!photon) throw new Error("Photon is required for image fixtures");
+	const png = new photon.PhotonImage(new Uint8Array(4).fill(255), 1, 1);
+	try {
+		image = { type: "image", mimeType: "image/png", data: Buffer.from(png.get_bytes()).toString("base64") };
+	} finally {
+		png.free();
+	}
+});
 afterEach(() => {
 	for (const session of restored.splice(0)) session.dispose();
 	for (const harness of harnesses.splice(0)) harness.cleanup();
@@ -262,11 +274,6 @@ describe("native working-session checkpoint", () => {
 		]);
 		const running = h.session.prompt("start");
 		await providerEntered.promise;
-		const image: ImageContent = {
-			type: "image",
-			mimeType: "image/png",
-			data: "aGVsbG8=",
-		};
 		await h.session.steer("steering with image", [image]);
 		await h.session.followUp("follow-up");
 		await h.session.sendCustomMessage(
@@ -332,8 +339,8 @@ describe("native working-session checkpoint", () => {
 		const h = await setup();
 		h.session.setSteeringMode("all");
 		h.session.setFollowUpMode("all");
-		await h.session.steer("steer", [{ type: "image", mimeType: "image/png", data: "aGk=" }]);
-		await h.session.steer("", [{ type: "image", mimeType: "image/png", data: "aGk=" }]);
+		await h.session.steer("steer", [image]);
+		await h.session.steer("", [image]);
 		await h.session.followUp("follow");
 		await h.session.sendCustomMessage(
 			{ customType: "next", content: "aside", display: true },
@@ -354,7 +361,7 @@ describe("native working-session checkpoint", () => {
 		await session.prompt("explicit continue");
 		for (const text of ["steer", "follow", "explicit continue", "aside"])
 			expect(session.messages.filter((message) => getMessageText(message) === text)).toHaveLength(1);
-		expect(JSON.stringify(session.messages)).toContain('"data":"aGk="');
+		expect(JSON.stringify(session.messages)).toContain(`"data":${JSON.stringify(image.data)}`);
 		expect(session.hasPendingMessages).toBe(false);
 		expect(session.pendingMessageCount).toBe(0);
 		expect(session.steeringMode).toBe("all");
@@ -385,7 +392,7 @@ describe("native working-session checkpoint", () => {
 	it("saves an initialized session before its first assistant/file exists", async () => {
 		const h = await setup();
 		h.sessionManager.appendCustomEntry("state", { beforeFirstTurn: true });
-		await h.session.steer("accepted", [{ type: "image", mimeType: "image/png", data: "aGk=" }]);
+		await h.session.steer("accepted", [image]);
 		expect(existsSync(h.session.sessionFile!)).toBe(false);
 		const hold = await h.session.acquireCheckpoint();
 		const manager = openSessionCheckpoint(hold.checkpoint);

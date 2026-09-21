@@ -45,6 +45,7 @@ import type {
 	TextContent,
 	Tool,
 	Usage,
+	UserMessage,
 } from "@earendil-works/pi-ai/compat";
 import {
 	clampThinkingLevel,
@@ -381,6 +382,8 @@ export class AgentSession {
 	private _pendingProviderMessages: AgentMessage[] = [];
 	/** Native inputs awaiting handling, admission, queueing, or rejection. */
 	private _pendingInputCount = 0;
+	/** Idle prompts normalize during admission; queued inputs normalize at native delivery, only once. */
+	private _normalizedUserMessages = new WeakSet<UserMessage>();
 	private _activeCommands = 0;
 	private _settling = 0;
 	private _checkpointHeld = false;
@@ -1008,23 +1011,32 @@ export class AgentSession {
 			this._flushPendingProviderMessages();
 		}
 
-		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
-		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._overflowRecoveryAttempted = false;
-			const messageText = contentText(event.message.content, "");
-			// Image-only queued inputs have empty text and still leave the pending display.
-			const steeringIndex = this._steeringMessages.indexOf(messageText);
-			if (steeringIndex !== -1) {
-				this._steeringMessages.splice(steeringIndex, 1);
+			// An "all" drain owns the entire batch before its first message starts. Reflect
+			// native ownership before yielding so clearQueue cannot restore already-drained text.
+			// Matching the current message by text would also remove undrained duplicates.
+			const queues = this.agent.getQueuedMessages();
+			const steering = queues.steering
+				.filter((message) => message.role === "user")
+				.map((message) => contentText(message.content, ""));
+			const followUp = queues.followUp
+				.filter((message) => message.role === "user")
+				.map((message) => contentText(message.content, ""));
+			if (
+				steering.length !== this._steeringMessages.length ||
+				followUp.length !== this._followUpMessages.length ||
+				steering.some((text, index) => text !== this._steeringMessages[index]) ||
+				followUp.some((text, index) => text !== this._followUpMessages[index])
+			) {
+				this._steeringMessages = steering;
+				this._followUpMessages = followUp;
 				this._emitQueueUpdate();
-			} else {
-				const followUpIndex = this._followUpMessages.indexOf(messageText);
-				if (followUpIndex !== -1) {
-					this._followUpMessages.splice(followUpIndex, 1);
-					this._emitQueueUpdate();
-				}
 			}
+			// The loop owns this await after draining the native queue. Awaiting image work in
+			// _queueSteer/_queueFollowUp instead could enqueue after the run has already settled.
+			// Finish accepted delivery even on abort; request preflight prevents further dispatch.
+			await this._normalizeUserMessageImages(event.message);
 		}
 
 		// Emit to extensions first
@@ -1730,15 +1742,18 @@ export class AgentSession {
 		return { text, images };
 	}
 
-	private async _normalizePromptImages(
-		images: ImageContent[] | undefined,
-	): Promise<{ images: ImageContent[]; hints: string[] }> {
-		if (!images) return { images: [], hints: [] };
+	private async _normalizeUserMessageImages(message: UserMessage): Promise<void> {
+		if (this._normalizedUserMessages.has(message) || typeof message.content === "string") return;
+		if (!message.content.some((part) => part.type === "image")) return;
 
-		const normalizedImages: ImageContent[] = [];
+		const content: (TextContent | ImageContent)[] = [];
 		const hints: string[] = [];
-		for (const image of images) {
-			const processed = await processImage(Buffer.from(image.data, "base64"), image.mimeType, {
+		for (const part of message.content) {
+			if (part.type === "text") {
+				content.push(part);
+				continue;
+			}
+			const processed = await processImage(Buffer.from(part.data, "base64"), part.mimeType, {
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
 				resizeOptions: this.model?.inputLimits?.images?.resize,
 			});
@@ -1746,10 +1761,20 @@ export class AgentSession {
 				hints.push(processed.message);
 				continue;
 			}
-			normalizedImages.push({ type: "image", data: processed.data, mimeType: processed.mimeType });
+			content.push({ type: "image", data: processed.data, mimeType: processed.mimeType });
 			hints.push(...processed.hints);
 		}
-		return { images: normalizedImages, hints };
+		// Keep the prompt hint convention without flattening structured Agent inputs:
+		// text blocks and surviving images retain their original order and boundaries.
+		if (hints.length > 0) {
+			const textIndex = content.findIndex((part) => part.type === "text");
+			const text = content[textIndex];
+			const hintText = `\n\n${hints.join("\n")}`;
+			if (text?.type === "text") content[textIndex] = { ...text, text: text.text + hintText };
+			else content.unshift({ type: "text", text: hintText });
+		}
+		message.content = content;
+		this._normalizedUserMessages.add(message);
 	}
 
 	/**
@@ -1863,18 +1888,14 @@ export class AgentSession {
 				const startupMessages = await this._prepareAgentStart(expandedText, currentImages);
 				signal.throwIfAborted();
 				// Hook-driven model selection determines the resize profile for request and history.
-				const normalized = await this._normalizePromptImages(currentImages);
+				const userMessage: UserMessage = {
+					role: "user",
+					content: [{ type: "text", text: expandedText }, ...(currentImages ?? [])],
+					timestamp: Date.now(),
+				};
+				await this._normalizeUserMessageImages(userMessage);
 				signal.throwIfAborted();
-				const userText =
-					normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
-				const userContent: (TextContent | ImageContent)[] = [
-					{ type: "text", text: userText },
-					...normalized.images,
-				];
-				const messages: AgentMessage[] = [
-					{ role: "user", content: userContent, timestamp: Date.now() },
-					...nextTurnMessages,
-				];
+				const messages: AgentMessage[] = [userMessage, ...nextTurnMessages];
 				// Renew request-only guidance before checking the budget, but keep compaction
 				// inside admission. Provider preflight also counts the new input and asides.
 				const lastAssistant = this._findLastAssistantMessage();
