@@ -1,81 +1,137 @@
-# fitchmultz/pi — custom pi fork
+# fitchmultz/pi — custom Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 
-## Installation
-
-The global `pi` entrypoint under `~/.local/share/npm-global` selects an immutable
-release under `~/.local/share/pi-fork/releases/<commit>/packages/coding-agent`.
-It does not point at the development checkout. Each release retains its own
-built workspace graph and dependencies, including lazy bundle chunks.
-
-User configuration under `~/.pi/agent` is shared. A core sync must not change
-settings, credentials, skills, extensions, themes, or session journals.
-
 ## Remotes and history
 
-- `origin`: upstream `earendil-works/pi`; fetch only, never push.
-- `fork`: personal `fitchmultz/pi`; deliver reviewed changes here.
+- `origin`: upstream `earendil-works/pi`; fetch only.
+- `fork`: personal `fitchmultz/pi`; reviewed delivery.
 - Local `main` tracks `fork/main`, with `branch.main.rebase=false`.
-- Merge upstream into the fork. Never rebase or force-push custom commits.
+- Merge upstream normally. Preserve custom ancestry; never rebase or force-push it.
+
+Native main protection requires `build-check-test`, an up-to-date branch, and
+blocks force pushes and deletion. Git delivery and runtime activation are separate.
+No fork maintenance command publishes packages or upstream releases.
 
 ## Updating from upstream
 
-Prepare a separate delivery worktree from the fork's reviewed base. Merge the
-chosen upstream commit normally, preserving ancestry and native fork behavior.
-Resolve conflicts individually. Experimental Pico/micro remain opt-in; normal
-AgentSession extensions continue to use the ordinary host.
+```sh
+./sync-upstream.sh                       # pin upstream origin/main
+./sync-upstream.sh --ref <upstream-ref>   # pin a branch, tag or commit
+```
 
-From that worktree, install and validate the complete workspace graph:
+The command fetches the upstream target once and creates a task branch from
+`fork/main` under `../worktrees/pi/`, relative to the main checkout's parent.
+It never merges into the invoking checkout or changes the installed runtime.
+Repo-local rerere records resolutions, with automatic staging disabled.
+
+A clean merge proceeds through frozen dependency installation, explicit provider
+registry generation, model-data hydration, verification, commit and PR creation.
+Conflicts preserve the native merge and print its exact worktree and resume command.
+Review each resolution and stage its explicit paths, then run:
+
+```sh
+./sync-upstream.sh --continue <worktree>
+```
+
+Continuation retains the pinned target even if upstream advances. Failed
+verification leaves the merge available for correction and another continuation.
+After ordinary reviewer-fix commits, republish with `--pr <worktree>`. Run local
+GPT, Ponytail and Claude reviewers after PR creation; fix or rebut findings and
+require green CI before merging. Merge approval remains a separate decision.
+After merging, fast-forward local `main` to `fork/main` and remove unused task
+worktrees. Preserve reviewer evidence and session journals.
+
+## Verification and frozen inputs
 
 ```sh
 npm ci --ignore-scripts
-npm run hydrate:model-data
-npm run build:offline
-npm run check
-./test.sh
+npm run hydrate:model-data               # once when preparing a new snapshot
+npm run verify:fork                      # full verification
+npm run verify:fork -- --suite runtime   # focused native lifecycle verification
 ```
 
-Hydration fetches public model metadata without changing tracked catalogs.
-`build:offline` uses that data and includes the durable workspace. Review any
-intentional catalog regeneration separately. Use `./test.sh`, not ambient
-`npm test`, so provider credentials and personal resources are isolated. Shell
-initialization must not replace the real Node/npm binaries with environment
-manager shims inside the isolated test home.
+Verification checks the existing catalog, builds offline, runs nonmutating checks,
+and runs isolated tests against the real bundled CLI. tmux is required; terminal
+coverage cannot silently skip. Use `./test.sh` for the complete isolated suite or
+`./test.sh -- <command...>` for focused tests. Node/npm resolve before HOME
+isolation so version-manager shims do not lose their installation. `npm run format`
+is the explicit formatting command; hooks never format or restage files.
 
-Review the integration and affected extension behavior before merging delivery.
-Do not use the legacy `sync-upstream.sh` delivery flow: it rebuilds and relinks a
-mutable checkout in place.
+CI hydrates once and freezes the commit plus ignored model data using the existing
+source archive helper. Linux Node 22.19 full validation and macOS Node 24 runtime
+validation consume that same archive. The required `build-check-test` aggregates
+both lanes. The `fork-source-<commit>` artifact retains `source.tar.gz` and
+`source.commit` for 30 days. Intentional generator changes belong in the reviewed
+Git diff; validation must not regenerate tracked inputs.
 
-## Reinstalling and activating the fork
+## Immutable installation and activation
 
-After reviewed delivery, stage the exact merged commit in a **new** release
-directory under `~/.local/share/pi-fork/releases/`. Install its frozen dependencies,
-hydrate model data, and build the complete graph there. Verify the candidate's
-`packages/coding-agent/dist/bundle/cli.js` and `cli-worker.js`, extension imports,
-and runtime identity before atomically selecting its package directory for the
-global entrypoint. Record the commit and build evidence. Never overwrite an
-existing release, rebuild a loaded snapshot, or copy individual chunks into it.
-Do not use `npm link` to select the development checkout.
-
-Existing processes retain their loaded release. Activate a validated runtime in
-the current managed session with native restart:
+After merging, wait for the merged main commit's CI and download its frozen input:
 
 ```sh
-pi restart \
-  --runtime "$HOME/.local/share/pi-fork/releases/<commit>/packages/coding-agent" \
+gh-personal run download <main-CI-run-id> --repo fitchmultz/pi \
+  --name fork-source-<merged-commit> --dir /path/to/frozen-source
+npm run install:fork -- --ref <merged-commit> \
+  --source-archive /path/to/frozen-source/source.tar.gz --stage
+```
+
+The installer checks the adjacent `source.commit` and compares the extracted
+source against that Git tree using a temporary index, allowing only the frozen
+model-data files in addition. It validates that data, builds in a temporary source
+directory, packs native workspace tarballs, and installs a
+production npm consumer into a new release. Installed SDK, CLI, extension imports,
+native checkpoint restore and real-terminal restart tests must pass before the
+release receives a validation receipt. It retains the archive, commit, tarballs
+and build identity. No hand-made workspace dependency links are used.
+
+Releases live under `~/.local/share/pi-fork/releases/<identity>`, where identity
+includes the commit, catalog digest, Node version, platform and architecture.
+Existing releases are never rebuilt or overwritten. Without `--source-archive`,
+local staging uses the exact Git ref and the checkout's already-hydrated catalog;
+it does not fetch or regenerate metadata. Deployed delivery uses the CI artifact.
+
+Select the printed identity, then activate its printed package directory:
+
+```sh
+npm run install:fork -- --activate <identity>
+pi restart --runtime <printed-packageDir> \
   --message "Verify the updated runtime and continue"
 ```
 
-This queues activation at a safe idle boundary; acknowledgment is not readiness.
-Keep the previous release and extension files intact for rollback. `/reload`
-does not apply code changes. The launcher remains loaded across worker restarts;
-launcher changes take effect on the next full CLI launch. See
-[Managed Restarts](packages/coding-agent/docs/restart.md) for admission, readiness,
-rollback, and supported modes. Never delete session journals during delivery.
+Without `--stage`, installation validates and selects in one command. Selection
+atomically replaces the package symlink under `~/.local/share/npm-global`; the
+previous target is retained at that symlink's `.previous` sibling. Settings,
+credentials, extensions and real session journals under `~/.pi` are unchanged.
+Never use `npm link` to select a mutable checkout.
 
-## Reverting to stock pi
+Restart acknowledgment means queued, not ready. Verify the replacement process,
+loaded package directory, same session identity, tools and real provider operation.
+Omitting `-e` preserves explicit extensions. `/reload` does not apply code changes.
+Launcher changes take effect at the next full CLI launch. See
+[Managed Restarts](packages/coding-agent/docs/restart.md).
 
-Install stock Pi separately and select its entrypoint only after verification.
-Keep the fork releases and saved sessions intact. Posthorse requires the fork's
-native context-window primitives and is not supported by the stock host.
+To return to an earlier installer-validated release, use `--rollback <identity>`
+and native restart with its package directory. Keep previous runtimes and extension
+files intact. Legacy releases without receipts remain untouched; their previous
+selector target is preserved for manual selection and native startup rollback.
+
+## Fork patch intent
+
+Keep patches at native boundaries and remove them when upstream provides the same
+behavior and passes the corresponding contracts. The table identifies continuing
+intent; Git history remains the detailed change record.
+
+| Intent | Contract / verification | Removal condition |
+| --- | --- | --- |
+| Fresh context windows without losing journal history | `interactive-context-window`, `context-window-system-state` tests | Upstream exposes equivalent context-window primitives used by Posthorse. |
+| Native checkpoint and managed restart, including tool selection and pending UI input | `checkpoint*`, `restart-*`, `interactive-shutdown-admission` tests; checkpoint/restart docs | Upstream round-trips the same session state and passes bundled lifecycle tests. |
+| Normalize newly delivered queued images like idle prompts | `agent-session-queued-images`, queue/admission/checkpoint suites | Upstream normalizes once at an awaited delivery boundary without queue races. |
+| Structured JSON read extraction | `read-json.test.ts` | Upstream supports the same JSON path/field extraction before output limits. |
+| Provider startup refresh and ambient account authentication | `provider-startup-refresh`, `ambient-auth`, `model-runtime-auth-options`, availability tests | Upstream preserves refresh, credential selection and failure isolation contracts. |
+| Safe fork delivery with frozen inputs and immutable installation | Sync/installer script tests, required CI and installed runtime smoke | Upstream tooling supports this fork's separate review, delivery and activation workflow. |
+
+Experimental Pico/micro remain opt-in; ordinary AgentSession extensions use the
+normal host. Install stock Pi separately if needed and verify before selecting it.
+Preserve fork releases and sessions. Posthorse requires the fork's native context
+window primitives and is not supported by the stock host.

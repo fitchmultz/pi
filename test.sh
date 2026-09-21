@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Resolve the actual distribution BEFORE replacing HOME. Version-manager shims
+# (notably mise) cannot discover their installation under an isolated home.
+real_node="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+node_bin="$(dirname "$real_node")"
+real_npm="$("$real_node" -p 'require("node:fs").realpathSync(process.argv[1])' "$node_bin/npm")"
+command=("$real_npm" test)
+if [[ $# -gt 0 ]]; then
+	if [[ "$1" != -- || $# -lt 2 ]]; then
+		echo "Usage: $0 [-- <command> [args...]]" >&2
+		exit 1
+	fi
+	shift
+	command=("$@")
+fi
+
 # Isolate user resources, credentials, temporary files, and tool configuration.
 temp_parent="${TMPDIR:-/tmp}"
 temp_parent="${temp_parent%/}"
@@ -38,7 +53,7 @@ trap cleanup EXIT
 
 # Start from an empty environment and allow only required platform and test settings.
 test_env=(
-	"PATH=$PATH"
+	"PATH=$node_bin:$PATH"
 	"PWD=$PWD"
 	"HOME=$test_root/home"
 	"USERPROFILE=$test_root/home"
@@ -69,11 +84,11 @@ for name in SystemRoot SYSTEMROOT WINDIR COMSPEC PATHEXT; do
 	[[ -z "$value" ]] || test_env+=("$name=$value")
 done
 
-# Preserve CI detection only for runner behavior and test reporting.
-for name in CI GITHUB_ACTIONS; do
+# Explicit test inputs only; never inherit provider keys or runtime/session state.
+for name in CI GITHUB_ACTIONS PI_TEST_CLI; do
 	value="${!name-}"
 	[[ -z "$value" ]] || test_env+=("$name=$value")
 done
 
 echo "Running tests without API keys in isolated home: $test_root/home"
-env -i "${test_env[@]}" npm test
+env -i "${test_env[@]}" "${command[@]}"
