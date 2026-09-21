@@ -239,44 +239,16 @@ function isTurnStartMessage(message: AgentMessage): boolean {
 	return false;
 }
 
-function isTurnStartEntry(entry: SessionEntry): boolean {
-	if (entry.type === "compaction") {
-		return false;
-	}
-	return sessionEntryToContextMessages(entry).some(isTurnStartMessage);
-}
-
-/**
- * Find valid cut points: indices of context-visible user-like or assistant messages.
- * Never cut at tool results (they must follow their tool call).
- * When we cut at an assistant message with tool calls, its tool results follow it
- * and will be kept.
- */
-function findValidCutPoints(entries: SessionEntry[], startIndex: number, endIndex: number): number[] {
-	const cutPoints: number[] = [];
-	for (let i = startIndex; i < endIndex; i++) {
-		const entry = entries[i];
-		if (entry.type === "compaction") {
-			continue;
-		}
-		if (sessionEntryToContextMessages(entry).some(isCutPointMessage)) {
-			cutPoints.push(i);
-		}
-	}
-	return cutPoints;
-}
-
 /**
  * Find the context-visible user-role message that starts the turn containing the given entry index.
  * Returns -1 if no turn start found before the index.
  */
 export function findTurnStartIndex(entries: SessionEntry[], entryIndex: number, startIndex: number): number {
-	for (let i = entryIndex; i >= startIndex; i--) {
-		if (isTurnStartEntry(entries[i])) {
-			return i;
-		}
-	}
-	return -1;
+	return findProjectedTurnStartIndex(
+		entries.map((sourceEntry) => ({ sourceEntry, messages: sessionEntryToContextMessages(sourceEntry) })),
+		entryIndex,
+		startIndex,
+	);
 }
 
 export interface CutPointResult {
@@ -310,55 +282,12 @@ export function findCutPoint(
 	endIndex: number,
 	keepRecentTokens: number,
 ): CutPointResult {
-	const cutPoints = findValidCutPoints(entries, startIndex, endIndex);
-
-	if (cutPoints.length === 0) {
-		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
-	}
-
-	// Walk backwards from newest, accumulating estimated message sizes
-	let accumulatedTokens = 0;
-	let cutIndex = cutPoints[0]; // Default: keep from first message (not header)
-
-	for (let i = endIndex - 1; i >= startIndex; i--) {
-		const entry = entries[i];
-		const messageTokens = sessionEntryToContextMessages(entry).reduce(
-			(sum, message) => sum + (message.role === "system" ? 0 : estimateTokens(message)),
-			0,
-		);
-		if (messageTokens === 0) continue;
-		accumulatedTokens += messageTokens;
-
-		// Check if we've exceeded the budget
-		if (accumulatedTokens >= keepRecentTokens) {
-			// Prefer the closest valid cut point at or after this entry. If trailing
-			// tool results exceed the budget by themselves, keep their preceding
-			// assistant tool call instead of falling back to the first message.
-			cutIndex = cutPoints.find((candidate) => candidate >= i) ?? cutPoints[cutPoints.length - 1];
-			break;
-		}
-	}
-
-	// Scan backwards from cutIndex to include adjacent metadata entries that do not affect context.
-	while (cutIndex > startIndex) {
-		const prevEntry = entries[cutIndex - 1];
-		// Stop at compaction boundaries or context-visible entries.
-		if (prevEntry.type === "compaction" || sessionEntryToContextMessages(prevEntry).length > 0) {
-			break;
-		}
-		cutIndex--;
-	}
-
-	// Determine if this is a split turn
-	const cutEntry = entries[cutIndex];
-	const startsTurn = isTurnStartEntry(cutEntry);
-	const turnStartIndex = startsTurn ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
-
-	return {
-		firstKeptEntryIndex: cutIndex,
-		turnStartIndex,
-		isSplitTurn: !startsTurn && turnStartIndex !== -1,
-	};
+	return findProjectedCutPoint(
+		entries.map((sourceEntry) => ({ sourceEntry, messages: sessionEntryToContextMessages(sourceEntry) })),
+		startIndex,
+		endIndex,
+		keepRecentTokens,
+	);
 }
 
 // ============================================================================

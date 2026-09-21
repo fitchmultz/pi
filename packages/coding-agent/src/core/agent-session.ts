@@ -763,13 +763,11 @@ export class AgentSession {
 		};
 
 		const previousTransform = this.agent.transformContext;
-		this.agent.transformContext = async (_messages, signal) => {
-			// prepareRequest can run again after the bounded late-steering drain. Only now
-			// can no further preflight boundary precede these inputs. Final tool declarations
-			// have also arrived: persist once, assign IDs, then take the authoritative projection.
+		this.agent.transformContext = async (messages, signal) => {
+			// Final input/tool declarations can now be persisted exactly once. Refresh the
+			// inspection cache without replacing request-only edits from prepareRequest.
 			this._flushPendingProviderMessages();
 			this._refreshFinalizedContext();
-			const messages = this.agent.state.messages;
 			const model = this.model;
 			const systemPrompt = getCurrentSystemPrompt(messages);
 			this._providerRequestPrefix = model

@@ -19,6 +19,50 @@ describe("AgentSession actionable boundaries", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
+	it("preserves composed request-only edits while persisting admitted input exactly once", async () => {
+		const harness = await createHarness({ settings: { compaction: { enabled: false } } });
+		harnesses.push(harness);
+		const hiddenId = harness.sessionManager.appendMessage({
+			role: "user",
+			content: "stored but filtered",
+			timestamp: 1,
+		});
+		harness.session.refreshContext();
+		const prepareRequest = harness.session.agent.prepareRequest!;
+		harness.session.agent.prepareRequest = async (request, signal) => {
+			const prepared = await prepareRequest(request, signal);
+			const context = prepared?.context ?? request.context;
+			return {
+				...prepared,
+				context: {
+					...context,
+					messages: [
+						...context.messages.filter((message) => getMessageText(message) !== "stored but filtered"),
+						{ role: "user", content: "request-only instruction", timestamp: 2 },
+					],
+				},
+			};
+		};
+		const requests: string[][] = [];
+		harness.setResponses([
+			(context) => {
+				requests.push(context.messages.filter((message) => message.role === "user").map(getMessageText));
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		await harness.session.prompt("persisted input");
+
+		expect(requests).toEqual([["persisted input", "request-only instruction"]]);
+		expect(harness.sessionManager.getEntry(hiddenId)).toMatchObject({
+			message: { content: "stored but filtered" },
+		});
+		expect(harness.session.messages.filter((message) => message.role === "user").map(getMessageText)).toEqual([
+			"stored but filtered",
+			"persisted input",
+		]);
+	});
+
 	it("commits a retain-none turn_end compaction and explicitly continues once", async () => {
 		let handled = false;
 		const observedIds: string[] = [];
