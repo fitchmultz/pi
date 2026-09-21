@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CheckpointActivity } from "../../src/core/checkpoint.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
+import { loadPhoton } from "../../src/utils/photon.ts";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
 
 async function createWaitingHarness(
@@ -250,8 +251,16 @@ describe("AgentSession queue characterization", () => {
 	it("runs direct and prompted queues through input handlers exactly once with pending ownership and images", async () => {
 		const inputEvents: Array<Pick<InputEvent, "text" | "source" | "streamingBehavior" | "images">> = [];
 		const pendingCounts: number[] = [];
-		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
-		const transformedImages: ImageContent[] = [{ type: "image", data: "bmV3", mimeType: "image/png" }];
+		const photon = await loadPhoton();
+		if (!photon) throw new Error("Photon is required for image fixtures");
+		const [images, transformedImages]: ImageContent[][] = [1, 2].map((size) => {
+			const image = new photon.PhotonImage(new Uint8Array(size * size * 4).fill(255), size, size);
+			try {
+				return [{ type: "image", data: Buffer.from(image.get_bytes()).toString("base64"), mimeType: "image/png" }];
+			} finally {
+				image.free();
+			}
+		});
 		const waiting = await createWaitingHarness({
 			extensionFactories: [
 				(pi) => {

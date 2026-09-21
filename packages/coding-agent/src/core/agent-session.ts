@@ -45,6 +45,7 @@ import type {
 	TextContent,
 	Tool,
 	Usage,
+	UserMessage,
 } from "@earendil-works/pi-ai/compat";
 import {
 	clampThinkingLevel,
@@ -381,6 +382,8 @@ export class AgentSession {
 	private _pendingProviderMessages: AgentMessage[] = [];
 	/** Native inputs awaiting handling, admission, queueing, or rejection. */
 	private _pendingInputCount = 0;
+	/** Idle prompts normalize during admission; queued inputs normalize at native delivery, only once. */
+	private _normalizedUserMessages = new WeakSet<UserMessage>();
 	private _activeCommands = 0;
 	private _settling = 0;
 	private _checkpointHeld = false;
@@ -1025,6 +1028,10 @@ export class AgentSession {
 					this._emitQueueUpdate();
 				}
 			}
+			// The loop owns this await after draining the native queue. Awaiting image work in
+			// _queueSteer/_queueFollowUp instead could enqueue after the run has already settled.
+			// Finish accepted delivery even on abort; request preflight prevents further dispatch.
+			await this._normalizeUserMessageImages(event.message);
 		}
 
 		// Emit to extensions first
@@ -1752,6 +1759,19 @@ export class AgentSession {
 		return { images: normalizedImages, hints };
 	}
 
+	private async _normalizeUserMessageImages(message: UserMessage): Promise<void> {
+		if (this._normalizedUserMessages.has(message) || typeof message.content === "string") return;
+		const images = message.content.filter((part) => part.type === "image");
+		if (images.length === 0) return;
+		const normalized = await this._normalizePromptImages(images);
+		const text = contentText(message.content, "");
+		message.content = [
+			{ type: "text", text: normalized.hints.length > 0 ? `${text}\n\n${normalized.hints.join("\n")}` : text },
+			...normalized.images,
+		];
+		this._normalizedUserMessages.add(message);
+	}
+
 	/**
 	 * Send a prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
@@ -1863,18 +1883,14 @@ export class AgentSession {
 				const startupMessages = await this._prepareAgentStart(expandedText, currentImages);
 				signal.throwIfAborted();
 				// Hook-driven model selection determines the resize profile for request and history.
-				const normalized = await this._normalizePromptImages(currentImages);
+				const userMessage: UserMessage = {
+					role: "user",
+					content: [{ type: "text", text: expandedText }, ...(currentImages ?? [])],
+					timestamp: Date.now(),
+				};
+				await this._normalizeUserMessageImages(userMessage);
 				signal.throwIfAborted();
-				const userText =
-					normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
-				const userContent: (TextContent | ImageContent)[] = [
-					{ type: "text", text: userText },
-					...normalized.images,
-				];
-				const messages: AgentMessage[] = [
-					{ role: "user", content: userContent, timestamp: Date.now() },
-					...nextTurnMessages,
-				];
+				const messages: AgentMessage[] = [userMessage, ...nextTurnMessages];
 				// Renew request-only guidance before checking the budget, but keep compaction
 				// inside admission. Provider preflight also counts the new input and asides.
 				const lastAssistant = this._findLastAssistantMessage();
