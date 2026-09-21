@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, type ImageContent, type UserMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import * as imageProcessing from "../../src/utils/image-process.ts";
@@ -317,10 +317,10 @@ describe("AgentSession queued image normalization", () => {
 			expect(harness.session.isStreaming).toBe(true);
 			expect(harness.session.isIdle).toBe(false);
 			expect(harness.session.pendingInputCount).toBe(0);
-			expect(harness.session.pendingMessageCount).toBe(1);
+			expect(harness.session.pendingMessageCount).toBe(mode === "all" ? 0 : 1);
 			expect(harness.faux.state.callCount).toBe(1);
 			await harness.session.prompt("third", { streamingBehavior: behavior });
-			expect(harness.session.pendingMessageCount).toBe(2);
+			expect(harness.session.pendingMessageCount).toBe(mode === "all" ? 1 : 2);
 		} finally {
 			release.resolve();
 			await run;
@@ -388,6 +388,237 @@ describe("AgentSession queued image normalization", () => {
 			expect(harness.session.hasPendingMessages).toBe(false);
 		},
 	);
+
+	// PR #71 review regression: native "all" drains own the whole batch before the first image await.
+	it.each([
+		["steer", false],
+		["steer", true],
+		["followUp", false],
+		["followUp", true],
+	] as const)("restores only undrained %s text (abort=%s)", async (behavior, shouldAbort) => {
+		const image = await createImage();
+		const entered = deferred();
+		const release = deferred();
+		vi.spyOn(imageProcessing, "processImage").mockImplementationOnce(async () => {
+			entered.resolve();
+			await release.promise;
+			return { ok: true, data: image.data, mimeType: image.mimeType, hints: [] };
+		});
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.setSteeringMode("all");
+		harness.session.setFollowUpMode("all");
+		harness.setResponses([
+			async () => {
+				await harness.session[behavior]("image", [image]);
+				await harness.session[behavior]("second queued instruction");
+				return fauxAssistantMessage("first");
+			},
+			fauxAssistantMessage("batch delivered"),
+		]);
+		const run = harness.session.prompt("start");
+		let abort: Promise<void> | undefined;
+		try {
+			await entered.promise;
+			expect(harness.session.agent.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
+			expect(harness.session.pendingMessageCount).toBe(0);
+			expect(harness.session.getSteeringMessages()).toEqual([]);
+			expect(harness.session.getFollowUpMessages()).toEqual([]);
+			expect(harness.eventsOfType("queue_update").at(-1)).toEqual({
+				type: "queue_update",
+				steering: [],
+				followUp: [],
+			});
+			await harness.session[behavior]("later undrained instruction");
+			expect(harness.session.pendingMessageCount).toBe(1);
+			expect(harness.session.clearQueue()).toEqual(
+				behavior === "steer"
+					? { steering: ["later undrained instruction"], followUp: [] }
+					: { steering: [], followUp: ["later undrained instruction"] },
+			);
+			if (shouldAbort) abort = harness.session.abort();
+		} finally {
+			release.resolve();
+			await run;
+			await abort;
+		}
+		expect(getUserTexts(harness)).toEqual(["start", "image", "second queued instruction"]);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "message" && entry.message.role === "user" ? [getMessageText(entry.message)] : [],
+				),
+		).toEqual(["start", "image", "second queued instruction"]);
+		expect(harness.faux.state.callCount).toBe(shouldAbort ? 1 : 2);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.session.hasPendingMessages).toBe(false);
+	});
+
+	it.each(["steer", "followUp"] as const)(
+		"does not remove undrained duplicates when the next %s batch message starts",
+		async (behavior) => {
+			const image = await createImage();
+			const entered = deferred();
+			const release = deferred();
+			vi.spyOn(imageProcessing, "processImage").mockImplementationOnce(async () => {
+				entered.resolve();
+				await release.promise;
+				return { ok: true, data: image.data, mimeType: image.mimeType, hints: [] };
+			});
+			const harness = await createHarness();
+			harnesses.push(harness);
+			harness.session.setSteeringMode("all");
+			harness.session.setFollowUpMode("all");
+			let restored: { steering: string[]; followUp: string[] } | undefined;
+			let pendingCount: number | undefined;
+			harness.session.subscribe((event) => {
+				if (
+					event.type === "message_start" &&
+					event.message.role === "user" &&
+					getMessageText(event.message) === "repeat"
+				) {
+					pendingCount = harness.session.pendingMessageCount;
+					restored = harness.session.clearQueue();
+				}
+			});
+			harness.setResponses([
+				async () => {
+					await harness.session[behavior]("image", [image]);
+					await harness.session[behavior]("repeat");
+					return fauxAssistantMessage("first");
+				},
+				fauxAssistantMessage("batch delivered"),
+			]);
+			const run = harness.session.prompt("start");
+			try {
+				await entered.promise;
+				await harness.session.steer("repeat");
+				await harness.session.followUp("repeat");
+			} finally {
+				release.resolve();
+				await run;
+			}
+			expect(pendingCount).toBe(2);
+			expect(restored).toEqual({ steering: ["repeat"], followUp: ["repeat"] });
+			expect(getUserTexts(harness)).toEqual(["start", "image", "repeat"]);
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(harness.session.hasPendingMessages).toBe(false);
+		},
+	);
+
+	it("does not remove queued duplicates when an identical idle prompt starts", async () => {
+		const image = await createImage();
+		const harness = await createHarness({ settings: { images: { autoResize: false } } });
+		harnesses.push(harness);
+		await harness.session.steer("repeat", [image]);
+		await harness.session.followUp("repeat");
+		const pendingCounts: number[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "message_start" && event.message.role === "user") {
+				pendingCounts.push(harness.session.pendingMessageCount);
+			}
+		});
+		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+		await harness.session.prompt("repeat");
+		expect(pendingCounts).toEqual([2, 1, 0]);
+		expect(getUserTexts(harness)).toEqual(["repeat", "repeat", "repeat"]);
+		expect(harness.session.pendingMessageCount).toBe(0);
+	});
+
+	// PR #71 review regression: public Agent queues accept interleaved content, not just text + attachments.
+	it.each([false, true])("preserves structured content (autoResize=%s)", async (autoResize) => {
+		const image = await createImage();
+		const original: UserMessage = {
+			role: "user",
+			content: [
+				{ type: "text", text: "Before:" },
+				image,
+				{ type: "text", text: "After:" },
+				{ type: "text", text: "Details:" },
+				image,
+				{ type: "text", text: "End." },
+			],
+			timestamp: Date.now(),
+		};
+		const harness = await createHarness({ models: [strictModel], settings: { images: { autoResize } } });
+		harnesses.push(harness);
+		harness.session.agent.followUp(structuredClone(original));
+		let sent: UserMessage | undefined;
+		harness.setResponses([
+			fauxAssistantMessage("first"),
+			(context) => {
+				sent = context.messages.filter((message) => message.role === "user").at(-1);
+				return fauxAssistantMessage("second");
+			},
+		]);
+		await harness.session.prompt("compare queued images");
+		if (!sent || typeof sent.content === "string") throw new Error("Expected structured user content");
+		expect(sent.content.map((part) => part.type)).toEqual(["text", "image", "text", "text", "image", "text"]);
+		const texts = sent.content.filter((part) => part.type === "text").map((part) => part.text);
+		expect(texts.slice(1)).toEqual(["After:", "Details:", "End."]);
+		if (autoResize) {
+			expect(texts[0]).toMatch(/^Before:\n\n/);
+			expect(texts[0].match(/original 16x16, displayed at 2x2/g)).toHaveLength(2);
+		} else {
+			expect(sent).toEqual(original);
+		}
+		for (const part of sent.content.filter((part) => part.type === "image")) {
+			expect(await dimensions({ ...sent, content: [part] })).toEqual(autoResize ? [2, 2] : [16, 16]);
+		}
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "message" && entry.message.role === "user")
+				.at(-1),
+		).toMatchObject({ message: sent });
+		expect(
+			harness
+				.eventsOfType("message_start")
+				.filter((event) => event.message.role === "user")
+				.at(-1),
+		).toEqual({
+			type: "message_start",
+			message: sent,
+		});
+	});
+
+	it("preserves text boundaries and surviving image positions when an image is omitted", async () => {
+		const image = await createImage();
+		const omission = "[Image omitted: test conversion failure.]";
+		const hints = ["[Image converted from image/jpeg to image/png.]", "[Image resized.]"];
+		vi.spyOn(imageProcessing, "processImage")
+			.mockResolvedValueOnce({ ok: false, message: omission })
+			.mockResolvedValueOnce({ ok: true, data: image.data, mimeType: image.mimeType, hints });
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.agent.followUp({
+			role: "user",
+			content: [
+				{ type: "text", text: "Before:" },
+				image,
+				{ type: "text", text: "Between:" },
+				{ ...image, mimeType: "image/jpeg" },
+				{ type: "text", text: "After:" },
+			],
+			timestamp: Date.now(),
+		});
+		let sent: UserMessage | undefined;
+		harness.setResponses([
+			fauxAssistantMessage("first"),
+			(context) => {
+				sent = context.messages.filter((message) => message.role === "user").at(-1);
+				return fauxAssistantMessage("second");
+			},
+		]);
+		await harness.session.prompt("compare queued images");
+		expect(sent?.content).toEqual([
+			{ type: "text", text: `Before:\n\n${[omission, ...hints].join("\n")}` },
+			{ type: "text", text: "Between:" },
+			image,
+			{ type: "text", text: "After:" },
+		]);
+	});
 
 	it("waits for normalization before a turn checkpoint and preserves the remaining native queue", async () => {
 		const image = await createImage();
