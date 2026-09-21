@@ -1203,10 +1203,19 @@ export class AgentSession {
 			} finally {
 				this._isEmittingAgentSettled = false;
 			}
-			// Keep the checkpoint barrier across all accepted deferred work, including
-			// the idle intervals between runs. Settled observers never re-enter dispatch.
+			// Deferred closures are not checkpoint queues. Keep the barrier until the last
+			// action starts; its native run then owns ordinary turn and settlement cuts.
 			const deferred = this._deferredSettledActions.splice(0);
+			const last = deferred.pop();
 			for (const action of deferred) await action();
+			if (last) {
+				this._settling--;
+				try {
+					await last();
+				} finally {
+					this._settling++;
+				}
+			}
 		} finally {
 			this._settling--;
 			await this._checkpointSafePoint("settled");
@@ -2471,18 +2480,10 @@ export class AgentSession {
 	}
 
 	private _appendCustomMessage(appMessage: CustomMessage): void {
-		try {
-			this.sessionManager.appendCustomMessageEntry(
-				appMessage.customType,
-				appMessage.content,
-				appMessage.display,
-				appMessage.details,
-			);
-		} finally {
-			// The journal accepts entries before I/O. Even a failed append must leave
-			// the inspection cache consistent with that accepted, retryable history.
-			this._refreshFinalizedContext();
-		}
+		// Appending one accepted message does not change the earlier projection. Keep it
+		// inspectable even if the journal's subsequent disk write fails.
+		this.agent.state.messages.push(appMessage);
+		this._persistMessage(appMessage);
 		this._emit({ type: "message_start", message: appMessage });
 		this._emit({ type: "message_end", message: appMessage });
 	}

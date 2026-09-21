@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type ImageContent, Type } from "@earendil-works/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.ts";
 import { openSessionCheckpoint, readSessionCheckpoint, writeSessionCheckpoint } from "../../src/core/checkpoint.ts";
@@ -473,6 +473,65 @@ describe("native working-session checkpoint", () => {
 		expect(h.faux.state.callCount).toBe(2);
 		hold.release();
 		await running;
+	});
+
+	it.each([1, 2])("allows a turn hold after admitting the last of %i deferred runs", async (count) => {
+		const entered = Array.from({ length: count }, deferred);
+		const release = Array.from({ length: count }, deferred);
+		let submitted = false;
+		const h = await setup({
+			extensionFactories: [
+				(pi) => {
+					pi.registerTool({
+						name: "noop",
+						label: "Noop",
+						description: "Checkpoint boundary",
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
+					});
+					pi.on("agent_settled", () => {
+						if (submitted) return;
+						submitted = true;
+						for (let index = 0; index < count; index++) pi.sendUserMessage(`deferred ${index}`);
+					});
+				},
+			],
+		});
+		h.setResponses([
+			fauxAssistantMessage("initial answer"),
+			...entered.map((gate, index) => async () => {
+				gate.resolve();
+				await release[index].promise;
+				return index === count - 1
+					? fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })
+					: fauxAssistantMessage("earlier deferred answer");
+			}),
+			fauxAssistantMessage("final answer"),
+		]);
+		const running = h.session.prompt("start");
+		await entered[0].promise;
+		let captured = false;
+		const pending = h.session.acquireCheckpoint({ boundary: "turn" }).then((hold) => {
+			captured = true;
+			return hold;
+		});
+		for (let index = 0; index < count - 1; index++) {
+			release[index].resolve();
+			await entered[index + 1].promise;
+			expect(captured).toBe(false);
+		}
+		release[count - 1].resolve();
+		const hold = await pending;
+		try {
+			expect(hold.checkpoint.boundary).toBe("turn");
+			expect(hold.checkpoint.settled).toBe(false);
+			expect(h.faux.state.callCount).toBe(count + 1);
+			expect(h.getPendingResponseCount()).toBe(1);
+		} finally {
+			hold.release();
+			await running;
+		}
+		expect(h.session.getLastAssistantText()).toBe("final answer");
 	});
 
 	it("settings/capture failures release ingress without clearing accepted queues", async () => {
