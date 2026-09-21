@@ -4,18 +4,32 @@ import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, InputEvent } from "../../src/core/extensions/index.ts";
 import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
+const processImage = vi.hoisted(() =>
+	vi.fn(async (_bytes: Uint8Array, mimeType: string) => ({
+		ok: true as const,
+		data: Buffer.from("normalized").toString("base64"),
+		mimeType,
+		hints: [],
+	})),
+);
+vi.mock("../../src/utils/image-process.ts", () => ({ processImage }));
+
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
 describe("AgentSession prompt characterization", () => {
 	const harnesses: Harness[] = [];
 	const tempDirs: string[] = [];
 
 	afterEach(() => {
+		processImage.mockClear();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
@@ -383,6 +397,114 @@ describe("AgentSession prompt characterization", () => {
 		});
 
 		expect(sawImage).toBe(true);
+	});
+
+	// Regression test for https://github.com/earendil-works/pi/issues/9631
+	it("uses the model selected by before_agent_start for image normalization", async () => {
+		let strictModel: Model<string> | undefined;
+		const harness = await createHarness({
+			models: [{ id: "wide" }, { id: "strict" }],
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async () => {
+						if (!strictModel) throw new Error("Expected strict model");
+						await pi.setModel(strictModel);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		strictModel = harness.getModel("strict");
+		if (!strictModel) throw new Error("Expected strict model");
+		const resizeOptions = { maxWidth: 1000, maxHeight: 1000, maxBytes: 500000, jpegQuality: 70 };
+		strictModel.inputLimits = { images: { resize: resizeOptions } };
+		harness.setResponses([fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("inspect", {
+			images: [{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+		});
+
+		expect(harness.session.model?.id).toBe("strict");
+		expect(processImage).toHaveBeenCalledWith(expect.any(Uint8Array), "image/png", {
+			autoResizeImages: true,
+			resizeOptions,
+		});
+		const userMessage = harness.session.messages.find((message) => message.role === "user");
+		expect(userMessage?.content).toContainEqual({
+			type: "image",
+			data: Buffer.from("normalized").toString("base64"),
+			mimeType: "image/png",
+		});
+	});
+
+	it.each(["cancel", "failure"] as const)("preserves prompt ownership across image processing %s", async (action) => {
+		let entered!: () => void;
+		let release!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		processImage.mockImplementationOnce(async () => {
+			entered();
+			await held;
+			if (action === "failure") throw new Error("image processing failed");
+			return { ok: true, data: "bm9ybWFsaXplZA==", mimeType: "image/png", hints: [] };
+		});
+		const aside = (content: string) => ({ customType: "image-admission", content, display: false });
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) => {
+						if (event.prompt === "first") pi.sendMessage(aside("hook aside"), { deliverAs: "nextTurn" });
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.sendCustomMessage(aside("before aside"), { deliverAs: "nextTurn" });
+		const preflight: boolean[] = [];
+		const run = Promise.allSettled([
+			harness.session.prompt("first", {
+				images: [{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+				preflightResult: (accepted) => preflight.push(accepted),
+			}),
+		]);
+		try {
+			await started;
+			expect(harness.session.isIdle).toBe(false);
+			expect(harness.session.pendingInputCount).toBe(1);
+			const abort = action === "cancel" ? harness.session.abort() : undefined;
+			release();
+			const result = await run;
+			await abort;
+			expect(result).toEqual([
+				{
+					status: "rejected",
+					reason: expect.objectContaining(
+						action === "cancel" ? { name: "AbortError" } : { message: "image processing failed" },
+					),
+				},
+			]);
+			expect(preflight).toEqual([false]);
+			expect(harness.faux.state.callCount).toBe(0);
+			expect(harness.session.pendingNextTurnCount).toBe(2);
+			expect(harness.session.pendingInputCount).toBe(0);
+			expect(harness.session.isIdle).toBe(true);
+			expect(harness.session.messages).toEqual([]);
+
+			harness.setResponses([fauxAssistantMessage("recovered")]);
+			await harness.session.prompt("retry");
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.session.pendingNextTurnCount).toBe(0);
+			const texts = harness.session.messages.map(getMessageText);
+			expect(texts.filter((text) => text === "before aside")).toHaveLength(1);
+			expect(texts.filter((text) => text === "hook aside")).toHaveLength(1);
+		} finally {
+			release();
+			await run;
+		}
 	});
 
 	it("expands skill commands before sending the prompt", async () => {

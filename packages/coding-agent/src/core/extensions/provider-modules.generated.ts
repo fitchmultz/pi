@@ -36,57 +36,59 @@ import * as module33 from "@earendil-works/pi-ai/providers/huggingface.models";
 import * as module34 from "@earendil-works/pi-ai/providers/images/register-builtins";
 import * as module35 from "@earendil-works/pi-ai/providers/kimi-coding";
 import * as module36 from "@earendil-works/pi-ai/providers/kimi-coding.models";
-import * as module37 from "@earendil-works/pi-ai/providers/minimax";
-import * as module40 from "@earendil-works/pi-ai/providers/minimax.models";
-import * as module38 from "@earendil-works/pi-ai/providers/minimax-cn";
-import * as module39 from "@earendil-works/pi-ai/providers/minimax-cn.models";
-import * as module41 from "@earendil-works/pi-ai/providers/mistral";
-import * as module42 from "@earendil-works/pi-ai/providers/mistral.models";
-import * as module43 from "@earendil-works/pi-ai/providers/moonshotai";
-import * as module46 from "@earendil-works/pi-ai/providers/moonshotai.models";
-import * as module44 from "@earendil-works/pi-ai/providers/moonshotai-cn";
-import * as module45 from "@earendil-works/pi-ai/providers/moonshotai-cn.models";
-import * as module47 from "@earendil-works/pi-ai/providers/nvidia";
-import * as module48 from "@earendil-works/pi-ai/providers/nvidia.models";
-import * as module49 from "@earendil-works/pi-ai/providers/openai";
-import * as module52 from "@earendil-works/pi-ai/providers/openai.models";
-import * as module50 from "@earendil-works/pi-ai/providers/openai-codex";
-import * as module51 from "@earendil-works/pi-ai/providers/openai-codex.models";
-import * as module53 from "@earendil-works/pi-ai/providers/opencode";
-import * as module57 from "@earendil-works/pi-ai/providers/opencode.models";
-import * as module54 from "@earendil-works/pi-ai/providers/opencode-go";
-import * as module55 from "@earendil-works/pi-ai/providers/opencode-go.models";
-import * as module56 from "@earendil-works/pi-ai/providers/opencode-headers";
-import * as module58 from "@earendil-works/pi-ai/providers/openrouter";
-import * as module60 from "@earendil-works/pi-ai/providers/openrouter.models";
-import * as module59 from "@earendil-works/pi-ai/providers/openrouter-images";
-import * as module61 from "@earendil-works/pi-ai/providers/qwen-token-plan";
-import * as module66 from "@earendil-works/pi-ai/providers/qwen-token-plan.models";
-import * as module62 from "@earendil-works/pi-ai/providers/qwen-token-plan-cn";
-import * as module63 from "@earendil-works/pi-ai/providers/qwen-token-plan-cn.models";
-import * as module64 from "@earendil-works/pi-ai/providers/qwen-token-plan-individual";
-import * as module65 from "@earendil-works/pi-ai/providers/qwen-token-plan-individual.models";
-import * as module67 from "@earendil-works/pi-ai/providers/radius";
-import * as module69 from "@earendil-works/pi-ai/providers/radius.models";
-import * as module68 from "@earendil-works/pi-ai/providers/radius-config";
-import * as module70 from "@earendil-works/pi-ai/providers/together";
-import * as module71 from "@earendil-works/pi-ai/providers/together.models";
-import * as module72 from "@earendil-works/pi-ai/providers/vercel-ai-gateway";
-import * as module73 from "@earendil-works/pi-ai/providers/vercel-ai-gateway.models";
-import * as module74 from "@earendil-works/pi-ai/providers/xai";
-import * as module75 from "@earendil-works/pi-ai/providers/xai.models";
-import * as module76 from "@earendil-works/pi-ai/providers/xiaomi";
-import * as module83 from "@earendil-works/pi-ai/providers/xiaomi.models";
-import * as module77 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-ams";
-import * as module78 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-ams.models";
-import * as module79 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-cn";
-import * as module80 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-cn.models";
-import * as module81 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-sgp";
-import * as module82 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-sgp.models";
-import * as module84 from "@earendil-works/pi-ai/providers/zai";
-import * as module87 from "@earendil-works/pi-ai/providers/zai.models";
-import * as module85 from "@earendil-works/pi-ai/providers/zai-coding-cn";
-import * as module86 from "@earendil-works/pi-ai/providers/zai-coding-cn.models";
+import * as module37 from "@earendil-works/pi-ai/providers/meta";
+import * as module38 from "@earendil-works/pi-ai/providers/meta.models";
+import * as module39 from "@earendil-works/pi-ai/providers/minimax";
+import * as module42 from "@earendil-works/pi-ai/providers/minimax.models";
+import * as module40 from "@earendil-works/pi-ai/providers/minimax-cn";
+import * as module41 from "@earendil-works/pi-ai/providers/minimax-cn.models";
+import * as module43 from "@earendil-works/pi-ai/providers/mistral";
+import * as module44 from "@earendil-works/pi-ai/providers/mistral.models";
+import * as module45 from "@earendil-works/pi-ai/providers/moonshotai";
+import * as module48 from "@earendil-works/pi-ai/providers/moonshotai.models";
+import * as module46 from "@earendil-works/pi-ai/providers/moonshotai-cn";
+import * as module47 from "@earendil-works/pi-ai/providers/moonshotai-cn.models";
+import * as module49 from "@earendil-works/pi-ai/providers/nvidia";
+import * as module50 from "@earendil-works/pi-ai/providers/nvidia.models";
+import * as module51 from "@earendil-works/pi-ai/providers/openai";
+import * as module54 from "@earendil-works/pi-ai/providers/openai.models";
+import * as module52 from "@earendil-works/pi-ai/providers/openai-codex";
+import * as module53 from "@earendil-works/pi-ai/providers/openai-codex.models";
+import * as module55 from "@earendil-works/pi-ai/providers/opencode";
+import * as module59 from "@earendil-works/pi-ai/providers/opencode.models";
+import * as module56 from "@earendil-works/pi-ai/providers/opencode-go";
+import * as module57 from "@earendil-works/pi-ai/providers/opencode-go.models";
+import * as module58 from "@earendil-works/pi-ai/providers/opencode-headers";
+import * as module60 from "@earendil-works/pi-ai/providers/openrouter";
+import * as module62 from "@earendil-works/pi-ai/providers/openrouter.models";
+import * as module61 from "@earendil-works/pi-ai/providers/openrouter-images";
+import * as module63 from "@earendil-works/pi-ai/providers/qwen-token-plan";
+import * as module68 from "@earendil-works/pi-ai/providers/qwen-token-plan.models";
+import * as module64 from "@earendil-works/pi-ai/providers/qwen-token-plan-cn";
+import * as module65 from "@earendil-works/pi-ai/providers/qwen-token-plan-cn.models";
+import * as module66 from "@earendil-works/pi-ai/providers/qwen-token-plan-individual";
+import * as module67 from "@earendil-works/pi-ai/providers/qwen-token-plan-individual.models";
+import * as module69 from "@earendil-works/pi-ai/providers/radius";
+import * as module71 from "@earendil-works/pi-ai/providers/radius.models";
+import * as module70 from "@earendil-works/pi-ai/providers/radius-config";
+import * as module72 from "@earendil-works/pi-ai/providers/together";
+import * as module73 from "@earendil-works/pi-ai/providers/together.models";
+import * as module74 from "@earendil-works/pi-ai/providers/vercel-ai-gateway";
+import * as module75 from "@earendil-works/pi-ai/providers/vercel-ai-gateway.models";
+import * as module76 from "@earendil-works/pi-ai/providers/xai";
+import * as module77 from "@earendil-works/pi-ai/providers/xai.models";
+import * as module78 from "@earendil-works/pi-ai/providers/xiaomi";
+import * as module85 from "@earendil-works/pi-ai/providers/xiaomi.models";
+import * as module79 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-ams";
+import * as module80 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-ams.models";
+import * as module81 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-cn";
+import * as module82 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-cn.models";
+import * as module83 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-sgp";
+import * as module84 from "@earendil-works/pi-ai/providers/xiaomi-token-plan-sgp.models";
+import * as module86 from "@earendil-works/pi-ai/providers/zai";
+import * as module89 from "@earendil-works/pi-ai/providers/zai.models";
+import * as module87 from "@earendil-works/pi-ai/providers/zai-coding-cn";
+import * as module88 from "@earendil-works/pi-ai/providers/zai-coding-cn.models";
 
 export const providerModules: Record<string, unknown> = {
 	all: module0,
@@ -126,55 +128,57 @@ export const providerModules: Record<string, unknown> = {
 	"images/register-builtins": module34,
 	"kimi-coding": module35,
 	"kimi-coding.models": module36,
-	minimax: module37,
-	"minimax-cn": module38,
-	"minimax-cn.models": module39,
-	"minimax.models": module40,
-	mistral: module41,
-	"mistral.models": module42,
-	moonshotai: module43,
-	"moonshotai-cn": module44,
-	"moonshotai-cn.models": module45,
-	"moonshotai.models": module46,
-	nvidia: module47,
-	"nvidia.models": module48,
-	openai: module49,
-	"openai-codex": module50,
-	"openai-codex.models": module51,
-	"openai.models": module52,
-	opencode: module53,
-	"opencode-go": module54,
-	"opencode-go.models": module55,
-	"opencode-headers": module56,
-	"opencode.models": module57,
-	openrouter: module58,
-	"openrouter-images": module59,
-	"openrouter.models": module60,
-	"qwen-token-plan": module61,
-	"qwen-token-plan-cn": module62,
-	"qwen-token-plan-cn.models": module63,
-	"qwen-token-plan-individual": module64,
-	"qwen-token-plan-individual.models": module65,
-	"qwen-token-plan.models": module66,
-	radius: module67,
-	"radius-config": module68,
-	"radius.models": module69,
-	together: module70,
-	"together.models": module71,
-	"vercel-ai-gateway": module72,
-	"vercel-ai-gateway.models": module73,
-	xai: module74,
-	"xai.models": module75,
-	xiaomi: module76,
-	"xiaomi-token-plan-ams": module77,
-	"xiaomi-token-plan-ams.models": module78,
-	"xiaomi-token-plan-cn": module79,
-	"xiaomi-token-plan-cn.models": module80,
-	"xiaomi-token-plan-sgp": module81,
-	"xiaomi-token-plan-sgp.models": module82,
-	"xiaomi.models": module83,
-	zai: module84,
-	"zai-coding-cn": module85,
-	"zai-coding-cn.models": module86,
-	"zai.models": module87,
+	meta: module37,
+	"meta.models": module38,
+	minimax: module39,
+	"minimax-cn": module40,
+	"minimax-cn.models": module41,
+	"minimax.models": module42,
+	mistral: module43,
+	"mistral.models": module44,
+	moonshotai: module45,
+	"moonshotai-cn": module46,
+	"moonshotai-cn.models": module47,
+	"moonshotai.models": module48,
+	nvidia: module49,
+	"nvidia.models": module50,
+	openai: module51,
+	"openai-codex": module52,
+	"openai-codex.models": module53,
+	"openai.models": module54,
+	opencode: module55,
+	"opencode-go": module56,
+	"opencode-go.models": module57,
+	"opencode-headers": module58,
+	"opencode.models": module59,
+	openrouter: module60,
+	"openrouter-images": module61,
+	"openrouter.models": module62,
+	"qwen-token-plan": module63,
+	"qwen-token-plan-cn": module64,
+	"qwen-token-plan-cn.models": module65,
+	"qwen-token-plan-individual": module66,
+	"qwen-token-plan-individual.models": module67,
+	"qwen-token-plan.models": module68,
+	radius: module69,
+	"radius-config": module70,
+	"radius.models": module71,
+	together: module72,
+	"together.models": module73,
+	"vercel-ai-gateway": module74,
+	"vercel-ai-gateway.models": module75,
+	xai: module76,
+	"xai.models": module77,
+	xiaomi: module78,
+	"xiaomi-token-plan-ams": module79,
+	"xiaomi-token-plan-ams.models": module80,
+	"xiaomi-token-plan-cn": module81,
+	"xiaomi-token-plan-cn.models": module82,
+	"xiaomi-token-plan-sgp": module83,
+	"xiaomi-token-plan-sgp.models": module84,
+	"xiaomi.models": module85,
+	zai: module86,
+	"zai-coding-cn": module87,
+	"zai-coding-cn.models": module88,
+	"zai.models": module89,
 };
