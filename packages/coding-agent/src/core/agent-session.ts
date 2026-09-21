@@ -61,6 +61,7 @@ import {
 import { APP_NAME } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
+import { processImage } from "../utils/image-process.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
@@ -632,8 +633,10 @@ export class AgentSession {
 
 			const content = hookResult?.content ?? result.content ?? [];
 			// Runs after the extension hook so images injected or replaced by extensions are normalized too.
+			const resizeOptions = this.model?.inputLimits?.images?.resize;
 			const normalizedContent = await normalizeToolResultImages(content, {
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
+				...(resizeOptions ? { resizeOptions } : {}),
 			});
 
 			if (!hookResult && normalizedContent === content) {
@@ -1727,6 +1730,28 @@ export class AgentSession {
 		return { text, images };
 	}
 
+	private async _normalizePromptImages(
+		images: ImageContent[] | undefined,
+	): Promise<{ images: ImageContent[]; hints: string[] }> {
+		if (!images) return { images: [], hints: [] };
+
+		const normalizedImages: ImageContent[] = [];
+		const hints: string[] = [];
+		for (const image of images) {
+			const processed = await processImage(Buffer.from(image.data, "base64"), image.mimeType, {
+				autoResizeImages: this.settingsManager.getImageAutoResize(),
+				resizeOptions: this.model?.inputLimits?.images?.resize,
+			});
+			if (!processed.ok) {
+				hints.push(processed.message);
+				continue;
+			}
+			normalizedImages.push({ type: "image", data: processed.data, mimeType: processed.mimeType });
+			hints.push(...processed.hints);
+		}
+		return { images: normalizedImages, hints };
+	}
+
 	/**
 	 * Send a prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
@@ -1833,16 +1858,23 @@ export class AgentSession {
 					throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 				}
 
-				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-				if (currentImages) {
-					userContent.push(...currentImages);
-				}
-				const messages: AgentMessage[] = [{ role: "user", content: userContent, timestamp: Date.now() }];
-
 				// Consume only these asides after startup succeeds; asides added by the hook stay queued.
-				const nextTurnCount = this._pendingNextTurnMessages.length;
-				messages.push(...this._pendingNextTurnMessages);
+				const nextTurnMessages = this._pendingNextTurnMessages.slice();
 				const startupMessages = await this._prepareAgentStart(expandedText, currentImages);
+				signal.throwIfAborted();
+				// Hook-driven model selection determines the resize profile for request and history.
+				const normalized = await this._normalizePromptImages(currentImages);
+				signal.throwIfAborted();
+				const userText =
+					normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
+				const userContent: (TextContent | ImageContent)[] = [
+					{ type: "text", text: userText },
+					...normalized.images,
+				];
+				const messages: AgentMessage[] = [
+					{ role: "user", content: userContent, timestamp: Date.now() },
+					...nextTurnMessages,
+				];
 				// Renew request-only guidance before checking the budget, but keep compaction
 				// inside admission. Provider preflight also counts the new input and asides.
 				const lastAssistant = this._findLastAssistantMessage();
@@ -1856,7 +1888,7 @@ export class AgentSession {
 					preflightResult(true);
 					signal.throwIfAborted();
 					// No await between consuming these asides and handing them to Agent.
-					this._pendingNextTurnMessages.splice(0, nextTurnCount);
+					this._pendingNextTurnMessages.splice(0, nextTurnMessages.length);
 					return messages;
 				};
 			});
