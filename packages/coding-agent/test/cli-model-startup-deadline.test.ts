@@ -25,6 +25,9 @@ vi.mock("../src/modes/index.ts", () => ({
 		constructor(runtime: AgentSessionRuntime) {
 			this.runtime = runtime;
 		}
+		init() {
+			return Promise.resolve();
+		}
 		run() {
 			return ui.run(this.runtime);
 		}
