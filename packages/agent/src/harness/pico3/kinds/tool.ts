@@ -447,10 +447,14 @@ function bound(
 	}
 	const bytes = new TextEncoder().encode(text);
 	if (bytes.length > bounds.maxBytes) {
-		droppedBytes = bytes.length - bounds.maxBytes;
-		text = new TextDecoder().decode(
-			bounds.retain === "head" ? bytes.subarray(0, bounds.maxBytes) : bytes.subarray(-bounds.maxBytes),
-		);
+		if (bounds.retain === "head") {
+			text = new TextDecoder().decode(bytes.subarray(0, bounds.maxBytes), { stream: true });
+		} else {
+			let start = Math.max(0, bytes.length - bounds.maxBytes);
+			while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++;
+			text = new TextDecoder().decode(bytes.subarray(start));
+		}
+		droppedBytes = bytes.length - new TextEncoder().encode(text).length;
 	}
 	if (droppedBytes === 0 && droppedLines === 0) return { result };
 	let textIndex = -1;

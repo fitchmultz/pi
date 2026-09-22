@@ -14,8 +14,8 @@ describe("regression #5208: late bash output callbacks", () => {
 	it("ignores output callbacks after bash operations resolve", async () => {
 		const operations: BashOperations = {
 			exec: async (_command, _cwd, { onData }) => {
-				onData(Buffer.from("before\n", "utf-8"));
-				setTimeout(() => onData(Buffer.from("late\n", "utf-8")), 0);
+				onData(Buffer.from("before\n", "utf-8"), "stdout");
+				setTimeout(() => onData(Buffer.from("late\n", "utf-8"), "stdout"), 0);
 				return { exitCode: 0 };
 			},
 		};

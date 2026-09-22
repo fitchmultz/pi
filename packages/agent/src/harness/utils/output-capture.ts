@@ -30,7 +30,6 @@ export class OutputCapture {
 	readonly #context: Context;
 	readonly #onUpdate: OutputCaptureHandlers["onUpdate"];
 
-	readonly #decoder = new TextDecoder();
 	#buffer = "";
 	#bufferBytes = 0;
 	#totalBytes = 0;
@@ -38,6 +37,7 @@ export class OutputCapture {
 	#endsWithNewline = true;
 	#currentLineBytes = 0;
 	#spillPath: string | undefined;
+	#finished = false;
 	#disposed = false;
 	readonly #publisher: AdaptivePublisher<ShellOutputView, ShellOutputUpdate>;
 
@@ -68,19 +68,14 @@ export class OutputCapture {
 		return this.#totalBytes > this.#maxBytes || this.#totalLines() > this.#maxLines;
 	}
 
-	push(chunk: string | Uint8Array): void {
-		if (this.#disposed) return;
-		if (typeof chunk === "string") {
-			this.#appendText(this.#decoder.decode());
-			this.#appendText(chunk);
-			return;
-		}
-		this.#appendText(this.#decoder.decode(chunk, { stream: true }));
+	push(chunk: string): void {
+		if (this.#disposed || this.#finished) return;
+		this.#appendText(chunk);
 	}
 
 	finish(): void {
-		if (this.#disposed) return;
-		this.#appendText(this.#decoder.decode());
+		if (this.#disposed || this.#finished) return;
+		this.#finished = true;
 	}
 
 	setSpillPath(path: string): void {
