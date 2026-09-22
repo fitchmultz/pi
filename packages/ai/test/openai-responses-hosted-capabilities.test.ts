@@ -6,7 +6,12 @@ import { createResponsesControl } from "../src/api/openai-responses-control.ts";
 import { convertResponsesMessages, convertResponsesTools } from "../src/api/openai-responses-shared.ts";
 import { getBuiltinModel } from "../src/providers/all.ts";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "../src/types.ts";
-import { mergeAssistantCheckpoint, normalizeContext, toToolDeclaration } from "../src/utils/transcript.ts";
+import {
+	mergeAssistantCheckpoint,
+	normalizeContext,
+	snapshotResponsesContent,
+	toToolDeclaration,
+} from "../src/utils/transcript.ts";
 import { createResponsesServer, replyWithOutput, textOutput } from "./responses-websocket-server.ts";
 
 const providers = new Set(["openai"]);
@@ -296,7 +301,10 @@ describe("hosted Responses state", () => {
 					(part): part is ToolCall => part.type === "toolCall" && part.id === result.toolCallId,
 				)!;
 				admitted.executionStarted = true;
-				if (status === "pending") answer.content = [admitted];
+				if (status === "pending") {
+					answer.content = [admitted];
+					answer.responsesContent = snapshotResponsesContent(answer.content);
+				}
 				const replay = convertResponsesMessages(
 					server.model,
 					normalizeContext({ messages: [answer, result] }),

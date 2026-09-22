@@ -56,6 +56,7 @@ import {
 	normalizeContext,
 	resolveTranscript,
 	resolveTranscriptTools,
+	snapshotResponsesContent,
 	withoutToolSearchState,
 } from "../utils/transcript.ts";
 import {
@@ -340,7 +341,28 @@ export function convertResponsesMessages<TApi extends Api>(
 	};
 
 	const supportsAsyncTools = model.compat && "supportsAsyncTools" in model.compat && model.compat.supportsAsyncTools;
-	const transformedMessages = transformMessages(normalizedContext.messages, model, normalizeToolCallId);
+	const replayMessages = normalizedContext.messages.map((message) => {
+		if (message.role !== "assistant" || !message.responsesOutput) return message;
+		if (
+			message.responsesContent &&
+			JSON.stringify(message.responsesContent) === JSON.stringify(snapshotResponsesContent(message.content))
+		)
+			return message;
+		// A content replacement may redact data also present in programs or encrypted items.
+		// Reconstruct this message solely from edited content; never forward its old native state.
+		return {
+			...message,
+			responsesOutput: undefined,
+			responsesContent: undefined,
+			content: message.content.flatMap((block): AssistantMessage["content"] => {
+				if (block.type === "text") return [{ type: "text", text: block.text }];
+				if (block.type === "thinking") return block.thinking ? [{ type: "text", text: block.thinking }] : [];
+				const { responsesItem: _item, thoughtSignature: _signature, ...call } = block;
+				return [call];
+			}),
+		};
+	});
+	const transformedMessages = transformMessages(replayMessages, model, normalizeToolCallId);
 	const injectedCallIds = new Set(
 		transformedMessages.flatMap((message) =>
 			message.role === "assistant" && canReplayResponses(message, model)
@@ -808,29 +830,36 @@ type ResponsesOutputSlot =
 type ToolCallOutputSlot = Extract<ResponsesOutputSlot, { type: "toolCall" }>;
 
 /** Some gateways send completed items only in the terminal frame. Project each item exactly once. */
-async function* completedResponseItems(events: AsyncIterable<ResponsesEvent>): AsyncGenerator<ResponsesEvent> {
+async function* completedResponseItems(
+	events: AsyncIterable<ResponsesEvent>,
+	onClose: () => void,
+): AsyncGenerator<ResponsesEvent> {
 	const completed = new Set<string>();
-	for await (const event of events) {
-		if (event.type === "response.created") completed.clear();
-		if (event.type === "response.output_item.done")
-			completed.add(event.item.id ?? `${event.output_index}:${event.item.type}`);
-		if (
-			event.type === "response.completed" ||
-			event.type === "response.incomplete" ||
-			event.type === "response.failed"
-		) {
-			for (const [index, item] of (event.response.output ?? []).entries()) {
-				if (!completed.has(item.id ?? `${index}:${item.type}`))
-					yield {
-						type: "response.output_item.done",
-						output_index: index,
-						item,
-						sequence_number: event.sequence_number,
-						incompleteItem: event.type !== "response.completed",
-					};
+	try {
+		for await (const event of events) {
+			if (event.type === "response.created") completed.clear();
+			if (event.type === "response.output_item.done")
+				completed.add(event.item.id ?? `${event.output_index}:${event.item.type}`);
+			if (
+				event.type === "response.completed" ||
+				event.type === "response.incomplete" ||
+				event.type === "response.failed"
+			) {
+				for (const [index, item] of (event.response.output ?? []).entries()) {
+					if (!completed.has(item.id ?? `${index}:${item.type}`))
+						yield {
+							type: "response.output_item.done",
+							output_index: index,
+							item,
+							sequence_number: event.sequence_number,
+							incompleteItem: event.type !== "response.completed",
+						};
+				}
 			}
+			yield event;
 		}
-		yield event;
+	} finally {
+		onClose();
 	}
 }
 
@@ -1110,9 +1139,12 @@ export async function processResponsesStream<TApi extends Api>(
 					(!("agent" in item) || !item.agent || item.agent.agent_name === "/root") &&
 					item.phase !== "commentary",
 			);
+		output.responsesContent = snapshotResponsesContent(output.content);
 	};
 
-	for await (const event of completedResponseItems(openaiStream)) {
+	for await (const event of completedResponseItems(openaiStream, () => {
+		if (output.responsesOutput) output.responsesContent = snapshotResponsesContent(output.content);
+	})) {
 		if (options?.diagnostics) recordResponsesEvent(options.diagnostics, event);
 		if (event.injectedInput) {
 			injections.push({ index: event.injectedInput.afterOutputIndex, input: event.injectedInput.items });
@@ -1298,6 +1330,7 @@ export async function processResponsesStream<TApi extends Api>(
 				});
 				outputSlots.delete(event.output_index);
 			}
+			output.responsesContent = snapshotResponsesContent(output.content);
 		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
 			finalizeResponse(event.response);
 			if (options?.continuesResponse?.()) {

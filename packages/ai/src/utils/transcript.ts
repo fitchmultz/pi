@@ -14,6 +14,26 @@ import { toolKey } from "./tool-identity.ts";
 
 export type { TranscriptContext } from "../types.ts";
 
+/** Retain exact provider content so edits cannot silently replay stale opaque Responses state. */
+export function snapshotResponsesContent(content: AssistantMessage["content"]): AssistantMessage["content"] {
+	return structuredClone(
+		content.map((block) => {
+			if (block.type !== "toolCall") return block;
+			return {
+				type: block.type,
+				id: block.id,
+				name: block.name,
+				arguments: block.arguments,
+				...(block.namespace === undefined ? {} : { namespace: block.namespace }),
+				...(block.kind === undefined ? {} : { kind: block.kind }),
+				...(block.async === undefined ? {} : { async: block.async }),
+				...(block.streaming === undefined ? {} : { streaming: block.streaming }),
+				...(block.thoughtSignature === undefined ? {} : { thoughtSignature: block.thoughtSignature }),
+			};
+		}),
+	);
+}
+
 /** Coalesce provider frames and execution checkpoints without losing final content or admitted calls. */
 export function mergeAssistantCheckpoint(message: AssistantMessage, checkpoint: AssistantMessage): AssistantMessage {
 	const latest =
@@ -171,6 +191,9 @@ export function withoutToolSearchState<T extends { role: string }>(messages: rea
 				return message;
 			return {
 				...message,
+				responsesContent: assistant.responsesContent?.map((block) =>
+					block.type === "toolCall" && block.kind === "toolSearch" ? { ...block, kind: undefined } : block,
+				),
 				content: assistant.content.map((block) =>
 					block.type === "toolCall" && block.kind === "toolSearch" ? { ...block, kind: undefined } : block,
 				),

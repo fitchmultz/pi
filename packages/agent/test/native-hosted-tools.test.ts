@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { stream } from "../../ai/src/api/openai-responses.ts";
 import { convertResponsesMessages } from "../../ai/src/api/openai-responses-shared.ts";
-import { normalizeContext } from "../../ai/src/utils/transcript.ts";
+import { normalizeContext, snapshotResponsesContent } from "../../ai/src/utils/transcript.ts";
 import { createResponsesServer, replyWithOutput, textOutput } from "../../ai/test/responses-websocket-server.ts";
 import { Agent } from "../src/agent.ts";
 import type { AgentEvent, AgentTool } from "../src/types.ts";
@@ -462,6 +462,7 @@ describe("hosted tool execution", () => {
 				{ apiKey: "fixture", transport: "sse" },
 			).result();
 			saved.content = [];
+			saved.responsesContent = [];
 			saved.responsesOutput = [program as NonNullable<AssistantMessage["responsesOutput"]>[number]];
 			saved.needsContinuation = true;
 			agent.state.messages = [saved];
@@ -481,6 +482,7 @@ describe("hosted tool execution", () => {
 				{
 					...saved,
 					content: [pending],
+					responsesContent: snapshotResponsesContent([pending]),
 					stopReason: "error",
 					responsesOutput: [program, item] as AssistantMessage["responsesOutput"],
 				},
@@ -507,6 +509,7 @@ describe("hosted tool execution", () => {
 					...saved,
 					stopReason: "pending",
 					content: [{ ...pending, executionStarted: undefined }],
+					responsesContent: snapshotResponsesContent([pending]),
 					responsesOutput: [program, item] as AssistantMessage["responsesOutput"],
 				},
 			];

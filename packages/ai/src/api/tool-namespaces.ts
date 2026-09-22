@@ -113,6 +113,9 @@ export function withToolNamespaces(
 					return [
 						{
 							...message,
+							responsesContent: message.responsesContent?.map((block) =>
+								block.type === "toolCall" ? { ...encode(block), kind: native ? block.kind : undefined } : block,
+							),
 							content: (message.content ?? []).map((block) =>
 								block.type === "toolCall" ? { ...encode(block), kind: native ? block.kind : undefined } : block,
 							),
@@ -138,6 +141,9 @@ export function withToolNamespaces(
 			};
 			const restore = (message: AssistantMessage): AssistantMessage => ({
 				...message,
+				responsesContent: message.responsesContent?.map((block) =>
+					block.type === "toolCall" ? decode(block) : block,
+				),
 				content: message.content.map((block) => (block.type === "toolCall" ? decode(block) : block)),
 			});
 			const mapped = normalizeContext({ messages });

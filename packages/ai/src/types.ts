@@ -578,6 +578,8 @@ export interface AssistantMessage {
 	webSearch?: ResponsesWebSearchMetadata;
 	/** Ordered authoritative Responses output, including acknowledged injected inputs. Content is its UI/execution projection. */
 	responsesOutput?: (BetaResponseInputItem | BetaResponseOutputItem)[];
+	/** Original projection, excluding execution bookkeeping. Native replay is invalid after content edits. */
+	responsesContent?: AssistantMessage["content"];
 	/** A successful hosted response requires another request before its final answer. */
 	needsContinuation?: boolean;
 	usage: Usage;

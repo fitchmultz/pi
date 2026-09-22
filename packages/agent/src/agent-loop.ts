@@ -14,6 +14,7 @@ import {
 	normalizeContext,
 	type ResponseControl,
 	type SystemMessage,
+	snapshotResponsesContent,
 	type Tool,
 	type ToolResultMessage,
 	type ToolStateChanges,
@@ -811,6 +812,8 @@ async function streamAssistantResponse(
 						...partialMessage,
 						content: partialMessage.content.filter((_block, index) => completeContent.has(index)),
 					};
+					if (checkpoint.responsesOutput)
+						checkpoint.responsesContent = snapshotResponsesContent(checkpoint.content);
 					await startAsyncCall(checkpoint, event.toolCall, scope);
 					break;
 				}

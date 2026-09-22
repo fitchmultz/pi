@@ -6,10 +6,56 @@ import { type AssistantMessage, fauxAssistantMessage, type ToolCall } from "@ear
 import { Type } from "typebox";
 import { expect, it, vi } from "vitest";
 import { convertResponsesMessages } from "../../../ai/src/api/openai-responses-shared.ts";
-import { normalizeContext } from "../../../ai/src/utils/transcript.ts";
+import { getBuiltinModel } from "../../../ai/src/providers/all.ts";
+import { normalizeContext, snapshotResponsesContent } from "../../../ai/src/utils/transcript.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "../../src/core/tools/tool-definition-wrapper.ts";
 import { createHarness } from "./harness.ts";
+
+// PR #83: context_edit preserves metadata, but native replay must use the replacement content.
+it.each(["gpt-5.2", "gpt-6-astra"] as const)(
+	"sends session context redaction instead of retained native text on %s",
+	async (id) => {
+		const harness = await createHarness({ tools: [] });
+		try {
+			const model = getBuiltinModel("openai", id);
+			const original = {
+				...fauxAssistantMessage([
+					{ type: "text", text: "original secret", textSignature: '{"v":1,"id":"msg_secret"}' },
+				]),
+				provider: model.provider,
+				api: model.api,
+				model: model.id,
+				responsesOutput: [
+					{
+						type: "message",
+						id: "msg_secret",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "original secret", annotations: [] }],
+					},
+				],
+			} satisfies AssistantMessage;
+			const entryId = harness.sessionManager.appendMessage({
+				...original,
+				responsesContent: snapshotResponsesContent(original.content),
+			});
+			harness.sessionManager.appendContextEdit(entryId, { content: "redacted" });
+			const messages = harness.sessionManager
+				.buildSessionProjection()
+				.messages.filter((message) => message.role === "assistant");
+			expect(messages[0].content).toEqual([{ type: "text", text: "redacted" }]);
+			const input = convertResponsesMessages(model, normalizeContext({ messages }), new Set(["openai"]));
+			expect(JSON.stringify(input)).not.toContain("original secret");
+			expect(JSON.stringify(input)).toContain("redacted");
+			expect(harness.sessionManager.getEntry(entryId)).toMatchObject({
+				message: { content: [{ text: "original secret" }] },
+			});
+		} finally {
+			harness.cleanup();
+		}
+	},
+);
 
 it("keeps the terminal journal snapshot immutable when a hosted call passes admission later", async () => {
 	let release!: () => void;
@@ -139,12 +185,14 @@ it("persists hosted caller, program state, compaction and admission across sessi
 				...fauxAssistantMessage([call], { responseId: "hosted_call", stopReason: "toolUse" }),
 				...metadata,
 				responsesOutput: output,
+				responsesContent: snapshotResponsesContent([call]),
 				needsContinuation: true,
 			},
 			{
 				...fauxAssistantMessage([], { responseId: "program_done" }),
 				...metadata,
 				responsesOutput: [{ type: "compaction", id: "cmp", encrypted_content: "encrypted-window" }],
+				responsesContent: [],
 				needsContinuation: true,
 			},
 			fauxAssistantMessage("answer"),

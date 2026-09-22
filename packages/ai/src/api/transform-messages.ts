@@ -186,7 +186,26 @@ export function transformMessages<TApi extends Api>(
 	const ordered = transformed.flatMap((message): Message[] => {
 		if (message.role !== "assistant") return [message];
 		// Hosted histories contain interleaved calls and injected results, not adjacent pairs.
-		if (message.responsesOutput && canReplayResponses(message, model)) return [message];
+		if (
+			message.responsesOutput &&
+			canReplayResponses(message, model) &&
+			(message.content.some((block) => block.type === "toolCall" && block.streaming) ||
+				message.responsesOutput.some(
+					(item) =>
+						("agent" in item && item.agent) ||
+						[
+							"program",
+							"program_output",
+							"multi_agent_call",
+							"multi_agent_call_output",
+							"agent_message",
+							"function_call_output",
+							"custom_tool_call_output",
+							"tool_search_output",
+						].includes(item.type ?? ""),
+				))
+		)
+			return [message];
 		const results = message.content.flatMap((call) => {
 			if (
 				call.type !== "toolCall" ||
