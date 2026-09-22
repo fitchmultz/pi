@@ -370,3 +370,137 @@ it.each([
 		}
 	},
 );
+
+it.each([false, true])(
+	"preserves an earlier async result during length recovery (selected truncated call=%s)",
+	async (truncatedCall) => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let resultWritten!: () => void;
+		const completedTool = new Promise<void>((resolve) => {
+			resultWritten = resolve;
+		});
+		const execute = vi.fn<AgentTool["execute"]>(async () => {
+			await gate;
+			return { ...result, terminate: true };
+		});
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 1_000_000, maxTokens: 100 }],
+			settings: {
+				retry: { enabled: false },
+				compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 },
+			},
+			tools: [
+				{
+					name: "work",
+					label: "Work",
+					description: "Work",
+					parameters: Type.Object({ path: Type.String() }),
+					async: true,
+					execute,
+				},
+			],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harness.session.agent.state.model = {
+			...harness.getModel(),
+			api: "openai-responses",
+			compat: { supportsAsyncTools: true },
+		} as Model<"openai-responses">;
+		const finishTurn = harness.session.agent.finishTurn;
+		harness.session.agent.finishTurn = async (turn, signal) => {
+			const decision = await finishTurn?.(turn, signal);
+			return turn.message.stopReason === "length" ? { action: "end" } : (decision ?? undefined);
+		};
+		harness.session.subscribe((event) => {
+			if (event.type !== "message_end") return;
+			if (event.message.role === "toolResult" && event.message.toolCallId === toolCall().id) resultWritten();
+			if (event.message.role === "assistant" && event.message.responseId === "first")
+				harness.session.agent.steer({ role: "user", content: "keep going", timestamp: Date.now() });
+		});
+		let requests = 0;
+		let recoveredMessages: unknown[] = [];
+		harness.session.agent.streamFunction = (model, context) => {
+			const request = ++requests;
+			if (request === 3) recoveredMessages = structuredClone(context.messages);
+			const stream = createAssistantMessageEventStream();
+			const call = toolCall();
+			const stopReason = request === 1 ? "toolUse" : request === 2 ? "length" : "stop";
+			const message: AssistantMessage = {
+				...fauxAssistantMessage(
+					request === 1
+						? [call]
+						: request === 2 && truncatedCall
+							? [{ type: "toolCall", id: "truncated", name: "work", arguments: { path: "partial" } }]
+							: "answer",
+					{ responseId: request === 1 ? "first" : `response-${request}`, stopReason },
+				),
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+			};
+			void (async () => {
+				stream.push({ type: "start", partial: message });
+				if (request === 1) stream.push({ type: "toolcall_end", partial: message, toolCall: call, contentIndex: 0 });
+				if (request === 2) {
+					release();
+					await completedTool;
+				}
+				stream.push({ type: "done", reason: stopReason, message });
+				stream.end();
+			})();
+			return stream;
+		};
+		try {
+			await harness.session.prompt("x".repeat(5000));
+
+			const entries = harness.sessionManager.getEntries();
+			const lateResult = entries.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === toolCall().id,
+			);
+			expect(lateResult).toMatchObject({ message: { content: result.content, isError: false } });
+			const omittedIds = entries.flatMap((entry) =>
+				entry.type === "context_edit" && entry.replacement === null ? [entry.targetId] : [],
+			);
+			expect(omittedIds).not.toContain(lateResult?.id);
+			const projectedResults = harness.sessionManager
+				.buildSessionProjection()
+				.messages.filter((message) => message.role === "toolResult");
+			expect(projectedResults).toMatchObject([
+				{ toolCallId: toolCall().id, content: result.content, isError: false },
+			]);
+			expect(recoveredMessages).toContainEqual(projectedResults[0]);
+			expect(harness.session.getPendingToolCalls()).toEqual([]);
+			expect(execute).toHaveBeenCalledOnce();
+			expect(requests).toBe(3);
+			if (truncatedCall) {
+				const truncatedResult = entries.find(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolCallId === "truncated",
+				);
+				expect(truncatedResult).toMatchObject({ message: { isError: true } });
+				expect(omittedIds).toContain(truncatedResult?.id);
+			}
+		} finally {
+			release();
+			harness.cleanup();
+		}
+	},
+);

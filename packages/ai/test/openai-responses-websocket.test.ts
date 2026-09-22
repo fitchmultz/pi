@@ -865,7 +865,7 @@ describe("native direct Responses WebSockets", () => {
 			expect(server.requests[1].body.previous_response_id).toBeUndefined();
 			expect(server.requests[1].body.input).toEqual([
 				{ role: "user", content: [{ type: "input_text", text: "current input" }] },
-				item,
+				...(isLength ? [item] : []),
 				{ role: "user", content: [{ type: "input_text", text: "finish" }] },
 			]);
 			expect(JSON.stringify(server.requests[1].body)).not.toContain("resp_partial");

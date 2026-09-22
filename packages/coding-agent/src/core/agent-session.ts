@@ -1554,7 +1554,13 @@ export class AgentSession {
 		for (const [index, targetId] of targetIds.entries()) {
 			if (!targetId) continue;
 			const target = targets[index];
-			if (target.role === "toolResult" && committedCallIds.has(target.toolCallId)) continue;
+			// Late async results can belong to earlier responses; omit only this attempt's removed calls.
+			if (
+				target.role === "toolResult" &&
+				(committedCallIds.has(target.toolCallId) ||
+					!message.content.some((block) => block.type === "toolCall" && block.id === target.toolCallId))
+			)
+				continue;
 			const committed =
 				target?.role === "assistant" && committedCallIds.size > 0
 					? target.content.filter((block) =>
