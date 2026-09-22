@@ -1090,9 +1090,10 @@ export async function main(args: string[], options?: MainOptions) {
 			onShutdownRequested: restart?.shutdownRequested,
 			writeExitCheckpoint,
 		});
+		await interactiveMode.init();
+		time("interactiveMode.init");
 		if (startupBenchmark) {
-			await interactiveMode.init();
-			time("interactiveMode.init");
+			console.error("PI_STARTUP_READY");
 			// Give the TUI's stdin handler a brief chance to consume terminal query replies
 			// (Kitty keyboard protocol, device attributes, cell size) before restoring the terminal.
 			await new Promise((resolve) => setTimeout(resolve, 150));
@@ -1109,12 +1110,10 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		if (restart) {
-			await interactiveMode.init();
 			if (!(await restart.ready())) return;
 		}
 		let closeCheckpointControl: (() => void) | undefined;
 		if (process.env[CHECKPOINT_SOCKET_ENV]) {
-			await interactiveMode.init();
 			closeCheckpointControl = await startCheckpointControl({
 				path: process.env[CHECKPOINT_SOCKET_ENV]!,
 				getSession: () => runtime.session,
@@ -1122,6 +1121,7 @@ export async function main(args: string[], options?: MainOptions) {
 				canQuiesce: () => interactiveMode.canQuiesceForCheckpoint(),
 			});
 		}
+		time("interactiveMode.ready");
 		printTimings();
 		try {
 			await interactiveMode.run();
