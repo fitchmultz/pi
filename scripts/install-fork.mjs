@@ -225,12 +225,12 @@ function printUsage() {
        node scripts/install-fork.mjs --rollback <identity>
 
 Builds an exact local commit (default HEAD) with the checkout's ALREADY hydrated
-model-data snapshot using create-source-archive.sh and build:offline. Prefer the
-reviewed CI --source-archive with its adjacent source.commit to reuse exactly the
-validated input. No fetch or model generation. npm may download frozen dependencies. Requires Node with npm
-installed alongside it, Git, tar, and tmux for required real-terminal validation.
+model-data snapshot using create-source-archive.sh and build:offline. An optional
+--source-archive with its adjacent source.commit reuses an already frozen input.
+No fetch or model generation. npm may download frozen dependencies. Requires Node
+with npm installed alongside it, Git, tar, and tmux for real-terminal validation.
 
---source-archive <file> Use a frozen CI archive and adjacent source.commit
+--source-archive <file> Use a frozen source archive and adjacent source.commit
 --stage                 Build/install/validate without changing the selector
 --activate <identity>   Select an existing validated release, without rebuilding
 --rollback <identity>   Select an older validated release (same native operation)
