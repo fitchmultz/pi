@@ -102,10 +102,41 @@ jobs:
       fork-ref: ${{ github.sha }}
       fork-source-artifact: fork-source-${{ github.sha }}
 
+  windows-shell-native:
+    needs: source-snapshot
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fork-source-${{ github.sha }}
+          path: .artifacts
+      - name: Use the shared source and model snapshot
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$(tr -d '\n' < .artifacts/source.commit)"
+          tar -xzf .artifacts/source.tar.gz --strip-components=1
+      - run: npm ci --ignore-scripts
+      - name: Verify native Windows bash, PowerShell and extension execution
+        working-directory: packages/coding-agent
+        run: node ../../node_modules/vitest/dist/cli.js --run test/shell-stream-lifecycle.test.ts test/exec.test.ts test/powershell-tool.test.ts test/bash-close-hang-windows.test.ts test/shell-example-operations.test.ts
+      - name: Verify shell decoding, finalization and Pico output bounds
+        working-directory: packages/agent
+        run: node ../../node_modules/vitest/dist/cli.js --config ../../vitest.base.ts --run test/harness/shell-decoder.test.ts test/harness/shell-output-finalization.test.ts test/harness/pico3/bash.test.ts test/harness/pico3/tool-bounds.test.ts
+      - name: Verification must not regenerate tracked inputs
+        shell: bash
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+
   # Stable required-check name for native main protection, including every lane.
   build-check-test:
     if: always()
-    needs: [source-snapshot, validate, extensions]
+    needs: [source-snapshot, validate, extensions, windows-shell-native]
     runs-on: ubuntu-latest
     steps:
       - name: Require snapshot and both validation lanes
@@ -113,4 +144,5 @@ jobs:
           SNAPSHOT_RESULT: ${{ needs.source-snapshot.result }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
           EXTENSIONS_RESULT: ${{ needs.extensions.result }}
-        run: test "$SNAPSHOT_RESULT" = success && test "$VALIDATE_RESULT" = success && test "$EXTENSIONS_RESULT" = success
+          WINDOWS_SHELL_RESULT: ${{ needs.windows-shell-native.result }}
+        run: test "$SNAPSHOT_RESULT" = success && test "$VALIDATE_RESULT" = success && test "$EXTENSIONS_RESULT" = success && test "$WINDOWS_SHELL_RESULT" = success
