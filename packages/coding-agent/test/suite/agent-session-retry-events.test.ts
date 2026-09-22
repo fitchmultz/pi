@@ -10,7 +10,9 @@ function normalizeEventOrder(events: Harness["events"]): string[] {
 		const label =
 			event.type === "message_start" || event.type === "message_end"
 				? `${event.type}:${event.message.role}`
-				: event.type === "tool_execution_start" || event.type === "tool_execution_end"
+				: event.type === "tool_execution_start" ||
+						event.type === "tool_execution_prepared" ||
+						event.type === "tool_execution_end"
 					? `${event.type}:${event.toolName}`
 					: event.type;
 		if (label === "message_update" && normalized[normalized.length - 1] === "message_update") {
@@ -440,6 +442,7 @@ describe("AgentSession retry and event characterization", () => {
 			"message_update",
 			"message_end:assistant",
 			"tool_execution_start:echo",
+			"tool_execution_prepared:echo",
 			"tool_execution_end:echo",
 			"message_start:toolResult",
 			"message_end:toolResult",

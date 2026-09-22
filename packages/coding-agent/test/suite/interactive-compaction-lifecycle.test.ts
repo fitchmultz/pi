@@ -115,6 +115,11 @@ describe("early compaction lifecycle", () => {
 		);
 		await harness.session.prompt(prefixOnly ? "seed" : "s".repeat(20_000));
 		expect(canSummarize).toEqual([]);
+		const previousUsage = harness.session.messages.find((message) => message.role === "assistant")!.usage.totalTokens;
+		expect(harness.session.getContextUsage()?.tokens).toBe(previousUsage);
+		const previousPrefixTokens = harness.session.messages
+			.filter((message) => message.role === "system")
+			.reduce((total, message) => total + estimateTokens(message), 0);
 
 		const run = harness.session.prompt(prefixOnly ? "finish the current task" : "x".repeat(200_000));
 		let phase: string | undefined;
@@ -126,10 +131,8 @@ describe("early compaction lifecycle", () => {
 			expect(tokens).toBeGreaterThan(48_000);
 			expect(tokens).toBeLessThan(64_000);
 			if (prefixOnly) {
-				const conversationTokens = harness.session.messages
-					.filter((message) => message.role !== "system")
-					.reduce((total, message) => total + estimateTokens(message), 0);
-				expect(tokens).toBe(50_000 + conversationTokens);
+				// Replacing the prefix retains provider-reported framing and conversation usage.
+				expect(tokens).toBe(previousUsage - previousPrefixTokens + 50_000);
 			}
 
 			await view.defaultEditor.onSubmit(queuedText);

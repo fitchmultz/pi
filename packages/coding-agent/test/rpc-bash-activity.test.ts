@@ -74,14 +74,7 @@ export default function (pi) {
 	try {
 		await client.start();
 		expect((await client.getState()).model).toBeUndefined();
-		const send = Reflect.get(client, "send") as (
-			this: RpcClient,
-			command: { type: "prompt"; message: string },
-		) => Promise<unknown>;
-		expect(await send.call(client, { type: "prompt", message: "requires a model" })).toMatchObject({
-			success: false,
-			error: expect.stringContaining("No model selected"),
-		});
+		await expect(client.prompt("requires a model")).rejects.toThrow("No model selected");
 		await client.prompt("/aside");
 		pending = client.bash("must not execute locally");
 		void pending.catch(() => {});
