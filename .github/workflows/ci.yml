@@ -123,7 +123,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Verify native Windows filesystem addressing and mutation queues
         working-directory: packages/coding-agent
-        run: node ../../node_modules/vitest/dist/cli.js --run test/native-file-semantics.test.ts
+        run: node ../../node_modules/vitest/dist/cli.js --run test/native-file-semantics.test.ts test/render-utils.test.ts
       - name: Verification must not regenerate tracked inputs
         shell: bash
         run: |

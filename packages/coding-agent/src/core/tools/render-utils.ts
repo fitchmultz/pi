@@ -1,11 +1,12 @@
+import { realpathSync, statSync } from "node:fs";
 import * as os from "node:os";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { getCapabilities, getImageDimensions, hyperlink, imageFallback } from "@earendil-works/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
-import { resolvePath } from "../../utils/paths.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
+import { resolveToCwd } from "./path-utils.ts";
 
 export function shortenPath(path: unknown): string {
 	if (typeof path !== "string") return "";
@@ -18,8 +19,18 @@ export function shortenPath(path: unknown): string {
 
 export function linkPath(styledText: string, rawPath: string, cwd: string): string {
 	if (!getCapabilities().hyperlinks) return styledText;
-	const absolutePath = resolvePath(rawPath, cwd);
-	return hyperlink(styledText, pathToFileURL(absolutePath).href);
+	let absolutePath = resolveToCwd(rawPath, cwd);
+	try {
+		statSync(absolutePath);
+		absolutePath = realpathSync.native(absolutePath);
+	} catch (error) {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") return styledText;
+	}
+	const url = pathToFileURL(absolutePath);
+	// A file URL cannot retain unresolved symlink/.. traversal. Keep the label
+	// unlinked until that target exists instead of linking a different file.
+	if (fileURLToPath(url) !== absolutePath) return styledText;
+	return hyperlink(styledText, url.href);
 }
 
 export function str(value: unknown): string | null {
