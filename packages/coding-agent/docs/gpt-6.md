@@ -14,13 +14,14 @@ Pi preserves compatible encrypted reasoning when switching between Astra, Sol, a
 
 ## Context and pricing
 
-Built-in direct OpenAI models default to the 272,000-token short-context pricing tier. Sol and Luna support a 1,050,000-token window and up to 128,000 output tokens. To use their full window, add a model override in `~/.pi/agent/models.json`:
+Built-in direct OpenAI Astra, Sol, and Luna default to the 272,000-token short-context pricing tier. All three support a 1,050,000-token window and up to 128,000 output tokens. To use the full window, add a model override in `~/.pi/agent/models.json` for each model you need:
 
 ```json
 {
   "providers": {
     "openai": {
       "modelOverrides": {
+        "gpt-6-astra": { "contextWindow": 1050000 },
         "gpt-6-sol": { "contextWindow": 1050000 },
         "gpt-6-luna": { "contextWindow": 1050000 }
       }

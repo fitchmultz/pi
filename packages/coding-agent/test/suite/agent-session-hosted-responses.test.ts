@@ -2,15 +2,107 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, type ToolCall } from "@earendil-works/pi-ai/compat";
+import {
+	type AssistantMessage,
+	createAssistantMessageEventStream,
+	fauxAssistantMessage,
+	type ToolCall,
+} from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { expect, it, vi } from "vitest";
-import { convertResponsesMessages } from "../../../ai/src/api/openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	processResponsesStream,
+	type ResponsesEvent,
+} from "../../../ai/src/api/openai-responses-shared.ts";
 import { getBuiltinModel } from "../../../ai/src/providers/all.ts";
 import { normalizeContext, snapshotResponsesContent } from "../../../ai/src/utils/transcript.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "../../src/core/tools/tool-definition-wrapper.ts";
 import { createHarness } from "./harness.ts";
+
+// PR #83: compaction's internal call-only projection must retain native async identity, while real edits still win.
+it.each([false, true])(
+	"carries native async calls across compaction without bypassing context edits (edited=%s)",
+	async (edited) => {
+		const harness = await createHarness({ tools: [] });
+		try {
+			const model = getBuiltinModel("openai", "gpt-6-astra");
+			const identity = { api: model.api, provider: model.provider, model: model.id };
+			const nativeCall = {
+				type: "function_call" as const,
+				id: "fc_work",
+				call_id: "work",
+				name: "work",
+				arguments: '{"value":"original secret"}',
+				async: true,
+				status: "completed" as const,
+			};
+			const text = {
+				type: "message" as const,
+				id: "msg_old",
+				role: "assistant" as const,
+				status: "completed" as const,
+				content: [{ type: "output_text" as const, text: "independent answer", annotations: [] }],
+			};
+			const original: AssistantMessage = {
+				...fauxAssistantMessage([], { responseId: "old", stopReason: "pending" }),
+				...identity,
+			};
+			async function* events(): AsyncGenerator<ResponsesEvent> {
+				yield {
+					type: "response.completed",
+					sequence_number: 1,
+					response: { id: "old", status: "completed", output: [nativeCall, text] },
+				} as ResponsesEvent;
+			}
+			await processResponsesStream(events(), original, createAssistantMessageEventStream(), model);
+			const manager = harness.sessionManager;
+			const originalId = manager.appendMessage(original);
+			const laterId = manager.appendMessage({
+				...fauxAssistantMessage("later answer", { responseId: "later" }),
+				...identity,
+			});
+			manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "work|fc_work",
+				toolName: "work",
+				content: [{ type: "text", text: "late result" }],
+				isError: false,
+				timestamp: 2,
+			});
+			if (edited)
+				manager.appendContextEdit(originalId, {
+					content: original.content.map((block) =>
+						block.type === "toolCall" ? { ...block, arguments: { value: "redacted" } } : block,
+					),
+				});
+			manager.appendCompaction("summary", laterId, 100);
+			const messages = manager
+				.buildSessionProjection()
+				.messages.filter((message) => message.role === "assistant" || message.role === "toolResult");
+			const input = convertResponsesMessages(model, normalizeContext({ messages }), new Set(["openai"]));
+			const replayedCall = input.find((item) => item.type === "function_call");
+			if (edited) {
+				expect(JSON.stringify(input)).not.toContain("original secret");
+				expect(replayedCall).toMatchObject({ arguments: '{"value":"redacted"}', async: true });
+			} else {
+				expect(replayedCall).toEqual(nativeCall);
+				expect(input.map((item) => item.type)).toEqual(["function_call", "message", "function_call_output"]);
+				expect(input.filter((item) => item.type === "function_call_output")).toEqual([
+					{ type: "function_call_output", call_id: "work", output: "late result" },
+				]);
+				const carried = messages.find((message) => message.role === "assistant" && message.responseId === "old");
+				expect(carried).toMatchObject({ content: [{ responsesItem: nativeCall }] });
+				expect(carried).not.toHaveProperty("responsesOutput", expect.anything());
+				expect(carried).not.toHaveProperty("responsesContent", expect.anything());
+			}
+			expect(original.responsesOutput).toEqual([nativeCall, text]);
+		} finally {
+			harness.cleanup();
+		}
+	},
+);
 
 // PR #83: context_edit preserves metadata, but native replay must use the replacement content.
 it.each(["gpt-5.2", "gpt-6-astra"] as const)(

@@ -20,6 +20,7 @@ import type {
 	ResponsesServerEvent,
 	ResponseToolSearchOutputItemParam,
 } from "openai/resources/responses/responses.js";
+import { Equal } from "typebox/value";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
@@ -345,7 +346,7 @@ export function convertResponsesMessages<TApi extends Api>(
 		if (message.role !== "assistant" || !message.responsesOutput) return message;
 		if (
 			message.responsesContent &&
-			JSON.stringify(message.responsesContent) === JSON.stringify(snapshotResponsesContent(message.content))
+			Equal(snapshotResponsesContent(message.responsesContent), snapshotResponsesContent(message.content))
 		)
 			return message;
 		// A content replacement may redact data also present in programs or encrypted items.
@@ -603,6 +604,7 @@ export function convertResponsesMessages<TApi extends Api>(
 					if (customInputProperty !== undefined) {
 						output.push({
 							type: "custom_tool_call",
+							...(supportsAsyncTools && toolCall.async !== undefined ? { async: toolCall.async } : {}),
 							id: itemId,
 							call_id: callId,
 							name: toolCall.name,
@@ -615,6 +617,7 @@ export function convertResponsesMessages<TApi extends Api>(
 						output.push({
 							type: "function_call",
 							id: itemId,
+							...(supportsAsyncTools && toolCall.async !== undefined ? { async: toolCall.async } : {}),
 							call_id: callId,
 							name: toolCall.name,
 							arguments: JSON.stringify(toolCall.arguments),

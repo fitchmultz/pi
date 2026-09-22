@@ -1,14 +1,18 @@
 import type { BetaResponseOutputItem, BetaResponseOutputMessage } from "openai/resources/beta/responses/responses.js";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
 	convertResponsesMessages,
 	processResponsesStream,
 	type ResponsesEvent,
 } from "../src/api/openai-responses-shared.ts";
+import { withToolNamespaces } from "../src/api/tool-namespaces.ts";
 import { getBuiltinModel } from "../src/providers/all.ts";
 import type { AssistantMessage, Model, ToolResultMessage } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
-import { normalizeContext } from "../src/utils/transcript.ts";
+import { shortHash } from "../src/utils/hash.ts";
+import { toolKey } from "../src/utils/tool-identity.ts";
+import { normalizeContext, snapshotResponsesContent } from "../src/utils/transcript.ts";
 
 const providers = new Set(["openai"]);
 const textItem = (id: string, text: string): BetaResponseOutputMessage => ({
@@ -54,6 +58,87 @@ function replay(model: Model<"openai-responses">, message: AssistantMessage, res
 }
 
 describe("edited Responses content", () => {
+	// PR #83: namespace mapping and JSON persistence may change key insertion order without editing content.
+	it.each([false, true])(
+		"retains native search-loaded async replay after namespace mapping (persisted=%s)",
+		async (persisted) => {
+			const model = getBuiltinModel("openai", "gpt-6-astra");
+			const bare = { name: "work", description: "Work", parameters: Type.Object({}), async: true };
+			const loaded: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "search|ts_search",
+				toolName: "discover",
+				toolsAdded: [bare],
+				content: [],
+				timestamp: 1,
+				isError: false,
+			};
+			const nativeCall = {
+				type: "function_call" as const,
+				id: "fc_work",
+				call_id: "work",
+				name: "work",
+				namespace: `pi_loaded_${shortHash(toolKey(bare))}`,
+				arguments: "{}",
+				async: true,
+				status: "completed" as const,
+			};
+			const first = withToolNamespaces(model, normalizeContext({ messages: [loaded] }), () => {
+				const stream = new AssistantMessageEventStream();
+				void capture(model, [nativeCall]).then((message) => {
+					stream.push({ type: "done", reason: "toolUse", message });
+					stream.end();
+				});
+				return stream;
+			});
+			const message = await first.result();
+			const saved = persisted ? (JSON.parse(JSON.stringify(message)) as AssistantMessage) : message;
+			let input: ReturnType<typeof convertResponsesMessages> = [];
+			const second = withToolNamespaces(model, normalizeContext({ messages: [loaded, saved] }), (mapped) => {
+				const current = mapped.messages.find((item): item is AssistantMessage => item.role === "assistant")!;
+				expect(current.responsesContent).toEqual(snapshotResponsesContent(current.content));
+				input = convertResponsesMessages(model, mapped, providers, { supportsToolSearch: true });
+				const stream = new AssistantMessageEventStream();
+				stream.push({ type: "done", reason: "toolUse", message });
+				stream.end();
+				return stream;
+			});
+			await second.result();
+			expect(input.find((item) => item.type === "function_call")).toEqual(nativeCall);
+		},
+	);
+
+	it.each(["function_call", "custom_tool_call"] as const)(
+		"preserves projected async semantics when reconstructing edited %s arguments",
+		async (type) => {
+			const model = getBuiltinModel("openai", "gpt-6-astra");
+			const nativeCall: BetaResponseOutputItem =
+				type === "function_call"
+					? {
+							type,
+							id: "fc",
+							call_id: "call",
+							name: "read",
+							arguments: '{"input":"original secret"}',
+							async: true,
+						}
+					: { type, id: "ctc", call_id: "call", name: "read", input: "original secret", async: true };
+			const original = await capture(model, [nativeCall]);
+			const edited = structuredClone(original);
+			for (const block of edited.content) if (block.type === "toolCall") block.arguments = { input: "redacted" };
+			const input = convertResponsesMessages(model, normalizeContext({ messages: [edited] }), providers, {
+				grammarToolInputProperties:
+					type === "custom_tool_call" ? new Map([[toolKey({ name: "read" }), "input"]]) : undefined,
+			});
+			expect(input.find((item) => item.type === type)).toMatchObject(
+				type === "function_call"
+					? { async: true, arguments: '{"input":"redacted"}' }
+					: { async: true, input: "redacted" },
+			);
+			expect(JSON.stringify(input)).not.toContain("original secret");
+		},
+	);
+
 	// PR #83: authoritative native history must not undo content redaction.
 	it.each(["gpt-5.2", "gpt-6-astra"] as const)("honors a replacement without signatures on %s", async (id) => {
 		const model = getBuiltinModel("openai", id);

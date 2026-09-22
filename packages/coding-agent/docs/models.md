@@ -423,7 +423,7 @@ Use a `promptCache` override to enable cache warming through a proxy whose backi
 }
 ```
 
-Direct OpenAI GPT-5.6 Sol, Terra, and Luna, and GPT-6 Sol and Luna default to a `272000` context window so requests remain within OpenAI's short-context pricing tier. To opt into OpenAI's 1.05M context window, increase it for each model you use:
+Direct OpenAI GPT-5.6 Sol, Terra, and Luna, and GPT-6 Astra, Sol, and Luna default to a `272000` context window so requests remain within OpenAI's short-context pricing tier. To opt into OpenAI's 1.05M context window, increase it for each model you use:
 
 ```json
 {
@@ -439,7 +439,7 @@ Direct OpenAI GPT-5.6 Sol, Terra, and Luna, and GPT-6 Sol and Luna default to a 
 }
 ```
 
-The override preserves the built-in pricing metadata. Requests with more than 272K total input tokens use the model's long-context rates for the entire request. Apply the same override to `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-sol`, or `gpt-6-luna` when needed. See [GPT-6](gpt-6.md) for reasoning, hosted tools, and compaction controls.
+The override preserves the built-in pricing metadata. Requests with more than 272K total input tokens use the model's long-context rates for the entire request. Apply the same override to `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-sol`, or `gpt-6-luna` when needed. See [GPT-6](gpt-6.md) for reasoning, hosted tools, and compaction controls.
 
 Behavior notes:
 - `modelOverrides` apply to matching model IDs in the provider's final model list.
