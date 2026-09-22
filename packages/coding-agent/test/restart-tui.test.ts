@@ -47,11 +47,12 @@ function terminalFixture() {
 		agentDir,
 		temporary,
 		status,
-		start(args: string[], env: string[] = [], discoverExtensions = false) {
+		start(args: string[], env: string[] = [], discoverExtensions = false, managed = true) {
 			const launch = join(root, "launch.sh");
-			const launcherArgs = process.env.PI_TEST_CLI
-				? [process.env.PI_TEST_CLI]
-				: ["--import", sourceResolver, sourceLauncher];
+			const launcherArgs =
+				managed && process.env.PI_TEST_CLI
+					? [process.env.PI_TEST_CLI]
+					: ["--import", sourceResolver, managed ? sourceLauncher : join(packageDir, "src", "cli.ts")];
 			const command = [
 				"env",
 				"-i",
@@ -76,7 +77,10 @@ function terminalFixture() {
 				...(args.includes("--checkpoint") ? [] : ["--provider", "faux", "--model", "faux-1"]),
 				...args,
 			];
-			writeFileSync(launch, `${command.map(quote).join(" ")}\nprintf '%s\\n' "$?" > ${quote(status)}\nsleep 60\n`);
+			writeFileSync(
+				launch,
+				`${command.map(quote).join(" ")}\nprintf '%s\\n' "$?" > ${quote(`${status}.tmp`)}\nmv ${quote(`${status}.tmp`)} ${quote(status)}\nsleep 60\n`,
+			);
 			execFileSync("tmux", [
 				"-L",
 				socket,
@@ -128,7 +132,12 @@ import { fauxProvider } from "@earendil-works/pi-ai";
 export default function(pi) {
 	const faux = fauxProvider();
 	pi.registerProvider("faux", { api: faux.api, baseUrl: faux.getModel().baseUrl, apiKey: "faux-key", models: faux.models, streamSimple: faux.provider.streamSimple });
-	pi.on("session_shutdown", () => writeFileSync(${JSON.stringify(shutdown)}, "shutdown"));
+	let timer;
+	pi.on("session_start", () => { timer = setInterval(() => {}, 1000); });
+	pi.on("session_shutdown", () => {
+		clearInterval(timer);
+		writeFileSync(${JSON.stringify(shutdown)}, "shutdown");
+	});
 	process.once("beforeExit", () => writeFileSync(${JSON.stringify(beforeExit)}, JSON.stringify({
 		calls: faux.state.callCount, managed: process.env.PI_MANAGED_CLI, restartEnabled: process.env.PI_RESTART_SOCKET !== undefined,
 		stdinRaw: process.stdin.isRaw, stdinPaused: process.stdin.isPaused()
@@ -146,7 +155,7 @@ export default function(pi) {
 		expect(readFileSync(status, "utf8").trim(), screen).toBe("0");
 		expect(screen).toContain("interactiveMode.init:");
 		expect(readdirSync(temporary).filter((name) => name.startsWith("pi-restart-"))).toEqual([]);
-		expect(existsSync(shutdown)).toBe(false);
+		expect(readFileSync(shutdown, "utf8")).toBe("shutdown");
 		expect(JSON.parse(readFileSync(beforeExit, "utf8"))).toEqual({
 			calls: 0,
 			managed: "1",
@@ -155,6 +164,55 @@ export default function(pi) {
 			stdinPaused: true,
 		});
 	});
+
+	it.each([true, false])(
+		"includes awaited startup handlers in normal timing totals (managed: %s)",
+		async (managed) => {
+			const terminal = terminalFixture();
+			const timingLog = join(terminal.root, "timings.log");
+			const extension = join(terminal.root, "slow-startup.ts");
+			writeFileSync(
+				extension,
+				`
+import { appendFileSync } from "node:fs";
+import { fauxProvider } from "@earendil-works/pi-ai";
+export default function(pi) {
+	const original = console.error;
+	console.error = (...args) => {
+		appendFileSync(${JSON.stringify(timingLog)}, args.join(" ") + "\\n");
+		original(...args);
+	};
+	const faux = fauxProvider();
+	pi.registerProvider("faux", { api: faux.api, baseUrl: faux.getModel().baseUrl, apiKey: "faux-key", models: faux.models, streamSimple: faux.provider.streamSimple });
+	pi.on("session_start", async () => {
+		await new Promise(resolve => setTimeout(resolve, 120));
+		console.error("startup handler complete");
+	});
+}
+`,
+			);
+			terminal.start(["--no-session", "-e", extension], ["PI_TIMING=1"], false, managed);
+			await vi.waitFor(
+				() => expect(readFileSync(timingLog, "utf8")).toContain("--- Startup Timings: extensions ---"),
+				{
+					timeout: 8_000,
+				},
+			);
+			const log = readFileSync(timingLog, "utf8");
+			expect(log).toContain("startup handler complete");
+			expect(log).toContain("interactiveMode.ready:");
+			expect(log.indexOf("startup handler complete")).toBeLessThan(log.indexOf("--- Startup Timings: main ---"));
+			const init = Number(log.match(/interactiveMode\.init: ([\d.]+)ms/)?.[1]);
+			const total = Number(log.match(/TOTAL: ([\d.]+)ms/)?.[1]);
+			expect(init).toBeGreaterThanOrEqual(100);
+			expect(total).toBeGreaterThanOrEqual(init);
+			expect(log).toContain("--- Startup Timings: extensions ---");
+			expect(log).not.toContain("PI_STARTUP_READY");
+			execFileSync("tmux", ["-L", terminal.socket, "send-keys", "-t", "test", "C-d"]);
+			await vi.waitFor(() => expect(existsSync(terminal.status)).toBe(true));
+			expect(readFileSync(terminal.status, "utf8").trim(), terminal.screen()).toBe("0");
+		},
+	);
 
 	// PR #29: Ctrl+G's asynchronous editor owns input until its result returns to the TUI.
 	it.each(["Unsent external draft", ""])(

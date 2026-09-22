@@ -46,6 +46,78 @@ describe("AgentSession context usage estimate", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
+	it.each(["reported", "pending tools"] as const)(
+		"reuses unchanged %s usage without rebuilding conversation or tool declarations",
+		async (mode) => {
+			const harness = await createHarness({
+				tools: [
+					{
+						name: "lookup",
+						label: "Lookup",
+						description: "Lookup records",
+						parameters: Type.Object({ query: Type.String({ description: "schema ".repeat(100) }) }),
+						execute: async () => ({ content: [], details: {} }),
+					},
+				],
+				settings: { compaction: { enabled: false } },
+			});
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("done")]);
+			await harness.session.prompt("retained input ".repeat(100));
+			const session = harness.session;
+			if (mode === "pending tools")
+				session.state.tools[0] = { ...session.state.tools[0], description: "Pending changed declaration" };
+			const expected = session.getContextUsage();
+			expect(expected?.source).toBe(mode === "reported" ? "reported" : "estimated");
+			const user = session.messages.find((message) => message.role === "user")!;
+			if (typeof user.content === "string") throw new Error("Expected normalized input blocks");
+			const entries = vi.spyOn(Object, "entries");
+			const serialize = vi.spyOn(JSON, "stringify");
+			for (let i = 0; i < 10; i++) expect(session.getContextUsage()).toEqual(expected);
+			expect(entries.mock.calls.filter(([value]) => value === user.content[0])).toHaveLength(0);
+			// Native tuple keys are cheap; declarations and schemas must not be serialized again.
+			expect(serialize.mock.calls.filter(([value]) => !Array.isArray(value))).toHaveLength(0);
+		},
+	);
+
+	it("refreshes cached usage for in-place SDK message, usage and tool-schema edits", async () => {
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		await harness.session.prompt("initial");
+		const session = harness.session;
+		const response = session.messages.at(-1) as AssistantMessage;
+		const initial = session.getContextUsage()!;
+		initial.tokens = -1;
+		expect(session.getContextUsage()!.tokens).toBeGreaterThan(0);
+		response.usage = usage(50_000);
+		expect(session.getContextUsage()).toMatchObject({ tokens: 50_000, source: "reported" });
+		response.usage.totalTokens = 60_000;
+		expect(session.getContextUsage()).toMatchObject({ tokens: 60_000, source: "reported" });
+		const user = session.messages.find((message) => message.role === "user")!;
+		if (typeof user.content === "string" || user.content[0]?.type !== "text")
+			throw new Error("Expected normalized text");
+		user.content[0].text = "edited input";
+		expect(session.getContextUsage()).toMatchObject({ source: "estimated" });
+		expect(session.getContextUsage()!.tokens).toBeLessThan(60_000);
+		user.content[0].text = "initial";
+		expect(session.getContextUsage()).toMatchObject({ tokens: 60_000, source: "reported" });
+
+		session.state.tools.push({
+			name: "lookup",
+			label: "Lookup",
+			description: "Lookup",
+			parameters: Type.Object({ query: Type.String() }),
+			execute: async () => ({ content: [], details: {} }),
+		});
+		const beforeSchema = session.getContextUsage()!.tokens!;
+		session.state.tools[0].parameters.description = "new schema ".repeat(400);
+		expect(session.getContextUsage()!.tokens).toBeGreaterThan(beforeSchema);
+	});
+
 	it.each(["root", "window", "compaction", "response"])(
 		"avoids historical arrays when checking current usage after %s",
 		async (boundary) => {
