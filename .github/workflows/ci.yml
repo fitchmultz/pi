@@ -93,9 +93,9 @@ jobs:
 
   extensions:
     needs: source-snapshot
-    uses: fitchmultz/.github/.github/workflows/pi-compatibility.yml@bdf02c482bca47b53b09f7926d332cbe6def90cc # Subagents full-suite capacity
+    uses: fitchmultz/.github/.github/workflows/pi-compatibility.yml@117b227140265329055bcda5927ac170c6301d75 # v1.0.0
     with:
-      automation-ref: bdf02c482bca47b53b09f7926d332cbe6def90cc # Subagents full-suite capacity
+      automation-ref: 117b227140265329055bcda5927ac170c6301d75 # v1.0.0
       repository: all
       host: fork
       source-ref: ${{ vars.PI_COMPATIBILITY_SOURCE_REF || 'main' }}
