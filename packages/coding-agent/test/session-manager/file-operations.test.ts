@@ -447,10 +447,22 @@ describe("SessionManager default session directory", () => {
 		);
 
 		for (const sessionDir of [undefined, dir]) {
+			expect.soft(SessionManager.findById(projectB, "a", sessionDir)).toBeUndefined();
 			expect.soft(await SessionManager.list(projectB, sessionDir)).toEqual([]);
 			expect.soft(SessionManager.continueRecent(projectB, sessionDir).getSessionFile()).not.toBe(file);
+			expect(SessionManager.findById(projectA, "a", sessionDir)).toBe(file);
 			expect((await SessionManager.list(projectA, sessionDir)).map((info) => info.path)).toEqual([file]);
 			expect(SessionManager.continueRecent(projectA, sessionDir).getSessionFile()).toBe(file);
+		}
+
+		const otherFile = join(dir, "b.jsonl");
+		writeFileSync(
+			otherFile,
+			`${JSON.stringify({ type: "session", version: 3, id: "a", cwd: projectB, timestamp: "2025-01-01T00:00:00Z" })}\n`,
+		);
+		for (const sessionDir of [undefined, dir]) {
+			expect(SessionManager.findById(projectA, "a", sessionDir)).toBe(file);
+			expect(SessionManager.findById(projectB, "a", sessionDir)).toBe(otherFile);
 		}
 	});
 
@@ -461,6 +473,7 @@ describe("SessionManager default session directory", () => {
 		const header = `${JSON.stringify({ type: "session", version: 3, id: "legacy", cwd, timestamp: "2025-01-01T00:00:00Z" })}\n`;
 		writeFileSync(file, header);
 		for (const sessionDir of [undefined, dir]) {
+			expect(SessionManager.findById(project, "legacy", sessionDir)).toBe(file);
 			expect((await SessionManager.list(project, sessionDir)).map((info) => info.path)).toEqual([file]);
 			expect(SessionManager.continueRecent(project, sessionDir).getSessionFile()).toBe(file);
 		}
@@ -468,6 +481,7 @@ describe("SessionManager default session directory", () => {
 		mkdirSync(customDir);
 		const customFile = join(customDir, "legacy.jsonl");
 		writeFileSync(customFile, header);
+		expect(SessionManager.findById(project, "legacy", customDir)).toBeUndefined();
 		expect(await SessionManager.list(project, customDir)).toEqual([]);
 		expect(SessionManager.continueRecent(project, customDir).getSessionFile()).not.toBe(customFile);
 	});
