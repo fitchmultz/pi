@@ -594,6 +594,8 @@ export interface AssistantMessage {
 		requestId?: string;
 		responseId?: string;
 	};
+	/** Pi session that observed this monitoring stop. Historical copies retain their original owner. */
+	monitoringSessionId?: string;
 	rawStopReason?: string;
 	/**
 	 * Provider indication of whether the model explicitly ended its turn.

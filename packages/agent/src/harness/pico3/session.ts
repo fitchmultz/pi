@@ -1069,14 +1069,8 @@ class TxImpl implements CoreTx {
 	}
 	async monitoringStopped(conversationId: Id): Promise<boolean> {
 		this.assertCore("monitoringStopped");
-		// A history fork inherits the lineage's present stop, even when its cutoff predates it.
-		let id: Id | undefined = conversationId;
-		while (id !== undefined) {
-			await this.preload([{ doc: "sticky", conversationId: id }]);
-			if (this.sticky(id).monitoringBlocked === true) return true;
-			id = (await this.conversation(id))?.parent?.conversationId;
-		}
-		return false;
+		await this.preload([{ doc: "sticky", conversationId }]);
+		return this.sticky(conversationId).monitoringBlocked === true;
 	}
 	async stopForMonitoring(conversationId: Id, inputs: readonly Id[] = []): Promise<void> {
 		this.assertCore("stopForMonitoring");

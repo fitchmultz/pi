@@ -143,7 +143,7 @@ agent.prepareRequest = async ({ context }) => ({
 
 When the earlier steering poll returned nothing, the loop admits one steering batch queued during `prepareRequest` and prepares the request again with that input. It does not drain another message when one-at-a-time mode already selected input. Tool declarations are reconciled after preparation.
 
-`finishTurn` runs after the assistant and all tool results are finalized, but before `turn_end`. It runs for normal, error, and aborted responses:
+`finishTurn` runs after the assistant and all tool results are finalized, but before `turn_end`. It runs for normal, error, and aborted responses, except monitoring stops, which terminate without further finalization:
 
 ```typescript
 agent.finishTurn = async ({ message }) => {
@@ -239,7 +239,7 @@ const agent = new Agent({
   // are in the transcript's system messages, not on the context.
   streamFn: models.streamSimple.bind(models),
 
-  // Session ID for provider caching
+  // Session ID for provider caching and persisted local monitoring state
   sessionId: "session-123",
 
   // Dynamic API key resolution (for expiring OAuth tokens)
@@ -379,6 +379,12 @@ agent.thinkingBudgets = {
 agent.abort();           // Cancel current operation
 await agent.waitForIdle(); // Wait for completion
 ```
+
+### Monitoring stops
+
+A fresh provider error with code `misalignment_policy_violation` stops the affected Agent session, signals active tools, and prevents further dispatch. Navigating, replacing, or resetting that session's transcript does not clear its stop. Completed effects and provider error IDs remain available for review.
+
+Supply a stable `sessionId` when restoring the same session. Failed messages record the observing session in `monitoringSessionId`; an Agent without `sessionId` uses an instance-local identity. A fork or new session may keep that history without inheriting Pi's stop. A fresh provider block in the destination still stops the destination.
 
 ### Events
 
@@ -572,6 +578,8 @@ for await (const event of agentLoopContinue(context, config, undefined, streamFn
 ```
 
 These low-level streams are observational. They preserve event order, but they do not wait for your async event handling to settle before later producer phases continue. If you need message processing to act as a barrier before tool preflight, use the `Agent` class instead of raw `agentLoop()` or `agentLoopContinue()`.
+
+Use a stable `config.sessionId` to recognize monitoring stops in persisted messages from the same session. When it is absent, `config.monitoringSessionId` can identify the local session without changing provider cache routing. `AgentContext.monitoringStop` retains an observed stop as `{ sessionId, message }` while navigating or pruning; a different destination identity ignores that source stop.
 
 Unexpected callback failures (including a thrown or rejected `streamFn` call) end `agentLoop()` and `agentLoopContinue()` with an assistant error message, `turn_end`, and `agent_end`. Iteration finishes and `result()` resolves with the completed messages, including the failure. An aborted signal sets the failure's stop reason to `aborted`; otherwise it is `error`. Ordinary provider failures should still use the `StreamFn` error-event protocol. The direct promise runners, `runAgentLoop()` and `runAgentLoopContinue()`, reject on unexpected callback failures instead.
 

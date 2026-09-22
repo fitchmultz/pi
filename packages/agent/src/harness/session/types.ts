@@ -345,8 +345,8 @@ export interface LaneState {
 	currentOperationId: string | null;
 	lastOperationId: string | null;
 	inbox: InboxItem[];
-	/** Conversation-wide stop; navigation and model changes do not clear it. */
-	monitoringStop?: { message: SettledAssistantMessage; tipId: string | null };
+	/** Lane-local stop; navigation and model changes do not clear it. */
+	monitoringStop?: { message: SettledAssistantMessage };
 }
 
 export type PendingEntry =

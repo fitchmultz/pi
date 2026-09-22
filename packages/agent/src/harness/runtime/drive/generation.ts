@@ -203,12 +203,12 @@ async function performGeneration<TContext extends object | undefined>(
 						drive.gate,
 						context,
 					);
-					await assertMonitoringActive(lane, drive);
+					assertMonitoringActive(lane, drive);
 					return result?.payload;
 				},
 				afterResponse: response.afterResponse,
 				request: async (aiContext, options, context) => {
-					await assertMonitoringActive(lane, drive);
+					assertMonitoringActive(lane, drive);
 					const admitted = withAbortSignal(drive.gate.signal, context);
 					return drive.gate.admit(() =>
 						lane.models.streamSimple(prepared.model, aiContext, {

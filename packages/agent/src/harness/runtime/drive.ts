@@ -30,7 +30,6 @@ export async function driveOperation<TContext extends object | undefined>(
 	lane: Lane<TContext>,
 	drive: Drive,
 ): Promise<DriveOutcome> {
-	await lane.refreshMonitoringStop(drive.context);
 	let operation = currentOperation(lane, drive);
 	if (operation.state.control.status === "running" && lane.state.monitoringStop === undefined) {
 		try {
@@ -47,7 +46,6 @@ export async function driveOperation<TContext extends object | undefined>(
 	}
 
 	for (;;) {
-		await lane.refreshMonitoringStop(drive.context);
 		operation = currentOperation(lane, drive);
 		const state = operation.state;
 		let result: ProcedureResult;
@@ -105,10 +103,7 @@ export async function driveOperation<TContext extends object | undefined>(
 			result = { kind: "continue" };
 		}
 
-		if (result.kind === "settled") {
-			await lane.refreshMonitoringStop(drive.context);
-			return { kind: "settled", outcome: result.outcome };
-		}
+		if (result.kind === "settled") return { kind: "settled", outcome: result.outcome };
 		if (result.kind === "waiting") return result.outcome;
 		const next = currentOperation(lane, drive).state;
 		if (next === state && next.control.status !== "cancel_requested") {

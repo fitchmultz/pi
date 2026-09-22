@@ -198,7 +198,15 @@ describe("AgentSession retry", () => {
 			expect(session.getFollowUpMessages()).toEqual(["Keep this follow-up input"]);
 			expect(session.agent.getQueuedMessages().steering).toHaveLength(1);
 			expect(session.agent.getQueuedMessages().followUp).toHaveLength(1);
-			expect(session.messages.find((message) => message.role === "assistant")?.providerError).toEqual(providerError);
+			expect(session.messages.find((message) => message.role === "assistant")).toMatchObject({
+				providerError,
+				monitoringSessionId: session.sessionId,
+			});
+			expect(session.sessionManager.getEntries()).toContainEqual(
+				expect.objectContaining({
+					message: expect.objectContaining({ providerError, monitoringSessionId: session.sessionId }),
+				}),
+			);
 			expect(session.sessionManager.getBranch().filter((entry) => entry.type === "context_edit")).toHaveLength(0);
 		},
 	);
@@ -228,6 +236,7 @@ describe("AgentSession retry", () => {
 			stopReason: "error",
 			errorMessage: "Review required",
 			providerError: { code: "misalignment_policy_violation", requestId: "req_persisted" },
+			monitoringSessionId: session.sessionId,
 		});
 		const id = session.sessionManager.appendMessage(blocked);
 		session.sessionManager.appendContextEdit(id, null);
@@ -286,7 +295,9 @@ describe("AgentSession retry", () => {
 			}
 
 			expect(created.getCallCount()).toBe(1);
-			expect(messageEnds.some((message) => message.providerError?.requestId === "req_summary")).toBe(true);
+			expect(messageEnds).toContainEqual(
+				expect.objectContaining({ providerError, monitoringSessionId: session.sessionId }),
+			);
 			expect(
 				session.sessionManager
 					.getBranch()
@@ -294,7 +305,8 @@ describe("AgentSession retry", () => {
 						(entry) =>
 							entry.type === "message" &&
 							entry.message.role === "assistant" &&
-							entry.message.providerError?.requestId === "req_summary",
+							entry.message.providerError?.requestId === "req_summary" &&
+							entry.message.monitoringSessionId === session.sessionId,
 					),
 			).toBe(true);
 			expect(session.getFollowUpMessages()).toEqual(["Keep queued input"]);
@@ -322,8 +334,12 @@ describe("AgentSession retry", () => {
 		await cacheWarmer.onMonitoringBlocked!(blocked);
 
 		expect(abort).toHaveBeenCalledOnce();
+		expect(blocked.monitoringSessionId).toBe(session.sessionId);
 		expect(session.messages).toContainEqual(blocked);
-		expect(session.sessionManager.getBranch().at(-1)).toMatchObject({ type: "message", message: blocked });
+		expect(session.sessionManager.getBranch().at(-1)).toMatchObject({
+			type: "message",
+			message: { monitoringSessionId: session.sessionId, providerError: blocked.providerError },
+		});
 		expect(session.getFollowUpMessages()).toEqual(["Keep queued input"]);
 		await expect(session.prompt("Continue")).rejects.toThrow("Warm request review required");
 		expect(created.getCallCount()).toBe(0);
@@ -393,6 +409,7 @@ describe("AgentSession retry", () => {
 			stopReason: "error",
 			errorMessage: "Session review required",
 			providerError: { code: "misalignment_policy_violation" },
+			monitoringSessionId: session.sessionId,
 		});
 		session.sessionManager.appendMessage(blocked);
 		session.refreshContext();

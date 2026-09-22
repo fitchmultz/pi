@@ -19,7 +19,7 @@ import {
 	operationScopeOf,
 	type SettledAssistantMessage,
 } from "../../../src/harness/session/types.ts";
-import { laneState, operationState } from "../../../src/harness/session/values.ts";
+import { laneState, operationState, setValue } from "../../../src/harness/session/values.ts";
 import type { AgentHarnessTool } from "../../../src/harness/types.ts";
 import { deferred as barrier } from "./test-utils.ts";
 
@@ -50,45 +50,62 @@ async function fixture(deferred = false) {
 	return { session, repo, faux, models, options, harness, lane };
 }
 
+async function stopLane<TContext extends object | undefined>(lane: Lane<TContext>): Promise<void> {
+	await lane.command((state) => {
+		const next = { ...state, monitoringStop: { message: blocked } };
+		return {
+			kind: "commit",
+			writes: [
+				setValue(laneState(lane.name), {
+					currentOperationId: state.operation?.meta.operationId ?? null,
+					lastOperationId: state.lastOperationId,
+					inbox: state.inbox,
+					monitoringStop: next.monitoringStop,
+				}),
+			],
+			next,
+			materialize: () => undefined,
+		};
+	}, BACKGROUND_CONTEXT);
+}
+
 afterEach(async () => {
 	for (const repo of repositories.splice(0)) await repo.close(BACKGROUND_CONTEXT);
 });
 
 describe("durable monitoring stop", () => {
 	it.each(["assistant", "compaction", "navigation", "deferred"] as const)(
-		"checks the last %s dispatch boundary after an asynchronous preparation hook",
+		"checks the stopped lane at the last %s dispatch boundary after an asynchronous hook",
 		async (kind) => {
 			const { lane, harness, faux, models } = await fixture();
 			const root = await lane.appendMessage({ role: "user", content: "history", timestamp: 1 }, BACKGROUND_CONTEXT);
-			const related = await harness.lane("related", { createAt: root }, BACKGROUND_CONTEXT);
 			if (kind === "navigation") {
-				await related.appendMessage({ role: "user", content: "branch", timestamp: 2 }, BACKGROUND_CONTEXT);
+				await lane.appendMessage({ role: "user", content: "branch", timestamp: 2 }, BACKGROUND_CONTEXT);
 			}
 			if (kind === "deferred") {
 				await harness.setStreamOptions({ deferred: true }, BACKGROUND_CONTEXT);
 				faux.setResponses([fauxAssistantMessage("deferred answer")]);
-				await related.prompt("deferred request", undefined, BACKGROUND_CONTEXT);
+				await lane.prompt("deferred request", undefined, BACKGROUND_CONTEXT);
 				await harness.setStreamOptions({ deferred: false }, BACKGROUND_CONTEXT);
 			}
 			const entered = barrier();
 			const release = barrier();
 			harness.hooks.on("before_request", async (event) => {
-				if (event.lane !== "related") return;
+				if (event.lane !== "main") return;
 				entered.resolve();
 				await release.promise;
 				return undefined;
 			});
 			const running =
 				kind === "assistant"
-					? related.prompt("held request", undefined, BACKGROUND_CONTEXT)
+					? lane.prompt("held request", undefined, BACKGROUND_CONTEXT)
 					: kind === "compaction"
-						? related.compact(undefined, BACKGROUND_CONTEXT)
+						? lane.compact(undefined, BACKGROUND_CONTEXT)
 						: kind === "navigation"
-							? related.navigateTree(root, { summarize: true }, BACKGROUND_CONTEXT)
-							: related.resume(BACKGROUND_CONTEXT);
+							? lane.navigateTree(root, { summarize: true }, BACKGROUND_CONTEXT)
+							: lane.resume(BACKGROUND_CONTEXT);
 			await entered.promise;
-			faux.setResponses([blocked]);
-			await lane.prompt("stop this conversation", undefined, BACKGROUND_CONTEXT);
+			await stopLane(lane);
 			const request = vi.spyOn(models, "streamSimple");
 			const summary = vi.spyOn(models, "completeSimple");
 			const poll = vi.spyOn(models, "streamDeferred");
@@ -107,7 +124,7 @@ describe("durable monitoring stop", () => {
 	);
 
 	it.each(["assistant", "compaction", "navigation", "deferred"] as const)(
-		"checks the last %s payload hook without losing the stored monitoring error",
+		"allows a related %s payload to dispatch when only the source lane stops",
 		async (kind) => {
 			const { lane, harness, faux, models, session } = await fixture();
 			const root = await lane.appendMessage({ role: "user", content: "history", timestamp: 1 }, BACKGROUND_CONTEXT);
@@ -169,26 +186,25 @@ describe("durable monitoring stop", () => {
 			faux.setResponses([blocked]);
 			await lane.prompt("stop this conversation", undefined, BACKGROUND_CONTEXT);
 			release.resolve();
-			const failure = {
-				status: "failed",
-				error: { code: "misalignment_policy_violation", details: blocked.providerError },
-			};
 			expect(await running).toMatchObject({
 				ok: true,
-				value: kind === "compaction" || kind === "navigation" ? { [kind]: failure } : failure,
+				value:
+					kind === "compaction" || kind === "navigation"
+						? { [kind]: { status: "completed" } }
+						: { status: "completed" },
 			});
-			expect(dispatch).not.toHaveBeenCalled();
+			expect(dispatch).toHaveBeenCalledOnce();
 			expect(
-				(await session.getValue(laneState("related"), BACKGROUND_CONTEXT))?.value.monitoringStop?.message
-					.providerError,
-			).toEqual(blocked.providerError);
+				(await session.getValue(laneState("related"), BACKGROUND_CONTEXT))?.value.monitoringStop,
+			).toBeUndefined();
 		},
 	);
 
-	it("stops prepared tools and signals active tools while retaining actual completed effects", async () => {
+	it("stops prepared tools in the affected lane while retaining actual completed effects", async () => {
 		const { lane, harness, faux } = await fixture();
 		const root = await lane.appendMessage({ role: "user", content: "history", timestamp: 1 }, BACKGROUND_CONTEXT);
 		const related = await harness.lane("related", { createAt: root }, BACKGROUND_CONTEXT);
+		if (!(related instanceof Lane)) throw new Error("Expected runtime lane");
 		const active = barrier();
 		const entered = barrier();
 		const release = barrier();
@@ -225,8 +241,7 @@ describe("durable monitoring stop", () => {
 		]);
 		const running = related.prompt("parallel work", undefined, BACKGROUND_CONTEXT);
 		await Promise.all([active.promise, entered.promise]);
-		faux.setResponses([blocked]);
-		await lane.prompt("stop this conversation", undefined, BACKGROUND_CONTEXT);
+		await stopLane(related);
 		release.resolve();
 		await vi.waitFor(() => expect(activeSignal?.aborted || execute.mock.calls.length === 2).toBe(true));
 		finishActive.resolve();
@@ -248,7 +263,7 @@ describe("durable monitoring stop", () => {
 	});
 
 	it.each(["already-related", "navigate-existing"] as const)(
-		"blocks execution in an existing %s lane while retaining inspection and unrelated work",
+		"keeps an existing %s lane usable while the source remains stopped",
 		async (kind) => {
 			const { lane, harness, session, repo, options, faux, models } = await fixture();
 			const root = await lane.appendMessage({ role: "user", content: "history", timestamp: 1 }, BACKGROUND_CONTEXT);
@@ -258,7 +273,6 @@ describe("durable monitoring stop", () => {
 				BACKGROUND_CONTEXT,
 			);
 			const unrelated = await harness.lane("unrelated", { createAt: null }, BACKGROUND_CONTEXT);
-			await related.nextRun("queued continuation", undefined, BACKGROUND_CONTEXT);
 			faux.setResponses([blocked]);
 			await lane.prompt("question", undefined, BACKGROUND_CONTEXT);
 			const request = vi.spyOn(models, "streamSimple");
@@ -268,22 +282,25 @@ describe("durable monitoring stop", () => {
 					value: { navigation: { status: "completed" } },
 				});
 			}
-			expect(await related.accept({ kind: "prompt", prompt: "continue" }, BACKGROUND_CONTEXT)).toMatchObject({
-				ok: false,
-				error: { reason: "monitoring_blocked" },
-			});
-			expect(await related.compact(undefined, BACKGROUND_CONTEXT)).toMatchObject({
-				ok: false,
-				error: { reason: "monitoring_blocked" },
-			});
-			const stopped = (await session.getValue(laneState("related"), BACKGROUND_CONTEXT))?.value;
-			expect(stopped?.monitoringStop?.message.providerError).toEqual(blocked.providerError);
-			expect(stopped?.inbox).toHaveLength(1);
-			expect(await related.findEntries(undefined, BACKGROUND_CONTEXT)).toHaveLength(1);
-			await related.navigateTree(null, undefined, BACKGROUND_CONTEXT);
-			expect(request).not.toHaveBeenCalled();
-
+			await related.nextRun("queued continuation", undefined, BACKGROUND_CONTEXT);
 			faux.setResponses([fauxAssistantMessage("ordinary answer")]);
+			expect(await related.prompt("continue", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+				ok: true,
+				value: { status: "completed" },
+			});
+			expect((await session.getValue(laneState("related"), BACKGROUND_CONTEXT))?.value).toMatchObject({
+				inbox: [],
+			});
+			expect(
+				(await session.getValue(laneState("related"), BACKGROUND_CONTEXT))?.value.monitoringStop,
+			).toBeUndefined();
+			expect(await related.findEntries(undefined, BACKGROUND_CONTEXT)).not.toHaveLength(0);
+			expect(request).toHaveBeenCalledTimes(1);
+			expect(await lane.prompt("source remains stopped", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+				ok: false,
+				error: { reason: "monitoring_blocked" },
+			});
+			faux.setResponses([fauxAssistantMessage("independent answer")]);
 			expect(await unrelated.prompt("independent work", undefined, BACKGROUND_CONTEXT)).toMatchObject({
 				ok: true,
 				value: { status: "completed" },
@@ -294,15 +311,21 @@ describe("durable monitoring stop", () => {
 				BACKGROUND_CONTEXT,
 			);
 			const restored = await reopened.harness.lane("related", BACKGROUND_CONTEXT);
+			faux.setResponses([fauxAssistantMessage("still ordinary")]);
 			expect(await restored.prompt("continue after reopening", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+				ok: true,
+				value: { status: "completed" },
+			});
+			const stopped = await reopened.harness.lane("main", BACKGROUND_CONTEXT);
+			expect(await stopped.prompt("still stopped after reopening", undefined, BACKGROUND_CONTEXT)).toMatchObject({
 				ok: false,
 				error: { reason: "monitoring_blocked" },
 			});
-			expect(request).toHaveBeenCalledTimes(1);
+			expect(request).toHaveBeenCalledTimes(3);
 		},
 	);
 
-	it("stops previously admitted related work before its first drive hook or request", async () => {
+	it("drives previously admitted related work after the source stops", async () => {
 		const { lane, harness, faux, models } = await fixture();
 		const root = await lane.appendMessage({ role: "user", content: "history", timestamp: 1 }, BACKGROUND_CONTEXT);
 		const related = await harness.lane("related", { createAt: root }, BACKGROUND_CONTEXT);
@@ -313,12 +336,13 @@ describe("durable monitoring stop", () => {
 		const hook = vi.fn();
 		harness.hooks.on("before_drive", hook);
 		const request = vi.spyOn(models, "streamSimple");
+		faux.setResponses([fauxAssistantMessage("ordinary answer")]);
 		expect(await related.drive({ operationId: admitted.value.operationId }, BACKGROUND_CONTEXT)).toMatchObject({
 			ok: true,
-			value: { kind: "settled", outcome: { status: "failed", error: { code: "misalignment_policy_violation" } } },
+			value: { kind: "settled", outcome: { status: "completed" } },
 		});
-		expect(hook).not.toHaveBeenCalled();
-		expect(request).not.toHaveBeenCalled();
+		expect(hook).toHaveBeenCalledOnce();
+		expect(request).toHaveBeenCalledOnce();
 	});
 
 	it.each([false, true])(
@@ -381,8 +405,13 @@ describe("durable monitoring stop", () => {
 			expect(request).not.toHaveBeenCalled();
 			expect(summary).not.toHaveBeenCalled();
 			expect(poll).not.toHaveBeenCalled();
+			const related = await reopened.harness.lane("related", { createAt: root }, BACKGROUND_CONTEXT);
 			const unrelated = await reopened.harness.lane("other", { createAt: null }, BACKGROUND_CONTEXT);
-			faux.setResponses([fauxAssistantMessage("ordinary answer")]);
+			faux.setResponses([fauxAssistantMessage("related answer"), fauxAssistantMessage("ordinary answer")]);
+			expect(await related.prompt("same history, new lane", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+				ok: true,
+				value: { status: deferred ? "suspended" : "completed" },
+			});
 			expect(await unrelated.prompt("new conversation", undefined, BACKGROUND_CONTEXT)).toMatchObject({
 				ok: true,
 				value: { status: deferred ? "suspended" : "completed" },
@@ -437,7 +466,7 @@ describe("durable monitoring stop", () => {
 	});
 
 	it.each(["branch-tip", "branch-ancestor", "tree", "lane-tip", "lane-ancestor", "data-branch"] as const)(
-		"inherits a stopped conversation through %s",
+		"does not inherit the source stop through %s",
 		async (kind) => {
 			const { lane, harness, session, repo, options, faux, models } = await fixture();
 			const root = await lane.appendMessage({ role: "user", content: "history", timestamp: 1 }, BACKGROUND_CONTEXT);
@@ -461,18 +490,23 @@ describe("durable monitoring stop", () => {
 				if (kind === "data-branch") await session.createBranch("derived", target, BACKGROUND_CONTEXT);
 				derived = await destination.lane("derived", { createAt: target }, BACKGROUND_CONTEXT);
 			}
+			faux.setResponses([fauxAssistantMessage("derived answer")]);
 			expect(await derived.prompt("continue", undefined, BACKGROUND_CONTEXT)).toMatchObject({
-				ok: false,
-				error: { reason: "monitoring_blocked" },
+				ok: true,
+				value: { status: "completed" },
 			});
 			expect(await derived.findEntries(undefined, BACKGROUND_CONTEXT)).not.toHaveLength(0);
-			await derived.navigateTree(root, undefined, BACKGROUND_CONTEXT);
-			const descendant = await destination.lane("descendant", { createAt: root }, BACKGROUND_CONTEXT);
-			expect(await descendant.prompt("continue again", undefined, BACKGROUND_CONTEXT)).toMatchObject({
-				ok: false,
-				error: { reason: "monitoring_blocked" },
+			expect(await derived.navigateTree(root, undefined, BACKGROUND_CONTEXT)).toMatchObject({
+				ok: true,
+				value: { navigation: { status: "completed" } },
 			});
-			expect(request).not.toHaveBeenCalled();
+			const descendant = await destination.lane("descendant", { createAt: root }, BACKGROUND_CONTEXT);
+			faux.setResponses([fauxAssistantMessage("descendant answer")]);
+			expect(await descendant.prompt("continue again", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+				ok: true,
+				value: { status: "completed" },
+			});
+			expect(request).toHaveBeenCalledTimes(2);
 
 			const empty = await destination.lane("unrelated", { createAt: null }, BACKGROUND_CONTEXT);
 			faux.setResponses([fauxAssistantMessage("ordinary answer")]);
@@ -480,10 +514,14 @@ describe("durable monitoring stop", () => {
 				ok: true,
 				value: { status: "completed" },
 			});
+			expect(await lane.prompt("source remains stopped", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+				ok: false,
+				error: { reason: "monitoring_blocked" },
+			});
 		},
 	);
 
-	it("inherits a summary stop after navigation and reopen without blocking unrelated history", async () => {
+	it("keeps a summary stop local after navigation and reopen", async () => {
 		const { lane, harness, session, repo, options, faux, models } = await fixture();
 		const history = await lane.appendMessage({ role: "user", content: "history", timestamp: 1 }, BACKGROUND_CONTEXT);
 		const unrelated = await harness.lane("unrelated", { createAt: null }, BACKGROUND_CONTEXT);
@@ -504,14 +542,47 @@ describe("durable monitoring stop", () => {
 		);
 		const request = vi.spyOn(models, "streamSimple");
 		const derived = await reopened.harness.lane("derived", { createAt: history }, BACKGROUND_CONTEXT);
+		faux.setResponses([fauxAssistantMessage("derived answer")]);
 		expect(await derived.prompt("continue", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+			ok: true,
+			value: { status: "completed" },
+		});
+		const stopped = await reopened.harness.lane("main", BACKGROUND_CONTEXT);
+		expect(await stopped.prompt("source remains stopped", undefined, BACKGROUND_CONTEXT)).toMatchObject({
 			ok: false,
 			error: { reason: "monitoring_blocked" },
 		});
-		expect(request).not.toHaveBeenCalled();
+		expect(request).toHaveBeenCalledOnce();
 		const separate = await reopened.harness.lane("separate", { createAt: otherHistory }, BACKGROUND_CONTEXT);
 		faux.setResponses([fauxAssistantMessage("ordinary answer")]);
 		expect(await separate.prompt("continue separate work", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+			ok: true,
+			value: { status: "completed" },
+		});
+	});
+
+	it("a new provider block stops only its destination lane", async () => {
+		const { lane, harness, session, faux } = await fixture();
+		const root = await lane.appendMessage(
+			{ role: "user", content: "shared history", timestamp: 1 },
+			BACKGROUND_CONTEXT,
+		);
+		const destination = await harness.lane("destination", { createAt: root }, BACKGROUND_CONTEXT);
+		faux.setResponses([blocked]);
+		expect(await destination.prompt("blocked here", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+			ok: true,
+			value: { status: "failed", error: { code: "misalignment_policy_violation", details: blocked.providerError } },
+		});
+		const stop = (await session.getValue(laneState("destination"), BACKGROUND_CONTEXT))?.value.monitoringStop;
+		expect(stop?.message.providerError).toEqual(blocked.providerError);
+		expect(stop).not.toHaveProperty("tipId");
+		expect(await destination.prompt("no second request", undefined, BACKGROUND_CONTEXT)).toMatchObject({
+			ok: false,
+			error: { reason: "monitoring_blocked" },
+		});
+		expect((await session.getValue(laneState("main"), BACKGROUND_CONTEXT))?.value.monitoringStop).toBeUndefined();
+		faux.setResponses([fauxAssistantMessage("source answer")]);
+		expect(await lane.prompt("source still works", undefined, BACKGROUND_CONTEXT)).toMatchObject({
 			ok: true,
 			value: { status: "completed" },
 		});
@@ -626,7 +697,7 @@ describe("durable monitoring stop", () => {
 				currentOperationId: id,
 				lastOperationId: null,
 				inbox: [],
-				monitoringStop: { message: blocked, tipId: lane.state.tipId },
+				monitoringStop: { message: blocked },
 			},
 			BACKGROUND_CONTEXT,
 		);

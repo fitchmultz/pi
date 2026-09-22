@@ -482,9 +482,7 @@ export async function publishResponse<TContext extends object | undefined>(
 					record,
 					lane: {
 						tipId: responseEntryId,
-						...(isMonitoringBlocked(committed)
-							? { monitoringStop: { message: committed, tipId: responseEntryId } }
-							: {}),
+						...(isMonitoringBlocked(committed) ? { monitoringStop: { message: committed } } : {}),
 					},
 					materialize: () => ({ kind: "settled", outcome: record }) as const,
 					events,

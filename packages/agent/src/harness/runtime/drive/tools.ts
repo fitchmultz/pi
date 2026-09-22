@@ -381,7 +381,7 @@ async function performToolInvocation<TContext extends object | undefined>(
 
 	let execution: Promise<ExecutedToolCall>;
 	try {
-		await assertMonitoringActive(lane, drive);
+		assertMonitoringActive(lane, drive);
 		execution = executeToolCall(
 			cleared,
 			drive.gate,

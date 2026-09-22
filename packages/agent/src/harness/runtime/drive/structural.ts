@@ -757,7 +757,7 @@ async function publishNestedRequestOutcome<TContext extends object | undefined>(
 ): Promise<void> {
 	await lane.settleOperation(
 		effect,
-		(state, current) => {
+		(_state, current) => {
 			const next = { ...current, usageIds: [...current.usageIds, usageId] };
 			delete next.request;
 			const row: Omit<UsageRow, "seq"> = { id: usageId, usage: response.usage, adjustment: false };
@@ -768,7 +768,7 @@ async function publishNestedRequestOutcome<TContext extends object | undefined>(
 				...(isMonitoringBlocked(response)
 					? {
 							lane: {
-								monitoringStop: { message: { ...response, stopReason: "error" as const }, tipId: state.tipId },
+								monitoringStop: { message: { ...response, stopReason: "error" as const } },
 							},
 						}
 					: {}),
@@ -850,7 +850,7 @@ async function performStructuralAttempt<TContext extends object | undefined>(
 		const admittedContext = withAbortSignal(drive.gate.signal, requestContext);
 		let response: AssistantMessage;
 		try {
-			await assertMonitoringActive(lane, drive);
+			assertMonitoringActive(lane, drive);
 			response = await drive.gate.admit(() =>
 				lane.models.completeSimple(
 					model,
@@ -862,7 +862,7 @@ async function performStructuralAttempt<TContext extends object | undefined>(
 							drive.gate,
 							admittedContext,
 						);
-						await assertMonitoringActive(lane, drive);
+						assertMonitoringActive(lane, drive);
 						return hook?.payload;
 					}),
 				),

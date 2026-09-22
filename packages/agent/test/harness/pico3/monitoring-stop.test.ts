@@ -53,7 +53,7 @@ for (const backend of ["memory", "jsonl"] as const) {
 	});
 }
 
-test("JSONL reopen, reset, and history forks preserve the stop while reads and empty conversations remain usable", async () => {
+test("JSONL reopen and reset retain the source stop while history forks and new conversations can dispatch", async () => {
 	const models = blockedFake();
 	const original = await open({ backend: "jsonl", models, root: { rewindable: { model, keepRecent: 0 } } });
 	let env = original;
@@ -77,25 +77,62 @@ test("JSONL reopen, reset, and history forks preserve the stop while reads and e
 		assert.equal((await untilTerminal(env, collapse)).outcome?.status, "failed");
 		for (const at of [entries[0]!.id, blocked.id]) {
 			const fork = await env.root.fork(at, {}, ctx);
-			await fork.context(ctx);
-			await assert.rejects(fork.send({ content: "continue" }, ctx), /misalignment_policy_violation/);
+			assert.equal((await fork.sticky(ctx)).monitoringBlocked, undefined);
+			assert.equal((await (await fork.send({ content: "continue" }, ctx)).wait(ctx)).status, "done");
 		}
+		const related = await env.h.createConversation(
+			{ parent: { conversationId: env.root.id, at: blocked.id }, rewindable: { model } },
+			ctx,
+		);
+		assert.equal((await related.sticky(ctx)).monitoringBlocked, undefined);
+		assert.equal((await (await related.send({ content: "related" }, ctx)).wait(ctx)).status, "done");
+		assert.ok(
+			models.requests
+				.slice(1, 4)
+				.every((messages) =>
+					messages.some((message) => message.role === "user" && message.content === "original request"),
+				),
+		);
 		await env.root.reset(undefined, ctx);
 		await assert.rejects(env.root.send({ content: "after reset" }, ctx), /misalignment_policy_violation/);
-		assert.equal(models.calls, 1);
+		assert.equal((await env.root.sticky(ctx)).monitoringBlocked, true);
+		assert.equal(models.calls, 4);
 		const fresh = await env.h.createConversation({ rewindable: { model } }, ctx);
 		assert.equal((await (await fresh.send({ content: "independent" }, ctx)).wait(ctx)).status, "done");
 		const emptyFork = await env.root.fork("start", { rewindable: { model } }, ctx);
 		assert.equal((await (await emptyFork.send({ content: "empty" }, ctx)).wait(ctx)).status, "done");
-		assert.equal(models.calls, 3);
+		assert.equal(models.calls, 6);
 		assert.ok(
 			models.requests
-				.slice(1)
+				.slice(4)
 				.every(
 					(messages) =>
 						!messages.some((message) => message.role === "user" && message.content === "original request"),
 				),
 		);
+	} finally {
+		await env.close();
+		await original.close();
+	}
+});
+
+test("a new monitoring stop in a history fork does not stop its source after JSONL reopen", async () => {
+	const models = blockedFake({ blockCall: 1 });
+	const original = await open({ backend: "jsonl", models });
+	let env = original;
+	try {
+		const source = await (await env.root.send({ content: "source history" }, ctx)).wait(ctx);
+		assert.equal(source.status, "done");
+		const fork = await env.root.fork(source.answer!, {}, ctx);
+		assert.equal((await (await fork.send({ content: "blocked fork" }, ctx)).wait(ctx)).status, "unanswered");
+		await fork.waitForIdle(ctx);
+		assert.equal((await fork.sticky(ctx)).monitoringBlocked, true);
+		assert.equal((await env.root.sticky(ctx)).monitoringBlocked, undefined);
+		env = await (await env.crash())();
+		const reopenedFork = (await env.h.conversation(fork.id, ctx))!;
+		await assert.rejects(reopenedFork.send({ content: "still blocked" }, ctx), /misalignment_policy_violation/);
+		assert.equal((await (await env.root.send({ content: "source continues" }, ctx)).wait(ctx)).status, "done");
+		assert.equal(models.calls, 3);
 	} finally {
 		await env.close();
 		await original.close();

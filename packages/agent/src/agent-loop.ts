@@ -248,9 +248,18 @@ async function runLoop(
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
 ): Promise<void> {
-	const previousBlock = initialContext.messages.find(
-		(message): message is AssistantMessage => message.role === "assistant" && isMonitoringBlocked(message),
-	);
+	const monitoringSessionId = initialConfig.sessionId ?? initialConfig.monitoringSessionId;
+	const previousBlock =
+		monitoringSessionId === undefined
+			? undefined
+			: initialContext.monitoringStop?.sessionId === monitoringSessionId
+				? initialContext.monitoringStop.message
+				: initialContext.messages.find(
+						(message): message is AssistantMessage =>
+							message.role === "assistant" &&
+							isMonitoringBlocked(message) &&
+							message.monitoringSessionId === monitoringSessionId,
+					);
 	if (previousBlock) {
 		await emit({ type: "turn_end", message: previousBlock, toolResults: [] });
 		await emit({ type: "agent_end", messages: newMessages });
@@ -727,7 +736,11 @@ async function streamAssistantResponse(
 		}
 	};
 	const commit = async (message: AssistantMessage): Promise<AssistantMessage> => {
-		if (isMonitoringBlocked(message)) onMonitoringBlock(message);
+		if (isMonitoringBlocked(message)) {
+			const sessionId = config.sessionId ?? config.monitoringSessionId;
+			if (sessionId !== undefined) message.monitoringSessionId = sessionId;
+			onMonitoringBlock(message);
+		}
 		if (
 			lastCommitted &&
 			(lastCommitted === message || (message.responseId && lastCommitted.responseId === message.responseId))

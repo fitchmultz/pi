@@ -756,12 +756,20 @@ export class AgentSession {
 
 	private _getMonitoringBlock(): AssistantMessage | undefined {
 		const live = this.messages.find(
-			(message): message is AssistantMessage => message.role === "assistant" && isMonitoringBlocked(message),
+			(message): message is AssistantMessage =>
+				message.role === "assistant" &&
+				isMonitoringBlocked(message) &&
+				message.monitoringSessionId === this.sessionId,
 		);
 		if (live) return live;
 		// Projection edits, context windows, and tree navigation must not erase a stop in this session.
 		for (const entry of this.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant" && isMonitoringBlocked(entry.message)) {
+			if (
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				isMonitoringBlocked(entry.message) &&
+				entry.message.monitoringSessionId === this.sessionId
+			) {
 				return entry.message;
 			}
 		}
@@ -1383,6 +1391,7 @@ export class AgentSession {
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		if (event.type === "message_end" && event.message.role === "assistant" && isMonitoringBlocked(event.message)) {
+			event.message.monitoringSessionId = this.sessionId;
 			this._cacheWarmer?.cancel();
 		}
 		if (event.type === "message_checkpoint") {
@@ -3493,6 +3502,7 @@ export class AgentSession {
 	// =========================================================================
 
 	private _recordMonitoringBlock(message: AssistantMessage): void {
+		message.monitoringSessionId = this.sessionId;
 		this._cacheWarmer?.cancel();
 		this._flushPendingProviderMessages();
 		this._persistMessage(message);

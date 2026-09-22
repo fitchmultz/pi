@@ -1,6 +1,6 @@
 # GPT-6
 
-Pi registers Astra, Sol, and Luna on both routes: select `openai/gpt-6-sol` for the direct Responses API or `openai-codex/gpt-6-sol` for Codex subscription access, and substitute `astra` or `luna` as needed. The hosted features below apply to the direct OpenAI route.
+Pi registers Astra, Sol, and Luna on direct OpenAI and Codex routes. Select `openai/gpt-6-sol` for the direct Responses API or `openai-codex/gpt-6-sol` for the Codex backend, and substitute `astra` or `luna` as needed. A Codex catalog entry does not guarantee account access to that model. The hosted features below apply to the direct OpenAI route.
 
 ## Ordinary sessions
 
@@ -14,7 +14,7 @@ Pi preserves compatible encrypted reasoning when switching between Astra, Sol, a
 
 ## Context and pricing
 
-Built-in direct OpenAI Astra, Sol, and Luna default to the 272,000-token short-context pricing tier. All three support a 1,050,000-token window and up to 128,000 output tokens. To use the full window, add a model override in `~/.pi/agent/models.json` for each model you need:
+Built-in direct OpenAI Astra, Sol, and Luna default to the 272,000-token short-context pricing tier. All three support a 1,050,000-token total window, up to 922,000 input tokens, and up to 128,000 output tokens. To use the full window, add a model override in `~/.pi/agent/models.json` for each model you need:
 
 ```json
 {
@@ -32,7 +32,7 @@ Built-in direct OpenAI Astra, Sol, and Luna default to the 272,000-token short-c
 
 Above 272,000 total input tokens, input and cache rates double and output rates increase by 50% for the entire request. The model definitions include these tiers. Pro mode and hosted subagents consume additional tokens; neither is enabled by default.
 
-GPT-6 uses `prompt_cache_options.ttl: "30m"`, rather than the older `prompt_cache_retention` field. Pi uses the provider's implicit caching by default. `cacheRetention: "none"` requests explicit-only caching without breakpoints, preventing cache writes. Request hooks can place explicit breakpoints on reusable input content when an application needs finer control.
+GPT-6 uses `prompt_cache_options.ttl: "30m"`, rather than the older `prompt_cache_retention` field. Pi uses the provider's implicit caching by default. `cacheRetention: "none"` requests explicit-only caching. Pi adds no breakpoints, so it makes no cache writes unless a request hook supplies one on reusable input content.
 
 ## Pro mode and reasoning context
 
@@ -71,7 +71,7 @@ This is OpenAI's hosted orchestration, separate from a local subagent extension.
 
 Pi uses the beta Responses transport, executes client tools from all agents through the existing tool registry, and displays the root agent's answer. It preserves child output and encrypted collaboration state for continuation. WebSockets return completed client-tool results to the active response; HTTP returns them in the next request. Late injection rejection reuses the saved result rather than executing the tool again.
 
-Every hosted agent receives the configured tools. The concurrency setting limits active descendants, not total agents, tree depth, or spend. Reported usage includes the hosted agents' combined token usage; Pi's context estimate is conservative and is not a per-root-agent measurement. Existing local subagent tools are not removed. Reasoning summaries and positional effort updates are unavailable in hosted multi-agent mode; server-side compaction is enabled by OpenAI. Native asynchronous tools require parallel tool calls to be disabled in this mode.
+Every hosted agent receives the configured tools. The concurrency setting limits active descendants, not total agents, tree depth, or spend. OpenAI does not support `max_tool_calls` in this mode, so Pi omits it even when configured; native async-capable tools require `parallel_tool_calls: false`. Reported usage includes the hosted agents' combined token usage; Pi's context estimate is conservative and is not a per-root-agent measurement. Existing local subagent tools are not removed. Reasoning summaries and positional effort updates are unavailable in hosted multi-agent mode; server-side compaction is enabled by OpenAI.
 
 ## Programmatic tool calling
 
@@ -133,9 +133,9 @@ For an explicit native compaction request, an extension can append `{ "type": "c
 
 ## Computer use and monitoring
 
-Image-bearing computer-use tools continue through their existing extensions and platform runtimes. Enabling GPT-6 does not install a second desktop executor or make Pi execute native Responses `computer_call` actions.
+Image-bearing computer-use tools continue through their existing extensions and platform runtimes. Enabling GPT-6 does not install a second desktop executor or make Pi execute native Responses `computer_call` actions. Other OpenAI-hosted built-in tools can be supplied through `samplingParams.tools`, which replaces Pi's request tool list rather than appending to it; Pi does not provide a dedicated UI for those tools.
 
-A provider error with code `misalignment_policy_violation` stops further dispatch and automatic continuation of that workflow, including retry and compaction recovery. Pi preserves the error and available request/response identifiers for review. Already completed actions are not undone.
+A provider error with code `misalignment_policy_violation` stops further dispatch and automatic continuation in the affected Pi session, including retry and compaction recovery. That session remains stopped through navigation and restart. Forks and related new sessions do not inherit Pi's stop, even when they retain the source history; a fresh provider block stops the destination session independently. Pi preserves the error and available request/response identifiers for review. Already completed actions are not undone.
 
 ## References
 

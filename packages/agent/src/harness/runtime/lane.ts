@@ -92,7 +92,6 @@ import {
 import { formatSkillInvocation } from "../skills.ts";
 import { durableBranchPreparation, durableCompactionPreparation } from "./drive/structural.ts";
 import { driveOperation } from "./drive.ts";
-import { findMonitoringStop } from "./monitoring.ts";
 import { readAssistantFrames } from "./progress.ts";
 import { chainEntries, committedEntryEvents, readLaneQueues } from "./transcript.ts";
 import {
@@ -490,31 +489,11 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 		);
 	}
 
-	/** Refresh inherited stops before admitting or advancing work on an existing lane. */
-	async refreshMonitoringStop(context: Context): Promise<void> {
-		if (this.state.monitoringStop !== undefined) return;
-		await this.command(async (state, reader) => {
-			if (state.monitoringStop !== undefined) return { kind: "return", result: undefined };
-			const monitoringStop = await findMonitoringStop(reader, state.tipId, context);
-			if (monitoringStop === undefined) return { kind: "return", result: undefined };
-			const next = { ...state, monitoringStop };
-			return {
-				kind: "commit",
-				writes: [
-					setValue(laneStateValue(this.name), durableLaneState(next, state.operation?.meta.operationId ?? null)),
-				],
-				next,
-				materialize: () => undefined,
-			};
-		}, context);
-	}
-
 	async accept(request: OperationRequest, context: Context): Promise<OperationAdmissionResult> {
 		if (this.closedError instanceof HarnessClosed) {
 			return Result.err(new Closed({ message: this.closedError.message }));
 		}
 		this.assertOpen();
-		await this.refreshMonitoringStop(context);
 		const startedAt = Date.now();
 		const operationId = request.operationId ?? this.session.idGenerator.next(startedAt);
 		const acceptanceConfig = this.readConfig();

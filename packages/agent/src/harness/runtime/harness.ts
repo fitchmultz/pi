@@ -22,7 +22,6 @@ import type { LaneConfiguration, Session } from "../session/types.ts";
 import { branchTip, deleteValue, entryLabel, laneConfig, laneState, sessionName, setValue } from "../session/values.ts";
 import type { AgentHarnessStreamOptions, AgentHarnessTool } from "../types.ts";
 import { Lane } from "./lane.ts";
-import { findMonitoringStop } from "./monitoring.ts";
 import { readLaneStorage, restoreLaneState, restoreSession } from "./restore.ts";
 import { type Config, type LaneState, SliceNotImplemented } from "./types.ts";
 
@@ -126,14 +125,12 @@ export class Harness<TContext extends object | undefined> implements AgentHarnes
 					thinkingLevel: this.seed.thinkingLevel,
 					activeToolNames: [...this.seed.activeToolNames],
 				};
-				const monitoringStop = await findMonitoringStop(mutator, tipId, context);
 				const state: LaneState = {
 					tipId,
 					configuration: attachedConfiguration,
 					inbox: [],
 					lastOperationId: null,
 					operation: null,
-					...(monitoringStop === undefined ? {} : { monitoringStop }),
 				};
 				const writes = [
 					...(stored.kind === "absent" ? [setValue(branchTip(name), tipId)] : []),
@@ -142,7 +139,6 @@ export class Harness<TContext extends object | undefined> implements AgentHarnes
 						currentOperationId: null,
 						lastOperationId: null,
 						inbox: [],
-						...(monitoringStop === undefined ? {} : { monitoringStop }),
 					}),
 				];
 				await mutator.commit(writes, context);

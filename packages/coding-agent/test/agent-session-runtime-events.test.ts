@@ -213,10 +213,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		{ persist: true, position: "before" as const },
 		{ persist: false, position: "at" as const },
 		{ persist: false, position: "before" as const },
-	])("carries monitoring stops through history forks ($persist, $position)", async ({ persist, position }) => {
+	])("leaves earlier-point forks usable after a source stop ($persist, $position)", async ({ persist, position }) => {
 		const { runtimeHost, faux } = await createRuntimeHost(() => {}, persist);
 		const source = runtimeHost.session.sessionManager;
-		source.newSession();
+		const sourceId = source.getSessionId();
+		source.resetLeaf();
 		const firstUserId = source.appendMessage({
 			role: "user",
 			content: "Original request",
@@ -230,14 +231,17 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				requestId: "req_fork_blocked",
 				responseId: "resp_fork_blocked",
 			},
+			monitoringSessionId: sourceId,
 		};
 		source.appendMessage(blocked);
 		runtimeHost.session.refreshContext();
+		const sourceFile = source.getSessionFile();
+		await expect(runtimeHost.session.prompt("Continue source")).rejects.toThrow("Lineage review required");
 
 		await runtimeHost.fork(position === "before" ? firstUserId : ancestorId, { position });
 
 		const fork = runtimeHost.session.sessionManager;
-		expect(fork.getEntries()).toContainEqual(expect.objectContaining({ message: blocked }));
+		expect(fork.getSessionId()).not.toBe(sourceId);
 		expect(
 			fork
 				.getEntries()
@@ -247,39 +251,184 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 						entry.message.role === "assistant" &&
 						entry.message.providerError?.requestId === "req_fork_blocked",
 				),
-		).toHaveLength(1);
-		if (persist) {
-			const reopened = SessionManager.open(fork.getSessionFile()!);
-			expect(reopened.getEntries()).toContainEqual(expect.objectContaining({ message: blocked }));
-		}
-		await expect(runtimeHost.session.prompt("Continue fork")).rejects.toThrow("Lineage review required");
-		await expect(runtimeHost.session.compact()).rejects.toThrow("Lineage review required");
-		expect(faux.state.callCount).toBe(0);
-
-		await runtimeHost.newSession();
-		await runtimeHost.session.prompt("Unrelated fresh task");
+		).toHaveLength(0);
+		await runtimeHost.session.prompt("Continue fork");
 		expect(faux.state.callCount).toBe(1);
+
+		if (persist) {
+			const reopenedFork = SessionManager.open(fork.getSessionFile()!);
+			expect(
+				reopenedFork
+					.getEntries()
+					.some(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "assistant" &&
+							entry.message.providerError?.requestId === "req_fork_blocked",
+					),
+			).toBe(false);
+			await runtimeHost.switchSession(sourceFile!);
+			await expect(runtimeHost.session.prompt("Continue source after reopening")).rejects.toThrow(
+				"Lineage review required",
+			);
+			expect(runtimeHost.session.sessionManager.getEntries()).toContainEqual(
+				expect.objectContaining({ message: blocked }),
+			);
+		}
 	});
 
-	it("carries a named parent's monitoring stop into a related new session", async () => {
+	it.each([true, false])(
+		"keeps blocked history inspectable but lets a fork proceed (persist: %s)",
+		async (persist) => {
+			const { runtimeHost, faux } = await createRuntimeHost(() => {}, persist);
+			const source = runtimeHost.session.sessionManager;
+			const sourceId = source.getSessionId();
+			source.appendMessage({ role: "user", content: "Original request", timestamp: Date.now() });
+			const blocked = {
+				...fauxAssistantMessage("Partial output", {
+					stopReason: "error",
+					errorMessage: "Source review required: context length exceeded",
+				}),
+				providerError: {
+					code: "misalignment_policy_violation",
+					requestId: "req_source",
+					responseId: "resp_source",
+				},
+				monitoringSessionId: sourceId,
+			};
+			const blockedId = source.appendMessage(blocked);
+			const sourceFile = source.getSessionFile();
+			await expect(runtimeHost.session.prompt("Continue source")).rejects.toThrow("Source review required");
+
+			await runtimeHost.fork(blockedId, { position: "at" });
+
+			const fork = runtimeHost.session.sessionManager;
+			expect(fork.getSessionId()).not.toBe(sourceId);
+			expect(fork.getEntries()).toContainEqual(expect.objectContaining({ message: blocked }));
+			await runtimeHost.session.prompt("New work");
+			expect(faux.state.callCount).toBe(1);
+
+			if (persist) {
+				const forkFile = fork.getSessionFile()!;
+				await runtimeHost.switchSession(forkFile);
+				expect(runtimeHost.session.sessionManager.getEntries()).toContainEqual(
+					expect.objectContaining({ message: blocked }),
+				);
+				await runtimeHost.session.prompt("Continue reopened fork");
+				expect(faux.state.callCount).toBe(2);
+				await runtimeHost.switchSession(sourceFile!);
+				await expect(runtimeHost.session.prompt("Continue reopened source")).rejects.toThrow(
+					"Source review required",
+				);
+			}
+		},
+	);
+
+	it("keeps a cross-project fork usable with copied blocked history", async () => {
 		const { runtimeHost, faux } = await createRuntimeHost(() => {});
+		const source = runtimeHost.session.sessionManager;
 		const blocked = {
-			...fauxAssistantMessage("", { stopReason: "error", errorMessage: "Parent review required" }),
-			providerError: { code: "misalignment_policy_violation", requestId: "req_parent_blocked" },
+			...fauxAssistantMessage("Partial output", { stopReason: "error", errorMessage: "Source review required" }),
+			providerError: { code: "misalignment_policy_violation", requestId: "req_cross_project" },
+			monitoringSessionId: source.getSessionId(),
 		};
-		runtimeHost.session.sessionManager.appendMessage(blocked);
-		const parentSession = runtimeHost.session.sessionFile!;
-		await runtimeHost.newSession();
+		source.appendMessage(blocked);
+		const sourceFile = source.getSessionFile()!;
+		const targetCwd = join(runtimeHost.cwd, "other-project");
+		mkdirSync(targetCwd);
+		const fork = SessionManager.forkFrom(sourceFile, targetCwd, join(runtimeHost.cwd, "other-project-sessions"));
 
-		await runtimeHost.newSession({ parentSession });
+		expect(fork.getSessionId()).not.toBe(source.getSessionId());
+		expect(fork.getHeader()?.parentSession).toBe(sourceFile);
+		expect(fork.getEntries()).toContainEqual(expect.objectContaining({ message: blocked }));
+		await runtimeHost.switchSession(fork.getSessionFile()!);
+		await runtimeHost.session.prompt("New project task");
+		expect(faux.state.callCount).toBe(1);
+		await runtimeHost.switchSession(sourceFile);
+		await expect(runtimeHost.session.prompt("Continue source")).rejects.toThrow("Source review required");
+	});
 
+	it.each([false, true])(
+		"does not carry a named parent's monitoring stop into a new session (other current session: %s)",
+		async (fromOtherSession) => {
+			const { runtimeHost, faux } = await createRuntimeHost(() => {});
+			const source = runtimeHost.session.sessionManager;
+			const blocked = {
+				...fauxAssistantMessage("", { stopReason: "error", errorMessage: "Parent review required" }),
+				providerError: { code: "misalignment_policy_violation", requestId: "req_parent_blocked" },
+				monitoringSessionId: source.getSessionId(),
+			};
+			source.appendMessage(blocked);
+			const parentSession = runtimeHost.session.sessionFile!;
+			await expect(runtimeHost.session.prompt("Continue parent")).rejects.toThrow("Parent review required");
+			if (fromOtherSession) await runtimeHost.newSession();
+
+			await runtimeHost.newSession({ parentSession });
+
+			expect(runtimeHost.session.sessionManager.getHeader()?.parentSession).toBe(parentSession);
+			expect(runtimeHost.session.sessionManager.getEntries().filter((entry) => entry.type === "message")).toEqual(
+				[],
+			);
+			await runtimeHost.session.prompt("Continue handoff");
+			expect(faux.state.callCount).toBe(1);
+
+			await runtimeHost.switchSession(parentSession);
+			await expect(runtimeHost.session.prompt("Continue parent after reopening")).rejects.toThrow(
+				"Parent review required",
+			);
+			expect(runtimeHost.session.sessionManager.getEntries()).toContainEqual(
+				expect.objectContaining({ message: blocked }),
+			);
+		},
+	);
+
+	it("stops a related new session when its own provider request is blocked", async () => {
+		const { runtimeHost, faux } = await createRuntimeHost(() => {});
+		const source = runtimeHost.session.sessionManager;
+		source.appendMessage({
+			...fauxAssistantMessage("", { stopReason: "error", errorMessage: "Source review required" }),
+			providerError: { code: "misalignment_policy_violation", requestId: "req_source" },
+			monitoringSessionId: source.getSessionId(),
+		});
+		const sourceFile = source.getSessionFile()!;
+
+		await runtimeHost.newSession({ parentSession: sourceFile });
+		const childId = runtimeHost.session.sessionId;
+		faux.setResponses([
+			{
+				...fauxAssistantMessage("Partial child output", {
+					stopReason: "error",
+					errorMessage: "Child review required",
+				}),
+				providerError: {
+					code: "misalignment_policy_violation",
+					requestId: "req_child",
+					responseId: "resp_child",
+				},
+			},
+		]);
+
+		await runtimeHost.session.prompt("Trigger child stop");
+
+		expect(faux.state.callCount).toBe(1);
+		const childFile = runtimeHost.session.sessionFile!;
 		expect(runtimeHost.session.sessionManager.getEntries()).toContainEqual(
-			expect.objectContaining({ message: blocked }),
+			expect.objectContaining({
+				message: expect.objectContaining({
+					monitoringSessionId: childId,
+					providerError: {
+						code: "misalignment_policy_violation",
+						requestId: "req_child",
+						responseId: "resp_child",
+					},
+				}),
+			}),
 		);
-		await expect(runtimeHost.session.prompt("Continue handoff")).rejects.toThrow("Parent review required");
-		expect(faux.state.callCount).toBe(0);
-		await runtimeHost.newSession();
-		await runtimeHost.session.prompt("Unrelated fresh task");
+		await expect(runtimeHost.session.prompt("Continue child")).rejects.toThrow("Child review required");
+		await runtimeHost.switchSession(childFile);
+		await expect(runtimeHost.session.prompt("Continue reopened child")).rejects.toThrow("Child review required");
+		await runtimeHost.switchSession(sourceFile);
+		await expect(runtimeHost.session.prompt("Continue reopened source")).rejects.toThrow("Source review required");
 		expect(faux.state.callCount).toBe(1);
 	});
 

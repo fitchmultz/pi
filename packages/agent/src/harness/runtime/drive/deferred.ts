@@ -190,7 +190,7 @@ async function performDeferredPoll<TContext extends object | undefined>(
 	intent: DeferredEffectPendingOperation,
 	recovery: boolean,
 ): Promise<SettledAssistantMessage> {
-	await assertMonitoringActive(lane, drive);
+	assertMonitoringActive(lane, drive);
 	const response = openAssistantResponse(lane, drive, intent.responseEntryId, recovery);
 	let metadata: { status?: number; headers?: Record<string, string> } = {};
 	const admitted = withAbortSignal(drive.gate.signal, drive.context);
@@ -210,7 +210,7 @@ async function performDeferredPoll<TContext extends object | undefined>(
 					drive.gate,
 					drive.context,
 				);
-				await assertMonitoringActive(lane, drive);
+				assertMonitoringActive(lane, drive);
 				return result?.payload;
 			},
 			onResponse: (response) => {

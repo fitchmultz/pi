@@ -1,5 +1,5 @@
 import type { CommittedListAppendWrite, CommittedValueSetWrite } from "./commit.ts";
-import type { ForkOptions, LaneState } from "./types.ts";
+import type { ForkOptions } from "./types.ts";
 
 export type ForkCurrentStatePlan =
 	| { scope: "branch"; branch: string; destinationTip: string | null }
@@ -54,18 +54,12 @@ export function projectForkCurrentStateWrite(
 			return plan.scope === "tree" || write.key === plan.branch ? write : undefined;
 		case "pi.lane.state": {
 			if (plan.scope === "branch" && write.key !== plan.branch) return undefined;
-			const stopped = (write.value as LaneState).monitoringStop;
 			return {
 				...write,
 				value: {
 					currentOperationId: null,
 					lastOperationId: null,
 					inbox: [],
-					...(stopped === undefined
-						? {}
-						: {
-								monitoringStop: plan.scope === "branch" ? { ...stopped, tipId: plan.destinationTip } : stopped,
-							}),
 				},
 			};
 		}
