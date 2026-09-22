@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-// The same offline validation for a task worktree, a CI source archive, and a
-// candidate release. Callers install frozen dependencies and hydrate once first.
+// Offline validation for a task worktree or candidate release. Callers install
+// frozen dependencies and hydrate model data first.
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -26,7 +26,7 @@ try {
 	run("tmux", ["-V"]);
 	run(npm, ["run", "check:model-data"]);
 	run(npm, ["run", "build:offline"]);
-	run(npm, ["run", "check"]);
+	if (suite === "full") run(npm, ["run", "check"]);
 	const cli = join(root, "packages/coding-agent/dist/bundle/cli.js");
 	if (!existsSync(cli)) throw new Error(`Missing bundled CLI: ${cli}`);
 	const testEnv = { PI_TEST_CLI: cli };

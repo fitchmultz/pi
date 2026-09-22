@@ -52,52 +52,51 @@ npm run verify:fork                      # full verification
 npm run verify:fork -- --suite runtime   # focused native lifecycle verification
 ```
 
-Verification checks the existing catalog, builds offline, runs nonmutating checks,
-and runs isolated tests against the real bundled CLI. tmux is required; terminal
-coverage cannot silently skip. Use `./test.sh` for the complete isolated suite or
+Full verification checks the hydrated catalog, builds offline, runs nonmutating
+checks and isolated tests against the real bundled CLI. Runtime verification
+builds offline and runs focused restart and checkpoint tests without repeating
+the platform-independent checks. tmux is required; terminal coverage cannot
+silently skip. Use `./test.sh` for the complete isolated suite and
 `./test.sh -- <command...>` for focused tests. Node/npm resolve before HOME
-isolation so version-manager shims do not lose their installation. `npm run format`
-is the explicit formatting command; hooks never format or restage files.
+isolation so version-manager shims do not lose their installation. `npm run format` is the
+explicit formatting command; hooks never format or restage files.
 
-Hydrate once, then freeze the reviewed commit plus ignored model data with the
-source archive helper. Local Linux Node 22.19 full validation, macOS Node 24 runtime
-validation and extension compatibility checks consume that same snapshot. Retain
-`source.tar.gz`, its adjacent `source.commit`, checksums and validation logs.
-Intentional generator changes belong in the reviewed Git diff; verification must
-not regenerate tracked inputs.
+CI runs Linux Node 22.19 full verification on PRs, main and manual dispatch.
+macOS Node 24 runs focused runtime verification on PRs and manual dispatch.
+Each lane hydrates model data independently, so they verify the same commit
+against potentially different live catalog data. CI uploads no source artifact.
+Local installation freezes its own commit and hydrated catalog. Intentional
+generator changes belong in the reviewed Git diff; verification must not
+regenerate tracked inputs.
 
 ## Immutable installation and activation
 
-Create the frozen input from the exact reviewed commit before local qualification.
-If merging changes the commit ID, archive the merged commit with the same hydrated
-catalog and verify that its source tree matches the qualified tree.
+Hydrate model data in the checkout, then stage the exact reviewed commit. If
+merging changes the commit ID, stage and validate the merged commit before
+activation.
 
 ```sh
+npm ci --ignore-scripts
+npm run hydrate:model-data
 commit=$(git rev-parse HEAD)
-version=$(node -p 'require("./packages/coding-agent/package.json").version')
-mkdir -p /path/to/frozen-source
-printf '%s\n' "$commit" > /path/to/frozen-source/source.commit
-bash scripts/create-source-archive.sh --version "$version" --ref "$commit" \
-  --out /path/to/frozen-source/source.tar.gz
-npm run install:fork -- --ref "$commit" \
-  --source-archive /path/to/frozen-source/source.tar.gz --stage
+npm run install:fork -- --ref "$commit" --stage
 ```
 
-The installer checks the adjacent `source.commit` and compares the extracted
-source against that Git tree using a temporary index, allowing only the frozen
-model-data files in addition. It validates that data, builds in a temporary source
-directory, packs native workspace tarballs, and installs a
-production npm consumer into a new release. Installed SDK, CLI, extension imports,
-native checkpoint restore and real-terminal restart tests must pass before the
-release receives a validation receipt. It retains the archive, commit, tarballs
-and build identity. No hand-made workspace dependency links are used.
+The installer creates a source archive from that Git commit and the checkout's
+already-hydrated model data; it does not fetch or regenerate metadata. An
+optional `--source-archive` reuses a separately frozen archive with an adjacent
+`source.commit`, checking its source tree against the selected commit. The
+installer validates model data, builds in a temporary source directory, packs
+native workspace tarballs and installs a production npm consumer into a new
+release. Installed SDK, CLI, extension imports, native checkpoint restore and
+real-terminal restart tests must pass before the release receives a validation
+receipt. It retains the archive, commit, tarballs and build identity. No
+hand-made workspace dependency links are used.
 
 Releases live under `~/.local/share/pi-fork/releases/<identity>`, where identity
 includes the commit, catalog digest, Node version, platform and architecture.
-Existing releases are never rebuilt or overwritten. Without `--source-archive`,
-local staging uses the exact Git ref and the checkout's already-hydrated catalog;
-it does not fetch or regenerate metadata. Deployed delivery uses the locally
-qualified frozen archive.
+Existing releases are never rebuilt or overwritten. Deployed delivery uses the
+locally qualified frozen archive.
 
 Select the printed identity, then activate its printed package directory:
 
