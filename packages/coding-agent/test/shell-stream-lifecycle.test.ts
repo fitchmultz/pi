@@ -112,13 +112,15 @@ describe("legacy shell stream lifecycle", () => {
 		const failure = new Error("read failed");
 		const operations = createLocalShellOperations("node", () => ({ shell: process.execPath, args: ["-e"] }));
 		const updates: string[] = [];
+		let child: ReturnType<typeof spawn> | undefined;
 		const wrapped: BashOperations = {
 			exec: (command, cwd, options) =>
 				operations.exec(command, cwd, {
 					...options,
 					onData: (chunk, source) => {
 						options.onData(chunk, source);
-						const child = vi.mocked(spawn).mock.results.at(-1)!.value as ReturnType<typeof spawn>;
+						// Windows cleanup also spawns taskkill; retain the execution child before injecting errors.
+						child = vi.mocked(spawn).mock.results.at(-1)!.value as ReturnType<typeof spawn>;
 						child.stdout!.emit("error", failure);
 						child.stderr!.emit("error", failure);
 					},
@@ -134,11 +136,10 @@ describe("legacy shell stream lifecycle", () => {
 		).rejects.toBe(failure);
 		expect(updates.at(-1)).toBe("�");
 		const count = updates.length;
-		const child = vi.mocked(spawn).mock.results.at(-1)!.value as ReturnType<typeof spawn>;
-		child.stdout!.emit("data", Buffer.from("late"));
+		child!.stdout!.emit("data", Buffer.from("late"));
 		expect(updates).toHaveLength(count);
-		expect(child.stdout!.destroyed).toBe(true);
-		expect(child.stderr!.destroyed).toBe(true);
+		expect(child!.stdout!.destroyed).toBe(true);
+		expect(child!.stderr!.destroyed).toBe(true);
 	});
 
 	it.skipIf(process.platform !== "win32")(
