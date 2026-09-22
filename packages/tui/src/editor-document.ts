@@ -12,8 +12,8 @@ export interface EditorDocument {
 	readonly folds: RangeSet<Fold>;
 }
 
-export function document(text: string | Text, collapsed = false): EditorDocument {
-	const value = typeof text === "string" ? Text.of(text.split("\n")) : text;
+export function document(text: string, collapsed = false): EditorDocument {
+	const value = Text.of(text.split("\n"));
 	return {
 		text: value,
 		folds: collapsed && value.length ? RangeSet.of([fold.range(0, value.length)]) : RangeSet.empty,
@@ -105,25 +105,23 @@ export class EditorProjection {
 		return this.text.length;
 	}
 
-	segments(from: number, to: number, segmenter: Intl.Segmenter): EditorSegment[] {
-		const result: EditorSegment[] = [];
+	*segments(from: number, to: number, segmenter: Intl.Segmenter): Generator<EditorSegment, undefined, unknown> {
 		const input = this.text.sliceString(from, to);
 		let at = from;
-		const plain = (end: number) => {
-			for (const s of segmenter.segment(this.text.sliceString(at, end))) {
-				result.push({ ...s, input, index: at - from + s.index });
+		function* plain(end: number): Generator<EditorSegment, undefined, unknown> {
+			for (const s of segmenter.segment(input.slice(at - from, end - from))) {
+				yield { ...s, input, index: at - from + s.index };
 			}
 			at = end;
-		};
+		}
 		for (const p of this.pieces) {
 			if (!p.atomic || p.end <= from || p.start >= to) continue;
-			if (at < p.start) plain(p.start);
+			if (at < p.start) yield* plain(p.start);
 			const end = Math.min(p.end, to);
-			result.push({ segment: this.text.sliceString(at, end), index: at - from, input, atomic: true });
+			yield { segment: input.slice(at - from, end - from), index: at - from, input, atomic: true };
 			at = end;
 		}
-		plain(to);
-		return result;
+		yield* plain(to);
 	}
 }
 

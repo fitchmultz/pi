@@ -191,12 +191,6 @@ interface CompletionContext {
 	col: number;
 }
 
-interface LayoutLine {
-	text: string;
-	hasCursor: boolean;
-	cursorPos?: number;
-}
-
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	selectList: SelectListTheme;
@@ -295,7 +289,16 @@ export class Editor implements Component, Focusable {
 		cursor = from + insert.text.length,
 		notify = true,
 	): void {
-		this.value = replaceDocument(this.value, from, to, insert);
+		const value = replaceDocument(this.value, from, to, insert);
+		// A provider can select an interior source position without changing its text.
+		this.value = {
+			text: value.text,
+			folds: value.folds.update({
+				filterFrom: cursor,
+				filterTo: cursor,
+				filter: (a, b) => cursor <= a || cursor >= b,
+			}),
+		};
 		this.cursor = cursor;
 		this.revision++;
 		this.preferredVisualCol = null;
@@ -515,15 +518,13 @@ export class Editor implements Component, Focusable {
 		this.lastWidth = layoutWidth;
 
 		// Layout the text
-		const layoutLines = this.layoutText(layoutWidth);
+		const layoutLines = this.buildVisualLineMap(layoutWidth);
+		const cursorLineIndex = this.findCurrentVisualLine(layoutLines);
+		const projectedCursor = this.projectedCursor;
 
 		// Calculate max visible lines: 30% of terminal height, minimum 5 lines
 		const terminalRows = this.tui.terminal.rows;
 		const maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
-
-		// Find the cursor line index in layoutLines
-		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
-		if (cursorLineIndex === -1) cursorLineIndex = 0;
 
 		// Adjust scroll offset to keep cursor visible
 		if (cursorLineIndex < this.scrollOffset) {
@@ -553,15 +554,17 @@ export class Editor implements Component, Focusable {
 		// autocomplete (e.g. slash-command menu) is visible.
 		const emitCursorMarker = this.focused;
 
-		for (const layoutLine of visibleLines) {
+		for (let i = 0; i < visibleLines.length; i++) {
+			const layoutLine = visibleLines[i];
 			let displayText = sliceByColumn(layoutLine.text, 0, layoutWidth, true);
 			let lineVisibleWidth = visibleWidth(displayText);
 			let cursorInPadding = false;
 
 			// Add cursor if this line has it
-			if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
-				const before = displayText.slice(0, layoutLine.cursorPos);
-				const after = displayText.slice(layoutLine.cursorPos);
+			if (this.scrollOffset + i === cursorLineIndex) {
+				const cursorPos = projectedCursor - layoutLine.from;
+				const before = displayText.slice(0, cursorPos);
+				const after = displayText.slice(cursorPos);
 
 				// Hardware cursor marker (zero-width, emitted before fake cursor for IME positioning)
 				const marker = emitCursorMarker ? CURSOR_MARKER : "";
@@ -574,7 +577,7 @@ export class Editor implements Component, Focusable {
 						this.projectedCursor + after.length,
 						graphemeSegmenter,
 					);
-					const firstGrapheme = afterGraphemes[0]?.segment || "";
+					const firstGrapheme = afterGraphemes.next().value?.segment || "";
 					const restAfter = after.slice(firstGrapheme.length);
 					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
 					displayText = before + marker + cursor + restAfter;
@@ -921,16 +924,6 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	private layoutText(contentWidth: number): LayoutLine[] {
-		const rows = this.buildVisualLineMap(contentWidth);
-		const current = this.findCurrentVisualLine(rows);
-		return rows.map((row, index) => ({
-			text: row.text,
-			hasCursor: index === current,
-			cursorPos: index === current ? this.projectedCursor - row.from : undefined,
-		}));
-	}
-
 	/** Canonical source text, including collapsed pastes. */
 	getText(): string {
 		return this.value.text.toString();
@@ -997,7 +990,7 @@ export class Editor implements Component, Focusable {
 		this.pushUndoSnapshot();
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
-		this.insertTextAtCursorInternal(text);
+		this.change(this.cursor, this.cursor, document(this.normalizeText(text)));
 	}
 
 	/**
@@ -1007,15 +1000,6 @@ export class Editor implements Component, Focusable {
 	 */
 	private normalizeText(text: string): string {
 		return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
-	}
-
-	/**
-	 * Internal text insertion at cursor. Handles single and multi-line text.
-	 * Does not push undo snapshots or trigger autocomplete - caller is responsible.
-	 * Normalizes line endings and calls onChange once at the end.
-	 */
-	private insertTextAtCursorInternal(text: string): void {
-		if (text) this.change(this.cursor, this.cursor, document(this.normalizeText(text)));
 	}
 
 	private insertCharacter(char: string, skipUndoCoalescing?: boolean): void {
@@ -1148,11 +1132,11 @@ export class Editor implements Component, Focusable {
 		const line = this.view.text.lineAt(at);
 		if (direction < 0) {
 			if (at === line.from) return Math.max(0, at - 1);
-			const segments = this.view.segments(line.from, at, graphemeSegmenter);
+			const segments = [...this.view.segments(line.from, at, graphemeSegmenter)];
 			return line.from + (segments.at(-1)?.index ?? 0);
 		}
 		if (at === line.to) return Math.min(this.view.text.length, at + 1);
-		return at + (this.view.segments(at, line.to, graphemeSegmenter)[0]?.segment.length ?? 1);
+		return at + (this.view.segments(at, line.to, graphemeSegmenter).next().value?.segment.length ?? 1);
 	}
 
 	private handleBackspace(): void {
@@ -1232,10 +1216,12 @@ export class Editor implements Component, Focusable {
 			return this.adjacentPosition(direction);
 		const start = direction < 0 ? line.from : at;
 		const end = direction < 0 ? at : line.to;
-		const segments = this.view.segments(start, end, wordSegmenter);
-		const atomic = new Set(segments.filter((s) => s.atomic).map((s) => s.index));
 		const text = this.view.text.sliceString(start, end);
-		const options = { segment: () => segments, isAtomicSegment: (_text: string, index: number) => atomic.has(index) };
+		const options = {
+			segment: () => this.view.segments(start, end, wordSegmenter),
+			isAtomicSegment: (_text: string, index: number) =>
+				this.view.pieces.some((piece) => piece.atomic && piece.start === start + index),
+		};
 		return start + (direction < 0 ? findWordBackward(text, text.length, options) : findWordForward(text, 0, options));
 	}
 
@@ -1261,7 +1247,7 @@ export class Editor implements Component, Focusable {
 		const rows: VisualLine[] = [];
 		let from = 0;
 		for (const line of this.lines) {
-			const chunks = wordWrapLine(line, width, this.view.segments(from, from + line.length, graphemeSegmenter));
+			const chunks = wordWrapLine(line, width, [...this.view.segments(from, from + line.length, graphemeSegmenter)]);
 			for (let i = 0; i < chunks.length; i++) {
 				const chunk = chunks[i];
 				rows.push({
@@ -1335,9 +1321,10 @@ export class Editor implements Component, Focusable {
 			this.moveToVisualLine(rows, current, current + deltaLine);
 		}
 		if (deltaCol !== 0) {
+			const previous = this.projectedCursor;
 			const at = this.adjacentPosition(deltaCol < 0 ? -1 : 1);
 			this.setProjectedCursor(at);
-			if (deltaCol > 0 && at === this.view.text.length) {
+			if (deltaCol > 0 && previous === this.view.text.length) {
 				this.preferredVisualCol = visibleWidth(this.view.text.sliceString(rows[current].from, at));
 			}
 			if (this.autocompleteState) this.updateAutocomplete();
@@ -1391,13 +1378,23 @@ export class Editor implements Component, Focusable {
 
 	private jumpToChar(char: string, direction: "forward" | "backward"): void {
 		this.lastAction = null;
-		const segments = this.view.segments(0, this.view.text.length, graphemeSegmenter);
+		const text = this.view.text.toString();
 		const at = this.projectedCursor;
-		const target =
-			direction === "forward"
-				? segments.find((s) => s.index > at && s.segment.includes(char))
-				: segments.reverse().find((s) => s.index < at && s.segment.includes(char));
-		if (target) this.setProjectedCursor(target.index);
+		const forward = direction === "forward";
+		let searchFrom = at + (forward ? 1 : -1);
+		while (searchFrom >= 0 && searchFrom < text.length) {
+			const found = forward ? text.indexOf(char, searchFrom) : text.lastIndexOf(char, searchFrom);
+			if (found < 0) break;
+			const fold = this.view.pieces.find((piece) => piece.atomic && piece.start <= found && found < piece.end);
+			const segment = fold ? undefined : graphemeSegmenter.segment(text).containing(found);
+			const start = fold?.start ?? segment!.index;
+			const end = fold?.end ?? start + segment!.segment.length;
+			if (forward ? start > at : start < at) {
+				this.setProjectedCursor(start);
+				break;
+			}
+			searchFrom = forward ? end : start - 1;
+		}
 		if (this.autocompleteState) this.updateAutocomplete();
 	}
 

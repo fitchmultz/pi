@@ -40,6 +40,52 @@ function click(x: number): TuiMouseEvent {
 }
 
 describe("Editor source and cell geometry", () => {
+	it("does not retain the previous column when crossing into a final empty line", () => {
+		const target = editor();
+		target.setText("abcdefg\n");
+		target.handleInput("\x1b[D");
+		assert.deepEqual(target.getCursor(), { line: 0, col: 7 });
+		target.handleInput("\x1b[C");
+		assert.deepEqual(target.getCursor(), { line: 1, col: 0 });
+		target.handleInput("\x1b[A");
+		assert.deepEqual(target.getCursor(), { line: 0, col: 0 });
+	});
+
+	it("jumps to grapheme boundaries while excluding the current grapheme", () => {
+		const target = editor();
+		target.setText("a\u0301 x a\u0301");
+		target.handleInput("\x01");
+		target.handleInput("\x1d");
+		target.handleInput("\u0301");
+		assert.deepEqual(target.getCursor(), { line: 0, col: 5 });
+		target.handleInput("\x1b\x1d");
+		target.handleInput("\u0301");
+		assert.deepEqual(target.getCursor(), { line: 0, col: 0 });
+	});
+
+	it("jumps through fold labels atomically without treating identical literals as folds", () => {
+		const target = editor();
+		paste(target);
+		const label = "[paste #1 +12 lines]";
+		target.insertTextAtCursor(label);
+		target.handleInput("\x01");
+		target.handleInput("\x1d");
+		target.handleInput("p");
+		assert.equal(offset(target), payload.length + 1);
+		target.handleInput("\x1b\x1d");
+		target.handleInput("p");
+		assert.equal(offset(target), 0);
+	});
+
+	it("jumps to a distant match in a large unfolded programmatic draft", () => {
+		const target = editor();
+		target.setText(`${"a".repeat(1_000_000)}z`);
+		target.handleInput("\x01");
+		target.handleInput("\x1d");
+		target.handleInput("z");
+		assert.deepEqual(target.getCursor(), { line: 0, col: 1_000_000 });
+	});
+
 	it("uses terminal cells rather than UTF-16 columns for vertical movement", () => {
 		const target = editor();
 		target.setText("ab\n界a");

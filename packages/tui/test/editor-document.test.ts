@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import type { AutocompleteProvider, AutocompleteSuggestions } from "../src/autocomplete.ts";
 import { Editor } from "../src/components/editor.ts";
+import { document, EditorProjection } from "../src/editor-document.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -37,6 +38,29 @@ const applyCompletion: AutocompleteProvider["applyCompletion"] = (lines, line, c
 };
 
 describe("Editor canonical document", () => {
+	it("projects the first word without consuming unrelated trailing segments", () => {
+		const segmenter = new Intl.Segmenter("en", { granularity: "word" });
+		const nativeSegment = segmenter.segment.bind(segmenter);
+		let consumed = 0;
+		segmenter.segment = (text) => {
+			const segments = nativeSegment(text);
+			const nativeIterator = segments[Symbol.iterator].bind(segments);
+			segments[Symbol.iterator] = function* (): Generator<Intl.SegmentData, undefined, unknown> {
+				for (const segment of nativeIterator()) {
+					consumed++;
+					yield segment;
+				}
+			};
+			return segments;
+		};
+		const projection = new EditorProjection(document("foo bar ".repeat(12_500)));
+		for (const segment of projection.segments(0, projection.text.length, segmenter)) {
+			assert.equal(segment.segment, "foo");
+			break;
+		}
+		assert.equal(consumed, 1);
+	});
+
 	it("exposes normalized content and source coordinates while rendering a collapsed paste", () => {
 		const target = editor();
 		const changes: string[] = [];
@@ -174,6 +198,29 @@ describe("Editor canonical document", () => {
 });
 
 describe("Editor canonical completion", () => {
+	it("unfolds a provider-selected interior cursor before notifying or editing", async () => {
+		const target = editor();
+		paste(target);
+		target.setAutocompleteProvider({
+			getSuggestions: async () => ({ prefix: "", items: [{ value: "go", label: "go" }] }),
+			applyCompletion: (lines) => ({ lines, cursorLine: 5, cursorCol: 2 }),
+		});
+		const changes: Array<{ text: string; cursor: { line: number; col: number }; labels: string[] }> = [];
+		target.onChange = (text) => changes.push({ text, cursor: target.getCursor(), labels: labels(target) });
+		target.handleInput("\t");
+		await flushAutocomplete();
+		assert.deepEqual(changes, [{ text: payload, cursor: { line: 5, col: 2 }, labels: [] }]);
+
+		target.handleInput("\x7f");
+		assert.equal(target.getText(), payload.replace("hidden-5", "hdden-5"));
+		assert.deepEqual(target.getCursor(), { line: 5, col: 1 });
+		target.handleInput("\x1b[45;5u");
+		target.handleInput("\x1b[45;5u");
+		assert.equal(target.getText(), payload);
+		assert.equal(labels(target).length, 1);
+		assert.deepEqual(target.getCursor(), { line: 11, col: 9 });
+	});
+
 	it("rejects a completion prefix that begins inside a folded payload", async () => {
 		const target = editor();
 		const hidden = `${payload}\n./sr`;
