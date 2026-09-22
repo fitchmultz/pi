@@ -79,6 +79,18 @@ After building, run `npm run check:package-install`. It packs the public package
 
 `npm run check` also checks runtime dependency declarations and rejects excluded development sources pulled into a package's build through imports.
 
+## Startup profiling
+
+Run `npm run profile:tui` in a terminal, or `npm run profile:rpc`. Both build the Node entrypoint by default. Use `--bundle` for the managed launcher and worker, or `--entry /absolute/path/to/cli.js` to measure an existing build without rebuilding. `--cwd /path/to/project` selects the benchmark's working directory; the default is `packages/coding-agent`.
+
+The report prints the entrypoint, runtime, working directory, agent-directory selection and effective offline flags. It uses your configured agent directory unless `--agent-dir` or `--isolated-agent-dir` is supplied. Offline mode is forced by default; `--no-offline` preserves inherited environment flags rather than clearing them.
+
+TUI process-to-ready time ends when `InteractiveMode.init()` completes, including awaited extension startup handlers and the initial completed render. It excludes the benchmark's subsequent 150ms terminal-reply drain and shutdown. Detached extension work is outside that boundary. RPC readiness is a successful `get_state` response. Process-to-exit time is reported separately. An older TUI target without the readiness marker is rejected instead of reporting shutdown as readiness.
+
+`PI_TIMING=1` also records interactive initialization during ordinary CLI launches. The `main` and `extensions` timing groups measure overlapping internal spans; do not add their totals or equate them with process-to-ready wall time. The latter includes process launch and imports before instrumentation begins.
+
+Add `--cpu-profile` for diagnostic runs. Each run gets its own directory, and default runtime filenames preserve distinct launcher and worker profiles. Profiles include post-ready work through process exit and add measurement overhead; omit this option for headline startup measurements. Use `--runs` and `--warmup` to repeat measurements.
+
 ## Project Structure
 
 ```
