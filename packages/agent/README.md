@@ -123,6 +123,8 @@ In parallel mode, tool completion events follow tool completion order, but persi
 
 The mode can be set globally via `toolExecution` in the agent config, or per-tool via `executionMode` on `AgentTool`. If any tool call in a batch targets a tool with `executionMode: "sequential"`, the entire batch executes sequentially regardless of the global setting.
 
+Per-tool sequential ordering is scoped to one assistant response. Native asynchronous work from an earlier response can continue while a later response runs a sequential tool, such as changing the directory for subsequent calls. Explicit global `toolExecution: "sequential"` still waits for earlier work to finish across responses. Admission checkpoints, cancellation and final run settlement retain their existing barriers.
+
 The `beforeToolCall` hook runs after `tool_execution_start` and validated argument parsing. It can block execution and attach `terminate: true` to the blocked result. The `afterToolCall` hook runs after tool execution finishes and before `tool_execution_end` and final tool result message events are emitted.
 
 Tools, blocked `beforeToolCall` results, and `afterToolCall` overrides can return `terminate: true` to hint that the automatic follow-up LLM call should be skipped. The loop only stops early when every finalized tool result in that batch sets `terminate: true`. Mixed batches continue normally.
