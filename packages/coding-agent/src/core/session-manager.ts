@@ -2139,7 +2139,6 @@ export class SessionManager {
 	 */
 	static findById(cwd: string, id: string, sessionDir?: string): string | undefined {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
 		const resolvedCwd = resolvePath(cwd);
 
 		try {
@@ -2148,7 +2147,7 @@ export class SessionManager {
 				const path = join(dir, file);
 				const header = readSessionHeaderForDiscovery(path);
 				if (header?.id !== id) continue;
-				if (filterCwd && !sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd, dir)) continue;
+				if (!sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd, dir)) continue;
 				return path;
 			}
 		} catch {

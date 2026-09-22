@@ -1,4 +1,5 @@
 import * as bundledPiAgentCore from "@earendil-works/pi-agent-core";
+import * as bundledPiAgentNode from "@earendil-works/pi-agent-core/node";
 import * as bundledPiAiCompat from "@earendil-works/pi-ai/compat";
 import * as bundledPiAiOauth from "@earendil-works/pi-ai/oauth";
 import * as bundledPiTui from "@earendil-works/pi-tui";
@@ -19,6 +20,7 @@ export const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@sinclair/typebox/compile": bundledTypeboxCompile,
 	"@sinclair/typebox/value": bundledTypeboxValue,
 	"@earendil-works/pi-agent-core": bundledPiAgentCore,
+	"@earendil-works/pi-agent-core/node": bundledPiAgentNode,
 	"@earendil-works/pi-tui": bundledPiTui,
 	// Extensions resolve the pi-ai root to the compat entrypoint (a strict
 	// superset of the core entrypoint): existing extensions using the old
@@ -28,6 +30,7 @@ export const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@earendil-works/pi-ai/oauth": bundledPiAiOauth,
 	"@earendil-works/pi-coding-agent": bundledPiCodingAgent,
 	"@mariozechner/pi-agent-core": bundledPiAgentCore,
+	"@mariozechner/pi-agent-core/node": bundledPiAgentNode,
 	"@mariozechner/pi-tui": bundledPiTui,
 	"@mariozechner/pi-ai": bundledPiAiCompat,
 	"@mariozechner/pi-ai/compat": bundledPiAiCompat,

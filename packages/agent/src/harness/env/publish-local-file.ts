@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, open, readlink, realpath, rename, unlink } from "node:fs/promises";
+import { access, lstat, open, readlink, realpath, rename, stat, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 
 /** Resolve a local file target, including a dangling final symlink. Its parent must exist. */
@@ -10,8 +10,17 @@ export async function resolveLocalFileTarget(absolutePath: string): Promise<stri
 	const links = new Set<string>();
 	for (;;) {
 		// A trailing separator requires an existing directory, never a new regular file.
-		if (target.endsWith(sep) || target.endsWith("/")) return realpath(target);
-		const parent = await realpath(dirname(target));
+		if (target.endsWith(sep) || target.endsWith("/")) {
+			await stat(target);
+			return realpath(target);
+		}
+		const parentInput = dirname(target);
+		// realpath alone can accept regular-file/.. on macOS; stat checks traversal.
+		const parentInfo = await stat(parentInput);
+		if (!parentInfo.isDirectory()) {
+			throw Object.assign(new Error(`Not a directory: ${parentInput}`), { code: "ENOTDIR" });
+		}
+		const parent = await realpath(parentInput);
 		target = join(parent, basename(target));
 		const info = await lstat(target).catch((error: NodeJS.ErrnoException) => {
 			if (error.code !== "ENOENT") throw error;

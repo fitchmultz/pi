@@ -56,7 +56,10 @@ export class Bounded {
 		const incomingStart = tailStart(chunk, this.maxBytes, this.maxLines);
 		this.drop(chunk.subarray(0, incomingStart));
 		const combined = concat(this.bytes, chunk.subarray(incomingStart));
-		const start = tailStart(combined, this.maxBytes, this.maxLines);
+		let start = tailStart(combined, this.maxBytes, this.maxLines);
+		if (start > 0 || this.droppedBytes > 0) {
+			while (start < combined.length && (combined[start]! & 0xc0) === 0x80) start++;
+		}
 		this.drop(combined.subarray(0, start));
 		this.bytes = combined.slice(start);
 	}
@@ -71,7 +74,8 @@ export class Bounded {
 	}
 
 	text(): string {
-		return new TextDecoder().decode(this.bytes);
+		// A clipped head is not EOF: omit its partial character, but keep raw byte accounting.
+		return new TextDecoder().decode(this.bytes, { stream: this.retain === "head" && this.droppedBytes > 0 });
 	}
 }
 

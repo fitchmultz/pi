@@ -541,6 +541,35 @@ describe("AgentSessionRuntime characterization", () => {
 		).toEqual(beforeMessages);
 	});
 
+	it.each(["at", "before"] as const)("preserves the active cwd when forking %s a saved entry", async (position) => {
+		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+		const savedCwd = join(tempDir, "old-worktree");
+		mkdirSync(savedCwd);
+		const saved = SessionManager.create(savedCwd, join(tempDir, "sessions"));
+		saved.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		saved.appendMessage(fauxAssistantMessage("one"));
+		const laterUser = saved.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		const leaf = saved.appendMessage(fauxAssistantMessage("two"));
+		const sourceFile = saved.getSessionFile()!;
+
+		await runtime.switchSession(sourceFile, { cwdOverride: tempDir });
+		rmSync(savedCwd, { recursive: true });
+		const sourceBytes = readFileSync(sourceFile, "utf8");
+		let replacementCwd: string | undefined;
+		await runtime.fork(position === "at" ? leaf : laterUser, {
+			position,
+			withSession: async (ctx) => {
+				replacementCwd = ctx.cwd;
+			},
+		});
+
+		expect(runtime.cwd).toBe(tempDir);
+		expect(replacementCwd).toBe(tempDir);
+		expect(runtime.session.sessionManager.getHeader()).toMatchObject({ cwd: tempDir, parentSession: sourceFile });
+		expect(runtime.session.sessionManager.getSessionDir()).toBe(saved.getSessionDir());
+		expect(readFileSync(sourceFile, "utf8")).toBe(sourceBytes);
+	});
+
 	it("throws when forking with an invalid entry id", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		await expect(runtime.fork("missing-entry")).rejects.toThrow("Invalid entry ID for forking");

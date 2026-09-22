@@ -33,7 +33,7 @@ Spilling also belongs where bytes originate. If execution is remote, a spill on 
 - adaptive publication of the latest bounded state;
 - a forced final publication before settlement.
 
-It does not return or retain separate `stdout` and `stderr` values. Both pipes feed one arrival-ordered model-visible text view, matching bash and `ToolOutput`; preserving stream styling through tail eviction would require a segmented retained state that the Harness does not expose. Text is folded from updates, and `ShellExecResult` contains only exit and truncation/spill metadata.
+It does not return or retain separate `stdout` and `stderr` values. Both pipes feed one model-visible view in completed-text order, matching bash and `ToolOutput`; preserving stream styling through tail eviction would require a segmented retained state that the Harness does not expose. Text is folded from updates, and `ShellExecResult` contains only exit and truncation/spill metadata.
 
 Bash owns only command semantics and its model-visible footer. Its old rolling buffer, spill creation, 100 ms throttle, and full-output accumulation are gone. The existing two-second durable checkpoint request remains temporarily until `ToolOutput` owns durable cadence.
 
@@ -127,7 +127,7 @@ This avoids both an unbounded promise chain and one async file-open/append cycle
 
 The spill path is force-published as metadata when it becomes available. Spill writes are awaited before the final output flush.
 
-Node streams remain raw for spill throughput and exact archival bytes. `OutputCapture` uses one streaming `TextDecoder`, so a read boundary cannot split a code point; invalid display control characters are removed only from bounded snapshots, not by scanning the complete raw stream. Line totals count a final unterminated line, and `lastLineBytes` remains exact even when one line exceeds the working buffer.
+Node streams remain raw for spill throughput and exact archival bytes. `NodeExecutionEnv` decodes stdout and stderr independently with `ShellDecoder`, then feeds completed text into `OutputCapture`. Each decoder flushes once at its pipe's EOF, preserving split code points even when the pipes interleave. Completed-text order can differ from raw chunk arrival order; no ordering across OS pipes is guaranteed. Invalid display control characters are removed only from bounded snapshots, not by scanning the complete raw stream. Line totals count a final unterminated line, and `lastLineBytes` remains exact even when one line exceeds the working buffer.
 
 ## 6. Remote execution
 

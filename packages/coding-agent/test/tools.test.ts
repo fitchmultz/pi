@@ -584,7 +584,10 @@ describe("Coding Agent Tools", () => {
 					{ signal: "KILL", exitCode: 137 },
 					{ signal: "TERM", exitCode: 143 },
 				]) {
-					const result = await operations.exec(`kill -${signal} $$`, testDir, { onData: () => {} });
+					const result = await operations.exec(`kill -${signal} $$`, testDir, {
+						onData: () => {},
+						onEnd: () => {},
+					});
 					expect(result.exitCode).toBe(exitCode);
 				}
 			},
@@ -610,7 +613,7 @@ describe("Coding Agent Tools", () => {
 		it("should reject a null exit code from custom operations", async () => {
 			const operations: BashOperations = {
 				exec: async (_command, _cwd, { onData }) => {
-					onData(Buffer.from("partial\n", "utf-8"));
+					onData(Buffer.from("partial\n", "utf-8"), "stdout");
 					return { exitCode: null };
 				},
 			};
@@ -634,7 +637,7 @@ describe("Coding Agent Tools", () => {
 				const operations: BashOperations = {
 					exec: async (_command, _cwd, { onData }) => {
 						for (let i = 1; i <= 3000; i++) {
-							onData(Buffer.from(`${i}\n`, "utf-8"));
+							onData(Buffer.from(`${i}\n`, "utf-8"), "stdout");
 						}
 						throw new Error(testCase.error);
 					},
@@ -700,6 +703,7 @@ describe("Coding Agent Tools", () => {
 			await expect(
 				ops.exec("echo test", testDir, {
 					onData: () => {},
+					onEnd: () => {},
 				}),
 			).rejects.toThrow("Custom shell path not found: /custom/bash");
 			expect(getShellConfigSpy).toHaveBeenCalledWith("/custom/bash");
@@ -723,6 +727,7 @@ describe("Coding Agent Tools", () => {
 
 			const result = await ops.exec(command, testDir, {
 				onData: (data) => chunks.push(data),
+				onEnd: () => {},
 			});
 
 			expect(result.exitCode).toBe(0);
@@ -784,7 +789,7 @@ describe("Coding Agent Tools", () => {
 			const operations: BashOperations = {
 				exec: async (_command, _cwd, { onData }) => {
 					for (let i = 0; i < 5000; i++) {
-						onData(Buffer.from(`line ${i}\n`, "utf-8"));
+						onData(Buffer.from(`line ${i}\n`, "utf-8"), "stdout");
 					}
 					return { exitCode: 0 };
 				},
@@ -804,7 +809,7 @@ describe("Coding Agent Tools", () => {
 			const operations: BashOperations = {
 				exec: async (_command, _cwd, { onData }) => {
 					for (let i = 1; i <= 4000; i++) {
-						onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`, "utf-8"));
+						onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`, "utf-8"), "stdout");
 					}
 					return { exitCode: 0 };
 				},
@@ -826,8 +831,8 @@ describe("Coding Agent Tools", () => {
 			const euro = Buffer.from("€\n", "utf-8");
 			const operations: BashOperations = {
 				exec: async (_command, _cwd, { onData }) => {
-					onData(euro.subarray(0, 1));
-					onData(euro.subarray(1));
+					onData(euro.subarray(0, 1), "stdout");
+					onData(euro.subarray(1), "stdout");
 					return { exitCode: 0 };
 				},
 			};
@@ -844,6 +849,7 @@ describe("Coding Agent Tools", () => {
 
 			const result = await ops.exec("echo $TEST_LOCAL_BASH_OPS", testDir, {
 				onData: (data) => chunks.push(data),
+				onEnd: () => {},
 				env: { ...process.env, TEST_LOCAL_BASH_OPS: "from-local-ops" },
 			});
 
@@ -899,7 +905,7 @@ describe("Coding Agent Tools", () => {
 						testDir,
 						{
 							exec: async (_command, _cwd, { onData }) => {
-								onData(Buffer.from(output));
+								onData(Buffer.from(output), "stdout");
 								if (outcome === "abort") controller.abort();
 								if (outcome !== "success") throw failure;
 								return { exitCode: 0 };
@@ -936,6 +942,21 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("grep tool", () => {
+		it.skipIf(process.platform === "win32")("reads context through a symlink parent traversal", async () => {
+			mkdirSync(join(testDir, "physical", "child"), { recursive: true });
+			symlinkSync("physical/child", join(testDir, "link"));
+			writeFileSync(join(testDir, "physical", "target.txt"), "before\nneedle\nafter");
+			writeFileSync(join(testDir, "target.txt"), "unrelated");
+
+			const result = await createGrepTool(testDir).execute("traversal-context", {
+				path: "link/../",
+				pattern: "needle",
+				context: 1,
+			});
+
+			expect(getTextOutput(result)).toBe("target.txt-1- before\ntarget.txt:2: needle\ntarget.txt-3- after");
+		});
+
 		it.skipIf(process.platform === "win32")("preserves literal backslashes in POSIX filenames", async () => {
 			writeFileSync(join(testDir, "part\\name.txt"), "before\nneedle\nafter");
 			mkdirSync(join(testDir, "part"));
@@ -1067,6 +1088,22 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("find tool", () => {
+		it.skipIf(process.platform === "win32")("searches through a symlink parent traversal", async () => {
+			mkdirSync(join(testDir, "physical", "child"), { recursive: true });
+			mkdirSync(join(testDir, "physical", "src"));
+			symlinkSync("physical/child", join(testDir, "link"));
+			writeFileSync(join(testDir, "physical", "src", "target.txt"), "intended");
+			mkdirSync(join(testDir, "src"));
+			writeFileSync(join(testDir, "src", "unrelated.txt"), "unrelated");
+
+			const result = await createFindTool(testDir).execute("traversal-find", {
+				path: "link/../",
+				pattern: "src/*.txt",
+			});
+
+			expect(getTextOutput(result)).toBe("src/target.txt");
+		});
+
 		it.each([
 			["src/*.ts", ["src/UPPER.TS", "src/main.ts"]],
 			["./src/*.ts", ["src/UPPER.TS", "src/main.ts"]],
@@ -1149,6 +1186,19 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("ls tool", () => {
+		it.skipIf(process.platform === "win32")("classifies children through a symlink parent traversal", async () => {
+			mkdirSync(join(testDir, "physical", "child"), { recursive: true });
+			symlinkSync("physical/child", join(testDir, "link"));
+			for (const entry of ["directory", "@literal", "~"]) {
+				mkdirSync(join(testDir, "physical", entry));
+				writeFileSync(join(testDir, entry), "unrelated");
+			}
+
+			const result = await createLsTool(testDir).execute("traversal-ls", { path: "link/../" });
+
+			expect(getTextOutput(result).split("\n").sort()).toEqual(["@literal/", "child/", "directory/", "~/"]);
+		});
+
 		it.skipIf(process.platform === "win32")("lists dangling symlinks and marks linked directories", async () => {
 			symlinkSync("missing", join(testDir, "broken-link"));
 			expect(getTextOutput(await lsTool.execute("broken-link", { path: testDir }))).toBe("broken-link");

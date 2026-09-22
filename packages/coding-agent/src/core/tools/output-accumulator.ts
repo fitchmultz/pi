@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { once } from "node:events";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { finished } from "node:stream/promises";
+import { ShellDecoder, type ShellSource } from "@earendil-works/pi-agent-core/node";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "./truncate.ts";
 
 export interface OutputAccumulatorOptions {
@@ -38,7 +39,7 @@ export class OutputAccumulator {
 	private readonly maxBytes: number;
 	private readonly maxRollingBytes: number;
 	private readonly tempFilePrefix: string;
-	private readonly decoder = new TextDecoder();
+	private readonly decoder = new ShellDecoder();
 
 	private rawChunks: Buffer[] = [];
 	private tailText = "";
@@ -54,6 +55,7 @@ export class OutputAccumulator {
 
 	private tempFilePath: string | undefined;
 	private tempFileStream: WriteStream | undefined;
+	private tempFileCompletion: Promise<void> | undefined;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
@@ -62,13 +64,13 @@ export class OutputAccumulator {
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
 	}
 
-	append(data: Buffer): void {
+	append(data: Buffer, source: ShellSource): void {
 		if (this.finished) {
 			throw new Error("Cannot append to a finished output accumulator");
 		}
 
 		this.totalRawBytes += data.length;
-		this.appendDecodedText(this.decoder.decode(data, { stream: true }));
+		this.appendDecodedText(this.decoder.push(data, source));
 
 		if (this.tempFileStream || this.shouldUseTempFile()) {
 			this.ensureTempFile();
@@ -78,12 +80,18 @@ export class OutputAccumulator {
 		}
 	}
 
+	end(source: ShellSource): void {
+		if (this.finished) return;
+		this.appendDecodedText(this.decoder.end(source));
+		if (this.shouldUseTempFile()) this.ensureTempFile();
+	}
+
 	finish(): void {
 		if (this.finished) {
 			return;
 		}
 		this.finished = true;
-		this.appendDecodedText(this.decoder.decode());
+		this.appendDecodedText(this.decoder.finish());
 		if (this.shouldUseTempFile()) {
 			this.ensureTempFile();
 		}
@@ -127,9 +135,8 @@ export class OutputAccumulator {
 		const stream = this.tempFileStream;
 		this.tempFileStream = undefined;
 
-		const finished = once(stream, "finish");
 		stream.end();
-		await finished;
+		await this.tempFileCompletion;
 	}
 
 	getLastLineBytes(): number {
@@ -205,6 +212,9 @@ export class OutputAccumulator {
 		}
 		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
 		this.tempFileStream = createWriteStream(this.tempFilePath);
+		this.tempFileCompletion = finished(this.tempFileStream, { cleanup: true });
+		// Retain early storage failures for closeTempFile without an unhandled rejection.
+		void this.tempFileCompletion.catch(() => {});
 		for (const chunk of this.rawChunks) {
 			this.tempFileStream.write(chunk);
 		}

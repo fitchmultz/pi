@@ -147,6 +147,24 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.deepStrictEqual(values, ["@README.md", "@src/"].sort());
 		});
 
+		test("keeps @ attachment precedence on slash-ineligible lines", async () => {
+			setupFolder(baseDir, { files: { "source.ts": "text" } });
+			const provider = new CombinedAutocompleteProvider([{ name: "model" }], baseDir, requireFdPath());
+			for (const force of [false, true]) {
+				const line = "/model @sou";
+				const result = await provider.getSuggestions([line], 0, line.length, {
+					signal: new AbortController().signal,
+					slashCommands: false,
+					force,
+				});
+				assert.equal(result?.prefix, "@sou");
+				assert.deepEqual(
+					result?.items.map((item) => item.value),
+					["@source.ts"],
+				);
+			}
+		});
+
 		test("recognizes @ after CJK punctuation without consuming the preceding text", async () => {
 			setupFolder(baseDir, { files: { "README.md": "readme" } });
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());

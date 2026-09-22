@@ -339,6 +339,32 @@ describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () 
 });
 
 describe("InteractiveMode.setupAutocompleteProvider", () => {
+	test("preserves line context and suggestion options through checkpoint tracking", async () => {
+		const base = new CombinedAutocompleteProvider([], "/tmp/project");
+		const getSuggestions = vi.spyOn(base, "getSuggestions").mockResolvedValue(null);
+		const defaultEditor = { setAutocompleteProvider: vi.fn() };
+		const fakeThis = {
+			createBaseAutocompleteProvider: () => base,
+			defaultEditor,
+			editor: defaultEditor,
+			checkpointCallback,
+			checkpointUIActivity: new CheckpointActivity(),
+			session: { notifyCheckpointStateChanged: vi.fn() },
+			autocompleteProviderWrappers: [],
+		};
+		const setup = Reflect.get(InteractiveMode.prototype, "setupAutocompleteProvider") as (
+			this: typeof fakeThis,
+		) => void;
+		setup.call(fakeThis);
+		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
+		const options = { signal: new AbortController().signal, slashCommands: false, force: false };
+
+		expect(provider.inputContext).toBe("line");
+		await provider.getSuggestions(["/model so"], 0, 9, options);
+		expect(getSuggestions).toHaveBeenCalledWith(["/model so"], 0, 9, options);
+		expect(fakeThis.checkpointUIActivity.busy).toBe(false);
+	});
+
 	test("stacks wrapper factories over a fresh base provider", () => {
 		const defaultEditor = { setAutocompleteProvider: vi.fn() };
 		const customEditor = { setAutocompleteProvider: vi.fn() };
@@ -387,6 +413,7 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 		expect(customEditor.setAutocompleteProvider).toHaveBeenCalledTimes(1);
 		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
 		expect(provider).toBe(customEditor.setAutocompleteProvider.mock.calls[0]?.[0]);
+		expect(provider.inputContext).toBeUndefined();
 		expect(provider.shouldTriggerFileCompletion?.(["foo"], 0, 3)).toBe(true);
 		expect(calls).toEqual(["shouldTrigger:wrap2", "shouldTrigger:wrap1"]);
 	});

@@ -20,6 +20,7 @@ import {
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
+	Editor,
 	EditorComponent,
 	Keybinding,
 	KeyId,
@@ -813,6 +814,7 @@ export class InteractiveMode {
 		}
 
 		this.autocompleteProvider = {
+			inputContext: provider.inputContext,
 			triggerCharacters: provider.triggerCharacters,
 			getSuggestions: this.checkpointCallback((...args) => provider.getSuggestions(...args)),
 			applyCompletion: (...args) => provider.applyCompletion(...args),
@@ -2959,7 +2961,7 @@ export class InteractiveMode {
 		this.editorComponentFactory = factory;
 
 		// Save text from current editor before switching
-		const currentText = this.editor.getText();
+		const currentText = this.editor.getExpandedText?.() ?? this.editor.getText();
 
 		this.disposeActiveSelector();
 		this.editorContainer.clear();
@@ -3059,7 +3061,9 @@ export class InteractiveMode {
 			onHandle?: (handle: OverlayHandle) => void;
 		},
 	): Promise<T> {
-		const savedText = this.editor.getText();
+		const savedEditor = this.editor as EditorComponent & Partial<Pick<Editor, "saveDraft" | "restoreDraft">>;
+		const savedDraft = savedEditor.restoreDraft ? savedEditor.saveDraft?.() : undefined;
+		const savedText = savedEditor.getExpandedText?.() ?? savedEditor.getText();
 		let savedFocus = this.renderer.getFocusedComponent();
 		// Pending replacements share the fallback TUI restores when an awaited dialog closes.
 		// Inherit it now, rather than remembering a parent host that the dialog will unmount.
@@ -3071,7 +3075,11 @@ export class InteractiveMode {
 		const restoreEditor = () => {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
-			this.editor.setText(savedText);
+			if (this.editor === savedEditor && savedDraft && savedEditor.restoreDraft) {
+				savedEditor.restoreDraft(savedDraft);
+			} else {
+				this.editor.setText(savedText);
+			}
 			this.ui.setFocus(this.editor);
 			this.ui.requestRender();
 		};
@@ -5110,7 +5118,7 @@ export class InteractiveMode {
 			return 0;
 		}
 		const queuedText = allQueued.join("\n\n");
-		const currentText = options?.currentText ?? this.editor.getText();
+		const currentText = options?.currentText ?? this.editor.getExpandedText?.() ?? this.editor.getText();
 		const combinedText = [queuedText, currentText].filter((t) => t.trim()).join("\n\n");
 		this.editor.setText(combinedText);
 		this.updatePendingMessagesDisplay();

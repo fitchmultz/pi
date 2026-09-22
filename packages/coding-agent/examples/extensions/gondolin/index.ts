@@ -323,7 +323,7 @@ function sanitizeEnv(env: NodeJS.ProcessEnv | undefined): Record<string, string>
 
 function createGondolinBashOps(vm: VM, localCwd: string, shellPath: string): BashOperations {
 	return {
-		exec: async (command, cwd, { onData, signal, timeout, env }) => {
+		exec: async (command, cwd, { onData, onEnd, signal, timeout, env }) => {
 			if (signal?.aborted) throw new Error("aborted");
 			const guestCwd = toGuestPath(localCwd, cwd);
 			const controller = new AbortController();
@@ -347,10 +347,19 @@ function createGondolinBashOps(vm: VM, localCwd: string, shellPath: string): Bas
 					stdout: "pipe",
 					stderr: "pipe",
 				});
-				for await (const chunk of proc.output()) onData(chunk.data);
+				// The result can reject before the output iterator has drained.
+				void proc.result.catch(() => {});
+				try {
+					for await (const chunk of proc.output()) onData(chunk.data, chunk.stream);
+				} finally {
+					// output() reports data provenance, but not individual pipe EOFs.
+					onEnd("stdout");
+					onEnd("stderr");
+				}
 				const result = await proc;
 				return { exitCode: result.exitCode };
 			} catch (error) {
+				controller.abort();
 				if (signal?.aborted) throw new Error("aborted");
 				if (timedOut) throw new Error(`timeout:${timeout}`);
 				throw error;

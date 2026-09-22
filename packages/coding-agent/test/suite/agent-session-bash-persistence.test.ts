@@ -428,7 +428,7 @@ describe("AgentSession bash and persistence characterization", () => {
 		harnesses.push(harness);
 		const operations: BashOperations = {
 			exec: async (_command, _cwd, options) => {
-				options.onData(Buffer.from("hello from custom ops"));
+				options.onData(Buffer.from("hello from custom ops"), "stdout");
 				return { exitCode: 0 };
 			},
 		};
@@ -451,8 +451,8 @@ describe("AgentSession bash and persistence characterization", () => {
 		});
 		const operations: BashOperations = {
 			exec: async (_command, _cwd, options) => {
-				options.onData(Buffer.from("hello "));
-				options.onData(Buffer.from("world"));
+				options.onData(Buffer.from("hello "), "stdout");
+				options.onData(Buffer.from("world"), "stdout");
 				return { exitCode: 0 };
 			},
 		};
@@ -468,5 +468,37 @@ describe("AgentSession bash and persistence characterization", () => {
 			{ id: "bash-1", delta: "hello " },
 			{ id: "bash-1", delta: "world" },
 		]);
+	});
+
+	it("persists decoded shell output after EOF and matches RPC-facing updates", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const chunks: string[] = [];
+		let callbacks: Parameters<BashOperations["exec"]>[2] | undefined;
+		const result = await harness.session.executeBash("split-pipes", (chunk) => chunks.push(chunk), {
+			id: "shell-eof",
+			operations: {
+				exec: async (_command, _cwd, options) => {
+					callbacks = options;
+					options.onData(Buffer.from([0xe2]), "stdout");
+					options.onData(Buffer.from("WARN\n"), "stderr");
+					options.onData(Buffer.from([0x82, 0xac, 0xe2]), "stdout");
+					return { exitCode: 0 };
+				},
+			},
+		});
+		callbacks!.onData(Buffer.from("late"), "stderr");
+		callbacks!.onEnd("stdout");
+		expect(result.output).toBe("WARN\n€�");
+		expect(chunks.join("")).toBe(result.output);
+		const updates = harness.eventsOfType("bash_execution_update");
+		expect(updates.every((event) => event.id === "shell-eof")).toBe(true);
+		expect(updates.map((event) => event.delta).join("")).toBe(result.output);
+		expect(harness.session.messages.at(-1)).toMatchObject({ role: "bashExecution", output: result.output });
+		expect(harness.sessionManager.getEntries().at(-1)).toMatchObject({
+			type: "message",
+			message: { role: "bashExecution", output: result.output },
+		});
+		expect(harness.session.isBashRunning).toBe(false);
 	});
 });

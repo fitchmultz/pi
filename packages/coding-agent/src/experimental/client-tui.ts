@@ -134,7 +134,7 @@ export class ExperimentalClientTui implements Component {
 		this.#chatInput.onAction("app.clear", finish);
 		this.#chatInput.onAction("app.model.select", () => void this.#executeSlashCommand("model", ""));
 		this.#chatInput.onAction("app.message.followUp", () => {
-			const text = this.#chatInput.getText().trim();
+			const text = this.#chatInput.getExpandedText().trim();
 			if (text.length === 0) return;
 			this.#chatInput.setText("");
 			void this.#queueFollowUp(text);

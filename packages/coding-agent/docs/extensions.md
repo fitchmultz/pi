@@ -2412,6 +2412,8 @@ pi.registerTool({
 
 **Operations interfaces:** `ReadOperations`, `WriteOperations`, `EditOperations`, `BashOperations`, `PowerShellOperations`, `LsOperations`, `GrepOperations`, `FindOperations`
 
+Custom `BashOperations` and `PowerShellOperations` producers must call `onData(data, source)` with unchanged `Buffer` bytes and the originating `"stdout"` or `"stderr"` pipe. Call `onEnd(source)` once after each pipe's last data, including when terminating with an error. Stop output callbacks before resolving or rejecting `exec`; requesting cancellation alone is not EOF. Consumers decode each pipe independently, so split UTF-8 characters survive interleaved output. No ordering across OS pipes is guaranteed. Wrappers that forward the options object unchanged need no adaptation; producers that previously called only `onData(data)` must supply the source and EOF callbacks.
+
 For `user_bash`, extensions can reuse pi's local shell backend via `createLocalBashOperations()` instead of reimplementing local process spawning, shell resolution, and process-tree termination.
 
 The `bash` and `powershell` tools also support a spawn hook to adjust the command, cwd, or env before execution:

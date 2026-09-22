@@ -1,6 +1,5 @@
 import { readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import nodePath from "path";
 import { type Static, Type } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
@@ -118,7 +117,7 @@ export function createLsToolDefinition(
 								break;
 							}
 
-							const fullPath = nodePath.join(dirPath, entry);
+							const fullPath = resolveToCwd(`./${entry}`, dirPath);
 							let suffix = "";
 							try {
 								const entryStat = await ops.stat(fullPath);

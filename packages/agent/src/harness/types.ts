@@ -239,7 +239,7 @@ export class BranchSummaryError extends Error {
 export interface FileInfo {
 	/** Basename of {@link path}. */
 	name: string;
-	/** Absolute, syntactically normalized addressed path in the execution environment. Symlinks are not followed. */
+	/** Absolute addressed path in the execution environment. Final symlinks are not followed. */
 	path: string;
 	/** Object kind. Symlink targets are not followed; use {@link FileSystem.canonicalPath} explicitly. */
 	kind: FileKind;
@@ -276,10 +276,12 @@ export interface FileSystem {
 	/** Current working directory for relative paths. */
 	cwd: string;
 
-	/** Return an absolute addressed path without requiring it to exist and without resolving symlinks. */
+	/** Lexically normalize an absolute path without requiring it to exist or resolving symlinks. */
 	absolutePath(path: string, context: Context): Promise<Result<string, FileError>>;
 	/** Join path segments in the filesystem namespace without requiring the result to exist. */
 	joinPath(parts: string[], context: Context): Promise<Result<string, FileError>>;
+	/** Optional shared local mutation executor. Callers hold this across read/plan/write; writeFile does not reacquire it. */
+	withFileMutationQueue?<T>(path: string, fn: () => Promise<T>, context: Context): Promise<T>;
 	/** Read a UTF-8 text file. */
 	readTextFile(path: string, context: Context): Promise<Result<string, FileError>>;
 	/** Open a UTF-8 text file for pull-based line reading. */
