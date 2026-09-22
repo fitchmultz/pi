@@ -1,7 +1,7 @@
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { processFileArguments } from "../src/cli/file-processor.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createReadTool } from "../src/core/tools/read.ts";
@@ -108,7 +108,33 @@ describe("blockImages setting", () => {
 		});
 
 		afterEach(() => {
+			vi.restoreAllMocks();
 			rmSync(testDir, { recursive: true, force: true });
+		});
+
+		it.skipIf(process.platform === "win32")("reads attachments through a symlink parent traversal", async () => {
+			mkdirSync(join(testDir, "physical", "child"), { recursive: true });
+			symlinkSync("physical/child", join(testDir, "link"));
+			writeFileSync(join(testDir, "physical", "target.txt"), "intended");
+			writeFileSync(join(testDir, "target.txt"), "unrelated");
+			const addressedPath = `${testDir}/link/../target.txt`;
+
+			const result = await processFileArguments([addressedPath]);
+
+			expect(result).toEqual({ text: `<file name="${addressedPath}">\nintended\n</file>\n`, images: [] });
+		});
+
+		it.skipIf(process.platform === "win32")("rejects a file attachment with a trailing separator", async () => {
+			const file = join(testDir, "target.txt");
+			writeFileSync(file, "content");
+			vi.spyOn(console, "error").mockImplementation(() => {});
+			const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+				throw new Error("process.exit");
+			});
+
+			await expect(processFileArguments([`${file}/`])).rejects.toThrow("process.exit");
+			expect(exit).toHaveBeenCalledWith(1);
+			expect(console.error).toHaveBeenCalledWith(expect.stringContaining(`${file}/`));
 		});
 
 		it("should always process images (filtering happens at convertToLlm layer)", async () => {

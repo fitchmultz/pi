@@ -17,7 +17,7 @@ export {
 	type EditToolInput,
 	type EditToolOptions,
 } from "./edit.ts";
-export { withFileMutationQueue } from "./file-mutation-queue.ts";
+export { getFileMutationQueueKey, withFileMutationQueue } from "./file-mutation-queue.ts";
 export {
 	createFindTool,
 	createFindToolDefinition,
