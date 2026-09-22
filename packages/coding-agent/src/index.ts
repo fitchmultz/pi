@@ -376,6 +376,7 @@ export {
 	type GrepToolDetails,
 	type GrepToolInput,
 	type GrepToolOptions,
+	getFileMutationQueueKey,
 	type LsOperations,
 	type LsToolDetails,
 	type LsToolInput,

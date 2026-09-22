@@ -38,7 +38,8 @@ const BUDGETS = {
 	"packages/agent": {
 		"./harness/runtime/reducer": { maxFiles: 1 },
 		"./harness/context": { maxFiles: 6, forbid: ["harness/runtime/", "harness/execution/", "packages/ai/"] },
-		"./harness/env/nodejs": { maxFiles: 6, forbid: ["packages/ai/", "harness/runtime/"] },
+		// Includes the shared local mutation queue and operation-path addressing.
+		"./harness/env/nodejs": { maxFiles: 8, forbid: ["packages/ai/", "harness/runtime/"] },
 		"./harness/session": { maxFiles: 25, forbid: ["harness/runtime/", "harness/execution/", "packages/ai/src/index.ts"] },
 	},
 };

@@ -1,7 +1,8 @@
 import { accessSync, constants } from "node:fs";
-import { access } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { normalizePath, resolvePath } from "../../utils/paths.ts";
+import { access, realpath } from "node:fs/promises";
+import { dirname } from "node:path";
+import { resolveLocalOperationPath } from "@earendil-works/pi-agent-core/node";
+import { normalizePath } from "../../utils/paths.ts";
 
 const NARROW_NO_BREAK_SPACE = "\u202F";
 
@@ -32,8 +33,8 @@ export async function pathExists(filePath: string): Promise<boolean> {
 // fd/rg's --no-require-git also removes nested repository boundaries (#5960).
 // Use it only outside Git; leave ignore-file parsing to the native tools.
 export async function isInsideGitRepo(searchPath: string): Promise<boolean> {
-	for (let current = searchPath; ; ) {
-		if (await pathExists(join(current, ".git"))) return true;
+	for (let current = await realpath(searchPath).catch(() => searchPath); ; ) {
+		if (await pathExists(resolveLocalOperationPath(current, ".git"))) return true;
 		const parent = dirname(current);
 		if (parent === current) return false;
 		current = parent;
@@ -49,12 +50,15 @@ export function expandPath(filePath: string): string {
  * Handles ~ expansion and absolute paths without changing literal filename characters.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
-	return resolvePath(filePath, cwd, { stripAtPrefix: true });
+	return resolveLocalOperationPath(cwd, normalizePath(filePath, { stripAtPrefix: true, expandTilde: false }));
 }
 
 // Filename conveniences are read-only fallbacks, never preferred over an exact path.
 function* readPathFallbacks(filePath: string, cwd: string): Generator<string> {
-	const resolved = resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
+	const resolved = resolveLocalOperationPath(
+		cwd,
+		normalizePath(filePath, { normalizeUnicodeSpaces: true, stripAtPrefix: true, expandTilde: false }),
+	);
 	yield resolved;
 
 	const nfdVariant = resolved.normalize("NFD");

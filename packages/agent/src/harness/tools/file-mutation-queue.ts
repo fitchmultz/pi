@@ -43,6 +43,7 @@ export async function withFileMutationQueue<T>(
 	fn: () => Promise<T>,
 	context: Context,
 ): Promise<T> {
+	if (env.withFileMutationQueue) return env.withFileMutationQueue(path, fn, context);
 	const state = getState(env);
 	const registration = state.registration.then(async () => {
 		const key = await getMutationQueueKey(env, path, context);
