@@ -1385,10 +1385,12 @@ export class Editor implements Component, Focusable {
 		while (searchFrom >= 0 && searchFrom < text.length) {
 			const found = forward ? text.indexOf(char, searchFrom) : text.lastIndexOf(char, searchFrom);
 			if (found < 0) break;
-			const fold = this.view.pieces.find((piece) => piece.atomic && piece.start <= found && found < piece.end);
-			const segment = fold ? undefined : graphemeSegmenter.segment(text).containing(found);
-			const start = fold?.start ?? segment!.index;
-			const end = fold?.end ?? start + segment!.segment.length;
+			const piece = this.view.pieces.find((piece) => piece.start <= found && found < piece.end)!;
+			const segment = piece.atomic
+				? undefined
+				: graphemeSegmenter.segment(text.slice(piece.start, piece.end)).containing(found - piece.start);
+			const start = piece.atomic ? piece.start : piece.start + segment!.index;
+			const end = piece.atomic ? piece.end : start + segment!.segment.length;
 			if (forward ? start > at : start < at) {
 				this.setProjectedCursor(start);
 				break;

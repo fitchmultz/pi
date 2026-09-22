@@ -77,6 +77,19 @@ describe("Editor source and cell geometry", () => {
 		assert.equal(offset(target), 0);
 	});
 
+	it("jumps to an editable combining mark immediately after a fold", () => {
+		const target = editor();
+		paste(target);
+		target.insertTextAtCursor("\u0301");
+		target.handleInput("\x01");
+		target.handleInput("\x1d");
+		target.handleInput("\u0301");
+		assert.deepEqual(target.getCursor(), { line: 11, col: 9 });
+		target.handleInput("\x1b[3~");
+		assert.equal(target.getText(), payload);
+		assert.match(target.render(80).map(stripTerminalSequences).join("\n"), /\[paste #1 \+12 lines\]/);
+	});
+
 	it("jumps to a distant match in a large unfolded programmatic draft", () => {
 		const target = editor();
 		target.setText(`${"a".repeat(1_000_000)}z`);
