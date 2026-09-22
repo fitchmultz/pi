@@ -360,7 +360,7 @@ async function runBuild(bundle) {
 	process.stdout.write(`Build completed in ${formatMs(performance.now() - startedAt)}\n`);
 }
 
-export function getRuntimeCommand(runtime, mode, profileDir, cpuProfile, entryPath) {
+function getRuntimeCommand(runtime, mode, profileDir, cpuProfile, entryPath) {
 	const benchmarkArgs = ["--no-session"];
 	if (mode === "rpc") {
 		benchmarkArgs.push("--mode", "rpc");
