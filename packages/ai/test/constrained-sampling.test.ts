@@ -256,10 +256,10 @@ describe("constrained tool sampling", () => {
 		}
 	});
 
-	it("replays grammar calls as custom Responses items", () => {
+	it.each(["ctc_1", "fc_legacy"])("replays grammar calls as custom Responses items from %s", (itemId) => {
 		const replayedToolCall: ToolCall = {
 			type: "toolCall",
-			id: "call_1|ctc_1",
+			id: `call_1|${itemId}`,
 			name: "sample_tool",
 			arguments: { payload: "abc" },
 		};
@@ -277,7 +277,7 @@ describe("constrained tool sampling", () => {
 				},
 				{
 					role: "toolResult",
-					toolCallId: "call_1|ctc_1",
+					toolCallId: `call_1|${itemId}`,
 					toolName: "sample_tool",
 					content: [{ type: "text", text: "done" }],
 					isError: false,
@@ -302,7 +302,7 @@ describe("constrained tool sampling", () => {
 
 		expect(messages).toContainEqual({
 			type: "custom_tool_call",
-			id: "ctc_1",
+			id: itemId.startsWith("ctc_") ? itemId : undefined,
 			call_id: "call_1",
 			name: "sample_tool",
 			input: "abc",
