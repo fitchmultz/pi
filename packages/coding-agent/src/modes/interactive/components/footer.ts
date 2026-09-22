@@ -99,7 +99,7 @@ export class FooterComponent implements Component {
 			for (const entry of this.session.sessionManager.getEntries()) {
 				if (entry.type === "usage") {
 					addUsageToTotals(usageTotals, entry.usage);
-				} else if (entry.type === "message" && entry.message.role === "assistant") {
+				} else if (entry.type === "message" && !entry.checkpoint && entry.message.role === "assistant") {
 					addUsageToTotals(usageTotals, entry.message.usage);
 
 					const latestPromptTokens =

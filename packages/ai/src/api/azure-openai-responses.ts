@@ -17,7 +17,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getCurrentTools, getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
@@ -25,8 +25,15 @@ import {
 	diagnosticServiceTier,
 	finishResponsesDiagnostics,
 } from "./openai-responses-diagnostics.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	getNativeToolSearch,
+	processResponsesStream,
+	resolveResponsesTranscript,
+} from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { withToolNamespaces } from "./tool-namespaces.ts";
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 const AZURE_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "azure-openai-responses"]);
@@ -74,13 +81,17 @@ export interface AzureOpenAIResponsesOptions extends StreamOptions {
 /**
  * Generate function for Azure OpenAI Responses API
  */
-export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions> = (
+const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions> = (
 	model: Model<"azure-openai-responses">,
 	context: TranscriptContext,
 	options?: AzureOpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+	const normalizedContext = resolveResponsesTranscript(
+		context,
+		model.compat?.supportsMidConvoSystemMessages,
+		model.compat?.supportsToolSearch,
+	);
 
 	// Start async processing
 	(async () => {
@@ -161,7 +172,14 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model, { diagnostics, grammarToolInputProperties });
+			await processResponsesStream(openaiStream, output, stream, model, {
+				diagnostics,
+				grammarToolInputProperties,
+				toolSearchTool: getNativeToolSearch(
+					getCurrentTools(normalizedContext.messages),
+					model.compat?.supportsToolSearch,
+				),
+			});
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -194,6 +212,22 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 
 	return stream;
 };
+
+export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions> = (
+	model,
+	context,
+	options,
+) =>
+	withToolNamespaces(
+		model,
+		context,
+		(mapped, mapControl) =>
+			streamRaw(model, mapped, {
+				...options,
+				onResponseControl: (control) => options?.onResponseControl?.(control ? mapControl(control) : undefined),
+			}),
+		options?.signal,
+	);
 
 export const streamSimple: StreamFunction<"azure-openai-responses", SimpleStreamOptions> = (
 	model: Model<"azure-openai-responses">,
@@ -326,6 +360,7 @@ function buildParams(
 		supportsAdditionalTools,
 		supportsToolSearch,
 		toolOptions: {
+			toolSearchTool: getNativeToolSearch(getCurrentTools(context.messages), supportsToolSearch),
 			supportsStrictMode: model.compat?.supportsStrictMode ?? true,
 			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
 		},
@@ -349,6 +384,7 @@ function buildParams(
 
 	if (transcriptTools.requestTools.length > 0) {
 		params.tools = convertResponsesTools(transcriptTools.requestTools, {
+			toolSearchTool: getNativeToolSearch(getCurrentTools(context.messages), supportsToolSearch),
 			supportsStrictMode: model.compat?.supportsStrictMode ?? true,
 			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
 		});

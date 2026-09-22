@@ -13,8 +13,10 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type {
 	Agent,
 	AgentContext,
@@ -26,6 +28,7 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
+import { getPendingToolCalls } from "@earendil-works/pi-agent-core";
 import {
 	contentText,
 	getCurrentSystemMessage,
@@ -33,7 +36,13 @@ import {
 	getCurrentTools,
 	getToolStateChanges,
 	retryDelayMs,
+	type ToolReference,
+	type ToolSelection,
+	toolId,
+	toolKey,
 	toToolDeclaration,
+	toToolReference,
+	withoutToolSearchState,
 } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
@@ -43,7 +52,6 @@ import type {
 	ProviderHeaders,
 	SystemMessage,
 	TextContent,
-	Tool,
 	ToolResultMessage,
 	Usage,
 	UserMessage,
@@ -86,6 +94,7 @@ import {
 	compact,
 	estimateContextTokens,
 	estimateProjectedContextTokens,
+	estimateTokens,
 	generateBranchSummary,
 	isContextUsageInvalidatingEntry,
 	prepareCompaction,
@@ -195,8 +204,9 @@ export type AgentSessionEvent =
 			type: "agent_end";
 			messages: AgentMessage[];
 			willRetry: boolean;
+			pendingToolCalls?: ReturnType<typeof getPendingToolCalls>;
 	  }
-	| { type: "agent_settled" }
+	| { type: "agent_settled"; pendingToolCalls?: ReturnType<typeof getPendingToolCalls> }
 	| {
 			type: "queue_update";
 			steering: readonly string[];
@@ -265,13 +275,13 @@ export interface AgentSessionConfig {
 	/** Keeps the prompt cache entry of the last session request warm. */
 	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
-	initialActiveToolNames?: string[];
+	initialActiveToolNames?: ToolSelection[];
 	/** Suppress default built-ins, retaining extension tools and explicit selection. */
 	noBuiltinTools?: boolean;
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
-	allowedToolNames?: string[];
+	allowedToolNames?: ToolSelection[];
 	/** Optional denylist of tool names. When provided, these tool names are not exposed. */
-	excludedToolNames?: string[];
+	excludedToolNames?: ToolSelection[];
 	/**
 	 * Override base tools (useful for custom runtimes).
 	 *
@@ -351,11 +361,62 @@ interface ToolDefinitionEntry {
 
 interface ProviderRequestPrefix {
 	provider: string;
+	api: string;
 	model: string;
 	systemPrompt: string;
 	/** Structured prompt at dispatch; idle usage stays valid when a request-only force ends. */
 	transcriptSystemPrompt: string;
 	toolKeys: readonly string[];
+	/** Dispatch-time conversation and prefix estimate; opaque content is covered by response usage. */
+	conversation: unknown[];
+	systemTokens: number;
+	response?: AssistantMessage;
+	responseSnapshot?: unknown;
+}
+
+function isSameResponse(message: AgentMessage, response: AssistantMessage): boolean {
+	return (
+		message === response ||
+		(message.role === "assistant" &&
+			!!response.responseId &&
+			message.responseId === response.responseId &&
+			message.provider === response.provider &&
+			message.api === response.api &&
+			message.model === response.model)
+	);
+}
+
+/** Match persisted JSON's optional fields without reserializing large conversation strings. */
+function withoutUndefined(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map((item) => withoutUndefined(item ?? null));
+	if (value === null || typeof value !== "object") return value;
+	return Object.fromEntries(
+		Object.entries(value)
+			.filter(([, item]) => item !== undefined)
+			.map(([key, item]) => [key, withoutUndefined(item)]),
+	);
+}
+
+/** Snapshot provider content; execution checkpoints and request diagnostics are local bookkeeping. */
+function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
+	return convertToLlm(messages.filter((message) => message.role !== "system")).map((message) => {
+		if (message.role !== "assistant") return withoutUndefined({ ...message, timestamp: 0 });
+		const { usage: _usage, diagnostics: _diagnostics, ...response } = message;
+		return withoutUndefined({
+			...response,
+			timestamp: 0,
+			content: message.content.map((block) => {
+				if (block.type !== "toolCall") return block;
+				const {
+					executionStarted: _started,
+					executionArguments: _arguments,
+					executionDetached: _detached,
+					...call
+				} = block;
+				return call;
+			}),
+		});
+	});
 }
 
 // ============================================================================
@@ -376,8 +437,8 @@ export class AgentSession {
 	private _promptAbortController: AbortController | undefined;
 	private readonly _shutdownAbortController = new AbortController();
 	private _agentRunAbortRequested = false;
-	private _idleWaitPromise: Promise<void> | undefined;
-	private _resolveIdleWait: (() => void) | undefined;
+	private readonly _idleWaiters = new Set<() => void>();
+	private readonly _deferredSettlement = new AsyncLocalStorage<{ barriers: number }>();
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -399,7 +460,7 @@ export class AgentSession {
 	private _settling = 0;
 	private _checkpointHeld = false;
 	private _checkpointRestored = false;
-	private _checkpointActiveTools?: string[];
+	private _checkpointActiveTools?: ToolSelection[];
 	private _checkpointEntryPersistence?: AbortSignal;
 	private readonly _shutdownCheckpointWaiters = new Set<() => void>();
 	private _checkpointRequest?: {
@@ -448,10 +509,10 @@ export class AgentSession {
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
-	private _initialActiveToolNames?: string[];
+	private _initialActiveToolNames?: ToolSelection[];
 	private _noBuiltinTools: boolean;
-	private _allowedToolNames?: Set<string>;
-	private _excludedToolNames?: Set<string>;
+	private _allowedToolNames?: ToolSelection[];
+	private _excludedToolNames?: ToolSelection[];
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
@@ -468,6 +529,7 @@ export class AgentSession {
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
+	private _toolIds = new Map<string, string>();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -497,8 +559,8 @@ export class AgentSession {
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._noBuiltinTools = config.noBuiltinTools ?? false;
-		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
-		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
+		this._allowedToolNames = config.allowedToolNames?.slice();
+		this._excludedToolNames = config.excludedToolNames?.slice();
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
@@ -509,6 +571,9 @@ export class AgentSession {
 		this.agent.afterTurn = async (signal) => {
 			await afterTurn?.(signal);
 			await this._checkpointSafePoint("turn");
+		};
+		this.agent.prepareSteering = async (message) => {
+			if (message.role === "user") await this._normalizeUserMessageImages(message);
 		};
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
@@ -526,7 +591,7 @@ export class AgentSession {
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions({
 			...this._baseSystemPromptOptions,
 			selectedTools: restoredSystemMessage
-				? (restoredSystemMessage.toolsAdded ?? []).map((tool) => tool.name)
+				? (restoredSystemMessage.toolsAdded ?? []).map(toToolReference)
 				: this._baseSystemPromptOptions.selectedTools,
 		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
@@ -625,6 +690,7 @@ export class AgentSession {
 				return await runner.emitToolCall({
 					type: "tool_call",
 					toolName: toolCall.name,
+					namespace: toolCall.namespace,
 					toolCallId: toolCall.id,
 					input: args as Record<string, unknown>,
 				});
@@ -642,6 +708,7 @@ export class AgentSession {
 				? await runner.emitToolResult({
 						type: "tool_result",
 						toolName: toolCall.name,
+						namespace: toolCall.namespace,
 						toolCallId: toolCall.id,
 						input: args as Record<string, unknown>,
 						content: result.content,
@@ -683,6 +750,10 @@ export class AgentSession {
 		)
 			return undefined;
 
+		if (this.agent.state.pendingToolCalls.size > 0 || this.getPendingToolCalls().length > 0) {
+			this._pendingNewContext = next;
+			return undefined;
+		}
 		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
 		const usage = this.getContextUsage();
 		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null);
@@ -770,16 +841,23 @@ export class AgentSession {
 			this._refreshFinalizedContext();
 			const model = this.model;
 			const systemPrompt = getCurrentSystemPrompt(messages);
+			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
 			this._providerRequestPrefix = model
 				? {
 						provider: model.provider,
+						api: model.api,
 						model: model.id,
-						systemPrompt,
+						systemPrompt: getCurrentSystemPrompt(transformed),
 						transcriptSystemPrompt: systemPrompt,
 						toolKeys: this.agent.state.tools.map((tool) => this._captureToolPrefix(tool)),
+						conversation: snapshotProviderConversation(transformed),
+						systemTokens: this._projectEstimatedMessages(transformed).reduce(
+							(sum, message) => sum + (message.role === "system" ? estimateTokens(message) : 0),
+							0,
+						),
 					}
 				: undefined;
-			return previousTransform ? await previousTransform(messages, signal) : messages;
+			return transformed;
 		};
 	}
 
@@ -837,8 +915,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Best available native estimate of the active context. Exact-prefix usage wins; an unknown
-	 * legacy prefix uses the larger of matching-model usage and the full prompt/tool/message estimate.
+	 * Keep measured usage for retained conversations, estimating changed prefixes and new input.
+	 * Unknown legacy prefixes use the larger of matching usage and the full visible estimate.
 	 */
 	private _estimateContextTokens(
 		context: AgentContext = this.agent.state,
@@ -877,47 +955,82 @@ export class AgentSession {
 			: sections || changes.toolsAdded.length || changes.toolsRemoved.length
 				? [...context.messages, { role: "system", content: "", sections, ...changes, timestamp: Date.now() }]
 				: context.messages;
-		// Replacement prompts are sent as one leading checkpoint, not accumulated patches.
 		const forced = pendingOptions?.forceSystemPrompt;
-		const estimatedMessages =
-			forced !== undefined ||
-			messages.some((message, index) => index > 0 && message.role === "system" && message.replace)
-				? [getCurrentSystemMessage(messages)!, ...messages.filter((message) => message.role !== "system")]
-				: messages;
+		const estimatedMessages = this._projectEstimatedMessages(messages, forced !== undefined);
+		if (options.useReportedUsage && this._reportedConversationApplies(context)) {
+			const estimate = estimateContextTokens(
+				context.messages.filter((message) => message.role !== "system"),
+				options,
+			);
+			const systemTokens = estimatedMessages.reduce(
+				(sum, message) => sum + (message.role === "system" ? estimateTokens(message) : 0),
+				0,
+			);
+			return {
+				...estimate,
+				tokens: Math.max(0, estimate.tokens + systemTokens - this._reportedUsagePrefix!.systemTokens),
+				source: "estimated" as const,
+			};
+		}
 		const fullEstimate = estimateContextTokens(estimatedMessages, { ...options, useReportedUsage: false });
 		if (forced !== undefined || this._reportedUsagePrefix !== undefined || !usageState.hasPostCompactionUsage) {
 			return fullEstimate;
 		}
 
 		const historicalEstimate = estimateContextTokens(context.messages, options);
-		return historicalEstimate.tokens > fullEstimate.tokens ? historicalEstimate : fullEstimate;
+		return historicalEstimate.tokens > fullEstimate.tokens
+			? { ...historicalEstimate, source: "estimated" as const }
+			: fullEstimate;
+	}
+
+	/** Match native replacement replay for both captured and adjusted prefix estimates. */
+	private _projectEstimatedMessages(messages: AgentMessage[], forceCollapse = false): AgentMessage[] {
+		return forceCollapse ||
+			messages.some((message, index) => index > 0 && message.role === "system" && message.replace)
+			? [getCurrentSystemMessage(messages)!, ...messages.filter((message) => message.role !== "system")]
+			: messages;
 	}
 
 	private _captureToolPrefix(tool: AgentTool): string {
-		const { name, description, parameters, constrainedSampling } = tool;
-		const key = JSON.stringify({
-			name,
-			description,
-			parameters,
-			constrainedSampling: constrainedSampling || undefined,
-		} satisfies Tool);
+		const key = JSON.stringify(
+			toToolDeclaration({ ...tool, constrainedSampling: tool.constrainedSampling || undefined }),
+		);
 		this._toolPrefixKeys.set(tool, key);
 		return key;
 	}
 
+	private _reportedConversationApplies(context: AgentContext): boolean {
+		const prefix = this._reportedUsagePrefix;
+		const model = this.model;
+		if (
+			!prefix?.response ||
+			!model ||
+			prefix.provider !== model.provider ||
+			prefix.api !== model.api ||
+			prefix.model !== model.id
+		)
+			return false;
+		const { lastUsageIndex } = estimateContextTokens(context.messages, { model });
+		return (
+			lastUsageIndex !== null &&
+			isSameResponse(context.messages[lastUsageIndex], prefix.response) &&
+			isDeepStrictEqual(
+				snapshotProviderConversation([context.messages[lastUsageIndex]])[0],
+				prefix.responseSnapshot,
+			) &&
+			isDeepStrictEqual(snapshotProviderConversation(context.messages.slice(0, lastUsageIndex)), prefix.conversation)
+		);
+	}
+
 	private _reportedUsageApplies(context: AgentContext): boolean {
 		const prefix = this._reportedUsagePrefix;
-		if (!prefix) return false;
-		const model = this.model;
+		if (!prefix || !this._reportedConversationApplies(context)) return false;
 		const tools = context.tools ?? [];
 		const pendingOptions = this._getPendingSystemPromptOptions();
 		const systemPrompt = pendingOptions
 			? buildSystemPrompt(pendingOptions)
 			: getCurrentSystemPrompt(context.messages);
 		return (
-			!!model &&
-			prefix.provider === model.provider &&
-			prefix.model === model.id &&
 			(pendingOptions ? prefix.systemPrompt : prefix.transcriptSystemPrompt) === systemPrompt &&
 			prefix.toolKeys.length === tools.length &&
 			tools.every(
@@ -945,12 +1058,16 @@ export class AgentSession {
 				const entryId = entry.id;
 				if (
 					message.provider === model.provider &&
+					message.api === model.api &&
 					message.model === model.id &&
 					message.stopReason !== "aborted" &&
 					message.stopReason !== "error" &&
 					message.usage &&
 					calculateContextTokens(message.usage) > 0 &&
-					messages.some((projected) => projected === message || this._entryIdsByMessage.get(projected) === entryId)
+					messages.some(
+						(projected) =>
+							isSameResponse(projected, message) || this._entryIdsByMessage.get(projected) === entryId,
+					)
 				) {
 					return { hasPostCompactionUsage: true, useReportedUsage: !invalidated };
 				}
@@ -976,7 +1093,7 @@ export class AgentSession {
 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
 			const options = normalizeBuildSystemPromptOptions({
 				...runOptions,
-				selectedTools: this.getActiveToolNames(),
+				selectedTools: this.getActiveToolReferences(),
 				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
 				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
 			});
@@ -1022,7 +1139,11 @@ export class AgentSession {
 			message.role === "assistant" ||
 			message.role === "toolResult"
 		) {
-			entryId = this.sessionManager.appendMessage(message);
+			entryId = this.sessionManager.appendMessage(
+				message.role === "assistant" && message.content.some((block) => block.type === "toolCall" && block.async)
+					? structuredClone(message)
+					: message,
+			);
 		}
 		if (entryId) this._entryIdsByMessage.set(message, entryId);
 	}
@@ -1171,24 +1292,10 @@ export class AgentSession {
 		}
 	}
 
-	private _getIdleWaitPromise(): Promise<void> {
-		if (!this._idleWaitPromise) {
-			this._idleWaitPromise = new Promise((resolve) => {
-				this._resolveIdleWait = resolve;
-			});
-		}
-		return this._idleWaitPromise;
-	}
-
 	private _resolveIdleWaitIfIdle(): void {
 		this.notifyCheckpointStateChanged();
-		if (!this.isIdle || this._settling || !this._resolveIdleWait) {
-			return;
-		}
-		const resolve = this._resolveIdleWait;
-		this._idleWaitPromise = undefined;
-		this._resolveIdleWait = undefined;
-		resolve();
+		if (!this.isIdle) return;
+		for (const notify of this._idleWaiters) notify();
 	}
 
 	private async _emitAgentSettled(): Promise<void> {
@@ -1198,8 +1305,10 @@ export class AgentSession {
 		this._isEmittingAgentSettled = true;
 		try {
 			try {
-				await this._extensionRunner.emit({ type: "agent_settled" });
-				this._emit({ type: "agent_settled" });
+				const pendingToolCalls = this.getPendingToolCalls();
+				const event = { type: "agent_settled" as const, ...(pendingToolCalls.length ? { pendingToolCalls } : {}) };
+				await this._extensionRunner.emit(event);
+				this._emit(event);
 			} finally {
 				this._isEmittingAgentSettled = false;
 			}
@@ -1207,7 +1316,15 @@ export class AgentSession {
 			// action starts; its native run then owns ordinary turn and settlement cuts.
 			const deferred = this._deferredSettledActions.splice(0);
 			const last = deferred.pop();
-			for (const action of deferred) await action();
+			for (const action of deferred) {
+				// An action may join child work, but cannot wait for its own enclosing drain.
+				const scope = { barriers: this._settling };
+				try {
+					await this._deferredSettlement.run(scope, action);
+				} finally {
+					scope.barriers = 0;
+				}
+			}
 			if (last) {
 				this._settling--;
 				try {
@@ -1225,13 +1342,49 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "message_checkpoint") {
+			this._flushPendingProviderMessages();
+			const entryId = this.sessionManager.appendMessage(structuredClone(event.message), true);
+			this._entryIdsByMessage.set(event.message, entryId);
+			this._emit(event);
+			return;
+		}
+		if (event.type === "steering") {
+			// Status is independent of input delivery. An accepted send is not application.
+			this.sessionManager.appendCustomEntry("response-steering", {
+				message: event.message,
+				status: event.status,
+				steeringId: event.steeringId,
+				responseId: event.responseId,
+				errorMessage: event.errorMessage,
+			});
+			await this._extensionRunner.emit(event);
+			this._emit(event);
+			return;
+		}
+		if (event.type === "tool_execution_prepared" || event.type === "tool_execution_detached") {
+			await this._extensionRunner.emit(event);
+			this._emit(event);
+			return;
+		}
 		const requestEnded = event.type === "message_end" && event.message.role === "assistant";
 		const requestPrefix = requestEnded ? this._providerRequestPrefix : undefined;
-		if (requestEnded) {
-			this._providerRequestPrefix = undefined;
-			this._skipNextProviderRequestPreflight = false;
-		}
+		const responseSnapshot =
+			event.type === "message_end" && event.message.role === "assistant"
+				? snapshotProviderConversation([event.message])[0]
+				: undefined;
+		if (requestEnded) this._skipNextProviderRequestPreflight = false;
+		if (event.type === "agent_end") this._providerRequestPrefix = undefined;
 		if (event.type === "message_start" && event.message.role === "assistant") {
+			if (this._providerRequestPrefix && event.continuationInput !== undefined) {
+				this._providerRequestPrefix = {
+					...this._providerRequestPrefix,
+					conversation: [
+						...this._providerRequestPrefix.conversation,
+						...snapshotProviderConversation([...event.continuationInput]),
+					],
+				};
+			}
 			this._flushPendingProviderMessages();
 		}
 
@@ -1270,16 +1423,33 @@ export class AgentSession {
 			const message = event.message;
 			if (
 				requestPrefix.provider === message.provider &&
+				requestPrefix.api === message.api &&
 				requestPrefix.model === message.model &&
 				message.stopReason !== "error" &&
 				message.stopReason !== "aborted" &&
 				calculateContextTokens(message.usage) > 0
 			) {
-				this._reportedUsagePrefix = requestPrefix;
+				this._reportedUsagePrefix = {
+					...requestPrefix,
+					response: message,
+					responseSnapshot,
+				};
 			}
+			this._providerRequestPrefix = {
+				...requestPrefix,
+				conversation: [...requestPrefix.conversation, responseSnapshot],
+			};
 		}
 
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		this._emit(
+			event.type === "agent_end"
+				? {
+						...event,
+						willRetry: this._willRetryAfterAgentEnd(event),
+						...(this.getPendingToolCalls().length ? { pendingToolCalls: this.getPendingToolCalls() } : {}),
+					}
+				: event,
+		);
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -1373,9 +1543,27 @@ export class AgentSession {
 		if (unresolvedProjectedTarget) {
 			throw new Error("Cannot persist recovery omission because a projected message has no source entry");
 		}
-		for (const targetId of targetIds) {
+		const committedCallIds = new Set(
+			message.content.flatMap((block) => (block.type === "toolCall" && block.executionStarted ? [block.id] : [])),
+		);
+		for (const [index, targetId] of targetIds.entries()) {
 			if (!targetId) continue;
-			const editId = this.sessionManager.appendContextEdit(targetId, null);
+			const target = targets[index];
+			if (target.role === "toolResult" && committedCallIds.has(target.toolCallId)) continue;
+			const committed =
+				target?.role === "assistant"
+					? target.content.filter((block) =>
+							block.type === "toolCall"
+								? !!block.responsesItem || block.executionStarted
+								: block.type === "text"
+									? !!block.textSignature
+									: !!block.thinkingSignature,
+						)
+					: [];
+			const editId = this.sessionManager.appendContextEdit(
+				targetId,
+				committed.length > 0 ? { content: committed } : null,
+			);
 			const entry = this.sessionManager.getEntry(editId);
 			if (entry) this._emit({ type: "entry_appended", entry });
 		}
@@ -1466,6 +1654,7 @@ export class AgentSession {
 				type: "tool_execution_start",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
+				namespace: event.namespace,
 				args: event.args,
 			};
 			await this._extensionRunner.emit(extensionEvent);
@@ -1474,6 +1663,7 @@ export class AgentSession {
 				type: "tool_execution_update",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
+				namespace: event.namespace,
 				args: event.args,
 				partialResult: event.partialResult,
 			};
@@ -1483,6 +1673,7 @@ export class AgentSession {
 				type: "tool_execution_end",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
+				namespace: event.namespace,
 				result: event.result,
 				isError: event.isError,
 			};
@@ -1551,6 +1742,7 @@ export class AgentSession {
 			this._cacheWarmer.cancel();
 		}
 		cleanupSessionResources(this.sessionId);
+		this._deferredSettlement.disable();
 	}
 
 	// =========================================================================
@@ -1566,6 +1758,11 @@ export class AgentSession {
 	/** Full agent state */
 	get state(): AgentState {
 		return this.agent.state;
+	}
+
+	/** Native call obligations in the active branch/window. Detached work can remain after local idle. */
+	getPendingToolCalls(): ReturnType<typeof getPendingToolCalls> {
+		return getPendingToolCalls(this.agent.state.messages);
 	}
 
 	/** Current cache-warming state and the policy inputs that produced it. */
@@ -1623,20 +1820,22 @@ export class AgentSession {
 		return this._retryAttempt;
 	}
 
-	/**
-	 * Get the names of currently active tools.
-	 * Returns the names of tools currently set on the agent.
-	 */
+	/** Return every active tool's public ID, accepted by setActiveToolsByName. */
 	getActiveToolNames(): string[] {
-		return this.agent.state.tools.map((t) => t.name);
+		return this.agent.state.tools.map(toolId);
 	}
 
-	/**
-	 * Get all configured tools with name, description, parameter schema, prompt guidelines, and source metadata.
-	 */
+	/** Return the complete active loadout with exact namespace/name identities. */
+	getActiveToolReferences(): ToolReference[] {
+		return this.agent.state.tools.map(toToolReference);
+	}
+
+	/** Get all permitted tools with public IDs, declarations, and source metadata. */
 	getAllTools(): ToolInfo[] {
 		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
-			name: definition.name,
+			id: toolId(definition),
+			...toToolReference(definition),
+			...(definition.toolSearch ? { toolSearch: definition.toolSearch } : {}),
 			description: definition.description,
 			parameters: definition.parameters,
 			promptGuidelines: definition.promptGuidelines,
@@ -1644,29 +1843,33 @@ export class AgentSession {
 		}));
 	}
 
-	getToolDefinition(name: string): ToolDefinition | undefined {
-		return this._toolDefinitions.get(name)?.definition;
+	getToolDefinition(name: ToolSelection): ToolDefinition | undefined {
+		return this._toolDefinitions.get(this._toolSelectionKey(name))?.definition;
 	}
 
-	/**
-	 * Set active tools by name.
-	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
-	 * Also rebuilds the system prompt to reflect the new tool set.
-	 * Changes take effect on the next agent turn.
-	 */
+	/** Replace the complete active loadout by public ID; unknown IDs are ignored. */
 	setActiveToolsByName(toolNames: string[]): void {
+		this._setActiveTools(toolNames);
+	}
+
+	private _toolSelectionKey(tool: ToolSelection): string {
+		return typeof tool === "string" ? (this._toolIds.get(tool) ?? toolKey(tool)) : toolKey(tool);
+	}
+
+	setActiveToolReferences(references: ToolReference[]): void {
+		this._setActiveTools(references);
+	}
+
+	private _setActiveTools(references: ToolSelection[]): void {
 		this._assertNotCheckpointHeld();
-		const tools: AgentTool[] = [];
-		const validToolNames: string[] = [];
-		for (const name of toolNames) {
-			const tool = this._toolRegistry.get(name);
-			if (tool) {
-				tools.push(tool);
-				validToolNames.push(name);
-			}
+		const selected = new Map<string, AgentTool>();
+		for (const reference of references) {
+			const key = this._toolSelectionKey(reference);
+			const tool = this._toolRegistry.get(key);
+			if (tool) selected.set(key, tool);
 		}
-		this.agent.state.tools = tools;
-		this._rebuildSystemPrompt(validToolNames);
+		this.agent.state.tools = [...selected.values()];
+		this._rebuildSystemPrompt(this.getActiveToolReferences());
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -1748,8 +1951,8 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
-	private _rebuildSystemPrompt(toolNames: string[]): void {
-		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
+	private _rebuildSystemPrompt(toolNames: ToolSelection[]): void {
+		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(this._toolSelectionKey(name)));
 		const toolSnippets: Record<string, string> = {};
 		for (const name of this._toolRegistry.keys()) {
 			const snippet = this._toolPromptSnippets.get(name);
@@ -1788,9 +1991,11 @@ export class AgentSession {
 		options: NormalizedBuildSystemPromptOptions,
 		messages: AgentMessage[] = this.agent.state.messages,
 	): SystemMessage | undefined {
-		options.selectedTools = [...new Set(options.selectedTools)].filter((name) => this._toolRegistry.has(name));
+		options.selectedTools = [...new Map(options.selectedTools.map((tool) => [toolKey(tool), tool])).values()].filter(
+			(tool) => this._toolRegistry.has(this._toolSelectionKey(tool)),
+		);
 		this.agent.state.tools = options.selectedTools.flatMap((name) => {
-			const tool = this._toolRegistry.get(name);
+			const tool = this._toolRegistry.get(this._toolSelectionKey(name));
 			return tool ? [tool] : [];
 		});
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions(this._baseSystemPromptOptions);
@@ -1831,7 +2036,8 @@ export class AgentSession {
 				...(current?.toolsAdded ? { toolsAdded: current.toolsAdded } : {}),
 				timestamp: current?.timestamp ?? Date.now(),
 			};
-			return [head, ...transformed.filter((message) => message.role !== "system")];
+			if (this._providerRequestPrefix) this._providerRequestPrefix.systemTokens = estimateTokens(head);
+			return [head, ...withoutToolSearchState(transformed.filter((message) => message.role !== "system"))];
 		};
 	}
 
@@ -1840,10 +2046,10 @@ export class AgentSession {
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		if (!current) return;
 		const toolNames = (current.toolsAdded ?? [])
-			.map((tool) => tool.name)
-			.filter((name) => this._toolRegistry.has(name));
+			.map(toToolReference)
+			.filter((tool) => this._toolRegistry.has(this._toolSelectionKey(tool)));
 		this.agent.state.tools = toolNames.flatMap((name) => {
-			const registered = this._toolRegistry.get(name);
+			const registered = this._toolRegistry.get(toolKey(name));
 			return registered ? [registered] : [];
 		});
 		// Restoration changes the selected tools, not local prompt edits or loaded resources.
@@ -1877,14 +2083,20 @@ export class AgentSession {
 			const accept = await prepare(controller.signal);
 			controller.signal.throwIfAborted();
 			const messages = accept();
-			this._promptAbortController = undefined;
 			this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
 			started = true;
 			let run = this.agent.prompt(messages);
 			while (true) {
-				// Agent clears its signal on settlement; retain it through recovery and the boundary.
+				// Keep extension cancellation alive when the low-level Agent releases its signal.
 				const signal = this.agent.signal;
-				await run;
+				const abort = () => controller.abort(signal?.reason);
+				if (signal?.aborted) abort();
+				signal?.addEventListener("abort", abort, { once: true });
+				try {
+					await run;
+				} finally {
+					signal?.removeEventListener("abort", abort);
+				}
 				const continueRun = await this._handlePostAgentRun(signal);
 				if (this._agentRunAbortRequested || signal?.aborted || this._shutdownAbortController.signal.aborted) break;
 				if (!continueRun && !(await this._runBeforeSettleBoundary())) break;
@@ -1892,10 +2104,9 @@ export class AgentSession {
 				run = this.agent.continue();
 			}
 		} catch (error) {
-			controller.signal.throwIfAborted();
+			if (!started) controller.signal.throwIfAborted();
 			throw error;
 		} finally {
-			this._promptAbortController = undefined;
 			if (controller.signal.aborted) this._pendingNewContext = undefined;
 			this._skipNextProviderRequestPreflight = false;
 			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
@@ -1907,6 +2118,7 @@ export class AgentSession {
 			this._flushPendingProviderMessages();
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
+			this._promptAbortController = undefined;
 			if (started) {
 				await this._emitAgentSettled();
 			} else {
@@ -1922,8 +2134,10 @@ export class AgentSession {
 		// Explicit selectedTools edits win; otherwise honor live setActiveTools() calls.
 		const handlerEditedTools =
 			result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
-			result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
-		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
+			result.systemPromptOptions.selectedTools.some(
+				(name, index) => toolKey(name) !== toolKey(selectedToolsBefore[index]),
+			);
+		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolReferences();
 		const messages: AgentMessage[] = result.messages.map((message) => ({
 			role: "custom",
 			customType: message.customType,
@@ -2624,7 +2838,7 @@ export class AgentSession {
 				model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
 				thinkingLevel: this.thinkingLevel,
 				activeTools: this.getActiveToolNames(),
-				knownTools: this.getAllTools().map((tool) => tool.name),
+				knownTools: this.getAllTools().map((tool) => tool.id),
 			},
 			header,
 			entries: this.sessionManager.getEntries(),
@@ -2858,18 +3072,16 @@ export class AgentSession {
 	}
 
 	/** Startup handlers may reconstruct tools; apply the exact saved selection after they finish. */
-	restoreCheckpointTools(names: string[], configuration?: SessionCheckpoint["toolConfiguration"]): void {
+	restoreCheckpointTools(names: ToolSelection[], configuration?: SessionCheckpoint["toolConfiguration"]): void {
 		this._assertNotCheckpointHeld();
 		if (configuration) {
 			this._noBuiltinTools = configuration.noBuiltinTools ?? false;
-			this._allowedToolNames = configuration.allowedToolNames ? new Set(configuration.allowedToolNames) : undefined;
-			this._excludedToolNames = configuration.excludedToolNames
-				? new Set(configuration.excludedToolNames)
-				: undefined;
+			this._allowedToolNames = configuration.allowedToolNames?.slice();
+			this._excludedToolNames = configuration.excludedToolNames?.slice();
 			this._refreshToolRegistry();
 		}
 		this._checkpointActiveTools = [...names];
-		this.setActiveToolsByName(names);
+		this._setActiveTools(names);
 		if (!this.hasExtensionHandlers("session_start") && !this.hasExtensionHandlers("resources_discover"))
 			this._finishCheckpointToolRestore();
 	}
@@ -2877,9 +3089,9 @@ export class AgentSession {
 	private _finishCheckpointToolRestore(): void {
 		const names = this._checkpointActiveTools;
 		if (!names) return;
-		if (names.some((name) => !this._toolRegistry.has(name)))
+		if (names.some((name) => !this._toolRegistry.has(this._toolSelectionKey(name))))
 			throw new Error("Checkpoint tools unavailable after extension initialization");
-		this.setActiveToolsByName(names);
+		this._setActiveTools(names);
 		this._checkpointActiveTools = undefined;
 	}
 
@@ -2931,10 +3143,17 @@ export class AgentSession {
 	}
 
 	async waitForIdle(): Promise<void> {
-		if (this.isIdle) {
-			return;
-		}
-		await this._getIdleWaitPromise();
+		const scope = this._deferredSettlement.getStore();
+		const isIdle = () => this.isIdle && this._settling <= (scope?.barriers ?? 0);
+		if (isIdle()) return;
+		await new Promise<void>((resolve) => {
+			const notify = () => {
+				if (!isIdle()) return;
+				this._idleWaiters.delete(notify);
+				resolve();
+			};
+			this._idleWaiters.add(notify);
+		});
 	}
 
 	// =========================================================================
@@ -3473,7 +3692,10 @@ export class AgentSession {
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
 		// shouldn't trigger compaction for the new model.
 		const sameModel =
-			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
+			this.model &&
+			assistantMessage.provider === this.model.provider &&
+			assistantMessage.api === this.model.api &&
+			assistantMessage.model === this.model.id;
 
 		// Automatic cases 1 and 2: context overflow.
 		// A length stop is recoverable when output ended below the model's original desired limit,
@@ -3997,6 +4219,14 @@ export class AgentSession {
 						this._emit({ type: "entry_appended", entry });
 					}
 				},
+				recordUsage: ({ id, kind, provider, model, usage, note }) => {
+					if (typeof id !== "string") throw new Error("Usage contribution ID must be a string");
+					if (!this._checkpointEntryPersistence || this._checkpointEntryPersistence.aborted)
+						this._assertNotCheckpointHeld();
+					const revision = this.sessionManager.getEntriesRevision();
+					const entry = this.sessionManager.appendUsage(kind, provider, model, usage, note, id);
+					if (this.sessionManager.getEntriesRevision() !== revision) this._emit({ type: "entry_appended", entry });
+				},
 				setSessionName: (name) => {
 					this.setSessionName(name);
 				},
@@ -4008,6 +4238,8 @@ export class AgentSession {
 					this.sessionManager.appendLabelChange(entryId, label);
 				},
 				getActiveTools: () => this.getActiveToolNames(),
+				getActiveToolReferences: () => this.getActiveToolReferences(),
+				setActiveToolReferences: (tools) => this.setActiveToolReferences(tools),
 				getAllTools: () => this.getAllTools(),
 				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
 				refreshTools: () => this._refreshToolRegistry(),
@@ -4026,7 +4258,7 @@ export class AgentSession {
 				isIdle: () => !this._shutdownAbortController.signal.aborted && this.isIdle,
 				isBashRunning: () => this.isBashRunning,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
-				getSignal: () => this.agent.signal,
+				getSignal: () => this._promptAbortController?.signal ?? this.agent.signal,
 				abort: () => {
 					if (this._extensionAbortHandler) {
 						this._extensionAbortHandler();
@@ -4038,6 +4270,7 @@ export class AgentSession {
 				hasPendingSteeringMessages: () => this.agent.hasQueuedSteeringMessages(),
 				getPendingNextTurnCount: () => this.pendingNextTurnCount,
 				getPendingInputCount: () => this.pendingInputCount,
+				getPendingToolCalls: () => this.getPendingToolCalls(),
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
 				},
@@ -4075,13 +4308,16 @@ export class AgentSession {
 		);
 	}
 
-	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+	private _refreshToolRegistry(options?: {
+		activeToolNames?: ToolSelection[];
+		includeAllExtensionTools?: boolean;
+	}): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
-		const previousActiveToolNames = this.getActiveToolNames();
-		const allowedToolNames = this._allowedToolNames;
-		const excludedToolNames = this._excludedToolNames;
-		const isAllowedTool = (name: string): boolean =>
-			(!allowedToolNames || allowedToolNames.has(name)) && !excludedToolNames?.has(name);
+		const previousActiveToolNames = this.getActiveToolReferences();
+		const allowedToolNames = this._allowedToolNames ? new Set(this._allowedToolNames.map(toolKey)) : undefined;
+		const excludedToolNames = this._excludedToolNames ? new Set(this._excludedToolNames.map(toolKey)) : undefined;
+		const isAllowedTool = (tool: ToolSelection): boolean =>
+			(!allowedToolNames || allowedToolNames.has(toolKey(tool))) && !excludedToolNames?.has(toolKey(tool));
 
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
 		const allCustomTools = [
@@ -4090,30 +4326,38 @@ export class AgentSession {
 				definition,
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
-		].filter((tool) => isAllowedTool(tool.definition.name));
+		].filter((tool) => isAllowedTool(tool.definition));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
-				.filter(([name]) => isAllowedTool(name))
+				.filter(([, definition]) => isAllowedTool(definition))
 				.map(([name, definition]) => [
 					name,
 					{
 						definition,
-						sourceInfo: createSyntheticSourceInfo(`<builtin:${name}>`, { source: "builtin" }),
+						sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
 					},
 				]),
 		);
 		for (const tool of allCustomTools) {
-			definitionRegistry.set(tool.definition.name, {
+			definitionRegistry.set(toolKey(tool.definition), {
 				definition: tool.definition,
 				sourceInfo: tool.sourceInfo,
 			});
+		}
+		const publicIds = new Map<string, string>();
+		for (const [key, { definition }] of definitionRegistry) {
+			const id = toolId(definition);
+			const previous = publicIds.get(id);
+			if (previous !== undefined && previous !== key)
+				throw new Error(`Ambiguous public tool ID ${JSON.stringify(id)}`);
+			publicIds.set(id, key);
 		}
 		this._toolDefinitions = definitionRegistry;
 		this._toolPromptSnippets = new Map(
 			Array.from(definitionRegistry.values())
 				.map(({ definition }) => {
 					const snippet = this._normalizePromptSnippet(definition.promptSnippet);
-					return snippet ? ([definition.name, snippet] as const) : undefined;
+					return snippet ? ([toolKey(definition), snippet] as const) : undefined;
 				})
 				.filter((entry): entry is readonly [string, string] => entry !== undefined),
 		);
@@ -4121,7 +4365,7 @@ export class AgentSession {
 			Array.from(definitionRegistry.values())
 				.map(({ definition }) => {
 					const guidelines = this._normalizePromptGuidelines(definition.promptGuidelines);
-					return guidelines.length > 0 ? ([definition.name, guidelines] as const) : undefined;
+					return guidelines.length > 0 ? ([toolKey(definition), guidelines] as const) : undefined;
 				})
 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
 		);
@@ -4129,7 +4373,7 @@ export class AgentSession {
 		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
 		const wrappedBuiltInTools = wrapRegisteredTools(
 			Array.from(this._baseToolDefinitions.values())
-				.filter((definition) => isAllowedTool(definition.name))
+				.filter((definition) => isAllowedTool(definition))
 				.map((definition) => ({
 					definition,
 					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
@@ -4137,39 +4381,30 @@ export class AgentSession {
 			runner,
 		);
 
-		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
+		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [toolKey(tool), tool]));
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
-			toolRegistry.set(tool.name, tool);
+			toolRegistry.set(toolKey(tool), tool);
 		}
 		this._toolRegistry = toolRegistry;
+		this._toolIds = publicIds;
 
 		const nextActiveToolNames = (
 			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
 		).filter((name) => isAllowedTool(name));
 
-		if (allowedToolNames) {
-			for (const toolName of this._toolRegistry.keys()) {
-				if (allowedToolNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
-				}
-			}
-		} else if (options?.includeAllExtensionTools) {
-			for (const tool of wrappedExtensionTools) {
-				nextActiveToolNames.push(tool.name);
-			}
+		if (options?.includeAllExtensionTools) {
+			for (const tool of wrappedExtensionTools) nextActiveToolNames.push(toToolReference(tool));
 		} else if (!options?.activeToolNames) {
-			for (const toolName of this._toolRegistry.keys()) {
-				if (!previousRegistryNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
-				}
+			for (const [key, tool] of this._toolRegistry) {
+				if (!previousRegistryNames.has(key)) nextActiveToolNames.push(toToolReference(tool));
 			}
 		}
 
-		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
+		this.setActiveToolReferences(nextActiveToolNames.map(toToolReference));
 	}
 
 	private _buildRuntime(options: {
-		activeToolNames?: string[];
+		activeToolNames?: ToolSelection[];
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 	}): void {
@@ -4193,7 +4428,7 @@ export class AgentSession {
 				});
 
 		this._baseToolDefinitions = new Map(
-			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
+			Object.values(baseToolDefinitions).map((tool) => [toolKey(tool), tool as ToolDefinition]),
 		);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
@@ -4244,7 +4479,7 @@ export class AgentSession {
 		resetApiProviders();
 		await this._resourceLoader.reload();
 		this._buildRuntime({
-			activeToolNames: this.getActiveToolNames(),
+			activeToolNames: this.getActiveToolReferences(),
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
@@ -4782,7 +5017,7 @@ export class AgentSession {
 			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 				addUsageToTotals(usageTotals, entry.usage);
 			}
-			if (entry.type !== "message") continue;
+			if (entry.type !== "message" || entry.checkpoint) continue;
 			totalMessages++;
 			const message = entry.message;
 			if (message.role === "user") {
@@ -4832,7 +5067,7 @@ export class AgentSession {
 		// Retained pre-compaction usage is unknown until a matching projected response arrives.
 		const usageState = this._getContextUsageState(this.messages);
 		if (!usageState.hasPostCompactionUsage) {
-			return { tokens: null, contextWindow, percent: null };
+			return { tokens: null, contextWindow, percent: null, source: "unknown" };
 		}
 
 		const estimate = this._estimateContextTokens(this.agent.state, usageState);
@@ -4840,6 +5075,7 @@ export class AgentSession {
 
 		return {
 			tokens: estimate.tokens,
+			source: estimate.source,
 			contextWindow,
 			percent,
 		};

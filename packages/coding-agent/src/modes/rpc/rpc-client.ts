@@ -192,7 +192,8 @@ export class RpcClient {
 
 	/**
 	 * Send a prompt to the agent.
-	 * Returns immediately after sending; use onEvent() to receive streaming events.
+	 * Resolves after host acceptance; rejects if the host refuses the prompt.
+	 * Use onEvent() to receive streaming events.
 	 * Use waitForIdle() to wait for completion.
 	 */
 	async prompt(message: string, images?: ImageContent[]): Promise<void> {
@@ -458,24 +459,11 @@ export class RpcClient {
 	// =========================================================================
 
 	/**
-	 * Wait for agent to become idle (no streaming).
-	 * Resolves when agent_settled event is received.
+	 * Wait for the host session to become idle, including prompt preparation and continuations.
+	 * Resolves immediately if already idle. Timeout does not abort the running operation.
 	 */
-	waitForIdle(timeout = 60000): Promise<void> {
-		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
-				unsubscribe();
-				reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
-			}, timeout);
-
-			const unsubscribe = this.onEvent((event) => {
-				if (event.type === "agent_settled") {
-					clearTimeout(timer);
-					unsubscribe();
-					resolve();
-				}
-			});
-		});
+	async waitForIdle(timeout = 60000): Promise<void> {
+		await this.send({ type: "wait_for_idle" }, timeout);
 	}
 
 	/**
@@ -504,9 +492,16 @@ export class RpcClient {
 	 * Send prompt and wait for completion, returning all events.
 	 */
 	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<JsonAgentSessionEvent[]> {
-		const eventsPromise = this.collectEvents(timeout);
-		await this.prompt(message, images);
-		return eventsPromise;
+		const events: JsonAgentSessionEvent[] = [];
+		const unsubscribe = this.onEvent((event) => events.push(event));
+		const deadline = Date.now() + timeout;
+		try {
+			await this.send({ type: "prompt", message, images }, timeout);
+			await this.waitForIdle(Math.max(0, deadline - Date.now()));
+			return events;
+		} finally {
+			unsubscribe();
+		}
 	}
 
 	// =========================================================================
@@ -517,11 +512,10 @@ export class RpcClient {
 		try {
 			const data = JSON.parse(line);
 
-			// Check if it's a response to a pending request
-			if (data.type === "response" && data.id && this.pendingRequests.has(data.id)) {
-				const pending = this.pendingRequests.get(data.id)!;
+			if (data.type === "response") {
+				const pending = this.pendingRequests.get(data.id);
 				this.pendingRequests.delete(data.id);
-				pending.resolve(data as RpcResponse);
+				pending?.resolve(data as RpcResponse);
 				return;
 			}
 
@@ -545,7 +539,7 @@ export class RpcClient {
 		this.pendingRequests.clear();
 	}
 
-	private async send(command: RpcCommandBody): Promise<RpcResponse> {
+	private async send(command: RpcCommandBody, timeout = 30000): Promise<RpcResponse> {
 		const childProcess = this.process;
 		const stdin = childProcess?.stdin;
 		if (!childProcess || !stdin) {
@@ -569,18 +563,23 @@ export class RpcClient {
 		const fullCommand = { ...command, id } as RpcCommand;
 
 		return new Promise((resolve, reject) => {
-			const timeout = setTimeout(() => {
+			const timer = setTimeout(() => {
 				this.pendingRequests.delete(id);
-				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
-			}, 30000);
+				const target = command.type === "wait_for_idle" ? "agent to become idle" : `response to ${command.type}`;
+				reject(new Error(`Timeout waiting for ${target}. Stderr: ${this.stderr}`));
+			}, timeout);
 
 			this.pendingRequests.set(id, {
 				resolve: (response) => {
-					clearTimeout(timeout);
-					resolve(response);
+					clearTimeout(timer);
+					if (response.success) {
+						resolve(response);
+					} else {
+						reject(new Error(response.error));
+					}
 				},
 				reject: (error) => {
-					clearTimeout(timeout);
+					clearTimeout(timer);
 					reject(error);
 				},
 			});
@@ -597,10 +596,6 @@ export class RpcClient {
 	}
 
 	private getData<T>(response: RpcResponse): T {
-		if (!response.success) {
-			const errorResponse = response as Extract<RpcResponse, { success: false }>;
-			throw new Error(errorResponse.error);
-		}
 		// Type assertion: we trust response.data matches T based on the command sent.
 		// This is safe because each public method specifies the correct T for its command.
 		const successResponse = response as Extract<RpcResponse, { success: true; data: unknown }>;

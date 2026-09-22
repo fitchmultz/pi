@@ -11,6 +11,7 @@ import type {
 	OpenAIResponsesCompat,
 	ProviderEnv,
 	ProviderHeaders,
+	ResponseControl,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -24,7 +25,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getCurrentTools, getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -33,9 +34,20 @@ import {
 	diagnosticServiceTier,
 	finishResponsesDiagnostics,
 } from "./openai-responses-diagnostics.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	createResponsesSuccessor,
+	getInitialResponsesEffort,
+	getNativeToolSearch,
+	processResponsesStream,
+	resolveResponsesEffort,
+	resolveResponsesTranscript,
+	supportsPositionalResponsesEffort,
+} from "./openai-responses-shared.ts";
 import { streamResponsesWebSocket } from "./openai-responses-websocket.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { withToolNamespaces } from "./tool-namespaces.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 // OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
@@ -86,6 +98,9 @@ function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCo
 		supportsToolSearch: model.compat?.supportsToolSearch ?? false,
 		supportsExplicitPromptCacheMode: model.compat?.supportsExplicitPromptCacheMode ?? false,
 		supportsMaxOutputTokens: model.compat?.supportsMaxOutputTokens ?? true,
+		supportsAsyncTools: model.compat?.supportsAsyncTools ?? false,
+		supportsSteering: model.compat?.supportsSteering ?? false,
+		supportsReasoningEffortUpdates: model.compat?.supportsReasoningEffortUpdates ?? false,
 	};
 }
 
@@ -119,17 +134,21 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 /**
  * Generate function for OpenAI Responses API
  */
-export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
+const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 	model: Model<"openai-responses">,
 	context: TranscriptContext,
 	options?: OpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, getCompat(model).supportsMidConvoSystemMessages);
+	const normalizedContext = resolveResponsesTranscript(
+		context,
+		getCompat(model).supportsMidConvoSystemMessages,
+		getCompat(model).supportsToolSearch,
+	);
 
 	// Start async processing
 	(async () => {
-		const output: AssistantMessage = {
+		let output: AssistantMessage = {
 			role: "assistant",
 			content: [],
 			api: model.api as Api,
@@ -169,6 +188,8 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				cacheSessionId,
 			);
 			let params = buildParams(model, normalizedContext, options, compat, grammarToolInputProperties);
+			if (compat.supportsReasoningEffortUpdates)
+				output.providerThinkingLevel = resolveResponsesEffort(model, options?.reasoningEffort);
 			details.prepareMs = performance.now() - diagnostics.startedAt;
 			const hookStartedAt = performance.now();
 			try {
@@ -181,7 +202,18 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			}
 			details.requestedServiceTier = diagnosticServiceTier(params.service_tier);
 			details.requestReadyMs = performance.now() - diagnostics.startedAt;
+			let liveControl: ResponseControl | undefined;
+			let retired = false;
 			const streamOptions = {
+				continuesResponse: () => liveControl?.waitingForSuccessor ?? false,
+				wasRetired: () => retired || liveControl?.retired === true,
+				onResponseStart: (message: AssistantMessage) => {
+					output = message;
+				},
+				onResponseEnd: (message: AssistantMessage) => {
+					output = createResponsesSuccessor(message);
+				},
+				toolSearchTool: getNativeToolSearch(getCurrentTools(normalizedContext.messages), compat.supportsToolSearch),
 				diagnostics,
 				serviceTier: options?.serviceTier,
 				grammarToolInputProperties,
@@ -190,12 +222,21 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			};
 			let websocketCompleted = false;
 			let started = false;
-			if (model.provider === "openai" && options?.transport !== "sse" && !params.background) {
+			if (
+				(model.provider === "openai" || compat.supportsSteering) &&
+				options?.transport !== "sse" &&
+				!params.background
+			) {
 				let recovered = false;
 				let callbackFailed = false;
 				const websocketOptions: OpenAIResponsesOptions = {
 					...options,
 					cacheRetention,
+					onResponseControl: (control) => {
+						retired ||= liveControl?.retired === true;
+						liveControl = control;
+						options?.onResponseControl?.(control);
+					},
 					onResponse: async (response, responseModel) => {
 						details.headersMs = performance.now() - diagnostics.startedAt;
 						try {
@@ -222,6 +263,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 										stream.push({ type: "start", partial: output });
 									},
 									diagnostics,
+									stream,
 								);
 								if (!websocketStream) return false;
 								try {
@@ -343,6 +385,18 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 	return stream;
 };
 
+export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (model, context, options) =>
+	withToolNamespaces(
+		model,
+		context,
+		(mapped, mapControl) =>
+			streamRaw(model, mapped, {
+				...options,
+				onResponseControl: (control) => options?.onResponseControl?.(control ? mapControl(control) : undefined),
+			}),
+		options?.signal,
+	);
+
 export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOptions> = (
 	model: Model<"openai-responses">,
 	context: TranscriptContext,
@@ -421,12 +475,18 @@ function buildParams(
 		context.messages,
 		compat.supportsAdditionalTools || compat.supportsToolSearch,
 	);
+	const effort = resolveResponsesEffort(model, options?.reasoningEffort);
+	const positional = supportsPositionalResponsesEffort(model, options?.samplingParams);
+	const toolSearchTool = getNativeToolSearch(getCurrentTools(context.messages), compat.supportsToolSearch);
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
+		reasoningEffort: positional ? effort : undefined,
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
 		supportsAdditionalTools: compat.supportsAdditionalTools,
 		supportsToolSearch: compat.supportsToolSearch,
 		toolOptions: {
+			toolSearchTool,
+			supportsAsyncTools: compat.supportsAsyncTools,
 			supportsStrictMode: compat.supportsStrictMode,
 			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
 		},
@@ -457,6 +517,8 @@ function buildParams(
 
 	if (transcriptTools.requestTools.length > 0) {
 		params.tools = convertResponsesTools(transcriptTools.requestTools, {
+			toolSearchTool,
+			supportsAsyncTools: compat.supportsAsyncTools,
 			supportsStrictMode: compat.supportsStrictMode,
 			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
 		});
@@ -467,21 +529,18 @@ function buildParams(
 	}
 
 	if (model.reasoning) {
-		if (options?.reasoningEffort || options?.reasoningSummary) {
-			const effort = options?.reasoningEffort
-				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
-				: "medium";
+		if (options?.reasoningEffort || options?.reasoningSummary || compat.supportsReasoningEffortUpdates) {
 			params.reasoning = {
-				effort: effort as NonNullable<typeof params.reasoning>["effort"],
+				effort: (positional && effort ? getInitialResponsesEffort(model, context, effort) : effort) as NonNullable<
+					typeof params.reasoning
+				>["effort"],
 				summary: options?.reasoningSummary || "auto",
 			};
-			params.include = ["reasoning.encrypted_content"];
 		} else if (model.provider !== "github-copilot" && model.thinkingLevelMap?.off !== null) {
-			params.reasoning = {
-				effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],
-			};
+			params.reasoning = { effort: effort as NonNullable<typeof params.reasoning>["effort"] };
 		}
-		if (model.provider === "xai") params.include = ["reasoning.encrypted_content"];
+		// store:false has no server-side history: retain opaque reasoning even when effort was omitted.
+		params.include = ["reasoning.encrypted_content"];
 	}
 
 	// Last so custom keys override the named request fields.
@@ -489,6 +548,11 @@ function buildParams(
 		Object.assign(params, options.samplingParams);
 	}
 
+	if (model.id === "gpt-6-astra") {
+		delete params.temperature;
+		delete params.top_p;
+		delete params.top_logprobs;
+	}
 	return params;
 }
 

@@ -2,7 +2,7 @@
  * System prompt construction and project context loading
  */
 
-import { getSystemMessageText } from "@earendil-works/pi-ai";
+import { getSystemMessageText, type ToolSelection, toolKey } from "@earendil-works/pi-ai";
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
@@ -12,7 +12,7 @@ export interface BuildSystemPromptOptions {
 	/** Exact full prompt replacement set by a before_agent_start handler. */
 	forceSystemPrompt?: string;
 	/** Tools to include in prompt. Default: [read, bash, edit, write]. */
-	selectedTools?: string[];
+	selectedTools?: ToolSelection[];
 	/** Optional one-line tool snippets keyed by tool name. */
 	toolSnippets?: Record<string, string>;
 	/** Guideline bullets contributed by each tool, keyed by tool name. */
@@ -32,7 +32,7 @@ export interface BuildSystemPromptOptions {
 }
 
 export type NormalizedBuildSystemPromptOptions = BuildSystemPromptOptions & {
-	selectedTools: string[];
+	selectedTools: ToolSelection[];
 	toolSnippets: Record<string, string>;
 	toolGuidelines: Record<string, string[]>;
 	promptGuidelines: string[];
@@ -55,7 +55,9 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 	return {
 		customPrompt: input.customPrompt,
 		forceSystemPrompt: input.forceSystemPrompt,
-		selectedTools: [...(input.selectedTools ?? ["read", "bash", "edit", "write"])],
+		selectedTools: (input.selectedTools ?? ["read", "bash", "edit", "write"]).map((tool) =>
+			typeof tool === "string" ? tool : tool.namespace === undefined ? tool.name : { ...tool },
+		),
 		toolSnippets: { ...(input.toolSnippets ?? {}) },
 		toolGuidelines: Object.fromEntries(
 			Object.entries(input.toolGuidelines ?? {}).map(([name, guidelines]) => [name, [...guidelines]]),
@@ -78,8 +80,13 @@ function renderProjectContext(contextFiles: Array<{ path: string; content: strin
 	].join("\n\n");
 }
 
+function toolPromptMetadata<T>(tool: ToolSelection, values: Record<string, T>): T | undefined {
+	const bareName = typeof tool === "string" ? tool : tool.namespace === undefined ? tool.name : undefined;
+	return values[toolKey(tool)] ?? (bareName === undefined ? undefined : values[bareName]);
+}
+
 function buildRules(
-	selectedTools: string[],
+	selectedTools: ToolSelection[],
 	toolGuidelines: Record<string, string[]>,
 	promptGuidelines: string[],
 ): string {
@@ -109,7 +116,7 @@ function buildRules(
 	}
 
 	for (const name of selectedTools) {
-		for (const rule of toolGuidelines[name] ?? []) addRule(rule);
+		for (const rule of toolPromptMetadata(name, toolGuidelines) ?? []) addRule(rule);
 	}
 	for (const rule of promptGuidelines) addRule(rule);
 	addRule("Be concise in your responses");
@@ -145,9 +152,16 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	} else {
 		promptSections.preamble =
 			"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
-		const visibleTools = selectedTools.filter((name) => !!toolSnippets[name]);
+		const visibleTools = selectedTools.filter((tool) => !!toolPromptMetadata(tool, toolSnippets));
 		const tools =
-			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
+			visibleTools.length > 0
+				? visibleTools
+						.map((tool) => {
+							const name = typeof tool === "string" ? tool : `${tool.namespace}.${tool.name}`;
+							return `- ${name}: ${toolPromptMetadata(tool, toolSnippets)}`;
+						})
+						.join("\n")
+				: "(none)";
 		promptSections.tools = `${tools}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.`;
 		promptSections.rules = buildRules(selectedTools, toolGuidelines, promptGuidelines);
 		promptSections.docs = `Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
@@ -167,7 +181,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		const skillsPrompt = formatSkillsForPrompt(skills, skillFileReadTool).trim();
 		if (skillsPrompt) promptSections.skills = skillsPrompt;
 	}
-	promptSections.cwd = cwd.replace(/\\/g, "/");
+	promptSections.cwd = process.platform === "win32" ? cwd.replace(/\\/g, "/") : cwd;
 	for (const [name, content] of Object.entries(customSections)) {
 		if (content) promptSections[name] = content;
 	}

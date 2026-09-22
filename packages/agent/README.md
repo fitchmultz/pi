@@ -493,6 +493,14 @@ const readFileTool: AgentTool = {
 agent.state.tools = [readFileTool];
 ```
 
+### Tool search and namespaces
+
+Tools and calls may carry an optional `namespace`; dispatch matches the exact namespace/name pair. Omitting the namespace identifies only an unnamespaced tool.
+
+Set `toolSearch: true` on a discovery tool. Its result must include `tools: ToolReference[]` after the callback adds its matches to `agent.state.tools`. The runtime resolves those references against the current active tools and records only their declarations in `ToolResultMessage.toolsAdded`. Invalid references produce a tool error. Native client search calls use `ToolCall.kind: "toolSearch"` and retain that identity as `toolCallKind` on their result; unsupported routes call the same tool as an ordinary function.
+
+`Agent` refreshes the executable snapshot between turns, so newly loaded tools become callable on the next request, never retroactively in the current sibling batch. Low-level loop callers can provide `getTools()` to return their current permitted executable set after a search callback.
+
 ### Error Handling
 
 **Throw an error** when a tool fails. Do not return error messages as content.

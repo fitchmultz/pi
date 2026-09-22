@@ -1,15 +1,18 @@
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	getCurrentSystemMessage,
 	type ImageContent,
 	type Message,
+	mergeAssistantCheckpoint,
 	type SystemMessage,
 	type TextContent,
 	type ToolResultMessage,
 	type Usage,
 	type UserMessage,
 	uuidv7,
+	withoutToolSearchState,
 } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
@@ -70,6 +73,8 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Non-billable completed-item snapshot saved before an early tool effect. */
+	checkpoint?: boolean;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -95,6 +100,8 @@ export interface ContextWindowEntry extends SessionEntryBase {
 
 export interface UsageEntry extends SessionEntryBase {
 	type: "usage";
+	/** Optional journal-scoped idempotency key. Copied entries retain it when forked. */
+	contributionId?: string;
 	/** Arbitrary usage category, such as "cache_warm". */
 	kind: string;
 	provider: string;
@@ -496,6 +503,31 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	return [];
 }
 
+function coalesceAssistantCheckpoints(path: SessionEntry[]): SessionEntry[] {
+	const positions = new Map<string, number>();
+	const entries: SessionEntry[] = [];
+	for (const entry of path) {
+		if (entry.type === "message" && entry.message.role === "assistant" && entry.message.responseId) {
+			const responseId = entry.message.responseId;
+			const index = positions.get(responseId);
+			if (index !== undefined) {
+				const previous = entries[index];
+				entries[index] =
+					previous.type === "message" && previous.message.role === "assistant"
+						? {
+								...(entry.checkpoint ? previous : entry),
+								message: mergeAssistantCheckpoint(previous.message, entry.message),
+							}
+						: entry;
+				continue;
+			}
+			positions.set(responseId, entries.length);
+		}
+		entries.push(entry);
+	}
+	return entries;
+}
+
 /**
  * Build the active session entry list for the selected leaf.
  *
@@ -516,7 +548,8 @@ export function buildContextEntries(
 			break;
 		}
 	}
-	const path = contextWindowIndex === -1 ? fullPath : fullPath.slice(contextWindowIndex);
+	const windowPath = contextWindowIndex === -1 ? fullPath : fullPath.slice(contextWindowIndex);
+	const path = coalesceAssistantCheckpoints(windowPath);
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -536,9 +569,20 @@ export function buildContextEntries(
 
 	const contextEntries: SessionEntry[] = [compaction];
 	let foundFirstKept = false;
+	const firstKept = windowPath.find((entry) => entry.id === compaction.firstKeptEntryId);
+	const firstKeptResponseId =
+		firstKept?.type === "message" && firstKept.message.role === "assistant"
+			? firstKept.message.responseId
+			: undefined;
 	for (let i = 0; i < compactionIdx; i++) {
 		const entry = path[i];
-		if (entry.id === compaction.firstKeptEntryId) {
+		if (
+			entry.id === compaction.firstKeptEntryId ||
+			(firstKeptResponseId &&
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.responseId === firstKeptResponseId)
+		) {
 			foundFirstKept = true;
 		}
 		if (foundFirstKept && !(entry.type === "message" && entry.message.role === "system")) {
@@ -587,7 +631,7 @@ export function buildSessionProjection(
 	const { thinkingLevel, model } = getSessionContextSettings(path);
 	const contextEntries = buildContextEntries(entries, leafId, byId);
 	const edits = new Map<string, ContextEditEntry>();
-	for (const entry of contextEntries) {
+	for (const entry of path) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
 	}
 	const projectedEntries = contextEntries.map(
@@ -606,6 +650,75 @@ export function buildSessionProjection(
 						),
 		}),
 	);
+	// Async result dependencies span turns. Carry only their original call items across
+	// compaction; a fresh context-window boundary deliberately excludes older operations.
+	if (contextEntries[0]?.type === "compaction") {
+		let windowIndex = -1;
+		for (let index = path.length - 1; index >= 0; index--) {
+			if (path[index].type === "context_window") {
+				windowIndex = index;
+				break;
+			}
+		}
+		const windowEntries = coalesceAssistantCheckpoints(path.slice(Math.max(0, windowIndex)));
+		const retained = projectedEntries.flatMap((entry) => entry.messages);
+		const retainedCalls = new Set(
+			retained.flatMap((message) =>
+				message.role === "assistant"
+					? message.content.flatMap((call) => (call.type === "toolCall" ? [call.id] : []))
+					: [],
+			),
+		);
+		const retainedResults = new Set(
+			retained.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
+		);
+		const allResults = new Set(
+			windowEntries.flatMap((entry) =>
+				entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
+			),
+		);
+		const carried = windowEntries.flatMap((sourceEntry): ProjectedSessionEntry[] => {
+			if (sourceEntry.type !== "message" || sourceEntry.message.role !== "assistant") return [];
+			const message = projectContextEntry(sourceEntry, edits.get(sourceEntry.id))[0];
+			if (message?.role !== "assistant") return [];
+			const calls = message.content.filter(
+				(call) =>
+					call.type === "toolCall" &&
+					call.async &&
+					!retainedCalls.has(call.id) &&
+					(retainedResults.has(call.id) || !allResults.has(call.id)),
+			);
+			return calls.length > 0 ? [{ sourceEntry, messages: [{ ...message, content: calls }] }] : [];
+		});
+		projectedEntries.splice(1, 0, ...carried);
+		// An explicit call omission also omits its dependent output; never resurrect the removed call.
+		const omittedCalls = new Set<string>();
+		for (const source of windowEntries) {
+			if (source.type !== "message" || source.message.role !== "assistant" || !edits.has(source.id)) continue;
+			const visible = projectContextEntry(source, edits.get(source.id))[0];
+			const visibleIds = new Set(
+				visible?.role === "assistant"
+					? visible.content.flatMap((call) => (call.type === "toolCall" ? [call.id] : []))
+					: [],
+			);
+			for (const call of source.message.content)
+				if (call.type === "toolCall" && call.async && !visibleIds.has(call.id)) omittedCalls.add(call.id);
+		}
+		const retainedIds = new Set(
+			path
+				.slice(
+					0,
+					path.findIndex((entry) => entry.id === contextEntries[0].id),
+				)
+				.map((entry) => entry.id),
+		);
+		for (const entry of projectedEntries) {
+			entry.messages = entry.messages.filter(
+				(message) => message.role !== "toolResult" || !omittedCalls.has(message.toolCallId),
+			);
+			if (retainedIds.has(entry.sourceEntry.id)) entry.messages = withoutToolSearchState(entry.messages);
+		}
+	}
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),
@@ -878,7 +991,7 @@ async function buildSessionInfo(
 				name = entry.name?.trim() || undefined;
 			}
 
-			if (entry.type !== "message") continue;
+			if (entry.type !== "message" || entry.checkpoint) continue;
 			messageCount++;
 
 			const activityTime = getMessageActivityTime(entry);
@@ -1210,13 +1323,21 @@ export class SessionManager {
 		}
 	}
 
+	private _hasPersistableEntries(): boolean {
+		return this.fileEntries.some(
+			(e) => e.type === "usage" || (e.type === "message" && e.message.role === "assistant"),
+		);
+	}
+
 	/**
-	 * Retry failed journal persistence without appending entries or moving the leaf.
-	 * Throws while persistence still fails. In-memory sessions and journals deferred
-	 * until the first assistant response remain untouched.
+	 * Persist accepted entries without appending entries or moving the leaf.
+	 * Throws while persistence still fails. In-memory sessions remain untouched;
+	 * new journals wait for an assistant response or usage entry.
 	 */
 	flush(): void {
-		if (this.needsRewrite) this._rewriteFile(this.flushed ? "w" : "wx");
+		if (this.needsRewrite || (!this.flushed && this._hasPersistableEntries())) {
+			this._rewriteFile(this.flushed ? "w" : "wx");
+		}
 	}
 
 	isPersisted(): boolean {
@@ -1246,20 +1367,15 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		if (this.needsRewrite) {
-			// The newly accepted entry is already in fileEntries; repair all entries once.
+		if (!this.flushed || this.needsRewrite) {
+			// The newly accepted entry is already in fileEntries; publish or repair all entries once.
 			this.flush();
 			return;
 		}
 
-		if (!this.flushed) {
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) this._rewriteFile("wx");
-		} else {
-			this.needsRewrite = true;
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-			this.needsRewrite = false;
-		}
+		this.needsRewrite = true;
+		appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+		this.needsRewrite = false;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1287,13 +1403,14 @@ export class SessionManager {
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+	appendMessage(message: Message | CustomMessage | BashExecutionMessage, checkpoint = false): string {
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			message,
+			...(checkpoint ? { checkpoint: true } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1344,7 +1461,57 @@ export class SessionManager {
 	}
 
 	/** Append model-attributed usage that does not participate in LLM context. Returns the appended entry. */
-	appendUsage(kind: string, provider: string, model: string, usage: Usage, note?: string): UsageEntry {
+	appendUsage(
+		kind: string,
+		provider: string,
+		model: string,
+		usage: Usage,
+		note?: string,
+		contributionId?: string,
+	): UsageEntry {
+		if (contributionId !== undefined) {
+			if ([contributionId, kind, provider, model].some((value) => typeof value !== "string" || !value.trim()))
+				throw new Error("Usage contribution ID, kind, provider and model must be non-empty strings");
+			if (note !== undefined && typeof note !== "string") throw new Error("Usage note must be a string");
+			const values = [
+				usage?.input,
+				usage?.output,
+				usage?.cacheRead,
+				usage?.cacheWrite,
+				usage?.totalTokens,
+				usage?.cost?.input,
+				usage?.cost?.output,
+				usage?.cost?.cacheRead,
+				usage?.cost?.cacheWrite,
+				usage?.cost?.total,
+				...(usage?.cacheWrite1h === undefined ? [] : [usage.cacheWrite1h]),
+				...(usage?.reasoning === undefined ? [] : [usage.reasoning]),
+			];
+			if (values.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0))
+				throw new Error("Usage tokens and costs must be finite non-negative numbers");
+			// Snapshot the persisted JSON shape, including omission of optional undefined fields.
+			usage = JSON.parse(JSON.stringify(usage)) as Usage;
+			const existing = this.fileEntries.find(
+				(entry) => entry.type === "usage" && entry.contributionId === contributionId,
+			);
+			if (existing?.type === "usage") {
+				if (
+					!isDeepStrictEqual(
+						{
+							kind: existing.kind,
+							provider: existing.provider,
+							model: existing.model,
+							usage: existing.usage,
+							note: existing.note,
+						},
+						{ kind, provider, model, usage, note },
+					)
+				)
+					throw new Error(`Conflicting usage contribution: ${contributionId}`);
+				this.flush();
+				return existing;
+			}
+		}
 		const entry: UsageEntry = {
 			type: "usage",
 			id: generateId(this.byId),
@@ -1354,7 +1521,8 @@ export class SessionManager {
 			provider,
 			model,
 			usage,
-			...(note ? { note } : {}),
+			...(note !== undefined ? { note } : {}),
+			...(contributionId !== undefined ? { contributionId } : {}),
 		};
 		this._appendEntry(entry);
 		return entry;
@@ -1811,18 +1979,7 @@ export class SessionManager {
 			this.flushed = false;
 			this._buildIndex();
 
-			// Only write the file now if it contains an assistant message.
-			// Otherwise defer to _persist(), which creates the file on the
-			// first assistant response, matching the newSession() contract
-			// and avoiding the duplicate-header bug when _persist()'s
-			// no-assistant guard later resets flushed to false.
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) {
-				this._rewriteFile();
-				this.flushed = true;
-			} else {
-				this.flushed = false;
-			}
+			if (this._hasPersistableEntries()) this._rewriteFile();
 
 			return newSessionFile;
 		}

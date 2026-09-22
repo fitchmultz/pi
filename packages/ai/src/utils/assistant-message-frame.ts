@@ -30,6 +30,12 @@ export type AssistantMessageFrame =
 			arguments: ToolCall["arguments"];
 			thoughtSignature?: string;
 			namespace?: string;
+			kind?: ToolCall["kind"];
+			async?: boolean;
+			responsesItem?: ToolCall["responsesItem"];
+			executionStarted?: boolean;
+			executionArguments?: ToolCall["arguments"];
+			executionDetached?: boolean;
 	  };
 
 type EncoderBlockState =
@@ -71,6 +77,14 @@ function cloneToolCall(toolCall: ToolCall): ToolCall {
 		arguments: structuredClone(toolCall.arguments),
 		...(toolCall.thoughtSignature === undefined ? {} : { thoughtSignature: toolCall.thoughtSignature }),
 		...(toolCall.namespace === undefined ? {} : { namespace: toolCall.namespace }),
+		...(toolCall.kind === undefined ? {} : { kind: toolCall.kind }),
+		...(toolCall.async === undefined ? {} : { async: toolCall.async }),
+		...(toolCall.responsesItem === undefined ? {} : { responsesItem: structuredClone(toolCall.responsesItem) }),
+		...(toolCall.executionStarted === undefined ? {} : { executionStarted: toolCall.executionStarted }),
+		...(toolCall.executionArguments === undefined
+			? {}
+			: { executionArguments: structuredClone(toolCall.executionArguments) }),
+		...(toolCall.executionDetached === undefined ? {} : { executionDetached: toolCall.executionDetached }),
 	};
 }
 
@@ -97,7 +111,7 @@ function assertContentIndex(contentIndex: number): void {
 	}
 }
 
-function eventBlock(event: Exclude<AssistantMessageEvent, { type: "start" | "done" | "error" }>) {
+function eventBlock(event: Extract<AssistantMessageEvent, { contentIndex: number }>) {
 	assertContentIndex(event.contentIndex);
 	const block = event.partial.content[event.contentIndex];
 	if (!block) {
@@ -149,6 +163,9 @@ export class AssistantMessageFrameEncoder {
 				if (this.started) throw new Error("Assistant message stream contains more than one start event");
 				this.started = true;
 				return { type: "start", partial: cloneStartMessage(event.partial) };
+			case "steering":
+				return undefined;
+			case "response_end":
 			case "done":
 				if (!this.started) throw new Error("Assistant message done event appears before start");
 				this.terminal = true;
@@ -279,6 +296,20 @@ export class AssistantMessageFrameEncoder {
 						? {}
 						: { thoughtSignature: event.toolCall.thoughtSignature }),
 					...(event.toolCall.namespace === undefined ? {} : { namespace: event.toolCall.namespace }),
+					...(event.toolCall.kind === undefined ? {} : { kind: event.toolCall.kind }),
+					...(event.toolCall.async === undefined ? {} : { async: event.toolCall.async }),
+					...(event.toolCall.responsesItem === undefined
+						? {}
+						: { responsesItem: structuredClone(event.toolCall.responsesItem) }),
+					...(event.toolCall.executionStarted === undefined
+						? {}
+						: { executionStarted: event.toolCall.executionStarted }),
+					...(event.toolCall.executionArguments === undefined
+						? {}
+						: { executionArguments: structuredClone(event.toolCall.executionArguments) }),
+					...(event.toolCall.executionDetached === undefined
+						? {}
+						: { executionDetached: event.toolCall.executionDetached }),
 				};
 			}
 		}
@@ -472,6 +503,19 @@ export function reduceAssistantMessageFrames(frames: Iterable<AssistantMessageFr
 				delete block.namespace;
 				if (frame.thoughtSignature !== undefined) block.thoughtSignature = frame.thoughtSignature;
 				if (frame.namespace !== undefined) block.namespace = frame.namespace;
+				delete block.kind;
+				delete block.async;
+				delete block.responsesItem;
+				delete block.executionStarted;
+				delete block.executionArguments;
+				delete block.executionDetached;
+				if (frame.kind !== undefined) block.kind = frame.kind;
+				if (frame.async !== undefined) block.async = frame.async;
+				if (frame.responsesItem !== undefined) block.responsesItem = structuredClone(frame.responsesItem);
+				if (frame.executionStarted !== undefined) block.executionStarted = frame.executionStarted;
+				if (frame.executionArguments !== undefined)
+					block.executionArguments = structuredClone(frame.executionArguments);
+				if (frame.executionDetached !== undefined) block.executionDetached = frame.executionDetached;
 				state.ended = true;
 				break;
 			}

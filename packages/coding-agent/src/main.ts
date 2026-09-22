@@ -956,8 +956,8 @@ export async function main(args: string[], options?: MainOptions) {
 			const knownTools = new Set(restart.handoff.checkpoint.knownTools);
 			const added = created.session
 				.getAllTools()
-				.filter((tool) => tool.sourceInfo.source !== "builtin" && !knownTools.has(tool.name))
-				.map((tool) => tool.name);
+				.filter((tool) => tool.sourceInfo.source !== "builtin" && !knownTools.has(tool.id))
+				.map((tool) => tool.id);
 			created.session.setActiveToolsByName([...new Set([...created.session.getActiveToolNames(), ...added])]);
 		}
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;

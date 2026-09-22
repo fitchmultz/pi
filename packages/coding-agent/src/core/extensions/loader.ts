@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Provider } from "@earendil-works/pi-ai";
+import { type Provider, type ToolReference, toolId, toolKey } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import type { createJiti } from "jiti";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.ts";
@@ -32,6 +32,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	ToolSearchDefinition,
 } from "./types.ts";
 
 const require = createRequire(import.meta.url);
@@ -171,10 +172,13 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		sendMessage: notInitialized,
 		sendUserMessage: notInitialized,
 		appendEntry: notInitialized,
+		recordUsage: notInitialized,
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
 		setLabel: notInitialized,
 		getActiveTools: notInitialized,
+		getActiveToolReferences: notInitialized,
+		setActiveToolReferences: notInitialized,
 		getAllTools: notInitialized,
 		setActiveTools: notInitialized,
 		// registerTool() is valid during extension load; refresh is only needed post-bind.
@@ -284,11 +288,25 @@ function createExtensionAPI(
 					`Tool "${tool.name}" registered by extension "${extension.path}" must define an object parameter schema.`,
 				);
 			}
-			extension.tools.set(tool.name, {
-				definition: tool,
-				sourceInfo: extension.sourceInfo,
-			});
-			runtime.refreshTools();
+			const key = toolKey(tool);
+			for (const existing of extension.tools.values()) {
+				if (toolId(existing.definition) === toolId(tool) && toolKey(existing.definition) !== key) {
+					throw new Error(`Ambiguous public tool ID ${JSON.stringify(toolId(tool))}`);
+				}
+			}
+			const previous = extension.tools.get(key);
+			extension.tools.set(key, { definition: tool, sourceInfo: extension.sourceInfo });
+			try {
+				runtime.refreshTools();
+			} catch (error) {
+				if (previous) extension.tools.set(key, previous);
+				else extension.tools.delete(key);
+				throw error;
+			}
+		},
+
+		registerToolSearch(tool: ToolSearchDefinition): void {
+			api.registerTool({ ...tool, toolSearch: true });
 		},
 
 		registerBashCwdHook(hook: BashCwdHook): void {
@@ -376,6 +394,11 @@ function createExtensionAPI(
 			runtime.appendEntry(customType, data);
 		},
 
+		recordUsage(contribution): void {
+			assertActive();
+			runtime.recordUsage(contribution);
+		},
+
 		setSessionName(name: string): void {
 			assertActive();
 			runtime.setSessionName(name);
@@ -399,6 +422,18 @@ function createExtensionAPI(
 		getActiveTools(): string[] {
 			assertActive();
 			return runtime.getActiveTools();
+		},
+
+		getActiveToolReferences(): ToolReference[] {
+			assertActive();
+			if (!runtime.getActiveToolReferences) throw new Error("Runtime does not support tool references");
+			return runtime.getActiveToolReferences();
+		},
+
+		setActiveToolReferences(tools: ToolReference[]): void {
+			assertActive();
+			if (!runtime.setActiveToolReferences) throw new Error("Runtime does not support tool references");
+			runtime.setActiveToolReferences(tools);
 		},
 
 		getAllTools() {

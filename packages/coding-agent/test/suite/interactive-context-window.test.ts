@@ -1,5 +1,5 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { Container } from "@earendil-works/pi-tui";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { expect, it, onTestFinished } from "vitest";
 import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
@@ -17,6 +17,7 @@ function createView(harness: Harness) {
 		isInitialized: true,
 		chatContainer: new Container(),
 		pendingTools: new Map(),
+		completedToolCalls: new Set(),
 		defaultEditor: {},
 		editor: { addToHistory() {} },
 		footer: { invalidate() {} },
@@ -41,6 +42,98 @@ function createView(harness: Harness) {
 		handleEvent(event: AgentSessionEvent): Promise<void>;
 	};
 }
+
+it("replaces a live same-leaf renderer when the namespace arrives on toolcall_end", async () => {
+	const harness = await createHarness({
+		tools: [],
+		extensionFactories: [
+			(pi) => {
+				for (const namespace of [undefined, "records"])
+					pi.registerTool({
+						name: "read",
+						namespace,
+						label: "Read",
+						description: "Read",
+						parameters: Type.Object({}),
+						renderCall: () => new Text(namespace ? "records renderer" : "bare renderer", 0, 0),
+						execute: async () => ({ content: [], details: {} }),
+					});
+			},
+		],
+	});
+	onTestFinished(() => harness.cleanup());
+	const view = createView(harness);
+	const call = fauxToolCall("read", {}, { id: "late-identity" });
+	const partial = fauxAssistantMessage(call, { stopReason: "pending" });
+	await view.handleEvent({ type: "message_start", message: partial });
+	await view.handleEvent({
+		type: "message_update",
+		message: partial,
+		assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, partial },
+	});
+	expect(stripAnsi(view.chatContainer.render(120).join("\n"))).toContain("bare renderer");
+	const finalCall = { ...call, namespace: "records" };
+	const final = fauxAssistantMessage(finalCall, { stopReason: "toolUse" });
+	await view.handleEvent({
+		type: "message_update",
+		message: final,
+		assistantMessageEvent: { type: "toolcall_end", contentIndex: 0, toolCall: finalCall, partial: final },
+	});
+	const rendered = stripAnsi(view.chatContainer.render(120).join("\n"));
+	expect(rendered).toContain("records renderer");
+	expect(rendered).not.toContain("bare renderer");
+});
+
+it("previews only admitted arguments after preflight rewrites the target", async () => {
+	let admit!: () => void;
+	let entered!: () => void;
+	const ready = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const barrier = new Promise<void>((resolve) => {
+		admit = resolve;
+	});
+	const harness = await createHarness({
+		tools: [],
+		settings: { compaction: { enabled: false }, showCacheMissNotices: false },
+		extensionFactories: [
+			(pi) => {
+				pi.on("tool_call", async (event) => {
+					entered();
+					await barrier;
+					Object.assign(event.input, { path: "admitted-B" });
+				});
+				pi.registerTool({
+					name: "edit",
+					label: "Edit",
+					description: "Edit",
+					parameters: Type.Object({ path: Type.String() }),
+					renderCall: (args, _theme, context) =>
+						new Text(context.argsComplete ? `preview:${args.path}` : "waiting for admission", 0, 0),
+					execute: async () => ({ content: [{ type: "text", text: "completed" }], details: {}, terminate: true }),
+				});
+			},
+		],
+	});
+	onTestFinished(() => harness.cleanup());
+	const view = createView(harness);
+	const events: Promise<void>[] = [];
+	harness.session.subscribe((event) => {
+		events.push(view.handleEvent(event));
+	});
+	harness.setResponses([
+		fauxAssistantMessage(fauxToolCall("edit", { path: "original-A" }), { stopReason: "toolUse" }),
+	]);
+	const run = harness.session.prompt("edit");
+	await ready;
+	expect(stripAnsi(view.chatContainer.render(120).join("\n"))).not.toContain("preview:original-A");
+	admit();
+	await run;
+	await Promise.all(events);
+	const rendered = stripAnsi(view.chatContainer.render(120).join("\n"));
+	expect(rendered).toContain("preview:admitted-B");
+	expect(rendered).not.toContain("preview:original-A");
+});
 
 it.each(["idle", "preflight", "tool batch", "automatic"])(
 	"releases the previous native window on %s without losing history or pending inputs",

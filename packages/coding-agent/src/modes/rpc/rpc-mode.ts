@@ -621,6 +621,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			case "get_state":
 				return success(id, "get_state", getRpcState());
 
+			case "wait_for_idle": {
+				await session.waitForIdle();
+				return success(id, "wait_for_idle");
+			}
+
 			// =================================================================
 			// Model
 			// =================================================================

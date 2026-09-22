@@ -35,7 +35,7 @@ describe("export HTML tool output whitespace", () => {
 			cwd: "/tmp",
 		});
 
-		expect(renderer.renderResult("id", "custom", [], undefined, false)?.expanded).toBe(
+		expect(renderer.renderResult("id", { name: "custom" }, [], undefined, false)?.expanded).toBe(
 			'<div class="ansi-line"><span style="color:#800000">one</span></div><div class="ansi-line">two</div>',
 		);
 	});

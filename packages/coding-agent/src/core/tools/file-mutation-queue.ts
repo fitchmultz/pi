@@ -1,5 +1,5 @@
-import { realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { resolveLocalFileTarget } from "@earendil-works/pi-agent-core/node";
 
 const fileMutationQueues = new Map<string, Promise<void>>();
 let registrationQueue = Promise.resolve();
@@ -19,7 +19,7 @@ async function getMutationQueueKey(filePath: string): Promise<string> {
 	const missing: string[] = [];
 	for (;;) {
 		try {
-			return join(await realpath(ancestor), ...missing);
+			return join(await resolveLocalFileTarget(ancestor), ...missing);
 		} catch (error) {
 			if (!isMissingPathError(error)) throw error;
 			const parent = dirname(ancestor);

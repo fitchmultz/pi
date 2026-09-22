@@ -14,28 +14,43 @@ import type {
 	ResponsesServerEvent,
 	ResponseToolSearchOutputItemParam,
 } from "openai/resources/responses/responses.js";
-import { calculateCost } from "../models.ts";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
 	AssistantMessage,
 	ImageContent,
+	JsonObject,
 	Model,
 	StopReason,
 	SystemMessage,
 	TextContent,
 	TextSignatureV1,
 	ThinkingContent,
+	ThinkingLevel,
 	Tool,
 	ToolCall,
+	ToolReference,
+	ToolResultMessage,
 	TranscriptContext,
 	Usage,
+	UserMessage,
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
-import { resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { toolKey, toToolReference } from "../utils/tool-identity.ts";
+import {
+	getCurrentSystemMessage,
+	getCurrentTools,
+	getInitialSystemMessage,
+	hasNonAdditiveToolChanges,
+	normalizeContext,
+	resolveTranscript,
+	resolveTranscriptTools,
+	withoutToolSearchState,
+} from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
 	type GrammarToolInputJsonBuffer,
@@ -79,7 +94,7 @@ function parseTextSignature(
 
 type ToolResultOutputContent = Array<ResponseInputText | ResponseInputImage>;
 
-function convertToolResultOutput<TApi extends Api>(
+export function convertToolResultOutput<TApi extends Api>(
 	model: Model<TApi>,
 	content: readonly (TextContent | ImageContent)[],
 ): string | ToolResultOutputContent {
@@ -108,7 +123,19 @@ function convertToolResultOutput<TApi extends Api>(
 	return output;
 }
 
+/** Transport-local snapshots travel with the frame, never through a mutable live controller. */
+export type ResponsesEvent = (ResponseStreamEvent | ResponsesServerEvent) & {
+	continuationInput?: readonly (UserMessage | ToolResultMessage)[];
+};
+
 export interface OpenAIResponsesStreamOptions {
+	continuesResponse?: () => boolean;
+	wasRetired?: () => boolean;
+	onResponseStart?: (message: AssistantMessage) => void;
+	onResponseEnd?: (message: AssistantMessage) => void;
+	responseError?: (response: Extract<ResponseStreamEvent, { type: "response.failed" }>["response"]) => Error;
+	/** The single active callback corresponding to the nameless native search declaration. */
+	toolSearchTool?: ToolReference;
 	diagnostics?: ResponsesDiagnostics;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
@@ -130,6 +157,8 @@ export interface ConvertResponsesMessagesOptions {
 	supportsAdditionalTools?: boolean;
 	supportsToolSearch?: boolean;
 	toolOptions?: ConvertResponsesToolsOptions;
+	/** Initial request effort remains stable; changes are inserted at their historical position. */
+	reasoningEffort?: string;
 }
 
 export interface ConvertResponsesToolsOptions {
@@ -137,6 +166,99 @@ export interface ConvertResponsesToolsOptions {
 	supportsStrictMode?: boolean;
 	supportsOpenAIGrammarTools?: boolean;
 	toolSearchResult?: boolean;
+	supportsAsyncTools?: boolean;
+	toolSearchTool?: ToolReference;
+}
+
+/** A native search declaration has no name, so multiple callbacks remain ordinary functions. */
+export function getNativeToolSearch(tools: readonly Tool[], supported: boolean | undefined): Tool | undefined {
+	if (!supported) return undefined;
+	const searches = tools.filter((tool) => tool.toolSearch);
+	return searches.length === 1 ? searches[0] : undefined;
+}
+
+/** Tool-search additions can remain in place even when later instruction text must be folded. */
+export function resolveResponsesTranscript(
+	context: TranscriptContext,
+	supportsMidConvoSystemMessages: boolean | undefined,
+	supportsToolSearch: boolean | undefined,
+): TranscriptContext {
+	const nonAdditive = hasNonAdditiveToolChanges(context.messages);
+	if (
+		nonAdditive &&
+		context.messages.some((message) => message.role === "toolResult" && message.toolsAdded !== undefined)
+	) {
+		const normalized = resolveTranscript(context, supportsMidConvoSystemMessages);
+		const initial = getInitialSystemMessage(normalized.messages);
+		const head: SystemMessage = {
+			...(initial ?? { role: "system", content: "", timestamp: 0 }),
+			toolsAdded: getCurrentTools(context.messages),
+			toolsRemoved: undefined,
+		};
+		return normalizeContext({
+			messages: [
+				head,
+				...withoutToolSearchState(normalized.messages.slice(initial ? 1 : 0)).map((message) =>
+					message.role === "system" ? { ...message, toolsAdded: undefined, toolsRemoved: undefined } : message,
+				),
+			],
+		});
+	}
+	if (
+		supportsMidConvoSystemMessages ||
+		!supportsToolSearch ||
+		nonAdditive ||
+		context.messages.some((message, index) => index > 0 && message.role === "system" && message.replace)
+	) {
+		return resolveTranscript(context, supportsMidConvoSystemMessages);
+	}
+	const head = getCurrentSystemMessage(context.messages);
+	if (!head) return context;
+	const initial = getInitialSystemMessage(context.messages);
+	return normalizeContext({
+		messages: [
+			{ ...head, toolsAdded: initial?.toolsAdded },
+			...context.messages
+				.slice(initial ? 1 : 0)
+				.map((message) => (message.role === "system" ? { ...message, content: "", sections: undefined } : message)),
+		],
+	});
+}
+
+/** Serialize registered search declarations identically for replay and live steering continuations. */
+export function convertResponsesToolSearchOutput(
+	model: Model<Api>,
+	result: ToolResultMessage,
+	options?: ConvertResponsesToolsOptions,
+): ResponseInput {
+	const messages: ResponseInput = [
+		{
+			type: "tool_search_output",
+			call_id: result.toolCallId.split("|")[0],
+			execution: "client",
+			status: result.isError ? "incomplete" : "completed",
+			tools: convertResponsesTools(result.toolsAdded ?? [], {
+				...options,
+				toolSearchResult: true,
+				toolSearchTool: undefined,
+			}),
+		},
+	];
+	// Search outputs only carry declarations; retain callback text/images as ordinary model context.
+	if (result.content.length > 0) {
+		const output = convertToolResultOutput(model, result.content);
+		messages.push({
+			role: "user",
+			content: [
+				{
+					type: "input_text",
+					text: `Tool search result from ${toolKey({ name: result.toolName, namespace: result.namespace })}:`,
+				},
+				...(typeof output === "string" ? [{ type: "input_text" as const, text: output }] : output),
+			],
+		});
+	}
+	return messages;
 }
 
 // =============================================================================
@@ -149,7 +271,11 @@ export function convertResponsesMessages<TApi extends Api>(
 	allowedToolCallProviders: ReadonlySet<string>,
 	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
-	const normalizedContext = resolveTranscript(context, options?.supportsMidConvoSystemMessages);
+	const normalizedContext = resolveResponsesTranscript(
+		context,
+		options?.supportsMidConvoSystemMessages,
+		options?.supportsToolSearch,
+	);
 	const messages: ResponseInput = [];
 
 	const normalizeIdPart = (part: string): string => {
@@ -177,12 +303,27 @@ export function convertResponsesMessages<TApi extends Api>(
 		return `${normalizedCallId}|${normalizedItemId}`;
 	};
 
+	const supportsAsyncTools = model.compat && "supportsAsyncTools" in model.compat && model.compat.supportsAsyncTools;
 	const transformedMessages = transformMessages(normalizedContext.messages, model, normalizeToolCallId);
+	const originalCalls = new Map(
+		transformedMessages.flatMap((message) =>
+			message.role === "assistant"
+				? message.content.flatMap((block) =>
+						block.type === "toolCall" &&
+						block.responsesItem &&
+						message.provider === model.provider &&
+						message.api === model.api
+							? [[block.id, block.responsesItem] as const]
+							: [],
+					)
+				: [],
+		),
+	);
 	const transcriptTools = resolveTranscriptTools(
 		normalizedContext.messages,
 		(options?.supportsAdditionalTools ?? false) || (options?.supportsToolSearch ?? false),
 	);
-	const appendSystemToolAdditions = (message: SystemMessage, seed: string): void => {
+	const appendSystemToolAdditions = (message: Pick<SystemMessage, "toolsAdded">, seed: string): void => {
 		const tools = transcriptTools.anchorsAdditions ? (message.toolsAdded ?? []) : [];
 		if (tools.length === 0) return;
 		if (options?.supportsAdditionalTools) {
@@ -194,7 +335,7 @@ export function convertResponsesMessages<TApi extends Api>(
 			return;
 		}
 		if (!options?.supportsToolSearch) return;
-		const names = tools.map((tool) => tool.name);
+		const names = tools.map(toolKey);
 		const callId = `pi_tool_load_${shortHash(`${seed}:${names.join(",")}`)}`;
 		messages.push({
 			type: "tool_search_call",
@@ -215,6 +356,20 @@ export function convertResponsesMessages<TApi extends Api>(
 	const compat = model.compat as { supportsDeveloperRole?: boolean } | undefined;
 	const instructionRole = model.reasoning && compat?.supportsDeveloperRole !== false ? "developer" : "system";
 
+	let activeEffort =
+		options?.reasoningEffort === undefined
+			? undefined
+			: getInitialResponsesEffort(model, context, options.reasoningEffort);
+	const updateEffort = (effort: string): void => {
+		if (effort === activeEffort) return;
+		const update: ResponseInputItem = {
+			type: "configuration_update",
+			reasoning: { effort: effort as "low" | "medium" | "high" | "xhigh" | "max" },
+		};
+		if (messages.at(-1)?.type === "configuration_update") messages[messages.length - 1] = update;
+		else messages.push(update);
+		activeEffort = effort;
+	};
 	let msgIndex = 0;
 	let sourceIndex = 0;
 	for (const msg of transformedMessages) {
@@ -290,8 +445,23 @@ export function convertResponsesMessages<TApi extends Api>(
 					} satisfies ResponseOutputMessage);
 				} else if (block.type === "toolCall") {
 					const toolCall = block as ToolCall;
+					const original = originalCalls.get(toolCall.id);
+					if (original && toolCall.async && supportsAsyncTools) {
+						output.push(original);
+						continue;
+					}
 					const [callId, itemIdRaw] = toolCall.id.split("|");
-					const customInputProperty = options?.grammarToolInputProperties?.get(toolCall.name);
+					const customInputProperty = options?.grammarToolInputProperties?.get(toolKey(toolCall));
+					if (toolCall.kind === "toolSearch" && options?.supportsToolSearch) {
+						output.push({
+							type: "tool_search_call",
+							call_id: callId,
+							execution: "client",
+							status: "completed",
+							arguments: toolCall.arguments,
+						});
+						continue;
+					}
 					let itemId: string | undefined = itemIdRaw;
 
 					// For different-model messages, set id to undefined to avoid pairing validation.
@@ -315,7 +485,7 @@ export function convertResponsesMessages<TApi extends Api>(
 							input: sanitizeSurrogates(
 								getGrammarToolInput(toolCall.name, toolCall.arguments, customInputProperty),
 							),
-							...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
+							...(toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
 						} satisfies ResponseOutputItem);
 					} else {
 						output.push({
@@ -324,18 +494,30 @@ export function convertResponsesMessages<TApi extends Api>(
 							call_id: callId,
 							name: toolCall.name,
 							arguments: JSON.stringify(toolCall.arguments),
-							...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
+							...(toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
 						});
 					}
 				}
 			}
 			if (output.length === 0) continue;
+			if (activeEffort !== undefined && isSameModel && assistantMsg.providerThinkingLevel !== undefined)
+				updateEffort(assistantMsg.providerThinkingLevel);
 			messages.push(...output);
 		} else if (msg.role === "toolResult") {
 			const [callId] = msg.toolCallId.split("|");
 			const output = convertToolResultOutput(model, msg.content);
 
-			if (options?.grammarToolInputProperties?.has(msg.toolName)) {
+			if (msg.toolCallKind === "toolSearch" && options?.supportsToolSearch) {
+				messages.push(...convertResponsesToolSearchOutput(model, msg, options.toolOptions));
+				continue;
+			}
+
+			const original = originalCalls.get(msg.toolCallId);
+			if (
+				supportsAsyncTools && original?.async
+					? original.type === "custom_tool_call"
+					: options?.grammarToolInputProperties?.has(toolKey({ name: msg.toolName, namespace: msg.namespace }))
+			) {
 				messages.push({
 					type: "custom_tool_call_output",
 					call_id: callId,
@@ -348,11 +530,79 @@ export function convertResponsesMessages<TApi extends Api>(
 					output,
 				});
 			}
+			appendSystemToolAdditions(msg, `result:${msg.toolCallId}`);
 		}
 		if (!isLeadingSystemMessage) msgIndex++;
 	}
 
+	if (options?.reasoningEffort !== undefined) updateEffort(options.reasoningEffort);
 	return messages;
+}
+
+/** Raw and simple entry points share the same unsupported-level clamping. */
+export function resolveResponsesEffort(
+	model: Model<"openai-responses" | "openai-codex-responses">,
+	requested?: ThinkingLevel | "none",
+): string | undefined {
+	if (!model.reasoning) return undefined;
+	if (requested !== undefined) {
+		const level = clampThinkingLevel(model, requested === "none" ? "off" : requested);
+		return model.thinkingLevelMap?.[level] ?? (level === "off" ? "none" : level);
+	}
+	return model.thinkingLevelMap?.off === null ? "medium" : (model.thinkingLevelMap?.off ?? "none");
+}
+
+export function getInitialResponsesEffort(model: Model<Api>, context: TranscriptContext, current: string): string {
+	for (const message of context.messages) {
+		if (
+			message.role === "assistant" &&
+			message.api === model.api &&
+			message.provider === model.provider &&
+			message.model === model.id &&
+			message.providerThinkingLevel !== undefined
+		)
+			return message.providerThinkingLevel;
+	}
+	return current;
+}
+
+/** Positional effort is supported only in standard single-agent requests with explicit compaction triggers. */
+export function supportsPositionalResponsesEffort(
+	model: Model<"openai-responses" | "openai-codex-responses">,
+	params?: Record<string, unknown>,
+): boolean {
+	const reasoning = params?.reasoning as { mode?: string } | undefined;
+	return (
+		model.compat?.supportsReasoningEffortUpdates === true &&
+		(!reasoning?.mode || reasoning.mode === "standard") &&
+		!params?.context_management &&
+		params?.truncation !== "auto" &&
+		!params?.multi_agent &&
+		!params?.agent &&
+		!params?.agents
+	);
+}
+
+/** A transport failure between successors must not mutate or charge the response already committed. */
+export function createResponsesSuccessor(message: AssistantMessage): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: message.api,
+		provider: message.provider,
+		model: message.model,
+		providerThinkingLevel: message.providerThinkingLevel,
+		stopReason: "pending",
+		timestamp: Date.now(),
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+	};
 }
 
 // =============================================================================
@@ -364,11 +614,36 @@ export function convertResponsesTools(tools: readonly Tool[], options?: ConvertR
 	const supportsStrictMode = options?.supportsStrictMode ?? true;
 	const supportsOpenAIGrammarTools = options?.supportsOpenAIGrammarTools ?? false;
 
-	return tools.map((tool) => {
+	const converted: OpenAITool[] = [];
+	const namespaces = new Map<string, Extract<OpenAITool, { type: "namespace" }>>();
+	const append = (tool: Tool, declaration: Extract<OpenAITool, { type: "function" | "custom" }>): void => {
+		if (tool.namespace === undefined) {
+			converted.push(declaration);
+			return;
+		}
+		let namespace = namespaces.get(tool.namespace);
+		if (!namespace) {
+			namespace = { type: "namespace", name: tool.namespace, description: tool.namespace, tools: [] };
+			namespaces.set(tool.namespace, namespace);
+			converted.push(namespace);
+		}
+		namespace.tools.push(declaration);
+	};
+	for (const tool of tools) {
+		if (tool.toolSearch && options?.toolSearchTool && toolKey(tool) === toolKey(options.toolSearchTool)) {
+			converted.push({
+				type: "tool_search",
+				execution: "client",
+				description: tool.description,
+				parameters: tool.parameters,
+			});
+			continue;
+		}
 		const grammar = resolveGrammarConstrainedSampling(tool, supportsOpenAIGrammarTools);
 		if (grammar) {
-			return {
+			append(tool, {
 				type: "custom",
+				...(options?.supportsAsyncTools && tool.async !== undefined ? { async: tool.async } : {}),
 				name: tool.name,
 				description: tool.description,
 				format: {
@@ -377,7 +652,8 @@ export function convertResponsesTools(tools: readonly Tool[], options?: ConvertR
 					definition: grammar.definition,
 				},
 				...(options?.toolSearchResult ? { defer_loading: true } : {}),
-			} satisfies OpenAITool;
+			} satisfies OpenAITool);
+			continue;
 		}
 
 		const constrainedStrict = resolveJsonSchemaStrictSampling(tool, supportsStrictMode);
@@ -386,6 +662,7 @@ export function convertResponsesTools(tools: readonly Tool[], options?: ConvertR
 			strict?: Extract<OpenAITool, { type: "function" }>["strict"];
 		} = {
 			type: "function",
+			...(options?.supportsAsyncTools && tool.async !== undefined ? { async: tool.async } : {}),
 			name: tool.name,
 			description: tool.description,
 			parameters: getJsonSchemaToolParameters(tool, strict === true) as Record<string, unknown>,
@@ -394,8 +671,9 @@ export function convertResponsesTools(tools: readonly Tool[], options?: ConvertR
 		if (supportsStrictMode) {
 			functionTool.strict = strict;
 		}
-		return functionTool as OpenAITool;
-	});
+		append(tool, functionTool as Extract<OpenAITool, { type: "function" }>);
+	}
+	return converted;
 }
 
 // =============================================================================
@@ -433,7 +711,7 @@ type ResponsesOutputSlot =
 type ToolCallOutputSlot = Extract<ResponsesOutputSlot, { type: "toolCall" }>;
 
 export async function processResponsesStream<TApi extends Api>(
-	openaiStream: AsyncIterable<ResponseStreamEvent | ResponsesServerEvent>,
+	openaiStream: AsyncIterable<ResponsesEvent>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	model: Model<TApi>,
@@ -490,7 +768,7 @@ export async function processResponsesStream<TApi extends Api>(
 		});
 	};
 	const createSlot = (outputIndex: number, item: ResponseOutputItem): ResponsesOutputSlot | undefined => {
-		if (item.type === "reasoning") {
+		if (item.type === "reasoning" || item.type === "compaction") {
 			const block: ThinkingContent = { type: "thinking", thinking: "" };
 			output.content.push(block);
 			const slot = {
@@ -509,6 +787,26 @@ export async function processResponsesStream<TApi extends Api>(
 			const slot = { type: "text", block, contentIndex: output.content.length - 1 } satisfies ResponsesOutputSlot;
 			outputSlots.set(outputIndex, slot);
 			stream.push({ type: "text_start", contentIndex: slot.contentIndex, partial: output });
+			return slot;
+		}
+		if (item.type === "tool_search_call" && item.execution === "client") {
+			if (!options?.toolSearchTool || !item.call_id)
+				throw new Error("Client tool search has no unique active callback or call ID");
+			const block: StreamingToolCall = {
+				type: "toolCall",
+				kind: "toolSearch",
+				id: `${item.call_id}|${item.id}`,
+				...toToolReference(options.toolSearchTool),
+				arguments: {},
+			};
+			output.content.push(block);
+			const slot = {
+				type: "toolCall",
+				block,
+				contentIndex: output.content.length - 1,
+			} satisfies ResponsesOutputSlot;
+			outputSlots.set(outputIndex, slot);
+			stream.push({ type: "toolcall_start", contentIndex: slot.contentIndex, partial: output });
 			return slot;
 		}
 		if (item.type === "function_call") {
@@ -531,7 +829,7 @@ export async function processResponsesStream<TApi extends Api>(
 			return slot;
 		}
 		if (item.type === "custom_tool_call") {
-			const inputProperty = options?.grammarToolInputProperties?.get(item.name) ?? "input";
+			const inputProperty = options?.grammarToolInputProperties?.get(toolKey(item)) ?? "input";
 			const input = item.input || "";
 			const block: StreamingToolCall = {
 				type: "toolCall",
@@ -581,6 +879,8 @@ export async function processResponsesStream<TApi extends Api>(
 		response: Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>["response"],
 	): void => {
 		sawTerminalResponseEvent = true;
+		const endTurn = (response as { end_turn?: unknown }).end_turn;
+		if (typeof endTurn === "boolean") output.endTurn = endTurn;
 		backfillReasoningSignatures(response.output ?? []);
 		for (const item of response.output ?? []) recordWebSearchItem(item);
 		if (response?.id) {
@@ -628,6 +928,15 @@ export async function processResponsesStream<TApi extends Api>(
 	for await (const event of openaiStream) {
 		if (options?.diagnostics) recordResponsesEvent(options.diagnostics, event);
 		if (event.type === "response.created") {
+			if (sawTerminalResponseEvent) {
+				output = createResponsesSuccessor(output);
+				output.responseId = event.response.id;
+				outputSlots.clear();
+				reasoningBlocksById.clear();
+				sawTerminalResponseEvent = false;
+				options?.onResponseStart?.(output);
+				stream.push({ type: "start", partial: output, continuationInput: event.continuationInput });
+			}
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
 			createSlot(event.output_index, event.item);
@@ -715,9 +1024,9 @@ export async function processResponsesStream<TApi extends Api>(
 			applyMessagePhaseStopReason(item);
 			const slot = getOrCreateSlot(event.output_index, item);
 
-			if (item.type === "reasoning" && slot?.type === "thinking") {
-				const summaryText = item.summary?.map((s) => s.text).join("\n\n") || "";
-				const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
+			if ((item.type === "reasoning" || item.type === "compaction") && slot?.type === "thinking") {
+				const summaryText = item.type === "reasoning" ? item.summary?.map((s) => s.text).join("\n\n") || "" : "";
+				const contentText = item.type === "reasoning" ? item.content?.map((c) => c.text).join("\n\n") || "" : "";
 				slot.block.thinking = summaryText || contentText || slot.block.thinking;
 				slot.block.thinkingSignature = JSON.stringify(item);
 				reasoningBlocksById.set(item.id, slot.block);
@@ -738,12 +1047,27 @@ export async function processResponsesStream<TApi extends Api>(
 					partial: output,
 				});
 				outputSlots.delete(event.output_index);
+			} else if (item.type === "tool_search_call" && item.execution === "client" && slot?.type === "toolCall") {
+				if (typeof item.arguments !== "object" || item.arguments === null || Array.isArray(item.arguments)) {
+					throw new Error("Client tool search arguments must be an object");
+				}
+				slot.block.arguments = item.arguments as JsonObject;
+				stream.push({
+					type: "toolcall_end",
+					contentIndex: slot.contentIndex,
+					toolCall: slot.block,
+					partial: output,
+				});
+				outputSlots.delete(event.output_index);
 			} else if (
 				item.type === "function_call" &&
 				slot?.type === "toolCall" &&
 				slot.block.partialJson !== undefined
 			) {
 				slot.block.arguments = parseStreamingJson(item.arguments || slot.block.partialJson || "{}");
+				slot.block.responsesItem = item;
+				if (item.async !== undefined) slot.block.async = item.async;
+				if (item.async) slot.block.arguments = JSON.parse(item.arguments);
 				if (item.namespace !== undefined) slot.block.namespace = item.namespace;
 				// Finalize in-place and strip the scratch buffer so replay only
 				// carries parsed arguments.
@@ -761,6 +1085,10 @@ export async function processResponsesStream<TApi extends Api>(
 					appendCustomToolCallInput(slot.block, item.input ?? getCustomToolCallInput(slot.block), true),
 				);
 				if (item.namespace !== undefined) slot.block.namespace = item.namespace;
+				slot.block.responsesItem = item;
+				if (item.async !== undefined) slot.block.async = item.async;
+				const inputProperty = options?.grammarToolInputProperties?.get(toolKey(slot.block));
+				if (inputProperty !== undefined) slot.block.arguments = { [inputProperty]: item.input };
 				delete slot.block.customInput;
 				stream.push({
 					type: "toolcall_end",
@@ -772,12 +1100,15 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
 			finalizeResponse(event.response);
+			if (options?.continuesResponse?.()) {
+				stream.push({ type: "response_end", message: output });
+				options.onResponseEnd?.(output);
+			}
 		} else if (event.type === "error") {
 			const error = "error" in event ? event.error : event;
 			throw new Error(`Error Code ${error.code}: ${error.message}` || "Unknown error");
 		} else if (event.type === "response.failed") {
-			sawTerminalResponseEvent = true;
-			output.rawStopReason = event.response?.status;
+			finalizeResponse(event.response);
 			const error = event.response?.error;
 			const details = event.response?.incomplete_details;
 			const msg = error
@@ -785,8 +1116,16 @@ export async function processResponsesStream<TApi extends Api>(
 				: details?.reason
 					? `incomplete: ${details.reason}`
 					: "Unknown error (no error details in response)";
-			throw new Error(msg);
+			throw options?.responseError?.(event.response) ?? new Error(msg);
 		}
+	}
+	if (options?.wasRetired?.()) {
+		if (!sawTerminalResponseEvent) {
+			output.stopReason = "stop";
+			output.rawStopReason = "context_replaced";
+		}
+		options.onResponseStart?.(output);
+		return;
 	}
 	if (!sawTerminalResponseEvent) {
 		throw new Error("OpenAI Responses stream ended before a terminal response event");
@@ -802,6 +1141,7 @@ function mapStopReason(
 		case "completed":
 			return { stopReason: "stop" };
 		case "incomplete":
+			if (incompleteReason === "steered") return { stopReason: "stop" };
 			if (incompleteReason === "max_output_tokens") {
 				return { stopReason: "length" };
 			}

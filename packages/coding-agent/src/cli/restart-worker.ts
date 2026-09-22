@@ -286,7 +286,7 @@ export function createRestartControl(options: {
 						model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,
 						thinkingLevel: pi.getThinkingLevel(),
 						activeTools: pi.getActiveTools(),
-						knownTools: pi.getAllTools().map((tool) => tool.name),
+						knownTools: pi.getAllTools().map((tool) => tool.id),
 					},
 				});
 			});

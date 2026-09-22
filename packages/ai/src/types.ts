@@ -1,5 +1,10 @@
 import type { TelemetryContext } from "@earendil-works/pi-telemetry";
-import type { ResponseFunctionWebSearch, ResponseOutputText } from "openai/resources/responses/responses.js";
+import type {
+	ResponseCustomToolCall,
+	ResponseFunctionToolCall,
+	ResponseFunctionWebSearch,
+	ResponseOutputText,
+} from "openai/resources/responses/responses.js";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.ts";
 import type { BedrockOptions } from "./api/bedrock-converse-stream.ts";
@@ -184,7 +189,25 @@ export interface ProviderRequestOptions<TModel = Model<Api>> {
 	maxRetryDelayMs?: number;
 }
 
+export type SteeringStatus = "queued" | "accepted" | "pending" | "applied" | "unknown" | "failed";
+
+/** Control for the currently active duplex response. A successful send is not an application receipt. */
+export interface ResponseControl {
+	readonly waitingForSuccessor: boolean;
+	/** Original local call IDs submitted on this connection for an accepted steer continuation. */
+	readonly deliveredToolCallIds: ReadonlySet<string>;
+	steer(message: UserMessage): boolean;
+	/** Deliberate local retirement, distinct from an unexpected connection failure. */
+	readonly retired: boolean;
+	/** Retire the remote chain before starting a fresh local context. */
+	retire(): void;
+	/** Deliver saved results when accepted steering is waiting for client tools. Never executes tools. */
+	submitToolResults(results: ToolResultMessage[]): void;
+}
+
 export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
+	/** Present only while the selected transport can accept live input. Undefined releases ownership. */
+	onResponseControl?: (control: ResponseControl | undefined) => void;
 	/**
 	 * Optional callback invoked after an HTTP response is received and before
 	 * its body stream is consumed.
@@ -386,6 +409,18 @@ export interface ImageContent {
 
 export interface ToolCall {
 	type: "toolCall";
+	/** Native client tool search; omitted for ordinary function calls. */
+	kind?: "toolSearch";
+	/** Provider permits this call to remain pending across subsequent responses. */
+	async?: boolean;
+	/** Authoritative completed Responses item, retained independently of today's tool declaration. */
+	responsesItem?: ResponseFunctionToolCall | ResponseCustomToolCall;
+	/** A local execution was admitted. A missing result after process loss has an unknown outcome. */
+	executionStarted?: boolean;
+	/** Validated, preflight-adjusted arguments admitted for execute/resume. The provider item stays unchanged. */
+	executionArguments?: JsonObject;
+	/** Local execution stopped while its durable external owner retained the unfinished operation. */
+	executionDetached?: boolean;
 	id: string;
 	name: string;
 	arguments: JsonObject;
@@ -555,10 +590,17 @@ export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails>
 			role: "toolResult";
 			toolCallId: string;
 			toolName: string;
+			namespace?: string;
+			/** Preserves native search call/result identity, including errors and empty results. */
+			toolCallKind?: "toolSearch";
+			/** Exact registered declarations resolved by the runtime after tool search. */
+			toolsAdded?: Tool[];
 			content: (TextContent | ImageContent)[]; // Supports text and images
 			details?: JsonRepresentation<TDetails>;
 			/** Usage from the tool execution itself, if available. Not part of main LLM context accounting. */
 			usage?: Usage;
+			/** Actual executor time, excluding validation, preflight and result hooks. Absent when never executed. */
+			elapsedMs?: number;
 			isError: boolean;
 			timestamp: number; // Unix timestamp in milliseconds
 		}
@@ -611,8 +653,11 @@ export type ConstrainedSamplingConfig =
 			variants: GrammarVariants;
 	  };
 
-export interface Tool<TParameters extends TSchema = TSchema> {
-	name: string;
+export interface Tool<TParameters extends TSchema = TSchema> extends ToolReference {
+	/** Allow supported providers to issue asynchronous calls. Independent of local executionMode. */
+	async?: boolean;
+	/** A client search callback, exposed as a normal function on unsupported routes. */
+	toolSearch?: true;
 	description: string;
 	parameters: TParameters;
 	constrainedSampling?: false | ConstrainedSamplingConfig;
@@ -620,7 +665,11 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 
 export interface ToolReference {
 	name: string;
+	namespace?: string;
 }
+
+/** Bare names select only unnamespaced tools. */
+export type ToolSelection = string | ToolReference;
 
 /**
  * Request input accepted by the public stream entry points (`Models.stream()`,
@@ -664,7 +713,22 @@ export type TranscriptContext = {
  * `toolcall_delta` carries subsequent JSON updates.
  */
 export type AssistantMessageEvent =
-	| { type: "start"; partial: AssistantMessage }
+	| {
+			type: "start";
+			partial: AssistantMessage;
+			/** Inputs added to the preceding response by a native continuation. Absent on the first response. */
+			continuationInput?: readonly (UserMessage | ToolResultMessage)[];
+	  }
+	/** One response ended, but the duplex stream owns its automatic or tool-waiting successor. */
+	| { type: "response_end"; message: AssistantMessage }
+	| {
+			type: "steering";
+			message: UserMessage;
+			status: SteeringStatus;
+			steeringId?: string;
+			responseId?: string;
+			errorMessage?: string;
+	  }
 	| { type: "text_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
 	| { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
@@ -786,6 +850,12 @@ export interface OpenAIResponsesCompat {
 	supportsExplicitPromptCacheMode?: boolean;
 	/** Whether the provider accepts the `max_output_tokens` parameter. Some Codex-protocol gateways reject it. Default: true. */
 	supportsMaxOutputTokens?: boolean;
+	/** Whether this exact route supports native asynchronous function/custom calls. */
+	supportsAsyncTools?: boolean;
+	/** Whether the route supports response.steer on its WebSocket transport. */
+	supportsSteering?: boolean;
+	/** Whether standard single-agent requests support positional reasoning configuration updates. */
+	supportsReasoningEffortUpdates?: boolean;
 }
 
 /** Compatibility settings for Anthropic Messages-compatible APIs. */

@@ -1,20 +1,17 @@
 import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import OpenAI from "openai";
-import type {
-	ResponseCreateParamsStreaming,
-	ResponsesClientEvent,
-	ResponsesServerEvent,
-} from "openai/resources/responses/responses.js";
+import type { ResponseCreateParamsStreaming, ResponsesClientEvent } from "openai/resources/responses/responses.js";
 import { ResponsesWS } from "openai/resources/responses/ws";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
-import type { AssistantMessage, Model, ProviderResponse } from "../types.ts";
+import type { AssistantMessage, AssistantMessageEventStream, Model, ProviderResponse } from "../types.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { normalizeContext } from "../utils/transcript.ts";
 import type { OpenAIResponsesOptions } from "./openai-responses.ts";
+import { createResponsesControl } from "./openai-responses-control.ts";
 import type { ResponsesDiagnostics } from "./openai-responses-diagnostics.ts";
-import { convertResponsesMessages } from "./openai-responses-shared.ts";
+import { convertResponsesMessages, type ResponsesEvent } from "./openai-responses-shared.ts";
 
 const TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const IDLE_RETENTION_MS = 5 * 60 * 1000;
@@ -58,10 +55,11 @@ export async function* streamResponsesWebSocket(
 	model: Model<"openai-responses">,
 	output: AssistantMessage,
 	options: OpenAIResponsesOptions,
-	grammarToolInputProperties: ReadonlyMap<string, string>,
+	grammarToolInputProperties: Map<string, string>,
 	onStart: () => void,
 	diagnostics: ResponsesDiagnostics,
-): AsyncGenerator<ResponsesServerEvent> {
+	stream: AssistantMessageEventStream,
+): AsyncGenerator<ResponsesEvent> {
 	const details = diagnostics.details;
 	details.transport = "websocket";
 	details.websocketAttempts++;
@@ -130,6 +128,7 @@ export async function* streamResponsesWebSocket(
 	const onAbort = () => closeConnection(active);
 	options.signal?.addEventListener("abort", onAbort, { once: true });
 	let keep = false;
+	let control: ReturnType<typeof createResponsesControl> | undefined;
 	try {
 		if (options.signal?.aborted) throw new OpenAI.APIUserAbortError();
 		const next = async () => {
@@ -186,6 +185,14 @@ export async function* streamResponsesWebSocket(
 		}
 		active.continuation = undefined;
 		details.websocketRequestMode = event.previous_response_id ? "delta" : "full";
+		control = createResponsesControl(
+			model,
+			body,
+			(event) => active.socket.send(event),
+			(event) => stream.push(event),
+			() => closeConnection(active),
+			grammarToolInputProperties,
+		);
 		active.socket.send(event);
 		let started = false;
 		let replayable = false;
@@ -196,17 +203,21 @@ export async function* streamResponsesWebSocket(
 				started = true;
 				onStart();
 			}
-			yield event.message;
-			if (event.message.type === "response.completed" || event.message.type === "response.incomplete") {
+			const continuationInput = control.handle(event.message);
+			if (event.message.type === "response.created" && model.compat?.supportsSteering)
+				options.onResponseControl?.(control.control);
+			yield { ...event.message, continuationInput };
+			if (control.finished) {
 				// A cached reply must contain only items Pi can replay in the current logical window.
 				// Otherwise keep the socket, but start the next request with full input.
 				replayable =
+					!control.used &&
 					event.message.type === "response.completed" &&
 					Array.isArray(event.message.response.output) &&
 					event.message.response.output.every((item) =>
 						item.type === "message"
 							? item.content.every((part) => part.type === "output_text")
-							: ["reasoning", "function_call", "custom_tool_call"].includes(item.type),
+							: ["reasoning", "function_call", "custom_tool_call", "tool_search_call"].includes(item.type),
 					);
 				break;
 			}
@@ -215,15 +226,25 @@ export async function* streamResponsesWebSocket(
 		if (keep && replayable && incremental && fullInput && output.responseId) {
 			const replay = convertResponsesMessages(model, normalizeContext({ messages: [output] }), TOOL_CALL_PROVIDERS, {
 				includeSystemPrompt: false,
+				supportsToolSearch: model.compat?.supportsToolSearch,
 				grammarToolInputProperties,
-			}).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");
+			}).filter(
+				(item) =>
+					item.type !== "function_call_output" &&
+					item.type !== "custom_tool_call_output" &&
+					item.type !== "tool_search_output",
+			);
 			active.continuation = {
 				request,
 				input: [...fullInput, ...replay.map((item) => JSON.stringify(item))],
 				responseId: output.responseId,
 			};
 		}
+	} catch (error) {
+		if (!control?.control.retired) throw error;
 	} finally {
+		control?.close();
+		options.onResponseControl?.(undefined);
 		options.signal?.removeEventListener("abort", onAbort);
 		await events.return?.();
 		active.busy = false;

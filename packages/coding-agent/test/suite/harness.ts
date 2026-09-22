@@ -15,7 +15,7 @@ import type {
 	Model,
 } from "@earendil-works/pi-ai/compat";
 import { registerFauxProvider, streamSimple } from "@earendil-works/pi-ai/compat";
-import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
+import { AgentSession, type AgentSessionConfig, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
@@ -68,9 +68,9 @@ export interface HarnessOptions {
 	/** Replaces the in-memory session manager, e.g. a file-backed one to test resume. */
 	sessionManager?: SessionManager;
 	tools?: AgentTool[];
-	initialActiveToolNames?: string[];
-	allowedToolNames?: string[];
-	excludedToolNames?: string[];
+	initialActiveToolNames?: AgentSessionConfig["initialActiveToolNames"];
+	allowedToolNames?: AgentSessionConfig["allowedToolNames"];
+	excludedToolNames?: AgentSessionConfig["excludedToolNames"];
 	resourceLoader?: ResourceLoader;
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;

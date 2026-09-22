@@ -1,7 +1,48 @@
-import type { Context, Message, SystemMessage, Tool, ToolReference, TranscriptContext } from "../types.ts";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	SystemMessage,
+	Tool,
+	ToolCall,
+	ToolReference,
+	ToolResultMessage,
+	TranscriptContext,
+} from "../types.ts";
 import { contentText, getSystemMessageText } from "./text.ts";
+import { toolKey } from "./tool-identity.ts";
 
 export type { TranscriptContext } from "../types.ts";
+
+/** Coalesce provider frames and execution checkpoints without losing final content or admitted calls. */
+export function mergeAssistantCheckpoint(message: AssistantMessage, checkpoint: AssistantMessage): AssistantMessage {
+	const latest =
+		checkpoint.stopReason === "pending" &&
+		(message.stopReason !== "pending" || message.content.length > checkpoint.content.length)
+			? message
+			: checkpoint;
+	const executions = new Map<
+		string,
+		Pick<ToolCall, "executionStarted" | "executionArguments" | "executionDetached">
+	>();
+	for (const frame of [message, checkpoint]) {
+		for (const call of frame.content) {
+			if (call.type !== "toolCall" || call.executionStarted === undefined) continue;
+			executions.set(call.id, {
+				...executions.get(call.id),
+				executionStarted: call.executionStarted,
+				...(call.executionArguments === undefined ? {} : { executionArguments: call.executionArguments }),
+				...(call.executionDetached === undefined ? {} : { executionDetached: call.executionDetached }),
+			});
+		}
+	}
+	return {
+		...latest,
+		content: latest.content.map((block) =>
+			block.type === "toolCall" && executions.has(block.id) ? { ...block, ...executions.get(block.id) } : block,
+		),
+	};
+}
 
 /**
  * Build the leading system message for a prompt and tool set. Returns undefined when
@@ -43,6 +84,10 @@ function isSystemMessage(message: { role: string }): message is SystemMessage {
 	return message.role === "system";
 }
 
+function isToolStateMessage(message: { role: string }): message is SystemMessage | ToolResultMessage {
+	return message.role === "system" || message.role === "toolResult";
+}
+
 /** Return the leading system message, if the transcript starts with one. */
 export function getInitialSystemMessage(messages: TranscriptMessages): SystemMessage | undefined {
 	const first = messages[0];
@@ -58,10 +103,12 @@ export function withoutInitialSystemMessage(messages: Message[]): Message[] {
 export function getCurrentTools(messages: TranscriptMessages): Tool[] {
 	const tools = new Map<string, Tool>();
 	for (const message of messages) {
-		if (!isSystemMessage(message)) continue;
-		if (message.replace) tools.clear();
-		for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
-		for (const tool of message.toolsAdded ?? []) tools.set(tool.name, tool);
+		if (!isToolStateMessage(message)) continue;
+		if (message.role === "system") {
+			if (message.replace) tools.clear();
+			for (const tool of message.toolsRemoved ?? []) tools.delete(toolKey(tool));
+		}
+		for (const tool of message.toolsAdded ?? []) tools.set(toolKey(tool), tool);
 	}
 	return [...tools.values()];
 }
@@ -107,13 +154,36 @@ export function getCurrentSystemPrompt(messages: TranscriptMessages): string {
 	return message ? getSystemMessageText(message) : "";
 }
 
+/** Project retained history behind a complete tool-state checkpoint without replaying old search deltas. */
+export function withoutToolSearchState<T extends { role: string }>(messages: readonly T[]): T[] {
+	return messages.map((message) => {
+		if (message.role === "toolResult") {
+			const result = message as T & ToolResultMessage;
+			if (result.toolsAdded === undefined && result.toolCallKind === undefined) return message;
+			return { ...message, toolsAdded: undefined, toolCallKind: undefined };
+		}
+		if (message.role === "assistant") {
+			const assistant = message as T & AssistantMessage;
+			if (!assistant.content.some((block) => block.type === "toolCall" && block.kind === "toolSearch"))
+				return message;
+			return {
+				...message,
+				content: assistant.content.map((block) =>
+					block.type === "toolCall" && block.kind === "toolSearch" ? { ...block, kind: undefined } : block,
+				),
+			};
+		}
+		return message;
+	});
+}
+
 /**
  * Rebuild the transcript for APIs without mid-conversation system messages: the replayed
  * system message leads, and every later system message is dropped.
  */
 export function collapseSystemMessages(context: TranscriptContext): TranscriptContext {
 	const head = getCurrentSystemMessage(context.messages);
-	const messages = context.messages.filter((message) => message.role !== "system");
+	const messages = withoutToolSearchState(context.messages.filter((message) => message.role !== "system"));
 	return { messages: head ? [head, ...messages] : messages } as TranscriptContext;
 }
 
@@ -136,9 +206,14 @@ export function resolveTranscript(
 export function toToolDeclaration(tool: Tool): Tool {
 	return {
 		name: tool.name,
+		...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
+		...(tool.toolSearch === undefined ? {} : { toolSearch: tool.toolSearch }),
+		...(tool.async === undefined ? {} : { async: tool.async }),
 		description: tool.description,
 		parameters: JSON.parse(JSON.stringify(tool.parameters)) as Tool["parameters"],
-		...(tool.constrainedSampling === undefined ? {} : { constrainedSampling: tool.constrainedSampling }),
+		...(tool.constrainedSampling === undefined
+			? {}
+			: { constrainedSampling: structuredClone(tool.constrainedSampling) }),
 	};
 }
 
@@ -161,21 +236,21 @@ export interface ToolStateChanges {
 
 /** Compare two complete tool states. A changed definition is a removal followed by an addition. */
 export function getToolStateChanges(previous: readonly Tool[], current: readonly Tool[]): ToolStateChanges {
-	const previousTools = new Map(previous.map((tool) => [tool.name, tool]));
-	const currentTools = new Map(current.map((tool) => [tool.name, tool]));
+	const previousTools = new Map(previous.map((tool) => [toolKey(tool), tool]));
+	const currentTools = new Map(current.map((tool) => [toolKey(tool), tool]));
 	return {
 		toolsAdded: current
 			.filter((tool) => {
-				const previousTool = previousTools.get(tool.name);
+				const previousTool = previousTools.get(toolKey(tool));
 				return previousTool === undefined || !declarationsEqual(previousTool, tool);
 			})
 			.map(toToolDeclaration),
 		toolsRemoved: previous
 			.filter((tool) => {
-				const currentTool = currentTools.get(tool.name);
+				const currentTool = currentTools.get(toolKey(tool));
 				return currentTool === undefined || !declarationsEqual(tool, currentTool);
 			})
-			.map((tool) => ({ name: tool.name })),
+			.map((tool) => ({ name: tool.name, ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }) })),
 	};
 }
 
@@ -183,8 +258,8 @@ export function getToolStateChanges(previous: readonly Tool[], current: readonly
 export function getDeclaredTools(messages: TranscriptMessages): Tool[] {
 	const definitions = new Map<string, Tool>();
 	for (const message of messages) {
-		if (!isSystemMessage(message)) continue;
-		for (const tool of message.toolsAdded ?? []) definitions.set(tool.name, tool);
+		if (!isToolStateMessage(message)) continue;
+		for (const tool of message.toolsAdded ?? []) definitions.set(toolKey(tool), tool);
 	}
 	return [...definitions.values()];
 }
@@ -196,11 +271,11 @@ export function getDeclaredTools(messages: TranscriptMessages): Tool[] {
 export function hasToolRedefinitions(messages: TranscriptMessages): boolean {
 	const declared = new Map<string, Tool>();
 	for (const message of messages) {
-		if (!isSystemMessage(message)) continue;
+		if (!isToolStateMessage(message)) continue;
 		for (const tool of message.toolsAdded ?? []) {
-			const previous = declared.get(tool.name);
+			const previous = declared.get(toolKey(tool));
 			if (previous !== undefined && !declarationsEqual(previous, tool)) return true;
-			declared.set(tool.name, tool);
+			declared.set(toolKey(tool), tool);
 		}
 	}
 	return false;
@@ -208,13 +283,14 @@ export function hasToolRedefinitions(messages: TranscriptMessages): boolean {
 
 /** Whether tool history contains a removal or same-name redeclaration that an addition-only transport cannot replay. */
 export function hasNonAdditiveToolChanges(messages: TranscriptMessages): boolean {
-	const declared = new Set<string>();
+	const declared = new Map<string, Tool>();
 	for (const message of messages) {
-		if (!isSystemMessage(message)) continue;
-		if ((message.toolsRemoved?.length ?? 0) > 0) return true;
+		if (!isToolStateMessage(message)) continue;
+		if (message.role === "system" && (message.toolsRemoved?.length ?? 0) > 0) return true;
 		for (const tool of message.toolsAdded ?? []) {
-			if (declared.has(tool.name)) return true;
-			declared.add(tool.name);
+			const previous = declared.get(toolKey(tool));
+			if (previous && (message.role === "system" || !declarationsEqual(previous, tool))) return true;
+			declared.set(toolKey(tool), tool);
 		}
 	}
 	return false;

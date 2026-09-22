@@ -61,7 +61,7 @@ export function isReplayable(model: Model<Api>, options: SimpleStreamOptions | u
 function lastPromptTokens(entries: SessionEntry[]): number {
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index];
-		if (entry.type === "message" && entry.message.role === "assistant") {
+		if (entry.type === "message" && !entry.checkpoint && entry.message.role === "assistant") {
 			const usage = entry.message.usage;
 			return usage.input + usage.cacheRead + usage.cacheWrite;
 		}

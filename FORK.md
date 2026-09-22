@@ -9,8 +9,8 @@ Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi).
 - Local `main` tracks `fork/main`, with `branch.main.rebase=false`.
 - Merge upstream normally. Preserve custom ancestry; never rebase or force-push it.
 
-Native main protection requires `build-check-test`, an up-to-date branch, and
-blocks force pushes and deletion. Git delivery and runtime activation are separate.
+Main protection blocks force pushes and deletion. Verification runs locally against
+frozen source and model data. Git delivery and runtime activation are separate.
 No fork maintenance command publishes packages or upstream releases.
 
 ## Updating from upstream
@@ -38,9 +38,10 @@ Continuation retains the pinned target even if upstream advances. Failed
 verification leaves the merge available for correction and another continuation.
 After ordinary reviewer-fix commits, republish with `--pr <worktree>`. Run local
 GPT, Ponytail and Claude reviewers after PR creation; fix or rebut findings and
-require green CI before merging. Merge approval remains a separate decision.
-After merging, fast-forward local `main` to `fork/main` and remove unused task
-worktrees. Preserve reviewer evidence and session journals.
+require passing local verification for the final revision before merging. Merge
+approval remains a separate decision. Keep the main checkout untouched and remove
+unused task worktrees when no active work depends on them. Preserve reviewer
+evidence and session journals.
 
 ## Verification and frozen inputs
 
@@ -58,23 +59,27 @@ coverage cannot silently skip. Use `./test.sh` for the complete isolated suite o
 isolation so version-manager shims do not lose their installation. `npm run format`
 is the explicit formatting command; hooks never format or restage files.
 
-CI hydrates once and freezes the commit plus ignored model data using the existing
-source archive helper. Linux Node 22.19 full validation and macOS Node 24 runtime
-validation consume that same archive. Extension compatibility checks also use
-that frozen fork source. The required `build-check-test` aggregates the source
-snapshot, both validation lanes, and extension compatibility. The
-`fork-source-<commit>` artifact retains `source.tar.gz` and `source.commit` for
-30 days. Intentional generator changes belong in the reviewed
-Git diff; validation must not regenerate tracked inputs.
+Hydrate once, then freeze the reviewed commit plus ignored model data with the
+source archive helper. Local Linux Node 22.19 full validation, macOS Node 24 runtime
+validation and extension compatibility checks consume that same snapshot. Retain
+`source.tar.gz`, its adjacent `source.commit`, checksums and validation logs.
+Intentional generator changes belong in the reviewed Git diff; verification must
+not regenerate tracked inputs.
 
 ## Immutable installation and activation
 
-After merging, wait for the merged main commit's CI and download its frozen input:
+Create the frozen input from the exact reviewed commit before local qualification.
+If merging changes the commit ID, archive the merged commit with the same hydrated
+catalog and verify that its source tree matches the qualified tree.
 
 ```sh
-gh-personal run download <main-CI-run-id> --repo fitchmultz/pi \
-  --name fork-source-<merged-commit> --dir /path/to/frozen-source
-npm run install:fork -- --ref <merged-commit> \
+commit=$(git rev-parse HEAD)
+version=$(node -p 'require("./packages/coding-agent/package.json").version')
+mkdir -p /path/to/frozen-source
+printf '%s\n' "$commit" > /path/to/frozen-source/source.commit
+bash scripts/create-source-archive.sh --version "$version" --ref "$commit" \
+  --out /path/to/frozen-source/source.tar.gz
+npm run install:fork -- --ref "$commit" \
   --source-archive /path/to/frozen-source/source.tar.gz --stage
 ```
 
@@ -91,7 +96,8 @@ Releases live under `~/.local/share/pi-fork/releases/<identity>`, where identity
 includes the commit, catalog digest, Node version, platform and architecture.
 Existing releases are never rebuilt or overwritten. Without `--source-archive`,
 local staging uses the exact Git ref and the checkout's already-hydrated catalog;
-it does not fetch or regenerate metadata. Deployed delivery uses the CI artifact.
+it does not fetch or regenerate metadata. Deployed delivery uses the locally
+qualified frozen archive.
 
 Select the printed identity, then activate its printed package directory:
 
@@ -131,7 +137,10 @@ intent; Git history remains the detailed change record.
 | Normalize newly delivered queued images like idle prompts | `agent-session-queued-images`, queue/admission/checkpoint suites | Upstream normalizes once at an awaited delivery boundary without queue races. |
 | Structured JSON read extraction | `read-json.test.ts` | Upstream supports the same JSON path/field extraction before output limits. |
 | Provider startup refresh and ambient account authentication | `provider-startup-refresh`, `ambient-auth`, `model-runtime-auth-options`, availability tests | Upstream preserves refresh, credential selection and failure isolation contracts. |
-| Safe fork delivery with frozen inputs and immutable installation | Sync/installer script tests, required CI and installed runtime smoke | Upstream tooling supports this fork's separate review, delivery and activation workflow. |
+| Native async tools, steering and automatic Responses successors | `native-async*`, `native-steering`, `astra-native-protocol` and native session/context usage tests | Upstream preserves original-call durability, successor input snapshots and measured context through the same lifecycle. |
+| Exact tool namespaces and client-side discovery | Tool identity/search/namespace, retained projection and native renderer/export tests | Upstream keeps registered, wire and displayed identities consistent across discovery, execution and replay. |
+| Atomic local file publication and durable external usage | Publication, `extension-record-usage`, persistence and checkpoint billing tests | Upstream provides the same publication and journal accounting guarantees. |
+| Safe fork delivery with frozen inputs and immutable installation | Sync/installer script tests, local platform qualification and installed runtime smoke | Upstream tooling supports this fork's separate review, delivery and activation workflow. |
 
 Experimental Pico/micro remain opt-in; ordinary AgentSession extensions use the
 normal host. Install stock Pi separately if needed and verify before selecting it.

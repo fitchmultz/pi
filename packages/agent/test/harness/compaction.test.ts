@@ -367,18 +367,44 @@ describe("harness compaction", () => {
 		expect(estimate.tokens).toBe(20 + estimate.trailingTokens);
 
 		const switched = estimateContextTokens([assistant], {
-			model: { provider: "other", id: "small" },
+			model: { provider: "other", api: assistant.api, id: "small" },
 			systemPrompt: "s".repeat(400),
 			tools: [{ name: "base", description: "d".repeat(400), parameters: Type.Object({}) }],
 		});
 		expect(switched.usageTokens).toBe(0);
 		expect(switched.tokens).toBeGreaterThan(200);
 		const withoutReportedUsage = estimateContextTokens([assistant], {
-			model: { provider: assistant.provider, id: assistant.model },
+			model: { provider: assistant.provider, api: assistant.api, id: assistant.model },
 			systemPrompt: "s".repeat(400),
 			useReportedUsage: false,
 		});
 		expect(withoutReportedUsage.usageTokens).toBe(0);
+	});
+
+	it("distinguishes reported usage from estimates and rejects another API's anchor", () => {
+		const assistant = createAssistantMessage("visible", createMockUsage(400_000, 100_000));
+		assistant.content.unshift({ type: "thinking", thinking: "", thinkingSignature: "opaque-test" });
+		const model = { provider: assistant.provider, api: assistant.api, id: assistant.model };
+		expect(estimateContextTokens([assistant], { model })).toMatchObject({ tokens: 500_000, source: "reported" });
+		expect(estimateContextTokens([assistant, createUserMessage("tail")], { model })).toMatchObject({
+			tokens: 500_001,
+			source: "estimated",
+		});
+		expect(estimateContextTokens([assistant], { model: { ...model, api: "openai-responses" } })).toMatchObject({
+			tokens: 2,
+			source: "estimated",
+			lastUsageIndex: null,
+		});
+		const tool = {
+			name: "grammar",
+			description: "Grammar",
+			parameters: Type.Object({ input: Type.String() }),
+			constrainedSampling: { type: "grammar" as const, variants: { openai_regex: "a".repeat(20_000) } },
+		};
+		expect(estimateContextTokens([], { tools: [tool] }).tokens).toBe(
+			estimateTokens({ role: "system", content: "", toolsAdded: [tool], timestamp: 0 }),
+		);
+		expect(estimateContextTokens([], { tools: [tool] }).tokens).toBeGreaterThan(5000);
 	});
 
 	it("builds session context with a compaction entry", async () => {

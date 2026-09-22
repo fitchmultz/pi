@@ -1,6 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { publishLocalFile } from "@earendil-works/pi-agent-core/node";
 import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
+import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { splitBom } from "../../utils/text.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
@@ -89,9 +90,8 @@ export interface EditOperations {
 	access: (absolutePath: string) => Promise<void>;
 }
 
-const defaultEditOperations: EditOperations = {
+const defaultEditOperations: Omit<EditOperations, "writeFile"> = {
 	readFile: (path) => fsReadFile(path),
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
 	access: (path) => fsAccess(path, constants.R_OK | constants.W_OK),
 };
 
@@ -163,8 +163,7 @@ export function createEditToolDefinition(
 			return withFileMutationQueue(absolutePath, async () => {
 				// Do not reject from an abort event listener here: that would release the
 				// mutation queue while an in-flight filesystem operation may still finish.
-				// Checking signal.aborted after each await observes the same aborts while
-				// keeping the queue locked until the current operation has settled.
+				// Once publication succeeds, late cancellation must not report it as failed.
 				const throwIfAborted = (): void => {
 					if (signal?.aborted) throw new Error("Operation aborted");
 				};
@@ -195,11 +194,11 @@ export function createEditToolDefinition(
 				throwIfAborted();
 
 				const finalContent = bom + restoreLineEndings(newContent, originalEnding);
-				await ops.writeFile(absolutePath, finalContent);
-				throwIfAborted();
-
 				const diffResult = generateDiffString(baseContent, newContent);
 				const patch = generateUnifiedPatch(path, baseContent, newContent);
+				throwIfAborted();
+				if (options?.operations) await options.operations.writeFile(absolutePath, finalContent);
+				else await publishLocalFile(absolutePath, finalContent, signal);
 				return {
 					content: [
 						{

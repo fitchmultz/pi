@@ -38,6 +38,20 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("prompt structure", () => {
+		test.each([
+			["linux", "/tmp/literal\\directory", "/tmp/literal\\directory"],
+			["darwin", "/tmp/literal\\directory", "/tmp/literal\\directory"],
+			["win32", "C:\\Users\\project", "C:/Users/project"],
+		])("renders the working directory on %s", (platform, cwd, expected) => {
+			const originalPlatform = process.platform;
+			try {
+				Object.defineProperty(process, "platform", { value: platform });
+				expect(buildSystemPrompt({ cwd })).toContain(`<cwd>\n${expected}\n</cwd>`);
+			} finally {
+				Object.defineProperty(process, "platform", { value: originalPlatform });
+			}
+		});
+
 		test("keeps the default and custom prompt prefixes exact", () => {
 			const defaultPrompt = buildSystemPrompt({ cwd: "/tmp", selectedTools: [], contextFiles: [], skills: [] });
 			const customPrompt = buildSystemPrompt({

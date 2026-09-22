@@ -91,7 +91,13 @@ describe("native direct Responses WebSockets", () => {
 		expect(first.stopReason).toBe("toolUse");
 		expect(first.content).toEqual([
 			{ type: "thinking", thinking: "Need the tool.", thinkingSignature: JSON.stringify(reasoning) },
-			{ type: "toolCall", id: "call_first|fc_first", name: "echo", arguments: { text: "hello" } },
+			{
+				type: "toolCall",
+				id: "call_first|fc_first",
+				name: "echo",
+				arguments: { text: "hello" },
+				responsesItem: call,
+			},
 		]);
 		expect(first.usage).toMatchObject({ input: 70, output: 10, cacheRead: 30, reasoning: 5, totalTokens: 110 });
 		expect(first.usage.cost.total).toBeCloseTo(((70 + 20 + 15) * 2) / 1_000_000);
@@ -859,7 +865,7 @@ describe("native direct Responses WebSockets", () => {
 			expect(server.requests[1].body.previous_response_id).toBeUndefined();
 			expect(server.requests[1].body.input).toEqual([
 				{ role: "user", content: [{ type: "input_text", text: "current input" }] },
-				...(isLength ? [item] : []),
+				item,
 				{ role: "user", content: [{ type: "input_text", text: "finish" }] },
 			]);
 			expect(JSON.stringify(server.requests[1].body)).not.toContain("resp_partial");
@@ -1088,6 +1094,7 @@ describe("native direct Responses WebSockets", () => {
 			toolsAdded: [
 				{
 					name: "query",
+					namespace: "dynamic_tools",
 					description: "Run a query",
 					parameters: Type.Object({ query: Type.String() }),
 					constrainedSampling: { type: "grammar", variants: { openai_lark: "start: /.+/s" } },
@@ -1104,6 +1111,14 @@ describe("native direct Responses WebSockets", () => {
 				name: "query",
 				arguments: { query: "SELECT value" },
 				namespace: "dynamic_tools",
+				responsesItem: {
+					type: "custom_tool_call",
+					id: "ctc_query",
+					call_id: "query_call",
+					name: "query",
+					input: "SELECT value",
+					namespace: "dynamic_tools",
+				},
 			},
 		]);
 		expect(server.requests[1].body).toMatchObject({
@@ -1115,9 +1130,15 @@ describe("native direct Responses WebSockets", () => {
 					role: "developer",
 					tools: [
 						{
-							type: "custom",
-							name: "query",
-							format: { type: "grammar", syntax: "lark", definition: "start: /.+/s" },
+							type: "namespace",
+							name: "dynamic_tools",
+							tools: [
+								{
+									type: "custom",
+									name: "query",
+									format: { type: "grammar", syntax: "lark", definition: "start: /.+/s" },
+								},
+							],
 						},
 					],
 				},
@@ -1127,6 +1148,7 @@ describe("native direct Responses WebSockets", () => {
 			role: "toolResult",
 			toolCallId: "query_call|ctc_query",
 			toolName: "query",
+			namespace: "dynamic_tools",
 			content: [
 				{ type: "text", text: "query result" },
 				{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },

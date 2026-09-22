@@ -4,6 +4,7 @@ import type {
 	ResponseCreateParamsStreaming,
 	ResponseInput,
 	ResponseStreamEvent,
+	ResponsesServerEvent,
 } from "openai/resources/responses/responses.js";
 
 import { clampThinkingLevel } from "../models.ts";
@@ -17,6 +18,7 @@ import type {
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
+	ToolReference,
 	TranscriptContext,
 	Usage,
 } from "../types.ts";
@@ -33,10 +35,10 @@ import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getSystemMessageText } from "../utils/text.ts";
 import {
+	getCurrentTools,
 	getDeclaredTools,
 	getInitialSystemMessage,
 	normalizeContext,
-	resolveTranscript,
 	resolveTranscriptTools,
 } from "../utils/transcript.ts";
 import { uuidv7 } from "../utils/uuid.ts";
@@ -47,6 +49,7 @@ import {
 } from "../utils/websocket-diagnostics.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import { createResponsesControl } from "./openai-responses-control.ts";
 import {
 	createResponsesDiagnostics,
 	diagnosticServiceTier,
@@ -54,8 +57,19 @@ import {
 	type ResponsesDiagnostics,
 	recordResponsesEvent,
 } from "./openai-responses-diagnostics.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	createResponsesSuccessor,
+	getInitialResponsesEffort,
+	getNativeToolSearch,
+	processResponsesStream,
+	resolveResponsesEffort,
+	resolveResponsesTranscript,
+	supportsPositionalResponsesEffort,
+} from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { withToolNamespaces } from "./tool-namespaces.ts";
 
 // ============================================================================
 // Configuration
@@ -250,16 +264,20 @@ function compressRequestBodyZstd(bodyJson: string): Uint8Array | null {
 // Main Stream Function
 // ============================================================================
 
-export const stream: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions> = (
+const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions> = (
 	model: Model<"openai-codex-responses">,
 	context: TranscriptContext,
 	options?: OpenAICodexResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+	const normalizedContext = resolveResponsesTranscript(
+		context,
+		model.compat?.supportsMidConvoSystemMessages,
+		model.compat?.supportsToolSearch,
+	);
 
 	(async () => {
-		const output: AssistantMessage = {
+		let output: AssistantMessage = {
 			role: "assistant",
 			content: [],
 			api: "openai-codex-responses" as Api,
@@ -291,9 +309,15 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				getDeclaredTools(normalizedContext.messages),
 				model.compat?.supportsOpenAIGrammarTools ?? false,
 			);
+			const toolSearchTool = getNativeToolSearch(
+				getCurrentTools(normalizedContext.messages),
+				model.compat?.supportsToolSearch,
+			);
 			const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
 			const codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
 			let body = buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties);
+			if (model.compat?.supportsReasoningEffortUpdates)
+				output.providerThinkingLevel = resolveResponsesEffort(model, options?.reasoningEffort);
 			details.prepareMs = performance.now() - diagnostics.startedAt;
 			const hookStartedAt = performance.now();
 			try {
@@ -360,8 +384,12 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							cacheSessionId,
 							accountId,
 							grammarToolInputProperties,
+							toolSearchTool,
 							diagnostics,
 							options,
+							(message) => {
+								output = message;
+							},
 						);
 
 						if (options?.signal?.aborted) {
@@ -543,7 +571,16 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				startEmitted = true;
 				stream.push({ type: "start", partial: output });
 			}
-			await processStream(response, output, stream, model, grammarToolInputProperties, diagnostics, options);
+			await processStream(
+				response,
+				output,
+				stream,
+				model,
+				grammarToolInputProperties,
+				toolSearchTool,
+				diagnostics,
+				options,
+			);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -569,6 +606,22 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 
 	return stream;
 };
+
+export const stream: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions> = (
+	model,
+	context,
+	options,
+) =>
+	withToolNamespaces(
+		model,
+		context,
+		(mapped, mapControl) =>
+			streamRaw(model, mapped, {
+				...options,
+				onResponseControl: (control) => options?.onResponseControl?.(control ? mapControl(control) : undefined),
+			}),
+		options?.signal,
+	);
 
 export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStreamOptions> = (
 	model: Model<"openai-codex-responses">,
@@ -612,13 +665,23 @@ function buildRequestBody(
 	const supportsAdditionalTools = model.compat?.supportsAdditionalTools ?? false;
 	const supportsToolSearch = model.compat?.supportsToolSearch ?? false;
 	const transcriptTools = resolveTranscriptTools(context.messages, supportsAdditionalTools || supportsToolSearch);
+	const effort = resolveResponsesEffort(model, options?.reasoningEffort);
+	const positional = supportsPositionalResponsesEffort(model);
+	const toolSearchTool = getNativeToolSearch(getCurrentTools(context.messages), supportsToolSearch);
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
+		reasoningEffort: positional ? effort : undefined,
 		includeSystemPrompt: false,
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		supportsAdditionalTools,
 		supportsToolSearch,
-		toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },
+		toolOptions: {
+			strict: null,
+			supportsStrictMode,
+			supportsOpenAIGrammarTools,
+			supportsAsyncTools: model.compat?.supportsAsyncTools,
+			toolSearchTool,
+		},
 	});
 
 	const initialSystemMessage = getInitialSystemMessage(context.messages);
@@ -636,37 +699,30 @@ function buildRequestBody(
 		parallel_tool_calls: true,
 	};
 
-	if (options?.temperature !== undefined) {
-		body.temperature = options.temperature;
-	}
-
 	if (options?.serviceTier !== undefined) {
 		body.service_tier = options.serviceTier;
 	}
 
 	if (transcriptTools.requestTools.length > 0) {
 		body.tools = convertResponsesTools(transcriptTools.requestTools, {
+			toolSearchTool,
+			supportsAsyncTools: model.compat?.supportsAsyncTools,
 			strict: null,
 			supportsStrictMode,
 			supportsOpenAIGrammarTools,
 		});
 	}
 
-	if (options?.reasoningEffort !== undefined) {
-		const effort =
-			options.reasoningEffort === "none"
-				? model.thinkingLevelMap?.off === undefined
-					? "none"
-					: model.thinkingLevelMap.off
-				: (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort);
-		if (effort !== null) {
-			body.reasoning = {
-				effort,
-				summary: options.reasoningSummary ?? "auto",
-			};
-		}
-	} else if (model.reasoning && model.thinkingLevelMap?.off !== null) {
-		body.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
+	if (
+		effort !== undefined &&
+		(options?.reasoningEffort !== undefined || positional || model.thinkingLevelMap?.off !== null)
+	) {
+		body.reasoning = {
+			effort: positional ? getInitialResponsesEffort(model, context, effort) : effort,
+			...(options?.reasoningEffort !== undefined || positional
+				? { summary: options?.reasoningSummary ?? "auto" }
+				: {}),
+		};
 	}
 
 	return body;
@@ -736,12 +792,13 @@ async function processStream(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
-	grammarToolInputProperties: ReadonlyMap<string, string>,
+	grammarToolInputProperties: Map<string, string>,
+	toolSearchTool: ToolReference | undefined,
 	diagnostics: ResponsesDiagnostics,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	await processResponsesStream(
-		mapCodexEvents(parseSSE(response, options?.signal), output, diagnostics),
+		mapCodexEvents(parseSSE(response, options?.signal), diagnostics),
 		output,
 		stream,
 		model,
@@ -749,6 +806,8 @@ async function processStream(
 			diagnostics,
 			serviceTier: options?.serviceTier,
 			grammarToolInputProperties,
+			toolSearchTool,
+			responseError: codexResponseError,
 			resolveServiceTier: resolveCodexServiceTier,
 			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 		},
@@ -766,6 +825,13 @@ class CodexApiError extends Error {
 		this.payload = options?.payload;
 		this.cause = options?.cause;
 	}
+}
+
+function codexResponseError(response: Extract<ResponseStreamEvent, { type: "response.failed" }>["response"]): Error {
+	return new CodexApiError(response.error?.message || "Codex response failed", {
+		code: response.error?.code,
+		payload: { response },
+	});
 }
 
 class CodexProtocolError extends Error {
@@ -806,8 +872,8 @@ function extractCodexEventError(event: Record<string, unknown>): { code?: string
 
 async function* mapCodexEvents(
 	events: AsyncIterable<Record<string, unknown>>,
-	output: AssistantMessage,
 	diagnostics: ResponsesDiagnostics,
+	keepStreaming = false,
 ): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
 		const type = typeof event.type === "string" ? event.type : undefined;
@@ -822,24 +888,20 @@ async function* mapCodexEvents(
 			});
 		}
 
+		// The shared parser records failed-response usage and IDs before raising the provider error.
 		if (type === "response.failed") {
-			recordResponsesEvent(diagnostics, event);
-			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
-			const code = response?.error?.code;
-			const message = response?.error?.message;
-			throw new CodexApiError(message || "Codex response failed", { code, payload: event });
+			yield event as unknown as ResponseStreamEvent;
+			return;
 		}
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
 			const response = (event as { response?: { status?: unknown; end_turn?: unknown } }).response;
-			if (typeof response?.end_turn === "boolean") {
-				output.endTurn = response.end_turn;
-			}
 			const normalizedResponse = response
 				? { ...response, status: normalizeCodexStatus(response.status) }
 				: response;
 			yield { ...event, type: "response.completed", response: normalizedResponse } as ResponseStreamEvent;
-			return;
+			if (!keepStreaming) return;
+			continue;
 		}
 
 		yield event as unknown as ResponseStreamEvent;
@@ -1411,6 +1473,8 @@ async function* parseWebSocket(
 	diagnostics: ResponsesDiagnostics,
 	signal?: AbortSignal,
 	idleTimeoutMs?: number,
+	control?: ReturnType<typeof createResponsesControl>,
+	onControl?: OpenAICodexResponsesOptions["onResponseControl"],
 ): AsyncGenerator<Record<string, unknown>> {
 	const queue: Record<string, unknown>[] = [];
 	let pending: (() => void) | null = null;
@@ -1433,11 +1497,7 @@ async function* parseWebSocket(
 				text = await decodeWebSocketData((event as { data?: unknown }).data);
 				if (!text) return;
 				const parsed = JSON.parse(text) as Record<string, unknown>;
-				const type = typeof parsed.type === "string" ? parsed.type : "";
-				if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
-					sawCompletion = true;
-					done = true;
-				}
+
 				queue.push(parsed);
 				wake();
 			} catch (cause) {
@@ -1459,7 +1519,7 @@ async function* parseWebSocket(
 
 	const onClose: WebSocketListener = (event) => {
 		recordWebSocketClose(diagnostics, event);
-		if (sawCompletion) {
+		if (sawCompletion && !control?.waiting) {
 			done = true;
 			wake();
 			return;
@@ -1490,7 +1550,20 @@ async function* parseWebSocket(
 				throw new Error("Request was aborted");
 			}
 			if (queue.length > 0) {
-				yield queue.shift()!;
+				const event = queue.shift()!;
+				const terminal =
+					event.type === "response.completed" ||
+					event.type === "response.done" ||
+					event.type === "response.incomplete";
+				if (terminal) sawCompletion = true;
+				if (event.type === "response.created") sawCompletion = false;
+				const continuationInput = control?.handle({
+					...event,
+					...(event.type === "response.done" ? { type: "response.completed" } : {}),
+				} as unknown as ResponsesServerEvent);
+				if (event.type === "response.created" && control) onControl?.(control.control);
+				yield { ...event, continuationInput };
+				if (control ? control.finished : terminal) return;
 				continue;
 			}
 			if (done) break;
@@ -1516,10 +1589,10 @@ async function* parseWebSocket(
 			});
 		}
 
-		if (failed) {
+		if (failed && !control?.control.retired) {
 			throw failed;
 		}
-		if (!sawCompletion) {
+		if (!sawCompletion && !control?.control.retired) {
 			throw new Error("WebSocket stream closed before response.completed");
 		}
 	} finally {
@@ -1587,12 +1660,13 @@ function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body:
 async function* startWebSocketOutputOnFirstEvent(
 	events: AsyncIterable<ResponseStreamEvent>,
 	onStart: () => void,
+	startOnCreated = false,
 ): AsyncGenerator<ResponseStreamEvent> {
 	let started = false;
 	for await (const event of events) {
 		if (
 			!started &&
-			event.type !== "response.created" &&
+			(startOnCreated || event.type !== "response.created") &&
 			event.type !== "response.in_progress" &&
 			(event.type as string) !== "codex.rate_limits"
 		) {
@@ -1615,9 +1689,11 @@ async function processWebSocketStream(
 	websocketConnectTimeoutMs: number | undefined,
 	cacheSessionId: string | undefined,
 	accountId: string,
-	grammarToolInputProperties: ReadonlyMap<string, string>,
+	grammarToolInputProperties: Map<string, string>,
+	toolSearchTool: ToolReference | undefined,
 	diagnostics: ResponsesDiagnostics,
 	options?: OpenAICodexResponsesOptions,
+	onAssistantMessage?: (message: AssistantMessage) => void,
 ): Promise<void> {
 	const details = diagnostics.details;
 	// Keep each attempt distinguishable; the failure diagnostic snapshots these fields.
@@ -1679,6 +1755,14 @@ async function processWebSocketStream(
 			stats.lastPreviousResponseId = undefined;
 		}
 	}
+	const control = createResponsesControl(
+		model,
+		body as ResponseCreateParamsStreaming,
+		(event) => socket.send(JSON.stringify(event)),
+		(event) => stream.push(event),
+		() => closeWebSocketSilently(socket, 1000, "context_replaced"),
+		grammarToolInputProperties,
+	);
 	try {
 		const requestJson = JSON.stringify({ type: "response.create", ...requestBody });
 		details.websocketSendBytes = utf8ByteLength(requestJson);
@@ -1687,13 +1771,30 @@ async function processWebSocketStream(
 		socket.send(requestJson);
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
-				mapCodexEvents(parseWebSocket(socket, diagnostics, options?.signal, idleTimeoutMs), output, diagnostics),
+				mapCodexEvents(
+					parseWebSocket(socket, diagnostics, options?.signal, idleTimeoutMs, control, options?.onResponseControl),
+					diagnostics,
+					true,
+				),
 				onStart,
+				model.compat?.supportsSteering === true,
 			),
 			output,
 			stream,
 			model,
 			{
+				continuesResponse: () => control.waiting,
+				wasRetired: () => control.control.retired,
+				onResponseStart: (message) => {
+					output = message;
+					onAssistantMessage?.(message);
+				},
+				onResponseEnd: (message) => {
+					output = createResponsesSuccessor(message);
+					onAssistantMessage?.(output);
+				},
+				toolSearchTool,
+				responseError: codexResponseError,
 				diagnostics,
 				serviceTier: options?.serviceTier,
 				grammarToolInputProperties,
@@ -1701,18 +1802,24 @@ async function processWebSocketStream(
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			},
 		);
-		if (options?.signal?.aborted) {
+		if (options?.signal?.aborted || control.control.retired) {
 			keepConnection = false;
-		} else if (useCachedContext && entry && output.responseId) {
+		} else if (!control.used && useCachedContext && entry && output.responseId) {
 			const responseItems = convertResponsesMessages(
 				model,
 				normalizeContext({ messages: [output] }),
 				CODEX_TOOL_CALL_PROVIDERS,
 				{
 					includeSystemPrompt: false,
+					supportsToolSearch: model.compat?.supportsToolSearch,
 					grammarToolInputProperties,
 				},
-			).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");
+			).filter(
+				(item) =>
+					item.type !== "function_call_output" &&
+					item.type !== "custom_tool_call_output" &&
+					item.type !== "tool_search_output",
+			);
 			entry.continuation = {
 				lastRequestBody: fullBody,
 				lastResponseId: output.responseId,
@@ -1726,6 +1833,8 @@ async function processWebSocketStream(
 		keepConnection = false;
 		throw error;
 	} finally {
+		control.close();
+		options?.onResponseControl?.(undefined);
 		const socketDetails = snapshotWebSocketSocket(socket);
 		if (socketDetails) details.socket = socketDetails;
 		release({ keep: keepConnection });

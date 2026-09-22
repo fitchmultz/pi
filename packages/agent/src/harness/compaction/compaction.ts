@@ -9,11 +9,13 @@ import {
 	type RetryPolicy,
 	retryAssistantCall,
 	type SimpleStreamOptions,
+	type Tool,
+	toToolDeclaration,
 	type Usage,
 	uuidv7,
 } from "@earendil-works/pi-ai";
 import { estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
-import type { AgentMessage, AgentTool, ThinkingLevel } from "../../types.ts";
+import type { AgentMessage, ThinkingLevel } from "../../types.ts";
 import { type Context, getTelemetryContext } from "../context.ts";
 import { convertToLlm, createBranchSummaryMessage, createCompactionSummaryMessage } from "../messages.ts";
 import { buildContextEntries, sessionEntryToContextMessages } from "../session/context.ts";
@@ -168,14 +170,14 @@ export function calculateContextTokens(usage: Usage): number {
 
 /** Extra active-context state that provider usage does not always cover. */
 export interface ContextEstimateOptions {
-	model?: Pick<Model<any>, "provider" | "id">;
+	model?: Pick<Model<Api>, "provider" | "api" | "id">;
 	systemPrompt?: string;
-	tools?: Pick<AgentTool, "name" | "description" | "parameters">[];
-	/** Set false when the active prompt or tool definitions changed after the reported usage. */
+	tools?: Tool[];
+	/** Set false when the reported usage no longer describes the retained conversation. */
 	useReportedUsage?: boolean;
 }
 
-function getAssistantUsage(msg: AgentMessage, model?: Pick<Model<any>, "provider" | "id">): Usage | undefined {
+function getAssistantUsage(msg: AgentMessage, model?: ContextEstimateOptions["model"]): Usage | undefined {
 	if (msg.role === "assistant" && "usage" in msg) {
 		const assistantMsg = msg as AssistantMessage;
 		if (
@@ -183,7 +185,10 @@ function getAssistantUsage(msg: AgentMessage, model?: Pick<Model<any>, "provider
 			assistantMsg.stopReason !== "error" &&
 			assistantMsg.usage &&
 			calculateContextTokens(assistantMsg.usage) > 0 &&
-			(!model || (assistantMsg.provider === model.provider && assistantMsg.model === model.id))
+			(!model ||
+				(assistantMsg.provider === model.provider &&
+					assistantMsg.api === model.api &&
+					assistantMsg.model === model.id))
 		) {
 			return assistantMsg.usage;
 		}
@@ -205,6 +210,8 @@ export function getLastAssistantUsage(entries: readonly { type: string; message?
 
 /** Estimated context-token usage for a message list. */
 export interface ContextUsageEstimate {
+	/** Reported aggregate alone, or a value containing heuristic estimates. */
+	source: "reported" | "estimated";
 	/** Estimated total context tokens. */
 	tokens: number;
 	/** Tokens reported by the most recent assistant usage block. */
@@ -217,23 +224,13 @@ export interface ContextUsageEstimate {
 
 function getLastAssistantUsageInfo(
 	messages: AgentMessage[],
-	model?: Pick<Model<any>, "provider" | "id">,
+	model?: ContextEstimateOptions["model"],
 ): { usage: Usage; index: number } | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const usage = getAssistantUsage(messages[i], model);
 		if (usage) return { usage, index: i };
 	}
 	return undefined;
-}
-
-function estimateToolsTokens(tools: ContextEstimateOptions["tools"]): number {
-	let tokens = 0;
-	for (const tool of tools ?? []) {
-		tokens += Math.ceil(
-			safeJsonStringify({ name: tool.name, description: tool.description, parameters: tool.parameters }).length / 4,
-		);
-	}
-	return tokens;
 }
 
 /** Estimate active context tokens using provider usage where it still applies. */
@@ -245,9 +242,15 @@ export function estimateContextTokens(
 		options.useReportedUsage === false ? undefined : getLastAssistantUsageInfo(messages, options.model);
 
 	if (!usageInfo) {
-		let estimated = Math.ceil((options.systemPrompt?.length ?? 0) / 4) + estimateToolsTokens(options.tools);
+		let estimated = estimateTokens({
+			role: "system",
+			content: options.systemPrompt ?? "",
+			toolsAdded: options.tools?.map(toToolDeclaration),
+			timestamp: 0,
+		});
 		for (const message of messages) estimated += estimateTokens(message);
 		return {
+			source: "estimated",
 			tokens: estimated,
 			usageTokens: 0,
 			trailingTokens: estimated,
@@ -260,6 +263,7 @@ export function estimateContextTokens(
 	for (let i = usageInfo.index + 1; i < messages.length; i++) trailingTokens += estimateTokens(messages[i]);
 
 	return {
+		source: usageInfo.index === messages.length - 1 ? "reported" : "estimated",
 		tokens: usageTokens + trailingTokens,
 		usageTokens,
 		trailingTokens,

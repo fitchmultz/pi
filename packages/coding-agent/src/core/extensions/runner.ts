@@ -9,6 +9,9 @@ import {
 	type Model,
 	type Provider,
 	type ProviderHeaders,
+	type ToolSelection,
+	toolKey,
+	withoutToolSearchState,
 } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
@@ -301,7 +304,7 @@ function restoreSystemMessages(
 ): AgentMessage[] {
 	if (sameMessages(returned, visible)) return current;
 	const head = getCurrentSystemMessage(current);
-	return head ? [head, ...returned] : returned;
+	return head ? [head, ...withoutToolSearchState(returned)] : returned;
 }
 
 export async function emitProjectTrustEvent(
@@ -387,6 +390,7 @@ export class ExtensionRunner {
 	private hasPendingSteeringMessagesFn: () => boolean = () => false;
 	private getPendingNextTurnCountFn!: () => number;
 	private getPendingInputCountFn!: () => number;
+	private getPendingToolCallsFn: ExtensionContext["getPendingToolCalls"] = () => [];
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private getCompactionSettingsFn!: () => CompactionSettings;
 	private newContextFn: NonNullable<ExtensionContextActions["newContext"]> = () => {};
@@ -459,10 +463,13 @@ export class ExtensionRunner {
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
+		this.runtime.recordUsage = actions.recordUsage;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setLabel = actions.setLabel;
 		this.runtime.getActiveTools = actions.getActiveTools;
+		this.runtime.getActiveToolReferences = actions.getActiveToolReferences;
+		this.runtime.setActiveToolReferences = actions.setActiveToolReferences;
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.setActiveTools = actions.setActiveTools;
 		this.runtime.refreshTools = actions.refreshTools;
@@ -483,6 +490,7 @@ export class ExtensionRunner {
 		this.hasPendingSteeringMessagesFn = contextActions.hasPendingSteeringMessages;
 		this.getPendingNextTurnCountFn = contextActions.getPendingNextTurnCount;
 		this.getPendingInputCountFn = contextActions.getPendingInputCount;
+		this.getPendingToolCallsFn = contextActions.getPendingToolCalls ?? (() => []);
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.getCompactionSettingsFn = contextActions.getCompactionSettings;
@@ -646,23 +654,23 @@ export class ExtensionRunner {
 		return cwd;
 	}
 
-	/** Get all registered tools from all extensions (first registration per name wins). */
+	/** Get all registered tools from all extensions (first registration per exact identity wins). */
 	getAllRegisteredTools(): RegisteredTool[] {
 		const toolsByName = new Map<string, RegisteredTool>();
 		for (const ext of this.extensions) {
 			for (const tool of ext.tools.values()) {
-				if (!toolsByName.has(tool.definition.name)) {
-					toolsByName.set(tool.definition.name, tool);
+				if (!toolsByName.has(toolKey(tool.definition))) {
+					toolsByName.set(toolKey(tool.definition), tool);
 				}
 			}
 		}
 		return Array.from(toolsByName.values());
 	}
 
-	/** Get a tool definition by name. Returns undefined if not found. */
-	getToolDefinition(toolName: string): RegisteredTool["definition"] | undefined {
+	/** Get a tool definition by exact identity. Bare strings select unnamespaced tools. */
+	getToolDefinition(toolName: ToolSelection): RegisteredTool["definition"] | undefined {
 		for (const ext of this.extensions) {
-			const tool = ext.tools.get(toolName);
+			const tool = ext.tools.get(toolKey(toolName));
 			if (tool) {
 				return tool.definition;
 			}
@@ -945,6 +953,10 @@ export class ExtensionRunner {
 			getPendingInputCount: () => {
 				runner.assertActive();
 				return runner.getPendingInputCountFn();
+			},
+			getPendingToolCalls: () => {
+				runner.assertActive();
+				return runner.getPendingToolCallsFn();
 			},
 			shutdown: () => {
 				runner.assertActive();

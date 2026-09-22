@@ -59,7 +59,7 @@ With images:
 {"type": "prompt", "message": "New instruction", "streamingBehavior": "steer"}
 ```
 
-- `"steer"`: Queue the message while the agent is running. It is delivered after the current assistant turn finishes executing its tool calls, before the next LLM call.
+- `"steer"`: Send live input on supported Responses WebSocket routes; otherwise queue it for the next turn. Native async work can continue while steering is processed.
 - `"followUp"`: Wait until the agent finishes. Message is delivered only when agent stops.
 
 If the agent is streaming and no `streamingBehavior` is specified, the command returns an error.
@@ -79,7 +79,7 @@ The `images` field is optional. Each image uses `ImageContent` format: `{"type":
 
 #### steer
 
-Queue a steering message while the agent is running. It is delivered after the current assistant turn finishes executing its tool calls, before the next LLM call. Skill commands and prompt templates are expanded. Extension commands are not allowed (use `prompt` instead).
+Steer the active response on supported Responses WebSocket routes; otherwise queue the message for the next turn. Skill commands, prompt templates and images are prepared before delivery. Extension commands are not allowed (use `prompt` instead). Command success acknowledges local admission; `steering` events report remote acceptance and application.
 
 ```json
 {"type": "steer", "message": "Stop and do this instead"}
@@ -246,6 +246,21 @@ Response:
 
 The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `pendingExtensionUIRequests` contains unresolved blocking UI requests so a reconnecting client can restore them.
 
+#### wait_for_idle
+
+Wait for the current session to become idle. This delegates to `AgentSession.waitForIdle()`, joining admitted prompt preparation, the running response, automatic continuations, and compaction. It responds immediately if the session is already idle, including after a previously received `agent_settled` event or input handled without starting a model run.
+
+```json
+{"id": "idle-1", "type": "wait_for_idle"}
+```
+
+Response:
+```json
+{"id": "idle-1", "type": "response", "command": "wait_for_idle", "success": true}
+```
+
+The command does not start or abort work, emit a settlement event, or block other RPC commands. It follows native session idle semantics: input interception before admission, detached extension work, and user Bash are not agent activity. Await the `prompt` acceptance response before waiting for that prompt's completion.
+
 #### get_messages
 
 Get all messages in the conversation.
@@ -391,7 +406,7 @@ Response:
 
 #### set_steering_mode
 
-Control how steering messages (from `steer`) are delivered.
+Control how queued steering messages (from `steer`) are delivered. Supported live WebSocket steering sends each prepared input immediately.
 
 ```json
 {"type": "set_steering_mode", "mode": "one-at-a-time"}
@@ -899,14 +914,18 @@ Events are streamed to stdout as JSON lines during agent operation. Events do no
 |-------|-------------|
 | `agent_start` | Agent begins processing |
 | `agent_end` | One low-level agent run completes (may still be followed by retry, compaction, or queued continuations) |
-| `agent_settled` | Agent run is fully settled; no automatic retry, compaction retry, or queued continuation remains |
+| `agent_settled` | Local run has settled; optional `pendingToolCalls` reports detached external work |
 | `turn_start` | New turn begins |
 | `turn_end` | Turn completes (includes assistant message and tool results) |
 | `message_start` | Message begins |
 | `message_update` | Streaming update (text/thinking/toolcall deltas) |
 | `message_end` | Message completes |
+| `message_checkpoint` | Durable completed-item snapshot before a native tool side effect; not another completed response |
+| `steering` | Live input status: queued, accepted, pending, applied, failed or unknown |
 | `bash_execution_update` | Direct RPC bash command output chunk |
-| `tool_execution_start` | Tool begins execution |
+| `tool_execution_start` | Tool enters preparation and validation |
+| `tool_execution_prepared` | Tool admitted with validated, preflight-adjusted arguments |
+| `tool_execution_detached` | Aborted local execution leaves durable external work pending |
 | `tool_execution_update` | Tool execution progress (streaming output) |
 | `tool_execution_end` | Tool completes |
 | `queue_update` | Pending steering/follow-up queue changed |
@@ -942,7 +961,7 @@ Emitted when one low-level agent run completes. Contains all messages generated 
 
 ### agent_settled
 
-Emitted after the full session-level run settles. At this point Pi will not continue automatically through retry, compaction retry, or queued follow-up messages.
+Emitted after the local session-level run settles. At this point Pi will not continue automatically through retry, compaction retry, or queued follow-up messages. Detached external work can remain: both `agent_end` and `agent_settled` include optional `pendingToolCalls` entries with `{ toolCallId, toolName, namespace?, state: "pending" | "started" | "detached" }`. The next prompt or continuation reattaches journaled started calls without executing them again.
 
 ```json
 {"type": "agent_settled"}
@@ -950,7 +969,7 @@ Emitted after the full session-level run settles. At this point Pi will not cont
 
 ### turn_start / turn_end
 
-A turn consists of one assistant response plus any resulting tool calls and results.
+A turn consists of one assistant response and its currently available tool results. Native async results can arrive after later assistant messages; correlate them by their original `toolCallId`.
 
 ```json
 {"type": "turn_start"}
@@ -972,6 +991,12 @@ Emitted when a message begins and completes. The `message` field contains an `Ag
 {"type": "message_start", "message": {...}}
 {"type": "message_end", "message": {...}}
 ```
+
+### message_checkpoint / steering
+
+`message_checkpoint` carries an assistant `message` with completed provider items and execution bookkeeping. Update the existing response identified by `message.responseId`; do not count the checkpoint as another response or add its usage again. Raw journal message entries mark these snapshots with `checkpoint: true`.
+
+`steering` carries the original user `message`, `status`, and optional `steeringId`, `responseId` and `errorMessage`. Status is `queued`, `accepted`, `pending` (waiting for client tools), `applied`, `failed` or `unknown`. An accepted send does not prove application. Each automatic successor emits its own message lifecycle and usage. Its `message_start.continuationInput` snapshots the user inputs and submitted tool results added to the preceding response; it is absent on the first response. These inputs already have their own message events and must not be appended again.
 
 ### message_update (Streaming)
 
@@ -1047,9 +1072,9 @@ Events stream all output while the command runs, even if the final `bash` respon
 }
 ```
 
-### tool_execution_start / tool_execution_update / tool_execution_end
+### tool_execution_start / tool_execution_prepared / tool_execution_update / tool_execution_end / tool_execution_detached
 
-Emitted when a tool begins, streams progress, and completes execution.
+`tool_execution_start` begins preparation. `tool_execution_prepared` has the same call identity and the admitted `args`; use these for execution previews. Progress and final results follow execution. An aborted native async call may instead emit `tool_execution_detached` with `toolCallId` and `toolName`, preserving its pending obligation without a final result.
 
 ```json
 {
@@ -1459,6 +1484,14 @@ Parse errors:
 }
 ```
 
+### TypeScript client
+
+All `RpcClient` command helpers reject with the host's error on `success: false`, including helpers that return no data.
+
+`await client.waitForIdle(timeout)` uses `wait_for_idle` rather than waiting for a future event. Its default timeout is 60 seconds. Timeout and process exit/error reject the wait and release its pending client request; timeout does not abort host work. A late response is ignored.
+
+`await client.promptAndWait(message, images, timeout)` subscribes before prompting, waits for acceptance and native idle, and returns the collected events. Its timeout covers both acceptance and completion. Rejected prompts preserve the host error, and handled input can complete without an `agent_settled` event. The event subscription is removed on success or failure.
+
 ## Types
 
 Source files:
@@ -1551,7 +1584,7 @@ Stop reasons: `"stop"`, `"length"`, `"toolUse"`, `"error"`, `"aborted"`
 }
 ```
 
-`usage` is optional and reports nested LLM work performed by the tool. When present, it contributes to session token and cost totals.
+`usage` is optional and reports nested LLM work performed by the tool. When present, it contributes to session token and cost totals. Optional `elapsedMs` measures actual executor time, excluding validation and hooks; blocked calls omit it.
 
 ### BashExecutionMessage
 
