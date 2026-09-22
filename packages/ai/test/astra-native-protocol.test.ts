@@ -4,6 +4,7 @@ import { WebSocket } from "ws";
 import { stream as codexStream } from "../src/api/openai-codex-responses.ts";
 import { stream as responsesStream } from "../src/api/openai-responses.ts";
 import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts";
+import { transformMessages } from "../src/api/transform-messages.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type {
 	AssistantMessage,
@@ -265,6 +266,96 @@ it("replays late native results adjacently when switching to a synchronous model
 	expect(input[0]).not.toHaveProperty("async");
 	expect(input[1]).toMatchObject({ call_id: "call", output: "late" });
 });
+
+it.each(["error", "aborted"] as const)(
+	"omits signed-only %s responses instead of replaying orphaned reasoning",
+	(stopReason) => {
+		for (const target of [{ ...nativeModel, id: "gpt-5.1", compat: {} }, nativeModel]) {
+			for (const signedText of [false, true]) {
+				const message = saved("medium", "partial");
+				message.model = target.id;
+				message.stopReason = stopReason;
+				message.content = [
+					{
+						type: "thinking",
+						thinking: "completed reasoning",
+						thinkingSignature: JSON.stringify({
+							type: "reasoning",
+							id: "rs_interrupted",
+							summary: [],
+							encrypted_content: "opaque",
+						}),
+					},
+					{ type: "text", text: "partial answer", ...(signedText ? { textSignature: "msg_signed" } : {}) },
+				];
+				const before = { role: "user" as const, content: "hello", timestamp: 1 };
+				const after = { role: "user" as const, content: "next", timestamp: 2 };
+				const messages = [before, message, after];
+				expect(convertResponsesMessages(target, normalizeContext({ messages }), new Set(["openai"]))).toEqual([
+					{ role: "user", content: [{ type: "input_text", text: "hello" }] },
+					{ role: "user", content: [{ type: "input_text", text: "next" }] },
+				]);
+				expect(transformMessages(messages, target)).toEqual([before, after]);
+				expect(message.content).toHaveLength(2);
+			}
+		}
+	},
+);
+
+it.each(["error", "aborted"] as const)(
+	"keeps native calls and results without replaying dangling reasoning after %s",
+	(stopReason) => {
+		const beforeCall = { type: "reasoning", id: "rs_call", summary: [], encrypted_content: "before call" };
+		const afterCall = { ...beforeCall, id: "rs_answer", encrypted_content: "before answer" };
+		const originalCall = {
+			type: "function_call" as const,
+			id: "fc_committed",
+			call_id: "committed",
+			name: "work",
+			arguments: "{}",
+			async: true,
+			status: "completed" as const,
+		};
+		for (const signedText of [false, true]) {
+			const message = saved("medium", "failed");
+			message.stopReason = stopReason;
+			message.content = [
+				{ type: "thinking", thinking: "", thinkingSignature: JSON.stringify(beforeCall) },
+				{
+					type: "toolCall",
+					id: "committed|fc_committed",
+					name: "work",
+					arguments: {},
+					async: true,
+					executionStarted: true,
+					responsesItem: originalCall,
+				},
+				{ type: "thinking", thinking: "", thinkingSignature: JSON.stringify(afterCall) },
+				{ type: "text", text: "answer", ...(signedText ? { textSignature: "msg_answer" } : {}) },
+			];
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "committed|fc_committed",
+				toolName: "work",
+				content: [{ type: "text", text: "actual recorded output" }],
+				isError: false,
+				timestamp: 2,
+			};
+			const input = convertResponsesMessages(
+				nativeModel,
+				normalizeContext({ messages: [message, result] }),
+				new Set(["openai"]),
+			);
+			expect(input).toEqual([
+				beforeCall,
+				originalCall,
+				...(signedText ? [afterCall, expect.objectContaining({ type: "message", id: "msg_answer" })] : []),
+				{ type: "function_call_output", call_id: "committed", output: "actual recorded output" },
+			]);
+			expect(message.content).toHaveLength(4);
+		}
+	},
+);
 
 it.each(["error", "aborted"] as const)(
 	"repairs completed synchronous calls after %s without duplicating recorded results",

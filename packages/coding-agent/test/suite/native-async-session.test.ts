@@ -212,3 +212,161 @@ it("normal AgentSession persists admission before effects, detaches, and reattac
 		rmSync(directory, { recursive: true, force: true });
 	}
 });
+
+it.each([
+	{ stopReason: "error", blocked: false },
+	{ stopReason: "error", blocked: true },
+	{ stopReason: "length", blocked: false },
+	{ stopReason: "length", blocked: true },
+] as const)(
+	"keeps native admission and its result during $stopReason recovery (blocked=$blocked)",
+	async ({ stopReason, blocked }) => {
+		let releasePreflight!: () => void;
+		const preflightGate = new Promise<void>((resolve) => {
+			releasePreflight = resolve;
+		});
+		const preflight = vi.fn(async () => {
+			await preflightGate;
+			return blocked ? { block: true, reason: "blocked before execution", terminate: true } : undefined;
+		});
+		const execute = vi.fn<AgentTool["execute"]>(async () => ({ ...result, terminate: true }));
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 1_000_000, maxTokens: 100 }],
+			settings: {
+				retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 },
+				compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 },
+			},
+			tools: [
+				{
+					name: "work",
+					label: "Work",
+					description: "Work",
+					parameters: Type.Object({ path: Type.String() }),
+					async: true,
+					execute,
+				},
+			],
+			extensionFactories: [
+				(pi) => {
+					pi.on("tool_call", preflight);
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		const originalStream = harness.session.agent.streamFunction;
+		let resultWritten!: () => void;
+		const completedTool = new Promise<void>((resolve) => {
+			resultWritten = resolve;
+		});
+		harness.session.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "toolResult") resultWritten();
+		});
+		harness.session.agent.state.model = {
+			...harness.getModel(),
+			api: "openai-responses",
+			compat: { supportsAsyncTools: true },
+		} as Model<"openai-responses">;
+		harness.session.agent.streamFunction = (model, context, options) => {
+			const stream = createAssistantMessageEventStream();
+			void (async () => {
+				const source = await originalStream(harness.getModel(), context, options);
+				for await (const event of source) {
+					if (event.type === "done" || event.type === "error") await completedTool;
+					const copy = structuredClone(event);
+					if ("partial" in copy) copy.partial.api = model.api;
+					if ("message" in copy && copy.message.role === "assistant") copy.message.api = model.api;
+					if ("error" in copy) copy.error.api = model.api;
+					stream.push(copy);
+				}
+				stream.end();
+			})();
+			return stream;
+		};
+		let recoveredMessages: unknown[] = [];
+		const beforeCall = {
+			type: "thinking" as const,
+			thinking: "before call",
+			thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_call", summary: [] }),
+		};
+		const dangling = {
+			...beforeCall,
+			thinking: "before unfinished answer",
+			thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_answer", summary: [] }),
+		};
+		harness.setResponses([
+			{
+				...assistant(),
+				content: [beforeCall, toolCall(), dangling, { type: "text", text: "unfinished answer" }],
+				stopReason,
+				errorMessage: stopReason === "error" ? "terminated" : undefined,
+			},
+			(context) => {
+				recoveredMessages = structuredClone(context.messages);
+				return fauxAssistantMessage("recovered");
+			},
+		]);
+		const run = harness.session.prompt("x".repeat(5000));
+		try {
+			await vi.waitFor(() => expect(preflight).toHaveBeenCalledOnce());
+			expect(execute).not.toHaveBeenCalled();
+			expect(harness.session.getPendingToolCalls()).toMatchObject([{ toolCallId: toolCall().id, state: "pending" }]);
+			expect(harness.sessionManager.getEntries()).toContainEqual(
+				expect.objectContaining({
+					type: "message",
+					checkpoint: true,
+					message: expect.objectContaining({ content: expect.arrayContaining([toolCall()]) }),
+				}),
+			);
+			releasePreflight();
+			await run;
+
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(preflight).toHaveBeenCalledOnce();
+			expect(execute).toHaveBeenCalledTimes(blocked ? 0 : 1);
+			expect(harness.session.getPendingToolCalls()).toEqual([]);
+			const recoveredCall = {
+				...toolCall(),
+				...(blocked
+					? {}
+					: {
+							executionStarted: true,
+							executionArguments: { path: "original" },
+							executionDetached: false,
+						}),
+			};
+			expect(recoveredMessages).toContainEqual(
+				expect.objectContaining({ role: "assistant", content: [beforeCall, recoveredCall] }),
+			);
+			const projection = harness.sessionManager.buildSessionProjection().messages;
+			expect(projection).toContainEqual(
+				expect.objectContaining({ role: "assistant", content: [beforeCall, recoveredCall] }),
+			);
+			expect(harness.sessionManager.getEntries()).toContainEqual(
+				expect.objectContaining({
+					type: "message",
+					message: expect.objectContaining({ stopReason, content: expect.arrayContaining([dangling]) }),
+				}),
+			);
+			const toolResults = projection.filter((message) => message.role === "toolResult");
+			expect(toolResults).toMatchObject([
+				{
+					toolCallId: toolCall().id,
+					content: blocked ? [{ type: "text", text: "blocked before execution" }] : result.content,
+					isError: blocked,
+				},
+			]);
+			expect(recoveredMessages).toContainEqual(toolResults[0]);
+			expect(harness.session.getLastAssistantText()).toBe("recovered");
+		} finally {
+			releasePreflight();
+			await run;
+			harness.cleanup();
+		}
+	},
+);

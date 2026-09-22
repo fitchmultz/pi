@@ -1543,23 +1543,30 @@ export class AgentSession {
 		if (unresolvedProjectedTarget) {
 			throw new Error("Cannot persist recovery omission because a projected message has no source entry");
 		}
+		// Native admission precedes preflight; even a blocked call owns its recorded result.
 		const committedCallIds = new Set(
-			message.content.flatMap((block) => (block.type === "toolCall" && block.executionStarted ? [block.id] : [])),
+			message.content.flatMap((block) =>
+				block.type === "toolCall" && (block.executionStarted || (block.async && block.responsesItem))
+					? [block.id]
+					: [],
+			),
 		);
 		for (const [index, targetId] of targetIds.entries()) {
 			if (!targetId) continue;
 			const target = targets[index];
 			if (target.role === "toolResult" && committedCallIds.has(target.toolCallId)) continue;
 			const committed =
-				target?.role === "assistant"
+				target?.role === "assistant" && committedCallIds.size > 0
 					? target.content.filter((block) =>
 							block.type === "toolCall"
-								? !!block.responsesItem || block.executionStarted
+								? committedCallIds.has(block.id)
 								: block.type === "text"
 									? !!block.textSignature
 									: !!block.thinkingSignature,
 						)
 					: [];
+			// Retained reasoning must still have a following completed text or call.
+			while (committed.at(-1)?.type === "thinking") committed.pop();
 			const editId = this.sessionManager.appendContextEdit(
 				targetId,
 				committed.length > 0 ? { content: committed } : null,

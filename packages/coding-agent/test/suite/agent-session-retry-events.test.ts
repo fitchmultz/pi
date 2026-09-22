@@ -75,6 +75,72 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.faux.state.callCount).toBe(3);
 	});
 
+	it.each(["thinking", "text", "synchronous call"] as const)(
+		"omits a failed ordinary response with completed %s before retrying, keeping the raw journal",
+		async (completed) => {
+			const harness = await createHarness({
+				settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
+			});
+			harnesses.push(harness);
+			const failed = fauxAssistantMessage(
+				[
+					completed === "thinking"
+						? { type: "thinking", thinking: "plan", thinkingSignature: "signed-thinking" }
+						: completed === "text"
+							? { type: "text", text: "completed block", textSignature: "signed-text" }
+							: {
+									type: "toolCall",
+									id: "call|fc_call",
+									name: "work",
+									arguments: {},
+									responsesItem: {
+										type: "function_call",
+										id: "fc_call",
+										call_id: "call",
+										name: "work",
+										arguments: "{}",
+										status: "completed",
+									},
+								},
+					{ type: "text", text: "unfinished answer" },
+				],
+				{ stopReason: "error", errorMessage: "terminated" },
+			);
+			let retryMessages: unknown;
+			harness.setResponses([
+				failed,
+				(context) => {
+					retryMessages = structuredClone(context.messages);
+					return fauxAssistantMessage("recovered");
+				},
+			]);
+
+			await harness.session.prompt("test");
+
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(retryMessages).toEqual([
+				expect.objectContaining({ role: "system" }),
+				expect.objectContaining({ role: "user" }),
+			]);
+			expect(harness.eventsOfType("auto_retry_start")).toMatchObject([{ attempt: 1 }]);
+			expect(harness.eventsOfType("auto_retry_end")).toMatchObject([{ success: true, attempt: 1 }]);
+			expect(harness.eventsOfType("agent_end").map((event) => event.willRetry)).toEqual([true, false]);
+			expect(harness.eventsOfType("tool_execution_start")).toEqual([]);
+			const entries = harness.sessionManager.getEntries();
+			const attempt = entries.find(
+				(entry) =>
+					entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "error",
+			);
+			expect(attempt).toMatchObject({ message: { content: failed.content } });
+			expect(entries.filter((entry) => entry.type === "context_edit")).toMatchObject([
+				{ targetId: attempt?.id, replacement: null },
+			]);
+			expect(harness.sessionManager.buildSessionProjection().messages).toEqual(harness.session.messages);
+			expect(harness.session.getLastAssistantText()).toBe("recovered");
+			expect(harness.session.retryAttempt).toBe(0);
+		},
+	);
+
 	// Regression test for #9340.
 	it("finalizes retry state when abort is requested after a retry attempt fails", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 0 } } });

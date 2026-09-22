@@ -236,7 +236,7 @@ export function transformMessages<TApi extends Api>(
 			// If we have pending orphaned tool calls from a previous assistant, insert synthetic results now
 			closePendingToolCalls();
 
-			// Skip errored/aborted assistant messages entirely.
+			// Skip errored/aborted assistant messages unless they contain committed tool calls.
 			// These are incomplete turns that shouldn't be replayed:
 			// - May have partial content (reasoning without message, incomplete tool calls)
 			// - Replaying them can cause API errors (e.g., OpenAI "reasoning without following item")
@@ -252,7 +252,10 @@ export function transformMessages<TApi extends Api>(
 							? !!block.textSignature
 							: !!block.thinkingSignature,
 				);
-				if (committed.length === 0) continue;
+				// Signatures alone are not tool obligations and may leave reasoning without a following item.
+				if (!committed.some((block) => block.type === "toolCall")) continue;
+				// Reasoning after the last completed output belongs to the interrupted suffix.
+				while (committed.at(-1)?.type === "thinking") committed.pop();
 				assistantMsg = { ...assistantMsg, content: committed };
 			}
 
