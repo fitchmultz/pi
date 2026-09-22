@@ -315,3 +315,75 @@ it("persists hosted caller, program state, compaction and admission across sessi
 		rmSync(directory, { recursive: true, force: true });
 	}
 });
+
+it.each([true, false])(
+	"keeps a monitoring stop after message_end replaces assistant metadata (retains error=%s)",
+	async (retainsError) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-monitoring-replacement-"));
+		const source = await createHarness({
+			sessionManager: SessionManager.create(directory, join(directory, "sessions")),
+			extensionFactories: [
+				(pi) => {
+					pi.on("message_end", ({ message }) => {
+						if (message.role !== "assistant" || !message.providerError) return;
+						const {
+							role,
+							content,
+							api,
+							provider,
+							model,
+							usage,
+							stopReason,
+							timestamp,
+							errorMessage,
+							providerError,
+						} = message;
+						return {
+							message: {
+								role,
+								content,
+								api,
+								provider,
+								model,
+								usage,
+								stopReason,
+								timestamp,
+								errorMessage,
+								...(retainsError ? { providerError } : {}),
+							},
+						};
+					});
+				},
+			],
+		});
+		let reopened: Awaited<ReturnType<typeof createHarness>> | undefined;
+		try {
+			const providerError = { code: "misalignment_policy_violation", requestId: "req_replaced" };
+			source.setResponses([
+				{
+					...fauxAssistantMessage("blocked", { stopReason: "error", errorMessage: "Review required" }),
+					providerError,
+				},
+			]);
+			await source.session.prompt("first");
+			expect(
+				source.sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "message" && entry.message.role === "assistant")
+					.at(-1),
+			).toMatchObject({
+				message: { providerError, monitoringSessionId: source.session.sessionId, stopReason: "error" },
+			});
+
+			reopened = await createHarness({ sessionManager: SessionManager.open(source.session.sessionFile!) });
+			reopened.setResponses([fauxAssistantMessage("ordinary")]);
+			expect(reopened.session.sessionId).toBe(source.session.sessionId);
+			await expect(reopened.session.prompt("after reopen")).rejects.toThrow("misalignment_policy_violation");
+			expect(reopened.faux.state.callCount).toBe(0);
+		} finally {
+			reopened?.cleanup();
+			source.cleanup();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	},
+);

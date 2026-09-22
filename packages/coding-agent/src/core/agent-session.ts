@@ -1390,10 +1390,11 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
-		if (event.type === "message_end" && event.message.role === "assistant" && isMonitoringBlocked(event.message)) {
-			event.message.monitoringSessionId = this.sessionId;
-			this._cacheWarmer?.cancel();
-		}
+		const monitoringError =
+			event.type === "message_end" && event.message.role === "assistant" && isMonitoringBlocked(event.message)
+				? { ...event.message.providerError }
+				: undefined;
+		if (monitoringError) this._cacheWarmer?.cancel();
 		if (event.type === "message_checkpoint") {
 			this._flushPendingProviderMessages();
 			const entryId = this.sessionManager.appendMessage(structuredClone(event.message), true);
@@ -1470,6 +1471,12 @@ export class AgentSession {
 
 		// Emit to extensions first, then notify public listeners.
 		await this._emitExtensionEvent(event);
+		if (monitoringError && event.type === "message_end" && event.message.role === "assistant") {
+			// Replacement content may change; the provider's stop and its owner must survive persistence.
+			event.message.providerError = monitoringError;
+			event.message.monitoringSessionId = this.sessionId;
+			event.message.stopReason = "error";
+		}
 
 		if (requestPrefix && event.type === "message_end" && event.message.role === "assistant") {
 			const message = event.message;
