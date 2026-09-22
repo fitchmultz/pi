@@ -59,15 +59,16 @@ function output(): AssistantMessage {
 		},
 	};
 }
+const nativeSearchItem = {
+	type: "tool_search_call",
+	id: "ts_1",
+	call_id: "search_1",
+	execution: "client",
+	status: "completed",
+	arguments: { query: "records" },
+} as const;
 async function* searchEvents(): AsyncGenerator<ResponseStreamEvent> {
-	const item = {
-		type: "tool_search_call",
-		id: "ts_1",
-		call_id: "search_1",
-		execution: "client",
-		status: "completed",
-		arguments: { query: "records" },
-	} as const;
+	const item = nativeSearchItem;
 	yield {
 		type: "response.output_item.added",
 		sequence_number: 0,
@@ -89,7 +90,14 @@ it("parses a real client search item as an executable call and replays its origi
 	});
 	expect(message.stopReason).toBe("toolUse");
 	expect(message.content).toEqual([
-		{ type: "toolCall", kind: "toolSearch", id: "search_1|ts_1", name: "discover", arguments: { query: "records" } },
+		{
+			type: "toolCall",
+			kind: "toolSearch",
+			id: "search_1|ts_1",
+			name: "discover",
+			arguments: { query: "records" },
+			responsesItem: nativeSearchItem,
+		},
 	]);
 	const result: Message = {
 		role: "toolResult",
