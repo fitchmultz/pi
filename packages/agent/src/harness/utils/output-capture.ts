@@ -30,7 +30,6 @@ export class OutputCapture {
 	readonly #context: Context;
 	readonly #onUpdate: OutputCaptureHandlers["onUpdate"];
 
-	readonly #decoder = new TextDecoder();
 	#buffer = "";
 	#bufferBytes = 0;
 	#totalBytes = 0;
@@ -69,20 +68,14 @@ export class OutputCapture {
 		return this.#totalBytes > this.#maxBytes || this.#totalLines() > this.#maxLines;
 	}
 
-	push(chunk: string | Uint8Array): void {
+	push(chunk: string): void {
 		if (this.#disposed || this.#finished) return;
-		if (typeof chunk === "string") {
-			this.#appendText(this.#decoder.decode());
-			this.#appendText(chunk);
-			return;
-		}
-		this.#appendText(this.#decoder.decode(chunk, { stream: true }));
+		this.#appendText(chunk);
 	}
 
 	finish(): void {
 		if (this.#disposed || this.#finished) return;
 		this.#finished = true;
-		this.#appendText(this.#decoder.decode());
 	}
 
 	setSpillPath(path: string): void {

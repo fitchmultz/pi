@@ -75,20 +75,17 @@ afterEach(() => {
 });
 
 describe("shell output finalization", () => {
-	it("flushes generic byte input before string input and rejects input after finish", () => {
+	it("rejects input after finish", () => {
 		const capture = new OutputCapture(undefined, BACKGROUND_CONTEXT, {
 			onError: (error) => {
 				throw error;
 			},
 		});
-		capture.push(Uint8Array.of(0xe2));
 		capture.push("text");
-		capture.push(Uint8Array.of(0xc2));
 		capture.finish();
 		capture.finish();
 		capture.push("late");
-		capture.push(Uint8Array.of(0xa2));
-		expect(capture.snapshot().text).toBe("�text�");
+		expect(capture.snapshot().text).toBe("text");
 		capture.dispose();
 	});
 

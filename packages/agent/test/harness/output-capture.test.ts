@@ -41,16 +41,6 @@ describe("OutputCapture", () => {
 		capture.push(input);
 		expect(capture.snapshot().text).toBe("ab\tc\ndefgh😀");
 	});
-	it("decodes UTF-8 split across raw process chunks", () => {
-		const { capture } = createCapture();
-		const bytes = new TextEncoder().encode("😀");
-		capture.push(bytes.subarray(0, 2));
-		expect(capture.snapshot().text).toBe("");
-		capture.push(bytes.subarray(2));
-		capture.finish();
-		expect(capture.snapshot().text).toBe("😀");
-	});
-
 	it("publishes the first bounded view immediately and trickling appends responsively", () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
