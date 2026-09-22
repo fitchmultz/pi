@@ -487,7 +487,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	replay?: "never" | "safe";
 	/**
 	 * Per-tool execution mode override.
-	 * - "sequential": this tool must execute one at a time with other tool calls.
+	 * - "sequential": this tool executes one at a time with other calls in the same response.
+	 *   Earlier responses' native async work does not block it unless the global mode is sequential.
 	 * - "parallel": this tool can execute concurrently with other tool calls.
 	 *
 	 * If omitted, the default execution mode applies.
