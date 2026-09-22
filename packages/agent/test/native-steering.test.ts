@@ -2,7 +2,9 @@ import type { ResponsesClientEvent } from "openai/resources/responses/responses.
 import { Type } from "typebox";
 import { expect, it, vi } from "vitest";
 import { streamSimple } from "../../ai/src/api/openai-responses.ts";
+import { convertResponsesMessages } from "../../ai/src/api/openai-responses-shared.ts";
 import { cleanupSessionResources } from "../../ai/src/session-resources.ts";
+import { normalizeContext } from "../../ai/src/utils/transcript.ts";
 import {
 	createResponsesServer,
 	type LocalResponsesRequest,
@@ -186,6 +188,18 @@ it.each(["pending", "disconnect", "fresh"] as const)(
 						event.message.responseId === "parent",
 				),
 			).toHaveLength(1);
+			if (mode === "pending") {
+				const replay = convertResponsesMessages(
+					agent.state.model,
+					normalizeContext({ messages: await agent.convertToLlm(agent.state.messages) }),
+					new Set([fixture.model.provider]),
+				);
+				for (const call of calls) {
+					expect(
+						replay.filter((item) => item.type === "function_call_output" && item.call_id === call.call_id),
+					).toEqual([{ type: "function_call_output", call_id: call.call_id, output: `actual ${call.call_id}` }]);
+				}
+			}
 			expect(fixture.requests).toHaveLength(3);
 		} finally {
 			cleanupSessionResources();

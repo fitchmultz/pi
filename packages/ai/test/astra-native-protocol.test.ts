@@ -320,18 +320,22 @@ it.each(["error", "aborted"] as const)(
 );
 
 describe.each([false, true])("native steering (Codex=%s)", (codex) => {
-	it.each(["completed", "steered", "pending", "disconnect"] as const)(
+	it.each(["completed", "steered", "pending", "pending-multiple", "disconnect"] as const)(
 		"handles %s parent and preserves per-response usage",
 		async (mode) => {
+			const pending = mode === "pending" || mode === "pending-multiple";
 			vi.stubGlobal("WebSocket", WebSocket);
 			let parent: LocalResponsesRequest | undefined;
 			let control: ResponseControl | undefined;
 			const events: AssistantMessageEvent[] = [];
 			const steer = { id: "steer1", previous_response_id: "parent" };
+			const secondSteer = { ...steer, id: "steer2" };
+			let accepted = 0;
 			const fixture = await createResponsesServer((request) => {
 				const body = request.body as ResponsesClientEvent;
 				if (body.type === "response.steer") {
-					request.send({ type: "response.steer.accepted", steer });
+					request.send({ type: "response.steer.accepted", steer: accepted++ === 0 ? steer : secondSteer });
+					if (mode === "pending-multiple" && accepted === 1) return;
 					parent!.send({
 						type: mode === "completed" ? "response.completed" : "response.incomplete",
 						response: {
@@ -344,7 +348,7 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 						},
 					});
 					if (mode === "disconnect") request.socket!.close();
-					else if (mode === "pending")
+					else if (pending)
 						request.send({
 							type: "response.steer.pending",
 							steer,
@@ -358,6 +362,12 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 				} else if (body.type === "response.create" && body.previous_response_id) {
 					expect(body.previous_response_id).toBe("parent");
 					expect(body.input).toEqual([{ type: "function_call_output", call_id: "call1", output: "actual" }]);
+					if (mode === "pending-multiple")
+						request.send({
+							type: "response.steer.pending",
+							steer: secondSteer,
+							required_input: [{ type: "function_call_output", call_id: "call1" }],
+						});
 					replyWithOutput(request, "successor", [textOutput("successor")], {
 						status: "completed",
 						...{ end_turn: true },
@@ -396,7 +406,9 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 				const steeringInput = { role: "user" as const, content: "new input", timestamp: 2 };
 				expect(control!.steer(steeringInput)).toBe(true);
 				steeringInput.content = "edited after send";
-				if (mode === "pending") {
+				if (mode === "pending-multiple")
+					expect(control!.steer({ role: "user", content: "second input", timestamp: 3 })).toBe(true);
+				if (pending) {
 					await vi.waitFor(() =>
 						expect(events.some((event) => event.type === "steering" && event.status === "pending")).toBe(true),
 					);
@@ -425,7 +437,8 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 					expect(events.filter((event) => event.type === "start")[1]).toMatchObject({
 						continuationInput: [
 							{ role: "user", content: "new input", timestamp: 2 },
-							...(mode === "pending"
+							...(mode === "pending-multiple" ? [{ role: "user", content: "second input", timestamp: 3 }] : []),
+							...(pending
 								? [
 										{
 											role: "toolResult",
@@ -444,13 +457,15 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 				expect(statuses).toEqual(
 					mode === "disconnect"
 						? ["queued", "accepted", "unknown"]
-						: mode === "pending"
-							? ["queued", "accepted", "pending", "applied"]
-							: ["queued", "accepted", "applied"],
+						: mode === "pending-multiple"
+							? ["queued", "queued", "accepted", "accepted", "pending", "pending", "applied", "applied"]
+							: pending
+								? ["queued", "accepted", "pending", "applied"]
+								: ["queued", "accepted", "applied"],
 				);
 				expect(message.responseId).toBe(mode === "disconnect" ? undefined : "successor");
 				expect(message.usage.totalTokens).toBe(mode === "disconnect" ? 0 : 110);
-				expect(fixture.requests).toHaveLength(mode === "pending" ? 3 : 2);
+				expect(fixture.requests).toHaveLength(mode === "pending-multiple" ? 4 : pending ? 3 : 2);
 			} finally {
 				await fixture.close();
 			}

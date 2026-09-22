@@ -222,7 +222,11 @@ export function createResponsesControl(
 			} else if (event.type === "response.steer.pending") {
 				const submission = submissions.find((candidate) => candidate.id === event.steer.id);
 				if (submission) update(submission, "pending");
-				required = { parentId: event.steer.previous_response_id, inputs: event.required_input };
+				required = {
+					parentId: event.steer.previous_response_id,
+					inputs: event.required_input,
+					sent: required?.parentId === event.steer.previous_response_id ? required.sent : undefined,
+				};
 				continueWithResults();
 			} else if (event.type === "response.steer.failed") {
 				const submission = submissions.find((candidate) =>

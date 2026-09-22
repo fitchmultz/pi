@@ -149,7 +149,10 @@ describe("publishLocalFile", () => {
 	it("retains the directory requirement of a symlink target ending in a separator", async () => {
 		const alias = join(root, "link");
 		await nativeFs.symlink("missing/", alias);
-		await expect(nativeFs.writeFile(alias, "replacement")).rejects.toMatchObject({ code: "ENOENT" });
+		// Native open reports EISDIR on Linux and ENOENT on macOS for this directory-only target.
+		await expect(nativeFs.writeFile(alias, "replacement")).rejects.toMatchObject({
+			code: expect.stringMatching(/^(ENOENT|EISDIR)$/),
+		});
 		await expect(publishLocalFile(alias, "replacement")).rejects.toMatchObject({ code: "ENOENT" });
 		await expect(nativeFs.lstat(join(root, "missing"))).rejects.toMatchObject({ code: "ENOENT" });
 		expect(await nativeFs.readlink(alias)).toBe("missing/");

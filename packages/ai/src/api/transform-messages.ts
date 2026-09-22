@@ -165,7 +165,7 @@ export function transformMessages<TApi extends Api>(
 		return msg;
 	});
 
-	// Synchronous routes require call/result adjacency even when native async history spans turns.
+	// Synchronous calls and routes require adjacency even when steering or async history spans turns.
 	const completed = new Map(
 		transformed.flatMap((message) => (message.role === "toolResult" ? [[message.toolCallId, message] as const] : [])),
 	);
@@ -175,8 +175,7 @@ export function transformMessages<TApi extends Api>(
 		const results = message.content.flatMap((call) => {
 			if (
 				call.type !== "toolCall" ||
-				!call.async ||
-				(nativeAsync && message.provider === model.provider && message.api === model.api)
+				(call.async && nativeAsync && message.provider === model.provider && message.api === model.api)
 			)
 				return [];
 			const result = completed.get(call.id);
