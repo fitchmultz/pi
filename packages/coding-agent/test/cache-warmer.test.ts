@@ -94,7 +94,11 @@ function fakeRuntime(
 	const warmedEntries: UsageEntry[] = [];
 	const usageManager = SessionManager.inMemory();
 	const appendUsage = vi.fn(usageManager.appendUsage.bind(usageManager));
-	const state = { mode: options.mode ?? "idle", branch: options.branch ?? branchWithPrompt(100_000) };
+	const state = {
+		mode: options.mode ?? "idle",
+		branch: options.branch ?? branchWithPrompt(100_000),
+		sessionId: usageManager.getSessionId(),
+	};
 	const warmer = new CacheWarmer(
 		{
 			streamSimple: (model, _context, streamOptions) => {
@@ -104,7 +108,7 @@ function fakeRuntime(
 				} as unknown as AssistantMessageEventStream;
 			},
 		},
-		{ appendUsage, getBranch: () => state.branch },
+		{ appendUsage, getBranch: () => state.branch, getSessionId: () => state.sessionId },
 		() => state.mode,
 		async (event) => {
 			events.push(event);
@@ -306,6 +310,76 @@ describe("cache warming", () => {
 		expect(failed.appendUsage).not.toHaveBeenCalled();
 		failed.warmer.cancel();
 	});
+
+	it("reports monitoring blocks and never refreshes the stopped request again", async () => {
+		vi.useFakeTimers();
+		const blocked = {
+			...response(adaptiveModel, "error"),
+			errorMessage: "Review required",
+			providerError: { code: "misalignment_policy_violation", requestId: "req_warm" },
+		};
+		const { warmer, calls, appendUsage } = fakeRuntime({ result: async () => blocked });
+		const onMonitoringBlocked = vi.fn();
+		warmer.onMonitoringBlocked = onMonitoringBlocked;
+		warmer.start(request(), current);
+
+		await vi.advanceTimersByTimeAsync(270_000);
+		await vi.advanceTimersByTimeAsync(600_000);
+
+		expect(calls).toHaveLength(1);
+		expect(onMonitoringBlocked).toHaveBeenCalledExactlyOnceWith(blocked);
+		expect(appendUsage).not.toHaveBeenCalled();
+		expect(warmer.status).toMatchObject({
+			state: "inactive",
+			reason: "conversation stopped by misalignment monitoring",
+		});
+	});
+
+	it.each([true, false])(
+		"handles a stale warm request's late block only for its owning session (same session: %s)",
+		async (sameSession) => {
+			vi.useFakeTimers();
+			const blocked = {
+				...response(adaptiveModel, "error"),
+				providerError: { code: "misalignment_policy_violation", requestId: "req_old_warm" },
+			};
+			let release!: () => void;
+			let resultCount = 0;
+			const { warmer, calls, state } = fakeRuntime({
+				result: (model) => {
+					if (resultCount++ > 0) return Promise.resolve(response(model));
+					return new Promise((resolve) => {
+						release = () => resolve(blocked);
+					});
+				},
+			});
+			const onMonitoringBlocked = vi.fn();
+			warmer.onMonitoringBlocked = onMonitoringBlocked;
+			let stillCurrent = true;
+			warmer.start(request(), () => stillCurrent);
+			await vi.advanceTimersByTimeAsync(270_000);
+			expect(calls).toHaveLength(1);
+
+			// Navigation, compaction, or switching models invalidates the cache, not the owning conversation.
+			stillCurrent = false;
+			if (!sameSession) state.sessionId = "different-session";
+			warmer.start(request(), current);
+			expect(calls[0].options?.signal?.aborted).toBe(true);
+			release();
+			await vi.advanceTimersByTimeAsync(0);
+
+			if (sameSession) {
+				expect(onMonitoringBlocked).toHaveBeenCalledExactlyOnceWith(blocked);
+				expect(warmer.status.state).toBe("inactive");
+			} else {
+				expect(onMonitoringBlocked).not.toHaveBeenCalled();
+				expect(warmer.status.state).toBe("scheduled");
+			}
+			await vi.advanceTimersByTimeAsync(270_000);
+			expect(calls).toHaveLength(sameSession ? 1 : 2);
+			warmer.cancel();
+		},
+	);
 
 	it("formats status and usage entries", () => {
 		const decision: CacheWarmingDecision = {

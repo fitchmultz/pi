@@ -4,6 +4,7 @@ import {
 	type AssistantMessage,
 	getCurrentSystemMessage,
 	type ImageContent,
+	isMonitoringBlocked,
 	type Message,
 	mergeAssistantCheckpoint,
 	type SystemMessage,
@@ -60,6 +61,7 @@ export interface SessionHeader {
 
 export interface NewSessionOptions {
 	id?: string;
+	/** Related-session lineage; monitoring stops from this parent are retained. */
 	parentSession?: string;
 }
 
@@ -1223,6 +1225,11 @@ export class SessionManager {
 			assertValidSessionId(options.id);
 		}
 		this.flush();
+		const parentEntries = options?.parentSession
+			? options.parentSession === this.sessionFile
+				? this.getEntries()
+				: loadEntriesFromFile(options.parentSession)
+			: [];
 		this.sessionId = options?.id ?? createSessionId();
 		const timestamp = new Date().toISOString();
 		const header: SessionHeader = {
@@ -1244,6 +1251,11 @@ export class SessionManager {
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
 			this.sessionFile = join(this.getSessionDir(), `${fileTimestamp}_${this.sessionId}.jsonl`);
+		}
+		for (const entry of parentEntries) {
+			if (entry.type === "message" && entry.message.role === "assistant" && isMonitoringBlocked(entry.message)) {
+				this.appendMessage(entry.message);
+			}
 		}
 		return this.sessionFile;
 	}
@@ -1888,16 +1900,28 @@ export class SessionManager {
 	}
 
 	/**
-	 * Create a new session file containing only the path from root to the specified leaf.
+	 * Create a new session file containing the path from root to the specified leaf.
+	 * A null leaf selects an empty prefix. Monitoring stops follow every history fork.
 	 * Useful for extracting a single conversation path from a branched session.
 	 * Returns the new session file path, or undefined if not persisting.
 	 */
-	createBranchedSession(leafId: string): string | undefined {
+	createBranchedSession(leafId: string | null): string | undefined {
 		this.flush();
 		const previousSessionFile = this.sessionFile;
-		const path = this.getBranch(leafId);
-		if (path.length === 0) {
+		const path = leafId === null ? [] : this.getBranch(leafId);
+		if (leafId !== null && path.length === 0) {
 			throw new Error(`Entry ${leafId} not found`);
+		}
+		const retainedIds = new Set(path.map((entry) => entry.id));
+		for (const entry of this.getEntries()) {
+			if (
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				isMonitoringBlocked(entry.message) &&
+				!retainedIds.has(entry.id)
+			) {
+				path.push(entry);
+			}
 		}
 
 		// Filter out LabelEntry from path - we'll recreate them from the resolved map.

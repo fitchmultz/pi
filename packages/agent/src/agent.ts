@@ -3,6 +3,7 @@ import {
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
 	type ImageContent,
+	isMonitoringBlocked,
 	type Message,
 	type Model,
 	mergeAssistantCheckpoint,
@@ -219,6 +220,15 @@ export class Agent {
 	/** Shared invocation boundary for agent turns and host-owned requests such as summaries. */
 	public readonly streamResponse: StreamFn = (model, context, options) => {
 		this.requestAdmissionSignal?.throwIfAborted();
+		const blocked = this._state.messages.find(
+			(message) => message.role === "assistant" && isMonitoringBlocked(message),
+		);
+		if (blocked?.role === "assistant") {
+			throw new Error(
+				blocked.errorMessage ??
+					"Conversation stopped by monitoring. Review prior actions; this stop did not undo them.",
+			);
+		}
 		const streamFunction = this.streamFunction;
 		return streamFunction(model, context, options);
 	};
@@ -471,7 +481,11 @@ export class Agent {
 			}
 		}
 
-		if (lastMessage.role === "assistant" && getPendingToolCalls(this._state.messages).length === 0)
+		if (
+			lastMessage.role === "assistant" &&
+			!lastMessage.needsContinuation &&
+			getPendingToolCalls(this._state.messages).length === 0
+		)
 			throw new Error("Cannot continue from message role: assistant");
 		await this.runContinuation();
 	}

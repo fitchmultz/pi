@@ -388,6 +388,31 @@ describe("runtime generation checkpoint", () => {
 });
 
 describe("runtime assistant generation", () => {
+	it("continues a persisted hosted program-only response to its final answer", async () => {
+		const fixture = await createFixture();
+		const ready = await advanceToReady(fixture);
+		const output: AssistantMessage["responsesOutput"] = [
+			{ type: "program", id: "prog", call_id: "program", code: "text(3)", fingerprint: "opaque" },
+			{ type: "program_output", id: "po", call_id: "program", result: "3", status: "completed" },
+		];
+		fixture.faux.setResponses([
+			{ ...fauxAssistantMessage([]), responsesOutput: output, needsContinuation: true },
+			fauxAssistantMessage("answer"),
+		]);
+		await runGeneration(fixture.lane, fixture.drive, ready);
+		const checkpoint = currentRun(fixture.lane);
+		if (checkpoint.at !== "checkpoint") throw new Error("missing hosted checkpoint");
+		expect(checkpoint.continuation.kind).toBe("need_assistant");
+		expect(await fixture.session.getEntry(checkpoint.latestAssistantEntryId!, BACKGROUND_CONTEXT)).toMatchObject({
+			message: { responsesOutput: output, needsContinuation: true },
+		});
+		await expectProjectionRestores(fixture);
+		await runCheckpoint(fixture.lane, fixture.drive, checkpoint);
+		await runGeneration(fixture.lane, fixture.drive, readyGeneration(fixture.lane));
+		expect(fixture.faux.state.callCount).toBe(2);
+		expect(currentRun(fixture.lane)).toMatchObject({ at: "checkpoint", continuation: { kind: "may_finish" } });
+	});
+
 	it("commits intent before provider admission, preserves queued inbox state, and settles reserved ids", async () => {
 		const fixture = await createFixture();
 		const ready = await advanceToReady(fixture);

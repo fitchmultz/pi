@@ -25,6 +25,7 @@ import {
 } from "../../session/values.ts";
 import type { AgentHarnessTool, AgentHarnessToolInvocation } from "../../types.ts";
 import type { Lane } from "../lane.ts";
+import { assertMonitoringActive } from "../monitoring.ts";
 import { openToolProgress } from "../progress.ts";
 import type { ContinueOperationResult, Drive, LaneState, ProcedureResult } from "../types.ts";
 import {
@@ -380,6 +381,7 @@ async function performToolInvocation<TContext extends object | undefined>(
 
 	let execution: Promise<ExecutedToolCall>;
 	try {
+		await assertMonitoringActive(lane, drive);
 		execution = executeToolCall(
 			cleared,
 			drive.gate,

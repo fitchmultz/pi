@@ -1035,6 +1035,8 @@ The callback is supported by `stream`, `complete`, `streamSimple`, and `complete
 
 ## OpenAI Responses Transport
 
+For GPT-6 model capabilities, native asynchronous tools, hosted orchestration, reasoning modes, and compaction controls, see the [GPT-6 guide](../coding-agent/docs/gpt-6.md).
+
 Direct `openai` requests prefer the official SDK's persistent Responses WebSocket transport. Use the existing `transport` option:
 
 - `"auto"` (also the default when omitted) or `"websocket-cached"`: reuse a session connection and send incremental input when the previous response matches the current context.
@@ -1043,7 +1045,7 @@ Direct `openai` requests prefer the official SDK's persistent Responses WebSocke
 
 Always pass the **full current context**, including completed tool results. Pi sends a delta with `previous_response_id` only when the current input has the exact previous input and replayable reply as its prefix, with unchanged request parameters. Edited history, fresh windows, compaction, or changed instructions/tools/model start a new chain. Changed resolved headers, credentials, endpoint, or proxy select a new connection. The saved session transcript is unchanged.
 
-Incomplete replies, refusals, and server output that Pi cannot replay, such as built-in web-search calls, clear only the continuation. Web-search calls and citations remain saved as message metadata; they are not replayed as model input. The next request sends full current input on the same socket, with its tools still enabled. A later fully replayable completed reply can establish a new incremental chain.
+Incomplete replies, refusals, and hosted output such as built-in web-search calls clear the incremental continuation. Pi preserves authoritative Responses items for full-input replay on a compatible model route, including hosted calls, citations, programs, and compaction state. The next request sends full current input on the same socket, with its tools still enabled. A later ordinary completed reply can establish a new incremental chain.
 
 Before output starts, a missing cached response ID or expired connection retries once with full current input on a fresh socket. Other transport failures before output starts fall back to full-input HTTP/SSE. Failures after output starts surface normally rather than replaying partial output. Pre-stream provider errors with status/retry headers use the existing `maxRetries` and `maxRetryDelayMs` policy.
 
@@ -1259,6 +1261,14 @@ interface OpenAICompletionsCompat {
 
 interface OpenAIResponsesCompat {
   supportsDeveloperRole?: boolean;   // Whether provider supports `developer` role vs `system` (default: true)
+  supportsMidConvoSystemMessages?: boolean; // Preserve later developer messages in place
+  supportsAdditionalTools?: boolean; // Append Responses tool declarations without replacing the prefix
+  supportsToolSearch?: boolean;      // Native client tool search
+  supportsExplicitPromptCacheMode?: boolean; // GPT-5.6+ explicit caching and 30-minute TTL
+  supportsAsyncTools?: boolean;      // Native async calls for tools that opt in
+  supportsSteering?: boolean;        // Mid-response WebSocket user input
+  supportsReasoningEffortUpdates?: boolean; // Positional effort changes in compatible requests
+  supportsMaxOutputTokens?: boolean; // Whether to send max_output_tokens (default: true)
   sessionAffinityFormat?: 'openai' | 'openai-nosession' | 'openrouter'; // Session-affinity header format: 'openai' sends `session_id` and `x-client-request-id`; 'openai-nosession' sends `x-client-request-id`; 'openrouter' sends `x-session-id`. Does not affect the `prompt_cache_key` body param (default: auto-detected)
   supportsLongCacheRetention?: boolean; // Whether provider supports `prompt_cache_retention: "24h"` (default: true)
   supportsStrictMode?: boolean;      // Whether provider supports strict JSON-schema function tools (default: false; enabled in metadata for built-in OpenAI models)
@@ -1577,7 +1587,7 @@ Use this when one process needs different provider settings per request, or when
 Several providers support OAuth authentication instead of static API keys:
 
 - **Anthropic** (Claude Pro/Max subscription)
-- **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
+- **OpenAI Codex** (ChatGPT Plus/Pro subscription, GPT-5.x and GPT-6 model catalog)
 - **GitHub Copilot** (Copilot subscription)
 - **OpenRouter** (OAuth PKCE that mints a user-controlled API key)
 
@@ -1689,7 +1699,7 @@ login when cancelling or replacing an attempt. Losing a server continuation
 requires a new login; this option does not persist or resume pending consent.
 Use a backend for web apps, not frontend credential storage.
 
-**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options unless `cacheRetention` is `"none"`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity. Call `cleanupSessionResources(sessionId)` when finished so the pooled connection does not keep the process alive.
+**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Its model catalog includes GPT-5.x models and GPT-6 Astra, Sol, and Luna. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options unless `cacheRetention` is `"none"`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity. Call `cleanupSessionResources(sessionId)` when finished so the pooled connection does not keep the process alive.
 
 A transient Codex WebSocket transport failure falls back to SSE only if streaming has not started; otherwise the request fails without replay. The next request tries WebSocket again. Oversized frames (close code `1009`) keep using SSE for that session. Call `cleanupSessionResources(sessionId)` when disposing a session to close its sockets and clear its fallback/debug state.
 

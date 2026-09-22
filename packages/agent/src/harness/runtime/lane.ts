@@ -92,6 +92,7 @@ import {
 import { formatSkillInvocation } from "../skills.ts";
 import { durableBranchPreparation, durableCompactionPreparation } from "./drive/structural.ts";
 import { driveOperation } from "./drive.ts";
+import { findMonitoringStop } from "./monitoring.ts";
 import { readAssistantFrames } from "./progress.ts";
 import { chainEntries, committedEntryEvents, readLaneQueues } from "./transcript.ts";
 import {
@@ -181,7 +182,12 @@ function durableLaneState(
 	inbox: InboxItem[] = state.inbox,
 	lastOperationId: string | null = state.lastOperationId,
 ) {
-	return { currentOperationId, lastOperationId, inbox };
+	return {
+		currentOperationId,
+		lastOperationId,
+		inbox,
+		...(state.monitoringStop === undefined ? {} : { monitoringStop: state.monitoringStop }),
+	};
 }
 
 function pendingEntryWrite(entryId: string, pending: PendingEntry): NewEntry {
@@ -404,12 +410,16 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 					writes: [
 						...decision.writes,
 						setValue(operationStateValue(operation.meta.operationId), decision.operationState),
-						...(decision.lane?.inbox === undefined
+						...(decision.lane?.inbox === undefined && decision.lane?.monitoringStop === undefined
 							? []
 							: [
 									setValue(
 										laneStateValue(this.name),
-										durableLaneState(state, operation.meta.operationId, decision.lane.inbox),
+										durableLaneState(
+											{ ...state, ...decision.lane },
+											operation.meta.operationId,
+											decision.lane?.inbox,
+										),
 									),
 								]),
 					],
@@ -429,7 +439,10 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 				writes: [
 					...decision.writes,
 					setValue(operationResultValue(operation.meta.operationId), decision.record),
-					setValue(laneStateValue(this.name), durableLaneState(state, null, inbox, operation.meta.operationId)),
+					setValue(
+						laneStateValue(this.name),
+						durableLaneState({ ...state, ...decision.lane }, null, inbox, operation.meta.operationId),
+					),
 				],
 				next: {
 					...state,
@@ -477,11 +490,31 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 		);
 	}
 
+	/** Refresh inherited stops before admitting or advancing work on an existing lane. */
+	async refreshMonitoringStop(context: Context): Promise<void> {
+		if (this.state.monitoringStop !== undefined) return;
+		await this.command(async (state, reader) => {
+			if (state.monitoringStop !== undefined) return { kind: "return", result: undefined };
+			const monitoringStop = await findMonitoringStop(reader, state.tipId, context);
+			if (monitoringStop === undefined) return { kind: "return", result: undefined };
+			const next = { ...state, monitoringStop };
+			return {
+				kind: "commit",
+				writes: [
+					setValue(laneStateValue(this.name), durableLaneState(next, state.operation?.meta.operationId ?? null)),
+				],
+				next,
+				materialize: () => undefined,
+			};
+		}, context);
+	}
+
 	async accept(request: OperationRequest, context: Context): Promise<OperationAdmissionResult> {
 		if (this.closedError instanceof HarnessClosed) {
 			return Result.err(new Closed({ message: this.closedError.message }));
 		}
 		this.assertOpen();
+		await this.refreshMonitoringStop(context);
 		const startedAt = Date.now();
 		const operationId = request.operationId ?? this.session.idGenerator.next(startedAt);
 		const acceptanceConfig = this.readConfig();
@@ -572,6 +605,9 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 		const prompt = messages.map((message) => ({ id: this.session.idGenerator.next(startedAt), message }));
 
 		return this.command<OperationAdmissionResult>(async (state, reader) => {
+			if (state.monitoringStop !== undefined) {
+				return { kind: "return", result: Result.err(this.monitoringAdmissionError(state)) };
+			}
 			if (state.operation !== null) {
 				return {
 					kind: "return",
@@ -685,6 +721,9 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 	): Promise<OperationAdmissionResult> {
 		const taskId = this.session.idGenerator.next(startedAt);
 		return this.command<OperationAdmissionResult>(async (state, reader) => {
+			if (state.monitoringStop !== undefined) {
+				return { kind: "return", result: Result.err(this.monitoringAdmissionError(state)) };
+			}
 			if (state.operation !== null) {
 				return {
 					kind: "return",
@@ -795,6 +834,9 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 				}
 			}
 			const accepted = await this.command<OperationAdmissionResult | undefined>(async (state, reader) => {
+				if (summarize && state.monitoringStop !== undefined) {
+					return { kind: "return", result: Result.err(this.monitoringAdmissionError(state)) };
+				}
 				if (state.operation !== null) {
 					return {
 						kind: "return",
@@ -1209,6 +1251,7 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 			switch (admission.error._tag) {
 				case "LaneBusy":
 				case "NothingToCompact":
+				case "InvalidMessage":
 				case "Closed":
 					return Result.err(admission.error);
 				default:
@@ -1242,6 +1285,7 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 			switch (admission.error._tag) {
 				case "LaneBusy":
 				case "InvalidNavigation":
+				case "InvalidMessage":
 				case "UnknownTarget":
 				case "Closed":
 					return Result.err(admission.error);
@@ -1322,6 +1366,16 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 			new SessionInvariantError(`Continuation run ${admission.value.operationId} returned an unwaited retry`),
 			context,
 		);
+	}
+
+	private monitoringAdmissionError(state: LaneState): InvalidMessage {
+		return new InvalidMessage({
+			lane: this.name,
+			reason: "monitoring_blocked",
+			message:
+				state.monitoringStop?.message.errorMessage ??
+				"Conversation stopped by monitoring. Review prior actions; this stop did not undo them.",
+		});
 	}
 
 	async resume(context: Context): Promise<ResumeResult> {

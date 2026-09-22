@@ -12,6 +12,18 @@ import type {
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
 
+/** Opaque Responses state is portable only on the same route/model or the verified direct GPT-6 family. */
+export function canReplayResponses(message: AssistantMessage, model: Model<Api>): boolean {
+	if (message.provider !== model.provider || message.api !== model.api) return false;
+	return (
+		message.model === model.id ||
+		(model.provider === "openai" &&
+			model.api === "openai-responses" &&
+			/^gpt-6-(astra|sol|luna)$/.test(message.model) &&
+			/^gpt-6-(astra|sol|luna)$/.test(model.id))
+	);
+}
+
 function replaceImagesWithPlaceholder(content: (TextContent | ImageContent)[], placeholder: string): TextContent[] {
 	const result: TextContent[] = [];
 	let previousWasPlaceholder = false;
@@ -101,6 +113,7 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.provider === model.provider &&
 				assistantMsg.api === model.api &&
 				assistantMsg.model === model.id;
+			const compatibleResponses = model.api === "openai-responses" && canReplayResponses(assistantMsg, model);
 
 			const transformedContent = assistantMsg.content.flatMap((block) => {
 				if (block.type === "thinking") {
@@ -111,7 +124,7 @@ export function transformMessages<TApi extends Api>(
 					}
 					// For same model: keep thinking blocks with signatures (needed for replay)
 					// even if the thinking text is empty (OpenAI encrypted reasoning)
-					if (isSameModel && block.thinkingSignature) return block;
+					if ((isSameModel || compatibleResponses) && block.thinkingSignature) return block;
 					// Skip empty thinking blocks, convert others to plain text
 					if (!block.thinking || block.thinking.trim() === "") return [];
 					if (isSameModel) return block;
@@ -122,7 +135,7 @@ export function transformMessages<TApi extends Api>(
 				}
 
 				if (block.type === "text") {
-					if (isSameModel) return block;
+					if (isSameModel || compatibleResponses) return block;
 					return {
 						type: "text" as const,
 						text: block.text,
@@ -143,7 +156,7 @@ export function transformMessages<TApi extends Api>(
 						toolCall.async &&
 						assistantMsg.provider === model.provider &&
 						assistantMsg.api === model.api;
-					if (!isSameModel && !preserveAsyncIdentity && normalizeToolCallId) {
+					if (!isSameModel && !compatibleResponses && !preserveAsyncIdentity && normalizeToolCallId) {
 						const normalizedId = normalizeToolCallId(toolCall.id, model, assistantMsg);
 						if (normalizedId !== toolCall.id) {
 							toolCallIdMap.set(toolCall.id, normalizedId);
@@ -172,6 +185,8 @@ export function transformMessages<TApi extends Api>(
 	const relocated = new Set<string>();
 	const ordered = transformed.flatMap((message): Message[] => {
 		if (message.role !== "assistant") return [message];
+		// Hosted histories contain interleaved calls and injected results, not adjacent pairs.
+		if (message.responsesOutput && canReplayResponses(message, model)) return [message];
 		const results = message.content.flatMap((call) => {
 			if (
 				call.type !== "toolCall" ||
@@ -247,7 +262,9 @@ export function transformMessages<TApi extends Api>(
 				// authoritative item even when the remainder of the response was interrupted.
 				const committed = assistantMsg.content.filter((block) =>
 					block.type === "toolCall"
-						? !!block.responsesItem || block.executionStarted
+						? block.executionStarted ||
+							completed.has(block.id) ||
+							(!!block.responsesItem && (block.async || !assistantMsg.responsesOutput))
 						: block.type === "text"
 							? !!block.textSignature
 							: !!block.thinkingSignature,
@@ -257,6 +274,27 @@ export function transformMessages<TApi extends Api>(
 				// Reasoning after the last completed output belongs to the interrupted suffix.
 				while (committed.at(-1)?.type === "thinking") committed.pop();
 				assistantMsg = { ...assistantMsg, content: committed };
+				if (assistantMsg.responsesOutput) {
+					const calls = new Set(
+						committed.flatMap((block) => (block.type === "toolCall" ? [block.id.split("|")[0]] : [])),
+					);
+					let lastCall = -1;
+					for (const [index, item] of assistantMsg.responsesOutput.entries())
+						if (
+							(item.type === "function_call" ||
+								item.type === "custom_tool_call" ||
+								item.type === "tool_search_call") &&
+							item.call_id &&
+							calls.has(item.call_id)
+						)
+							lastCall = index;
+					assistantMsg.responsesOutput = assistantMsg.responsesOutput
+						.slice(0, lastCall + 1)
+						.filter(
+							(item) =>
+								(item.type !== "function_call" && item.type !== "custom_tool_call") || calls.has(item.call_id),
+						);
+				}
 			}
 
 			// Track tool calls from this assistant message
@@ -265,10 +303,13 @@ export function transformMessages<TApi extends Api>(
 				pendingToolCalls = toolCalls.filter(
 					(call) =>
 						!(
-							call.async &&
-							nativeAsync &&
-							assistantMsg.provider === model.provider &&
-							assistantMsg.api === model.api
+							(assistantMsg.responsesOutput &&
+								completed.has(call.id) &&
+								canReplayResponses(assistantMsg, model)) ||
+							(call.async &&
+								nativeAsync &&
+								assistantMsg.provider === model.provider &&
+								assistantMsg.api === model.api)
 						),
 				);
 				existingToolResultIds = new Set();

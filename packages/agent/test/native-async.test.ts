@@ -1,4 +1,10 @@
-import type { AssistantMessage, Message, Model, ToolCall } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	type Message,
+	type Model,
+	normalizeContext,
+	type ToolCall,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { AssistantMessageEventStream } from "../../ai/src/utils/event-stream.ts";
@@ -113,6 +119,133 @@ async function answer(streams: AssistantMessageEventStream[], index: number) {
 }
 
 describe("native async lifecycle", () => {
+	it("stops queued calls, signals active calls, and preserves completed effects on a monitoring block", async () => {
+		const active = deferred<AgentToolResult>();
+		let activeSignal: AbortSignal | undefined;
+		const execute = vi.fn<AgentTool["execute"]>(async (id, _args, signal) => {
+			if (id.startsWith("completed")) return result;
+			activeSignal = signal;
+			return active.promise;
+		});
+		const { agent, streams, events } = setup(execute, { executionMode: "sequential" });
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const message = assistant("blocked");
+		await emitCall(streams[0], message, call("completed"));
+		await vi.waitFor(() => expect(events.some((event) => event.type === "tool_execution_end")).toBe(true));
+		for (const id of ["active", "queued"]) {
+			const toolCall = call(id);
+			message.content.push(toolCall);
+			streams[0].push({
+				type: "toolcall_end",
+				contentIndex: message.content.length - 1,
+				toolCall,
+				partial: message,
+			});
+		}
+		await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+		Object.assign(message, {
+			providerError: { code: "misalignment_policy_violation", requestId: "req_blocked" },
+			errorMessage: "Conversation stopped; review prior actions. Earlier actions were not undone.",
+		});
+		finish(streams[0], message, true);
+		// Wait for error delivery before releasing active work; an executor may finish despite cancellation.
+		await vi.waitFor(() =>
+			expect(events.some((event) => event.type === "message_end" && event.message.role === "assistant")).toBe(true),
+		);
+		const signaled = activeSignal?.aborted;
+		active.resolve(result);
+		await run;
+		expect(signaled).toBe(true);
+		expect(execute).toHaveBeenCalledTimes(2);
+		expect(streams).toHaveLength(1);
+		expect(
+			events.some((event) => event.type === "tool_execution_start" && event.toolCallId === "queued|fc_queued"),
+		).toBe(false);
+		expect(
+			agent.state.messages.find((entry) => entry.role === "assistant" && entry.responseId === "blocked"),
+		).toMatchObject({
+			stopReason: "error",
+			providerError: { code: "misalignment_policy_violation", requestId: "req_blocked" },
+		});
+		expect(agent.state.messages.filter((entry) => entry.role === "toolResult")).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ toolCallId: "completed|fc_completed", content: result.content, isError: false }),
+				expect.objectContaining({ toolCallId: "active|fc_active", content: result.content, isError: false }),
+			]),
+		);
+	});
+
+	it("does not enter an executor after monitoring stops a call waiting on persistence", async () => {
+		const execute = vi.fn<AgentTool["execute"]>(async () => result);
+		const { agent, streams, events } = setup(execute);
+		const barrier = deferred<void>();
+		agent.subscribe(async (event) => {
+			if (event.type === "tool_execution_prepared") await barrier.promise;
+		});
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const message = assistant("blocked");
+		await emitCall(streams[0], message, call());
+		await vi.waitFor(() => expect(events.some((event) => event.type === "tool_execution_prepared")).toBe(true));
+		Object.assign(message, { providerError: { code: "misalignment_policy_violation" } });
+		finish(streams[0], message, true);
+		await vi.waitFor(() =>
+			expect(events.some((event) => event.type === "message_end" && event.message.role === "assistant")).toBe(true),
+		);
+		barrier.resolve();
+		await run;
+		expect(execute).not.toHaveBeenCalled();
+		expect(streams).toHaveLength(1);
+	});
+
+	it("does not recover uncertain steering or dispatch synchronous calls after a monitoring block", async () => {
+		const execute = vi.fn<AgentTool["execute"]>(async () => result);
+		const { agent, streams } = setup(execute);
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const message = assistant("blocked", [
+			{ type: "toolCall", id: "sync", name: "work", arguments: { path: "original" } },
+		]);
+		streams[0].push({ type: "start", partial: message });
+		streams[0].push({
+			type: "steering",
+			message: { role: "user", content: "additional work", timestamp: 2 },
+			status: "unknown",
+		});
+		Object.assign(message, { providerError: { code: "misalignment_policy_violation" } });
+		finish(streams[0], message, true);
+		// End any erroneous continuation so the regression fails without leaving a running agent.
+		await vi.waitFor(() => expect(!agent.state.isStreaming || streams.length === 2).toBe(true));
+		if (streams.length === 2) await answer(streams, 1);
+		await run;
+		expect(execute).not.toHaveBeenCalled();
+		expect(streams).toHaveLength(1);
+	});
+
+	it("does not reattach or request another response from a restored blocked conversation", async () => {
+		const resume = vi.fn<NonNullable<AgentTool["resume"]>>(async () => result);
+		const { agent, streams } = setup(async () => result, { resume });
+		const blocked = Object.assign(assistant("blocked", [{ ...call(), executionStarted: true }]), {
+			stopReason: "error" as const,
+			providerError: { code: "misalignment_policy_violation" },
+			errorMessage: "Conversation stopped for review",
+		});
+		agent.state.messages = [blocked];
+		const run = agent.prompt("continue");
+		await vi.waitFor(() => expect(!agent.state.isStreaming || streams.length === 1).toBe(true));
+		if (streams.length === 1) {
+			agent.abort();
+			await answer(streams, 0);
+		}
+		await run;
+		expect(resume).not.toHaveBeenCalled();
+		expect(streams).toHaveLength(0);
+		expect(() => agent.streamResponse(model, normalizeContext({ messages: [] }))).toThrow(
+			"Conversation stopped for review",
+		);
+	});
+
 	it("clears rejected live-input preparation so a corrected run can steer again", async () => {
 		const { agent, streams } = setup(async () => result);
 		const provider = agent.streamFunction;

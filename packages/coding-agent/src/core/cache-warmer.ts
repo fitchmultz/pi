@@ -1,7 +1,9 @@
 import {
 	type Api,
+	type AssistantMessage,
 	type Context,
 	calculateCost,
+	isMonitoringBlocked,
 	type Model,
 	type ModelsSimpleStreamOptions,
 	type SimpleStreamOptions,
@@ -139,6 +141,7 @@ export interface CacheWarmRequest {
 }
 
 interface ActiveRun extends CacheWarmRequest {
+	sessionId: string;
 	/** False once the session's model or messages no longer match the request. */
 	isCurrent: () => boolean;
 	ttlMs: number;
@@ -163,16 +166,18 @@ export class CacheWarmer {
 	private run?: ActiveRun;
 	private inactive: CacheWarmingStatus;
 	private readonly models: Pick<ModelRuntime, "streamSimple">;
-	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">;
+	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getBranch" | "getSessionId">;
 	private readonly getMode: () => CacheWarmingMode;
 	/** Lets extensions override `event.action`; failures fall back to pi's decision. */
 	private readonly decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction>;
 	/** Called with the persisted usage entry after each successful refresh. */
 	onWarmed?: (entry: UsageEntry) => void;
+	/** Preserve a stopped refresh and stop its owning conversation. */
+	onMonitoringBlocked?: (message: AssistantMessage) => void | Promise<void>;
 
 	constructor(
 		models: Pick<ModelRuntime, "streamSimple">,
-		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">,
+		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch" | "getSessionId">,
 		getMode: () => CacheWarmingMode,
 		decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction> = async (event) => event.action,
 	) {
@@ -229,6 +234,7 @@ export class CacheWarmer {
 		}
 		this.run = {
 			...request,
+			sessionId: this.sessionManager.getSessionId(),
 			isCurrent,
 			ttlMs,
 			delayMs,
@@ -337,6 +343,12 @@ export class CacheWarmer {
 					signal: run.controller.signal,
 				})
 				.result();
+			// A newer request can replace warming while the same conversation still owns this response.
+			if (isMonitoringBlocked(message) && run.sessionId === this.sessionManager.getSessionId()) {
+				this.stop("conversation stopped by misalignment monitoring");
+				await this.onMonitoringBlocked?.(message);
+				return;
+			}
 			if (!this.validateRun(run)) return;
 			if (message.stopReason !== "error" && message.stopReason !== "aborted") {
 				const entry = this.sessionManager.appendUsage(

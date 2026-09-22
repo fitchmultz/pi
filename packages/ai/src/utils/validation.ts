@@ -330,6 +330,13 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): any {
  * @throws Error with formatted message if validation fails
  */
 export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
+	const item = toolCall.responsesItem;
+	const caller = item && "caller" in item && item.caller?.type === "program" ? "programmatic" : "direct";
+	if (
+		(tool.allowedCallers && !tool.allowedCallers.includes(caller)) ||
+		(caller === "programmatic" && (!tool.allowedCallers?.includes("programmatic") || tool.async))
+	)
+		throw new Error(`Tool ${toolCall.name} does not permit ${caller} calls`);
 	const args = structuredClone(toolCall.arguments);
 	normalizeOptionalNulls(args, tool.parameters as JsonSchemaObject);
 	Value.Convert(tool.parameters, args);

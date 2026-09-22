@@ -486,6 +486,10 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = unknown, TState = any> {
 	/** Permit native asynchronous calls on supported routes; independent of local executionMode. */
 	async?: boolean;
+	/** Hosted program eligibility. Omitted tools remain direct-only. */
+	allowedCallers?: ("direct" | "programmatic")[];
+	/** Schema of the JSON encoded in output text, not details. */
+	outputSchema?: Record<string, unknown>;
 	/** Tool name (used in LLM tool calls) */
 	name: string;
 	/** Exact namespace, independent of the tool's leaf name. */

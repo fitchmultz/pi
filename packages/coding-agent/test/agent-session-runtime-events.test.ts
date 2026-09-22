@@ -35,7 +35,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		}
 	});
 
-	async function createRuntimeHost(extensionFactory: ExtensionFactory) {
+	async function createRuntimeHost(extensionFactory: ExtensionFactory, persist = true) {
 		const tempDir = join(tmpdir(), `pi-runtime-events-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -97,7 +97,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const runtimeHost = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir),
+			sessionManager: persist
+				? SessionManager.create(tempDir, join(tempDir, "sessions"))
+				: SessionManager.inMemory(tempDir),
 		});
 		await runtimeHost.session.bindExtensions({});
 
@@ -204,6 +206,81 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		);
 		runtimeHost.setBeforeSessionInvalidate(undefined);
 		runtimeHost.setRebindSession(undefined);
+	});
+
+	it.each([
+		{ persist: true, position: "at" as const },
+		{ persist: true, position: "before" as const },
+		{ persist: false, position: "at" as const },
+		{ persist: false, position: "before" as const },
+	])("carries monitoring stops through history forks ($persist, $position)", async ({ persist, position }) => {
+		const { runtimeHost, faux } = await createRuntimeHost(() => {}, persist);
+		const source = runtimeHost.session.sessionManager;
+		source.newSession();
+		const firstUserId = source.appendMessage({
+			role: "user",
+			content: "Original request",
+			timestamp: Date.now(),
+		});
+		const ancestorId = source.appendMessage(fauxAssistantMessage("Earlier response"));
+		const blocked = {
+			...fauxAssistantMessage("Partial output", { stopReason: "error", errorMessage: "Lineage review required" }),
+			providerError: {
+				code: "misalignment_policy_violation",
+				requestId: "req_fork_blocked",
+				responseId: "resp_fork_blocked",
+			},
+		};
+		source.appendMessage(blocked);
+		runtimeHost.session.refreshContext();
+
+		await runtimeHost.fork(position === "before" ? firstUserId : ancestorId, { position });
+
+		const fork = runtimeHost.session.sessionManager;
+		expect(fork.getEntries()).toContainEqual(expect.objectContaining({ message: blocked }));
+		expect(
+			fork
+				.getEntries()
+				.filter(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.providerError?.requestId === "req_fork_blocked",
+				),
+		).toHaveLength(1);
+		if (persist) {
+			const reopened = SessionManager.open(fork.getSessionFile()!);
+			expect(reopened.getEntries()).toContainEqual(expect.objectContaining({ message: blocked }));
+		}
+		await expect(runtimeHost.session.prompt("Continue fork")).rejects.toThrow("Lineage review required");
+		await expect(runtimeHost.session.compact()).rejects.toThrow("Lineage review required");
+		expect(faux.state.callCount).toBe(0);
+
+		await runtimeHost.newSession();
+		await runtimeHost.session.prompt("Unrelated fresh task");
+		expect(faux.state.callCount).toBe(1);
+	});
+
+	it("carries a named parent's monitoring stop into a related new session", async () => {
+		const { runtimeHost, faux } = await createRuntimeHost(() => {});
+		const blocked = {
+			...fauxAssistantMessage("", { stopReason: "error", errorMessage: "Parent review required" }),
+			providerError: { code: "misalignment_policy_violation", requestId: "req_parent_blocked" },
+		};
+		runtimeHost.session.sessionManager.appendMessage(blocked);
+		const parentSession = runtimeHost.session.sessionFile!;
+		await runtimeHost.newSession();
+
+		await runtimeHost.newSession({ parentSession });
+
+		expect(runtimeHost.session.sessionManager.getEntries()).toContainEqual(
+			expect.objectContaining({ message: blocked }),
+		);
+		await expect(runtimeHost.session.prompt("Continue handoff")).rejects.toThrow("Parent review required");
+		expect(faux.state.callCount).toBe(0);
+		await runtimeHost.newSession();
+		await runtimeHost.session.prompt("Unrelated fresh task");
+		expect(faux.state.callCount).toBe(1);
 	});
 
 	it("emits session_before_fork and session_start and honors cancellation", async () => {

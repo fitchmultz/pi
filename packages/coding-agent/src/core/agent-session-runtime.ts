@@ -295,7 +295,7 @@ export class AgentSessionRuntime {
 				throw new Error("Persisted session is missing a session file");
 			}
 			const sessionDir = this.session.sessionManager.getSessionDir();
-			if (!targetLeafId) {
+			if (!targetLeafId && !existsSync(currentSessionFile)) {
 				const sessionManager = SessionManager.create(this.cwd, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
 				await this.teardownCurrent("fork", sessionManager.getSessionFile());
@@ -336,11 +336,7 @@ export class AgentSessionRuntime {
 
 		const sessionManager = this.session.sessionManager;
 		await this.teardownCurrent("fork", sessionManager.getSessionFile());
-		if (!targetLeafId) {
-			sessionManager.newSession({ parentSession: previousSessionFile });
-		} else {
-			sessionManager.createBranchedSession(targetLeafId);
-		}
+		sessionManager.createBranchedSession(targetLeafId);
 		this.apply(
 			await this.createRuntime({
 				cwd: this.cwd,

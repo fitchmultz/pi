@@ -33,6 +33,8 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
+import { captureProviderError, getProviderError } from "../utils/provider-error.ts";
+import { isMonitoringBlocked } from "../utils/retry.ts";
 import { getSystemMessageText } from "../utils/text.ts";
 import {
 	getCurrentTools,
@@ -297,6 +299,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 
 		const diagnostics = createResponsesDiagnostics(output);
 		const details = diagnostics.details;
+		let requestId: string | undefined;
 
 		try {
 			const apiKey = options?.apiKey;
@@ -510,6 +513,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 						combinedSignal.cleanup();
 					}
 					details.headersMs = performance.now() - diagnostics.startedAt;
+					requestId = response.headers.get("x-request-id") ?? undefined;
 					await options?.onResponse?.(
 						{ status: response.status, headers: headersToRecord(response.headers) },
 						model,
@@ -520,6 +524,9 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 					}
 
 					const errorText = await response.text();
+					const info = parseErrorResponse(errorText, response);
+					const error = Object.assign(new Error(info.friendlyMessage || info.message), info.providerError);
+					if (isMonitoringBlocked(info)) throw error;
 					if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
 						const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
 						const delayMs =
@@ -531,13 +538,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 						continue;
 					}
 
-					// Parse error for friendly message on final attempt or non-retryable error
-					const fakeResponse = new Response(errorText, {
-						status: response.status,
-						statusText: response.statusText,
-					});
-					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
+					throw error;
 				} catch (error) {
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
@@ -548,6 +549,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 					// Network errors are retryable
 					if (
 						attempt < maxRetries &&
+						!isMonitoringBlocked({ providerError: getProviderError(lastError) }) &&
 						!(lastError instanceof RetryDelayExceededError) &&
 						!lastError.message.includes("usage limit")
 					) {
@@ -598,6 +600,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatProviderError(normalizeProviderError(error));
+			captureProviderError(output, error, requestId);
 			finishResponsesDiagnostics(diagnostics);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
@@ -882,10 +885,13 @@ async function* mapCodexEvents(
 		if (type === "error") {
 			recordResponsesEvent(diagnostics, event);
 			const { code, message } = extractCodexEventError(event);
-			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
-				code,
-				payload: event,
-			});
+			throw Object.assign(
+				new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
+					code,
+					payload: event,
+				}),
+				getProviderError(event),
+			);
 		}
 
 		// The shared parser records failed-response usage and IDs before raising the provider error.
@@ -1845,19 +1851,26 @@ async function processWebSocketStream(
 // Error Handling
 // ============================================================================
 
-async function parseErrorResponse(response: Response): Promise<{ message: string; friendlyMessage?: string }> {
-	const raw = await response.text();
+function parseErrorResponse(
+	raw: string,
+	response: Response,
+): { message: string; friendlyMessage?: string; providerError?: AssistantMessage["providerError"] } {
 	let message = raw || response.statusText || "Request failed";
 	let friendlyMessage: string | undefined;
+	let providerError: AssistantMessage["providerError"];
 
 	try {
 		const parsed = JSON.parse(raw) as {
 			error?: { code?: string; type?: string; message?: string; plan_type?: string; resets_at?: number };
 		};
 		const err = parsed?.error;
+		providerError = getProviderError({ ...parsed, status: response.status, headers: response.headers });
 		if (err) {
 			const code = err.code || err.type || "";
-			if (/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) || response.status === 429) {
+			if (
+				!isMonitoringBlocked({ providerError }) &&
+				(/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) || response.status === 429)
+			) {
 				const plan = err.plan_type ? ` (${err.plan_type.toLowerCase()} plan)` : "";
 				const mins = err.resets_at
 					? Math.max(0, Math.round((err.resets_at * 1000 - Date.now()) / 60000))
@@ -1869,7 +1882,7 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 		}
 	} catch {}
 
-	return { message, friendlyMessage };
+	return { message, friendlyMessage, providerError };
 }
 
 // ============================================================================

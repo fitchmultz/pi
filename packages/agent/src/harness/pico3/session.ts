@@ -266,6 +266,8 @@ const CORE_TX_METHODS = [
 	"toolSlot",
 	"appendEntry",
 	"send",
+	"monitoringStopped",
+	"stopForMonitoring",
 	"resolveInputs",
 	"boundary",
 	"markTask",
@@ -1016,6 +1018,8 @@ class TxImpl implements CoreTx {
 			const existing = await this.inputByRequest(conversationId, input.requestId); // before any write
 			if (existing !== undefined) return existing.id;
 		}
+		if (await this.monitoringStopped(conversationId))
+			throw new Error("Conversation stopped by provider monitoring (misalignment_policy_violation)");
 		if (this.busy(conversationId)) {
 			const mode = input.whenBusy ?? "followUp";
 			if (mode === "reject") throw new ConversationBusy(conversationId);
@@ -1063,6 +1067,43 @@ class TxImpl implements CoreTx {
 		if (current === undefined) throw new Error(`input ${id} not found`);
 		this.putInput({ ...current, ...patch });
 	}
+	async monitoringStopped(conversationId: Id): Promise<boolean> {
+		this.assertCore("monitoringStopped");
+		// A history fork inherits the lineage's present stop, even when its cutoff predates it.
+		let id: Id | undefined = conversationId;
+		while (id !== undefined) {
+			await this.preload([{ doc: "sticky", conversationId: id }]);
+			if (this.sticky(id).monitoringBlocked === true) return true;
+			id = (await this.conversation(id))?.parent?.conversationId;
+		}
+		return false;
+	}
+	async stopForMonitoring(conversationId: Id, inputs: readonly Id[] = []): Promise<void> {
+		this.assertCore("stopForMonitoring");
+		const state = this.sticky(conversationId);
+		state.monitoringBlocked = true;
+		const ids = new Set([...inputs, ...state.inbox.map((q) => q.id)]);
+		for (const task of this.liveTasks.values()) {
+			if (task.conversationId !== conversationId || !["pi.generation", "pi.post_tools"].includes(task.kind))
+				continue;
+			for (const id of (task.input as { inputs: Id[] }).inputs) ids.add(id);
+		}
+		const unresolved: Id[] = [];
+		for (const id of ids) {
+			const input = await this.input(id);
+			if (input?.status === "queued" || input?.status === "placed") unresolved.push(id);
+		}
+		const detail = "Conversation stopped by provider monitoring (misalignment_policy_violation)";
+		await this.resolveInputs(unresolved, { status: "unanswered", reason: "failed", detail });
+		state.inbox.splice(0);
+		// In-flight tools retain their slots until post-tools closes the turn.
+		delete state.turn.message;
+		if (unresolved.length > 0)
+			this.changes.events.push({
+				conversationId,
+				event: { type: "turn.ended", inputs: unresolved, status: "unanswered", reason: "failed", detail },
+			});
+	}
 	/** Kernel: withdraw a queued input. */
 	async withdrawInput(id: Id): Promise<"aborted" | "already_placed" | "not_found"> {
 		this.assertCore("withdrawInput");
@@ -1095,6 +1136,10 @@ class TxImpl implements CoreTx {
 		headBoundary: Id | undefined,
 	): Promise<{ triggers: Id[]; terminated: boolean }> {
 		this.assertCore("boundary");
+		if (await this.monitoringStopped(conversationId)) {
+			await this.stopForMonitoring(conversationId);
+			return { triggers: [], terminated: true };
+		}
 		const s = this.raw<StickyState>({ doc: "sticky", conversationId });
 		const inbox = [...s.inbox].sort((a, b) => a.id - b.id);
 		let cut: Id | undefined;

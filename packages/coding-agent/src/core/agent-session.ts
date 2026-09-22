@@ -26,6 +26,7 @@ import type {
 	AgentTool,
 	NewContextRequest,
 	PrepareNextTurnContext,
+	StreamFn,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import { getPendingToolCalls } from "@earendil-works/pi-agent-core";
@@ -61,6 +62,7 @@ import {
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
+	isMonitoringBlocked,
 	isRecoverableLength,
 	isRetryableAssistantError,
 	modelsAreEqual,
@@ -273,7 +275,10 @@ export interface AgentSessionConfig {
 	/** Canonical model/auth runtime used by coding-agent internals. */
 	modelRuntime: ModelRuntime;
 	/** Keeps the prompt cache entry of the last session request warm. */
-	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
+	cacheWarmer?: Pick<
+		CacheWarmer,
+		"cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed" | "onMonitoringBlocked"
+	>;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: ToolSelection[];
 	/** Suppress default built-ins, retaining extension tools and explicit selection. */
@@ -525,7 +530,7 @@ export class AgentSession {
 	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
-	private _cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
+	private _cacheWarmer?: AgentSessionConfig["cacheWarmer"];
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -555,6 +560,10 @@ export class AgentSession {
 		this._cacheWarmer = config.cacheWarmer;
 		if (this._cacheWarmer) {
 			this._cacheWarmer.onWarmed = (entry) => this._emit({ type: "entry_appended", entry });
+			this._cacheWarmer.onMonitoringBlocked = async (message) => {
+				this._recordMonitoringBlock(message);
+				await this.abort();
+			};
 		}
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
@@ -739,7 +748,31 @@ export class AgentSession {
 		};
 	}
 
+	private _getMonitoringBlock(): AssistantMessage | undefined {
+		const live = this.messages.find(
+			(message): message is AssistantMessage => message.role === "assistant" && isMonitoringBlocked(message),
+		);
+		if (live) return live;
+		// Projection edits, context windows, and tree navigation must not erase a stop in this session.
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type === "message" && entry.message.role === "assistant" && isMonitoringBlocked(entry.message)) {
+				return entry.message;
+			}
+		}
+		return undefined;
+	}
+
+	private _assertNotMonitoringBlocked(): void {
+		const monitoringBlock = this._getMonitoringBlock();
+		if (monitoringBlock) {
+			throw new Error(
+				`Conversation stopped by misalignment monitoring (misalignment_policy_violation). ${monitoringBlock.errorMessage ?? "Review the recorded actions before starting new work."}`,
+			);
+		}
+	}
+
 	private _consumeNewContext(request?: NewContextRequest): AgentContext | undefined {
+		if (this._getMonitoringBlock()) return undefined;
 		const next = request ?? this._pendingNewContext;
 		this._pendingNewContext = undefined;
 		if (
@@ -1140,7 +1173,8 @@ export class AgentSession {
 			message.role === "toolResult"
 		) {
 			entryId = this.sessionManager.appendMessage(
-				message.role === "assistant" && message.content.some((block) => block.type === "toolCall" && block.async)
+				message.role === "assistant" &&
+					message.content.some((block) => block.type === "toolCall" && (block.async || block.streaming))
 					? structuredClone(message)
 					: message,
 			);
@@ -1342,6 +1376,9 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "message_end" && event.message.role === "assistant" && isMonitoringBlocked(event.message)) {
+			this._cacheWarmer?.cancel();
+		}
 		if (event.type === "message_checkpoint") {
 			this._flushPendingProviderMessages();
 			const entryId = this.sessionManager.appendMessage(structuredClone(event.message), true);
@@ -1546,7 +1583,8 @@ export class AgentSession {
 		// Native admission precedes preflight; even a blocked call owns its recorded result.
 		const committedCallIds = new Set(
 			message.content.flatMap((block) =>
-				block.type === "toolCall" && (block.executionStarted || (block.async && block.responsesItem))
+				block.type === "toolCall" &&
+				(block.executionStarted || ((block.async || block.streaming) && block.responsesItem))
 					? [block.id]
 					: [],
 			),
@@ -1752,6 +1790,7 @@ export class AgentSession {
 		this._eventListeners = [];
 		if (this._cacheWarmer) {
 			this._cacheWarmer.onWarmed = undefined;
+			this._cacheWarmer.onMonitoringBlocked = undefined;
 			this._cacheWarmer.cancel();
 		}
 		cleanupSessionResources(this.sessionId);
@@ -2082,6 +2121,7 @@ export class AgentSession {
 	private async _runAgentPrompt(prepare: (signal: AbortSignal) => Promise<() => AgentMessage[]>): Promise<void> {
 		this._assertNotCheckpointHeld();
 		this._shutdownAbortController.signal.throwIfAborted();
+		this._assertNotMonitoringBlocked();
 		if (this._checkpointActiveTools) throw new Error("Checkpoint restore requires extension initialization");
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
@@ -2111,6 +2151,7 @@ export class AgentSession {
 					signal?.removeEventListener("abort", abort);
 				}
 				const continueRun = await this._handlePostAgentRun(signal);
+				if (this._getMonitoringBlock()) break;
 				if (this._agentRunAbortRequested || signal?.aborted || this._shutdownAbortController.signal.aborted) break;
 				if (!continueRun && !(await this._runBeforeSettleBoundary())) break;
 				if (this._agentRunAbortRequested || this._shutdownAbortController.signal.aborted) break;
@@ -2170,6 +2211,11 @@ export class AgentSession {
 		const toolResults = this._lastAssistantToolResults;
 		this._lastAssistantMessage = undefined;
 		this._lastAssistantToolResults = [];
+		const monitoringBlock = this._getMonitoringBlock();
+		if (monitoringBlock) {
+			await this._finishCancelledRetry(monitoringBlock.errorMessage);
+			return false;
+		}
 		if (
 			this._agentRunAbortRequested ||
 			this._shutdownAbortController.signal.aborted ||
@@ -3440,6 +3486,26 @@ export class AgentSession {
 	// Compaction
 	// =========================================================================
 
+	private _recordMonitoringBlock(message: AssistantMessage): void {
+		this._cacheWarmer?.cancel();
+		this._flushPendingProviderMessages();
+		this._persistMessage(message);
+		this._refreshFinalizedContext();
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
+	}
+
+	private _streamSummarizationResponse: StreamFn = async (model, context, options) => {
+		this._assertNotMonitoringBlocked();
+		const stream = await this.agent.streamResponse(model, context, options);
+		const message = await stream.result();
+		if (isMonitoringBlocked(message)) {
+			// Summaries bypass ordinary agent events. Keep the stopped response before callers reduce it to an error.
+			this._recordMonitoringBlock(message);
+		}
+		return stream;
+	};
+
 	/** Generate Pi's built-in compaction summary for manual and automatic compaction. */
 	private async _runDefaultCompaction(
 		preparation: CompactionPreparation,
@@ -3459,7 +3525,7 @@ export class AgentSession {
 			customInstructions,
 			signal,
 			this.thinkingLevel,
-			this.agent.streamResponse,
+			this._streamSummarizationResponse,
 			env,
 			this.settingsManager.getRetrySettings(),
 			this._summarizationRetryCallbacks({ source: "compaction", reason }),
@@ -3490,6 +3556,7 @@ export class AgentSession {
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		this._assertNotCheckpointHeld();
 		this._shutdownAbortController.signal.throwIfAborted();
+		this._assertNotMonitoringBlocked();
 		await this.abort();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
@@ -3692,6 +3759,7 @@ export class AgentSession {
 		skipAbortedCheck = true,
 		toolResults: AgentMessage[] = [],
 	): Promise<boolean> {
+		if (this._getMonitoringBlock()) return false;
 		const settings = this.settingsManager.getCompactionSettings(this.model);
 		if (!settings.enabled) return false;
 
@@ -3821,6 +3889,7 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		if (this._getMonitoringBlock()) return false;
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
@@ -4555,7 +4624,7 @@ export class AgentSession {
 		};
 	}
 
-	private async _finishCancelledRetry(): Promise<void> {
+	private async _finishCancelledRetry(finalError = "Retry cancelled"): Promise<void> {
 		if (this._retryAttempt === 0) return;
 		const attempt = this._retryAttempt;
 		this._retryAttempt = 0;
@@ -4563,7 +4632,7 @@ export class AgentSession {
 			type: "auto_retry_end",
 			success: false,
 			attempt,
-			finalError: "Retry cancelled",
+			finalError,
 		});
 	}
 
@@ -4899,7 +4968,7 @@ export class AgentSession {
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
-					streamFn: this.agent.streamResponse,
+					streamFn: this._streamSummarizationResponse,
 					retry: this.settingsManager.getRetrySettings(),
 					callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
 				});

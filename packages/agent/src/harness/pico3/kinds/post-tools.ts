@@ -67,6 +67,11 @@ export const postTools: CoreKind<
 		return {
 			done: async (tx, current) => {
 				const conversationId = current.conversationId;
+				if (await tx.monitoringStopped(conversationId)) {
+					await tx.stopForMonitoring(conversationId, task.input.inputs);
+					tx.sticky(conversationId).turn = { tools: [] };
+					return { status: "completed", result: { ended: "terminate" } };
+				}
 				const head = await tx.newestEntry(conversationId, { withHead: true });
 				const state = tx.rewindable(conversationId);
 				const selectedTools = [...state.selectedTools];

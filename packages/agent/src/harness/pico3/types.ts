@@ -195,6 +195,8 @@ export type RewindableState = {
 };
 /** The present. Never folded historically; truncated to its last base. */
 export type StickyState = {
+	/** A provider monitoring stop survives reopening and history navigation. */
+	monitoringBlocked?: true;
 	retry: RetryPolicy;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
@@ -774,6 +776,8 @@ export interface CoreTx extends TaskTx {
 		opts?: { conversationId?: Id; background?: true; after?: Id[] },
 	): TaskRef<K>;
 	send(conversationId: Id, input: SendInput): Promise<Id>;
+	monitoringStopped(conversationId: Id): Promise<boolean>;
+	stopForMonitoring(conversationId: Id, inputs?: readonly Id[]): Promise<void>;
 	resolveInputs(
 		ids: readonly Id[],
 		resolution:

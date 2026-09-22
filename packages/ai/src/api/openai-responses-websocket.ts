@@ -1,7 +1,12 @@
 import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import OpenAI from "openai";
-import type { ResponseCreateParamsStreaming, ResponsesClientEvent } from "openai/resources/responses/responses.js";
+import type {
+	ResponseCreateParamsStreaming as BetaResponseCreateParamsStreaming,
+	BetaResponsesClientEvent,
+} from "openai/resources/beta/responses/responses.js";
+import { ResponsesWS as BetaResponsesWS } from "openai/resources/beta/responses/ws";
+import type { ResponsesClientEvent } from "openai/resources/responses/responses.js";
 import { ResponsesWS } from "openai/resources/responses/ws";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type { AssistantMessage, AssistantMessageEventStream, Model, ProviderResponse } from "../types.ts";
@@ -17,7 +22,7 @@ const TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const IDLE_RETENTION_MS = 5 * 60 * 1000;
 
 interface Connection {
-	socket: ResponsesWS;
+	socket: ResponsesWS | BetaResponsesWS;
 	identity: string;
 	sessionId?: string;
 	busy: boolean;
@@ -51,7 +56,7 @@ registerSessionResourceCleanup((sessionId) => {
 /** The SDK owns framing, send buffering and iteration; Pi owns current-window continuation. */
 export async function* streamResponsesWebSocket(
 	client: OpenAI,
-	params: ResponseCreateParamsStreaming,
+	params: BetaResponseCreateParamsStreaming,
 	model: Model<"openai-responses">,
 	output: AssistantMessage,
 	options: OpenAIResponsesOptions,
@@ -73,6 +78,8 @@ export async function* streamResponsesWebSocket(
 	});
 	const idleTimeoutMs = options.timeoutMs ?? client.timeout;
 	const headers = new Headers(req.headers);
+	const multiAgent = params.multi_agent?.enabled === true;
+	if (multiAgent) headers.set("OpenAI-Beta", "responses_multi_agent=v1");
 	const proxy = resolveHttpProxyUrlForTarget(url, options.env);
 	const identity = JSON.stringify([url, [...headers], proxy?.href]);
 	const sessionId = options.cacheRetention === "none" ? undefined : options.sessionId;
@@ -86,7 +93,8 @@ export async function* streamResponsesWebSocket(
 	details.socketReused = reused;
 	const cacheConnection = sessionId !== undefined && !connection?.busy;
 	if (!reused) {
-		const socket = new ResponsesWS(client, {
+		const Socket = multiAgent ? BetaResponsesWS : ResponsesWS;
+		const socket = new Socket(client, {
 			headers: headersToRecord(headers),
 			handshakeTimeout: options.websocketConnectTimeoutMs ?? 15_000,
 			...(proxy
@@ -114,10 +122,10 @@ export async function* streamResponsesWebSocket(
 			};
 		});
 		// SDK errors must have a listener even while a completed connection is idle.
-		socket.on("error", () => {
+		(socket as ResponsesWS).on("error", () => {
 			if (!created.busy) closeConnection(created);
 		});
-		socket.on("close", () => closeConnection(created));
+		(socket as ResponsesWS).on("close", () => closeConnection(created));
 		connection = created;
 		if (cacheConnection && sessionId) sessions.set(sessionId, created);
 	}
@@ -169,7 +177,7 @@ export async function* streamResponsesWebSocket(
 		const request = JSON.stringify(body);
 		const fullInput = Array.isArray(input) ? input.map((item) => JSON.stringify(item)) : undefined;
 		const previous = active.continuation;
-		const event: ResponsesClientEvent.ResponseCreate = { ...body, input, type: "response.create" };
+		const event: BetaResponsesClientEvent.ResponseCreate = { ...body, input, type: "response.create" };
 		const incremental = options.transport !== "websocket" && !body.previous_response_id && !body.conversation;
 		if (
 			incremental &&
@@ -188,12 +196,16 @@ export async function* streamResponsesWebSocket(
 		control = createResponsesControl(
 			model,
 			body,
-			(event) => active.socket.send(event),
+			(event) => {
+				if (active.socket instanceof BetaResponsesWS) active.socket.send(event);
+				else active.socket.send(event as ResponsesClientEvent);
+			},
 			(event) => stream.push(event),
 			() => closeConnection(active),
 			grammarToolInputProperties,
 		);
-		active.socket.send(event);
+		if (active.socket instanceof BetaResponsesWS) active.socket.send(event);
+		else active.socket.send(event as ResponsesClientEvent);
 		let started = false;
 		let replayable = false;
 		while (true) {
@@ -204,9 +216,9 @@ export async function* streamResponsesWebSocket(
 				onStart();
 			}
 			const continuationInput = control.handle(event.message);
-			if (event.message.type === "response.created" && model.compat?.supportsSteering)
+			if (event.message.type === "response.created" && (model.compat?.supportsSteering || multiAgent))
 				options.onResponseControl?.(control.control);
-			yield { ...event.message, continuationInput };
+			yield { ...event.message, continuationInput, injectedInput: control.takeInjectedInput() };
 			if (control.finished) {
 				// A cached reply must contain only items Pi can replay in the current logical window.
 				// Otherwise keep the socket, but start the next request with full input.

@@ -4,7 +4,7 @@ import { SessionInvariantError } from "../session/session.ts";
 import { runCheckpoint, startRun } from "./drive/checkpoint.ts";
 import { runDeferred } from "./drive/deferred.ts";
 import { runGeneration } from "./drive/generation.ts";
-import { reconcileOperation } from "./drive/reconcile.ts";
+import { publishStoppedTerminal, reconcileOperation } from "./drive/reconcile.ts";
 import { recoverAssistantGeneration } from "./drive/recovery.ts";
 import {
 	commitNavigation,
@@ -30,8 +30,9 @@ export async function driveOperation<TContext extends object | undefined>(
 	lane: Lane<TContext>,
 	drive: Drive,
 ): Promise<DriveOutcome> {
+	await lane.refreshMonitoringStop(drive.context);
 	let operation = currentOperation(lane, drive);
-	if (operation.state.control.status === "running") {
+	if (operation.state.control.status === "running" && lane.state.monitoringStop === undefined) {
 		try {
 			await lane.hooks.runWithGate(
 				"before_drive",
@@ -46,11 +47,19 @@ export async function driveOperation<TContext extends object | undefined>(
 	}
 
 	for (;;) {
+		await lane.refreshMonitoringStop(drive.context);
 		operation = currentOperation(lane, drive);
 		const state = operation.state;
 		let result: ProcedureResult;
 		try {
-			if (state.control.status === "cancel_requested") {
+			const stopped = lane.state.monitoringStop?.message;
+			if (stopped !== undefined && state.at !== "navigation.ready_to_commit") {
+				result = await publishStoppedTerminal(lane, drive, state, {
+					code: "misalignment_policy_violation",
+					message: stopped.errorMessage ?? "Conversation stopped by monitoring; review prior actions",
+					...(stopped.providerError === undefined ? {} : { details: { ...stopped.providerError } }),
+				});
+			} else if (state.control.status === "cancel_requested") {
 				result = await reconcileOperation(lane, drive);
 			} else
 				switch (state.at) {
@@ -96,7 +105,10 @@ export async function driveOperation<TContext extends object | undefined>(
 			result = { kind: "continue" };
 		}
 
-		if (result.kind === "settled") return { kind: "settled", outcome: result.outcome };
+		if (result.kind === "settled") {
+			await lane.refreshMonitoringStop(drive.context);
+			return { kind: "settled", outcome: result.outcome };
+		}
 		if (result.kind === "waiting") return result.outcome;
 		const next = currentOperation(lane, drive).state;
 		if (next === state && next.control.status !== "cancel_requested") {

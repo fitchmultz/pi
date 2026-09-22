@@ -38,6 +38,9 @@ export function mergeAssistantCheckpoint(message: AssistantMessage, checkpoint: 
 	}
 	return {
 		...latest,
+		...((message.responsesOutput?.length ?? 0) > (latest.responsesOutput?.length ?? 0)
+			? { responsesOutput: message.responsesOutput }
+			: {}),
 		content: latest.content.map((block) =>
 			block.type === "toolCall" && executions.has(block.id) ? { ...block, ...executions.get(block.id) } : block,
 		),
@@ -209,6 +212,8 @@ export function toToolDeclaration(tool: Tool): Tool {
 		...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
 		...(tool.toolSearch === undefined ? {} : { toolSearch: tool.toolSearch }),
 		...(tool.async === undefined ? {} : { async: tool.async }),
+		...(tool.allowedCallers === undefined ? {} : { allowedCallers: [...tool.allowedCallers] }),
+		...(tool.outputSchema === undefined ? {} : { outputSchema: structuredClone(tool.outputSchema) }),
 		description: tool.description,
 		parameters: JSON.parse(JSON.stringify(tool.parameters)) as Tool["parameters"],
 		...(tool.constrainedSampling === undefined

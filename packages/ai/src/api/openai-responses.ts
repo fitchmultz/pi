@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { APIConnectionError, APIConnectionTimeoutError, APIError, APIUserAbortError } from "openai/error";
+import type { ResponseCreateParamsStreaming as BetaResponseCreateParamsStreaming } from "openai/resources/beta/responses/responses.js";
 import { WebSocketError } from "openai/resources/responses/internal-base";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
@@ -24,6 +25,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
+import { captureProviderError, getProviderError } from "../utils/provider-error.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { getCurrentTools, getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
@@ -168,6 +170,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 
 		const diagnostics = createResponsesDiagnostics(output);
 		const details = diagnostics.details;
+		let requestId: string | undefined;
 
 		try {
 			// Create OpenAI client
@@ -187,24 +190,56 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 				options?.fetch,
 				cacheSessionId,
 			);
-			let params = buildParams(model, normalizedContext, options, compat, grammarToolInputProperties);
-			if (compat.supportsReasoningEffortUpdates)
-				output.providerThinkingLevel = resolveResponsesEffort(model, options?.reasoningEffort);
+			const request = buildParams(model, normalizedContext, options, compat, grammarToolInputProperties);
+			let params = request.params as BetaResponseCreateParamsStreaming;
+			if (compat.supportsReasoningEffortUpdates) output.providerThinkingLevel = request.effort;
+			const initialRequestEffort = params.reasoning?.effort;
 			details.prepareMs = performance.now() - diagnostics.startedAt;
 			const hookStartedAt = performance.now();
 			try {
 				const nextParams = await options?.onPayload?.(params, model);
 				if (nextParams !== undefined) {
-					params = nextParams as ResponseCreateParamsStreaming;
+					params = nextParams as BetaResponseCreateParamsStreaming;
 				}
 			} finally {
 				details.onPayloadMs = performance.now() - hookStartedAt;
+			}
+			const multiAgent = params.multi_agent?.enabled === true;
+			if (
+				!supportsPositionalResponsesEffort(model, params as unknown as Record<string, unknown>) &&
+				Array.isArray(params.input)
+			) {
+				params.input = params.input.filter((item) => item.type !== "configuration_update");
+				if (
+					output.providerThinkingLevel !== undefined &&
+					supportsPositionalResponsesEffort(model, options?.samplingParams) &&
+					params.reasoning?.effort === initialRequestEffort
+				) {
+					params.reasoning = {
+						...params.reasoning,
+						effort: output.providerThinkingLevel as NonNullable<typeof params.reasoning>["effort"],
+					};
+				}
+			}
+			if (multiAgent) {
+				if (params.reasoning) delete params.reasoning.summary;
+				delete params.max_tool_calls;
+				if (
+					params.tools?.some(
+						(tool) =>
+							("async" in tool && tool.async) ||
+							(tool.type === "namespace" && tool.tools.some((nested) => "async" in nested && nested.async)),
+					)
+				)
+					params.parallel_tool_calls = false;
 			}
 			details.requestedServiceTier = diagnosticServiceTier(params.service_tier);
 			details.requestReadyMs = performance.now() - diagnostics.startedAt;
 			let liveControl: ResponseControl | undefined;
 			let retired = false;
 			const streamOptions = {
+				hosted: multiAgent || params.tools?.some((tool) => tool.type === "programmatic_tool_calling"),
+				streamingTools: false,
 				continuesResponse: () => liveControl?.waitingForSuccessor ?? false,
 				wasRetired: () => retired || liveControl?.retired === true,
 				onResponseStart: (message: AssistantMessage) => {
@@ -224,6 +259,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 			let started = false;
 			if (
 				(model.provider === "openai" || compat.supportsSteering) &&
+				(!multiAgent || options?.onResponseControl !== undefined) &&
 				options?.transport !== "sse" &&
 				!params.background
 			) {
@@ -238,6 +274,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 						options?.onResponseControl?.(control);
 					},
 					onResponse: async (response, responseModel) => {
+						requestId = response.headers["x-request-id"];
 						details.headersMs = performance.now() - diagnostics.startedAt;
 						try {
 							await options?.onResponse?.(response, responseModel);
@@ -267,6 +304,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 								);
 								if (!websocketStream) return false;
 								try {
+									streamOptions.streamingTools = multiAgent;
 									await processResponsesStream(websocketStream, output, stream, model, streamOptions);
 									return true;
 								} catch (error) {
@@ -283,11 +321,14 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 										continue;
 									}
 									if (event && details && "status" in event && typeof event.status === "number") {
-										throw APIError.generate(
-											event.status,
-											{ error: details },
-											details.message,
-											new Headers("headers" in details ? details.headers : undefined),
+										throw Object.assign(
+											APIError.generate(
+												event.status,
+												{ error: details },
+												details.message,
+												new Headers("headers" in details ? details.headers : undefined),
+											),
+											getProviderError(error),
 										);
 									}
 									throw error;
@@ -318,6 +359,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 				}
 			}
 			if (!websocketCompleted) {
+				streamOptions.streamingTools = false;
 				const requestOptions = {
 					...(options?.signal ? { signal: options.signal } : {}),
 					...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -329,7 +371,13 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 						details.sseAttempts++;
 						details.lastAttemptStartMs = performance.now() - diagnostics.startedAt;
 						try {
-							return await client.responses.create(params, requestOptions).withResponse();
+							return multiAgent
+								? await client.beta.responses
+										.create({ ...params, betas: ["responses_multi_agent=v1"] }, requestOptions)
+										.withResponse()
+								: await client.responses
+										.create(params as ResponseCreateParamsStreaming, requestOptions)
+										.withResponse();
 						} catch (error) {
 							if (error instanceof APIConnectionTimeoutError) {
 								details.localTimeout = "sdk_request";
@@ -345,6 +393,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 					},
 				);
 				details.headersMs = performance.now() - diagnostics.startedAt;
+				requestId = response.headers.get("x-request-id") ?? undefined;
 				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 				stream.push({ type: "start", partial: output });
 				await processResponsesStream(openaiStream, output, stream, model, streamOptions);
@@ -376,6 +425,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 				normalizeProviderError(error),
 				`${model.provider === "openai" ? "OpenAI" : model.provider} API error`,
 			);
+			captureProviderError(output, error, requestId);
 			finishResponsesDiagnostics(diagnostics);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
@@ -392,7 +442,9 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		(mapped, mapControl) =>
 			streamRaw(model, mapped, {
 				...options,
-				onResponseControl: (control) => options?.onResponseControl?.(control ? mapControl(control) : undefined),
+				onResponseControl: options?.onResponseControl
+					? (control) => options.onResponseControl?.(control ? mapControl(control) : undefined)
+					: undefined,
 			}),
 		options?.signal,
 	);
@@ -475,7 +527,13 @@ function buildParams(
 		context.messages,
 		compat.supportsAdditionalTools || compat.supportsToolSearch,
 	);
-	const effort = resolveResponsesEffort(model, options?.reasoningEffort);
+	const reasoningOverride = options?.samplingParams?.reasoning as ResponseCreateParamsStreaming["reasoning"];
+	const isGpt6 = model.id.startsWith("gpt-6-");
+	const managesEffort = compat.supportsReasoningEffortUpdates || isGpt6;
+	const effort = resolveResponsesEffort(
+		model,
+		(managesEffort ? reasoningOverride?.effort : undefined) ?? options?.reasoningEffort,
+	);
 	const positional = supportsPositionalResponsesEffort(model, options?.samplingParams);
 	const toolSearchTool = getNativeToolSearch(getCurrentTools(context.messages), compat.supportsToolSearch);
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
@@ -548,12 +606,22 @@ function buildParams(
 		Object.assign(params, options.samplingParams);
 	}
 
-	if (model.id === "gpt-6-astra") {
+	if (managesEffort && params.reasoning && effort) {
+		params.reasoning = {
+			...params.reasoning,
+			effort: (positional ? getInitialResponsesEffort(model, context, effort) : effort) as NonNullable<
+				typeof params.reasoning
+			>["effort"],
+		};
+	}
+
+	if (isGpt6 && effort !== "none") {
 		delete params.temperature;
 		delete params.top_p;
 		delete params.top_logprobs;
+		if (params.include) params.include = params.include.filter((item) => item !== "message.output_text.logprobs");
 	}
-	return params;
+	return { params, effort };
 }
 
 function getServiceTierCostMultiplier(

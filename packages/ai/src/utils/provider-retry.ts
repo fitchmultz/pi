@@ -1,3 +1,6 @@
+import { getProviderError } from "./provider-error.ts";
+import { isMonitoringBlocked } from "./retry.ts";
+
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 
 interface ProviderRetryOptions {
@@ -116,6 +119,7 @@ export async function retryProviderRequest<T>(
 			// Each retry is a fresh SDK request, so X-Stainless-Retry-Count remains zero.
 			return await request();
 		} catch (error) {
+			if (isMonitoringBlocked({ providerError: getProviderError(error) })) throw error;
 			if (options.signal?.aborted) throw createAbortError();
 			if (
 				retriesRemaining <= 0 ||

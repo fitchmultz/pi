@@ -14,6 +14,7 @@ Add custom providers and models (Ollama, vLLM, LM Studio, proxies) via `~/.pi/ag
 - [Per-model Overrides](#per-model-overrides)
 - [Anthropic Messages Compatibility](#anthropic-messages-compatibility)
 - [OpenAI Compatibility](#openai-compatibility)
+- [GPT-6 capabilities and controls](gpt-6.md)
 
 ## Minimal Example
 
@@ -297,6 +298,8 @@ The built-in catalog fills this in for direct Anthropic (5 min / 1 h). Other pro
 
 Only OpenAI-compatible APIs apply it (`openai-completions`, `openai-responses`, `azure-openai-responses`); other APIs ignore it. Keys override pi's named request fields (for example a `temperature` key here beats the request-level temperature), so prefer it as the single source of sampling truth for a model. In `modelOverrides`, `samplingParams` merges per key with the base model's value.
 
+GPT-6 Responses requests still enforce model compatibility after these overrides: unsupported reasoning efforts clamp, active reasoning omits incompatible sampling/logprob parameters, and supported effort changes use positional updates. See [GPT-6 controls](gpt-6.md).
+
 A constant thinking-token cap can go here too, but it will not follow `thinkingBudgets` or leave room for the answer. Prefer `compat.thinkingTokenBudgetField` (or the `supportsThinkingTokenBudget` alias) for that.
 
 ### Thinking Level Map
@@ -420,7 +423,7 @@ Use a `promptCache` override to enable cache warming through a proxy whose backi
 }
 ```
 
-Direct OpenAI GPT-5.6 Sol, Terra, and Luna default to a `272000` context window so requests remain within OpenAI's short-context pricing tier. To opt into OpenAI's 1.05M context window, increase it for each model you use:
+Direct OpenAI GPT-5.6 Sol, Terra, and Luna, and GPT-6 Sol and Luna default to a `272000` context window so requests remain within OpenAI's short-context pricing tier. To opt into OpenAI's 1.05M context window, increase it for each model you use:
 
 ```json
 {
@@ -436,7 +439,7 @@ Direct OpenAI GPT-5.6 Sol, Terra, and Luna default to a `272000` context window 
 }
 ```
 
-The override preserves the built-in pricing metadata. Requests with more than 272K total input tokens use GPT-5.6's long-context rates for the entire request. Apply the same override to `gpt-5.6-terra` or `gpt-5.6-luna` when needed.
+The override preserves the built-in pricing metadata. Requests with more than 272K total input tokens use the model's long-context rates for the entire request. Apply the same override to `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-sol`, or `gpt-6-luna` when needed. See [GPT-6](gpt-6.md) for reasoning, hosted tools, and compaction controls.
 
 Behavior notes:
 - `modelOverrides` apply to matching model IDs in the provider's final model list.
@@ -541,6 +544,13 @@ For providers with partial OpenAI compatibility, use the `compat` field.
 | `sessionAffinityFormat` | For `openai-completions` and `openai-responses`, the session-affinity header format: `openai` sends `session_id`/`x-client-request-id` (completions also `x-session-affinity`), `openai-nosession` omits the underscore-containing `session_id` header, `openrouter` sends `x-session-id`. Does not affect the `prompt_cache_key` body param. Default: auto-detected. |
 | `supportsStrictMode` | Whether the provider accepts strict JSON-schema function tool definitions. Defaults depend on the API; built-in OpenAI models carry explicit capability metadata. |
 | `supportsOpenAIGrammarTools` | Whether OpenAI-compatible APIs emit custom Lark/regex grammar tools. When `false`, grammar-constrained tools fall back to normal function tools. Default: `false`; the built-in model catalog enables it for GPT-5+ models on OpenAI, OpenAI Codex, Azure OpenAI, GitHub Copilot, opencode, and Cloudflare AI Gateway. |
+| `supportsMidConvoSystemMessages` | Preserve later system/developer messages at their original position. Defaults to `false` unless model metadata enables it. |
+| `supportsAdditionalTools` | Send additive Responses tool declarations without replacing the original tool prefix. |
+| `supportsToolSearch` | Use native Responses client tool search for the single registered search callback. |
+| `supportsExplicitPromptCacheMode` | Use GPT-5.6+ Responses cache options, including explicit-only mode when caching is disabled. |
+| `supportsAsyncTools` | Allow native asynchronous function/custom calls for tools declaring `async: true`. |
+| `supportsSteering` | Allow live Responses WebSocket steering. HTTP retains queued steering. |
+| `supportsReasoningEffortUpdates` | Preserve the initial request effort and emit positional changes on compatible standard, single-agent requests. |
 | `supportsLongCacheRetention` | Whether the provider accepts long cache retention when cache retention is `long`: `prompt_cache_options.ttl: "30m"` for GPT-5.6+ Responses models, `prompt_cache_retention: "24h"` for earlier OpenAI models, or `cache_control.ttl: "1h"` when `cacheControlFormat` is `anthropic`. Default: `true`. |
 | `openRouterRouting` | OpenRouter provider routing preferences. This object is sent as-is in the `provider` field of the [OpenRouter API request](https://openrouter.ai/docs/guides/routing/provider-selection). |
 | `vercelGatewayRouting` | Vercel AI Gateway routing config for provider selection (`only`, `order`) |
