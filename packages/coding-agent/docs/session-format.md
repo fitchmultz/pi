@@ -73,7 +73,8 @@ interface ToolCall {
   thoughtSignature?: string;
   namespace?: string;
   async?: boolean;
-  responsesItem?: ResponseFunctionToolCall | ResponseCustomToolCall;
+  streaming?: boolean; // hosted call admitted while its response remains active
+  responsesItem?: ResponseFunctionToolCall | ResponseCustomToolCall | ResponseToolSearchCall;
   executionStarted?: boolean;
   executionArguments?: JsonObject;
   executionDetached?: boolean;
@@ -109,6 +110,16 @@ interface AssistantMessage {
   responseId?: string;
   providerThinkingLevel?: string;
   diagnostics?: AssistantMessageDiagnostic[];
+  responsesOutput?: (BetaResponseInputItem | BetaResponseOutputItem)[];
+  responsesContent?: (TextContent | ThinkingContent | ToolCall)[];
+  needsContinuation?: boolean;
+  providerError?: {
+    code?: string;
+    type?: string;
+    status?: number;
+    requestId?: string;
+    responseId?: string;
+  };
   usage: Usage;
   stopReason: "pending" | "stop" | "length" | "toolUse" | "error" | "aborted" | "deferred";
   deferred?: DeferredHandle;
@@ -254,6 +265,8 @@ A message in the conversation. The `message` field contains an `AgentMessage`. S
 A native async call can produce assistant entries with `checkpoint: true` before its side effect starts and when execution detaches or resumes. These are non-billable snapshots of the same `responseId`, not additional provider responses. Keep their usage intact for context projection, but exclude them from billing, response counts, and cache-request statistics. Context rebuilding combines snapshots with the final response's content and usage.
 
 `responsesItem` retains the original completed provider item and wire identity. `executionStarted` records admission; `executionArguments` contains validated, preflight-adjusted arguments without changing that provider item. `executionDetached` means local execution stopped while an external owner retained the unfinished operation. A missing result does not prove that the side effect did not happen; recovery uses the tool's `resume` callback and never repeats an already-started `execute` call.
+
+Responses assistants also retain ordered native items and acknowledged injected inputs in `responsesOutput`; `content` is the visible and executable projection. `responsesContent` records the original projection so a later content edit cannot replay that message's stale native items. `needsContinuation` records a successful hosted response that still needs another request. A failed response's `providerError` preserves its code and available request/response identifiers independently of the displayed error text.
 
 A `before_agent_start` handler that forces the whole prompt changes only provider requests for the active run. The transcript and compaction/context-window checkpoints keep the structured sections and tool declarations; the next run regenerates extension guidance. Older sessions can contain full-prompt records with `replace: true`. Replay clears earlier content, sections, and tools before applying such a record. Resuming restores that saved state; the next run writes a structured replacement baseline so the old opaque prompt does not accumulate alongside new sections.
 
@@ -413,7 +426,7 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
    - Includes entries after the compaction entry
 4. Preserves non-message entries in the selected range so interactive mode can render them
 
-`buildSessionProjection()` then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. The raw selected entries are not modified.
+`buildSessionProjection()` then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. When a Responses assistant's content changes, provider conversion uses the replacement instead of that message's saved native output. The raw selected entries are not modified.
 
 `buildSessionContext()` builds on that projection to produce the message list for the LLM:
 

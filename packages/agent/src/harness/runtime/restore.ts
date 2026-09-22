@@ -166,6 +166,9 @@ export async function restoreLaneState(
 		configuration: stored.configuration.value,
 		inbox: stored.laneState.value.inbox,
 		lastOperationId: stored.laneState.value.lastOperationId,
+		...(stored.laneState.value.monitoringStop === undefined
+			? {}
+			: { monitoringStop: stored.laneState.value.monitoringStop }),
 		operation,
 	};
 }

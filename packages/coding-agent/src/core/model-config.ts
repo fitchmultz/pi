@@ -113,6 +113,7 @@ const OpenAICompletionsCompatSchema = Type.Object({
 
 const OpenAIResponsesCompatSchema = Type.Object({
 	supportsDeveloperRole: Type.Optional(Type.Boolean()),
+	supportsMidConvoSystemMessages: Type.Optional(Type.Boolean()),
 	sessionAffinityFormat: Type.Optional(
 		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
 	),
@@ -120,6 +121,12 @@ const OpenAIResponsesCompatSchema = Type.Object({
 	supportsStrictMode: Type.Optional(Type.Boolean()),
 	supportsOpenAIGrammarTools: Type.Optional(Type.Boolean()),
 	supportsMaxOutputTokens: Type.Optional(Type.Boolean()),
+	supportsAdditionalTools: Type.Optional(Type.Boolean()),
+	supportsToolSearch: Type.Optional(Type.Boolean()),
+	supportsExplicitPromptCacheMode: Type.Optional(Type.Boolean()),
+	supportsAsyncTools: Type.Optional(Type.Boolean()),
+	supportsSteering: Type.Optional(Type.Boolean()),
+	supportsReasoningEffortUpdates: Type.Optional(Type.Boolean()),
 });
 
 const ModelCostRatesSchema = {
@@ -179,11 +186,11 @@ const AnthropicMessagesCompatSchema = Type.Object({
 	),
 });
 
-const ProviderCompatSchema = Type.Union([
-	OpenAICompletionsCompatSchema,
-	OpenAIResponsesCompatSchema,
-	AnthropicMessagesCompatSchema,
-]);
+const ProviderCompatSchema = Type.Object({
+	...OpenAICompletionsCompatSchema.properties,
+	...OpenAIResponsesCompatSchema.properties,
+	...AnthropicMessagesCompatSchema.properties,
+});
 
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1 }),

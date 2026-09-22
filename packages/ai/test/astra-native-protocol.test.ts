@@ -152,6 +152,124 @@ it("holds initial effort stable and emits only positional changes, including omi
 	}
 });
 
+it("uses the effective sampling override for positional effort and saved response metadata", async () => {
+	const fixture = await createResponsesServer((request) => replyWithOutput(request, "override", [textOutput("done")]));
+	try {
+		const message = await responsesStream(
+			{ ...nativeModel, baseUrl: fixture.baseUrl },
+			normalizeContext({ messages: [...context.messages, saved("low", "first")] }),
+			{
+				apiKey: "local",
+				transport: "sse",
+				reasoningEffort: "medium",
+				samplingParams: { reasoning: { mode: "standard", effort: "high", context: "all_turns" } },
+			},
+		).result();
+		expect(message.stopReason).toBe("stop");
+		expect(message.providerThinkingLevel).toBe("high");
+		expect(fixture.requests[0].body.reasoning).toEqual({
+			mode: "standard",
+			effort: "low",
+			context: "all_turns",
+		});
+		expect(fixture.requests[0].body.input).toContainEqual({
+			type: "configuration_update",
+			reasoning: { effort: "high" },
+		});
+	} finally {
+		await fixture.close();
+	}
+});
+
+it.each(["gpt-6-sol", "gpt-6-luna"])("filters unsupported sampling only while %s is reasoning", async (id) => {
+	for (const effort of ["none", "high"] as const) {
+		let payload: Record<string, unknown> | undefined;
+		await responsesStream(
+			{ ...nativeModel, id, thinkingLevelMap: { ...nativeModel.thinkingLevelMap, off: "none" } },
+			context,
+			{
+				apiKey: "local",
+				samplingParams: {
+					reasoning: { effort },
+					temperature: 0.3,
+					top_p: 0.5,
+					top_logprobs: 3,
+					include: ["message.output_text.logprobs", "reasoning.encrypted_content"],
+				},
+				onPayload(value) {
+					payload = value as Record<string, unknown>;
+					throw new Error("capture");
+				},
+			},
+		).result();
+		for (const key of ["temperature", "top_p", "top_logprobs"]) {
+			if (effort === "none") expect(payload).toHaveProperty(key);
+			else expect(payload).not.toHaveProperty(key);
+		}
+		expect(payload?.include).toEqual(
+			effort === "none"
+				? ["message.output_text.logprobs", "reasoning.encrypted_content"]
+				: ["reasoning.encrypted_content"],
+		);
+	}
+});
+
+it("preserves opt-in pro mode, reasoning context and structured output without enabling them by default", async () => {
+	const format = {
+		type: "json_schema",
+		name: "answer",
+		strict: true,
+		schema: {
+			type: "object",
+			properties: { answer: { type: "string" } },
+			required: ["answer"],
+			additionalProperties: false,
+		},
+	};
+	for (const pro of [false, true]) {
+		let payload: Record<string, unknown> | undefined;
+		await responsesStream(nativeModel, normalizeContext({ messages: [...context.messages, saved("low", "first")] }), {
+			apiKey: "local",
+			reasoningEffort: "high",
+			samplingParams: pro
+				? { reasoning: { mode: "pro", effort: "max", context: "all_turns" }, text: { format } }
+				: undefined,
+			onPayload(value) {
+				payload = value as Record<string, unknown>;
+				throw new Error("capture");
+			},
+		}).result();
+		if (pro) {
+			expect(payload?.reasoning).toEqual({ mode: "pro", effort: "max", context: "all_turns" });
+			expect(payload?.text).toEqual({ format });
+			expect((payload?.input as { type?: string }[]).some((item) => item.type === "configuration_update")).toBe(
+				false,
+			);
+		} else {
+			expect(payload?.reasoning).not.toHaveProperty("mode");
+			expect(payload?.reasoning).not.toHaveProperty("context");
+			expect(payload).not.toHaveProperty("text");
+		}
+	}
+});
+
+it("leaves other providers' raw reasoning overrides unchanged without positional effort support", async () => {
+	let payload: Record<string, unknown> | undefined;
+	await responsesStream(
+		{ ...nativeModel, id: "vendor-model", compat: { supportsReasoningEffortUpdates: false } },
+		context,
+		{
+			apiKey: "local",
+			samplingParams: { reasoning: { effort: "vendor-effort" } },
+			onPayload(value) {
+				payload = value as Record<string, unknown>;
+				throw new Error("capture");
+			},
+		},
+	).result();
+	expect(payload?.reasoning).toEqual({ effort: "vendor-effort" });
+});
+
 it.each([false, true])("records failed-response usage before raising (Codex=%s)", async (codex) => {
 	const options = {
 		apiKey: codex ? token : "local",

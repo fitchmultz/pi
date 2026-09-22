@@ -29,6 +29,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
+import { captureProviderError, getProviderError } from "../utils/provider-error.ts";
 
 export interface PiMessagesOptions extends StreamOptions {
 	reasoning?: ThinkingLevel;
@@ -81,6 +82,7 @@ export type PiMessagesEvent =
 			reason: Extract<PiMessagesStopReason, "aborted" | "error">;
 			usage: PiMessagesUsage;
 			errorMessage?: string;
+			providerError?: AssistantMessage["providerError"];
 			responseId?: string;
 			providerThinkingLevel?: string;
 			rewrite?: PiMessagesRewriteImpact;
@@ -142,17 +144,20 @@ function createPiMessagesResponseError(
 ): PiMessagesResponseError {
 	const errorBody = parsePiMessagesErrorBody(body);
 	const code = typeof errorBody?.error?.code === "string" ? errorBody.error.code : undefined;
-	return new PiMessagesResponseError(formatPiMessagesResponseError(response, body, errorBody), code, {
-		version: 1,
-		provider: model.provider,
-		model: model.id,
-		url: url.toString(),
-		status: response.status,
-		statusText: response.statusText,
-		...(errorBody?.error === undefined ? {} : { error: errorBody.error as JsonValue }),
-		...(errorBody ? {} : { body: truncateDiagnosticString(body) }),
-		timestampMs: Date.now(),
-	});
+	return Object.assign(
+		new PiMessagesResponseError(formatPiMessagesResponseError(response, body, errorBody), code, {
+			version: 1,
+			provider: model.provider,
+			model: model.id,
+			url: url.toString(),
+			status: response.status,
+			statusText: response.statusText,
+			...(errorBody?.error === undefined ? {} : { error: errorBody.error as JsonValue }),
+			...(errorBody ? {} : { body: truncateDiagnosticString(body) }),
+			timestampMs: Date.now(),
+		}),
+		getProviderError({ ...errorBody, status: response.status, headers: response.headers }),
+	);
 }
 
 function createEmptyUsage(): PiMessagesUsage {
@@ -208,6 +213,7 @@ function createEventConverter(model: Model<"pi-messages">) {
 					stopReason: event.reason,
 					usage: event.usage,
 					errorMessage: event.errorMessage,
+					providerError: event.providerError,
 					responseId: event.responseId,
 				});
 				if (event.providerThinkingLevel !== undefined) {
@@ -333,6 +339,7 @@ function createErrorEvent(model: Model<"pi-messages">, error: unknown, aborted: 
 		errorMessage: error instanceof Error ? error.message : String(error),
 		timestamp: Date.now(),
 	};
+	captureProviderError(assistantMessage, error);
 
 	if (!aborted && error instanceof PiMessagesResponseError) {
 		appendAssistantMessageDiagnostic(

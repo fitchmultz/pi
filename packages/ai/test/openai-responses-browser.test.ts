@@ -33,6 +33,7 @@ it("bundles and runs direct Responses over HTTP without Node socket dependencies
 		Blob,
 		File,
 		crypto: globalThis.crypto,
+		structuredClone,
 		queueMicrotask,
 		AbortController,
 		AbortSignal,

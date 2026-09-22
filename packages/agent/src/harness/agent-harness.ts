@@ -87,11 +87,11 @@ export type RunResult = Result<
 >;
 export type CompactionResult = Result<
 	{ compaction: OperationResultRecord; run?: OperationResultRecord | SuspendedRun },
-	LaneBusy | NothingToCompact | Closed
+	LaneBusy | NothingToCompact | InvalidMessage | Closed
 >;
 export type NavigationResult = Result<
 	{ navigation: OperationResultRecord; run?: OperationResultRecord | SuspendedRun },
-	LaneBusy | InvalidNavigation | UnknownTarget | Closed
+	LaneBusy | InvalidNavigation | InvalidMessage | UnknownTarget | Closed
 >;
 export type ResumeResult = Result<OperationResultRecord | SuspendedRun, NothingToResume | Closed>;
 export type QueueResult = Result<{ entryId: string }, InvalidMessage | Closed>;

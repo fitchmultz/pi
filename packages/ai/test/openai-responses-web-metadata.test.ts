@@ -155,14 +155,14 @@ describe("Responses web-search metadata", () => {
 			},
 		]);
 		expect(output.stopReason).toBe("toolUse");
-		// Metadata is observational, not a new executable/replayable tool type.
+		// Hosted items are replayable state, never locally executable tool calls.
 		const replay = convertResponsesMessages(
 			model,
 			normalizeContext({ messages: [output] }),
 			new Set([model.provider]),
 		);
 		expect(replay.filter((item) => item.type === "function_call")).toHaveLength(1);
-		expect(replay.some((item) => item.type === "web_search_call")).toBe(false);
+		expect(replay.filter((item) => item.type === "web_search_call")).toEqual(calls);
 	});
 
 	it("keeps terminal-only sources and citations, including enrichment of an existing call", async () => {

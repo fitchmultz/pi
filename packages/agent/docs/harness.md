@@ -538,9 +538,9 @@ type ForkOptions =
   | { scope: "tree"; id?: string };
 ```
 
-**Branch scope** requires the named source Branch to be a complete configured AgentLane: tip, configuration, and lane state must all exist. A missing tip is an unknown Branch; a data-only Branch rejects; a partial configuration/state pair, or lane values without a tip, is corruption. `entryId`, when supplied, must be on the named Branch's current-tip ancestry, inclusive; omission selects the current tip. `position` defaults to `"at"`; `"before"` selects the target's parent and may produce a `null` destination tip before a root entry. A `null` source tip is legal only with no `entryId`. The destination contains exactly that one Branch under the same name, its selected path and tip, copied configuration, and fresh idle lane state.
+**Branch scope** requires the named source Branch to be a complete configured AgentLane: tip, configuration, and lane state must all exist. A missing tip is an unknown Branch; a data-only Branch rejects; a partial configuration/state pair, or lane values without a tip, is corruption. `entryId`, when supplied, must be on the named Branch's current-tip ancestry, inclusive; omission selects the current tip. `position` defaults to `"at"`; `"before"` selects the target's parent and may produce a `null` destination tip before a root entry. A `null` source tip is legal only with no `entryId`. The destination contains exactly that one Branch under the same name, its selected path and tip, copied configuration, and fresh idle lane state without the source lane's monitoring stop.
 
-**Tree scope** copies every immutable entry, including entries unreachable from all current tips; every Branch tip; every configured lane's configuration plus fresh idle lane state under the same name; and every data-only Branch as data-only. A partial configuration/state pair or lane values without a tip is corruption and rejects instead of being dropped. A branchless source produces a branchless destination.
+**Tree scope** copies every immutable entry, including entries unreachable from all current tips; every Branch tip; every configured lane's configuration plus fresh idle lane state without its source monitoring stop under the same name; and every data-only Branch as data-only. A partial configuration/state pair or lane values without a tip is corruption and rejects instead of being dropped. A branchless source produces a branchless destination.
 
 **Both scopes** copy the session name and labels only for copied entries. They exclude the usage ledger, `pi.result`, every `pi.op.*`, and every `pi.pending.*` value/list, including pending entries, tool checkpoints, and assistant frames. Destination usage starts at zero and `messageCount` counts copied message entries. Copied entries retain ids.
 
@@ -654,12 +654,15 @@ interface LaneState {
   currentOperationId: string | null;
   lastOperationId: string | null;
   inbox: Array<{ entryId: string; kind: "steer" | "followUp" | "nextRun" | "write" }>;
+  monitoringStop?: { message: SettledAssistantMessage };
 }
 ```
 
 Attachment reads `branchTip`, `laneConfig`, and `laneState` per configured lane; if `currentOperationId` names O, also `operationMeta(O)` and `operationState(O)`. It validates required existence, lane/id agreement, and intent-to-leaf reachability. It never reads `operationResult`: `lastOperationId` is only an observation pointer.
 
 The restored process-local projection is authoritative while the Harness owns the Session; every supported mutation commits on the Session mutation line and publishes the matching projection before releasing it. Attachment does not dereference transcript, inbox payloads, deferred sources, frames, tool arguments/checkpoints/memos, preparations, or staged outcomes — `watch` and drive procedures validate those references when they consume them (§4.4). Missing optional frame lists and tool checkpoints are legal; contradictory required content faults its consumer.
+
+**Monitoring stops.** A response with `providerError.code === "misalignment_policy_violation"` persists `monitoringStop` only in the affected lane, preserving the error and available request and response IDs. It takes precedence over retries, overflow recovery, cancellation, response hooks, and summary continuation. Further execution admission returns `InvalidMessage` with reason `monitoring_blocked`; resumed work fails before dispatching requests, tools, summaries, or deferred polls. Read-only inspection and unsummarized navigation remain available, but navigating to an ancestor, changing models, or reopening the same session does not clear that lane's stop. Other lanes may use shared history, including the blocked response, without inheriting the stop. Branch and tree forks likewise copy the history but start with fresh idle lane state; a later monitoring block in a destination stops only that destination lane. The stop does not undo earlier actions; review those actions and the recorded error before proceeding with other work.
 
 ## 3.4 The atomic transition rule
 
@@ -762,7 +765,7 @@ Each append checks the same response id is still effect-pending: an append admit
 
 ### Classification order
 
-First match wins:
+A monitoring stop (§3.3) fails the operation before these ordinary classifications. Otherwise, first match wins:
 
 1. current durable control is `cancel_requested` → normalize to `aborted`; reconciliation terminalizes it as aborted;
 2. adapter-reported or recognized context overflow → normalize to `error`; enter one overflow summary, or terminal-fail if recovery was already used;
@@ -868,7 +871,7 @@ interface OperationResultRecord {
 
 Every terminal path performs one universal suffix in the same transaction as its final business writes: procedure-specific entries/usage/tip writes → delete all operation-owned `pi.op.*` and pending progress/frame/outcome addresses → set `operationResult(operationId)` exactly once → set `laneState{ currentOperationId: null, lastOperationId: operationId, inbox: preservedCurrentInbox }`. This is the implementation's normative write order. The old §3.13 prose listed result before cleanup, while its worked trace and source used cleanup first; this resolves that contradiction in favor of source and the trace.
 
-The record is the public settled outcome, not a pointer to a hydrated outcome object; it embeds no entries and is never read by recovery. `fromTipId`/`tipId` delimit the operation's transcript segment; a precise rewrite may make either pointer dangle (§2.9) without changing the recorded disposition. Records are immutable, lane-lived, and retained for every operation; J1 snapshot compaction must carry them forward. `getResult(id)` is one value read. `drive(id)` is total: the current id installs/joins the lane Drive, an existing record returns `{ kind: "settled", outcome: record }`, and neither returns `OperationMismatch`; `LaneState.lastOperationId` and `LaneSnapshot.lastResult` expose the newest record without limiting access to older ids. A terminal commit under `cancel_requested` always records `aborted`, so `completed`/`declined`/`failed` imply terminal control was still running. Operation cleanup never deletes the lane inbox; usage rows and immutable transcript entries survive terminal cleanup.
+The record is the public settled outcome, not a pointer to a hydrated outcome object; it embeds no entries and is never read by recovery. `fromTipId`/`tipId` delimit the operation's transcript segment; a precise rewrite may make either pointer dangle (§2.9) without changing the recorded disposition. Records are immutable, lane-lived, and retained for every operation; J1 snapshot compaction must carry them forward. `getResult(id)` is one value read. `drive(id)` is total: the current id installs/joins the lane Drive, an existing record returns `{ kind: "settled", outcome: record }`, and neither returns `OperationMismatch`; `LaneState.lastOperationId` and `LaneSnapshot.lastResult` expose the newest record without limiting access to older ids. A terminal commit under `cancel_requested` records `aborted` unless a monitoring stop (§3.3) takes precedence and records `failed`. Operation cleanup never deletes the lane inbox; usage rows and immutable transcript entries survive terminal cleanup.
 
 # Part 4 — Execution, recovery, abort, close
 
@@ -1039,10 +1042,10 @@ type RunResult = Result<OperationResultRecord | SuspendedRun,
   LaneBusy | InvalidMessage | UnknownSkill | UnknownTemplate | Closed>;
 type CompactionResult = Result<
   { compaction: OperationResultRecord; run?: OperationResultRecord | SuspendedRun },
-  LaneBusy | NothingToCompact | Closed>;
+  LaneBusy | NothingToCompact | InvalidMessage | Closed>;
 type NavigationResult = Result<
   { navigation: OperationResultRecord; run?: OperationResultRecord | SuspendedRun },
-  LaneBusy | InvalidNavigation | UnknownTarget | Closed>;
+  LaneBusy | InvalidNavigation | InvalidMessage | UnknownTarget | Closed>;
 type ResumeResult = Result<OperationResultRecord | SuspendedRun, NothingToResume | Closed>;
 type QueueResult = Result<{ entryId: string }, InvalidMessage | Closed>;
 type CancelQueuedResult = Result<{ kind: "cancelled" | "already_consumed" | "not_found" }, Closed>;
@@ -1190,7 +1193,7 @@ Timing and repetition:
 | `before_drive` | once per newly installed real drive pass, after the cancellation check and before recovery or ordinary work; repeats after every wait/suspension or process loss; joiners do not rerun it |
 | `before_run` | while a run is durably `starting`, after `before_drive`; may rerun until its consuming commit succeeds; never after that transition |
 | `transform_context`, `before_request`, `before_payload` | once per request attempt, including retry and replay; `transform_context` at `AgentMessage` level before `toProviderMessages`; `before_payload` on the provider-specific wire payload |
-| `after_response` | per settled response, after streaming settles and the latest frame write completes (§3.7), before `message_end` and the commit; unless abort wins before it starts |
+| `after_response` | per settled response, after streaming settles and the latest frame write completes (§3.7), before `message_end` and the commit; unless abort wins before it starts or the response carries a monitoring stop |
 | `before_tool` | after validation, before execution; per call execution; not when an orphaned unsafe call is synthesized without execution |
 | `after_tool` | after execution, before outcome staging; per executed result unless abort wins before it starts; runs on safe replay |
 | `before_compaction`, `before_navigation` | in `deciding`; once until a structural source commits; never once generation is durable |
@@ -1334,7 +1337,7 @@ Operations:
 16. Only terminal transitions construct `OperationResultRecord`. Exactly one immutable `pi.result/{operationId}` is retained per terminal operation; older records remain readable after later operations, and recovery never reads any record.
 17. At most one operation is open per lane. Two is corruption.
 18. `overflowRecoveryUsed` is `true` only after overflow compaction. A transition that adds projecting conversational input or tool results and requires an assistant writes `false`; an unprojected custom write preserves it.
-19. A response committed with `stopReason: "aborted"` has `control.status === "cancel_requested"`; every terminal transaction under cancelled control records `status: "aborted"`. Equivalently, a terminal `completed`, `declined`, or `failed` record proves control was still running at its terminal commit. Providers must comply with the harness-owned signal contract; violation is corruption.
+19. A response committed with `stopReason: "aborted"` has `control.status === "cancel_requested"`; terminal transactions under cancelled control record `status: "aborted"` unless a monitoring stop (§3.3) takes precedence and records `failed`. Providers must comply with the harness-owned signal contract; violation is corruption.
 20. Attachment restores and validates only the small lane/operation projection (§3.3, §4.4). That owned projection is authoritative until close, fault, or process loss. Detailed presentation references are validated by `watch(context)` under the Session mutation line; drive payload references are validated by their consuming procedure. Missing or contradictory required data faults that consumer, while optional frame/checkpoint absence is legal. Top-level operation state has one live writer; only parallel tool-call status and queued progress/memo writes require child-state fencing. `pi.result` never determines an open operation's next procedure.
 21. At most one terminal transaction and one immutable result-record write commit per operation. The one lane-owned Drive is the sole top-level state-advance writer, and every terminal candidate serializes on the Session mutation line. Administrative mutation of a live Lane's reserved control values is unsupported; offline administration first acquires exclusive Session ownership.
 22. At most one `Drive` exists per lane. Acceptance and taskless `requestAbort` never install one. A matching `drive` installs it before releasing the Session mutation line; another matching drive joins that pass, and a stale id starts nothing. Caller cancellation ends only that caller's observation. A live Drive is never replaced in-process. Close/fault seal mutation admission and reject observations without writing operation state. Each newly installed pass invokes `before_drive` once after the cancellation check; joiners do not. `starting` under cancelled control invokes neither `before_drive` nor `before_run`.

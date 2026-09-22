@@ -197,6 +197,8 @@ export interface PrepareNextTurnContext extends AgentTurnContext {}
  */
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
+	/** Local monitoring identity when sessionId is absent; does not change provider cache routing. */
+	monitoringSessionId?: string;
 	/** Current permitted executable tools, read after an awaited search callback registers/activates matches. */
 	getTools?: () => readonly AgentTool[];
 
@@ -498,6 +500,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 
 /** Context snapshot passed into the low-level agent loop. */
 export interface AgentContext {
+	/** Session-owned stop retained while navigating; ignored when the destination identity differs. */
+	monitoringStop?: { sessionId: string; message: AssistantMessage };
 	/** Transcript visible to the model. */
 	messages: AgentMessage[];
 	/** Tools available for execution in this run. */

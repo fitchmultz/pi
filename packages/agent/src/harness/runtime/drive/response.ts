@@ -2,6 +2,7 @@ import {
 	type AssistantMessageEvent,
 	AssistantMessageFrameEncoder,
 	isContextOverflow,
+	isMonitoringBlocked,
 	isRecoverableLength,
 	isRetryableAssistantError,
 	retryDelayMs,
@@ -84,6 +85,7 @@ export function openAssistantResponse<TContext extends object | undefined>(
 		},
 		async afterResponse(message, metadata, context) {
 			await close();
+			if (isMonitoringBlocked(message)) return message;
 			const result = await lane.hooks.runWithGate(
 				"after_response",
 				{ lane: lane.name, runId: drive.operationId, ...metadata, message },
@@ -145,10 +147,11 @@ function uuidV7Timestamp(id: string): number {
 
 function providerError(source: "assistant" | "deferred", message: SettledAssistantMessage): OperationError {
 	return {
-		code: "assistant_error",
+		code: isMonitoringBlocked(message) ? "misalignment_policy_violation" : "assistant_error",
 		message:
 			message.errorMessage ??
 			`${source === "assistant" ? "Assistant" : "Deferred"} request ended with ${message.stopReason}`,
+		...(isMonitoringBlocked(message) ? { details: { ...message.providerError } } : {}),
 	};
 }
 
@@ -187,6 +190,8 @@ export async function publishResponse<TContext extends object | undefined>(
 	options: { recovery?: true } = {},
 ): Promise<ProcedureResult> {
 	const overflow =
+		lane.state.monitoringStop === undefined &&
+		!isMonitoringBlocked(response) &&
 		intent.at === "assistant.effect_pending" &&
 		(isContextOverflow(response, intent.contextWindow) || isRecoverableLength(response, intent.intendedOutputLimit));
 	const overflowPreparation =
@@ -209,7 +214,10 @@ export async function publishResponse<TContext extends object | undefined>(
 			let settled: OperationState | undefined;
 			let failure: OperationError | undefined;
 
-			if (current.control.status === "cancel_requested") {
+			const monitoringResponse = isMonitoringBlocked(response) ? response : state.monitoringStop?.message;
+			if (monitoringResponse !== undefined) {
+				failure = providerError(source, monitoringResponse);
+			} else if (current.control.status === "cancel_requested") {
 				committed = normalizeAborted(source, response);
 				settled = {
 					...scope,
@@ -305,6 +313,13 @@ export async function publishResponse<TContext extends object | undefined>(
 						...scope,
 						at: "tools",
 						batch: { assistantEntryId: responseEntryId, configuration, turnId, calls: planned },
+					};
+				} else if (response.needsContinuation) {
+					settled = {
+						...scope,
+						at: "checkpoint",
+						continuation: { kind: "need_assistant", overflowRecoveryUsed: false },
+						triggerEntryId: responseEntryId,
 					};
 				} else if (response.stopReason === "toolUse") {
 					committed = normalizeError(response, "Provider reported tool use without any tool calls");
@@ -465,7 +480,10 @@ export async function publishResponse<TContext extends object | undefined>(
 					kind: "finish",
 					writes,
 					record,
-					lane: { tipId: responseEntryId },
+					lane: {
+						tipId: responseEntryId,
+						...(isMonitoringBlocked(committed) ? { monitoringStop: { message: committed } } : {}),
+					},
 					materialize: () => ({ kind: "settled", outcome: record }) as const,
 					events,
 				};

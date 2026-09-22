@@ -16,6 +16,7 @@ import {
 import { deleteList, pendingAssistantFrames } from "../../session/values.ts";
 import type { AgentHarnessStreamOptions } from "../../types.ts";
 import type { Lane } from "../lane.ts";
+import { assertMonitoringActive } from "../monitoring.ts";
 import type { ContinueOperationResult, Drive, ProcedureResult } from "../types.ts";
 import { openAssistantResponse, publishConfigurationFailure, publishResponse } from "./response.ts";
 
@@ -189,6 +190,7 @@ async function performDeferredPoll<TContext extends object | undefined>(
 	intent: DeferredEffectPendingOperation,
 	recovery: boolean,
 ): Promise<SettledAssistantMessage> {
+	assertMonitoringActive(lane, drive);
 	const response = openAssistantResponse(lane, drive, intent.responseEntryId, recovery);
 	let metadata: { status?: number; headers?: Record<string, string> } = {};
 	const admitted = withAbortSignal(drive.gate.signal, drive.context);
@@ -208,6 +210,7 @@ async function performDeferredPoll<TContext extends object | undefined>(
 					drive.gate,
 					drive.context,
 				);
+				assertMonitoringActive(lane, drive);
 				return result?.payload;
 			},
 			onResponse: (response) => {

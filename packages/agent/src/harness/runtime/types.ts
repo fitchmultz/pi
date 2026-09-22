@@ -6,6 +6,7 @@ import { type Context, withoutAbortSignal } from "../context.ts";
 import { createGate, type Gate, type GateControl } from "../execution/effect-gate.ts";
 import type {
 	CommitResult,
+	LaneState as DurableLaneState,
 	InboxItem,
 	LaneConfiguration,
 	Operation,
@@ -45,6 +46,7 @@ export interface LaneState {
 	readonly inbox: InboxItem[];
 	readonly lastOperationId: string | null;
 	readonly operation: Operation | null;
+	readonly monitoringStop?: DurableLaneState["monitoringStop"];
 }
 
 type Synchronous<TResult> = TResult extends PromiseLike<unknown> ? never : TResult;
@@ -65,7 +67,7 @@ export type LaneCommand<TResult> =
 export type ContinueOperationResult<TResult> = { kind: "cancel_requested" } | { kind: "result"; value: TResult };
 
 /** A durable operation transition. The Lane pairs the state write with projection publication. */
-type LanePatch = Partial<Pick<LaneState, "tipId" | "configuration" | "inbox">>;
+type LanePatch = Partial<Pick<LaneState, "tipId" | "configuration" | "inbox" | "monitoringStop">>;
 
 interface FinishDecision<TResult> {
 	kind: "finish";

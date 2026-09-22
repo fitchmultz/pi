@@ -234,6 +234,28 @@ afterEach(async () => {
 });
 
 describe("runtime assistant retry wait", () => {
+	it.each(["503 service unavailable", "prompt is too long"])(
+		"settles monitoring blocks without retry or compaction despite message wording: %s",
+		async (errorMessage) => {
+			const fixture = await createFixture({ deferredSubmission: false });
+			const ready = await advanceToReady(fixture);
+			fixture.faux.setResponses([
+				{
+					...fauxAssistantMessage([], { stopReason: "error", errorMessage }),
+					providerError: { code: "misalignment_policy_violation", requestId: "req_blocked" },
+				},
+			]);
+			expect(await runGeneration(fixture.lane, fixture.drive, ready)).toMatchObject({
+				kind: "settled",
+				outcome: { status: "failed" },
+			});
+			expect(
+				fixture.events.some((event) => event.type === "retry_scheduled" || event.type === "compaction_start"),
+			).toBe(false);
+			await expectProjectionRestores(fixture);
+		},
+	);
+
 	it("classifies a live retryable provider error into durable retry wait", async () => {
 		const fixture = await createFixture({ deferredSubmission: false });
 		const ready = await advanceToReady(fixture);

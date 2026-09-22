@@ -723,7 +723,7 @@ describe("native direct Responses WebSockets", () => {
 		await vi.waitFor(() => expect(server.webSockets.clients.size).toBe(0));
 	});
 
-	it("sends current full input when server output includes items Pi cannot replay", async () => {
+	it("preserves hosted output and citations when starting a full-input continuation", async () => {
 		const citation = {
 			type: "url_citation",
 			url: "https://example.com",
@@ -774,7 +774,8 @@ describe("native direct Responses WebSockets", () => {
 		expect(server.connections).toHaveLength(1);
 		expect(server.requests[1].body.previous_response_id).toBeUndefined();
 		expect(server.requests[1].body.tools).toEqual([{ type: "web_search" }]);
-		expect(server.requests[1].body.input).toHaveLength(3);
+		expect(server.requests[1].body.input).toHaveLength(4);
+		expect(server.requests[1].body.input).toContainEqual(first.responsesOutput?.[0]);
 		expect(JSON.stringify(server.requests[1].body.input)).toContain("search result summary");
 		context.messages.push(second, { role: "user", content: "resume deltas", timestamp: 2 });
 		expect((await streamSimple(server.model, context, options).result()).stopReason).toBe("stop");
@@ -786,7 +787,7 @@ describe("native direct Responses WebSockets", () => {
 		expect(server.connections).toHaveLength(1);
 	});
 
-	// PR #15: refusals are persisted as text, not replayed as refusal content.
+	// PR #15: display refusals as text while keeping authoritative refusal content for replay.
 	it("keeps the socket but resets continuation after a refusal", async () => {
 		const server = await createResponsesServer((request) => {
 			const first = server.requests.length === 1;
@@ -808,7 +809,7 @@ describe("native direct Responses WebSockets", () => {
 		expect(server.requests[1].body.previous_response_id).toBeUndefined();
 		expect(server.requests[1].body.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "first input" }] },
-			textOutput("refusal", "Cannot help with that."),
+			{ ...textOutput("refusal"), content: [{ type: "refusal", refusal: "Cannot help with that." }] },
 			{ role: "user", content: [{ type: "input_text", text: "safe follow-up" }] },
 		]);
 		context.messages.push(second, { role: "user", content: "resume deltas", timestamp: 2 });

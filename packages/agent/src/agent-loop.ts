@@ -9,10 +9,12 @@ import {
 	findTool,
 	getCurrentTools,
 	getToolStateChanges,
+	isMonitoringBlocked,
 	mergeAssistantCheckpoint,
 	normalizeContext,
 	type ResponseControl,
 	type SystemMessage,
+	snapshotResponsesContent,
 	type Tool,
 	type ToolResultMessage,
 	type ToolStateChanges,
@@ -49,7 +51,10 @@ export function getPendingToolCalls(messages: readonly AgentMessage[]): readonly
 	return messages.flatMap((message) =>
 		message.role === "assistant"
 			? message.content.flatMap((call) =>
-					call.type === "toolCall" && call.async && call.responsesItem && !results.has(call.id)
+					call.type === "toolCall" &&
+					(call.async || call.streaming || call.executionStarted) &&
+					call.responsesItem &&
+					!results.has(call.id)
 						? [
 								{
 									toolCallId: call.id,
@@ -106,7 +111,8 @@ export function agentLoopContinue(
 
 	if (
 		context.messages[context.messages.length - 1].role === "assistant" &&
-		getPendingToolCalls(context.messages).length === 0
+		getPendingToolCalls(context.messages).length === 0 &&
+		!(context.messages.at(-1) as AssistantMessage).needsContinuation
 	) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
@@ -157,7 +163,8 @@ export async function runAgentLoopContinue(
 
 	if (
 		context.messages[context.messages.length - 1].role === "assistant" &&
-		getPendingToolCalls(context.messages).length === 0
+		getPendingToolCalls(context.messages).length === 0 &&
+		!(context.messages.at(-1) as AssistantMessage).needsContinuation
 	) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
@@ -241,12 +248,32 @@ async function runLoop(
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
 ): Promise<void> {
+	const monitoringSessionId = initialConfig.sessionId ?? initialConfig.monitoringSessionId;
+	const previousBlock =
+		monitoringSessionId === undefined
+			? undefined
+			: initialContext.monitoringStop?.sessionId === monitoringSessionId
+				? initialContext.monitoringStop.message
+				: initialContext.messages.find(
+						(message): message is AssistantMessage =>
+							message.role === "assistant" &&
+							isMonitoringBlocked(message) &&
+							message.monitoringSessionId === monitoringSessionId,
+					);
+	if (previousBlock) {
+		await emit({ type: "turn_end", message: previousBlock, toolResults: [] });
+		await emit({ type: "agent_end", messages: newMessages });
+		return;
+	}
+	const monitoringAbort = new AbortController();
+	const toolSignal = signal ? AbortSignal.any([signal, monitoringAbort.signal]) : monitoringAbort.signal;
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	let explicitContinuation = false;
 	const startedCalls = new Set<string>();
 	const pendingCalls = new Map<string, { scope: object; task: Promise<ExecutedToolCallBatch> }>();
+	const blockingCalls = new Set<string>();
 	const readyBatches: ExecutedToolCallBatch[] = [];
 	let asyncFailure: unknown;
 	let activeControl: ResponseControl | undefined;
@@ -271,8 +298,9 @@ async function runLoop(
 			.filter((pending) => !scope || config.toolExecution === "sequential" || pending.scope === scope)
 			.map((pending) => pending.task);
 	const startAsyncCall = async (message: AssistantMessage, call: AgentToolCall, scope: object): Promise<void> => {
-		if (startedCalls.has(call.id)) return;
+		if (monitoringAbort.signal.aborted || startedCalls.has(call.id)) return;
 		startedCalls.add(call.id);
+		if (!call.async) blockingCalls.add(call.id);
 		await emit({ type: "message_checkpoint", message: createToolCallCheckpoint(message, call) });
 		const sequential =
 			config.toolExecution === "sequential" ||
@@ -282,12 +310,13 @@ async function runLoop(
 			: exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope)
 				? [exclusiveCall.task]
 				: [];
-		const task = Promise.all(predecessors).then(() =>
-			executeToolCalls(
+		const task = Promise.all(predecessors).then(() => {
+			if (monitoringAbort.signal.aborted) return { messages: [], terminate: true };
+			return executeToolCalls(
 				currentContext,
 				message,
 				config,
-				signal,
+				toolSignal,
 				async (event) => {
 					if (event.type === "message_checkpoint" && event.message.responseId) {
 						for (const messages of [currentContext.messages, newMessages]) {
@@ -306,8 +335,8 @@ async function runLoop(
 					}
 				},
 				[call],
-			),
-		);
+			);
+		});
 		const pending = { scope, task };
 		if (sequential) exclusiveCall = pending;
 		pendingCalls.set(call.id, pending);
@@ -317,7 +346,7 @@ async function runLoop(
 					readyBatches.push(batch);
 					pendingNewContext ??= batch.newContext;
 					if (pendingNewContext) retireForNewContext();
-					else activeControl?.submitToolResults(savedResults);
+					else if (!monitoringAbort.signal.aborted) activeControl?.submitToolResults(savedResults);
 				},
 				(error: unknown) => {
 					asyncFailure = error;
@@ -328,6 +357,7 @@ async function runLoop(
 			})
 			.finally(() => {
 				pendingCalls.delete(call.id);
+				blockingCalls.delete(call.id);
 				if (exclusiveCall?.task === task) exclusiveCall = undefined;
 			});
 	};
@@ -341,7 +371,7 @@ async function runLoop(
 			for (const call of message.content) {
 				if (call.type !== "toolCall") continue;
 				if (resultIds.has(call.id)) startedCalls.add(call.id);
-				else if (call.executionStarted || (call.async && call.responsesItem))
+				else if (call.executionStarted || ((call.async || call.streaming) && call.responsesItem))
 					await startAsyncCall(message, call, message);
 			}
 		}
@@ -354,6 +384,10 @@ async function runLoop(
 
 			// Inner loop: process tool calls and steering messages
 			while (hasMoreToolCalls || pendingMessages.length > 0) {
+				// Hosted synchronous calls must finish before request preparation, including compaction after restart.
+				await Promise.all(
+					[...pendingCalls].filter(([id]) => blockingCalls.has(id)).map(([, pending]) => pending.task),
+				);
 				let preparedMessages: AgentMessage[] = [];
 				if (lastCompletedTurn) {
 					if (config.getTools) currentContext = { ...currentContext, tools: [...config.getTools()] };
@@ -473,6 +507,7 @@ async function runLoop(
 					},
 					startAsyncCall,
 					async (message, scope) => {
+						if (monitoringAbort.signal.aborted) return;
 						const calls = message.content.filter(
 							(call): call is AgentToolCall => call.type === "toolCall" && !startedCalls.has(call.id),
 						);
@@ -488,7 +523,7 @@ async function runLoop(
 						const batch =
 							message.stopReason === "length"
 								? await failToolCallsFromTruncatedMessage(calls, emit)
-								: await executeToolCalls(currentContext, message, config, signal, emit, calls);
+								: await executeToolCalls(currentContext, message, config, toolSignal, emit, calls);
 						for (const result of batch.messages) {
 							currentContext.messages.push(result);
 							newMessages.push(result);
@@ -499,17 +534,22 @@ async function runLoop(
 						if (pendingNewContext) retireForNewContext();
 						else activeControl?.submitToolResults(savedResults);
 					},
+					(message) => monitoringAbort.abort(new Error(message.errorMessage ?? "Conversation stopped for review")),
 				);
 				const message = streamed.message;
 				const scope = streamed.scope;
 				streamed.needsContinuation ||= responseRetired;
 				if (asyncFailure) throw asyncFailure;
 
-				if ((message.stopReason === "error" && !streamed.needsContinuation) || message.stopReason === "aborted") {
+				if (
+					isMonitoringBlocked(message) ||
+					(message.stopReason === "error" && !streamed.needsContinuation) ||
+					message.stopReason === "aborted"
+				) {
 					await joinPendingCalls();
 					const toolResults = readyBatches.flatMap((batch) => batch.messages);
 					lastCompletedTurn = { message, toolResults, context: currentContext, newMessages };
-					await config.finishTurn?.(lastCompletedTurn, signal);
+					if (!isMonitoringBlocked(message)) await config.finishTurn?.(lastCompletedTurn, signal);
 					await emit({ type: "turn_end", message, toolResults });
 					await emit({ type: "agent_end", messages: newMessages });
 					return;
@@ -520,7 +560,7 @@ async function runLoop(
 				);
 				const toolResults: ToolResultMessage[] = [];
 				let newContext: NewContextRequest | undefined;
-				hasMoreToolCalls = streamed.needsContinuation;
+				hasMoreToolCalls = streamed.needsContinuation || message.needsContinuation === true;
 				if (toolCalls.length > 0) {
 					if (exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope))
 						await exclusiveCall.task;
@@ -534,7 +574,7 @@ async function runLoop(
 					const executedToolBatch =
 						message.stopReason === "length"
 							? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-							: await executeToolCalls(currentContext, message, config, signal, emit, toolCalls);
+							: await executeToolCalls(currentContext, message, config, toolSignal, emit, toolCalls);
 					toolResults.push(...executedToolBatch.messages);
 					newContext = executedToolBatch.newContext;
 					hasMoreToolCalls = !executedToolBatch.terminate || newContext !== undefined;
@@ -668,6 +708,7 @@ async function streamAssistantResponse(
 	streamFunction: StreamFn,
 	startAsyncCall: (message: AssistantMessage, call: AgentToolCall, scope: object) => Promise<void>,
 	finishIntermediateResponse: (message: AssistantMessage, scope: object) => Promise<void>,
+	onMonitoringBlock: (message: AssistantMessage) => void,
 ): Promise<{ message: AssistantMessage; needsContinuation: boolean; scope: object }> {
 	let messages = context.messages;
 	if (config.transformContext) messages = await config.transformContext(messages, signal);
@@ -695,6 +736,11 @@ async function streamAssistantResponse(
 		}
 	};
 	const commit = async (message: AssistantMessage): Promise<AssistantMessage> => {
+		if (isMonitoringBlocked(message)) {
+			const sessionId = config.sessionId ?? config.monitoringSessionId;
+			if (sessionId !== undefined) message.monitoringSessionId = sessionId;
+			onMonitoringBlock(message);
+		}
 		if (
 			lastCommitted &&
 			(lastCommitted === message || (message.responseId && lastCommitted.responseId === message.responseId))
@@ -747,6 +793,7 @@ async function streamAssistantResponse(
 				case "toolcall_start":
 				case "toolcall_delta":
 				case "toolcall_end": {
+					if (isMonitoringBlocked(event.partial)) onMonitoringBlock(event.partial);
 					if (!partialMessage) break;
 					if (event.type === "toolcall_end") event.partial.content[event.contentIndex] = event.toolCall;
 					const saved = context.messages[contextIndex];
@@ -758,22 +805,28 @@ async function streamAssistantResponse(
 					if (event.type === "text_end" || event.type === "thinking_end" || event.type === "toolcall_end")
 						completeContent.add(event.contentIndex);
 					if (event.type !== "toolcall_end") break;
+					if (event.toolCall.streaming && config.getTools) context.tools = [...config.getTools()];
 					const tool = findTool(context.tools ?? [], event.toolCall);
-					if (!event.toolCall.async || !tool?.async) break;
+					const hostedCall = event.toolCall.streaming === true && !!event.toolCall.responsesItem;
+					if (!hostedCall && (!event.toolCall.async || !tool?.async)) break;
 					if (
-						!event.toolCall.responsesItem?.async ||
-						(config.model.api !== "openai-responses" && config.model.api !== "openai-codex-responses") ||
-						!(
-							config.model.compat &&
-							"supportsAsyncTools" in config.model.compat &&
-							config.model.compat.supportsAsyncTools
-						)
+						!hostedCall &&
+						(event.toolCall.responsesItem?.type === "tool_search_call" ||
+							!event.toolCall.responsesItem?.async ||
+							(config.model.api !== "openai-responses" && config.model.api !== "openai-codex-responses") ||
+							!(
+								config.model.compat &&
+								"supportsAsyncTools" in config.model.compat &&
+								config.model.compat.supportsAsyncTools
+							))
 					)
 						break;
 					const checkpoint = {
 						...partialMessage,
 						content: partialMessage.content.filter((_block, index) => completeContent.has(index)),
 					};
+					if (checkpoint.responsesOutput)
+						checkpoint.responsesContent = snapshotResponsesContent(checkpoint.content);
 					await startAsyncCall(checkpoint, event.toolCall, scope);
 					break;
 				}
@@ -1065,6 +1118,9 @@ async function prepareToolCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+	if (signal?.aborted) {
+		return { kind: "immediate", result: createErrorToolResult("Operation aborted"), isError: true };
+	}
 	const tool = findTool(currentContext.tools ?? [], toolCall);
 	if (!tool || (toolCall.kind === "toolSearch" && !tool.toolSearch)) {
 		return {
@@ -1174,9 +1230,10 @@ async function executePreparedToolCall(
 	});
 	const nativeAsync =
 		prepared.toolCall.async === true &&
+		prepared.toolCall.responsesItem?.type !== "tool_search_call" &&
 		prepared.toolCall.responsesItem?.async === true &&
 		prepared.tool.async === true;
-	if (nativeAsync) {
+	if (prepared.toolCall.responsesItem) {
 		prepared.toolCall.executionArguments = structuredClone(prepared.args) as AgentToolCall["arguments"];
 		prepared.toolCall.executionStarted = true;
 		prepared.toolCall.executionDetached = false;
@@ -1190,6 +1247,8 @@ async function executePreparedToolCall(
 	let acceptingUpdates = true;
 
 	try {
+		// Persistence hooks can yield while a monitoring block cancels this call.
+		if (signal?.aborted) return { result: createErrorToolResult("Operation aborted"), isError: true };
 		const execute = resume ? prepared.tool.resume : prepared.tool.execute;
 		const result = await execute?.(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
 			if (!acceptingUpdates) return;

@@ -6,7 +6,7 @@ import type {
 	DeferredHandle,
 	ToolCall,
 } from "@earendil-works/pi-ai";
-import { AssistantMessageFrameEncoder, isRetryableAssistantError } from "@earendil-works/pi-ai";
+import { AssistantMessageFrameEncoder, isMonitoringBlocked, isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { planManagedEntry, prepareDraft, type SystemInstructionsHooks, sameSnapshot, takeSnapshot } from "../system.ts";
 import {
@@ -147,6 +147,8 @@ export const generation: CoreKind<
 	// commit re-take S′, retry if it moved, else append the managed entry and checkpoint
 	// `prepared` with the cutoff. Runs once per generation; never on recovery.
 	async initial(task, rt, ctx) {
+		if (await rt.commit((tx) => tx.monitoringStopped(task.conversationId), ctx))
+			return failStep(task, "provider", "misalignment_policy_violation");
 		const { snapshot, canonical, seed } = await rt.commit(
 			(tx, current) => takeSnapshot(tx, current.conversationId, rt.registries.sections, rt.registries.tools),
 			ctx,
@@ -203,10 +205,13 @@ export const generation: CoreKind<
 			const derived = await derive(task, cp, rt, ctx);
 			if (estimate(derived.messages) > model.contextWindow - model.maxTokens) return overflow(task, rt);
 			const attempt = cp.attempt + 1;
-			await rt.commit((tx) => {
+			const stopped = await rt.commit(async (tx) => {
+				if (await tx.monitoringStopped(task.conversationId)) return true;
 				tx.checkpoint({ ...cp, phase: "requesting", attempt });
 				tx.emit({ type: "generation.started", taskId: task.id, attempt });
+				return false;
 			}, ctx); // before the effect
+			if (stopped) return failStep(task, "provider", "misalignment_policy_violation");
 			const { terminal, deferred } = await stream(cp, model, derived.messages, rt, ctx);
 			if (deferred !== undefined) {
 				const pollAt = rt.now() + (deferred.pollAfterMs ?? 5000);
@@ -260,9 +265,13 @@ export const generation: CoreKind<
 		// Provider-side async. Poll; not the retry backoff. Same after a crash: the handle is durable.
 		async deferred(task, rt, ctx) {
 			const cp = task.checkpoint;
+			if (await rt.commit((tx) => tx.monitoringStopped(task.conversationId), ctx))
+				return failStep(task, "provider", "misalignment_policy_violation");
 			const model = rt.models.resolve(cp.model);
 			if (model === undefined) return failStep(task, "no_model", "model disappeared");
 			await rt.sleep(cp.pollAt, ctx);
+			if (await rt.commit((tx) => tx.monitoringStopped(task.conversationId), ctx))
+				return failStep(task, "provider", "misalignment_policy_violation");
 			const result = await rt.models.fetchDeferred(model, cp.handle, ctx);
 			if ("deferred" in result && result.deferred !== undefined) {
 				const pollAt = rt.now() + (result.deferred.pollAfterMs ?? 5000);
@@ -284,7 +293,7 @@ export const generation: CoreKind<
 
 	async abort(task, rt, ctx) {
 		const cp = task.checkpoint;
-		if (cp?.phase === "deferred") {
+		if (cp?.phase === "deferred" && !(await rt.commit((tx) => tx.monitoringStopped(task.conversationId), ctx))) {
 			const model = rt.models.resolve(cp.model);
 			if (model) await rt.models.cancelDeferred(model, cp.handle as DeferredHandle, ctx).catch(() => {});
 		}
@@ -414,7 +423,12 @@ async function stream(
 // ---------------------------------------------------------------------------
 
 async function classify(task: G, cp: Prep, message: AssistantMessage, rt: Rt, ctx: Context): Promise<S> {
+	if (isMonitoringBlocked(message))
+		await rt.commit((tx) => tx.stopForMonitoring(task.conversationId, task.input.inputs), ctx);
 	await rt.hooks.each(ctx, (h, api) => h.afterResponse?.(message, { ...api, attempt: cp.attempt }, ctx));
+	if (isMonitoringBlocked(message)) return { done: terminalError(task, cp, message, "provider") };
+	if (await rt.commit((tx) => tx.monitoringStopped(task.conversationId), ctx))
+		return failStep(task, "provider", "misalignment_policy_violation");
 
 	if (message.stopReason === "error") {
 		const decision = retryDecision(cp, message, rt.now());
@@ -455,6 +469,10 @@ async function classify(task: G, cp: Prep, message: AssistantMessage, rt: Rt, ct
 		return {
 			done: async (tx, current) => {
 				const c = current.conversationId;
+				if (await tx.monitoringStopped(c)) {
+					await tx.stopForMonitoring(c, task.input.inputs);
+					return fail("provider", "misalignment_policy_violation");
+				}
 				const collapseThrough = await thresholdCollapseThrough(tx, c, message); // read BEFORE the append
 				const assistant = tx.appendEntry(c, {
 					kind: "pi.assistant",
@@ -498,6 +516,10 @@ async function classify(task: G, cp: Prep, message: AssistantMessage, rt: Rt, ct
 	return {
 		done: async (tx, current) => {
 			const c = current.conversationId;
+			if (await tx.monitoringStopped(c)) {
+				await tx.stopForMonitoring(c, task.input.inputs);
+				return fail("provider", "misalignment_policy_violation");
+			}
 			const collapseThrough = await thresholdCollapseThrough(tx, c, message); // read BEFORE the append
 			const head = await tx.newestEntry(c, { withHead: true });
 			const assistant = tx.appendEntry(c, { kind: "pi.assistant", model: [stored], data: { attempt: cp.attempt } });
@@ -546,7 +568,8 @@ function terminalError(task: G, cp: Prep, message: AssistantMessage, reason: "pr
 			detail: message.errorMessage ?? "provider error",
 			entry: assistant,
 		});
-		await settleFailedTurn(tx, current, task.input.inputs, message.errorMessage ?? "provider error", head?.id);
+		if (isMonitoringBlocked(message)) await tx.stopForMonitoring(current.conversationId, task.input.inputs);
+		else await settleFailedTurn(tx, current, task.input.inputs, message.errorMessage ?? "provider error", head?.id);
 		return fail(reason, message.errorMessage ?? "provider error", assistant);
 	};
 }
@@ -574,6 +597,7 @@ export function retryDecision(
 	message: AssistantMessage | null,
 	now: number,
 ): RetryDecision {
+	if (message !== null && isMonitoringBlocked(message)) return { kind: "fail", reason: "provider" };
 	if (message !== null && !isRetryableAssistantError(message)) return { kind: "fail", reason: "provider" };
 	if (!cp.retry.enabled) return { kind: "fail", reason: "provider" };
 	if (cp.attempt > cp.retry.maxRetries) return { kind: "fail", reason: "retries_exhausted" };

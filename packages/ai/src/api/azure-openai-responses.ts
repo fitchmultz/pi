@@ -16,6 +16,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
+import { captureProviderError } from "../utils/provider-error.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { getCurrentTools, getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
@@ -117,6 +118,7 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 
 		const diagnostics = createResponsesDiagnostics(output);
 		const details = diagnostics.details;
+		let requestId: string | undefined;
 
 		try {
 			// Create Azure OpenAI client
@@ -169,6 +171,7 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 				},
 			);
 			details.headersMs = performance.now() - diagnostics.startedAt;
+			requestId = response.headers.get("x-request-id") ?? undefined;
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -204,6 +207,7 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatAzureOpenAIError(error);
+			captureProviderError(output, error, requestId);
 			finishResponsesDiagnostics(diagnostics);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();

@@ -1,6 +1,7 @@
 import {
 	type Api,
 	type AssistantMessage,
+	isMonitoringBlocked,
 	isRetryableAssistantError,
 	type Model,
 	retryDelayMs,
@@ -44,6 +45,7 @@ import {
 import { branchTip, entryLabel, operationPreparation, setValue } from "../../session/values.ts";
 import type { AgentHarnessStreamOptions } from "../../types.ts";
 import type { Lane } from "../lane.ts";
+import { assertMonitoringActive } from "../monitoring.ts";
 import { committedEntryEvents, readBoundedEntries } from "../transcript.ts";
 import type { ContinueOperationResult, Drive, ProcedureResult } from "../types.ts";
 import {
@@ -763,6 +765,13 @@ async function publishNestedRequestOutcome<TContext extends object | undefined>(
 				kind: "commit",
 				writes: [insertUsage(row)],
 				operationState: next,
+				...(isMonitoringBlocked(response)
+					? {
+							lane: {
+								monitoringStop: { message: { ...response, stopReason: "error" as const } },
+							},
+						}
+					: {}),
 				materialize: () => undefined,
 				events: (commit) => [usageEvent(row, 0, commit, lane.name)],
 			};
@@ -841,6 +850,7 @@ async function performStructuralAttempt<TContext extends object | undefined>(
 		const admittedContext = withAbortSignal(drive.gate.signal, requestContext);
 		let response: AssistantMessage;
 		try {
+			assertMonitoringActive(lane, drive);
 			response = await drive.gate.admit(() =>
 				lane.models.completeSimple(
 					model,
@@ -852,6 +862,7 @@ async function performStructuralAttempt<TContext extends object | undefined>(
 							drive.gate,
 							admittedContext,
 						);
+						assertMonitoringActive(lane, drive);
 						return hook?.payload;
 					}),
 				),
@@ -863,6 +874,7 @@ async function performStructuralAttempt<TContext extends object | undefined>(
 		}
 		lastResponse = response;
 		await publishNestedRequestOutcome(lane, drive, intent.value, usageId, response);
+		if (lane.state.monitoringStop !== undefined) throw new StructuralCancelled();
 		return response;
 	};
 

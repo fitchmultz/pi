@@ -78,6 +78,8 @@ export const tool: CoreKind<ToolInput, ToolCheckpoint, ToolTaskResult, never, { 
 	// Offered-set check, lookup, validate, beforeTool, validate again; then write `started`
 	// (the in-flight checkpoint) and invoke. A crash before `started` reruns all of this.
 	async initial(task, rt, ctx) {
+		if (await rt.commit((tx) => tx.monitoringStopped(task.conversationId), ctx))
+			return { done: monitoringStop(task, rt.now()) };
 		const call = task.input.call;
 		if (!task.input.offered.includes(call.name))
 			return {
@@ -109,19 +111,24 @@ export const tool: CoreKind<ToolInput, ToolCheckpoint, ToolTaskResult, never, { 
 				),
 			};
 		const final = toStored(hooked.call);
-		await rt.commit((tx) => {
+		const stopped = await rt.commit(async (tx) => {
+			if (await tx.monitoringStopped(task.conversationId)) return true;
 			tx.checkpoint({ phase: "started", replay: declaration.replay ?? "unsafe", call: final });
 			const slot = tx.toolSlot(task);
 			slot.status = "running";
 			delete slot.waitingOn;
 			tx.emit({ type: "tool.started", taskId: task.id, callId: final.id, name: final.name });
+			return false;
 		}, ctx); // durable before the effect
+		if (stopped) return { done: monitoringStop(task, rt.now()) };
 		return { done: await invoke(task, final, declaration, rt, ctx) };
 	},
 
 	phases: {
 		// Only entered by the scheduler after reopen. The stored final call is the evidence; beforeTool never reruns.
 		async started(task, rt, ctx) {
+			if (await rt.commit((tx) => tx.monitoringStopped(task.conversationId), ctx))
+				return { done: monitoringStop(task, rt.now()) };
 			const cp = task.checkpoint;
 			const declaration = rt.tools.get(cp.call.name);
 			if (declaration === undefined)
@@ -245,6 +252,30 @@ async function beforeTool(
 }
 
 export const DEFAULT_BOUNDS = { maxBytes: 64 * 1024, maxLines: 200, retain: "head" as const };
+
+function monitoringStop(task: T, now: number): Out {
+	return (tx, current) => {
+		const call = task.checkpoint?.call ?? task.input.call;
+		const entry = tx.appendEntry(current.conversationId, {
+			kind: "pi.tool_result",
+			model: [
+				toMessage(
+					call,
+					synthetic("Conversation stopped by provider monitoring", "misalignment_policy_violation"),
+					now,
+				),
+			],
+		});
+		const slot = tx.sticky(current.conversationId).turn.tools[task.input.index];
+		if (slot !== undefined) {
+			slot.status = "error";
+			slot.entry = entry;
+			delete slot.waitingOn;
+		}
+		tx.emit({ type: "tool.finished", taskId: current.id, callId: call.id, entry, isError: true });
+		return { status: "completed", result: { entry } };
+	};
+}
 
 async function invoke(
 	task: T,

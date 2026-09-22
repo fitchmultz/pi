@@ -2342,6 +2342,12 @@ pi.registerTool({
 });
 ```
 
+### Native async and programmatic tools
+
+`async: true` lets a capable model continue independent work while a tool runs. Pi still validates and admits the call before execution and persists its original identity. This is separate from local `executionMode` ordering.
+
+For OpenAI-hosted programs, declare `allowedCallers: ["direct", "programmatic"]` and optionally `outputSchema`. The output schema describes the JSON text in the tool's returned `content`, not its `details`. A tool cannot be both native async and programmatic. See [GPT-6](gpt-6.md#programmatic-tool-calling) and [openai-programmatic-tools.ts](../examples/extensions/openai-programmatic-tools.ts).
+
 ### Overriding Built-in Tools
 
 Extensions can override built-in tools (`read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`) by registering a tool with the same name. Interactive mode displays a warning when this happens.
@@ -3199,6 +3205,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `todo.ts` | Stateful tool with persistence | `registerTool`, `appendEntry`, `renderResult`, session events |
 | `dynamic-tools.ts` | Register tools after startup and during commands | `registerTool`, `session_start`, `registerCommand` |
 | `structured-output.ts` | Final structured-output tool with `terminate: true` | `registerTool`, terminating tool results |
+| `openai-programmatic-tools.ts` | Opt-in hosted JavaScript with a structured read-only tool | `registerTool`, `allowedCallers`, `outputSchema`, `before_provider_request` |
 | `truncated-tool.ts` | Output truncation example | `registerTool`, `truncateHead` |
 | `tool-override.ts` | Override built-in read tool | `registerTool` (same name as built-in) |
 | **Commands** |||

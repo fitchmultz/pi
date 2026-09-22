@@ -79,6 +79,7 @@ export function createReadToolDefinition(
 		promptGuidelines: [...readToolSystemPromptContribution.guidelines],
 		parameters: readSchema,
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
+		async: true,
 		async execute(
 			_toolCallId,
 			{ path, offset, limit, json }: ReadToolInput,

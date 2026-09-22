@@ -1,10 +1,16 @@
-import type { AssistantMessage, Message, Model, ToolCall } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	type Message,
+	type Model,
+	normalizeContext,
+	type ToolCall,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { AssistantMessageEventStream } from "../../ai/src/utils/event-stream.ts";
 import { Agent } from "../src/agent.ts";
-import { getPendingToolCalls } from "../src/agent-loop.ts";
-import type { AgentEvent, AgentTool, AgentToolResult, StreamFn } from "../src/types.ts";
+import { agentLoop, getPendingToolCalls } from "../src/agent-loop.ts";
+import type { AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult, StreamFn } from "../src/types.ts";
 
 const model: Model<"openai-responses"> = {
 	id: "gpt-6-astra",
@@ -78,8 +84,10 @@ const result: AgentToolResult = { content: [{ type: "text", text: "actual result
 function setup(execute: AgentTool["execute"], options: Partial<AgentTool> = {}) {
 	const streams: AssistantMessageEventStream[] = [];
 	const inputs: Message[][] = [];
-	const streamFn: StreamFn = (_model, context) => {
+	const sessionIds: Array<string | undefined> = [];
+	const streamFn: StreamFn = (_model, context, options) => {
 		inputs.push(structuredClone(context.messages));
+		sessionIds.push(options?.sessionId);
 		const stream = new AssistantMessageEventStream();
 		streams.push(stream);
 		return stream;
@@ -98,7 +106,7 @@ function setup(execute: AgentTool["execute"], options: Partial<AgentTool> = {}) 
 	agent.subscribe((event) => {
 		events.push(structuredClone(event));
 	});
-	return { agent, streams, inputs, events, tool };
+	return { agent, streams, inputs, sessionIds, events, tool };
 }
 async function emitCall(stream: AssistantMessageEventStream, message: AssistantMessage, toolCall: ToolCall) {
 	message.content.push(toolCall);
@@ -113,6 +121,254 @@ async function answer(streams: AssistantMessageEventStream[], index: number) {
 }
 
 describe("native async lifecycle", () => {
+	it.each(["named", "anonymous"] as const)(
+		"scopes a copied low-level %s context to its destination ID",
+		async (identity) => {
+			const sessionId = identity === "named" ? "source" : "source-instance";
+			const config: AgentLoopConfig = {
+				model,
+				sessionId: identity === "named" ? sessionId : undefined,
+				monitoringSessionId: identity === "anonymous" ? sessionId : undefined,
+				convertToLlm: () => [],
+			};
+			const blocked = Object.assign(assistant("source-block"), {
+				providerError: { code: "misalignment_policy_violation", requestId: "req_source" },
+			});
+			const request = vi.fn<StreamFn>(() => {
+				const stream = new AssistantMessageEventStream();
+				finish(stream, blocked, true);
+				return stream;
+			});
+			const history = await agentLoop(
+				[{ role: "user", content: "first", timestamp: 1 }],
+				{ messages: [] },
+				config,
+				undefined,
+				request,
+			).result();
+			expect(blocked.monitoringSessionId).toBe(sessionId);
+			await agentLoop(
+				[{ role: "user", content: "same session", timestamp: 2 }],
+				{ messages: history },
+				config,
+				undefined,
+				request,
+			).result();
+			expect(request).toHaveBeenCalledOnce();
+			const destinationRequest = vi.fn<StreamFn>(() => {
+				const stream = new AssistantMessageEventStream();
+				const message = assistant("destination", [{ type: "text", text: "ordinary answer" }]);
+				stream.push({ type: "start", partial: message });
+				finish(stream, message);
+				return stream;
+			});
+			await agentLoop(
+				[{ role: "user", content: "new session", timestamp: 3 }],
+				{ messages: structuredClone(history), monitoringStop: { sessionId, message: blocked } },
+				{ ...config, sessionId: "destination" },
+				undefined,
+				destinationRequest,
+			).result();
+			expect(destinationRequest).toHaveBeenCalledOnce();
+			expect(blocked.providerError.requestId).toBe("req_source");
+		},
+	);
+
+	it("stops queued calls, signals active calls, and preserves completed effects on a monitoring block", async () => {
+		const active = deferred<AgentToolResult>();
+		let activeSignal: AbortSignal | undefined;
+		const execute = vi.fn<AgentTool["execute"]>(async (id, _args, signal) => {
+			if (id.startsWith("completed")) return result;
+			activeSignal = signal;
+			return active.promise;
+		});
+		const { agent, streams, events } = setup(execute, { executionMode: "sequential" });
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const message = assistant("blocked");
+		await emitCall(streams[0], message, call("completed"));
+		await vi.waitFor(() => expect(events.some((event) => event.type === "tool_execution_end")).toBe(true));
+		for (const id of ["active", "queued"]) {
+			const toolCall = call(id);
+			message.content.push(toolCall);
+			streams[0].push({
+				type: "toolcall_end",
+				contentIndex: message.content.length - 1,
+				toolCall,
+				partial: message,
+			});
+		}
+		await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+		Object.assign(message, {
+			providerError: { code: "misalignment_policy_violation", requestId: "req_blocked" },
+			errorMessage: "Conversation stopped; review prior actions. Earlier actions were not undone.",
+		});
+		finish(streams[0], message, true);
+		// Wait for error delivery before releasing active work; an executor may finish despite cancellation.
+		await vi.waitFor(() =>
+			expect(events.some((event) => event.type === "message_end" && event.message.role === "assistant")).toBe(true),
+		);
+		const signaled = activeSignal?.aborted;
+		active.resolve(result);
+		await run;
+		expect(signaled).toBe(true);
+		expect(execute).toHaveBeenCalledTimes(2);
+		expect(streams).toHaveLength(1);
+		expect(
+			events.some((event) => event.type === "tool_execution_start" && event.toolCallId === "queued|fc_queued"),
+		).toBe(false);
+		expect(
+			agent.state.messages.find((entry) => entry.role === "assistant" && entry.responseId === "blocked"),
+		).toMatchObject({
+			stopReason: "error",
+			providerError: { code: "misalignment_policy_violation", requestId: "req_blocked" },
+		});
+		expect(agent.state.messages.filter((entry) => entry.role === "toolResult")).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ toolCallId: "completed|fc_completed", content: result.content, isError: false }),
+				expect.objectContaining({ toolCallId: "active|fc_active", content: result.content, isError: false }),
+			]),
+		);
+	});
+
+	it("does not enter an executor after monitoring stops a call waiting on persistence", async () => {
+		const execute = vi.fn<AgentTool["execute"]>(async () => result);
+		const { agent, streams, events } = setup(execute);
+		const barrier = deferred<void>();
+		agent.subscribe(async (event) => {
+			if (event.type === "tool_execution_prepared") await barrier.promise;
+		});
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const message = assistant("blocked");
+		await emitCall(streams[0], message, call());
+		await vi.waitFor(() => expect(events.some((event) => event.type === "tool_execution_prepared")).toBe(true));
+		Object.assign(message, { providerError: { code: "misalignment_policy_violation" } });
+		finish(streams[0], message, true);
+		await vi.waitFor(() =>
+			expect(events.some((event) => event.type === "message_end" && event.message.role === "assistant")).toBe(true),
+		);
+		barrier.resolve();
+		await run;
+		expect(execute).not.toHaveBeenCalled();
+		expect(streams).toHaveLength(1);
+	});
+
+	it("does not recover uncertain steering or dispatch synchronous calls after a monitoring block", async () => {
+		const execute = vi.fn<AgentTool["execute"]>(async () => result);
+		const { agent, streams } = setup(execute);
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const message = assistant("blocked", [
+			{ type: "toolCall", id: "sync", name: "work", arguments: { path: "original" } },
+		]);
+		streams[0].push({ type: "start", partial: message });
+		streams[0].push({
+			type: "steering",
+			message: { role: "user", content: "additional work", timestamp: 2 },
+			status: "unknown",
+		});
+		Object.assign(message, { providerError: { code: "misalignment_policy_violation" } });
+		finish(streams[0], message, true);
+		// End any erroneous continuation so the regression fails without leaving a running agent.
+		await vi.waitFor(() => expect(!agent.state.isStreaming || streams.length === 2).toBe(true));
+		if (streams.length === 2) await answer(streams, 1);
+		await run;
+		expect(execute).not.toHaveBeenCalled();
+		expect(streams).toHaveLength(1);
+	});
+
+	it("does not reattach or dispatch after restoring and navigating an owned stopped session", async () => {
+		const resume = vi.fn<NonNullable<AgentTool["resume"]>>(async () => result);
+		const { agent: runtime, streams, tool } = setup(async () => result, { resume });
+		const blocked = Object.assign(assistant("blocked", [{ ...call(), executionStarted: true }]), {
+			stopReason: "error" as const,
+			providerError: { code: "misalignment_policy_violation" },
+			monitoringSessionId: "source-session",
+			errorMessage: "Conversation stopped for review",
+		});
+		const agent = new Agent({
+			sessionId: "source-session",
+			initialState: { model, tools: [tool], messages: [blocked] },
+			streamFn: runtime.streamFunction,
+		});
+		agent.state.messages = [assistant("earlier", [{ ...call(), executionStarted: true }])];
+		const run = agent.prompt("continue");
+		await vi.waitFor(() => expect(!agent.state.isStreaming || streams.length === 1).toBe(true));
+		if (streams.length === 1) {
+			agent.abort();
+			await answer(streams, 0);
+		}
+		await run;
+		expect(resume).not.toHaveBeenCalled();
+		expect(streams).toHaveLength(0);
+		expect(() => agent.streamResponse(model, normalizeContext({ messages: [] }))).toThrow(
+			"Conversation stopped for review",
+		);
+	});
+
+	it.each(["named", "anonymous"] as const)(
+		"keeps a %s source stopped after navigation while a new Agent can use its history",
+		async (identity) => {
+			const source = setup(async () => result);
+			if (identity === "named") source.agent.sessionId = "source";
+			const first = source.agent.prompt("source work");
+			await vi.waitFor(() => expect(source.streams).toHaveLength(1));
+			const blocked = Object.assign(assistant("source-block"), {
+				providerError: { code: "misalignment_policy_violation", requestId: "req_source" },
+				errorMessage: "Source stopped",
+			});
+			finish(source.streams[0], blocked, true);
+			await first;
+			const history = structuredClone(source.agent.state.messages);
+
+			const destination = setup(async () => result);
+			if (identity === "named") destination.agent.sessionId = "destination";
+			destination.agent.state.messages = history;
+			const next = destination.agent.prompt("new session");
+			await vi.waitFor(() =>
+				expect(!destination.agent.state.isStreaming || destination.streams.length === 1).toBe(true),
+			);
+			if (destination.streams.length === 1) await answer(destination.streams, 0);
+			await next;
+			expect(destination.streams).toHaveLength(1);
+			expect(destination.sessionIds).toEqual([identity === "named" ? "destination" : undefined]);
+			expect(source.sessionIds).toEqual([identity === "named" ? "source" : undefined]);
+			expect(history.find((message) => message.role === "assistant")).toMatchObject({
+				providerError: { code: "misalignment_policy_violation", requestId: "req_source" },
+				monitoringSessionId: expect.any(String),
+			});
+
+			source.agent.state.messages = [{ role: "user", content: "earlier history", timestamp: 0 }];
+			const continuation = source.agent.prompt("same session after navigation");
+			await vi.waitFor(() => expect(!source.agent.state.isStreaming || source.streams.length === 2).toBe(true));
+			if (source.streams.length === 2) await answer(source.streams, 1);
+			await continuation;
+			expect(source.streams).toHaveLength(1);
+			source.agent.reset();
+			const resetContinuation = source.agent.prompt("same identity after reset");
+			await vi.waitFor(() => expect(!source.agent.state.isStreaming || source.streams.length === 2).toBe(true));
+			if (source.streams.length === 2) await answer(source.streams, 1);
+			await resetContinuation;
+			expect(source.streams).toHaveLength(1);
+
+			const newBlock = destination.agent.prompt("later destination work");
+			await vi.waitFor(() => expect(destination.streams).toHaveLength(2));
+			finish(
+				destination.streams[1],
+				Object.assign(assistant("destination-block"), {
+					providerError: { code: "misalignment_policy_violation" },
+					errorMessage: "Destination stopped",
+				}),
+				true,
+			);
+			await newBlock;
+			await destination.agent.prompt("destination remains stopped");
+			expect(destination.streams).toHaveLength(2);
+			expect(destination.agent.state.errorMessage).not.toBeUndefined();
+		},
+	);
+
 	it("clears rejected live-input preparation so a corrected run can steer again", async () => {
 		const { agent, streams } = setup(async () => result);
 		const provider = agent.streamFunction;

@@ -1,9 +1,11 @@
 import type { TelemetryContext } from "@earendil-works/pi-telemetry";
+import type { BetaResponseInputItem, BetaResponseOutputItem } from "openai/resources/beta/responses/responses.js";
 import type {
 	ResponseCustomToolCall,
 	ResponseFunctionToolCall,
 	ResponseFunctionWebSearch,
 	ResponseOutputText,
+	ResponseToolSearchCall,
 } from "openai/resources/responses/responses.js";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.ts";
@@ -413,8 +415,10 @@ export interface ToolCall {
 	kind?: "toolSearch";
 	/** Provider permits this call to remain pending across subsequent responses. */
 	async?: boolean;
+	/** Completed hosted multi-agent call eligible for live result injection. Not API async. */
+	streaming?: boolean;
 	/** Authoritative completed Responses item, retained independently of today's tool declaration. */
-	responsesItem?: ResponseFunctionToolCall | ResponseCustomToolCall;
+	responsesItem?: ResponseFunctionToolCall | ResponseCustomToolCall | ResponseToolSearchCall;
 	/** A local execution was admitted. A missing result after process loss has an unknown outcome. */
 	executionStarted?: boolean;
 	/** Validated, preflight-adjusted arguments admitted for execute/resume. The provider item stays unchanged. */
@@ -572,10 +576,26 @@ export interface AssistantMessage {
 	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime request measurements, failures, and recoveries.
 	/** Observational metadata from completed Responses items; does not enable search or replay hosted calls. */
 	webSearch?: ResponsesWebSearchMetadata;
+	/** Ordered authoritative Responses output, including acknowledged injected inputs. Content is its UI/execution projection. */
+	responsesOutput?: (BetaResponseInputItem | BetaResponseOutputItem)[];
+	/** Original projection, excluding execution bookkeeping. Native replay is invalid after content edits. */
+	responsesContent?: AssistantMessage["content"];
+	/** A successful hosted response requires another request before its final answer. */
+	needsContinuation?: boolean;
 	usage: Usage;
 	stopReason: StopReason;
 	deferred?: DeferredHandle;
 	errorMessage?: string;
+	/** Provider error identity, retained independently of the human-readable error. */
+	providerError?: {
+		code?: string;
+		type?: string;
+		status?: number;
+		requestId?: string;
+		responseId?: string;
+	};
+	/** Pi session that observed this monitoring stop. Historical copies retain their original owner. */
+	monitoringSessionId?: string;
 	rawStopReason?: string;
 	/**
 	 * Provider indication of whether the model explicitly ended its turn.
@@ -656,6 +676,10 @@ export type ConstrainedSamplingConfig =
 export interface Tool<TParameters extends TSchema = TSchema> extends ToolReference {
 	/** Allow supported providers to issue asynchronous calls. Independent of local executionMode. */
 	async?: boolean;
+	/** Hosted program eligibility. Omitted tools remain direct-only. */
+	allowedCallers?: ("direct" | "programmatic")[];
+	/** Schema of the JSON encoded in the tool's output text, not its details. */
+	outputSchema?: Record<string, unknown>;
 	/** A client search callback, exposed as a normal function on unsupported routes. */
 	toolSearch?: true;
 	description: string;

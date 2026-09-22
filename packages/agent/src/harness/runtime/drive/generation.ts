@@ -1,4 +1,4 @@
-import type { Api, Model, Tool } from "@earendil-works/pi-ai";
+import { type Api, type Model, type Tool, toToolDeclaration } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "../../../types.ts";
 import { type Context, getTelemetryContext, withAbortSignal } from "../../context.ts";
 import { type HarnessAssistantStreamConfig, streamHarnessAssistant } from "../../execution/assistant.ts";
@@ -16,6 +16,7 @@ import {
 } from "../../session/types.ts";
 import type { AgentHarnessStreamOptions } from "../../types.ts";
 import type { Lane } from "../lane.ts";
+import { assertMonitoringActive } from "../monitoring.ts";
 import { readBoundedContext } from "../transcript.ts";
 import type { ContinueOperationResult, Drive, ProcedureResult } from "../types.ts";
 import { openAssistantResponse, publishConfigurationFailure, publishResponse } from "./response.ts";
@@ -90,12 +91,7 @@ async function prepareGeneration<TContext extends object | undefined>(
 	const tools: Tool[] = generation.generationContext.configuration.activeToolNames.map((name) => {
 		const tool = toolsByName.get(name);
 		if (tool === undefined) throw new SessionInvariantError(`Configured tool ${name} disappeared during resolution`);
-		return {
-			name: tool.name,
-			description: tool.description,
-			parameters: tool.parameters,
-			...(tool.constrainedSampling === undefined ? {} : { constrainedSampling: tool.constrainedSampling }),
-		};
+		return toToolDeclaration(tool);
 	});
 
 	const messages = await readBoundedContext(lane, drive, generation);
@@ -207,10 +203,12 @@ async function performGeneration<TContext extends object | undefined>(
 						drive.gate,
 						context,
 					);
+					assertMonitoringActive(lane, drive);
 					return result?.payload;
 				},
 				afterResponse: response.afterResponse,
-				request: (aiContext, options, context) => {
+				request: async (aiContext, options, context) => {
+					assertMonitoringActive(lane, drive);
 					const admitted = withAbortSignal(drive.gate.signal, context);
 					return drive.gate.admit(() =>
 						lane.models.streamSimple(prepared.model, aiContext, {

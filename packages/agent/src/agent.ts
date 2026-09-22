@@ -1,8 +1,10 @@
 import {
+	type AssistantMessage,
 	createInitialSystemMessage,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
 	type ImageContent,
+	isMonitoringBlocked,
 	type Message,
 	type Model,
 	mergeAssistantCheckpoint,
@@ -12,6 +14,7 @@ import {
 	type ThinkingBudgets,
 	type Transport,
 	toToolDeclaration,
+	uuidv7,
 } from "@earendil-works/pi-ai";
 import { getPendingToolCalls, runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
@@ -208,6 +211,8 @@ export class Agent {
 	private responseControl?: ResponseControl;
 	private readonly steeringListeners = new Set<() => void>();
 	private steeringPreparation?: Promise<void>;
+	private readonly monitoringInstanceId = uuidv7();
+	private readonly monitoringStops = new Map<string, AssistantMessage>();
 	/** Normalize newly admitted live user input before sending it on a duplex transport. */
 	public prepareSteering?: (message: AgentMessage) => Promise<void>;
 
@@ -219,8 +224,29 @@ export class Agent {
 	/** Shared invocation boundary for agent turns and host-owned requests such as summaries. */
 	public readonly streamResponse: StreamFn = (model, context, options) => {
 		this.requestAdmissionSignal?.throwIfAborted();
+		const blocked = this.getMonitoringStop();
+		if (blocked) {
+			throw new Error(
+				blocked.errorMessage ??
+					"Conversation stopped by monitoring. Review prior actions; this stop did not undo them.",
+			);
+		}
+		const sessionId = this.sessionId ?? this.monitoringInstanceId;
 		const streamFunction = this.streamFunction;
-		return streamFunction(model, context, options);
+		return Promise.resolve(streamFunction(model, context, options)).then((stream) => {
+			void stream.result().then(
+				(message) => {
+					if (!isMonitoringBlocked(message)) return;
+					message.monitoringSessionId = sessionId;
+					this.monitoringStops.set(sessionId, message);
+					if (sessionId === (this.sessionId ?? this.monitoringInstanceId)) {
+						this.abort();
+					}
+				},
+				() => {}, // The stream consumer owns request failures.
+			);
+			return stream;
+		});
 	};
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
@@ -245,7 +271,7 @@ export class Agent {
 	/** Awaited after all turn_end subscribers, before the loop can drain queues or start another turn. */
 	public afterTurn?: (signal: AbortSignal) => Promise<void>;
 	private activeRun?: ActiveRun;
-	/** Session identifier forwarded to providers for cache-aware backends. */
+	/** Session identity, also forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
 	public thinkingBudgets?: ThinkingBudgets;
@@ -279,6 +305,7 @@ export class Agent {
 		this.transport = runtimeOptions.transport ?? "auto";
 		this.maxRetryDelayMs = runtimeOptions.maxRetryDelayMs;
 		this.toolExecution = runtimeOptions.toolExecution ?? "parallel";
+		this.getMonitoringStop();
 	}
 
 	/**
@@ -471,7 +498,11 @@ export class Agent {
 			}
 		}
 
-		if (lastMessage.role === "assistant" && getPendingToolCalls(this._state.messages).length === 0)
+		if (
+			lastMessage.role === "assistant" &&
+			!lastMessage.needsContinuation &&
+			getPendingToolCalls(this._state.messages).length === 0
+		)
 			throw new Error("Cannot continue from message role: assistant");
 		await this.runContinuation();
 	}
@@ -523,10 +554,26 @@ export class Agent {
 		});
 	}
 
+	private getMonitoringStop(): AssistantMessage | undefined {
+		const sessionId = this.sessionId ?? this.monitoringInstanceId;
+		const stopped = this.monitoringStops.get(sessionId);
+		if (stopped) return stopped;
+		const message = this._state.messages.find(
+			(message): message is AssistantMessage =>
+				message.role === "assistant" && isMonitoringBlocked(message) && message.monitoringSessionId === sessionId,
+		);
+		if (message) this.monitoringStops.set(sessionId, message);
+		return message;
+	}
+
 	private createContextSnapshot(): AgentContext {
+		const monitoringStop = this.getMonitoringStop();
 		return {
 			messages: this._state.messages.slice(),
 			tools: this._state.tools.slice(),
+			...(monitoringStop === undefined
+				? {}
+				: { monitoringStop: { sessionId: this.sessionId ?? this.monitoringInstanceId, message: monitoringStop } }),
 		};
 	}
 
@@ -536,6 +583,7 @@ export class Agent {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
 			sessionId: this.sessionId,
+			monitoringSessionId: this.sessionId ?? this.monitoringInstanceId,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,
 			onResponseControl: (control) => {

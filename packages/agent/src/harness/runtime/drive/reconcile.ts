@@ -5,6 +5,7 @@ import { SessionInvariantError } from "../../session/session.ts";
 import type {
 	DeferredEffectPendingOperation,
 	DeferredSuspendedOperation,
+	OperationError,
 	OperationState,
 } from "../../session/types.ts";
 import type { Lane } from "../lane.ts";
@@ -52,18 +53,20 @@ async function readDeferredHandle<TContext extends object | undefined>(
 	);
 }
 
-async function publishAbortedTerminal<TContext extends object | undefined>(
+export async function publishStoppedTerminal<TContext extends object | undefined>(
 	lane: Lane<TContext>,
 	drive: Drive,
 	capability: OperationState,
+	error?: OperationError,
 ): Promise<ProcedureResult> {
 	return lane.settleOperation(
 		capability,
 		async (state, current, meta, reader) => {
-			if (current.control.status !== "cancel_requested") {
+			if (error === undefined && current.control.status !== "cancel_requested") {
 				throw new SessionInvariantError("Cancellation reconciliation requires cancelled durable control");
 			}
-			const record = operationResultRecord(meta, "aborted", state.tipId);
+			const terminal = error === undefined ? { status: "aborted" as const } : { status: "failed" as const, error };
+			const record = operationResultRecord(meta, terminal.status, state.tipId, error);
 			const cleanup = await operationCleanupWrites(reader, drive.operationId, current, drive.context);
 			const events: HarnessEvent[] = [];
 			if (meta.intent.kind === "run") {
@@ -80,7 +83,7 @@ async function publishAbortedTerminal<TContext extends object | undefined>(
 							lane: lane.name,
 							runId: drive.operationId,
 							reason: current.task.reason,
-							status: "aborted",
+							...terminal,
 							endedAt: record.endedAt,
 						});
 						break;
@@ -91,7 +94,7 @@ async function publishAbortedTerminal<TContext extends object | undefined>(
 					type: "run_end",
 					lane: lane.name,
 					runId: drive.operationId,
-					status: "aborted",
+					...terminal,
 					fromTipId: meta.sourceTipId,
 					tipId: state.tipId,
 					endedAt: record.endedAt,
@@ -102,7 +105,7 @@ async function publishAbortedTerminal<TContext extends object | undefined>(
 					lane: lane.name,
 					runId: drive.operationId,
 					reason: "manual",
-					status: "aborted",
+					...terminal,
 					endedAt: record.endedAt,
 				});
 			} else {
@@ -110,7 +113,7 @@ async function publishAbortedTerminal<TContext extends object | undefined>(
 					type: "navigation_end",
 					lane: lane.name,
 					runId: drive.operationId,
-					status: "aborted",
+					...terminal,
 					fromTipId: meta.sourceTipId,
 					tipId: state.tipId,
 					endedAt: record.endedAt,
@@ -152,7 +155,7 @@ export async function reconcileOperation<TContext extends object | undefined>(
 		case "deferred.suspended": {
 			const handle = await readDeferredHandle(lane, drive, state);
 			await cancelDeferredBestEffort(lane, drive, state, handle);
-			return publishAbortedTerminal(lane, drive, state);
+			return publishStoppedTerminal(lane, drive, state);
 		}
 		case "deferred.effect_pending": {
 			const handle = await readDeferredHandle(lane, drive, state);
@@ -168,6 +171,6 @@ export async function reconcileOperation<TContext extends object | undefined>(
 		case "summary.effect_pending":
 		case "summary.retry_wait":
 		case "navigation.ready_to_commit":
-			return publishAbortedTerminal(lane, drive, state);
+			return publishStoppedTerminal(lane, drive, state);
 	}
 }

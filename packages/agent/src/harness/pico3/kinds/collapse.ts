@@ -1,5 +1,6 @@
 import type { Context } from "@earendil-works/chord";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { isMonitoringBlocked } from "@earendil-works/pi-ai";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { effectiveTools } from "../system.ts";
 import {
@@ -91,6 +92,8 @@ export const collapse: CoreKind<
 	inflight: ["summarizing"],
 
 	async initial(task, runtime, ctx) {
+		if (await runtime.commit((tx) => tx.monitoringStopped(task.conversationId), ctx))
+			return { done: () => failed("provider", "misalignment_policy_violation") };
 		const state = await runtime.rewindable(task.conversationId, ctx);
 		if (state.model === undefined) return { done: () => failed("no_model", "no model configured") };
 		const sticky = await runtime.sticky(task.conversationId, ctx);
@@ -143,6 +146,8 @@ export const collapse: CoreKind<
 			return {
 				done: async (tx, current) => {
 					const { head, entries } = await tx.context(current.conversationId);
+					if (await tx.monitoringStopped(current.conversationId))
+						return failed("provider", "misalignment_policy_violation");
 					if ((head?.id ?? null) !== base.expectedHead) return failed("stale", "head moved during collapse");
 					const retained = entries.find((entry) => entry.id > task.input.through);
 					const id = tx.appendEntry(current.conversationId, {
@@ -194,6 +199,8 @@ async function summarizeNow(
 		},
 	];
 	let message: AssistantMessage | undefined;
+	if (await runtime.commit((tx) => tx.monitoringStopped(task.conversationId), ctx))
+		return { done: () => failed("provider", "misalignment_policy_violation") };
 	try {
 		for await (const event of runtime.models.stream(
 			model,
@@ -214,6 +221,19 @@ async function summarizeNow(
 		return afterFailure(base, null, String(error), runtime);
 	}
 	if (message === undefined) return afterFailure(base, null, "no message", runtime);
+	if (isMonitoringBlocked(message)) {
+		const blocked = toStored(message);
+		return {
+			done: async (tx, current) => {
+				tx.appendEntry(current.conversationId, {
+					kind: "pi.assistant",
+					data: { attempt: base.attempt, display: blocked, reason: "error" },
+				});
+				await tx.stopForMonitoring(current.conversationId);
+				return failed("provider", blocked.errorMessage ?? "misalignment_policy_violation");
+			},
+		};
+	}
 	if (message.content.some((content) => content.type === "toolCall")) {
 		return afterFailure(base, { ...message, stopReason: "error" }, "summarizer returned tool calls", runtime);
 	}

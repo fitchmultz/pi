@@ -13,7 +13,7 @@ For TypeScript definitions in your project, inspect `node_modules/@earendil-work
 
 ## Overview
 
-Pi has two summarization mechanisms:
+Pi has two summarization mechanisms. OpenAI's optional [native compaction](gpt-6.md#native-compaction) is a separate provider feature; enabling it does not replace these policies.
 
 | Mechanism | Trigger | Purpose |
 |-----------|---------|---------|
@@ -39,6 +39,8 @@ Before a provider request, Pi checks the canonical projected context together wi
 The fork's `session_before_auto_compact` hook runs before summary preparation and authentication. An extension can return `{ newContext: { handoff } }` to start a native context window without generating a summary. The original journal remains intact, and pending input follows the new window. Manual `/compact` keeps its ordinary summarization behavior.
 
 A provider context-overflow error or an early final `stopReason: "length"` can select one compact-and-retry recovery attempt. Length responses with tool calls retain their synthetic failed tool results and follow the ordinary tool/queue scheduler rather than forcing the run to end.
+
+The provider error code `misalignment_policy_violation` stops the affected session. Pi preserves the failed response and its request/response IDs, retains queued input, and stops automatic retries, compaction, cache warming, and fresh-context continuation. A stop received during compaction, branch summarization, or cache warming is also recorded. Context edits and tree navigation do not clear the stop in that session; reopening it restores the stop, and read-only inspection remains available. New sessions, including history forks, cross-project forks, and sessions that name a stopped parent, remain usable even when their history contains the old error. The copied error remains inspectable; a new provider stop in the destination stops that session. Review the recorded actions and error information; stopping does not undo actions already completed.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
 

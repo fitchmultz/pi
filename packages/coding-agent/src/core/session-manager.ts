@@ -688,7 +688,14 @@ export function buildSessionProjection(
 					!retainedCalls.has(call.id) &&
 					(retainedResults.has(call.id) || !allResults.has(call.id)),
 			);
-			return calls.length > 0 ? [{ sourceEntry, messages: [{ ...message, content: calls }] }] : [];
+			if (calls.length === 0) return [];
+			// Internal carry retains call items, not the whole response. Real edits still need replay invalidation.
+			const carriedMessage = {
+				...message,
+				content: calls,
+				...(!edits.has(sourceEntry.id) ? { responsesOutput: undefined, responsesContent: undefined } : {}),
+			};
+			return [{ sourceEntry, messages: [carriedMessage] }];
 		});
 		projectedEntries.splice(1, 0, ...carried);
 		// An explicit call omission also omits its dependent output; never resurrect the removed call.

@@ -52,10 +52,17 @@ export function projectForkCurrentStateWrite(
 			return write.key === plan.branch ? { ...write, value: plan.destinationTip } : undefined;
 		case "pi.lane.config":
 			return plan.scope === "tree" || write.key === plan.branch ? write : undefined;
-		case "pi.lane.state":
-			return plan.scope === "tree" || write.key === plan.branch
-				? { ...write, value: { currentOperationId: null, lastOperationId: null, inbox: [] } }
-				: undefined;
+		case "pi.lane.state": {
+			if (plan.scope === "branch" && write.key !== plan.branch) return undefined;
+			return {
+				...write,
+				value: {
+					currentOperationId: null,
+					lastOperationId: null,
+					inbox: [],
+				},
+			};
+		}
 		case "pi.result":
 			return undefined;
 	}
