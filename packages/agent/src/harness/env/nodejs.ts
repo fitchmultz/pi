@@ -493,7 +493,6 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		}
 
 		return await new Promise((resolvePromise) => {
-			let settled = false;
 			let finalizing = false;
 			let timedOut = false;
 			let callbackError: ExecutionError | undefined;
@@ -530,10 +529,6 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			}
 
 			const settle = (result: Result<ShellExecResult, ExecutionError>) => {
-				if (settled) return;
-				settled = true;
-				if (timeoutId) clearTimeout(timeoutId);
-				if (signal) signal.removeEventListener("abort", onAbort);
 				if (child?.pid) this.activeChildPids.delete(child.pid);
 				capture.dispose();
 				resolvePromise(result);
