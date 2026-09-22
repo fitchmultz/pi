@@ -77,7 +77,10 @@ function terminalFixture() {
 				...(args.includes("--checkpoint") ? [] : ["--provider", "faux", "--model", "faux-1"]),
 				...args,
 			];
-			writeFileSync(launch, `${command.map(quote).join(" ")}\nprintf '%s\\n' "$?" > ${quote(status)}\nsleep 60\n`);
+			writeFileSync(
+				launch,
+				`${command.map(quote).join(" ")}\nprintf '%s\\n' "$?" > ${quote(`${status}.tmp`)}\nmv ${quote(`${status}.tmp`)} ${quote(status)}\nsleep 60\n`,
+			);
 			execFileSync("tmux", [
 				"-L",
 				socket,
