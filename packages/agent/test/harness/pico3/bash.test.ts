@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, expect, test, vi } from "vitest";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "../../../src/harness/context.ts";
 import { bashTool } from "../../../src/harness/pico3/bash.ts";
+import { Bounded } from "../../../src/harness/pico3/bounded.ts";
 import type { ToolApi } from "../../../src/harness/pico3/types.ts";
 
 vi.mock("node:child_process", { spy: true });
@@ -40,6 +41,21 @@ test("bash decodes interleaved pipes independently and publishes EOF bytes befor
 	child.stderr.emit("end");
 	expect(chunks.join("")).toBe("warn€�");
 	expect(child.stdout.listenerCount("data")).toBe(0);
+});
+
+test("generic byte accounting measures decoded shell output, including EOF replacements", async () => {
+	const { child, api } = fixture();
+	const output = new Bounded(1, 10, "head");
+	api.stream = (chunk) => output.push(typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk);
+	const pending = bashTool().execute({ command: "unused" }, api, BACKGROUND_CONTEXT);
+	child.stdout.emit("data", Buffer.from("\uFEFF"));
+	child.stdout.emit("data", Buffer.from([0xe2]));
+	child.emit("close", 0, null);
+	await pending;
+	// The pipe BOM is consumed; EOF supplies the three UTF-8 bytes of U+FFFD.
+	expect(output.total).toBe(3);
+	expect(output.droppedBytes).toBe(2);
+	expect(output.text()).toBe("");
 });
 
 test.each(["process", "stdout", "stderr"])(
