@@ -10,7 +10,7 @@ export interface WordNavigationOptions {
 	/** Custom segmenter returning word segments for the given text. */
 	segment?: (text: string) => Iterable<Intl.SegmentData>;
 	/** Predicate identifying atomic segments that should be treated as single units (e.g. paste markers). */
-	isAtomicSegment?: (segment: string) => boolean;
+	isAtomicSegment?: (segment: string, index: number) => boolean;
 }
 
 /**
@@ -31,7 +31,7 @@ export function findWordBackward(text: string, cursor: number, options?: WordNav
 	// Skip trailing whitespace
 	while (
 		segments.length > 0 &&
-		!isAtomic?.(segments[segments.length - 1]?.segment || "") &&
+		!isAtomic?.(segments[segments.length - 1]?.segment || "", segments[segments.length - 1]?.index ?? 0) &&
 		isWhitespaceChar(segments[segments.length - 1]?.segment || "")
 	) {
 		newCursor -= segments.pop()?.segment.length || 0;
@@ -41,7 +41,7 @@ export function findWordBackward(text: string, cursor: number, options?: WordNav
 
 	const last = segments[segments.length - 1]!;
 
-	if (isAtomic?.(last.segment)) {
+	if (isAtomic?.(last.segment, last.index)) {
 		// Skip one atomic segment.
 		newCursor -= last.segment.length;
 	} else if (last.isWordLike) {
@@ -58,7 +58,7 @@ export function findWordBackward(text: string, cursor: number, options?: WordNav
 		// Skip non-word non-whitespace run (punctuation)
 		while (
 			segments.length > 0 &&
-			!isAtomic?.(segments[segments.length - 1]?.segment || "") &&
+			!isAtomic?.(segments[segments.length - 1]?.segment || "", segments[segments.length - 1]?.index ?? 0) &&
 			!segments[segments.length - 1]?.isWordLike &&
 			!isWhitespaceChar(segments[segments.length - 1]?.segment || "")
 		) {
@@ -87,14 +87,14 @@ export function findWordForward(text: string, cursor: number, options?: WordNavi
 	let newCursor = cursor;
 
 	// Skip leading whitespace
-	while (!next.done && !isAtomic?.(next.value.segment) && isWhitespaceChar(next.value.segment)) {
+	while (!next.done && !isAtomic?.(next.value.segment, next.value.index) && isWhitespaceChar(next.value.segment)) {
 		newCursor += next.value.segment.length;
 		next = iterator.next();
 	}
 
 	if (next.done) return newCursor;
 
-	if (isAtomic?.(next.value.segment)) {
+	if (isAtomic?.(next.value.segment, next.value.index)) {
 		// Skip one atomic segment.
 		newCursor += next.value.segment.length;
 	} else if (next.value.isWordLike) {
@@ -104,7 +104,7 @@ export function findWordForward(text: string, cursor: number, options?: WordNavi
 		// Skip non-word non-whitespace run (punctuation)
 		while (
 			!next.done &&
-			!isAtomic?.(next.value.segment) &&
+			!isAtomic?.(next.value.segment, next.value.index) &&
 			!next.value.isWordLike &&
 			!isWhitespaceChar(next.value.segment)
 		) {
