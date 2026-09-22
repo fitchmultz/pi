@@ -429,6 +429,16 @@ editor.getPaddingX();  // Get current padding
 - Horizontal lines above/below editor
 - Fake cursor rendering (hidden real cursor)
 
+`getText()`, `getExpandedText()`, `getLines()`, and `onChange` expose the complete
+normalized source, including collapsed pastes. `getCursor()` returns zero-based
+source line and UTF-16 column positions. Paste labels exist only in rendered
+output; typing or passing a label to `setText()` inserts literal text.
+
+Use `saveDraft()` and `restoreDraft()` for temporary, same-editor dialogs that
+must preserve folds, cursor, and undo history. Drafts are immutable in-memory
+snapshots, not a serialization format. Transfer `getExpandedText()` to a different
+editor or external process.
+
 **Key Bindings:**
 - `Enter` - Submit
 - `Shift+Enter`, `Ctrl+Enter`, or `Alt+Enter` - New line (terminal-dependent, Alt+Enter most reliable)
@@ -674,6 +684,13 @@ editor.setAutocompleteProvider(provider);
 - Press `Tab` for file path completion
 - Works with `~/`, `./`, `../`, and `@` prefix
 - Filters to attachable files for `@` prefix
+
+Custom autocomplete providers receive the complete canonical document and may
+return an arbitrary replacement document. Providers declaring `inputContext: "line"`
+receive only the editable part of the current line, bounded by adjacent folds.
+`CombinedAutocompleteProvider` uses this capability. Transparent wrappers must
+forward the declaration and query/trigger options: `slashCommands` is global
+command eligibility, while `force` is explicit file-completion intent.
 
 ## Key Detection
 

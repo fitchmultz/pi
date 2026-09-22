@@ -143,7 +143,7 @@ class MicroTui {
 		this.#editor.onAction("app.model.select", handlers.selectModel);
 		this.#editor.onAction("app.thinking.cycle", handlers.cycleThinking);
 		this.#editor.onAction("app.message.followUp", () => {
-			const text = this.#editor.getText().trim();
+			const text = this.#editor.getExpandedText().trim();
 			if (!text) return;
 			this.#editor.setText("");
 			handlers.followUp(text);

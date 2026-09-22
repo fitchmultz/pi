@@ -249,16 +249,20 @@ export interface AutocompleteSuggestions {
 }
 
 export interface AutocompleteProvider {
+	/** Opt in to current-line text bounded by folds; undeclared providers receive the whole document. */
+	inputContext?: "line";
+
 	/** Characters that should naturally trigger this provider at token boundaries. */
 	triggerCharacters?: string[];
 
 	// Get autocomplete suggestions for current text/cursor position
 	// Returns null if no suggestions available
+	// slashCommands defaults to true; disable it when scoped input cannot start a global command.
 	getSuggestions(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
-		options: { signal: AbortSignal; force?: boolean },
+		options: { signal: AbortSignal; force?: boolean; slashCommands?: boolean },
 	): Promise<AutocompleteSuggestions | null>;
 
 	// Apply the selected item
@@ -276,11 +280,17 @@ export interface AutocompleteProvider {
 	};
 
 	// Check if file completion should trigger for explicit Tab completion
-	shouldTriggerFileCompletion?(lines: string[], cursorLine: number, cursorCol: number): boolean;
+	shouldTriggerFileCompletion?(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		options?: { slashCommands?: boolean },
+	): boolean;
 }
 
 // Combined provider that handles both slash commands and file paths
 export class CombinedAutocompleteProvider implements AutocompleteProvider {
+	readonly inputContext?: "line" = "line";
 	private commands: (SlashCommand | AutocompleteItem)[];
 	private basePath: string;
 	private fdPath: string | null;
@@ -295,7 +305,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
-		options: { signal: AbortSignal; force?: boolean },
+		options: { signal: AbortSignal; force?: boolean; slashCommands?: boolean },
 	): Promise<AutocompleteSuggestions | null> {
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
@@ -315,6 +325,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			};
 		}
 
+		if (!options.force && options.slashCommands === false && textBeforeCursor.trimStart().startsWith("/")) {
+			return null;
+		}
 		if (!options.force && textBeforeCursor.startsWith("/")) {
 			const spaceIndex = textBeforeCursor.indexOf(" ");
 
@@ -404,7 +417,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 		// Check if we're completing a slash command (prefix starts with "/" but NOT a file path)
 		// Slash commands are at the start of the line and don't contain path separators after the first /
-		const isSlashCommand = prefix.startsWith("/") && beforePrefix.trim() === "" && !prefix.slice(1).includes("/");
+		const isSlashCommand =
+			prefix.startsWith("/") &&
+			beforePrefix.trim() === "" &&
+			!prefix.slice(1).includes("/") &&
+			!parsePathPrefix(item.value).rawPrefix.startsWith("/");
 		if (isSlashCommand) {
 			// This is a command name completion
 			const newLine = `${beforePrefix}/${item.value} ${adjustedAfterCursor}`;
@@ -821,12 +838,21 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	}
 
 	// Check if we should trigger file completion (called on Tab key)
-	shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
+	shouldTriggerFileCompletion(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		options?: { slashCommands?: boolean },
+	): boolean {
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 
 		// Don't trigger if we're typing a slash command at the start of the line
-		if (textBeforeCursor.trim().startsWith("/") && !textBeforeCursor.trim().includes(" ")) {
+		if (
+			options?.slashCommands !== false &&
+			textBeforeCursor.trim().startsWith("/") &&
+			!textBeforeCursor.trim().includes(" ")
+		) {
 			return false;
 		}
 

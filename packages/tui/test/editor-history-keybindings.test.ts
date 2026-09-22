@@ -40,4 +40,25 @@ describe("Editor prompt history keybindings", () => {
 		assert.strictEqual(editor.getText(), "draft");
 		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 3 });
 	});
+
+	it("restores a folded draft and its source cursor with configured history keys", () => {
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.editor.historyPrevious": "ctrl+p",
+				"tui.editor.historyNext": "ctrl+n",
+			}),
+		);
+		const editor = new Editor(new TuiMainScreen(new VirtualTerminal()), defaultEditorTheme);
+		const payload = "hidden\n".repeat(12);
+		editor.addToHistory("old prompt");
+		editor.handleInput(`\x1b[200~${payload}\x1b[201~`);
+		assert.deepStrictEqual(editor.getCursor(), { line: 12, col: 0 });
+		editor.handleInput("\x10");
+		assert.strictEqual(editor.getText(), "old prompt");
+		editor.handleInput("\x0e");
+		assert.strictEqual(editor.getText(), payload);
+		assert.deepStrictEqual(editor.getCursor(), { line: 12, col: 0 });
+		editor.handleInput("\x7f");
+		assert.strictEqual(editor.getText(), "");
+	});
 });
