@@ -2,6 +2,7 @@ import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { Value } from "typebox/value";
 import type { Tool, ToolCall } from "../types.ts";
+import { findTool } from "./tool-identity.ts";
 
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const TYPEBOX_KIND = Symbol.for("TypeBox.Kind");
@@ -238,6 +239,20 @@ function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown
 }
 
 function normalizeOptionalNulls(value: unknown, schema: JsonSchemaObject): void {
+	const alternatives = schema.anyOf ?? schema.oneOf;
+	if (alternatives && typeof value === "object" && value !== null) {
+		// Keep an already-valid nullable branch before trying omission in other branches.
+		if (getSubSchemaValidator(schema)?.Check(value)) return;
+		for (const alternative of alternatives) {
+			const candidate = structuredClone(value);
+			normalizeOptionalNulls(candidate, alternative);
+			const coerced = coerceWithJsonSchema(candidate, alternative);
+			if (!getSubSchemaValidator(alternative)?.Check(coerced)) continue;
+			for (const key of Object.keys(value)) delete (value as Record<string, unknown>)[key];
+			Object.assign(value, coerced);
+			break;
+		}
+	}
 	if (Array.isArray(value)) {
 		if (Array.isArray(schema.items)) {
 			for (let index = 0; index < value.length; index++) {
@@ -300,7 +315,7 @@ function formatValidationPath(error: TLocalizedValidationError): string {
  * @throws Error if tool is not found or validation fails
  */
 export function validateToolCall(tools: Tool[], toolCall: ToolCall): any {
-	const tool = tools.find((t) => t.name === toolCall.name);
+	const tool = findTool(tools, toolCall);
 	if (!tool) {
 		throw new Error(`Tool "${toolCall.name}" not found`);
 	}

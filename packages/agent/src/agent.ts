@@ -5,13 +5,15 @@ import {
 	type ImageContent,
 	type Message,
 	type Model,
+	mergeAssistantCheckpoint,
+	type ResponseControl,
 	type SimpleStreamOptions,
 	type TextContent,
 	type ThinkingBudgets,
 	type Transport,
 	toToolDeclaration,
 } from "@earendil-works/pi-ai";
-import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import { getPendingToolCalls, runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AfterToolCallContext,
@@ -203,6 +205,11 @@ export class Agent {
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
+	private responseControl?: ResponseControl;
+	private readonly steeringListeners = new Set<() => void>();
+	private steeringPreparation?: Promise<void>;
+	/** Normalize newly admitted live user input before sending it on a duplex transport. */
+	public prepareSteering?: (message: AgentMessage) => Promise<void>;
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -328,6 +335,17 @@ export class Agent {
 	/** Queue a message to be injected after the current assistant turn finishes. */
 	steer(message: AgentMessage): void {
 		this.steeringQueue.enqueue(message);
+		if (message.role === "user" && this.responseControl) {
+			// Queue first: normal draining owns the input if the socket ends during normalization.
+			this.steeringPreparation = (this.steeringPreparation ?? Promise.resolve()).then(async () => {
+				await this.prepareSteering?.(message);
+				if (this.steeringQueue.snapshot().includes(message) && this.responseControl?.steer(message)) {
+					this.steeringQueue.take((queued) => queued === message);
+				}
+			});
+			void this.steeringPreparation.catch(() => {});
+		}
+		for (const listener of this.steeringListeners) listener();
 	}
 
 	/** Queue a message to run only after the agent would otherwise stop. */
@@ -453,7 +471,8 @@ export class Agent {
 			}
 		}
 
-		if (lastMessage.role === "assistant") throw new Error("Cannot continue from message role: assistant");
+		if (lastMessage.role === "assistant" && getPendingToolCalls(this._state.messages).length === 0)
+			throw new Error("Cannot continue from message role: assistant");
 		await this.runContinuation();
 	}
 
@@ -519,10 +538,18 @@ export class Agent {
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,
+			onResponseControl: (control) => {
+				this.responseControl = control;
+			},
+			subscribeSteering: (listener) => {
+				this.steeringListeners.add(listener);
+				return () => this.steeringListeners.delete(listener);
+			},
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
+			getTools: () => this._state.tools,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			finishTurn: this.finishTurn,
@@ -540,6 +567,12 @@ export class Agent {
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
+				const preparation = this.steeringPreparation;
+				try {
+					await preparation;
+				} finally {
+					if (this.steeringPreparation === preparation) this.steeringPreparation = undefined;
+				}
 				if (steeringPollsToSkip > 0) {
 					steeringPollsToSkip--;
 					return [];
@@ -599,6 +632,7 @@ export class Agent {
 	}
 
 	private finishRun(): void {
+		this.responseControl = undefined;
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
@@ -616,17 +650,31 @@ export class Agent {
 	private async processEvents(event: AgentEvent): Promise<void> {
 		switch (event.type) {
 			case "message_start":
-				this._state.streamingMessage = event.message;
+				if (event.message.role === "assistant") this._state.streamingMessage = event.message;
 				break;
 
 			case "message_update":
 				this._state.streamingMessage = event.message;
 				break;
 
-			case "message_end":
-				this._state.streamingMessage = undefined;
-				this._state.messages.push(event.message);
+			case "message_checkpoint":
+			case "message_end": {
+				const message = event.message;
+				if (message.role === "assistant") {
+					if (event.type === "message_end") this._state.streamingMessage = undefined;
+					const index = message.responseId
+						? this._state.messages.findIndex(
+								(saved) => saved.role === "assistant" && saved.responseId === message.responseId,
+							)
+						: -1;
+					if (index >= 0) {
+						const saved = this._state.messages[index];
+						this._state.messages[index] =
+							saved.role === "assistant" ? mergeAssistantCheckpoint(saved, message) : message;
+					} else this._state.messages.push(message);
+				} else this._state.messages.push(message);
 				break;
+			}
 
 			case "tool_execution_start": {
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
@@ -635,6 +683,7 @@ export class Agent {
 				break;
 			}
 
+			case "tool_execution_detached":
 			case "tool_execution_end": {
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
 				pendingToolCalls.delete(event.toolCallId);

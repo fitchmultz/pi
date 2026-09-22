@@ -35,6 +35,74 @@ afterEach(() => {
 	fs.rmSync(directory, { recursive: true, force: true });
 });
 
+const usage = {
+	input: 10,
+	output: 20,
+	cacheRead: 30,
+	cacheWrite: 40,
+	totalTokens: 100,
+	cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 1 },
+};
+
+it("persists usage before any assistant response and retains it across a new session", () => {
+	const sm = SessionManager.create(directory, directory);
+	const file = sm.getSessionFile()!;
+	sm.appendCustomEntry("before-usage", { kept: true });
+	expect(fs.existsSync(file)).toBe(false);
+	const entry = sm.appendUsage("child_work", "test-provider", "test-model", usage, "slash command");
+	expect(fs.existsSync(file)).toBe(true);
+	const entries = sm.getEntries();
+	const reopened = SessionManager.open(file);
+	expect(reopened.getEntry(entry.id)).toEqual(entry);
+	expect(reopened.getEntries()).toEqual(entries);
+	expect(reopened.buildSessionContext().messages).toEqual([]);
+	const bytes = fs.readFileSync(file, "utf8");
+	sm.flush();
+	expect(fs.readFileSync(file, "utf8")).toBe(bytes);
+	sm.newSession();
+	expect(fs.existsSync(sm.getSessionFile()!)).toBe(false);
+	expect(SessionManager.open(file).getEntries()).toEqual(entries);
+});
+
+it.each(["branch", "fork"] as const)("persists copied %s usage without an assistant response", (kind) => {
+	const sm = SessionManager.create(directory, directory);
+	const entry = sm.appendUsage("child_work", "test-provider", "test-model", usage);
+	const source = sm.getSessionFile()!;
+	const sourceBytes = fs.readFileSync(source, "utf8");
+	const copy =
+		kind === "branch"
+			? sm.createBranchedSession(entry.id)!
+			: SessionManager.forkFrom(source, directory, directory).getSessionFile()!;
+	expect(copy).not.toBe(source);
+	expect(fs.existsSync(copy)).toBe(true);
+	const reopened = SessionManager.open(copy);
+	expect(reopened.getEntries()).toEqual([entry]);
+	expect(reopened.getHeader()?.parentSession).toBe(source);
+	reopened.appendCustomEntry("after-usage", { kept: true });
+	expect(SessionManager.open(copy).getEntries()).toEqual(reopened.getEntries());
+	expect(fs.readFileSync(source, "utf8")).toBe(sourceBytes);
+});
+
+it("retries failed branch publication without exposing a partial usage journal", async () => {
+	const actual = await vi.importActual<typeof fs>("node:fs");
+	const sm = SessionManager.create(directory, directory);
+	const entry = sm.appendUsage("child_work", "test-provider", "test-model", usage);
+	const source = sm.getSessionFile()!;
+	const files = fs.readdirSync(directory);
+	const failure = new Error("controlled branch write failure");
+	vi.mocked(fs.writeFileSync).mockImplementationOnce((fd, data) => {
+		actual.writeFileSync(fd, String(data).slice(0, 20));
+		throw failure;
+	});
+	expect(() => sm.createBranchedSession(entry.id)).toThrow(failure);
+	expect(sm.getSessionFile()).not.toBe(source);
+	expect(fs.existsSync(sm.getSessionFile()!)).toBe(false);
+	expect(fs.readdirSync(directory)).toEqual(files);
+	expect(SessionManager.open(source).getEntries()).toEqual([entry]);
+	sm.flush();
+	expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual([entry]);
+});
+
 const permissionTest = it.skipIf(process.platform === "win32" || process.getuid?.() === 0);
 
 permissionTest.each([false, true])(
@@ -168,15 +236,15 @@ permissionTest("retries initial creation after a real directory permission failu
 	expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual(sm.getEntries());
 });
 
-it.each(["initial", "append", "close"] as const)(
+it.each(["initial", "usage", "append", "close"] as const)(
 	"repairs a failed %s write without duplicate records",
 	async (kind) => {
 		const actual = await vi.importActual<typeof fs>("node:fs");
 		const sm = SessionManager.create(directory, directory);
 		sm.appendMessage({ role: "user", content: "retained user", timestamp: 1 });
-		if (kind !== "initial") sm.appendMessage(fauxAssistantMessage("first response"));
+		if (kind !== "initial" && kind !== "usage") sm.appendMessage(fauxAssistantMessage("first response"));
 		const failure = Object.assign(new Error("controlled write failure"), { code: "ENOSPC" });
-		if (kind === "initial") {
+		if (kind === "initial" || kind === "usage") {
 			vi.mocked(fs.writeFileSync).mockImplementationOnce((file, data) => {
 				actual.writeFileSync(file, String(data).slice(0, 20));
 				throw failure;
@@ -192,7 +260,11 @@ it.each(["initial", "append", "close"] as const)(
 				throw failure;
 			});
 		}
-		expect(() => sm.appendMessage(fauxAssistantMessage("retained failed response"))).toThrow(failure);
+		expect(() =>
+			kind === "usage"
+				? sm.appendUsage("child_work", "test-provider", "test-model", usage)
+				: sm.appendMessage(fauxAssistantMessage("retained failed response")),
+		).toThrow(failure);
 		const entries = sm.getEntries();
 		const revision = sm.getEntriesRevision();
 		const file = sm.getSessionFile()!;
@@ -225,11 +297,15 @@ it.each(["initial", "append", "close"] as const)(
 	},
 );
 
-it("does not overwrite a collided initial journal on retry", () => {
+it.each(["assistant", "usage"] as const)("does not overwrite a collided initial %s journal on retry", (kind) => {
 	const sm = SessionManager.create(directory, directory);
 	const file = sm.getSessionFile()!;
 	fs.writeFileSync(file, "unrelated file\n");
-	expect(() => sm.appendMessage(fauxAssistantMessage("retained response"))).toThrow(/EEXIST/);
+	expect(() =>
+		kind === "usage"
+			? sm.appendUsage("child_work", "test-provider", "test-model", usage)
+			: sm.appendMessage(fauxAssistantMessage("retained response")),
+	).toThrow(/EEXIST/);
 	expect(() => sm.flush()).toThrow(/EEXIST/);
 	expect(() => sm.appendCustomEntry("later", {})).toThrow(/EEXIST/);
 	expect(fs.readFileSync(file, "utf8")).toBe("unrelated file\n");
@@ -314,10 +390,18 @@ permissionTest.each(["new", "switch", "branch"] as const)(
 
 it("flush leaves ordinary deferred and in-memory entries alone", () => {
 	for (const sm of [SessionManager.create(directory, directory), SessionManager.inMemory(directory)]) {
+		sm.flush();
+		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
 		sm.appendCustomEntry("deferred", {});
 		sm.flush();
 		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
-		sm.appendMessage(fauxAssistantMessage("first response"));
+		const user = sm.appendMessage({ role: "user", content: "deferred user", timestamp: 1 });
+		sm.flush();
+		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
+		sm.createBranchedSession(user);
+		sm.flush();
+		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
+		sm.appendUsage("child_work", "test-provider", "test-model", usage);
 		sm.flush();
 		if (sm.isPersisted()) expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual(sm.getEntries());
 		else expect(sm.getSessionFile()).toBeUndefined();

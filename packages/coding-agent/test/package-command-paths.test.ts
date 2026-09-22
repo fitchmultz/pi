@@ -21,6 +21,7 @@ import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import { main } from "../src/main.ts";
 import { ConfigSelectorComponent } from "../src/modes/interactive/components/config-selector.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
+import * as childProcess from "../src/utils/child-process.ts";
 import { allowNetwork } from "./test-network-env.ts";
 
 describe("package commands", () => {
@@ -391,6 +392,68 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		} finally {
 			logSpy.mockRestore();
 		}
+	});
+
+	it.each([
+		{ args: ["git:github.com/example/extension"] },
+		{ args: ["--extension", "git:github.com/example/extension"] },
+		{ args: ["--extension", "npm:example"] },
+		{ args: ["--extensions"] },
+		{ args: ["--all"] },
+		{ args: ["--self", "--extensions"] },
+		{ args: ["pi", "--extensions"] },
+		{ args: ["self", "--extensions"] },
+	])("reports offline package updates as skipped for update $args", async ({ args }) => {
+		vi.stubEnv("PI_OFFLINE", "1");
+		vi.stubEnv("PI_SKIP_VERSION_CHECK", "1");
+		const settingsPath = join(projectDir, ".pi", "settings.json");
+		const installedPath = join(projectDir, ".pi", "git", "github.com", "example", "extension", "index.ts");
+		mkdirSync(join(projectDir, ".pi", "git", "github.com", "example", "extension"), { recursive: true });
+		writeFileSync(installedPath, "// installed version\n");
+		const settings = JSON.stringify({ packages: ["git:github.com/example/extension", "npm:example"] });
+		writeFileSync(settingsPath, settings);
+		const spawn = vi.spyOn(childProcess, "spawnProcess").mockImplementation(() => {
+			throw new Error("Unexpected subprocess while offline");
+		});
+		const spawnSync = vi.spyOn(childProcess, "spawnProcessSync").mockImplementation(() => {
+			throw new Error("Unexpected subprocess while offline");
+		});
+		const fetchMock = vi.fn().mockRejectedValue(new Error("Unexpected fetch while offline"));
+		vi.stubGlobal("fetch", fetchMock);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await main(["update", ...args, "--approve"]);
+
+		expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).not.toContain("Updated");
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			"Package updates skipped because offline mode is enabled (PI_OFFLINE).",
+		);
+		expect(process.exitCode).toBe(1);
+		expect(spawn).not.toHaveBeenCalled();
+		expect(spawnSync).not.toHaveBeenCalled();
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(readFileSync(installedPath, "utf8")).toBe("// installed version\n");
+		expect(readFileSync(settingsPath, "utf8")).toBe(settings);
+	});
+
+	it("keeps online local and pinned npm package updates as no-ops", async () => {
+		const settingsPath = join(agentDir, "settings.json");
+		const settings = JSON.stringify({ packages: [packageDir, "npm:example@1.2.3"] });
+		writeFileSync(settingsPath, settings);
+		const spawn = vi.spyOn(childProcess, "spawnProcess").mockImplementation(() => {
+			throw new Error("Unexpected subprocess for local or pinned npm packages");
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await main(["update", "--extensions"]);
+
+		expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Updated packages");
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+		expect(spawn).not.toHaveBeenCalled();
+		expect(readFileSync(settingsPath, "utf8")).toBe(settings);
 	});
 
 	it("lets trust.json override default project trust", async () => {

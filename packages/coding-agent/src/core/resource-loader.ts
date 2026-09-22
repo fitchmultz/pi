@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { toolId } from "@earendil-works/pi-ai";
 import chalk from "chalk";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
@@ -1059,7 +1060,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		for (const ext of extensions) {
 			// Check tools
-			for (const toolName of ext.tools.keys()) {
+			for (const { definition } of ext.tools.values()) {
+				const toolName = toolId(definition);
 				const existingOwner = toolOwners.get(toolName);
 				if (existingOwner && existingOwner !== ext.path) {
 					conflicts.push({

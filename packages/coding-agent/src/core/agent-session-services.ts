@@ -59,7 +59,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
-	tools?: string[];
+	tools?: CreateAgentSessionOptions["tools"];
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
 	noTools?: CreateAgentSessionOptions["noTools"];
 	customTools?: ToolDefinition[];

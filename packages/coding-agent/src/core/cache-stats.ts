@@ -127,7 +127,7 @@ function scan(
 					reportedCache: true,
 				};
 			}
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
+		} else if (entry.type === "message" && !entry.checkpoint && entry.message.role === "assistant") {
 			const miss = detectMiss(prev, entry.message, models);
 			if (miss) {
 				totals.missedTokens += miss.missedTokens;

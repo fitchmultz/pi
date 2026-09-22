@@ -1,3 +1,5 @@
+export { publishLocalFile } from "@earendil-works/pi-agent-core/node";
+
 // Core session management
 
 export { type Args, parseArgs } from "./cli/args.ts";
@@ -193,12 +195,14 @@ export type {
 	ToolRenderResultOptions,
 	ToolResultEvent,
 	ToolResultEventResult,
+	ToolSearchDefinition,
 	TurnEndEvent,
 	TurnEndEventResult,
 	TurnStartEvent,
 	UIPromptEndEvent,
 	UIPromptKind,
 	UIPromptStartEvent,
+	UsageContribution,
 	UserBashEvent,
 	UserBashEventResult,
 	WidgetPlacement,
@@ -312,6 +316,7 @@ export {
 	type SessionTreeNode,
 	sessionEntryToContextMessages,
 	type ThinkingLevelChangeEntry,
+	type UsageEntry,
 } from "./core/session-manager.ts";
 export {
 	type CacheWarmingMode,

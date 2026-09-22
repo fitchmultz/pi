@@ -235,9 +235,9 @@ describe("transcript system messages", () => {
 
 		expect(payload.tools?.map((value) => value.name)).toEqual(["base_tool"]);
 		expect(payload.input.map((item) => item.type)).toContain("tool_search_call");
-		expect(
-			payload.input.find((item) => item.type === "tool_search_output")?.tools?.map((value) => value.name),
-		).toEqual(["late_tool"]);
+		expect(payload.input.find((item) => item.type === "tool_search_output")?.tools).toMatchObject([
+			{ type: "namespace", tools: [{ name: "late_tool" }] },
+		]);
 	});
 
 	test("folds OpenAI updates into the leading developer message without native support", async () => {

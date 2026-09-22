@@ -38,21 +38,6 @@
         byId.set(entry.id, entry);
       }
 
-      // Tool call lookup (toolCallId -> {name, arguments})
-      const toolCallMap = new Map();
-      for (const entry of entries) {
-        if (entry.type === 'message' && entry.message.role === 'assistant') {
-          const content = entry.message.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === 'toolCall') {
-                toolCallMap.set(block.id, { name: block.name, arguments: block.arguments });
-              }
-            }
-          }
-        }
-      }
-
       // Label lookup (entryId -> label string)
       // Labels are stored in 'label' entries that reference their target via targetId
       const labelMap = new Map();
@@ -141,7 +126,49 @@
           }
           current = byId.get(current.parentId);
         }
-        return path;
+        const positions = new Map();
+        const display = [];
+        for (const entry of path) {
+          if (entry.type === 'message' && entry.message.role === 'assistant' && entry.message.responseId) {
+            const index = positions.get(entry.message.responseId);
+            if (index !== undefined) {
+              const previous = display[index];
+              display[index] = {
+                ...entry,
+                checkpointIds: [...(previous.checkpointIds || [previous.id]), entry.id],
+                message: mergeAssistantCheckpoint(previous.message, entry.message)
+              };
+              continue;
+            }
+            positions.set(entry.message.responseId, display.length);
+          }
+          display.push(entry);
+        }
+        return display;
+      }
+
+      // Browser counterpart of pi-ai's mergeAssistantCheckpoint; raw journal entries stay untouched.
+      function mergeAssistantCheckpoint(message, checkpoint) {
+        const latest = checkpoint.stopReason === 'pending' &&
+          (message.stopReason !== 'pending' || message.content.length > checkpoint.content.length)
+          ? message : checkpoint;
+        const executions = new Map();
+        for (const frame of [message, checkpoint]) {
+          for (const call of frame.content) {
+            if (call.type !== 'toolCall' || call.executionStarted === undefined) continue;
+            executions.set(call.id, {
+              ...executions.get(call.id),
+              executionStarted: call.executionStarted,
+              ...(call.executionArguments === undefined ? {} : { executionArguments: call.executionArguments }),
+              ...(call.executionDetached === undefined ? {} : { executionDetached: call.executionDetached })
+            });
+          }
+        }
+        return {
+          ...latest,
+          content: latest.content.map(block =>
+            block.type === 'toolCall' && executions.has(block.id) ? { ...block, ...executions.get(block.id) } : block)
+        };
       }
 
       // Tree node lookup for finding leaves
@@ -574,8 +601,13 @@
         return p;
       }
 
-      function formatToolCall(name, args) {
-        switch (name) {
+      function toolDisplayName(tool) {
+        return tool.namespace === undefined ? tool.name : `${tool.namespace}.${tool.name}`;
+      }
+
+      function formatToolCall(tool) {
+        const args = tool.executionArguments ?? tool.arguments ?? {};
+        switch (tool.namespace === undefined ? tool.name : null) {
           case 'read': {
             const path = shortenPath(String(args.path || args.file_path || ''));
             const offset = args.offset;
@@ -606,7 +638,7 @@
             return `[ls: ${shortenPath(String(args.path || '.'))}]`;
           default: {
             const argsStr = JSON.stringify(args).slice(0, 40);
-            return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? '...' : ''}]`;
+            return `[${toolDisplayName(tool)}: ${argsStr}${JSON.stringify(args).length > 40 ? '...' : ''}]`;
           }
         }
       }
@@ -677,11 +709,13 @@
               return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(no text)</span>`;
             }
             if (msg.role === 'toolResult') {
-              const toolCall = msg.toolCallId ? toolCallMap.get(msg.toolCallId) : null;
+              const path = buildActivePathIds(currentLeafId).has(entry.id) ? currentPath : getPath(findNewestLeaf(entry.id));
+              const toolCall = path.flatMap(e => e.type === 'message' && e.message.role === 'assistant' ? e.message.content : [])
+                .find(block => block.type === 'toolCall' && block.id === msg.toolCallId);
               if (toolCall) {
-                return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall.name, toolCall.arguments))}</span>`;
+                return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall))}</span>`;
               }
-              return labelHtml + `<span class="tree-role-tool">[${escapeHtml(msg.toolName || 'tool')}]</span>`;
+              return labelHtml + `<span class="tree-role-tool">[${escapeHtml(toolDisplayName({ name: msg.toolName || 'tool', namespace: msg.namespace }))}]</span>`;
             }
             if (msg.role === 'bashExecution') {
               const cmd = truncate(normalize(msg.command || ''));
@@ -721,6 +755,7 @@
 
       let currentLeafId = leafId;
       let currentTargetId = urlTargetId || leafId;
+      let currentPath = getPath(leafId);
       let treeRendered = false;
 
       function renderTree() {
@@ -849,10 +884,10 @@
       }
 
       function findToolResult(toolCallId) {
-        for (const entry of entries) {
+        for (const entry of currentPath) {
           if (entry.type === 'message' && entry.message.role === 'toolResult') {
             if (entry.message.toolCallId === toolCallId) {
-              return entry.message;
+              return entry;
             }
           }
         }
@@ -916,7 +951,8 @@
       }
 
       function renderToolCall(call) {
-        const result = findToolResult(call.id);
+        const resultEntry = findToolResult(call.id);
+        const result = resultEntry?.message;
         const isError = result?.isError || false;
         const statusClass = result ? (isError ? 'error' : 'success') : 'pending';
 
@@ -941,12 +977,12 @@
 
         const toolDomId = `tool-call-${escapeHtml(call.id)}`;
         let html = `<div class="tool-execution ${statusClass}" id="${toolDomId}">`;
-        const args = call.arguments || {};
-        const name = call.name;
+        const args = call.executionArguments ?? call.arguments ?? {};
+        const name = toolDisplayName(call);
 
         const invalidArg = '<span class="tool-error">[invalid arg]</span>';
 
-        switch (name) {
+        switch (call.namespace === undefined ? call.name : null) {
           case 'bash': {
             const command = str(args.command);
             const cmdDisplay = command === null ? invalidArg : escapeHtml(command || '...');
@@ -1039,23 +1075,26 @@
           default: {
             // Check for pre-rendered custom tool HTML
             const rendered = renderedTools?.[call.id];
-            if (rendered?.callHtml || rendered?.resultHtmlCollapsed || rendered?.resultHtmlExpanded) {
+            const callHtml = rendered?.calls?.[JSON.stringify(args)];
+            const resultHtml = rendered?.results?.[resultEntry?.id];
+            if (callHtml || resultHtml?.collapsed || resultHtml?.expanded) {
               // Custom tool with pre-rendered HTML from TUI renderer
-              if (rendered.callHtml) {
-                html += `<div class="tool-header ansi-rendered">${rendered.callHtml}</div>`;
+              if (callHtml) {
+                html += `<div class="tool-header ansi-rendered">${callHtml}</div>`;
               } else {
                 html += `<div class="tool-header"><span class="tool-name">${escapeHtml(name)}</span></div>`;
+                html += `<div class="tool-output"><pre>${escapeHtml(JSON.stringify(args, null, 2))}</pre></div>`;
               }
 
-              if (rendered.resultHtmlCollapsed && rendered.resultHtmlExpanded && rendered.resultHtmlCollapsed !== rendered.resultHtmlExpanded) {
+              if (resultHtml?.collapsed && resultHtml.expanded && resultHtml.collapsed !== resultHtml.expanded) {
                 // Both collapsed and expanded differ - render expandable section
                 html += `<div class="tool-output expandable ansi-rendered" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
-                  <div class="output-preview">${rendered.resultHtmlCollapsed}</div>
-                  <div class="output-full">${rendered.resultHtmlExpanded}</div>
+                  <div class="output-preview">${resultHtml.collapsed}</div>
+                  <div class="output-full">${resultHtml.expanded}</div>
                 </div>`;
-              } else if (rendered.resultHtmlExpanded) {
+              } else if (resultHtml?.expanded) {
                 // Only expanded exists (or collapsed is identical) - show directly
-                html += `<div class="tool-output ansi-rendered">${rendered.resultHtmlExpanded}</div>`;
+                html += `<div class="tool-output ansi-rendered">${resultHtml.expanded}</div>`;
               } else if (result) {
                 // No pre-rendered result HTML - fallback to JSON
                 const output = getResultText();
@@ -1351,7 +1390,7 @@
         const models = new Set();
 
         for (const entry of entryList) {
-          if (entry.type === 'message') {
+          if (entry.type === 'message' && !entry.checkpoint) {
             const msg = entry.message;
             if (msg.role === 'user') userMessages++;
             if (msg.role === 'assistant') {
@@ -1452,7 +1491,7 @@
               ${tools.map(t => {
                 const hasParams = t.parameters && typeof t.parameters === 'object' && t.parameters.properties && Object.keys(t.parameters.properties).length > 0;
                 if (!hasParams) {
-                  return `<div class="tool-item"><span class="tool-item-name">${escapeHtml(t.name)}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span></div>`;
+                  return `<div class="tool-item"><span class="tool-item-name">${escapeHtml(toolDisplayName(t))}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span></div>`;
                 }
                 const params = t.parameters;
                 const properties = params.properties;
@@ -1468,7 +1507,7 @@
                   }
                   paramsHtml += `</div>`;
                 }
-                return `<div class="tool-item" onclick="if(window.getSelection().toString())return;this.classList.toggle('params-expanded')"><span class="tool-item-name">${escapeHtml(t.name)}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span> <span class="tool-params-hint"></span><div class="tool-params-content">${paramsHtml}</div></div>`;
+                return `<div class="tool-item" onclick="if(window.getSelection().toString())return;this.classList.toggle('params-expanded')"><span class="tool-item-name">${escapeHtml(toolDisplayName(t))}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span> <span class="tool-params-hint"></span><div class="tool-params-content">${paramsHtml}</div></div>`;
               }).join('')}
             </div>
           </div>`;
@@ -1491,12 +1530,14 @@
           // were already resolved from the escaped id rendered by renderToolCall().
           return `tool-call-${entry.message.toolCallId}`;
         }
-        return `entry-${entryId}`;
+        const displayEntry = currentPath.find(entry => entry.checkpointIds?.includes(entryId));
+        return `entry-${displayEntry?.id || entryId}`;
       }
 
       function renderEntryToNode(entry) {
-        // Check cache first
-        if (entryCache.has(entry.id)) {
+        // Assistant cards include branch-dependent results and merged execution checkpoints.
+        const cacheable = entry.type !== 'message' || entry.message.role !== 'assistant';
+        if (cacheable && entryCache.has(entry.id)) {
           return entryCache.get(entry.id).cloneNode(true);
         }
 
@@ -1508,8 +1549,8 @@
         template.innerHTML = html;
         const node = template.content.firstElementChild;
 
-        // Cache the node
-        if (node) {
+        // Cache branch-independent nodes.
+        if (cacheable && node) {
           entryCache.set(entry.id, node.cloneNode(true));
         }
         return node;
@@ -1519,6 +1560,8 @@
         currentLeafId = targetId;
         currentTargetId = scrollToEntryId || targetId;
         const path = getPath(targetId);
+        currentPath = path;
+        treeRendered = false;
 
         renderTree();
 

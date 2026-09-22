@@ -10,9 +10,11 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 	Tool,
+	ToolReference,
 	ToolResultMessage,
 	TranscriptContext,
 	Usage,
+	UserMessage,
 } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
 
@@ -131,7 +133,7 @@ export interface AfterToolCallContext {
 export interface AgentTurnContext {
 	/** The assistant message that completed the turn. */
 	message: AssistantMessage;
-	/** Tool result messages emitted for the completed turn. */
+	/** Results available at this response boundary. Native async results may arrive in a later turn. */
 	toolResults: ToolResultMessage[];
 	/** Current agent context after the turn's assistant message and tool results have been appended. */
 	context: AgentContext;
@@ -145,7 +147,8 @@ export interface AgentTurnContext {
 export type AgentTurnDecision = { action: "continue" } | { action: "end" };
 
 /**
- * Called after a completed assistant turn and all of its tool-result messages, but before `turn_end`.
+ * Called after a completed assistant response and its currently available tool results, before `turn_end`.
+ * Native async calls may still be running; `agent_end` waits for local execution or durable detach.
  * On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
  * follow-up scheduling can satisfy that request and adds no extra request; otherwise the loop continues once
  * with the current context. Error and aborted responses remain hard exits.
@@ -194,6 +197,8 @@ export interface PrepareNextTurnContext extends AgentTurnContext {}
  */
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
+	/** Current permitted executable tools, read after an awaited search callback registers/activates matches. */
+	getTools?: () => readonly AgentTool[];
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -250,7 +255,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 
 	/**
-	 * Called after the assistant message and all tool-result messages have been emitted, immediately before `turn_end`.
+	 * Called after the assistant message and available tool-result messages have been emitted, immediately before `turn_end`.
+	 * Native async results may arrive later; ordinary tool batches still complete before this boundary.
 	 * `{ action: "end" }` ends the run without polling queues or preparing another request, unless a successful
 	 * tool batch requested a fresh context window. Cancellation always ends the run.
 	 * On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
@@ -288,6 +294,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Return [] when no steering messages are available.
 	 */
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
+	/** Wake the pending-tool wait when new steering input arrives. */
+	subscribeSteering?: (listener: () => void) => () => void;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -425,6 +433,10 @@ export interface NewContextRequest {
 
 /** Final or partial result produced by a tool. */
 export interface AgentToolResult<T = JsonValue | undefined> {
+	/** Search matches. The runtime resolves these against active registered tools, never caller-supplied schemas. */
+	tools?: ToolReference[];
+	/** Only on aborted native async execution: durable external work remains pending, without a final result. */
+	pending?: boolean;
 	/** Text or image content returned to the model. */
 	content: (TextContent | ImageContent)[];
 	/** Arbitrary structured details for logs or UI rendering. */
@@ -464,6 +476,13 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
 	) => Promise<AgentToolResult<TDetails>>;
+	/** Reattach a journaled started call. Undefined means its outcome cannot be recovered; execute is never retried. */
+	resume?(
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TDetails>,
+	): Promise<AgentToolResult<TDetails> | undefined>;
 	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
 	replay?: "never" | "safe";
 	/**
@@ -499,11 +518,35 @@ export type AgentEvent =
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
 	// Message lifecycle - emitted for system, user, assistant, and toolResult messages
-	| { type: "message_start"; message: AgentMessage }
+	| {
+			type: "message_start";
+			message: AgentMessage;
+			/** Provider-captured input delta for an automatic successor. */
+			continuationInput?: readonly (UserMessage | ToolResultMessage)[];
+	  }
 	// Only emitted for assistant messages during streaming
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
+	/** Awaited durable snapshot of completed assistant items before an early tool side effect. */
+	| { type: "message_checkpoint"; message: AssistantMessage }
+	| Extract<AssistantMessageEvent, { type: "steering" }>
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
-	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; namespace?: string; args: any }
+	| { type: "tool_execution_prepared"; toolCallId: string; toolName: string; namespace?: string; args: unknown }
+	| { type: "tool_execution_detached"; toolCallId: string; toolName: string; namespace?: string }
+	| {
+			type: "tool_execution_update";
+			toolCallId: string;
+			toolName: string;
+			namespace?: string;
+			args: any;
+			partialResult: any;
+	  }
+	| {
+			type: "tool_execution_end";
+			toolCallId: string;
+			toolName: string;
+			namespace?: string;
+			result: any;
+			isError: boolean;
+	  };

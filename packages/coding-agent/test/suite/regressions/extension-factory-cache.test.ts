@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { toolKey } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { clearExtensionCache, loadExtensions, loadExtensionsCached } from "../../../src/core/extensions/loader.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
@@ -151,7 +152,9 @@ export default function (pi) {
 			writeVersion(version);
 			await loader.reload();
 			expect(loader.getExtensions().errors).toEqual([]);
-			expect(loader.getExtensions().extensions[0].tools.get("reload_probe")?.definition).toMatchObject({
+			expect(
+				loader.getExtensions().extensions[0].tools.get(toolKey({ name: "reload_probe" }))?.definition,
+			).toMatchObject({
 				description: "version 1",
 				parameters: { properties: { action: { enum: ["version_1"] } } },
 			});
@@ -160,7 +163,9 @@ export default function (pi) {
 
 		const replacementLoader = new DefaultResourceLoader(options);
 		await replacementLoader.reload();
-		expect(replacementLoader.getExtensions().extensions[0].tools.get("reload_probe")?.definition).toMatchObject({
+		expect(
+			replacementLoader.getExtensions().extensions[0].tools.get(toolKey({ name: "reload_probe" }))?.definition,
+		).toMatchObject({
 			description: "version 1",
 			parameters: { properties: { action: { enum: ["version_1"] } } },
 		});
@@ -172,7 +177,7 @@ export default function (pi) {
 const loader = new DefaultResourceLoader(${JSON.stringify(options)});
 await loader.reload();
 if (loader.getExtensions().errors.length) throw new Error(JSON.stringify(loader.getExtensions().errors));
-console.log(JSON.stringify(loader.getExtensions().extensions[0].tools.get("reload_probe").definition));`,
+console.log(JSON.stringify(loader.getExtensions().extensions[0].tools.get(${JSON.stringify(toolKey({ name: "reload_probe" }))}).definition));`,
 		);
 		const fresh = execFileSync(
 			process.execPath,

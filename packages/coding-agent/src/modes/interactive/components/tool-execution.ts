@@ -73,6 +73,7 @@ export class ToolExecutionComponent extends Container {
 	private ui: TUI;
 	private cwd: string;
 	private executionStarted = false;
+	private detached = false;
 	private argsComplete = false;
 	private result?: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -189,6 +190,30 @@ export class ToolExecutionComponent extends Container {
 		});
 	}
 
+	updateToolDefinition(definition: ToolRenderers | undefined): void {
+		if (
+			this.toolDefinition?.renderCall === definition?.renderCall &&
+			this.toolDefinition?.renderResult === definition?.renderResult &&
+			this.toolDefinition?.renderShell === definition?.renderShell &&
+			(this.toolDefinition !== undefined) === (definition !== undefined)
+		)
+			return;
+		this.toolDefinition = definition;
+		this.callRendererComponent = undefined;
+		this.resultRendererComponent = undefined;
+		this.rendererState = {};
+		this.clear();
+		this.addChild(new Spacer(1));
+		this.addChild(
+			this.hasRendererDefinition()
+				? this.getRenderShell() === "self"
+					? this.selfRenderContainer
+					: this.contentBox
+				: this.contentTextRegion,
+		);
+		this.updateDisplay();
+	}
+
 	updateArgs(args: any): void {
 		this.args = args;
 		this.updateDisplay();
@@ -196,6 +221,12 @@ export class ToolExecutionComponent extends Container {
 
 	markExecutionStarted(): void {
 		this.executionStarted = true;
+		this.updateDisplay();
+		this.ui.requestRender();
+	}
+
+	markDetached(): void {
+		this.detached = true;
 		this.updateDisplay();
 		this.ui.requestRender();
 	}
@@ -214,6 +245,7 @@ export class ToolExecutionComponent extends Container {
 		},
 		isPartial = false,
 	): void {
+		this.detached = false;
 		this.result = result;
 		this.isPartial = isPartial;
 		this.updateDisplay();
@@ -403,6 +435,8 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 
+			if (this.detached)
+				renderContainer.addChild(new Text(theme.fg("muted", "Detached; external work remains pending"), 0, 0));
 			if (this.result) {
 				const resultRenderer = this.getResultRenderer();
 				if (!resultRenderer) {
@@ -490,6 +524,7 @@ export class ToolExecutionComponent extends Container {
 		if (content && (!this.compactView || this.expanded)) {
 			text += `\n\n${content}`;
 		}
+		if (this.detached) text += `\n${theme.fg("muted", "Detached; external work remains pending")}`;
 		const output = this.getTextOutput();
 		if (output) {
 			text += `\n${output}`;

@@ -123,6 +123,71 @@ describe("validateToolArguments", () => {
 		});
 	});
 
+	it("normalizes optional nulls inside the matching discriminated union branch", () => {
+		const parameters = Type.Object({
+			action: Type.Union([
+				Type.Object(
+					{
+						kind: Type.Literal("a"),
+						count: Type.Optional(Type.Number()),
+						limit: Type.Number(),
+						nullable: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+					},
+					{ additionalProperties: false },
+				),
+				Type.Object({ kind: Type.Literal("b"), text: Type.String() }, { additionalProperties: false }),
+			]),
+		});
+		for (const schema of [parameters, JSON.parse(JSON.stringify(parameters)) as Tool["parameters"]]) {
+			const tool = { name: "union", description: "Union", parameters: schema };
+			const call: ToolCall = {
+				type: "toolCall",
+				id: "union",
+				name: "union",
+				arguments: { action: { kind: "a", count: null, limit: "2", nullable: null } },
+			};
+			expect(validateToolArguments(tool, call)).toEqual({ action: { kind: "a", limit: 2, nullable: null } });
+			expect(call.arguments).toEqual({ action: { kind: "a", count: null, limit: "2", nullable: null } });
+		}
+	});
+
+	it("normalizes optional nulls inside an array union branch while preserving explicit nulls", () => {
+		const parameters = Type.Object({
+			action: Type.Union([
+				Type.Object({ query: Type.String() }, { additionalProperties: false }),
+				Type.Array(
+					Type.Object({
+						count: Type.Optional(Type.Number()),
+						nullable: Type.Union([Type.String(), Type.Null()]),
+					}),
+				),
+			]),
+		});
+		for (const schema of [parameters, JSON.parse(JSON.stringify(parameters)) as Tool["parameters"]]) {
+			const tool = { name: "union", description: "Union", parameters: schema };
+			const call: ToolCall = {
+				type: "toolCall",
+				id: "union",
+				name: "union",
+				arguments: { action: [{ count: null, nullable: null }] },
+			};
+			expect(validateToolArguments(tool, call)).toEqual({ action: [{ nullable: null }] });
+			expect(call.arguments).toEqual({ action: [{ count: null, nullable: null }] });
+		}
+	});
+
+	it("preserves explicitly nullable fields in a union even when another branch could omit them", () => {
+		const parameters = Type.Object({
+			action: Type.Union([
+				Type.Object({ count: Type.Optional(Type.Number()) }),
+				Type.Object({ count: Type.Optional(Type.Union([Type.Number(), Type.Null()])) }),
+			]),
+		});
+		const tool = { name: "union", description: "Union", parameters };
+		const call: ToolCall = { type: "toolCall", id: "union", name: "union", arguments: { action: { count: null } } };
+		expect(validateToolArguments(tool, call)).toEqual({ action: { count: null } });
+	});
+
 	it("preserves optional nulls whose referenced schema is nullable", () => {
 		const tool: Tool = {
 			name: "echo",

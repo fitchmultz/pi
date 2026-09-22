@@ -29,6 +29,7 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "wait_for_idle" }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -144,6 +145,7 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "wait_for_idle"; success: true }
 
 	// Model
 	| {

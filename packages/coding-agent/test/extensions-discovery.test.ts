@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { toolKey } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
 
@@ -272,8 +273,8 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("custom.ts");
 		// Verify the right tool was registered
-		expect(result.extensions[0].tools.has("from-custom")).toBe(true);
-		expect(result.extensions[0].tools.has("from-index")).toBe(false);
+		expect(result.extensions[0].tools.has(toolKey({ name: "from-custom" }))).toBe(true);
+		expect(result.extensions[0].tools.has(toolKey({ name: "from-index" }))).toBe(false);
 	});
 
 	it("ignores package.json without pi field, falls back to index.ts", async () => {
@@ -379,7 +380,7 @@ describe("extensions discovery", () => {
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has("my-tool")).toBe(true);
+		expect(result.extensions[0].tools.has(toolKey({ name: "my-tool" }))).toBe(true);
 	});
 
 	it("reports errors for invalid extension code", async () => {
@@ -414,7 +415,7 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("with-deps");
 		// The extension registers a 'parse_duration' tool
-		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
+		expect(result.extensions[0].tools.has(toolKey({ name: "parse_duration" }))).toBe(true);
 	});
 
 	it("registers message and entry renderers", async () => {
@@ -487,8 +488,8 @@ describe("extensions discovery", () => {
 				allTools.add(name);
 			}
 		}
-		expect(allTools.has("tool-a")).toBe(true);
-		expect(allTools.has("tool-b")).toBe(true);
+		expect(allTools.has(toolKey({ name: "tool-a" }))).toBe(true);
+		expect(allTools.has(toolKey({ name: "tool-b" }))).toBe(true);
 	});
 
 	it("loads extension with event handlers", async () => {
@@ -560,8 +561,8 @@ describe("extensions discovery", () => {
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has("explicit")).toBe(true);
-		expect(result.extensions[0].tools.has("discovered")).toBe(false);
+		expect(result.extensions[0].tools.has(toolKey({ name: "explicit" }))).toBe(true);
+		expect(result.extensions[0].tools.has(toolKey({ name: "discovered" }))).toBe(false);
 	});
 
 	it("loadExtensions with no paths loads nothing", async () => {

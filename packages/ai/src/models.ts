@@ -1,4 +1,5 @@
 import { lazyStream } from "./api/lazy.ts";
+import { withToolNamespaces } from "./api/tool-namespaces.ts";
 import { defaultProviderAuthContext as defaultAuthContext } from "./auth/context.ts";
 import { InMemoryCredentialStore } from "./auth/credential-store.ts";
 import { type AuthResolutionOverrides, ModelsError, resolveProviderAuth } from "./auth/resolve.ts";
@@ -724,7 +725,16 @@ class ModelsImpl implements MutableModels {
 					model,
 					options as ModelsApiStreamOptions<Api> | undefined,
 				);
-				return provider.stream(requestModel as Model<TApi>, transcript, requestOptions as ApiStreamOptions<TApi>);
+				return withToolNamespaces(
+					requestModel,
+					transcript,
+					(mapped, mapControl) =>
+						provider.stream(requestModel as Model<TApi>, mapped, {
+							...requestOptions,
+							onResponseControl: (control) => options?.onResponseControl?.(mapControl(control)),
+						} as ApiStreamOptions<TApi>),
+					options?.signal,
+				);
 			},
 			options?.signal,
 		);
@@ -745,7 +755,16 @@ class ModelsImpl implements MutableModels {
 			async () => {
 				const provider = this.requireProvider(model);
 				const { requestModel, requestOptions } = await this.applyAuth(model, options);
-				return provider.streamSimple(requestModel, transcript, requestOptions as SimpleStreamOptions);
+				return withToolNamespaces(
+					requestModel,
+					transcript,
+					(mapped, mapControl) =>
+						provider.streamSimple(requestModel, mapped, {
+							...requestOptions,
+							onResponseControl: (control) => options?.onResponseControl?.(mapControl(control)),
+						} as SimpleStreamOptions),
+					options?.signal,
+				);
 			},
 			options?.signal,
 		);
@@ -900,9 +919,37 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 			: undefined,
 		filterModels: input.filterModels,
 		stream: (model, context, options) =>
-			dispatch(model, (streams) => streams.stream(model, context, options), options?.signal),
+			withToolNamespaces(
+				model,
+				context,
+				(mapped, mapControl) =>
+					dispatch(
+						model,
+						(streams) =>
+							streams.stream(model, mapped, {
+								...options,
+								onResponseControl: (control) => options?.onResponseControl?.(mapControl(control)),
+							}),
+						options?.signal,
+					),
+				options?.signal,
+			),
 		streamSimple: (model, context, options) =>
-			dispatch(model, (streams) => streams.streamSimple(model, context, options), options?.signal),
+			withToolNamespaces(
+				model,
+				context,
+				(mapped, mapControl) =>
+					dispatch(
+						model,
+						(streams) =>
+							streams.streamSimple(model, mapped, {
+								...options,
+								onResponseControl: (control) => options?.onResponseControl?.(mapControl(control)),
+							}),
+						options?.signal,
+					),
+				options?.signal,
+			),
 	};
 
 	const streams = single ? [single] : Object.values(byApi ?? {}).filter((entry) => entry !== undefined);

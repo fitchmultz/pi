@@ -205,11 +205,11 @@ interface PromptOptions {
 
 It fires before `prompt()` resolves. `prompt()` still resolves only after the full accepted run finishes, including retries. Failures after acceptance are reported through the normal event and message stream, not through `preflightResult(false)`.
 
-After extension commands and input interception, an idle session reserves the prompt before auth checks, pre-prompt compaction, and `before_agent_start`. During this preparation, `session.isStreaming` is true and `session.isIdle` / `ctx.isIdle()` are false; the Agent's abort signal is not created until its run starts. Other prompts use the same busy queue/rejection rules below. Rejection cannot settle or change the active run.
+After extension commands and input interception, an idle session reserves the prompt before auth checks, pre-prompt compaction, and `before_agent_start`. During this preparation, `session.isStreaming` is true and `session.isIdle` / `ctx.isIdle()` are false. Extensions receive the admitted session-run signal through `ctx.signal`, including in `before_agent_start`; the lower-level `session.agent.signal` begins when the Agent starts. Other prompts use the same busy queue/rejection rules below. Rejection cannot settle or change the active run.
 
-`session.waitForIdle()` waits through preparation and the full run. Failed preflight releases its reservation without emitting `agent_settled`; queued messages and `nextTurn` asides remain available for the next prompt. A started run emits `agent_settled` once after it finishes or aborts, including any automatic continuation.
+`session.waitForIdle()` waits through preparation, the full run, and awaited `agent_settled` handlers, even when called during settlement notification. A deferred action can join child runs without waiting for its own enclosing drain; other callers still wait while later deferred actions remain. Failed preflight releases its reservation without emitting `agent_settled`; queued messages and `nextTurn` asides remain available for the next prompt. A started run emits `agent_settled` once after it finishes or aborts, including any automatic continuation.
 
-`session.abort()` also cancels an admitted prompt that is still preparing. It waits for preparation to finish, then rejects the prompt with `AbortError` rather than starting the agent run; unconsumed `nextTurn` asides and queued messages remain. TUI Escape and `ctx.abort()` use the same path, with TUI queued text restored to the editor.
+`session.abort()` also cancels an admitted prompt that is still preparing. It signals cooperative extension work immediately and joins preparation before rejecting the prompt with `AbortError` rather than starting the agent run; unconsumed `nextTurn` asides and queued messages remain. The session-run signal lasts through `agent_before_settle` and is absent from notification-only `agent_settled`. Abort still waits for awaited handlers and providers that ignore cancellation to return. Pre-admission `input` handlers remain outside active-run cancellation. TUI Escape and `ctx.abort()` use the same path, with TUI queued text restored to the editor.
 
 The `prompt()` method handles prompt templates, extension commands, and message sending:
 
@@ -237,7 +237,7 @@ await session.prompt("After you're done, also check X", { streamingBehavior: "fo
 For explicit queueing during streaming:
 
 ```typescript
-// Queue a steering message for delivery after the current assistant turn finishes its tool calls
+// Steer the live response on supported WebSocket routes; otherwise queue for the next turn
 await session.steer("New instruction");
 
 // Wait for agent to finish (delivered only when agent stops)
@@ -251,6 +251,26 @@ Both `steer()` and `followUp()` expand file-based prompt templates but error on 
 `session.sendCustomMessage(message, { deliverAs: "steer", persistOnCancel: true })` opts a streamed custom message into cancellation-safe persistence. Normal delivery is unchanged. If cancellation or final run cleanup prevents delivery, Pi removes queued copies and appends the message once before `agent_settled`, without requesting another model response. `clearQueue()` preserves opted-in messages still queued, deferring their append to the safe turn/final flush while streaming; it still returns only queued user texts. This option defaults to `false` and does not affect `nextTurn` asides. See [`pi.sendMessage()`](extensions.md#pisendmessagemessage-options) for all custom-message options.
 
 `session.pendingInputCount` reports submitted inputs still in native prompt preflight, plus input held by the bound mode. It covers asynchronous input handlers until handling, admission or failure; extension commands run first and do not count themselves. Native interactive bindings include both pending prompt-loop input and retained compaction/tree input. SDK hosts with their own input queue can supply its read-only count through `session.bindExtensions({ getQueuedInputCount })`. This does not change `isIdle` or steering/follow-up semantics. Extensions read the same fact with `ctx.getPendingInputCount()`.
+
+### Native asynchronous tools and steering
+
+Supported Responses routes can run a tool before the surrounding response finishes. Set `async: true` on its `ToolDefinition`; the provider must also emit an authoritative completed async call. Argument preparation, validation and `tool_call` hooks run before execution, and the existing session journal records the original provider item and admitted arguments before side effects. `executionMode` still controls local sequential or parallel execution.
+
+`tool_execution_start` begins host preflight. `tool_execution_prepared` supplies the admitted arguments for previews. A final `ToolResultMessage.elapsedMs` measures executor time only; blocked calls have no elapsed time. Final results keep their original call IDs and can arrive after later assistant messages.
+
+A durable tool may implement `resume(toolCallId, params, signal, onUpdate, ctx)`, returning its actual result or `undefined` when the outcome cannot be recovered. Pi calls it for a journaled started call with no result, using the saved admitted arguments without repeating preflight mutations. Pi never invokes `execute` again for that call. Missing or unsuccessful recovery is reported as an unknown/interrupted outcome.
+
+Only an aborted native async invocation whose external owner retains durable work may return `{ ...result, pending: true }`. This emits `tool_execution_detached` and keeps the call anchor without a final tool result. Local idle and `agent_settled` can then occur; `agent_settled.pendingToolCalls` identifies unfinished obligations. The next admitted prompt or continuation reattaches them. Ordinary background launch-handle results retain their existing behavior.
+
+`session.getPendingToolCalls()` and `ctx.getPendingToolCalls()` return read-only snapshots of `{ toolCallId, toolName, namespace?, state: "pending" | "started" | "detached" }`. Extensions can detect native host support by method presence, then independently check the current model's `compat.supportsAsyncTools` route flag. Catalog metadata alone does not establish host support.
+
+Live user steering emits `steering` events with `queued`, `accepted`, `pending`, `applied`, `failed` or `unknown` status. Accepted input waiting for client tools is continued on the same connection with the original results, without resending the input. After a disconnect, Pi retires the connection and reconstructs known items, results and one logical input from local history. Unobserved remote application remains unknown. Images are normalized before a live send; unsupported transports retain queued steering.
+
+Each automatic successor has its own assistant message and usage. Its SDK `message_start.continuationInput` is a send-time snapshot of the user inputs and submitted tool results added to the preceding response. It is absent on the first response; an empty array represents a known empty delta. These inputs already have their own message events and must not be appended again. Pi uses this snapshot to retain measured context usage without rerunning context hooks.
+
+`message_checkpoint` is a durable snapshot, not a completed response: raw-journal consumers must exclude message entries marked `checkpoint: true` from billing totals. Use response IDs when updating existing assistant rows; late tool events must not overwrite the current assistant row. JSON and RPC forward the same native events.
+
+On routes with `compat.supportsReasoningEffortUpdates`, Pi persists `providerThinkingLevel`, retains the initial reasoning effort and inserts coalesced positional updates. Omitted Astra effort is explicitly recorded as `medium`. Automatic provider compaction, truncation and nonstandard reasoning modes do not use this path; opaque explicit compaction items are replayed unchanged. Native fresh windows retain their drain boundary and do not replace Posthorse with a text summary.
 
 ### Working-session checkpoints
 
@@ -407,8 +427,7 @@ When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control 
 ### Model
 
 ```typescript
-import { getModel } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 const modelRuntime = await ModelRuntime.create();
 
@@ -419,9 +438,11 @@ const refreshedRuntime = await ModelRuntime.create({
   modelRefreshTimeoutMs: 15_000,
 });
 
-// Find specific built-in model (doesn't check if API key exists)
-const opus = getModel("anthropic", "claude-opus-4-5");
-if (!opus) throw new Error("Model not found");
+// Find models in the configured catalog, including models.json overrides
+// (doesn't check if API key exists)
+const opus = modelRuntime.getModel("anthropic", "claude-opus-4-5");
+const haiku = modelRuntime.getModel("anthropic", "claude-haiku-4-5");
+if (!opus || !haiku) throw new Error("Model not found");
 
 // Find any model by provider/id, including custom models from models.json
 // (doesn't check if API key exists)
@@ -567,7 +588,8 @@ Specify which built-in tools to enable:
 - Default built-ins: `read`, `bash`, `edit`, `write`
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins while keeping extension and custom tools enabled
-- `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
+- `excludeTools` disables specific built-in, extension, or custom tools after any `tools` allowlist is applied
+- `tools` and `excludeTools` accept bare names for unnamespaced tools, or exact `{ name, namespace? }` references. A bare allowlist never grants access to a namespaced same-name tool.
 
 The `edit` tool returns `details.diff` for Pi's TUI display and `details.patch` as a standard unified patch for SDK consumers.
 
@@ -673,6 +695,10 @@ const { session } = await createAgentSession({
 Use `defineTool()` for standalone definitions and arrays like `customTools: [myTool]`. Inline `pi.registerTool({ ... })` already infers parameter types correctly.
 
 Custom tools passed via `customTools` are combined with extension-registered tools. Extensions loaded by the ResourceLoader can also register tools via `pi.registerTool()`.
+
+A tool may include `namespace`. Use `session.getActiveToolReferences()` and `session.setActiveToolReferences(refs)` to select exact identities. `getActiveToolNames()` returns the public IDs also exposed as `getAllTools()[].id`; pass those IDs unchanged to `setActiveToolsByName()`. The setter replaces the whole loadout, including clearing all tools with `[]`.
+
+Extensions can register a discovery callback with `pi.registerToolSearch()`. It returns ordinary content/details plus `tools: ToolReference[]` after registering and activating matches. Pi validates references against the permitted active registry and records the exact declarations. The sole active callback uses native client search on capable Responses routes; multiple callbacks and unsupported routes use ordinary named functions. See [tool discovery](extensions.md#piregistertoolsearchdefinition).
 
 If you pass `tools`, include each custom or extension tool name you want enabled, for example `tools: ["read", "bash", "my_tool"]`.
 
@@ -1037,7 +1063,6 @@ interface LoadExtensionsResult {
 ## Complete Example
 
 ```typescript
-import { getModel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
   createAgentSession,
@@ -1068,7 +1093,7 @@ const statusTool = defineTool({
   }),
 });
 
-const model = getModel("anthropic", "claude-opus-4-5");
+const model = modelRuntime.getModel("anthropic", "claude-opus-4-5");
 if (!model) throw new Error("Model not found");
 
 // In-memory settings with overrides

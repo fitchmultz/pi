@@ -487,6 +487,7 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private completedToolCalls = new Set<string>();
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -2162,8 +2163,9 @@ export class InteractiveMode {
 	 * Extension-registered definition, falling back to the built-in one. The renderer components take
 	 * whatever this returns, so they never reach into the tool registry themselves.
 	 */
-	private getRegisteredToolDefinition(toolName: string) {
-		return withBuiltInRenderers(toolName, this.session.getToolDefinition(toolName));
+	private getRegisteredToolDefinition(toolName: string, namespace?: string) {
+		const definition = this.session.getToolDefinition({ name: toolName, namespace });
+		return namespace === undefined ? withBuiltInRenderers(toolName, definition) : definition;
 	}
 
 	private getMarkdownTransformers(): MarkdownTransformer[] {
@@ -2199,6 +2201,7 @@ export class InteractiveMode {
 			hasPendingSteeringMessages: () => this.session.agent.hasQueuedSteeringMessages(),
 			getPendingNextTurnCount: () => this.session.pendingNextTurnCount,
 			getPendingInputCount: () => this.session.pendingInputCount,
+			getPendingToolCalls: () => this.session.getPendingToolCalls(),
 			shutdown: () => {
 				this.shutdownRequested = true;
 			},
@@ -3566,6 +3569,7 @@ export class InteractiveMode {
 		switch (event.type) {
 			case "agent_start":
 				this.pendingTools.clear();
+				this.completedToolCalls.clear();
 				// Restore main escape handler if retry handler is still active
 				// (retry success event fires later, but we need main handler now)
 				if (this.retryEscapeHandler) {
@@ -3683,17 +3687,18 @@ export class InteractiveMode {
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
+							if (this.completedToolCalls.has(content.id)) continue;
 							if (!this.pendingTools.has(content.id)) {
 								const component = new ToolExecutionComponent(
 									content.name,
 									content.id,
-									content.arguments,
+									content.executionArguments ?? content.arguments,
 									{
 										showImages: this.settingsManager.getShowImages(),
 										imageWidthCells: this.settingsManager.getImageWidthCells(),
 										compactView: this.compactView,
 									},
-									this.getRegisteredToolDefinition(content.name),
+									this.getRegisteredToolDefinition(content.name, content.namespace),
 									this.ui,
 									this.sessionManager.getCwd(),
 								);
@@ -3703,7 +3708,14 @@ export class InteractiveMode {
 							} else {
 								const component = this.pendingTools.get(content.id);
 								if (component) {
-									component.updateArgs(content.arguments);
+									if (
+										event.assistantMessageEvent.type === "toolcall_end" &&
+										event.assistantMessageEvent.toolCall.id === content.id
+									)
+										component.updateToolDefinition(
+											this.getRegisteredToolDefinition(content.name, content.namespace),
+										);
+									component.updateArgs(content.executionArguments ?? content.arguments);
 								}
 							}
 						}
@@ -3727,7 +3739,11 @@ export class InteractiveMode {
 					}
 					this.streamingComponent.updateContent(this.streamingMessage, false);
 					if (this.streamingMessage.stopReason === "error") {
-						this.failedAttemptComponents = [this.streamingComponent, ...this.pendingTools.values()];
+						this.failedAttemptComponents = this.streamingMessage.content.some(
+							(block) => block.type === "toolCall" && block.executionStarted,
+						)
+							? []
+							: [this.streamingComponent, ...this.pendingTools.values()];
 						this.failedAttemptMessage = this.streamingMessage;
 					}
 
@@ -3735,19 +3751,17 @@ export class InteractiveMode {
 						if (!errorMessage) {
 							errorMessage = this.streamingMessage.errorMessage || "Error";
 						}
-						for (const [, component] of this.pendingTools.entries()) {
+						for (const [id, component] of this.pendingTools.entries()) {
+							if (this.session.state.pendingToolCalls.has(id)) continue;
 							component.updateResult({
 								content: [{ type: "text", text: errorMessage }],
 								isError: true,
 							});
 						}
-						this.pendingTools.clear();
+						for (const id of this.pendingTools.keys())
+							if (!this.session.state.pendingToolCalls.has(id)) this.pendingTools.delete(id);
 						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
-						// Args are now complete - trigger diff computation for edit tools
-						for (const [, component] of this.pendingTools.entries()) {
-							component.setArgsComplete();
-						}
 						this.maybeShowThinkingDropNotice(this.streamingMessage);
 						this.maybeShowCacheMissNotice(this.streamingMessage);
 					}
@@ -3774,7 +3788,7 @@ export class InteractiveMode {
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
 							compactView: this.compactView,
 						},
-						this.getRegisteredToolDefinition(event.toolName),
+						this.getRegisteredToolDefinition(event.toolName, event.namespace),
 						this.ui,
 						this.sessionManager.getCwd(),
 					);
@@ -3782,10 +3796,33 @@ export class InteractiveMode {
 					this.chatContainer.addChild(component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
-				component.markExecutionStarted();
+				component.updateToolDefinition(this.getRegisteredToolDefinition(event.toolName, event.namespace));
 				this.ui.requestRender();
 				break;
 			}
+
+			case "tool_execution_prepared": {
+				const component = this.pendingTools.get(event.toolCallId);
+				component?.updateToolDefinition(this.getRegisteredToolDefinition(event.toolName, event.namespace));
+				component?.updateArgs(event.args);
+				component?.markExecutionStarted();
+				component?.setArgsComplete();
+				break;
+			}
+
+			case "tool_execution_detached": {
+				const component = this.pendingTools.get(event.toolCallId);
+				component?.updateToolDefinition(this.getRegisteredToolDefinition(event.toolName, event.namespace));
+				component?.markDetached();
+				this.pendingTools.delete(event.toolCallId);
+				this.completedToolCalls.add(event.toolCallId);
+				this.ui.requestRender();
+				break;
+			}
+
+			case "steering":
+				this.showStatus(`Steering ${event.status}${event.errorMessage ? `: ${event.errorMessage}` : ""}`);
+				break;
 
 			case "tool_execution_update": {
 				const component = this.pendingTools.get(event.toolCallId);
@@ -3797,6 +3834,7 @@ export class InteractiveMode {
 			}
 
 			case "tool_execution_end": {
+				this.completedToolCalls.add(event.toolCallId);
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
@@ -3822,6 +3860,10 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
+				if (event.pendingToolCalls?.length)
+					this.showStatus(
+						`Stopped locally; ${event.pendingToolCalls.length} external tool call(s) remain pending. Continue to reattach.`,
+					);
 				await this.checkShutdownRequested();
 				break;
 
@@ -4196,20 +4238,26 @@ export class InteractiveMode {
 						const component = new ToolExecutionComponent(
 							content.name,
 							content.id,
-							content.arguments,
+							content.executionArguments ?? content.arguments,
 							{
 								showImages: this.settingsManager.getShowImages(),
 								imageWidthCells: this.settingsManager.getImageWidthCells(),
 								compactView: this.compactView,
 							},
-							this.getRegisteredToolDefinition(content.name),
+							this.getRegisteredToolDefinition(content.name, content.namespace),
 							this.ui,
 							this.sessionManager.getCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
 
-						if (message.stopReason === "aborted" || message.stopReason === "error") {
+						if (content.executionDetached) {
+							component.markDetached();
+							renderedPendingTools.set(content.id, component);
+						} else if (
+							(message.stopReason === "aborted" || message.stopReason === "error") &&
+							!content.executionStarted
+						) {
 							let errorMessage: string;
 							if (message.stopReason === "aborted") {
 								const retryAttempt = this.session.retryAttempt;
@@ -4405,13 +4453,13 @@ export class InteractiveMode {
 				const component = new ToolExecutionComponent(
 					content.name,
 					content.id,
-					content.arguments,
+					content.executionArguments ?? content.arguments,
 					{
 						showImages: this.settingsManager.getShowImages(),
 						imageWidthCells: this.settingsManager.getImageWidthCells(),
 						compactView: this.compactView,
 					},
-					this.getRegisteredToolDefinition(content.name),
+					this.getRegisteredToolDefinition(content.name, content.namespace),
 					this.ui,
 					this.sessionManager.getCwd(),
 				);

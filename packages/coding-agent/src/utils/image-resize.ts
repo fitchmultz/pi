@@ -118,6 +118,5 @@ export function formatDimensionNote(result: ResizedImage): string | undefined {
 		return undefined;
 	}
 
-	const scale = result.originalWidth / result.width;
-	return `[Image: original ${result.originalWidth}x${result.originalHeight}, displayed at ${result.width}x${result.height}. Multiply coordinates by ${scale.toFixed(2)} to map to original image.]`;
+	return `[Image: original ${result.originalWidth}x${result.originalHeight}, displayed at ${result.width}x${result.height}. Multiply x coordinates by ${result.originalWidth}/${result.width} and y coordinates by ${result.originalHeight}/${result.height} to map to original image.]`;
 }

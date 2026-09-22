@@ -66,11 +66,17 @@ interface ThinkingContent {
 
 interface ToolCall {
   type: "toolCall";
+  kind?: "toolSearch"; // native client search; omitted for ordinary functions
   id: string;
   name: string;
-  arguments: Record<string, any>;
+  arguments: JsonObject;
   thoughtSignature?: string;
   namespace?: string;
+  async?: boolean;
+  responsesItem?: ResponseFunctionToolCall | ResponseCustomToolCall;
+  executionStarted?: boolean;
+  executionArguments?: JsonObject;
+  executionDetached?: boolean;
 }
 ```
 
@@ -82,7 +88,7 @@ interface SystemMessage {
   content: string | TextContent[];
   sections?: Record<string, string | null>;
   toolsAdded?: Tool[];
-  toolsRemoved?: Array<{ name: string }>;
+  toolsRemoved?: Array<{ name: string; namespace?: string }>;
   replace?: boolean;  // discard earlier system messages; this one is the complete prompt and tool state
   timestamp: number;  // Unix ms
 }
@@ -116,9 +122,13 @@ interface ToolResultMessage {
   role: "toolResult";
   toolCallId: string;
   toolName: string;
+  namespace?: string;
+  toolCallKind?: "toolSearch";
+  toolsAdded?: Tool[]; // core-resolved search declarations, including [] for empty native results
   content: (TextContent | ImageContent)[];
   details?: any;      // Tool-specific metadata
   usage?: Usage;      // Nested LLM work performed by the tool
+  elapsedMs?: number; // Native executor time, excluding queueing and preflight
   isError: boolean;
   timestamp: number;
 }
@@ -141,7 +151,7 @@ interface Usage {
 }
 ```
 
-`"pending"` is reserved for partial messages in streaming events. Terminal events replace it with a completion reason before Pi persists the assistant message, so `"pending"` should never appear in session JSONL. `"deferred"` is a terminal reason for a provider response that will complete later; its `deferred` handle contains the provider data needed to retrieve that response.
+`"pending"` marks an in-progress response in streaming events and durable `checkpoint: true` assistant snapshots. A completed provider response is stored in an ordinary message entry with a terminal stop reason. `"deferred"` is a terminal reason for a provider response that will complete later; its `deferred` handle contains the provider data needed to retrieve that response.
 
 ### Provider Request Diagnostics
 
@@ -239,7 +249,11 @@ For sessions with a parent (created via `/fork`, `/clone`, or `newSession({ pare
 
 ### SessionMessageEntry
 
-A message in the conversation. The `message` field contains an `AgentMessage`. System messages carry the prompt and tool loadout: the first request of a session persists one with every prompt section and tool declaration, and later changes persist as system messages that patch `sections` by name (`null` removes one) and list `toolsAdded`/`toolsRemoved`. Replaying them in order yields the current prompt and tools; there is no separate prompt state entry.
+A message in the conversation. The `message` field contains an `AgentMessage`. System messages carry the prompt and tool loadout: the first request of a session persists one with every prompt section and tool declaration, and later changes persist as system messages that patch `sections` by name (`null` removes one) and list `toolsAdded`/`toolsRemoved`. Search tool results may also carry `toolsAdded`, resolved from the active permitted registry. Replaying system and tool-result declarations in order yields the current tool set; there is no separate tool catalog in session state. Identity is the exact `(namespace, name)` pair. Native search calls/results retain their original call ID and kind, and repeated identical search declarations do not invalidate additive replay.
+
+A native async call can produce assistant entries with `checkpoint: true` before its side effect starts and when execution detaches or resumes. These are non-billable snapshots of the same `responseId`, not additional provider responses. Keep their usage intact for context projection, but exclude them from billing, response counts, and cache-request statistics. Context rebuilding combines snapshots with the final response's content and usage.
+
+`responsesItem` retains the original completed provider item and wire identity. `executionStarted` records admission; `executionArguments` contains validated, preflight-adjusted arguments without changing that provider item. `executionDetached` means local execution stopped while an external owner retained the unfinished operation. A missing result does not prove that the side effect did not happen; recovery uses the tool's `resume` callback and never repeats an already-started `execute` call.
 
 A `before_agent_start` handler that forces the whole prompt changes only provider requests for the active run. The transcript and compaction/context-window checkpoints keep the structured sections and tool declarations; the next run regenerates extension guidance. Older sessions can contain full-prompt records with `replace: true`. Replay clears earlier content, sections, and tools before applying such a record. Resuming restores that saved state; the next run writes a structured replacement baseline so the old opaque prompt does not accumulate alongside new sections.
 
@@ -284,7 +298,9 @@ Records model-attributed usage that is not an assistant message and does not par
 {"type":"usage","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:08:00.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":50000,"cacheWrite":0,"totalTokens":50000,"cost":{"input":0,"output":0,"cacheRead":0.015,"cacheWrite":0,"total":0.015}}}
 ```
 
-Usage entries contribute to session token and cost totals. Pi hides them from the conversation tree. Consumers should treat unknown `kind` values as normal usage rather than rejecting them.
+Usage entries contribute to session token and cost totals. Appending the first usage entry saves the journal even before any assistant response, including earlier deferred entries. Copied branches containing usage are also saved immediately. Pi hides usage entries from the conversation tree. Consumers should treat unknown `kind` values as normal usage rather than rejecting them.
+
+An optional `contributionId` is an idempotency key, separate from the native entry `id`. `pi.recordUsage({ id, kind, provider, model, usage, note? })` records that ID and usage together in one entry. An identical repeat anywhere in the same journal is a no-op; a conflicting payload throws. Resume and forks retain IDs on copied entries. No separate accounting ledger is stored.
 
 ### CompactionEntry
 
@@ -390,11 +406,12 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 `buildContextEntries()` walks from the current leaf to the root, producing the active entry list while honoring compaction:
 
 1. Collects entries on the path, starting at the latest `ContextWindowEntry` when present
-2. If one or more `CompactionEntry` values remain, uses the latest one:
+2. Coalesces assistant execution snapshots by response identity, preserving final content and usage with the latest admitted-call state
+3. If one or more `CompactionEntry` values remain, uses the latest one:
    - Includes the compaction entry first
    - Includes non-system entries from `firstKeptEntryId` up to, but not including, the compaction entry
    - Includes entries after the compaction entry
-3. Preserves non-message entries in the selected range so interactive mode can render them
+4. Preserves non-message entries in the selected range so interactive mode can render them
 
 `buildSessionProjection()` then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. The raw selected entries are not modified.
 
@@ -484,14 +501,14 @@ Appends accept the entry into memory before synchronous journal I/O. If I/O thro
 
 Full rewrites stage the complete journal in an exclusively created sibling temporary file and replace the journal only after all writes and close succeed. For an existing journal opened through a symlink, staging and replacement use the resolved target, leaving the alias intact and preserving write-through behavior. Failed repair writes leave the prior journal bytes intact and remove the temporary file. Repair requires a writable target journal and its directory, and preserves the journal's permission mode; initial creation retains exclusive collision protection.
 
-`flush()` does not change entries, revisions or the selected leaf, and emits no events. It is a no-op for in-memory sessions and ordinary pre-first-assistant deferred journals. Replacing a manager's session via `newSession`, `setSessionFile` or `createBranchedSession` first retries failed persistence so replacement cannot forget unsaved entries. This is not a filesystem freeze or a crash-durability guarantee; retain the live process after a failed save.
+`flush()` does not change entries, revisions or the selected leaf, and emits no events. It is a no-op for in-memory sessions and deferred journals containing neither an assistant response nor a usage entry. Replacing a manager's session via `newSession`, `setSessionFile` or `createBranchedSession` first retries failed persistence so replacement cannot forget unsaved entries. This is not a filesystem freeze or a crash-durability guarantee; retain the live process after a failed save.
 
 ### Instance Methods - Appending (all return entry ID)
-- `appendMessage(message)` - Add message
+- `appendMessage(message, checkpoint?)` - Add a message; `checkpoint: true` records a non-billable assistant execution snapshot
 - `appendThinkingLevelChange(level)` - Record thinking change
 - `appendModelChange(provider, modelId)` - Record model change
 - `appendContextWindow(handoff, tokensBefore)` - Start a fresh context with the current prompt and tool checkpoint
-- `appendUsage(kind, provider, model, usage)` - Record model-attributed usage outside the conversation
+- `appendUsage(kind, provider, model, usage, note?, contributionId?)` - Record model-attributed usage outside the conversation; returns the appended or matching existing `UsageEntry`. Omitting `contributionId` keeps ordinary append semantics.
 - `appendCompaction(summary, firstKeptEntryId, tokensBefore, details?, fromHook?, usage?)` - Add compaction
 - `appendCustomEntry(customType, data?)` - Extension state (not in context)
 - `appendSessionInfo(name)` - Set session display name

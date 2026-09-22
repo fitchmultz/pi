@@ -1,4 +1,4 @@
-import { type ToolResultMessage, validateToolArguments } from "@earendil-works/pi-ai";
+import { findTool, type ToolResultMessage, validateToolArguments } from "@earendil-works/pi-ai";
 import type { AgentToolCall, AgentToolResult } from "../../types.ts";
 import { type Context, withAbortSignal } from "../context.ts";
 import type { JsonValue } from "../session/types.ts";
@@ -79,7 +79,7 @@ export function prepareToolCall<TContext extends object | undefined>(
 	call: AgentToolCall,
 	tools: AgentHarnessTool<TContext>[],
 ): PreparedToolCall<TContext> | ImmediateToolOutcome {
-	const tool = tools.find((candidate) => candidate.name === call.name);
+	const tool = findTool(tools, call);
 	if (!tool) {
 		return immediateError(call, `Tool ${JSON.stringify(call.name)} is unavailable`);
 	}
@@ -196,6 +196,8 @@ export function createToolResultMessage(call: FinalizedToolCall): ToolResultMess
 		role: "toolResult",
 		toolCallId: call.toolCall.id,
 		toolName: call.toolCall.name,
+		...(call.toolCall.namespace === undefined ? {} : { namespace: call.toolCall.namespace }),
+		...(call.toolCall.kind === undefined ? {} : { toolCallKind: call.toolCall.kind }),
 		content: call.result.content ?? [],
 		...(call.result.details === undefined ? {} : { details: call.result.details as JsonValue }),
 		...(call.result.usage === undefined ? {} : { usage: call.result.usage }),

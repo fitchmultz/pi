@@ -494,7 +494,7 @@ describe("AgentSession compaction characterization", () => {
 		]);
 	});
 
-	it("compacts and resumes after a length stop below the desired output limit", async () => {
+	it("compacts and resumes after a signed length stop below the desired output limit", async () => {
 		const harness = await createHarness({
 			// Leave room for the real prompt/tool checkpoint after the oversized input is compacted.
 			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
@@ -513,10 +513,14 @@ describe("AgentSession compaction characterization", () => {
 			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([
-			fauxAssistantMessage("partial response", { stopReason: "length" }),
-			fauxAssistantMessage("completed response"),
-		]);
+		const partial = fauxAssistantMessage(
+			[
+				{ type: "thinking", thinking: "plan", thinkingSignature: "signed-thinking" },
+				{ type: "text", text: "partial response", textSignature: "signed-text" },
+			],
+			{ stopReason: "length" },
+		);
+		harness.setResponses([partial, fauxAssistantMessage("completed response")]);
 
 		await harness.session.prompt("x".repeat(45_000));
 
@@ -530,6 +534,15 @@ describe("AgentSession compaction characterization", () => {
 			}),
 		]);
 		expect(harness.session.getLastAssistantText()).toBe("completed response");
+		const entries = harness.sessionManager.getEntries();
+		const attempt = entries.find(
+			(entry) =>
+				entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "length",
+		);
+		expect(attempt).toMatchObject({ message: { content: partial.content } });
+		expect(entries.filter((entry) => entry.type === "context_edit")).toMatchObject([
+			{ targetId: attempt?.id, replacement: null },
+		]);
 	});
 
 	// Regression coverage for #8133: model overrides must also apply between assistant turns.

@@ -109,7 +109,9 @@ describe("native pending input visibility", () => {
 		try {
 			await entered;
 			expect(ctx.isIdle()).toBe(false);
-			expect(ctx.signal).toBeUndefined();
+			const admittedSignal = ctx.signal;
+			expect(admittedSignal).toBeInstanceOf(AbortSignal);
+			expect(admittedSignal?.aborted).toBe(false);
 			if (queued) {
 				await harness.session.followUp("recover queued input");
 				view.defaultEditor.onEscape?.();
@@ -119,6 +121,8 @@ describe("native pending input visibility", () => {
 			release();
 			const result = await run;
 			await harness.session.waitForIdle();
+			expect(admittedSignal?.aborted).toBe(true);
+			expect(ctx.signal).toBeUndefined();
 			expect(harness.faux.state.callCount).toBe(0);
 			expect(result).toEqual([{ status: "rejected", reason: expect.objectContaining({ name: "AbortError" }) }]);
 			expect(ctx.isIdle()).toBe(true);

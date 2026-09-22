@@ -5,34 +5,24 @@
  * and converting the ANSI output to HTML.
  */
 
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent, TextContent, ToolReference } from "@earendil-works/pi-ai";
 import type { Component } from "@earendil-works/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderContext } from "../extensions/types.ts";
 import { ansiLinesToHtml } from "./ansi-to-html.ts";
+import type { ToolHtmlRenderer } from "./index.ts";
+
+export type { ToolHtmlRenderer } from "./index.ts";
 
 export interface ToolHtmlRendererDeps {
-	/** Function to look up tool definition by name */
-	getToolDefinition: (name: string) => ToolDefinition | undefined;
+	/** Function to look up an exact tool identity. */
+	getToolDefinition: (tool: ToolReference) => ToolDefinition | undefined;
 	/** Theme for styling */
 	theme: Theme;
 	/** Working directory for render context */
 	cwd: string;
 	/** Terminal width for rendering (default: 100) */
 	width?: number;
-}
-
-export interface ToolHtmlRenderer {
-	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
-	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
-	/** Render a tool result to collapsed/expanded HTML. Returns undefined if tool has no custom renderer. */
-	renderResult(
-		toolCallId: string,
-		toolName: string,
-		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
-		details: unknown,
-		isError: boolean,
-	): { collapsed?: string; expanded?: string } | undefined;
 }
 
 /**
@@ -96,10 +86,10 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 	};
 
 	return {
-		renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined {
+		renderCall(toolCallId: string, tool: ToolReference, args: unknown): string | undefined {
 			try {
 				renderedArgs.set(toolCallId, args);
-				const toolDef = getToolDefinition(toolName);
+				const toolDef = getToolDefinition(tool);
 				if (!toolDef?.renderCall) {
 					return undefined;
 				}
@@ -120,13 +110,13 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 
 		renderResult(
 			toolCallId: string,
-			toolName: string,
+			tool: ToolReference,
 			result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 			details: unknown,
 			isError: boolean,
 		): { collapsed?: string; expanded?: string } | undefined {
 			try {
-				const toolDef = getToolDefinition(toolName);
+				const toolDef = getToolDefinition(tool);
 				if (!toolDef?.renderResult) {
 					return undefined;
 				}

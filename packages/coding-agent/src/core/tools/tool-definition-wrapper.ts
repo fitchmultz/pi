@@ -8,12 +8,19 @@ export function wrapToolDefinition<TDetails = unknown>(
 ): AgentTool<any, TDetails> {
 	return {
 		name: definition.name,
+		namespace: definition.namespace,
+		toolSearch: definition.toolSearch,
+		async: definition.async,
 		label: definition.label,
 		description: definition.description,
 		parameters: definition.parameters,
 		constrainedSampling: definition.constrainedSampling,
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
+		resume: definition.resume
+			? (toolCallId, params, signal, onUpdate, ctx?: ExtensionContext) =>
+					definition.resume!(toolCallId, params, signal, onUpdate, ctx ?? (ctxFactory?.() as ExtensionContext))
+			: undefined,
 		execute: (toolCallId, params, signal, onUpdate, ctx?: ExtensionContext) =>
 			definition.execute(toolCallId, params, signal, onUpdate, ctx ?? (ctxFactory?.() as ExtensionContext)),
 	};
@@ -36,12 +43,18 @@ export function wrapToolDefinitions(
 export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDefinition<any, unknown> {
 	return {
 		name: tool.name,
+		namespace: tool.namespace,
+		toolSearch: tool.toolSearch,
+		async: tool.async,
 		label: tool.label,
 		description: tool.description,
 		parameters: tool.parameters as any,
 		constrainedSampling: tool.constrainedSampling,
 		prepareArguments: tool.prepareArguments,
 		executionMode: tool.executionMode,
+		resume: tool.resume
+			? (toolCallId, params, signal, onUpdate) => tool.resume!(toolCallId, params, signal, onUpdate)
+			: undefined,
 		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
 	};
 }

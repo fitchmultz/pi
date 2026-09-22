@@ -951,6 +951,7 @@ describe("durable length recovery", () => {
 			stopReason: "length",
 			timestamp: Date.now() - 1,
 		});
+		partial.api = harness.getModel().api;
 		const partialId = harness.sessionManager.appendMessage(partial);
 		harness.sessionManager.appendContextEdit(partialId, {
 			content: [{ type: "text", text: "edited partial" }],

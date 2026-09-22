@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { convertResponsesMessages, processResponsesStream } from "../src/api/openai-responses-shared.ts";
 import type { Api, AssistantMessage, Model, ToolCall } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
+import { toolKey } from "../src/utils/tool-identity.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const model: Model<"openai-responses"> = {
@@ -149,7 +150,11 @@ describe("OpenAI Responses tool-call namespaces", () => {
 
 	it("round-trips a custom-tool namespace received only on output_item.done", async () => {
 		const output = createOutput();
-		const grammarToolInputProperties = new Map([["query", "input"]]);
+		const grammarToolInputProperties = new Map([
+			[toolKey({ name: "query" }), "bareInput"],
+			[toolKey({ name: "query", namespace: "other_tools" }), "otherInput"],
+			[toolKey({ name: "query", namespace: "dynamic_tools" }), "queryText"],
+		]);
 		await processResponsesStream(createCustomToolCallEvents(), output, new AssistantMessageEventStream(), model, {
 			grammarToolInputProperties,
 		});
@@ -158,7 +163,7 @@ describe("OpenAI Responses tool-call namespaces", () => {
 		expect(toolCall).toMatchObject({
 			id: "call_test|ctc_test",
 			name: "query",
-			arguments: { input: "hello" },
+			arguments: { queryText: "hello" },
 			namespace: "dynamic_tools",
 		});
 
@@ -175,7 +180,7 @@ describe("OpenAI Responses tool-call namespaces", () => {
 		});
 	});
 
-	it("drops namespaces when the target cannot replay their load items", () => {
+	it("preserves exact namespaces across Responses model and provider switches", () => {
 		const output = createOutput();
 		output.content.push(
 			{
@@ -211,15 +216,15 @@ describe("OpenAI Responses tool-call namespaces", () => {
 				normalizeContext({ messages: [output] }),
 				new Set(["openai"]),
 				{
-					grammarToolInputProperties: new Map([["query", "input"]]),
+					grammarToolInputProperties: new Map([[toolKey({ name: "query", namespace: "dynamic_tools" }), "input"]]),
 				},
 			);
 			const functionCall = replayed.find((item) => item.type === "function_call");
 			const customToolCall = replayed.find((item) => item.type === "custom_tool_call");
 			expect(functionCall).toBeDefined();
-			expect(functionCall).not.toHaveProperty("namespace");
+			expect(functionCall).toHaveProperty("namespace", "dynamic_tools");
 			expect(customToolCall).toBeDefined();
-			expect(customToolCall).not.toHaveProperty("namespace");
+			expect(customToolCall).toHaveProperty("namespace", "dynamic_tools");
 		}
 	});
 

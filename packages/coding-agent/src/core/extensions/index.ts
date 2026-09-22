@@ -191,6 +191,7 @@ export type {
 	ToolRenderResultOptions,
 	ToolResultEvent,
 	ToolResultEventResult,
+	ToolSearchDefinition,
 	TreePreparation,
 	TurnEndEvent,
 	TurnEndEventResult,
@@ -198,6 +199,7 @@ export type {
 	UIPromptEndEvent,
 	UIPromptKind,
 	UIPromptStartEvent,
+	UsageContribution,
 	// Events - User Bash
 	UserBashEvent,
 	UserBashEventResult,

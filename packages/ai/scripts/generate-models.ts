@@ -935,11 +935,25 @@ function applyOpenAIResponsesTranscriptMetadata(model: Model<Api>): void {
 // those models accept `prompt_cache_options`; older models reject the parameter.
 // https://developers.openai.com/api/docs/guides/prompt-caching
 function applyOpenAIExplicitPromptCacheMetadata(model: Model<Api>): void {
-	if (model.provider !== "openai" || model.api !== "openai-responses") return;
+	if ((model.provider !== "openai" && model.provider !== "cloudflare-ai-gateway") || model.api !== "openai-responses") return;
 	if (!(model.cost.cacheWrite > 0)) return;
 	model.compat = {
 		...(model.compat as OpenAIResponsesCompat | undefined),
 		supportsExplicitPromptCacheMode: true,
+	};
+}
+
+function applyAstraLifecycleMetadata(model: Model<Api>): void {
+	if (model.id !== "gpt-6-astra") return;
+	if (!(
+		((model.provider === "openai" || model.provider === "cloudflare-ai-gateway") && model.api === "openai-responses") ||
+		(model.provider === "openai-codex" && model.api === "openai-codex-responses")
+	)) return;
+	model.compat = {
+		...(model.compat as OpenAIResponsesCompat | undefined),
+		supportsAsyncTools: true,
+		supportsSteering: true,
+		supportsReasoningEffortUpdates: true,
 	};
 }
 
@@ -3137,6 +3151,7 @@ async function generateModels() {
 		applyOpenAICompletionsTranscriptMetadata(model);
 		applyOpenAIResponsesTranscriptMetadata(model);
 		applyOpenAIExplicitPromptCacheMetadata(model);
+		applyAstraLifecycleMetadata(model);
 		applyPromptCacheMetadata(model);
 		applyImageInputMetadata(model);
 	}

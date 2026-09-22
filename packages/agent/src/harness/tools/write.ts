@@ -31,7 +31,6 @@ export function createWriteTool<TContext extends ExecutionToolContext = Executio
 				async () => {
 					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
 					getOrThrow(await env.writeFile(absolutePath, content, context));
-					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
 					return {
 						content: [{ type: "text", text: `Successfully wrote to ${path}` }],
 						details: undefined,

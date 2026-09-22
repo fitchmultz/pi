@@ -124,16 +124,16 @@ export function createEditTool<TContext extends ExecutionToolContext = Execution
 					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
 
 					const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+					const diffResult = generateDiffString(baseContent, newContent);
+					const patch = generateUnifiedPatch(path, baseContent, newContent);
+					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
 					const writeResult = await env.writeFile(absolutePath, finalContent, context);
 					if (!writeResult.ok) throw editAccessError(path, writeResult.error);
-					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
-
-					const diffResult = generateDiffString(baseContent, newContent);
 					return {
 						content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${path}.` }],
 						details: {
 							diff: diffResult.diff,
-							patch: generateUnifiedPatch(path, baseContent, newContent),
+							patch,
 							firstChangedLine: diffResult.firstChangedLine,
 						},
 					};

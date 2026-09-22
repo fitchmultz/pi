@@ -1,4 +1,5 @@
 import type { AgentState } from "@earendil-works/pi-agent-core";
+import type { ToolCall, ToolReference } from "@earendil-works/pi-ai";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
@@ -14,22 +15,23 @@ import { SessionManager } from "../session-manager.ts";
  */
 export interface ToolHtmlRenderer {
 	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
-	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
+	renderCall(toolCallId: string, tool: ToolReference, args: unknown): string | undefined;
 	/** Render a tool result to HTML. Returns collapsed/expanded or undefined if tool has no custom renderer. */
 	renderResult(
 		toolCallId: string,
-		toolName: string,
+		tool: ToolReference,
 		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 		details: unknown,
 		isError: boolean,
 	): { collapsed?: string; expanded?: string } | undefined;
 }
 
-/** Pre-rendered HTML for a custom tool call and result */
+/** Presentation variants for a call's snapshots and branch-specific results. */
 interface RenderedToolHtml {
-	callHtml?: string;
-	resultHtmlCollapsed?: string;
-	resultHtmlExpanded?: string;
+	/** Call previews keyed by serialized display arguments, including admitted execution arguments. */
+	calls?: Record<string, string>;
+	/** Results keyed by their raw journal entry ID. */
+	results?: Record<string, { collapsed?: string; expanded?: string }>;
 }
 
 export interface ExportOptions {
@@ -132,7 +134,7 @@ interface SessionData {
 	entries: ReturnType<SessionManager["getEntries"]>;
 	leafId: string | null;
 	systemPrompt?: string;
-	tools?: Array<Pick<ToolDefinition, "name" | "description" | "parameters">>;
+	tools?: Array<Pick<ToolDefinition, "name" | "namespace" | "description" | "parameters">>;
 	/** Pre-rendered HTML for custom tool calls/results, keyed by tool call ID */
 	renderedTools?: Record<string, RenderedToolHtml>;
 }
@@ -184,7 +186,36 @@ function preRenderCustomTools(
 	entries: SessionEntry[],
 	toolRenderer: ToolHtmlRenderer,
 ): Record<string, RenderedToolHtml> {
-	const renderedTools: Record<string, RenderedToolHtml> = {};
+	const renderedTools: Record<string, RenderedToolHtml> = Object.create(null);
+	const byId = new Map(entries.map((entry) => [entry.id, entry]));
+
+	const findCall = (entry: SessionEntry, toolCallId: string): ToolCall | undefined => {
+		let call: ToolCall | undefined;
+		let current: SessionEntry | undefined = entry;
+		while (current) {
+			if (current.type === "message" && current.message.role === "assistant") {
+				const block = current.message.content.find((block) => block.type === "toolCall" && block.id === toolCallId);
+				if (block?.type === "toolCall") {
+					call ??= block;
+					if (block.executionArguments !== undefined)
+						return { ...call, executionArguments: block.executionArguments };
+				}
+			}
+			current = current.parentId && current.parentId !== current.id ? byId.get(current.parentId) : undefined;
+		}
+		return call;
+	};
+
+	const renderCall = (call: ToolCall) => {
+		const args = call.executionArguments ?? call.arguments;
+		const callHtml = toolRenderer.renderCall(call.id, { name: call.name, namespace: call.namespace }, args);
+		if (callHtml) {
+			renderedTools[call.id] ??= {};
+			const rendered = renderedTools[call.id];
+			rendered.calls ??= Object.create(null) as NonNullable<RenderedToolHtml["calls"]>;
+			rendered.calls[JSON.stringify(args)] = callHtml;
+		}
+	};
 
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
@@ -193,11 +224,11 @@ function preRenderCustomTools(
 		// Find tool calls in assistant messages
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
-				if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
-					const callHtml = toolRenderer.renderCall(block.id, block.name, block.arguments);
-					if (callHtml) {
-						renderedTools[block.id] = { callHtml };
-					}
+				if (
+					block.type === "toolCall" &&
+					(block.namespace !== undefined || !TEMPLATE_RENDERED_TOOLS.has(block.name))
+				) {
+					renderCall(findCall(entry, block.id) ?? block);
 				}
 			}
 		}
@@ -205,22 +236,22 @@ function preRenderCustomTools(
 		// Find tool results
 		if (msg.role === "toolResult" && msg.toolCallId) {
 			const toolName = msg.toolName || "";
-			// Only render if we have a pre-rendered call OR it's not template-rendered
-			const existing = renderedTools[msg.toolCallId];
-			if (existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)) {
+			if (msg.namespace !== undefined || !TEMPLATE_RENDERED_TOOLS.has(toolName)) {
+				// Restore this branch's admitted arguments for the result renderer's context.
+				const call = findCall(entry, msg.toolCallId);
+				if (call) renderCall(call);
 				const rendered = toolRenderer.renderResult(
 					msg.toolCallId,
-					toolName,
+					{ name: toolName, namespace: msg.namespace },
 					msg.content,
 					msg.details,
 					msg.isError || false,
 				);
 				if (rendered) {
-					renderedTools[msg.toolCallId] = {
-						...existing,
-						resultHtmlCollapsed: rendered.collapsed,
-						resultHtmlExpanded: rendered.expanded,
-					};
+					renderedTools[msg.toolCallId] ??= {};
+					const tool = renderedTools[msg.toolCallId];
+					tool.results ??= Object.create(null) as NonNullable<RenderedToolHtml["results"]>;
+					tool.results[entry.id] = rendered;
 				}
 			}
 		}
@@ -265,7 +296,12 @@ export async function exportSessionToHtml(
 		entries,
 		leafId: sm.getLeafId(),
 		systemPrompt: state?.systemPrompt,
-		tools: state?.tools?.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
+		tools: state?.tools?.map((t) => ({
+			name: t.name,
+			namespace: t.namespace,
+			description: t.description,
+			parameters: t.parameters,
+		})),
 		renderedTools,
 	};
 

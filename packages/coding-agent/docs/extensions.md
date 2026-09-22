@@ -140,7 +140,7 @@ To share extensions via npm or git as pi packages, see [packages.md](packages.md
 
 | Package | Purpose |
 |---------|---------|
-| `@earendil-works/pi-coding-agent` | Extension types (`ExtensionAPI`, `ExtensionContext`, events) |
+| `@earendil-works/pi-coding-agent` | Extension types (`ExtensionAPI`, `ExtensionContext`, events) and helpers (`publishLocalFile`, `withFileMutationQueue`) |
 | `typebox` | Schema definitions for tool parameters |
 | `@earendil-works/pi-ai` | AI utilities (`StringEnum` for Google-compatible enums) |
 | `@earendil-works/pi-tui` | TUI components for custom rendering |
@@ -1184,15 +1184,14 @@ Both return an `AssistantMessageEventStream`. Iterate it for response events and
 
 ### ctx.signal
 
-The current agent abort signal, or `undefined` when no agent turn is active.
+The admitted session-run abort signal, from prompt preparation through `agent_before_settle`, including automatic retries and continuations. It is `undefined` in notification-only `agent_settled` and while idle.
 
 Use this for abort-aware nested work started by extension handlers, for example:
 - `fetch(..., { signal: ctx.signal })`
 - model calls that accept `signal`
 - file or process helpers that accept `AbortSignal`
 
-`ctx.signal` is typically defined during active turn events such as `tool_call`, `tool_result`, `message_update`, and `turn_end`.
-It is usually `undefined` in idle or non-turn contexts such as session events, extension commands, and shortcuts fired while pi is idle.
+`ctx.signal` is defined in `before_agent_start`, active turn events such as `tool_call`, `tool_result`, `message_update`, and `turn_end`, and `agent_before_settle`. Capture it when starting nested work. Native abort signals it immediately, but `abort()` and `waitForIdle()` still join awaited work until it actually returns, including settlement notifications. They do not forcibly stop JavaScript promises. An idle `input` handler runs before admission and has no run signal.
 
 ```typescript
 pi.on("tool_result", async (event, ctx) => {
@@ -1247,11 +1246,13 @@ pi.on("tool_call", (event, ctx) => {
 
 ### ctx.getContextUsage()
 
-Returns current context usage for the active model. Uses last assistant usage when its request prefix still applies, then estimates tokens for trailing messages. Ending a request-only forced prompt does not invalidate that reported usage while idle; real prompt, tool, model, or context-window changes do.
+Returns current context usage synchronously for the active model. Matching reported usage includes opaque reasoning. When the measured conversation remains intact, prompt/tool changes and trailing input are estimated relative to that measured total, without counting previous output again. Model, provider, API, conversation edits, and context boundaries invalidate inapplicable usage. Ending a request-only forced prompt preserves reported usage while idle.
+
+`source` is `"reported"` for the unchanged aggregate, `"estimated"` for adjusted or heuristic values, and `"unknown"` when tokens are unavailable after compaction. Estimates are not exact provider input counts. Resumed sessions without a captured request prefix use the larger of matching reported usage and the visible-context estimate.
 
 ```typescript
 const usage = ctx.getContextUsage();
-if (usage && usage.tokens > 100_000) {
+if (usage && usage.tokens !== null && usage.tokens > 100_000) {
   // ...
 }
 ```
@@ -1311,7 +1312,7 @@ This reports the current base prompt inputs. It does not include per-turn `befor
 
 ### ctx.waitForIdle()
 
-Wait for the agent to fully settle, including automatic retries, auto-compaction retries, and queued continuations. This waits for run completion, not permission to start another run: during shutdown it can resolve while `ctx.isIdle()` remains false.
+Wait for the agent to fully settle, including automatic retries, auto-compaction retries, and queued continuations. A command deferred by `agent_settled` can join child runs without waiting for its own enclosing drain. This does not release other callers waiting for later deferred actions. This waits for run completion, not permission to start another run: during shutdown it can resolve while `ctx.isIdle()` remains false.
 
 ```typescript
 pi.registerCommand("my-cmd", {
@@ -1611,6 +1612,16 @@ pi.registerTool({
 });
 ```
 
+### pi.registerToolSearch(definition)
+
+Register a tool-discovery callback with the same arguments, validation, execution hooks, cancellation, and renderers as `registerTool()`. Its `execute()` must return the normal tool result plus `tools: ToolReference[]`, where a reference is `{ name, namespace? }`.
+
+The callback owns search policy and registration. Activate matches before returning them. Pi resolves every reference against the current permitted, active registry and persists a snapshot of each declaration; returned objects cannot override schemas. An unknown, inactive, or denied reference makes the search fail without publishing declarations.
+
+Capable Responses routes expose the sole active search callback as native client `tool_search`. Its real call is dispatched normally and answered with `tool_search_output` under the original call ID. Repeated matches remain valid. If native search is unsupported, or more than one search callback is active, every callback remains an ordinary named function. Pi never chooses a hidden winner or runs a separate search engine.
+
+See [Dynamic Tool Loading](#dynamic-tool-loading) for a complete example.
+
 ### pi.registerBashCwdHook(hook)
 
 Resolve the working directory before the default `bash` tool checks it and before native user Bash execution (`!`, `!!`, or `AgentSession.executeBash()`) invokes its selected operations. Use this instead of prepending `cd` when the original directory may no longer exist.
@@ -1699,6 +1710,27 @@ pi.on("session_start", async (_event, ctx) => {
   }
 });
 ```
+
+### pi.recordUsage(contribution)
+
+Record model-attributed usage outside a tool result, such as a child task that finishes after its launching tool returns. This synchronous API appends a native `usage` entry and updates session token/cost totals without adding model context or requesting another turn.
+
+```typescript
+pi.recordUsage({
+  id: `my-extension:${childId}:final`,
+  kind: "subagent",
+  provider: result.provider,
+  model: result.model,
+  usage: result.usage,
+  note: "Background review",
+});
+```
+
+`UsageContribution` and `UsageEntry` are exported types. `id`, `kind`, `provider`, and `model` must be non-empty strings; usage tokens and costs must be finite, non-negative numbers. `note` is optional. Use a stable, namespaced ID and do not also include the same usage in a tool result.
+
+IDs are scoped to the entire session journal, including inactive branches. Repeating an ID with identical `kind`, `provider`, `model`, `usage`, and `note` is a no-op; different payloads throw without changing the journal. Resume preserves IDs. Forks preserve IDs on copied usage entries; entries omitted from a fork do not reserve their IDs there. Unrelated journals may use the same ID independently.
+
+Persistence uses the native session journal. A usage contribution creates and flushes a file-backed journal even before the first assistant response. An I/O failure throws but retains the accepted entry in memory; repeating the same contribution retries native persistence without counting it again. Recording late usage after cancellation is allowed while the extension instance remains active; captured APIs from a replaced or disposed session still reject as stale.
 
 ### pi.setSessionName(name)
 
@@ -1896,6 +1928,7 @@ Manage active tools. This works for both built-in tools and dynamically register
 const active = pi.getActiveTools(); // ["read", "bash", ...]
 const all = pi.getAllTools();
 // all = [{
+//   id: "read",
 //   name: "read",
 //   description: "Read file contents...",
 //   parameters: ...,
@@ -1908,7 +1941,18 @@ pi.setActiveTools([...new Set([...active, "my_custom_tool"])]); // Keep current 
 pi.setActiveTools(["read", "bash"]); // Switch to read-only
 ```
 
-`pi.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, and `sourceInfo`.
+`pi.getAllTools()` returns `id`, `name`, optional `namespace` and `toolSearch`, `description`, `parameters`, `promptGuidelines`, and `sourceInfo`. Use `id` when passing a tool back to `setActiveTools()`.
+
+`getActiveTools()` includes every active tool. Unnamespaced tools use their name as the public ID; namespaced IDs are opaque strings. `setActiveTools(ids)` replaces the complete selection, and `setActiveTools([])` clears it. Unknown IDs are ignored. Pi rejects registrations whose public IDs collide.
+
+For exact namespace-aware selection, use `getActiveToolReferences()` and `setActiveToolReferences(refs)`:
+
+```typescript
+const matches = [{ namespace: "crm", name: "lookup" }];
+pi.setActiveToolReferences([...pi.getActiveToolReferences(), ...matches]);
+```
+
+Tools must already be registered. Both setters remain constrained by the session's allowlist and exclusions; selection never widens those permissions. Bare tool names identify only unnamespaced tools. Two namespaces may register the same leaf name. Tool-call, tool-result, and execution events carry the leaf name and optional `namespace` separately; built-in type guards match only unnamespaced tools.
 
 Typical `sourceInfo.source` values:
 - `builtin` for built-in tools
@@ -2127,7 +2171,7 @@ export default function (pi: ExtensionAPI) {
 
 ## Custom Tools
 
-Register tools the LLM can call via `pi.registerTool()`. Tools appear in the system prompt and can have custom rendering.
+Register tools the LLM can call via `pi.registerTool()`. An optional `namespace` separates a tool's identity from its leaf `name`. Providers with native namespaces receive that structure; function-only providers use collision-checked wire aliases while Pi's transcript, hooks, and registry retain the original identity. Tools appear in the system prompt and can have custom rendering.
 
 Use `promptSnippet` for a short one-line entry in the `Available tools` section in the default system prompt. If omitted, custom tools are left out of that section.
 
@@ -2141,23 +2185,29 @@ If your custom tool mutates files, use `withFileMutationQueue()` so it participa
 
 Example failure case: your custom tool edits `foo.ts` while built-in `edit` also changes `foo.ts` in the same assistant turn. If your tool does not participate in the queue, both can read the original `foo.ts`, apply separate changes, and one of those changes is lost.
 
-Pass the real target file path to `withFileMutationQueue()`, not the raw user argument. Resolve it to an absolute path first, relative to `ctx.cwd` or your tool's working directory. For existing files, the helper canonicalizes through `realpath()`, so symlink aliases for the same file share one queue. For new files, it falls back to the resolved absolute path because there is nothing to `realpath()` yet.
+Pass the real target file path to `withFileMutationQueue()`, not the raw user argument. Resolve it to an absolute path first, relative to `ctx.cwd` or your tool's working directory. The helper resolves symlink aliases, including dangling final links, so supported aliases share one queue. Missing parents are resolved through their closest existing ancestor.
 
 Queue the entire mutation window on that target path. That includes read-modify-write logic, not just the final write.
 
+The SDK re-exports the same `publishLocalFile` function as `@earendil-works/pi-agent-core/node`; extensions use the SDK root import shown below so Pi's loader supplies it without a separate dependency installation.
+
+`publishLocalFile(absolutePath, content, signal?)` stages complete string or byte content beside the target and replaces it by rename. It requires an existing parent directory and does not own a queue. Default local `write` and `edit`, including `NodeExecutionEnv`, use this helper. Failures before rename leave existing bytes intact; once rename is submitted, its actual result wins over cancellation. Successful publication is reported as success even if cancellation arrives late.
+
+Publication follows existing and dangling final symlinks, preserves ordinary mode and numeric owner/group or fails before replacement, and checks existing-target write access. Replacement also needs a writable parent directory. Hardlink aliases and already-open handles retain the old file. ACLs, extended attributes, other platform metadata, and power-loss durability are not guaranteed. Custom tool operations and execution environments retain their own backend semantics.
+
 ```typescript
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { publishLocalFile, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+async execute(_toolCallId, params, signal, _onUpdate, ctx) {
   const absolutePath = resolve(ctx.cwd, params.path);
 
   return withFileMutationQueue(absolutePath, async () => {
     await mkdir(dirname(absolutePath), { recursive: true });
     const current = await readFile(absolutePath, "utf8");
     const next = current.replace(params.oldText, params.newText);
-    await writeFile(absolutePath, next, "utf8");
+    await publishLocalFile(absolutePath, next, signal);
 
     return {
       content: [{ type: "text", text: `Updated ${params.path}` }],
@@ -2627,7 +2677,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  pi.registerToolSearch({
     name: "search_tools",
     label: "Search Tools",
     description: "Search for and enable tools relevant to a task",
@@ -2660,6 +2710,7 @@ export default function (pi: ExtensionAPI) {
         return {
           content: [{ type: "text", text: `No tools found for: ${params.query}` }],
           details: { matches: [] },
+          tools: [],
         };
       }
 
@@ -2675,6 +2726,7 @@ export default function (pi: ExtensionAPI) {
             : `Matching tools already active: ${matches.join(", ")}`,
         }],
         details: { matches, added },
+        tools: matches.map((name) => ({ name })),
       };
     },
   });
@@ -2690,7 +2742,7 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-When `search_tools` adds a match, the model receives the complete updated tool list on the immediately following request.
+When `search_tools` returns a match, the immediately following request contains its registered declaration. Native client search returns the declaration in the search result itself, without a duplicate tool-addition message. Other routes use their existing tool-declaration path. For namespaced tools, return exact references and activate them with `setActiveToolReferences()`.
 
 ## Custom UI
 

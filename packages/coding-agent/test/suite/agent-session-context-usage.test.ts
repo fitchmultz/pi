@@ -10,13 +10,14 @@ import {
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	getToolStateChanges,
+	toToolDeclaration,
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRestartControl } from "../../src/cli/restart-worker.ts";
-import { estimateContextTokens } from "../../src/core/compaction/index.ts";
+import { estimateContextTokens, estimateTokens } from "../../src/core/compaction/index.ts";
 import type { ToolDefinition } from "../../src/core/extensions/index.ts";
 import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
@@ -52,10 +53,15 @@ describe("AgentSession context usage estimate", () => {
 			harnesses.push(harness);
 			const sm = harness.sessionManager;
 			for (let i = 0; i < 100; i++) sm.appendCustomEntry("old", i);
-			const kept = sm.appendMessage({ ...fauxAssistantMessage("old"), usage: usage(60_000) });
+			const kept = sm.appendMessage({
+				...fauxAssistantMessage("old"),
+				api: harness.getModel().api,
+				usage: usage(60_000),
+			});
 			if (boundary !== "root") sm.appendCompaction("summary", kept, 60_000);
 			if (boundary === "window") sm.appendContextWindow("fresh", 60_000);
-			if (boundary === "response") sm.appendMessage({ ...fauxAssistantMessage("new"), usage: usage(1234) });
+			if (boundary === "response")
+				sm.appendMessage({ ...fauxAssistantMessage("new"), api: harness.getModel().api, usage: usage(1234) });
 			sm.appendCustomEntry("metadata");
 			harness.session.agent.state.messages = sm.buildSessionContext().messages;
 			const scans = [vi.spyOn(sm, "getEntries"), vi.spyOn(sm, "getBranch"), vi.spyOn(sm, "buildContextEntries")];
@@ -79,7 +85,7 @@ describe("AgentSession context usage estimate", () => {
 		const harness = await createHarness({ tools: [], models: [{ id: "faux-1" }, { id: "other" }] });
 		harnesses.push(harness);
 		const sm = harness.sessionManager;
-		const old = { ...fauxAssistantMessage("retained"), usage: usage(60_000) };
+		const old = { ...fauxAssistantMessage("retained"), api: harness.getModel().api, usage: usage(60_000) };
 		const kept = sm.appendMessage(old);
 		const compaction = sm.appendCompaction("summary", kept, 60_000);
 		const sync = () => {
@@ -96,14 +102,18 @@ describe("AgentSession context usage estimate", () => {
 			{ ...fauxAssistantMessage("other model"), model: "other", usage: usage(1000) },
 			{ ...fauxAssistantMessage("other provider"), provider: "other", usage: usage(1000) },
 		]) {
-			sm.appendMessage(message);
+			sm.appendMessage({ ...message, api: harness.getModel().api });
 			sync();
 			expect(harness.session.getContextUsage()).toMatchObject({ tokens: null, percent: null });
 		}
-		const valid = sm.appendMessage({ ...fauxAssistantMessage("valid"), usage: usage(1234) });
+		const valid = sm.appendMessage({
+			...fauxAssistantMessage("valid"),
+			api: harness.getModel().api,
+			usage: usage(1234),
+		});
 		sync();
 		expect(harness.session.getContextUsage()?.tokens).toBe(1234);
-		sm.appendMessage({ ...fauxAssistantMessage("zero"), usage: usage(0) });
+		sm.appendMessage({ ...fauxAssistantMessage("zero"), api: harness.getModel().api, usage: usage(0) });
 		sync();
 		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThanOrEqual(1234);
 		await harness.session.setModel(harness.getModel("other")!);
@@ -306,7 +316,8 @@ describe("AgentSession context usage estimate", () => {
 			try {
 				await harness.session.bindExtensions({});
 				harness.setResponses([fauxAssistantMessage("o".repeat(1000))]);
-				await harness.session.prompt("h".repeat(1000));
+				// Leave room for the resumed input and output beneath the real threshold.
+				await harness.session.prompt("h".repeat(800));
 				const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
 				expect(reported).toBeLessThan(2500);
 				const { session } = await createAgentSession({
@@ -364,6 +375,8 @@ describe("AgentSession context usage estimate", () => {
 					session.agent.sessionId = undefined;
 					harness.setResponses([fauxAssistantMessage("continued"), fauxAssistantMessage("unexpected summary")]);
 					await session.prompt("again");
+					if (change === "unchanged")
+						expect((session.messages.at(-1) as AssistantMessage).usage.totalTokens).toBeLessThan(2500);
 					expect(compactions).toEqual([]);
 					expect(harness.getPendingResponseCount()).toBe(1);
 
@@ -379,7 +392,10 @@ describe("AgentSession context usage estimate", () => {
 					await session.reload();
 					expect(session.systemPrompt).toContain("Changed skill guidance");
 					expect(session.systemPrompt).not.toBe(getCurrentSystemPrompt(session.messages));
-					expect(session.getContextUsage()!.tokens).toBe(pendingEstimate());
+					const lastReported = (session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+					const previousEstimate = estimateContextTokens(session.messages, { useReportedUsage: false }).tokens;
+					expect(session.getContextUsage()!.tokens).toBe(lastReported + pendingEstimate() - previousEstimate);
+					expect(session.getContextUsage()).toMatchObject({ source: "estimated" });
 				} finally {
 					session.dispose();
 				}
@@ -547,6 +563,18 @@ describe("AgentSession context usage estimate", () => {
 			} else await harness.session.navigateTree(root);
 
 			const state = harness.session.state;
+			const previousEstimate = estimateContextTokens(
+				[
+					{
+						role: "system",
+						content: `${getCurrentSystemPrompt(state.messages)}\n\nTemporary guidance.`,
+						toolsAdded: getCurrentTools(state.messages),
+						timestamp: 0,
+					},
+					...state.messages.filter((message) => message.role !== "system"),
+				],
+				{ useReportedUsage: false },
+			).tokens;
 			const baseOptions = harness.session.extensionRunner.createCommandContext().getSystemPromptOptions();
 			const expected = estimateContextTokens(
 				[
@@ -564,7 +592,10 @@ describe("AgentSession context usage estimate", () => {
 				],
 				{ model: harness.getModel(), useReportedUsage: false },
 			).tokens;
-			expect(harness.session.getContextUsage()?.tokens).toBe(expected);
+			expect(harness.session.getContextUsage()?.tokens).toBe(
+				change === "navigation" ? expected : 8000 + expected - previousEstimate,
+			);
+			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
 			expect(expected).toBeLessThan(8000);
 			expect(harness.session.systemPrompt).not.toContain("Temporary guidance.");
 			override = false;
@@ -651,10 +682,18 @@ describe("AgentSession context usage estimate", () => {
 		expect(harness.eventsOfType("context_window_started")).toEqual([]);
 		expect(harness.session.messages.filter((message) => message.role === "user")).toHaveLength(2);
 		expect(harness.getPendingResponseCount()).toBe(0);
-		// A direct SDK edit to the stored prompt invalidates the last request's usage too.
+		// A direct SDK prefix edit keeps the measured conversation and estimates the changed prompt.
+		const previous = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
+		const conversationEstimate = estimateContextTokens(
+			harness.session.messages.filter((message) => message.role !== "system"),
+			{ useReportedUsage: false },
+		).tokens;
 		harness.session.agent.state.messages.push({ role: "system", content: "SDK edit", timestamp: Date.now() });
 		expect(harness.session.getContextUsage()?.tokens).toBe(
-			estimateContextTokens(harness.session.messages, { useReportedUsage: false }).tokens,
+			previous +
+				estimateContextTokens(harness.session.messages, { useReportedUsage: false }).tokens -
+				conversationEstimate -
+				Math.ceil("Short request-only instructions.".length / 4),
 		);
 	});
 
@@ -749,7 +788,8 @@ describe("AgentSession context usage estimate", () => {
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("ok")]);
 		await harness.session.prompt("hello");
-		const before = harness.session.getContextUsage()?.tokens;
+		const before = harness.session.getContextUsage()!.tokens!;
+		const beforeEstimate = estimateContextTokens(harness.session.messages, { useReportedUsage: false }).tokens;
 		const stateBefore = JSON.stringify(harness.session.agent.state);
 		if (change === "mutated schema")
 			Object.assign(parameters.properties.query, { description: "Changed field description" });
@@ -773,28 +813,249 @@ describe("AgentSession context usage estimate", () => {
 			expect(harness.session.getContextUsage()?.tokens).toBe(before);
 			const serialize = vi.spyOn(JSON, "stringify");
 			for (let i = 0; i < 10; i++) expect(harness.session.getContextUsage()?.tokens).toBe(before);
-			expect(serialize).not.toHaveBeenCalled();
+			// Tuple keys may serialize; unchanged tool schemas must stay cached.
+			for (const [value] of serialize.mock.calls) expect(value).toEqual([null, "lookup"]);
 		} else {
 			const state = harness.session.agent.state;
 			expect(harness.session.getContextUsage()?.tokens).toBe(
-				estimateContextTokens(
-					[
-						...state.messages,
+				before -
+					beforeEstimate +
+					estimateContextTokens(
+						[
+							...state.messages,
+							{
+								role: "system",
+								content: "",
+								...getToolStateChanges(getCurrentTools(state.messages), state.tools),
+								timestamp: Date.now(),
+							},
+						],
 						{
-							role: "system",
-							content: "",
-							...getToolStateChanges(getCurrentTools(state.messages), state.tools),
-							timestamp: Date.now(),
+							model: harness.getModel(),
+							useReportedUsage: false,
 						},
-					],
-					{
-						model: harness.getModel(),
-						useReportedUsage: false,
-					},
-				).tokens,
+					).tokens,
 			);
 			expect(harness.session.getContextUsage()?.tokens).not.toBe(before);
 		}
+	});
+
+	it.each(["prompt addition", "prompt removal", "tool addition", "tool removal", "tool reorder", "grammar"])(
+		"retains opaque reported usage through a %s without counting previous output twice",
+		async (change) => {
+			const tools: AgentTool[] = ["first", "second", "third"].map((name) => ({
+				name,
+				label: name,
+				description: `${name} tool`,
+				parameters: Type.Object({ input: Type.String() }),
+				execute: async () => ({ content: [], details: {} }),
+			}));
+			const harness = await createHarness({
+				tools,
+				initialActiveToolNames: ["first", "second"],
+				models: [{ id: "faux-1", contextWindow: 600_000, maxTokens: 128_000 }],
+				settings: { compaction: { enabled: false, reserveTokens: 64_000, keepRecentTokens: 40_000 } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_agent_start", () => ({ systemPrompt: "s".repeat(400) }));
+						pi.on("message_end", (event) => {
+							if (event.message.role === "assistant") {
+								event.message.usage = { ...usage(500_000), input: 400_000, output: 100_000 };
+							}
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				fauxAssistantMessage([
+					{
+						type: "thinking",
+						thinking: "",
+						thinkingSignature: JSON.stringify({
+							type: "reasoning",
+							id: "rs_test",
+							encrypted_content: "opaque-test",
+							summary: [],
+						}),
+					},
+					{ type: "text", text: "previous output".repeat(100) },
+				]),
+			]);
+			await harness.session.prompt("hello");
+			const session = harness.session;
+			const billed = session.getSessionStats();
+			const prefixTokens = (prompt: string) =>
+				estimateTokens({
+					role: "system",
+					content: prompt,
+					toolsAdded: session.state.tools.map(toToolDeclaration),
+					timestamp: 0,
+				});
+			const beforePrefix = prefixTokens("s".repeat(400));
+			expect(session.getContextUsage()?.tokens).toBe(500_000);
+			if (change === "tool addition") session.setActiveToolsByName(["first", "second", "third"]);
+			if (change === "tool removal") session.setActiveToolsByName(["first"]);
+			if (change === "tool reorder") session.setActiveToolsByName(["second", "first"]);
+			if (change === "grammar")
+				session.state.tools[0] = {
+					...session.state.tools[0],
+					constrainedSampling: { type: "grammar", variants: { openai_regex: "a".repeat(20_000) } },
+				};
+			const prompt = "s".repeat(change === "prompt addition" ? 800 : change === "prompt removal" ? 200 : 400);
+			session.extensionRunner.createCommandContext().getSystemPromptOptions().forceSystemPrompt = prompt;
+			await session.sendCustomMessage({ customType: "tail", content: "t".repeat(1600), display: false });
+			expect(session.getContextUsage()).toMatchObject({
+				tokens: 500_000 + prefixTokens(prompt) - beforePrefix + 400,
+				contextWindow: 600_000,
+				source: "estimated",
+			});
+			expect(session.getSessionStats().tokens).toEqual(billed.tokens);
+			expect(session.getSessionStats().cost).toBe(billed.cost);
+			expect(session.settingsManager.getCompactionSettings(session.model)).toMatchObject({
+				reserveTokens: 64_000,
+				keepRecentTokens: 40_000,
+			});
+		},
+	);
+
+	it("adjusts only the effective prefix after a persisted replacement", async () => {
+		const harness = await createHarness({ tools: [], settings: { compaction: { enabled: false } } });
+		harnesses.push(harness);
+		harness.sessionManager.appendMessage({
+			role: "system",
+			content: "obsolete ".repeat(10_000),
+			timestamp: 0,
+		});
+		harness.session.refreshContext();
+		harness.setResponses([
+			fauxAssistantMessage([
+				{ type: "thinking", thinking: "", thinkingSignature: "opaque-test" },
+				{ type: "text", text: "answer" },
+			]),
+		]);
+		await harness.session.prompt("hello");
+		const session = harness.session;
+		const response = session.messages.at(-1) as AssistantMessage;
+		response.usage = { ...usage(500_000), input: 400_000, output: 100_000 };
+		expect(session.getContextUsage()).toMatchObject({ tokens: 500_000, source: "reported" });
+		const systemMessages = session.messages.filter((message) => message.role === "system");
+		expect(systemMessages).toHaveLength(2);
+		expect(systemMessages[1].replace).toBe(true);
+		expect(estimateTokens(systemMessages[0])).toBe(22_500);
+		// Native transcript replay discards the obsolete prefix before the measured request.
+		const oldPrefix = estimateTokens(getCurrentSystemMessage(session.messages)!);
+		session.extensionRunner.createCommandContext().getSystemPromptOptions().forceSystemPrompt = "new";
+		expect(session.getContextUsage()).toMatchObject({
+			tokens: 500_000 + 1 - oldPrefix,
+			source: "estimated",
+		});
+	});
+
+	it("keeps the measured conversation through custom-message projection and structured prompt edits", async () => {
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", () => ({
+						message: { customType: "startup", content: "startup input", display: false },
+					}));
+					pi.on("message_end", (event) => {
+						if (event.message.role === "assistant") event.message.usage = usage(500_000);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage({ type: "thinking", thinking: "", thinkingSignature: "opaque-test" }),
+		]);
+		await harness.session.prompt("hello");
+		const session = harness.session;
+		session.refreshContext();
+		expect(session.getContextUsage()).toMatchObject({ tokens: 500_000, source: "reported" });
+		const options = session.extensionRunner.createCommandContext().getSystemPromptOptions();
+		options.sections = { ...options.sections, policy: "p".repeat(400) };
+		// The 400-character policy plus its XML section framing estimates to 105 tokens.
+		expect(session.getContextUsage()).toMatchObject({ tokens: 500_105, source: "estimated" });
+		await session.sendCustomMessage({ customType: "tail", content: "t".repeat(1600), display: false });
+		expect(session.getContextUsage()).toMatchObject({ tokens: 500_505, source: "estimated" });
+		delete options.sections.policy;
+		expect(session.getContextUsage()).toMatchObject({ tokens: 500_400, source: "estimated" });
+	});
+
+	it.each(["context", "message_end"])(
+		"does not apply reported usage to conversation omitted by a %s hook",
+		async (hook) => {
+			const harness = await createHarness({
+				tools: [],
+				settings: { compaction: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("context", (event) =>
+							hook === "context"
+								? {
+										messages: event.messages.filter((message) => message.role !== "user"),
+									}
+								: undefined,
+						);
+						pi.on("message_end", (event) => {
+							if (event.message.role !== "assistant") return;
+							event.message.usage = usage(500_000);
+							if (hook === "message_end") event.message.content = [];
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("done")]);
+			await harness.session.prompt("omitted input");
+			expect(harness.session.getContextUsage()?.tokens).toBeLessThan(500_000);
+			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
+		},
+	);
+
+	it.each([
+		"api",
+		"provider",
+		"context deletion",
+		"SDK deletion",
+		"SDK replacement",
+		"SDK reasoning deletion",
+		"new context",
+		"branch",
+	])("does not reuse an opaque usage anchor after %s", async (change) => {
+		const harness = await createHarness({ tools: [], settings: { compaction: { enabled: false } } });
+		harnesses.push(harness);
+		const root = harness.sessionManager.appendCustomEntry("root");
+		harness.setResponses([
+			fauxAssistantMessage({ type: "thinking", thinking: "", thinkingSignature: "opaque-test" }),
+		]);
+		await harness.session.prompt("hello");
+		const session = harness.session;
+		(session.messages.at(-1) as AssistantMessage).usage = usage(500_000);
+		expect(session.getContextUsage()?.tokens).toBe(500_000);
+		if (change === "api") session.agent.state.model = { ...harness.getModel(), api: "other-api" };
+		if (change === "provider") session.agent.state.model = { ...harness.getModel(), provider: "other-provider" };
+		if (change === "context deletion") {
+			const user = harness.sessionManager
+				.getBranch()
+				.find((entry) => entry.type === "message" && entry.message.role === "user")!;
+			harness.sessionManager.appendContextEdit(user.id, null);
+			session.refreshContext();
+		}
+		if (change === "SDK deletion")
+			session.state.messages = session.messages.filter((message) => message.role !== "user");
+		if (change === "SDK replacement") {
+			const user = session.messages.find((message) => message.role === "user")!;
+			user.content = "replacement";
+		}
+		if (change === "SDK reasoning deletion") (session.messages.at(-1) as AssistantMessage).content = [];
+		if (change === "new context") session.newContext();
+		if (change === "branch") await session.navigateTree(root);
+		expect(session.getContextUsage()?.tokens).toBeLessThan(500_000);
+		expect(session.getContextUsage()).toMatchObject({ source: "estimated" });
 	});
 
 	it("does not reuse usage or trigger rollover from a different model after a model switch", async () => {

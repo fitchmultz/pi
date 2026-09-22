@@ -115,6 +115,29 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("custom result");
 	});
 
+	test("refreshes the renderer when authoritative identity arrives and distinguishes detached work", () => {
+		const component = new ToolExecutionComponent(
+			"work",
+			"call",
+			{},
+			{},
+			{ renderCall: () => new Text("initial renderer", 0, 0) },
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateToolDefinition({
+			renderShell: "self",
+			renderCall: () => new Text("completed identity renderer", 0, 0),
+		});
+		component.markDetached();
+		const detached = stripAnsi(component.render(120).join("\n"));
+		expect(detached).toContain("completed identity renderer");
+		expect(detached).not.toContain("initial renderer");
+		expect(detached).toContain("external work remains pending");
+		component.updateResult({ content: [{ type: "text", text: "actual result" }], isError: false });
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("external work remains pending");
+	});
+
 	test("self-rendered empty tool rows take no layout space", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),

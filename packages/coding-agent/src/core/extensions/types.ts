@@ -9,9 +9,11 @@
  */
 
 import type {
+	AgentEvent,
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	getPendingToolCalls,
 	NewContextRequest,
 	ThinkingLevel,
 	ToolExecutionMode,
@@ -32,6 +34,7 @@ import type {
 	RefreshModelsContext,
 	SimpleStreamOptions,
 	TextContent,
+	ToolReference,
 	ToolResultMessage,
 	TranscriptContext,
 	Usage,
@@ -70,6 +73,7 @@ import type {
 	ReadonlySessionManager,
 	SessionEntry,
 	SessionManager,
+	UsageEntry,
 } from "../session-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
@@ -296,6 +300,8 @@ export interface ExtensionUIContext {
 // ============================================================================
 
 export interface ContextUsage {
+	/** Reported aggregate alone, an adjusted/heuristic estimate, or unknown after compaction. */
+	source: "reported" | "estimated" | "unknown";
 	/** Estimated context tokens, or null if unknown (e.g. right after compaction, before next LLM response). */
 	tokens: number | null;
 	contextWindow: number;
@@ -342,7 +348,7 @@ export interface ExtensionContext {
 	isBashRunning(): boolean;
 	/** Whether project-local trust is active for this context. */
 	isProjectTrusted(): boolean;
-	/** The current abort signal, or undefined when the agent is not streaming. */
+	/** Admitted run signal, including preparation and before-settle; undefined in agent_settled and while idle. */
 	signal: AbortSignal | undefined;
 	/** Abort the current agent operation */
 	abort(): void;
@@ -354,6 +360,8 @@ export interface ExtensionContext {
 	getPendingNextTurnCount(): number;
 	/** Submitted inputs awaiting native preflight or held in the current mode's input queues. Excludes dispatched extension commands. */
 	getPendingInputCount(): number;
+	/** Native async obligations in the selected branch/window. Method presence proves host lifecycle support. */
+	getPendingToolCalls(): ReturnType<typeof getPendingToolCalls>;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
@@ -476,8 +484,14 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
  * Tool definition for registerTool().
  */
 export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = unknown, TState = any> {
+	/** Permit native asynchronous calls on supported routes; independent of local executionMode. */
+	async?: boolean;
 	/** Tool name (used in LLM tool calls) */
 	name: string;
+	/** Exact namespace, independent of the tool's leaf name. */
+	namespace?: string;
+	/** Set by registerToolSearch. */
+	toolSearch?: true;
 	/** Human-readable label for UI */
 	label: string;
 	/** Description for LLM */
@@ -514,6 +528,15 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		ctx: ExtensionContext,
 	): Promise<AgentToolResult<TDetails>>;
 
+	/** Reattach durable work with original call ID and admitted arguments. Never start a replacement operation. */
+	resume?(
+		toolCallId: string,
+		params: Static<TParams>,
+		signal: AbortSignal | undefined,
+		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
+		ctx: ExtensionContext,
+	): Promise<AgentToolResult<TDetails> | undefined>;
+
 	/** Custom rendering for tool call display */
 	renderCall?: (args: Static<TParams>, theme: Theme, context: ToolRenderContext<TState, Static<TParams>>) => Component;
 
@@ -524,6 +547,17 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		theme: Theme,
 		context: ToolRenderContext<TState, Static<TParams>>,
 	) => Component;
+}
+
+export interface ToolSearchDefinition<TParams extends TSchema = TSchema, TDetails = unknown, TState = unknown>
+	extends Omit<ToolDefinition<TParams, TDetails, TState>, "execute"> {
+	execute(
+		toolCallId: string,
+		params: Static<TParams>,
+		signal: AbortSignal | undefined,
+		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
+		ctx: ExtensionContext,
+	): Promise<AgentToolResult<TDetails> & { tools: ToolReference[] }>;
 }
 
 type AnyToolDefinition = ToolDefinition<any, any, any>;
@@ -879,6 +913,8 @@ export interface AgentBeforeSettleEvent extends BoundaryState {
 /** Fired after an agent run has fully settled and no automatic retry, compaction, or queued continuation will run. */
 export interface AgentSettledEvent {
 	type: "agent_settled";
+	/** Detached native obligations may remain after the local run has stopped. */
+	pendingToolCalls?: ReturnType<typeof getPendingToolCalls>;
 }
 
 /** Native retry notifications; handlers are awaited before the retry proceeds. */
@@ -950,6 +986,7 @@ export interface ToolExecutionStartEvent {
 	type: "tool_execution_start";
 	toolCallId: string;
 	toolName: string;
+	namespace?: string;
 	args: any;
 }
 
@@ -958,6 +995,7 @@ export interface ToolExecutionUpdateEvent {
 	type: "tool_execution_update";
 	toolCallId: string;
 	toolName: string;
+	namespace?: string;
 	args: any;
 	partialResult: any;
 }
@@ -967,6 +1005,7 @@ export interface ToolExecutionEndEvent {
 	type: "tool_execution_end";
 	toolCallId: string;
 	toolName: string;
+	namespace?: string;
 	result: any;
 	isError: boolean;
 }
@@ -1042,6 +1081,7 @@ export type InputEventResult =
 
 interface ToolCallEventBase {
 	type: "tool_call";
+	namespace?: string;
 	toolCallId: string;
 }
 
@@ -1109,6 +1149,7 @@ export type ToolCallEvent =
 
 interface ToolResultEventBase {
 	type: "tool_result";
+	namespace?: string;
 	toolCallId: string;
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
@@ -1176,28 +1217,28 @@ export type ToolResultEvent =
 
 // Type guards for ToolResultEvent
 export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
-	return e.toolName === "bash";
+	return e.namespace === undefined && e.toolName === "bash";
 }
 export function isPowerShellToolResult(e: ToolResultEvent): e is PowerShellToolResultEvent {
-	return e.toolName === "powershell";
+	return e.namespace === undefined && e.toolName === "powershell";
 }
 export function isReadToolResult(e: ToolResultEvent): e is ReadToolResultEvent {
-	return e.toolName === "read";
+	return e.namespace === undefined && e.toolName === "read";
 }
 export function isEditToolResult(e: ToolResultEvent): e is EditToolResultEvent {
-	return e.toolName === "edit";
+	return e.namespace === undefined && e.toolName === "edit";
 }
 export function isWriteToolResult(e: ToolResultEvent): e is WriteToolResultEvent {
-	return e.toolName === "write";
+	return e.namespace === undefined && e.toolName === "write";
 }
 export function isGrepToolResult(e: ToolResultEvent): e is GrepToolResultEvent {
-	return e.toolName === "grep";
+	return e.namespace === undefined && e.toolName === "grep";
 }
 export function isFindToolResult(e: ToolResultEvent): e is FindToolResultEvent {
-	return e.toolName === "find";
+	return e.namespace === undefined && e.toolName === "find";
 }
 export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
-	return e.toolName === "ls";
+	return e.namespace === undefined && e.toolName === "ls";
 }
 
 /**
@@ -1233,7 +1274,7 @@ export function isToolCallEventType<TName extends string, TInput extends Record<
 	event: ToolCallEvent,
 ): event is ToolCallEvent & { toolName: TName; input: TInput };
 export function isToolCallEventType(toolName: string, event: ToolCallEvent): boolean {
-	return event.toolName === toolName;
+	return event.namespace === undefined && event.toolName === toolName;
 }
 
 /** Union of all event types */
@@ -1264,6 +1305,7 @@ export type ExtensionEvent =
 	| MessageStartEvent
 	| MessageUpdateEvent
 	| MessageEndEvent
+	| Extract<AgentEvent, { type: "tool_execution_prepared" | "tool_execution_detached" | "steering" }>
 	| ToolExecutionStartEvent
 	| ToolExecutionUpdateEvent
 	| ToolExecutionEndEvent
@@ -1427,6 +1469,11 @@ export interface ResolvedCommand extends RegisteredCommand {
 // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
+/** Model-attributed usage recorded exactly once per ID in a session journal. */
+export interface UsageContribution extends Pick<UsageEntry, "kind" | "provider" | "model" | "usage" | "note"> {
+	id: string;
+}
+
 /**
  * ExtensionAPI passed to extension factory functions.
  */
@@ -1508,6 +1555,15 @@ export interface ExtensionAPI {
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): () => void;
 	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): () => void;
 	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent, MessageEndEventResult>): () => void;
+	on(
+		event: "tool_execution_prepared",
+		handler: ExtensionHandler<Extract<AgentEvent, { type: "tool_execution_prepared" }>>,
+	): () => void;
+	on(
+		event: "tool_execution_detached",
+		handler: ExtensionHandler<Extract<AgentEvent, { type: "tool_execution_detached" }>>,
+	): () => void;
+	on(event: "steering", handler: ExtensionHandler<Extract<AgentEvent, { type: "steering" }>>): () => void;
 	on(event: "tool_execution_start", handler: ExtensionHandler<ToolExecutionStartEvent>): () => void;
 	on(event: "tool_execution_update", handler: ExtensionHandler<ToolExecutionUpdateEvent>): () => void;
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): () => void;
@@ -1525,6 +1581,11 @@ export interface ExtensionAPI {
 	/** Register a tool that the LLM can call. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown, TState = any>(
 		tool: ToolDefinition<TParams, TDetails, TState>,
+	): void;
+
+	/** Register an ordinary callback eligible for native client tool search when it is the sole active search handler. */
+	registerToolSearch<TParams extends TSchema = TSchema, TDetails = unknown, TState = unknown>(
+		tool: ToolSearchDefinition<TParams, TDetails, TState>,
 	): void;
 
 	/**
@@ -1609,6 +1670,9 @@ export interface ExtensionAPI {
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
+	/** Record usage once per journal/ID. Identical repeats are no-ops; conflicting payloads throw. */
+	recordUsage(contribution: UsageContribution): void;
+
 	// =========================================================================
 	// Session Metadata
 	// =========================================================================
@@ -1631,8 +1695,14 @@ export interface ExtensionAPI {
 	/** Get all configured tools with parameter schema, prompt guidelines, and source metadata. */
 	getAllTools(): ToolInfo[];
 
-	/** Set the active tools by name. */
+	/** Replace the complete loadout using registered public IDs; [] clears all tools. */
 	setActiveTools(toolNames: string[]): void;
+
+	/** Get the complete active tool set with exact namespace/name identities. */
+	getActiveToolReferences(): ToolReference[];
+
+	/** Replace the complete active tool set. Registered allow/exclude restrictions remain binding. */
+	setActiveToolReferences(tools: ToolReference[]): void;
 
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
@@ -1889,7 +1959,12 @@ export type GetSessionNameHandler = () => string | undefined;
 export type GetActiveToolsHandler = () => string[];
 
 /** Tool info with name, description, parameter schema, prompt guidelines, and source metadata. */
-export type ToolInfo = Pick<ToolDefinition, "name" | "description" | "parameters" | "promptGuidelines"> & {
+export type ToolInfo = Pick<
+	ToolDefinition,
+	"name" | "namespace" | "toolSearch" | "description" | "parameters" | "promptGuidelines"
+> & {
+	/** Registered public ID accepted by setActiveTools; namespaced IDs are opaque. */
+	id: string;
 	sourceInfo: SourceInfo;
 };
 
@@ -1946,10 +2021,13 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
+	recordUsage: ExtensionAPI["recordUsage"];
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;
 	setLabel: SetLabelHandler;
 	getActiveTools: GetActiveToolsHandler;
+	getActiveToolReferences?: () => ToolReference[];
+	setActiveToolReferences?: (tools: ToolReference[]) => void;
 	getAllTools: GetAllToolsHandler;
 	setActiveTools: SetActiveToolsHandler;
 	refreshTools: RefreshToolsHandler;
@@ -1975,6 +2053,7 @@ export interface ExtensionContextActions {
 	hasPendingSteeringMessages: () => boolean;
 	getPendingNextTurnCount: () => number;
 	getPendingInputCount: () => number;
+	getPendingToolCalls?: () => ReturnType<typeof getPendingToolCalls>;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
 	getCompactionSettings: () => CompactionSettings;

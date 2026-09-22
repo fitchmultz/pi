@@ -155,7 +155,8 @@ type MaybeJson = JsonValue | typeof MISSING;
 
 const spliceItems = (target: unknown[], index: number, remove: number, items: JsonValue[]): JsonValue[] => {
 	const removed = Reflect.apply(Array.prototype.splice, target, [index, remove]) as JsonValue[];
-	const chunkSize = 10_000;
+	// Leave stack room for a large argument list in the calling array mutator.
+	const chunkSize = 1_000;
 	for (let offset = 0; offset < items.length; offset += chunkSize) {
 		Reflect.apply(Array.prototype.splice, target, [index + offset, 0, ...items.slice(offset, offset + chunkSize)]);
 	}

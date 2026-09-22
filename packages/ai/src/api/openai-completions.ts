@@ -45,6 +45,7 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
+import { toolKey } from "../utils/tool-identity.ts";
 import {
 	getDeclaredTools,
 	resolveTranscript,
@@ -502,7 +503,9 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 					// Note: the "input" fallback here should/must not be taken.  in case the LLM makes up
 					// a tool we don't knwo about, we at least have a place to stash our stuff.
 					const customInputProperty =
-						toolCall.custom && !toolCall.function ? (grammarToolInputProperties.get(name) ?? "input") : undefined;
+						toolCall.custom && !toolCall.function
+							? (grammarToolInputProperties.get(toolKey({ name })) ?? "input")
+							: undefined;
 					const hasCustomInput = customInputProperty !== undefined;
 					block = {
 						type: "toolCall",
@@ -539,7 +542,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 					block.name = name;
 				}
 				if (toolCall.custom && !toolCall.function && !block.customInput) {
-					const customInputProperty = grammarToolInputProperties.get(block.name) ?? "input";
+					const customInputProperty = grammarToolInputProperties.get(toolKey(block)) ?? "input";
 					block.arguments = { [customInputProperty]: "" };
 					block.customInput = {
 						property: customInputProperty,
@@ -1351,7 +1354,7 @@ export function convertMessages(
 
 			if (toolCalls.length > 0) {
 				assistantMsg.tool_calls = toolCalls.map((tc): ChatCompletionMessageToolCall => {
-					const customInputProperty = options?.grammarToolInputProperties?.get(tc.name);
+					const customInputProperty = options?.grammarToolInputProperties?.get(toolKey(tc));
 					if (customInputProperty !== undefined) {
 						return {
 							id: tc.id,

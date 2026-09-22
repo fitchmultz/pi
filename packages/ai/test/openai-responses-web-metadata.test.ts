@@ -141,11 +141,18 @@ async function process(events: ResponseStreamEvent[], output = createOutput()): 
 
 describe("Responses web-search metadata", () => {
 	it("retains native calls and citation positions without duplicating terminal records or creating local tool calls", async () => {
+		const wireItem = structuredClone(local);
 		const output = await process(completedEvents([...calls, message, local]));
 		expect(JSON.parse(JSON.stringify(output)).webSearch).toEqual({ calls, citations: expectedCitations });
 		expect(output.content).toEqual([
 			{ type: "text", text: "Guide. Again.", textSignature: '{"v":1,"id":"msg_web"}' },
-			{ type: "toolCall", id: "call_local|fc_local", name: "read", arguments: { path: "README.md" } },
+			{
+				type: "toolCall",
+				id: "call_local|fc_local",
+				name: "read",
+				arguments: { path: "README.md" },
+				responsesItem: wireItem,
+			},
 		]);
 		expect(output.stopReason).toBe("toolUse");
 		// Metadata is observational, not a new executable/replayable tool type.

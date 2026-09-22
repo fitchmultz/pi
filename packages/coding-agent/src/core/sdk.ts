@@ -1,6 +1,11 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { getCurrentSystemMessage, type ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+import {
+	getCurrentSystemMessage,
+	type ModelsSimpleStreamOptions,
+	type ToolSelection,
+	toolKey,
+} from "@earendil-works/pi-ai";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -73,9 +78,9 @@ export interface CreateAgentSessionOptions {
 	 * `noTools` changes that default. When provided, only the listed tool names are
 	 * enabled.
 	 */
-	tools?: string[];
+	tools?: ToolSelection[];
 	/** Optional denylist of tool names to disable. Applies after `tools` when both are provided. */
-	excludeTools?: string[];
+	excludeTools?: ToolSelection[];
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
 
@@ -278,12 +283,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
-	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
+	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames.map(toolKey)) : undefined;
 	const initialActiveToolNames =
 		options.tools === undefined && options.noTools === undefined && getCurrentSystemMessage(existingSession.messages)
 			? undefined
 			: (options.tools ?? (options.noTools ? [] : (configuredDefaultToolNames ?? defaultActiveToolNames))).filter(
-					(name) => !excludedToolNameSet?.has(name),
+					(name) => !excludedToolNameSet?.has(toolKey(name)),
 				);
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)

@@ -10,7 +10,6 @@ import {
 	open as openFile,
 	readdir,
 	readFile,
-	realpath,
 	rename,
 	rm,
 	writeFile,
@@ -35,6 +34,7 @@ import {
 	toError,
 } from "../types.ts";
 import { OutputCapture } from "../utils/output-capture.ts";
+import { publishLocalFile, resolveLocalFileTarget } from "./publish-local-file.ts";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
@@ -768,7 +768,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			await mkdir(resolve(resolved, ".."), { recursive: true });
 			const afterMkdirAbort = abortResult<void>(signal, resolved);
 			if (afterMkdirAbort) return afterMkdirAbort;
-			await writeFile(resolved, content, { signal });
+			await publishLocalFile(resolved, content, signal);
 			return ok(undefined);
 		} catch (error) {
 			return err(toFileError(error, resolved));
@@ -846,7 +846,9 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		const aborted = abortResult<string>(context.abortSignal, resolved);
 		if (aborted) return aborted;
 		try {
-			return ok(await realpath(resolved));
+			// The addressed path must exist; a dangling final symlink still has a target identity.
+			await lstat(resolved);
+			return ok(await resolveLocalFileTarget(resolved));
 		} catch (error) {
 			return err(toFileError(error, resolved));
 		}

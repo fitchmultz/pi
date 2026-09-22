@@ -1,4 +1,5 @@
 import type { Tool } from "../types.ts";
+import { toolKey } from "../utils/tool-identity.ts";
 
 interface JsonSchemaObject {
 	[key: string]: unknown;
@@ -22,6 +23,7 @@ const UNSUPPORTED_STRICT_SCHEMA_KEYS = [
 	"propertyNames",
 	"contains",
 	"prefixItems",
+	"uniqueItems",
 	"not",
 	"if",
 	"then",
@@ -30,17 +32,6 @@ const UNSUPPORTED_STRICT_SCHEMA_KEYS = [
 
 function isJsonSchemaObject(value: unknown): value is JsonSchemaObject {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isStructuredSchema(schema: unknown): boolean {
-	if (!isJsonSchemaObject(schema)) return false;
-	const types = typeof schema.type === "string" ? [schema.type] : Array.isArray(schema.type) ? schema.type : [];
-	return (
-		types.includes("object") ||
-		types.includes("array") ||
-		schema.properties !== undefined ||
-		schema.items !== undefined
-	);
 }
 
 function schemaAllowsNull(schema: unknown): boolean {
@@ -65,9 +56,6 @@ function makeJsonSchemaNodeStrict(schema: unknown): void {
 			throw new UnsupportedStrictJsonSchemaError("anyOf must contain at least one schema");
 		}
 		for (const variant of schema.anyOf) {
-			if (isStructuredSchema(variant)) {
-				throw new UnsupportedStrictJsonSchemaError("object and array unions are unsupported");
-			}
 			makeJsonSchemaNodeStrict(variant);
 		}
 	}
@@ -118,6 +106,9 @@ export function makeStrictJsonSchema(schema: Tool["parameters"]): Record<string,
 	const cloned: unknown = structuredClone(schema);
 	if (!isJsonSchemaObject(cloned)) {
 		throw new UnsupportedStrictJsonSchemaError("root schema must have type object");
+	}
+	if (cloned.anyOf !== undefined) {
+		throw new UnsupportedStrictJsonSchemaError("root anyOf schemas are unsupported");
 	}
 	makeJsonSchemaNodeStrict(cloned);
 	if (cloned.type !== "object") {
@@ -265,12 +256,12 @@ export function resolveGrammarConstrainedSampling(
 export function createGrammarToolInputProperties(
 	tools: Tool[] | undefined,
 	supportsOpenAIGrammarTools: boolean,
-): ReadonlyMap<string, string> {
+): Map<string, string> {
 	const properties = new Map<string, string>();
 	for (const tool of tools ?? []) {
 		const grammar = resolveGrammarConstrainedSampling(tool, supportsOpenAIGrammarTools);
 		if (grammar) {
-			properties.set(tool.name, grammar.inputProperty);
+			properties.set(toolKey(tool), grammar.inputProperty);
 		}
 	}
 	return properties;

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ToolSelection } from "@earendil-works/pi-ai";
 import type { RestartCheckpoint } from "../cli/restart-protocol.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { CustomMessage } from "./messages.ts";
@@ -76,7 +77,11 @@ export interface SessionCheckpoint {
 	entries: SessionEntry[];
 	queues: SessionCheckpointQueues;
 	/** Native registry restrictions, not inferred from the active/known tool names. Absent on older v1 artifacts. */
-	toolConfiguration?: { allowedToolNames?: string[]; excludedToolNames?: string[]; noBuiltinTools?: boolean };
+	toolConfiguration?: {
+		allowedToolNames?: ToolSelection[];
+		excludedToolNames?: ToolSelection[];
+		noBuiltinTools?: boolean;
+	};
 	/** Exact native cycling scope, including session-only picker changes. Absent on older artifacts. */
 	scopedModels?: Array<{ provider: string; id: string; thinkingLevel?: RestartCheckpoint["thinkingLevel"] }>;
 	boundary: CheckpointBoundary;

@@ -66,6 +66,11 @@ export function transformMessages<TApi extends Api>(
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): Message[] {
+	const nativeAsync =
+		(model.api === "openai-responses" || model.api === "openai-codex-responses") &&
+		model.compat &&
+		"supportsAsyncTools" in model.compat &&
+		model.compat.supportsAsyncTools;
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
 	// Normalize null/undefined content from untyped callers (custom tools, hand-built
@@ -133,7 +138,12 @@ export function transformMessages<TApi extends Api>(
 						delete (normalizedToolCall as { thoughtSignature?: string }).thoughtSignature;
 					}
 
-					if (!isSameModel && normalizeToolCallId) {
+					const preserveAsyncIdentity =
+						nativeAsync &&
+						toolCall.async &&
+						assistantMsg.provider === model.provider &&
+						assistantMsg.api === model.api;
+					if (!isSameModel && !preserveAsyncIdentity && normalizeToolCallId) {
 						const normalizedId = normalizeToolCallId(toolCall.id, model, assistantMsg);
 						if (normalizedId !== toolCall.id) {
 							toolCallIdMap.set(toolCall.id, normalizedId);
@@ -155,6 +165,28 @@ export function transformMessages<TApi extends Api>(
 		return msg;
 	});
 
+	// Synchronous calls and routes require adjacency even when steering or async history spans turns.
+	const completed = new Map(
+		transformed.flatMap((message) => (message.role === "toolResult" ? [[message.toolCallId, message] as const] : [])),
+	);
+	const relocated = new Set<string>();
+	const ordered = transformed.flatMap((message): Message[] => {
+		if (message.role !== "assistant") return [message];
+		const results = message.content.flatMap((call) => {
+			if (
+				call.type !== "toolCall" ||
+				(call.async && nativeAsync && message.provider === model.provider && message.api === model.api)
+			)
+				return [];
+			const result = completed.get(call.id);
+			if (!result) return [];
+			relocated.add(call.id);
+			return [result];
+		});
+		return [message, ...results];
+	});
+	const emittedResults = new Set<string>();
+
 	// Second pass: insert synthetic empty tool results for orphaned tool calls
 	// This preserves thinking signatures and satisfies API requirements
 	const result: Message[] = [];
@@ -172,7 +204,16 @@ export function transformMessages<TApi extends Api>(
 						role: "toolResult",
 						toolCallId: tc.id,
 						toolName: tc.name,
-						content: [{ type: "text", text: "No result provided" }],
+						...(tc.namespace === undefined ? {} : { namespace: tc.namespace }),
+						...(tc.kind === undefined ? {} : { toolCallKind: tc.kind }),
+						content: [
+							{
+								type: "text",
+								text: tc.async
+									? "Asynchronous tool execution has no recorded result; its outcome is unknown."
+									: "No result provided",
+							},
+						],
 						isError: true,
 						timestamp: Date.now(),
 					} as ToolResultMessage);
@@ -185,31 +226,55 @@ export function transformMessages<TApi extends Api>(
 		heldSystemMessages.length = 0;
 	};
 
-	for (let i = 0; i < transformed.length; i++) {
-		const msg = transformed[i];
+	for (const msg of ordered) {
+		if (msg.role === "toolResult" && relocated.has(msg.toolCallId)) {
+			if (emittedResults.has(msg.toolCallId)) continue;
+			emittedResults.add(msg.toolCallId);
+		}
 
 		if (msg.role === "assistant") {
 			// If we have pending orphaned tool calls from a previous assistant, insert synthetic results now
 			closePendingToolCalls();
 
-			// Skip errored/aborted assistant messages entirely.
+			// Skip errored/aborted assistant messages unless they contain committed tool calls.
 			// These are incomplete turns that shouldn't be replayed:
 			// - May have partial content (reasoning without message, incomplete tool calls)
 			// - Replaying them can cause API errors (e.g., OpenAI "reasoning without following item")
 			// - The model should retry from the last valid state
-			const assistantMsg = msg as AssistantMessage;
+			let assistantMsg = msg as AssistantMessage;
 			if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
-				continue;
+				// A streamed call may already have committed a local side effect. Preserve its
+				// authoritative item even when the remainder of the response was interrupted.
+				const committed = assistantMsg.content.filter((block) =>
+					block.type === "toolCall"
+						? !!block.responsesItem || block.executionStarted
+						: block.type === "text"
+							? !!block.textSignature
+							: !!block.thinkingSignature,
+				);
+				// Signatures alone are not tool obligations and may leave reasoning without a following item.
+				if (!committed.some((block) => block.type === "toolCall")) continue;
+				// Reasoning after the last completed output belongs to the interrupted suffix.
+				while (committed.at(-1)?.type === "thinking") committed.pop();
+				assistantMsg = { ...assistantMsg, content: committed };
 			}
 
 			// Track tool calls from this assistant message
 			const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
 			if (toolCalls.length > 0) {
-				pendingToolCalls = toolCalls;
+				pendingToolCalls = toolCalls.filter(
+					(call) =>
+						!(
+							call.async &&
+							nativeAsync &&
+							assistantMsg.provider === model.provider &&
+							assistantMsg.api === model.api
+						),
+				);
 				existingToolResultIds = new Set();
 			}
 
-			result.push(msg);
+			result.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);

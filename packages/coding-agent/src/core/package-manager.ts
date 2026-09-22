@@ -1052,7 +1052,10 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async updateConfiguredSources(sources: ConfiguredUpdateSource[]): Promise<void> {
-		if (isOfflineModeEnabled() || sources.length === 0) {
+		if (isOfflineModeEnabled()) {
+			throw new Error("Package updates skipped because offline mode is enabled (PI_OFFLINE).");
+		}
+		if (sources.length === 0) {
 			return;
 		}
 

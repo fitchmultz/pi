@@ -2158,6 +2158,7 @@ describe("agentLoop with AgentMessage", () => {
 			"message_start",
 			"message_end",
 			"tool_execution_start",
+			"tool_execution_prepared",
 			"tool_execution_end",
 			"message_start",
 			"message_end",

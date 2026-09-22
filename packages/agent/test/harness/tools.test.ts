@@ -502,7 +502,9 @@ describe("AgentHarness tools", () => {
 			await delay(20);
 			expect(env.secondEditWriteStarted).toBe(false);
 			env.finishFirstEditWrite.resolve();
-			await expect(firstEdit).rejects.toThrow("Operation aborted");
+			await expect(firstEdit).resolves.toMatchObject({
+				content: [{ type: "text", text: "Successfully replaced 1 block(s) in file.txt." }],
+			});
 			await secondEdit;
 			expect(env.firstEditWriteSettled).toBe(true);
 			expect(getOrThrow(await env.readTextFile("file.txt", BACKGROUND_CONTEXT))).toBe("ALPHA\nBETA\n");
