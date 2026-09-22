@@ -428,6 +428,86 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it.each([
+		{ boundary: "async item", earlier: "parallel", global: false },
+		{ boundary: "async item", earlier: "sequential", global: false },
+		{ boundary: "stream end", earlier: "sequential", global: false },
+		{ boundary: "response end", earlier: "parallel", global: false },
+		{ boundary: "async item", earlier: "parallel", global: true },
+		{ boundary: "stream end", earlier: "parallel", global: true },
+	] as const)(
+		"scopes sequential ordering across responses ($boundary, earlier=$earlier, global=$global)",
+		async ({ boundary, earlier, global }) => {
+			const work = deferred<AgentToolResult>();
+			const invoked = vi.fn(async () => work.promise);
+			const changed = vi.fn(async () => result);
+			const { agent, streams, events, tool } = setup(invoked, { executionMode: earlier });
+			if (global) agent.toolExecution = "sequential";
+			agent.state.tools = [tool, { ...tool, name: "change_dir", executionMode: "sequential", execute: changed }];
+			const provider = agent.streamFunction;
+			agent.streamFunction = async (...args) => {
+				const response = await provider(...args);
+				if (streams.length > 2) {
+					finish(response, assistant(`answer-${streams.length}`, [{ type: "text", text: "done" }]));
+				}
+				return response;
+			};
+			const second = assistant("directory");
+			const run = agent.prompt("delegate work");
+			try {
+				await vi.waitFor(() => expect(streams).toHaveLength(1));
+				const first = assistant("delegate");
+				await emitCall(streams[0], first, call());
+				await vi.waitFor(() => expect(invoked).toHaveBeenCalledOnce());
+				finish(streams[0], first);
+				agent.steer({ role: "user", content: "change directory while work continues", timestamp: 2 });
+				await vi.waitFor(() => expect(streams).toHaveLength(2));
+				const change = { ...call("directory"), name: "change_dir", async: boundary === "async item" };
+				if (change.responsesItem?.type === "function_call") {
+					change.responsesItem.name = "change_dir";
+					change.responsesItem.async = change.async;
+				}
+				await emitCall(streams[1], second, change);
+				if (boundary === "response end") {
+					second.stopReason = "toolUse";
+					streams[1].push({ type: "response_end", message: second });
+					const successor = assistant("successor", [{ type: "text", text: "done" }]);
+					streams[1].push({ type: "start", partial: successor });
+					finish(streams[1], successor);
+				} else if (boundary === "stream end") {
+					finish(streams[1], second);
+				}
+				await vi.waitFor(() =>
+					expect(
+						events.some(
+							(event) =>
+								(event.type === "message_checkpoint" || event.type === "message_end") &&
+								event.message.role === "assistant" &&
+								event.message.responseId === second.responseId,
+						),
+					).toBe(true),
+				);
+				if (global) {
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					expect(changed).not.toHaveBeenCalled();
+				} else {
+					await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce(), { timeout: 200 });
+				}
+			} finally {
+				work.resolve(result);
+				if (boundary === "async item") {
+					await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+					finish(streams[1], second);
+				}
+				await run;
+			}
+			expect(invoked).toHaveBeenCalledOnce();
+			expect(changed).toHaveBeenCalledOnce();
+			expect(agent.state.messages.filter((message) => message.role === "toolResult")).toHaveLength(2);
+			expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
+		},
+	);
+
 	it("detaches only after abort, preserves the anchor, then resumes once with admitted args", async () => {
 		const execute = vi.fn(async (_id, _args, signal?: AbortSignal) => {
 			await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));

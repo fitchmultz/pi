@@ -367,6 +367,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 				let retriedTransportFailure = false;
 				while (true) {
 					websocketStarted = false;
+					let websocketCommitted = false;
 					try {
 						await processWebSocketStream(
 							resolveCodexWebSocketUrl(model.baseUrl),
@@ -381,6 +382,9 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 									startEmitted = true;
 									stream.push({ type: "start", partial: output });
 								}
+							},
+							() => {
+								websocketCommitted = true;
 							},
 							httpTimeoutMs,
 							websocketConnectTimeoutMs,
@@ -414,12 +418,13 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
 						if (
 							!aborted &&
-							!websocketStarted &&
+							!websocketCommitted &&
 							previousResponseNotFound &&
 							!retriedMissingWebSocketContinuation
 						) {
 							retriedMissingWebSocketContinuation = true;
 							details.missingContinuationRetries = 1;
+							delete output.responseId;
 							continue;
 						}
 						if (!aborted && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit) {
@@ -1663,13 +1668,25 @@ function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body:
 	};
 }
 
-async function* startWebSocketOutputOnFirstEvent(
+async function* observeWebSocketOutput(
 	events: AsyncIterable<ResponseStreamEvent>,
 	onStart: () => void,
+	onCommit: () => void,
 	startOnCreated = false,
 ): AsyncGenerator<ResponseStreamEvent> {
 	let started = false;
 	for await (const event of events) {
+		// Output items include local and hosted tools. A terminal parent remains committed between successors.
+		if (
+			event.type === "response.output_item.added" ||
+			event.type === "response.output_item.done" ||
+			event.type === "response.completed" ||
+			event.type === "response.incomplete" ||
+			(event.type === "response.failed" &&
+				((event.response.output?.length ?? 0) > 0 || (event.response.usage?.output_tokens ?? 0) > 0))
+		) {
+			onCommit();
+		}
 		if (
 			!started &&
 			(startOnCreated || event.type !== "response.created") &&
@@ -1691,6 +1708,7 @@ async function processWebSocketStream(
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
 	onStart: () => void,
+	onCommit: () => void,
 	idleTimeoutMs: number | undefined,
 	websocketConnectTimeoutMs: number | undefined,
 	cacheSessionId: string | undefined,
@@ -1776,13 +1794,14 @@ async function processWebSocketStream(
 		details.websocketSendMs = performance.now() - diagnostics.startedAt;
 		socket.send(requestJson);
 		await processResponsesStream(
-			startWebSocketOutputOnFirstEvent(
+			observeWebSocketOutput(
 				mapCodexEvents(
 					parseWebSocket(socket, diagnostics, options?.signal, idleTimeoutMs, control, options?.onResponseControl),
 					diagnostics,
 					true,
 				),
 				onStart,
+				onCommit,
 				model.compat?.supportsSteering === true,
 			),
 			output,
@@ -1831,8 +1850,12 @@ async function processWebSocketStream(
 				lastResponseId: output.responseId,
 				lastResponseItems: responseItems,
 			};
+		} else if (entry) {
+			// Control successors are not represented by fullBody; the previous baseline is no longer valid.
+			entry.continuation = undefined;
 		}
 	} catch (error) {
+		if (control.used || control.control.retired) onCommit();
 		if (entry) {
 			entry.continuation = undefined;
 		}

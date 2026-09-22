@@ -70,6 +70,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import { Clone } from "typebox/value";
 import { APP_NAME } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
@@ -483,6 +484,11 @@ export class AgentSession {
 	private _reportedUsagePrefix: ProviderRequestPrefix | null | undefined;
 	private _providerRequestPrefix: ProviderRequestPrefix | undefined;
 	private _toolPrefixKeys = new WeakMap<AgentTool, string>();
+	private _contextUsageCache?: {
+		inputs: unknown;
+		prefix: ProviderRequestPrefix | null | undefined;
+		usage: ContextUsage;
+	};
 	private _skipNextProviderRequestPreflight = false;
 
 	// Branch summarization state
@@ -5146,21 +5152,39 @@ export class AgentSession {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return undefined;
 
-		// Retained pre-compaction usage is unknown until a matching projected response arrives.
 		const usageState = this._getContextUsageState(this.messages);
-		if (!usageState.hasPostCompactionUsage) {
-			return { tokens: null, contextWindow, percent: null, source: "unknown" };
+		const inputs = {
+			model: [model.provider, model.api, model.id, contextWindow],
+			messages: this.messages,
+			tools: this.agent.state.tools,
+			basePrompt: this._baseSystemPromptOptions,
+			baseBaseline: this._baseSystemPromptBaseline,
+			runPrompt: this._runSystemPromptOptions,
+			usageState,
+		};
+		// SDK state and prompt options are mutable, including nested content and schemas.
+		// Compare a retained snapshot instead of rebuilding provider input on every UI render.
+		const cached = this._contextUsageCache;
+		if (cached && cached.prefix === this._reportedUsagePrefix && isDeepStrictEqual(cached.inputs, inputs)) {
+			return { ...cached.usage };
 		}
 
-		const estimate = this._estimateContextTokens(this.agent.state, usageState);
-		const percent = (estimate.tokens / contextWindow) * 100;
-
-		return {
-			tokens: estimate.tokens,
-			source: estimate.source,
-			contextWindow,
-			percent,
-		};
+		this._toolPrefixKeys = new WeakMap();
+		// Retained pre-compaction usage is unknown until a matching projected response arrives.
+		const estimate = usageState.hasPostCompactionUsage
+			? this._estimateContextTokens(this.agent.state, usageState)
+			: undefined;
+		const usage: ContextUsage = estimate
+			? {
+					tokens: estimate.tokens,
+					source: estimate.source,
+					contextWindow,
+					percent: (estimate.tokens / contextWindow) * 100,
+				}
+			: { tokens: null, contextWindow, percent: null, source: "unknown" };
+		// TypeBox's clone preserves schema metadata and executable tool references.
+		this._contextUsageCache = { inputs: Clone(inputs), prefix: this._reportedUsagePrefix, usage };
+		return { ...usage };
 	}
 
 	/**

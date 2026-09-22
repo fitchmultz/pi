@@ -569,11 +569,11 @@ export function convertResponsesMessages<TApi extends Api>(
 					// For different-model messages, set id to undefined to avoid pairing validation.
 					// OpenAI tracks which fc_xxx IDs were paired with rs_xxx reasoning items.
 					// By omitting the id, we avoid triggering that validation (like cross-provider does).
-					// When replaying custom-tool calls as a function_call, also drop non-fc_* ids such as
-					// ctc_* custom-tool ids because function_call item ids must be fc_*.
+					// Item IDs are optional, but their prefix must match the emitted tool kind.
+					// Keep call_id unchanged so saved results still pair after conversion.
 					if (
 						(isDifferentModel && itemId?.startsWith("fc_")) ||
-						(customInputProperty === undefined && !itemId?.startsWith("fc_"))
+						!itemId?.startsWith(customInputProperty === undefined ? "fc_" : "ctc_")
 					) {
 						itemId = undefined;
 					}
