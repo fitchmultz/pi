@@ -246,11 +246,11 @@ async function runLoop(
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	let explicitContinuation = false;
 	const startedCalls = new Set<string>();
-	const pendingCalls = new Map<string, Promise<ExecutedToolCallBatch>>();
+	const pendingCalls = new Map<string, { scope: object; task: Promise<ExecutedToolCallBatch> }>();
 	const readyBatches: ExecutedToolCallBatch[] = [];
 	let asyncFailure: unknown;
 	let activeControl: ResponseControl | undefined;
-	let exclusiveCall: Promise<ExecutedToolCallBatch> | undefined;
+	let exclusiveCall: { scope: object; task: Promise<ExecutedToolCallBatch> } | undefined;
 	let pendingNewContext: NewContextRequest | undefined;
 	let responseRetired = false;
 	const retireForNewContext = (): void => {
@@ -266,14 +266,22 @@ async function runLoop(
 	const resultIds = new Set(
 		currentContext.messages.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
 	);
-	const startAsyncCall = async (message: AssistantMessage, call: AgentToolCall): Promise<void> => {
+	const pendingTasks = (scope?: object): Promise<ExecutedToolCallBatch>[] =>
+		[...pendingCalls.values()]
+			.filter((pending) => !scope || config.toolExecution === "sequential" || pending.scope === scope)
+			.map((pending) => pending.task);
+	const startAsyncCall = async (message: AssistantMessage, call: AgentToolCall, scope: object): Promise<void> => {
 		if (startedCalls.has(call.id)) return;
 		startedCalls.add(call.id);
 		await emit({ type: "message_checkpoint", message: createToolCallCheckpoint(message, call) });
 		const sequential =
 			config.toolExecution === "sequential" ||
 			findTool(currentContext.tools ?? [], call)?.executionMode === "sequential";
-		const predecessors = sequential ? [...pendingCalls.values()] : exclusiveCall ? [exclusiveCall] : [];
+		const predecessors = sequential
+			? pendingTasks(scope)
+			: exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope)
+				? [exclusiveCall.task]
+				: [];
 		const task = Promise.all(predecessors).then(() =>
 			executeToolCalls(
 				currentContext,
@@ -300,8 +308,9 @@ async function runLoop(
 				[call],
 			),
 		);
-		if (sequential) exclusiveCall = task;
-		pendingCalls.set(call.id, task);
+		const pending = { scope, task };
+		if (sequential) exclusiveCall = pending;
+		pendingCalls.set(call.id, pending);
 		void task
 			.then(
 				(batch) => {
@@ -319,11 +328,11 @@ async function runLoop(
 			})
 			.finally(() => {
 				pendingCalls.delete(call.id);
-				if (exclusiveCall === task) exclusiveCall = undefined;
+				if (exclusiveCall?.task === task) exclusiveCall = undefined;
 			});
 	};
-	const joinPendingCalls = async (): Promise<void> => {
-		await Promise.allSettled(pendingCalls.values());
+	const joinPendingCalls = async (scope?: object): Promise<void> => {
+		await Promise.allSettled(pendingTasks(scope));
 		if (asyncFailure) throw asyncFailure;
 	};
 	try {
@@ -332,7 +341,8 @@ async function runLoop(
 			for (const call of message.content) {
 				if (call.type !== "toolCall") continue;
 				if (resultIds.has(call.id)) startedCalls.add(call.id);
-				else if (call.executionStarted || (call.async && call.responsesItem)) await startAsyncCall(message, call);
+				else if (call.executionStarted || (call.async && call.responsesItem))
+					await startAsyncCall(message, call, message);
 			}
 		}
 		// Check for steering messages at start (user may have typed while waiting)
@@ -462,17 +472,18 @@ async function runLoop(
 						return streamFunction(model, context, options);
 					},
 					startAsyncCall,
-					async (message) => {
+					async (message, scope) => {
 						const calls = message.content.filter(
 							(call): call is AgentToolCall => call.type === "toolCall" && !startedCalls.has(call.id),
 						);
 						if (calls.length === 0) return;
-						if (exclusiveCall) await exclusiveCall;
+						if (exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope))
+							await exclusiveCall.task;
 						if (
 							config.toolExecution === "sequential" ||
 							calls.some((call) => findTool(currentContext.tools ?? [], call)?.executionMode === "sequential")
 						)
-							await joinPendingCalls();
+							await joinPendingCalls(scope);
 						for (const call of calls) startedCalls.add(call.id);
 						const batch =
 							message.stopReason === "length"
@@ -490,6 +501,7 @@ async function runLoop(
 					},
 				);
 				const message = streamed.message;
+				const scope = streamed.scope;
 				streamed.needsContinuation ||= responseRetired;
 				if (asyncFailure) throw asyncFailure;
 
@@ -510,12 +522,13 @@ async function runLoop(
 				let newContext: NewContextRequest | undefined;
 				hasMoreToolCalls = streamed.needsContinuation;
 				if (toolCalls.length > 0) {
-					if (exclusiveCall) await exclusiveCall;
+					if (exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope))
+						await exclusiveCall.task;
 					if (
 						config.toolExecution === "sequential" ||
 						toolCalls.some((call) => findTool(currentContext.tools ?? [], call)?.executionMode === "sequential")
 					)
-						await joinPendingCalls();
+						await joinPendingCalls(scope);
 					for (const call of toolCalls) startedCalls.add(call.id);
 					// A length stop can leave apparently valid but truncated arguments; never execute them.
 					const executedToolBatch =
@@ -558,7 +571,7 @@ async function runLoop(
 					try {
 						// Subscribe before polling again so an input arriving at this boundary cannot be missed.
 						pendingMessages = (await config.getSteeringMessages?.()) || [];
-						if (pendingMessages.length === 0) await Promise.race([...pendingCalls.values(), input]);
+						if (pendingMessages.length === 0) await Promise.race([...pendingTasks(), input]);
 					} finally {
 						unsubscribe?.();
 					}
@@ -653,9 +666,9 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
-	startAsyncCall: (message: AssistantMessage, call: AgentToolCall) => Promise<void>,
-	finishIntermediateResponse: (message: AssistantMessage) => Promise<void>,
-): Promise<{ message: AssistantMessage; needsContinuation: boolean }> {
+	startAsyncCall: (message: AssistantMessage, call: AgentToolCall, scope: object) => Promise<void>,
+	finishIntermediateResponse: (message: AssistantMessage, scope: object) => Promise<void>,
+): Promise<{ message: AssistantMessage; needsContinuation: boolean; scope: object }> {
 	let messages = context.messages;
 	if (config.transformContext) messages = await config.transformContext(messages, signal);
 	const llmContext = normalizeContext({ messages: await config.convertToLlm(messages) });
@@ -666,6 +679,8 @@ async function streamAssistantResponse(
 	let contextIndex = -1;
 	let newIndex = -1;
 	let lastCommitted: AssistantMessage | undefined;
+	// Local ordering belongs to this response, even when its async work outlives it.
+	let scope: object = {};
 	const completeContent = new Set<number>();
 	const steering = new Map<UserMessage, string>();
 	const committedInputs = new Set<UserMessage>();
@@ -705,6 +720,7 @@ async function streamAssistantResponse(
 				case "start":
 					if (lastCommitted && config.getTools) context.tools = [...config.getTools()];
 					partialMessage = event.partial;
+					scope = {};
 					completeContent.clear();
 					contextIndex = context.messages.push(partialMessage) - 1;
 					newIndex = newMessages.push(partialMessage) - 1;
@@ -720,7 +736,7 @@ async function streamAssistantResponse(
 					if (!partialMessage) await commitInputs();
 					break;
 				case "response_end":
-					await finishIntermediateResponse(await commit(event.message));
+					await finishIntermediateResponse(await commit(event.message), scope);
 					break;
 				case "text_start":
 				case "text_delta":
@@ -758,7 +774,7 @@ async function streamAssistantResponse(
 						...partialMessage,
 						content: partialMessage.content.filter((_block, index) => completeContent.has(index)),
 					};
-					await startAsyncCall(checkpoint, event.toolCall);
+					await startAsyncCall(checkpoint, event.toolCall, scope);
 					break;
 				}
 				case "done":
@@ -766,6 +782,7 @@ async function streamAssistantResponse(
 					const message = await commit(await response.result());
 					return {
 						message,
+						scope,
 						needsContinuation: [...steering.values()].some(
 							(status) => status === "failed" || status === "unknown",
 						),
@@ -776,6 +793,7 @@ async function streamAssistantResponse(
 		const message = await commit(await response.result());
 		return {
 			message,
+			scope,
 			needsContinuation: [...steering.values()].some((status) => status === "failed" || status === "unknown"),
 		};
 	} finally {
