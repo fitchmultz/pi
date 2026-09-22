@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { constants as osConstants } from "node:os";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { ShellSource } from "@earendil-works/pi-agent-core/node";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
 import { waitForChildProcess } from "../../utils/child-process.ts";
@@ -69,7 +70,10 @@ export interface BashOperations {
 		command: string,
 		cwd: string,
 		options: {
-			onData: (data: Buffer) => void;
+			/** Original bytes, tagged with the pipe that produced them. */
+			onData: (data: Buffer, source: ShellSource) => void;
+			/** Report each pipe's EOF once, after its final data callback. */
+			onEnd: (source: ShellSource) => void;
 			signal?: AbortSignal;
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
@@ -80,7 +84,7 @@ export interface BashOperations {
 /** Shared process execution used by the built-in shell tools. */
 export function createLocalShellOperations(shellName: string, resolveShellConfig: () => ShellConfig): BashOperations {
 	return {
-		exec: async (command, cwd, { onData, signal, timeout, env }) => {
+		exec: async (command, cwd, { onData, onEnd, signal, timeout, env }) => {
 			const timeoutMs = resolveTimeoutMs(timeout);
 			if (signal?.aborted) {
 				throw new Error("aborted");
@@ -110,6 +114,34 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			const onAbort = () => {
 				if (child.pid) killProcessTree(child.pid);
 			};
+			let outputError: unknown;
+			let acceptingOutput = true;
+			const onOutputError = (error: unknown) => {
+				if (!acceptingOutput) return;
+				outputError ??= error;
+				onAbort();
+			};
+			const ended = new Set<ShellSource>();
+			const end = (source: ShellSource) => {
+				if (ended.has(source)) return;
+				ended.add(source);
+				try {
+					onEnd(source);
+				} catch (error) {
+					onOutputError(error);
+				}
+			};
+			const feed = (data: Buffer, source: ShellSource) => {
+				try {
+					onData(data, source);
+				} catch (error) {
+					onOutputError(error);
+				}
+			};
+			const onStdout = (data: Buffer) => feed(data, "stdout");
+			const onStderr = (data: Buffer) => feed(data, "stderr");
+			const onStdoutEnd = () => end("stdout");
+			const onStderrEnd = () => end("stderr");
 
 			try {
 				// Set timeout if provided.
@@ -120,8 +152,12 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 					}, timeoutMs);
 				}
 				// Stream stdout and stderr.
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
+				child.stdout?.on("data", onStdout);
+				child.stderr?.on("data", onStderr);
+				child.stdout?.once("end", onStdoutEnd);
+				child.stderr?.once("end", onStderrEnd);
+				child.stdout?.on("error", onOutputError);
+				child.stderr?.on("error", onOutputError);
 				// Handle abort signal by killing the entire process tree.
 				if (signal) {
 					if (signal.aborted) onAbort();
@@ -130,6 +166,9 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
 				const exitCode = await waitForChildProcess(child);
+				end("stdout");
+				end("stderr");
+				if (outputError) throw outputError;
 				if (signal?.aborted) {
 					throw new Error("aborted");
 				}
@@ -141,6 +180,15 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				const signalCode = child.signalCode;
 				return { exitCode: exitCode ?? (signalCode ? 128 + (osConstants.signals[signalCode] ?? 0) : 1) };
 			} finally {
+				child.stdout?.removeListener("data", onStdout);
+				child.stderr?.removeListener("data", onStderr);
+				child.stdout?.removeListener("end", onStdoutEnd);
+				child.stderr?.removeListener("end", onStderrEnd);
+				child.stdout?.destroy();
+				child.stderr?.destroy();
+				end("stdout");
+				end("stderr");
+				acceptingOutput = false;
 				if (child.pid) untrackDetachedChildPid(child.pid);
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", onAbort);
@@ -302,9 +350,14 @@ export function createShellToolDefinition(
 				onUpdate({ content: [], details: undefined });
 			}
 
-			const handleData = (data: Buffer) => {
+			const handleData = (data: Buffer, source: ShellSource) => {
 				if (!acceptingOutput) return;
-				output.append(data);
+				output.append(data, source);
+				scheduleOutputUpdate();
+			};
+			const handleEnd = (source: ShellSource) => {
+				if (!acceptingOutput) return;
+				output.end(source);
 				scheduleOutputUpdate();
 			};
 
@@ -312,9 +365,10 @@ export function createShellToolDefinition(
 				acceptingOutput = false;
 				output.finish();
 				clearUpdateTimer();
-				emitOutputUpdate();
 				const snapshot = output.snapshot({ persistIfTruncated: true });
 				await output.closeTempFile();
+				updateDirty = true;
+				emitOutputUpdate();
 				return snapshot;
 			};
 
@@ -345,6 +399,7 @@ export function createShellToolDefinition(
 				try {
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
+						onEnd: handleEnd,
 						signal,
 						timeout,
 						env: spawnContext.env,

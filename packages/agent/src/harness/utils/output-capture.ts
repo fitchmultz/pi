@@ -38,6 +38,7 @@ export class OutputCapture {
 	#endsWithNewline = true;
 	#currentLineBytes = 0;
 	#spillPath: string | undefined;
+	#finished = false;
 	#disposed = false;
 	readonly #publisher: AdaptivePublisher<ShellOutputView, ShellOutputUpdate>;
 
@@ -69,7 +70,7 @@ export class OutputCapture {
 	}
 
 	push(chunk: string | Uint8Array): void {
-		if (this.#disposed) return;
+		if (this.#disposed || this.#finished) return;
 		if (typeof chunk === "string") {
 			this.#appendText(this.#decoder.decode());
 			this.#appendText(chunk);
@@ -79,7 +80,8 @@ export class OutputCapture {
 	}
 
 	finish(): void {
-		if (this.#disposed) return;
+		if (this.#disposed || this.#finished) return;
+		this.#finished = true;
 		this.#appendText(this.#decoder.decode());
 	}
 

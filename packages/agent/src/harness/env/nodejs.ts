@@ -17,6 +17,7 @@ import {
 import { homedir, constants as osConstants, tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { withoutAbortSignal } from "@earendil-works/chord/context";
 import type { Context } from "../context.ts";
 import {
 	type ExecutionEnv,
@@ -34,6 +35,7 @@ import {
 	toError,
 } from "../types.ts";
 import { OutputCapture } from "../utils/output-capture.ts";
+import { ShellDecoder, type ShellSource } from "../utils/shell-decoder.ts";
 import { publishLocalFile, resolveLocalFileTarget } from "./publish-local-file.ts";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -345,6 +347,9 @@ function waitForChildProcess(
 			if (settled) return;
 			settled = true;
 			cleanup();
+			if (child.pid) killProcessTree(child.pid);
+			child.stdout?.destroy();
+			child.stderr?.destroy();
 			reject(error);
 		};
 		const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
@@ -364,6 +369,11 @@ function waitForChildProcess(
 		child.stderr?.once("end", onStderrEnd);
 		child.stdout?.on("data", onData);
 		child.stderr?.on("data", onData);
+		for (const stream of [child.stdout, child.stderr]) {
+			// The other pipe can still report a queued error while both streams close.
+			stream?.once("error", onError);
+			stream?.once("close", () => stream.removeListener("error", onError));
+		}
 		child.once("error", onError);
 		child.once("exit", onExit);
 		child.once("close", onClose);
@@ -484,6 +494,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 
 		return await new Promise((resolvePromise) => {
 			let settled = false;
+			let finalizing = false;
 			let timedOut = false;
 			let callbackError: ExecutionError | undefined;
 			let spillError: ExecutionError | undefined;
@@ -495,6 +506,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			let spillStart: Promise<void> | undefined;
 			let spillStream: WriteStream | undefined;
 			let spillBackpressured = false;
+			const decoder = new ShellDecoder();
 
 			const onAbort = () => {
 				if (child?.pid) killProcessTree(child.pid);
@@ -531,7 +543,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				child?.stderr?.pause();
 			};
 			const resumeOutput = () => {
-				if (callbackError || spillError || timedOut || signal?.aborted || spillBackpressured) return;
+				if (finalizing || spillBackpressured) return;
 				child?.stdout?.resume();
 				child?.stderr?.resume();
 			};
@@ -545,9 +557,10 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				);
 				spillBackpressured = false;
 				onAbort();
+				resumeOutput();
 			};
 			const writeSpill = (chunk: SpillChunk): void => {
-				if (spillStream === undefined || chunk.length === 0) return;
+				if (spillStream === undefined || spillError || chunk.length === 0) return;
 				if (spillStream.write(chunk) || spillBackpressured) return;
 				spillBackpressured = true;
 				pauseOutput();
@@ -557,6 +570,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				});
 			};
 			const startSpill = (chunk: SpillChunk): void => {
+				if (spillError) return;
 				if (spillStream !== undefined) {
 					writeSpill(chunk);
 					return;
@@ -565,10 +579,17 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				if (spillStart !== undefined) return;
 				pauseOutput();
 				spillStart = (async () => {
-					const created = await this.createTempFile({ prefix: "pi-output-", suffix: ".log" }, context);
+					const created = await this.createTempFile(
+						{ prefix: "pi-output-", suffix: ".log" },
+						withoutAbortSignal(context),
+					);
 					if (!created.ok) throw created.error;
 					spillPath = created.value;
-					capture.setSpillPath(spillPath);
+					try {
+						capture.setSpillPath(spillPath);
+					} catch (error) {
+						failCallback(error);
+					}
 					spillStream = createWriteStream(spillPath, { flags: "a", highWaterMark: SPILL_HIGH_WATER_MARK });
 					spillStream.on("error", failSpill);
 					for (const queued of spillQueue) writeSpill(queued);
@@ -580,12 +601,94 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			const finishSpill = async (): Promise<void> => {
 				await spillStart;
 				const stream = spillStream;
-				if (stream === undefined || spillError !== undefined || stream.destroyed) return;
+				if (stream === undefined || stream.closed) return;
 				await new Promise<void>((resolveFinish) => {
-					stream.once("error", () => resolveFinish());
-					stream.once("finish", resolveFinish);
-					stream.end();
+					stream.once("close", resolveFinish);
+					if (!stream.destroyed) stream.end();
 				});
+			};
+
+			const spillIfNeeded = (): void => {
+				if (!options?.capture?.spill || !capture.truncated) return;
+				for (const prefix of spillPrefix) startSpill(prefix);
+				spillPrefix.length = 0;
+			};
+			const feed = (chunk: Uint8Array, source: ShellSource): void => {
+				if (finalizing) return;
+				// Archive arrival order independently of completed-character display order.
+				if (options?.capture?.spill) {
+					if (spillStart !== undefined) startSpill(chunk);
+					else spillPrefix.push(chunk);
+				}
+				try {
+					capture.push(decoder.push(chunk, source));
+				} catch (error) {
+					failCallback(error);
+				}
+				spillIfNeeded();
+			};
+			const endSource = (source: ShellSource): void => {
+				if (finalizing) return;
+				try {
+					capture.push(decoder.end(source));
+				} catch (error) {
+					failCallback(error);
+				}
+				spillIfNeeded();
+			};
+			const onStdout = (chunk: Uint8Array) => feed(chunk, "stdout");
+			const onStderr = (chunk: Uint8Array) => feed(chunk, "stderr");
+			const onStdoutEnd = () => endSource("stdout");
+			const onStderrEnd = () => endSource("stderr");
+			const finalize = async (
+				code: number | null,
+				exitSignal: NodeJS.Signals | null,
+				processError?: ExecutionError,
+			): Promise<void> => {
+				if (finalizing) return;
+				finalizing = true;
+				if (timeoutId) clearTimeout(timeoutId);
+				if (signal) signal.removeEventListener("abort", onAbort);
+				child?.stdout?.removeListener("data", onStdout);
+				child?.stderr?.removeListener("data", onStderr);
+				child?.stdout?.removeListener("end", onStdoutEnd);
+				child?.stderr?.removeListener("end", onStderrEnd);
+				try {
+					capture.push(decoder.finish());
+					capture.finish();
+				} catch (error) {
+					failCallback(error);
+				}
+				spillIfNeeded();
+				await finishSpill();
+				try {
+					capture.flush();
+				} catch (error) {
+					failCallback(error);
+				}
+				if (callbackError) {
+					settle(err(callbackError));
+				} else if (timedOut) {
+					settle(err(new ExecutionError("timeout", `timeout:${options?.timeout}`)));
+				} else if (signal?.aborted) {
+					settle(err(new ExecutionError("aborted", "aborted")));
+				} else if (spillError) {
+					settle(err(spillError));
+				} else if (processError) {
+					settle(err(processError));
+				} else {
+					const output = capture.snapshot();
+					// Signal termination has no exit code; use the conventional 128 + signal number.
+					const exitCode = code ?? (exitSignal ? 128 + (osConstants.signals[exitSignal] ?? 0) : 1);
+					settle(
+						ok({
+							exitCode,
+							truncation: output.truncation,
+							...(output.spillPath === undefined ? {} : { spillPath: output.spillPath }),
+							...(output.lastLineBytes === undefined ? {} : { lastLineBytes: output.lastLineBytes }),
+						}),
+					);
+				}
 			};
 
 			try {
@@ -608,7 +711,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				}
 			} catch (error) {
 				const cause = toError(error);
-				settle(err(new ExecutionError("spawn_error", cause.message, cause)));
+				void finalize(null, null, new ExecutionError("spawn_error", cause.message, cause));
 				return;
 			}
 
@@ -625,26 +728,10 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				else signal.addEventListener("abort", onAbort, { once: true });
 			}
 
-			const feed = (chunk: Uint8Array) => {
-				try {
-					const wasTruncated = capture.truncated;
-					capture.push(chunk);
-					if (!options?.capture?.spill || chunk.length === 0) return;
-					if (spillPath !== undefined || wasTruncated) {
-						startSpill(chunk);
-					} else if (capture.truncated) {
-						for (const prefix of spillPrefix) startSpill(prefix);
-						spillPrefix.length = 0;
-						startSpill(chunk);
-					} else {
-						spillPrefix.push(chunk);
-					}
-				} catch (error) {
-					failCallback(error);
-				}
-			};
-			child.stdout?.on("data", feed);
-			child.stderr?.on("data", feed);
+			child.stdout?.on("data", onStdout);
+			child.stderr?.on("data", onStderr);
+			child.stdout?.once("end", onStdoutEnd);
+			child.stderr?.once("end", onStderrEnd);
 
 			void waitForChildProcess(
 				child,
@@ -653,45 +740,8 @@ export class NodeExecutionEnv implements ExecutionEnv {
 					spillStart !== undefined &&
 					(spillStream === undefined || spillBackpressured),
 			).then(
-				async ({ code, signal: exitSignal }) => {
-					await finishSpill();
-					try {
-						capture.finish();
-						capture.flush();
-					} catch (error) {
-						failCallback(error);
-					}
-					if (callbackError) {
-						settle(err(callbackError));
-						return;
-					}
-					if (timedOut) {
-						settle(err(new ExecutionError("timeout", `timeout:${options?.timeout}`)));
-						return;
-					}
-					if (signal?.aborted) {
-						settle(err(new ExecutionError("aborted", "aborted")));
-						return;
-					}
-					if (spillError) {
-						settle(err(spillError));
-						return;
-					}
-					const output = capture.snapshot();
-					// A process killed by a signal (e.g. OOM killer) has no exit code; map it
-					// to the conventional 128 + signal number so callers do not mistake it
-					// for a successful exit.
-					const exitCode = code ?? (exitSignal ? 128 + (osConstants.signals[exitSignal] ?? 0) : 1);
-					settle(
-						ok({
-							exitCode,
-							truncation: output.truncation,
-							...(output.spillPath === undefined ? {} : { spillPath: output.spillPath }),
-							...(output.lastLineBytes === undefined ? {} : { lastLineBytes: output.lastLineBytes }),
-						}),
-					);
-				},
-				(error: Error) => settle(err(new ExecutionError("spawn_error", error.message, error))),
+				({ code, signal: exitSignal }) => finalize(code, exitSignal),
+				(error: Error) => finalize(null, null, new ExecutionError("spawn_error", error.message, error)),
 			);
 		});
 	}

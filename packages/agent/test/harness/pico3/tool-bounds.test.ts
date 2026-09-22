@@ -24,6 +24,75 @@ test("Bounded: a single chunk larger than maxBytes is sliced on push and counted
 	assert.equal(tlines.droppedLines, 2);
 });
 
+test("head clipping omits a cut UTF-8 suffix while keeping raw byte counters", () => {
+	for (const text of ["€", "a€", "a😀"]) {
+		const bytes = new TextEncoder().encode(text);
+		for (const chunks of [[bytes], [...bytes].map((byte) => Uint8Array.of(byte))]) {
+			const maxBytes = bytes.length - 1;
+			const head = new Bounded(maxBytes, 10, "head");
+			for (const chunk of chunks) head.push(chunk);
+			assert.equal(head.text(), text === "€" ? "" : "a");
+			assert.ok(new TextEncoder().encode(head.text()).length <= maxBytes);
+			assert.equal(head.total, bytes.length);
+			assert.equal(head.droppedBytes, 1);
+			assert.equal(head.droppedLines, 0);
+			head.push(new TextEncoder().encode("x\n"));
+			assert.equal(head.text(), text === "€" ? "" : "a");
+			assert.equal(head.total, bytes.length + 2);
+			assert.equal(head.droppedBytes, 3);
+			assert.equal(head.droppedLines, 1);
+		}
+	}
+});
+
+test("unclipped incomplete UTF-8 still emits an EOF replacement and can complete on a later push", () => {
+	for (const maxBytes of [2, 3]) {
+		const head = new Bounded(maxBytes, 10, "head");
+		head.push(Uint8Array.of(0xe2, 0x82));
+		assert.equal(head.text(), "�");
+		assert.equal(head.total, 2);
+		assert.equal(head.droppedBytes, 0);
+		if (maxBytes === 3) {
+			head.push(Uint8Array.of(0xac));
+			assert.equal(head.text(), "€");
+			assert.equal(head.total, 3);
+			assert.equal(head.droppedBytes, 0);
+		}
+	}
+});
+
+test("tail clipping drops partial UTF-8 code points without exceeding its byte budget", () => {
+	for (const chunks of [["a€b"], ["a", "€", "b"]]) {
+		const tail = new Bounded(3, 100, "tail");
+		for (const chunk of chunks) tail.push(new TextEncoder().encode(chunk));
+		assert.equal(tail.text(), "b");
+		assert.equal(tail.droppedBytes, 4);
+	}
+	const tail = new Bounded(1, 100, "tail");
+	for (const byte of new TextEncoder().encode("€b")) tail.push(Uint8Array.of(byte));
+	assert.equal(tail.text(), "b");
+	assert.equal(tail.droppedBytes, 3);
+});
+
+test.each(["head", "tail"] as const)("returned %s text clips at complete UTF-8 code points", async (retain) => {
+	const declaration: ToolDeclaration = {
+		name: "unicode",
+		description: "",
+		parameters: Type.Object({ v: Type.String() }),
+		output: { maxBytes: 3, maxLines: 100, retain },
+		async execute() {
+			return { content: [{ type: "text", text: "a€b" }] };
+		},
+	};
+	const env = await open({ tools: [declaration] });
+	onTestFinished(() => env.close());
+	await (await env.root.send({ content: "tool:unicode" }, ctx)).wait(ctx);
+	const result = (await env.entries()).find((entry) => entry.kind === "pi.tool_result")!;
+	const text = (result.model![0] as { content: { text: string }[] }).content[0]!.text;
+	assert.equal(text, retain === "head" ? "a" : "b");
+	assert.equal((result.data as { truncated: { bytes: number } }).truncated.bytes, 4);
+});
+
 test("tool streaming: byte and line bounds are enforced on the stream and on the stored result; progress cannot touch identity fields", async () => {
 	const schema = Type.Object({ v: Type.String() });
 	let forbidden: unknown;

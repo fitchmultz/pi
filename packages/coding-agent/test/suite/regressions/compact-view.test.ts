@@ -472,7 +472,7 @@ describe("native compact-view settings and live rendering", () => {
 								: {
 										operations: {
 											exec: async (_command, _cwd, { onData }) => {
-												updateBash = (text) => onData(Buffer.from(text));
+												updateBash = (text) => onData(Buffer.from(text), "stdout");
 												updateBash("FIRST BASH\n");
 												await bashGate;
 												updateBash("FINAL BASH\n");

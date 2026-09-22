@@ -229,7 +229,7 @@ describe("ToolExecutionComponent parity", () => {
 		const operations: BashOperations = {
 			exec: async (_command, _cwd, { onData }) => {
 				for (let i = 1; i <= 4000; i++) {
-					onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`));
+					onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`), "stdout");
 				}
 				return { exitCode: 0 };
 			},
