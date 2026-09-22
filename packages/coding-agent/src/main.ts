@@ -91,17 +91,12 @@ async function readPipedStdin(): Promise<string | undefined> {
 		return undefined;
 	}
 
-	return new Promise((resolve) => {
-		let data = "";
-		process.stdin.setEncoding("utf8");
-		process.stdin.on("data", (chunk) => {
-			data += chunk;
-		});
-		process.stdin.on("end", () => {
-			resolve(data.trim() || undefined);
-		});
-		process.stdin.resume();
-	});
+	let data = "";
+	process.stdin.setEncoding("utf8");
+	for await (const chunk of process.stdin) {
+		data += chunk;
+	}
+	return data || undefined;
 }
 
 function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]): void {

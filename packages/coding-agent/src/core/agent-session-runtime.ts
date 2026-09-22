@@ -316,7 +316,7 @@ export class AgentSessionRuntime {
 					"This session has not been saved yet. Wait for the first assistant response before cloning or forking it.",
 				);
 			}
-			const sessionManager = SessionManager.open(currentSessionFile, sessionDir);
+			const sessionManager = SessionManager.open(currentSessionFile, sessionDir, this.cwd);
 			const forkedSessionPath = sessionManager.createBranchedSession(targetLeafId);
 			if (!forkedSessionPath) {
 				throw new Error("Failed to create forked session");
