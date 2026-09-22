@@ -129,7 +129,12 @@ import { fauxProvider } from "@earendil-works/pi-ai";
 export default function(pi) {
 	const faux = fauxProvider();
 	pi.registerProvider("faux", { api: faux.api, baseUrl: faux.getModel().baseUrl, apiKey: "faux-key", models: faux.models, streamSimple: faux.provider.streamSimple });
-	pi.on("session_shutdown", () => writeFileSync(${JSON.stringify(shutdown)}, "shutdown"));
+	let timer;
+	pi.on("session_start", () => { timer = setInterval(() => {}, 1000); });
+	pi.on("session_shutdown", () => {
+		clearInterval(timer);
+		writeFileSync(${JSON.stringify(shutdown)}, "shutdown");
+	});
 	process.once("beforeExit", () => writeFileSync(${JSON.stringify(beforeExit)}, JSON.stringify({
 		calls: faux.state.callCount, managed: process.env.PI_MANAGED_CLI, restartEnabled: process.env.PI_RESTART_SOCKET !== undefined,
 		stdinRaw: process.stdin.isRaw, stdinPaused: process.stdin.isPaused()
@@ -147,7 +152,7 @@ export default function(pi) {
 		expect(readFileSync(status, "utf8").trim(), screen).toBe("0");
 		expect(screen).toContain("interactiveMode.init:");
 		expect(readdirSync(temporary).filter((name) => name.startsWith("pi-restart-"))).toEqual([]);
-		expect(existsSync(shutdown)).toBe(false);
+		expect(readFileSync(shutdown, "utf8")).toBe("shutdown");
 		expect(JSON.parse(readFileSync(beforeExit, "utf8"))).toEqual({
 			calls: 0,
 			managed: "1",
