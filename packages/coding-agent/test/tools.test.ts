@@ -942,6 +942,21 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("grep tool", () => {
+		it.skipIf(process.platform === "win32")("reads context through a symlink parent traversal", async () => {
+			mkdirSync(join(testDir, "physical", "child"), { recursive: true });
+			symlinkSync("physical/child", join(testDir, "link"));
+			writeFileSync(join(testDir, "physical", "target.txt"), "before\nneedle\nafter");
+			writeFileSync(join(testDir, "target.txt"), "unrelated");
+
+			const result = await createGrepTool(testDir).execute("traversal-context", {
+				path: "link/../",
+				pattern: "needle",
+				context: 1,
+			});
+
+			expect(getTextOutput(result)).toBe("target.txt-1- before\ntarget.txt:2: needle\ntarget.txt-3- after");
+		});
+
 		it.skipIf(process.platform === "win32")("preserves literal backslashes in POSIX filenames", async () => {
 			writeFileSync(join(testDir, "part\\name.txt"), "before\nneedle\nafter");
 			mkdirSync(join(testDir, "part"));
@@ -1073,6 +1088,22 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("find tool", () => {
+		it.skipIf(process.platform === "win32")("searches through a symlink parent traversal", async () => {
+			mkdirSync(join(testDir, "physical", "child"), { recursive: true });
+			mkdirSync(join(testDir, "physical", "src"));
+			symlinkSync("physical/child", join(testDir, "link"));
+			writeFileSync(join(testDir, "physical", "src", "target.txt"), "intended");
+			mkdirSync(join(testDir, "src"));
+			writeFileSync(join(testDir, "src", "unrelated.txt"), "unrelated");
+
+			const result = await createFindTool(testDir).execute("traversal-find", {
+				path: "link/../",
+				pattern: "src/*.txt",
+			});
+
+			expect(getTextOutput(result)).toBe("src/target.txt");
+		});
+
 		it.each([
 			["src/*.ts", ["src/UPPER.TS", "src/main.ts"]],
 			["./src/*.ts", ["src/UPPER.TS", "src/main.ts"]],
@@ -1155,6 +1186,19 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("ls tool", () => {
+		it.skipIf(process.platform === "win32")("classifies children through a symlink parent traversal", async () => {
+			mkdirSync(join(testDir, "physical", "child"), { recursive: true });
+			symlinkSync("physical/child", join(testDir, "link"));
+			for (const entry of ["directory", "@literal", "~"]) {
+				mkdirSync(join(testDir, "physical", entry));
+				writeFileSync(join(testDir, entry), "unrelated");
+			}
+
+			const result = await createLsTool(testDir).execute("traversal-ls", { path: "link/../" });
+
+			expect(getTextOutput(result).split("\n").sort()).toEqual(["@literal/", "child/", "directory/", "~/"]);
+		});
+
 		it.skipIf(process.platform === "win32")("lists dangling symlinks and marks linked directories", async () => {
 			symlinkSync("missing", join(testDir, "broken-link"));
 			expect(getTextOutput(await lsTool.execute("broken-link", { path: testDir }))).toBe("broken-link");

@@ -15,7 +15,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { homedir, constants as osConstants, tmpdir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
 import type { Context } from "../context.ts";
@@ -36,6 +36,8 @@ import {
 } from "../types.ts";
 import { OutputCapture } from "../utils/output-capture.ts";
 import { ShellDecoder, type ShellSource } from "../utils/shell-decoder.ts";
+import { withFileMutationQueue } from "./file-mutation-queue.ts";
+import { resolveLocalOperationPath } from "./local-path.ts";
 import { publishLocalFile, resolveLocalFileTarget } from "./publish-local-file.ts";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -465,6 +467,10 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		return ok(join(...parts));
 	}
 
+	withFileMutationQueue<T>(path: string, fn: () => Promise<T>, _context: Context): Promise<T> {
+		return withFileMutationQueue(resolveLocalOperationPath(this.cwd, path), fn);
+	}
+
 	async exec(
 		command: string,
 		options: ShellExecOptions | undefined,
@@ -742,7 +748,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async openTextLineReader(path: string, context: Context): Promise<Result<TextLineReader, FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const aborted = abortResult<TextLineReader>(context.abortSignal, resolved);
 		if (aborted) return aborted;
 		try {
@@ -759,7 +765,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async readTextFile(path: string, context: Context): Promise<Result<string, FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const signal = context.abortSignal;
 		const aborted = abortResult<string>(signal, resolved);
 		if (aborted) return aborted;
@@ -793,7 +799,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async readBinaryFile(path: string, context: Context): Promise<Result<Uint8Array, FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const signal = context.abortSignal;
 		const aborted = abortResult<Uint8Array>(signal, resolved);
 		if (aborted) return aborted;
@@ -805,12 +811,12 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async writeFile(path: string, content: string | Uint8Array, context: Context): Promise<Result<void, FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const signal = context.abortSignal;
 		const aborted = abortResult<void>(signal, resolved);
 		if (aborted) return aborted;
 		try {
-			await mkdir(resolve(resolved, ".."), { recursive: true });
+			await mkdir(dirname(resolved), { recursive: true });
 			const afterMkdirAbort = abortResult<void>(signal, resolved);
 			if (afterMkdirAbort) return afterMkdirAbort;
 			await publishLocalFile(resolved, content, signal);
@@ -821,12 +827,12 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async appendFile(path: string, content: string | Uint8Array, context: Context): Promise<Result<void, FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const signal = context.abortSignal;
 		const aborted = abortResult<void>(signal, resolved);
 		if (aborted) return aborted;
 		try {
-			await mkdir(resolve(resolved, ".."), { recursive: true });
+			await mkdir(dirname(resolved), { recursive: true });
 			const afterMkdirAbort = abortResult<void>(signal, resolved);
 			if (afterMkdirAbort) return afterMkdirAbort;
 			await appendFile(resolved, content);
@@ -838,8 +844,8 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async renameFile(sourcePath: string, destinationPath: string, context: Context): Promise<Result<void, FileError>> {
-		const source = resolvePath(this.cwd, sourcePath);
-		const destination = resolvePath(this.cwd, destinationPath);
+		const source = resolveLocalOperationPath(this.cwd, sourcePath);
+		const destination = resolveLocalOperationPath(this.cwd, destinationPath);
 		const aborted = abortResult<void>(context.abortSignal, destination);
 		if (aborted) return aborted;
 		try {
@@ -851,7 +857,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async fileInfo(path: string, context: Context): Promise<Result<FileInfo, FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const aborted = abortResult<FileInfo>(context.abortSignal, resolved);
 		if (aborted) return aborted;
 		try {
@@ -862,7 +868,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async listDir(path: string, context: Context): Promise<Result<FileInfo[], FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const signal = context.abortSignal;
 		const aborted = abortResult<FileInfo[]>(signal, resolved);
 		if (aborted) return aborted;
@@ -872,7 +878,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			for (const entry of entries) {
 				const loopAbort = abortResult<FileInfo[]>(signal, resolved);
 				if (loopAbort) return loopAbort;
-				const entryPath = resolve(resolved, entry.name);
+				const entryPath = `${resolved.endsWith(sep) ? resolved : resolved + sep}${entry.name}`;
 				try {
 					const info = fileInfoFromStats(entryPath, await lstat(entryPath));
 					if (info.ok) infos.push(info.value);
@@ -887,7 +893,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async canonicalPath(path: string, context: Context): Promise<Result<string, FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const aborted = abortResult<string>(context.abortSignal, resolved);
 		if (aborted) return aborted;
 		try {
@@ -911,7 +917,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		options: { recursive?: boolean } | undefined,
 		context: Context,
 	): Promise<Result<void, FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const aborted = abortResult<void>(context.abortSignal, resolved);
 		if (aborted) return aborted;
 		try {
@@ -927,7 +933,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		options: { recursive?: boolean; force?: boolean } | undefined,
 		context: Context,
 	): Promise<Result<void, FileError>> {
-		const resolved = resolvePath(this.cwd, path);
+		const resolved = resolveLocalOperationPath(this.cwd, path);
 		const aborted = abortResult<void>(context.abortSignal, resolved);
 		if (aborted) return aborted;
 		try {
