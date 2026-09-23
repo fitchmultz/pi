@@ -153,7 +153,7 @@ it("keeps in-memory capture unsupported and pre-assistant journals deferred", as
 	directories.push(directory);
 	const h = await createHarness({ sessionManager: SessionManager.create(directory, directory) });
 	harnesses.push(h);
-	h.sessionManager.appendCustomEntry("before-assistant", { retained: true });
+	h.sessionManager.appendSessionInfo("before-assistant");
 	const file = h.session.sessionFile!;
 	const hold = await h.session.acquireCheckpoint({ quiesce: () => () => {} });
 	try {
