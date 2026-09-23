@@ -8,7 +8,8 @@ import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { createBashTool } from "../src/core/tools/bash.ts";
+import { createBashTool, createBashToolDefinition } from "../src/core/tools/bash.ts";
+import { createHarnessWithExtensions } from "./test-harness.ts";
 
 describe("AgentSession dynamic tool registration", () => {
 	let tempDir: string;
@@ -206,6 +207,45 @@ describe("AgentSession dynamic tool registration", () => {
 		expect(session.getActiveToolNames()).toContain("sdk_tool");
 
 		session.dispose();
+	});
+
+	it("preserves an SDK-supplied base Bash executor instead of replacing it with local Bash", async () => {
+		const marker = join(tempDir, "local-execution-marker");
+		let remoteCalls = 0;
+		const remoteBash = {
+			...createBashTool(tempDir),
+			async execute() {
+				remoteCalls++;
+				return { content: [{ type: "text" as const, text: "remote executor" }], details: undefined };
+			},
+		};
+		const harness = await createHarnessWithExtensions({
+			baseToolsOverride: { bash: remoteBash },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", () => {
+						if (pi.getAllTools().find((tool) => tool.name === "bash")?.sourceInfo.source === "builtin") {
+							pi.registerTool(createBashToolDefinition(tempDir));
+						}
+					});
+				},
+			],
+		});
+		try {
+			await harness.session.bindExtensions({});
+			const bash = harness.session.agent.state.tools.find((tool) => tool.name === "bash")!;
+			const result = await bash.execute("probe", { command: `printf local > ${JSON.stringify(marker)}` });
+
+			expect(remoteCalls).toBe(1);
+			expect(existsSync(marker)).toBe(false);
+			expect(result.content).toEqual([{ type: "text", text: "remote executor" }]);
+			expect(harness.session.getAllTools().find((tool) => tool.name === "bash")?.sourceInfo).toMatchObject({
+				path: "<sdk:bash>",
+				source: "sdk",
+			});
+		} finally {
+			harness.cleanup();
+		}
 	});
 
 	it("keeps custom tools active but omits them from available tools when promptSnippet is not provided", async () => {

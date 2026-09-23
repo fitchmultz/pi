@@ -3157,6 +3157,7 @@ export class AgentSession {
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
 		].filter((tool) => isAllowedTool(tool.definition.name));
+		const baseToolSource = this._baseToolsOverride ? "sdk" : "builtin";
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
 				.filter(([name]) => isAllowedTool(name))
@@ -3164,7 +3165,7 @@ export class AgentSession {
 					name,
 					{
 						definition,
-						sourceInfo: createSyntheticSourceInfo(`<builtin:${name}>`, { source: "builtin" }),
+						sourceInfo: createSyntheticSourceInfo(`<${baseToolSource}:${name}>`, { source: baseToolSource }),
 					},
 				]),
 		);
@@ -3198,7 +3199,9 @@ export class AgentSession {
 				.filter((definition) => isAllowedTool(definition.name))
 				.map((definition) => ({
 					definition,
-					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
+					sourceInfo: createSyntheticSourceInfo(`<${baseToolSource}:${definition.name}>`, {
+						source: baseToolSource,
+					}),
 				})),
 			runner,
 		);
