@@ -240,8 +240,11 @@ with npm installed alongside it, Git, tar, and tmux for real-terminal validation
 
 Selection atomically replaces only the package symlink; its old target is kept
 at <selector>.previous. Existing releases and user settings/auth/sessions are
-never edited. Run native pi restart --runtime <printed package directory> from
-the current session separately, then verify its loaded identity.
+never edited. Run native pi restart from the current session to load the
+selected release, then verify its loaded identity. Use --runtime <printed
+package directory> to try a staged release or pin a runtime across later
+restarts; a full CLI launch returns to selector-following behavior. An
+already-running older launcher needs one full CLI launch to follow selections.
 `);
 }
 

@@ -10,7 +10,7 @@ export const MAX_RESTART_BYTES = 64 * 1024;
 
 export interface RestartRequest {
 	message?: string;
-	/** Built coding-agent package directory; omitted to keep the current runtime. */
+	/** Built package directory; pins this worker for later restarts. Omitted keeps a pin or follows the original installation. */
 	runtime?: string;
 	/** Replace the explicit CLI extension list. Omitted means preserve it. */
 	extensions?: string[];

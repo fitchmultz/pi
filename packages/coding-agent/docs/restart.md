@@ -2,6 +2,8 @@
 
 The Node CLI can restart its agent process and resume the same saved session. A small launcher stays outside the agent process, so applying extension or runtime code changes does not require the user to restart Pi manually.
 
+By default, each restart loads the release selected by the original CLI invocation: for example, a changed npm package symlink or an installer-managed `current-version` pointer. A source checkout or directly launched release stays at its original location.
+
 This is different from `/reload`, which refreshes resources but retains cached extension code.
 
 ## Request a Restart
@@ -41,7 +43,7 @@ pi restart \
   --message "Check the updated runtime and continue"
 ```
 
-The directory must contain the built `dist/bundle/cli-worker.js`. Runtime and extension options can be combined. Paths resolve from the requesting shell's working directory.
+The directory must contain the built `dist/bundle/cli-worker.js`. Runtime and extension options can be combined. Paths resolve from the requesting shell's working directory. `--runtime` selects that exact worker for this restart and later ordinary restarts, even if the original installation selector moves. Another `--runtime` changes the pin; a full CLI launch returns to the original installation selector. Omit `--runtime` when an installer has already selected the desired release and you want to keep following that selector.
 
 **Keep the previous runtime, dependencies and extension files intact.** Rollback selects the previous launch configuration; it does not undo file edits, restore Git state, or reverse external side effects. An in-place overwrite of the only working version cannot be rolled back by restarting the same files.
 
@@ -51,7 +53,7 @@ The launcher starts the replacement only after the outgoing worker exits success
 
 Stored credentials are unchanged. A CLI `--api-key` is forwarded only while its original provider is still selected; after a provider change, Pi uses normal credential resolution rather than sending that key to a different provider.
 
-A replacement becomes ready after runtime creation and TUI initialization. If it fails or takes more than 60 seconds to reach readiness, the launcher tries the previous runtime and explicit extension list once, against the same checkpoint. A supplied continuation includes the startup failure notice so the agent can diagnose it. If recovery also fails, Pi stops instead of entering a restart loop.
+A replacement becomes ready after runtime creation and TUI initialization. If the selected worker is missing, fails, or takes more than 60 seconds to reach readiness, the launcher tries the exact previous worker and explicit extension list once, against the same checkpoint, even if the selector moved again. It also restores the previous selection policy: later ordinary restarts follow the original selector unless an earlier explicit `--runtime` was active. A supplied continuation includes the startup failure notice so the agent can diagnose it. If recovery also fails, Pi stops instead of entering a restart loop.
 
 Readiness is not proof that every tool or provider works. Validate candidates before requesting activation. Failures **after readiness** are not automatically replayed or rolled back: doing so could duplicate work whose side effects already occurred.
 
@@ -63,7 +65,7 @@ Managed restart is provided by the bundled Node CLI. Print, JSON and RPC modes a
 
 The launcher itself remains loaded across worker replacements. Changes to launcher code take effect on the next full CLI launch. It intentionally stays small and outside ordinary agent/runtime updates.
 
-An already-running older Pi process does not acquire this feature merely because files were updated. Start the updated CLI once with `--session <saved-session-file>` to establish the launcher. Subsequent worker/runtime updates can use the managed path.
+An already-running older Pi process does not acquire this behavior merely because files were updated. Start the updated CLI once with `--session <saved-session-file>` to establish the new launcher. Subsequent selected worker updates can use the managed path without another full launch.
 
 For source development, `src/cli-launcher.ts` is the managed entrypoint and `src/cli.ts` is the worker. The bundle emits these as `dist/bundle/cli.js` and `dist/bundle/cli-worker.js`, respectively.
 
@@ -78,4 +80,4 @@ node ../../node_modules/vitest/dist/cli.js --run \
   test/restart-tui.test.ts
 ```
 
-The terminal tests require tmux and use a private server, isolated configuration and a faux provider. They make no network or paid model requests. They verify that an updated tool runs in a new process in the same session, that a failed candidate recovers, and that completed tool calls and the original startup prompt are not replayed.
+The terminal tests require tmux and use a private server, isolated configuration and a faux provider. They make no network or paid model requests. They verify the replacement worker's process, loaded version and package directory, restored session and tool selection, single execution of completed work, and recovery from a failed candidate.

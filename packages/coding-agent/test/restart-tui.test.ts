@@ -1,18 +1,23 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
 	copyFileSync,
+	cpSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
+	renameSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { requestRestart } from "../src/cli/restart-protocol.ts";
+import { findNodePackageDir } from "../src/config.ts";
 import { readSessionCheckpoint } from "../src/core/checkpoint.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 
@@ -22,9 +27,21 @@ const sourceResolver = join(packageDir, "src", "experimental", "source-resolver.
 const sourceLauncher = join(packageDir, "src", "cli-launcher.ts");
 const bundledLauncher = join(packageDir, "dist", "bundle", "cli.js");
 const resources: Array<{ root: string; socket: string }> = [];
+const stagedRuntimes: string[] = [];
 
 function quote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function stageBundledRuntime(version: string): string {
+	const scratch = resolve(packageDir, "../..", ".artifacts");
+	mkdirSync(scratch, { recursive: true });
+	const runtime = mkdtempSync(join(scratch, "restart-runtime-"));
+	stagedRuntimes.push(runtime);
+	cpSync(join(packageDir, "dist"), join(runtime, "dist"), { recursive: true });
+	const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as Record<string, unknown>;
+	writeFileSync(join(runtime, "package.json"), JSON.stringify({ ...manifest, version }));
+	return runtime;
 }
 
 function terminalFixture() {
@@ -47,10 +64,11 @@ function terminalFixture() {
 		agentDir,
 		temporary,
 		status,
-		start(args: string[], env: string[] = [], discoverExtensions = false, managed = true) {
+		start(args: string[], env: string[] = [], discoverExtensions = false, managed = true, launcher?: string) {
 			const launch = join(root, "launch.sh");
-			const launcherArgs =
-				managed && process.env.PI_TEST_CLI
+			const launcherArgs = launcher
+				? [launcher]
+				: managed && process.env.PI_TEST_CLI
 					? [process.env.PI_TEST_CLI]
 					: ["--import", sourceResolver, managed ? sourceLauncher : join(packageDir, "src", "cli.ts")];
 			const command = [
@@ -113,6 +131,8 @@ afterEach(() => {
 		spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
 		rmSync(root, { recursive: true, force: true });
 	}
+	for (const path of stagedRuntimes.splice(0)) rmSync(path, { recursive: true, force: true });
+	vi.unstubAllEnvs();
 });
 
 // Uses a private tmux server, isolated config and the faux provider: no credentials, network or paid model calls.
@@ -560,10 +580,151 @@ export default function(pi) {
 		25_000,
 	);
 
-	it.each([false, true])(
-		"resumes automatically after a staged extension/runtime update (failed candidate: %s)",
-		async (failCandidate) => {
+	it("loads the newly selected package on an ordinary restart without replaying the prior turn", async () => {
+		expect(existsSync(bundledLauncher), "Build the coding-agent bundle before this terminal test").toBe(true);
+		const firstRuntime = stageBundledRuntime("1.0.0-selector-test");
+		const secondRuntime = stageBundledRuntime("2.0.0-selector-test");
+		const terminal = terminalFixture();
+		const { root, socket, status } = terminal;
+		const selector = join(root, "selected");
+		const bin = join(root, "bin");
+		mkdirSync(bin);
+		symlinkSync(firstRuntime, selector);
+		const cli = join(bin, "pi");
+		symlinkSync("../selected/dist/bundle/cli.js", cli);
+		const trace = join(root, "trace.jsonl");
+		const extension = join(root, "identity.ts");
+		writeFileSync(
+			extension,
+			`
+import { appendFileSync } from "node:fs";
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { VERSION, getPackageDir } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+const record = (value) => appendFileSync(${JSON.stringify(trace)}, JSON.stringify({pid:process.pid,version:VERSION,packageDir:getPackageDir(),...value}) + "\\n");
+record({event:"factory"});
+export default function(pi) {
+	const faux = fauxProvider();
+	pi.registerProvider("faux", { api:faux.api, baseUrl:faux.getModel().baseUrl, apiKey:"faux-key", models:faux.models, streamSimple:faux.provider.streamSimple });
+	pi.registerTool({ name:"runtime_probe", label:"Runtime probe", description:"Record the loaded runtime", parameters:Type.Object({}),
+		execute:async () => { record({event:"probe"}); return {content:[{type:"text",text:VERSION}],details:{}}; }
+	});
+	pi.on("session_start", (_event,ctx) => {
+		const resumed = VERSION === "2.0.0-selector-test";
+		record({event:"start",sessionId:ctx.sessionManager.getSessionId(),sessionFile:ctx.sessionManager.getSessionFile(),
+			leafId:ctx.sessionManager.getLeafId(),model:ctx.model && [ctx.model.provider,ctx.model.id],active:pi.getActiveTools()});
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("runtime_probe",{}),{stopReason:"toolUse"}),
+			fauxAssistantMessage(resumed ? "Selected runtime resumed" : "Seed saved")
+		]);
+	});
+	pi.on("before_agent_start", event => record({event:"prompt",text:event.prompt}));
+	pi.on("agent_settled", (_event,ctx) => {
+		record({event:"settled",leafId:ctx.sessionManager.getLeafId(),active:pi.getActiveTools()});
+		if (VERSION === "2.0.0-selector-test") ctx.shutdown();
+	});
+	pi.on("session_shutdown", (_event,ctx) => record({event:"shutdown",leafId:ctx.sessionManager.getLeafId(),calls:faux.state.callCount}));
+}
+`,
+		);
+		const events = () =>
+			readFileSync(trace, "utf8")
+				.trim()
+				.split("\n")
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							event: string;
+							pid: number;
+							version: string;
+							packageDir: string;
+							sessionId?: string;
+							sessionFile?: string;
+							leafId?: string;
+							model?: [string, string];
+							active?: string[];
+							text?: string;
+							calls?: number;
+						},
+				);
+		terminal.start(["-e", extension, "Save the initial prompt once"], [], false, true, cli);
+		try {
+			await vi.waitFor(() => expect(events().filter((event) => event.event === "settled")).toHaveLength(1), {
+				timeout: 12_000,
+			});
+			symlinkSync(secondRuntime, `${selector}.next`);
+			renameSync(`${selector}.next`, selector);
+			execFileSync("tmux", [
+				"-L",
+				socket,
+				"send-keys",
+				"-t",
+				"test",
+				"/restart Inspect the selected runtime",
+				"Enter",
+			]);
+			await vi.waitFor(() => expect(existsSync(status)).toBe(true), { timeout: 20_000 });
+		} catch (error) {
+			throw new Error(
+				`Selected runtime did not resume.\n${terminal.screen()}\n${existsSync(trace) ? readFileSync(trace, "utf8") : ""}`,
+				{ cause: error },
+			);
+		}
+		expect(readFileSync(status, "utf8").trim(), terminal.screen()).toBe("0");
+		const observed = events();
+		const starts = observed.filter((event) => event.event === "start");
+		const settled = observed.filter((event) => event.event === "settled");
+		expect(starts).toHaveLength(2);
+		expect(starts.map((event) => event.version)).toEqual(["1.0.0-selector-test", "2.0.0-selector-test"]);
+		expect(starts.map((event) => realpathSync(event.packageDir))).toEqual([
+			realpathSync(firstRuntime),
+			realpathSync(secondRuntime),
+		]);
+		expect(starts[1].pid).not.toBe(starts[0].pid);
+		expect(starts[1]).toMatchObject({
+			sessionId: starts[0].sessionId,
+			sessionFile: starts[0].sessionFile,
+			leafId: settled[0].leafId,
+			model: ["faux", "faux-1"],
+			active: settled[0].active,
+		});
+		expect(starts[0].active).toContain("runtime_probe");
+		expect(observed.filter((event) => event.event === "factory")).toHaveLength(2);
+		expect(observed.filter((event) => event.event === "probe").map((event) => event.version)).toEqual([
+			"1.0.0-selector-test",
+			"2.0.0-selector-test",
+		]);
+		expect(observed.filter((event) => event.event === "prompt").map((event) => event.text)).toEqual([
+			"Save the initial prompt once",
+			"[Pi restart continuation]\nInspect the selected runtime",
+		]);
+		expect(observed.filter((event) => event.event === "shutdown").map((event) => event.calls)).toEqual([2, 2]);
+		const journal = readFileSync(starts[0].sessionFile!, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		expect(journal.filter((entry) => entry.type === "message" && entry.message.role === "user")).toHaveLength(2);
+	});
+
+	it.each([
+		{ failCandidate: false, externalCli: false },
+		{ failCandidate: true, externalCli: false },
+		{ failCandidate: false, externalCli: true },
+	])(
+		"resumes automatically after a staged extension/runtime update (failed candidate: $failCandidate, external CLI: $externalCli)",
+		async ({ failCandidate, externalCli }) => {
 			expect(existsSync(bundledLauncher), "Build the coding-agent bundle before this terminal test").toBe(true);
+			if (externalCli) {
+				vi.stubEnv("PI_TEST_CLI", join(stageBundledRuntime("98.0.0-external-test"), "dist", "bundle", "cli.js"));
+			}
+			const initialPackageDir = findNodePackageDir(dirname(realpathSync(process.env.PI_TEST_CLI ?? sourceLauncher)));
+			const originalVersion = (
+				JSON.parse(readFileSync(join(initialPackageDir, "package.json"), "utf8")) as {
+					version: string;
+				}
+			).version;
+			const candidateVersion = "99.0.0-restart-test";
+			const candidateRuntime = stageBundledRuntime(candidateVersion);
 			const terminal = terminalFixture();
 			const { root, status } = terminal;
 			const trace = join(root, "trace.jsonl");
@@ -574,7 +735,7 @@ export default function(pi) {
 				bundledLauncher,
 				"restart",
 				"--runtime",
-				packageDir,
+				candidateRuntime,
 				"-e",
 				second,
 				"--message",
@@ -585,8 +746,9 @@ export default function(pi) {
 			const extension = (version: string) => `
 import { appendFileSync } from "node:fs";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { VERSION, getPackageDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-const record = (value) => appendFileSync(${JSON.stringify(trace)}, JSON.stringify({version:${JSON.stringify(version)},pid:process.pid,...value}) + "\\n");
+const record = (value) => appendFileSync(${JSON.stringify(trace)}, JSON.stringify({version:${JSON.stringify(version)},runtimeVersion:VERSION,packageDir:getPackageDir(),pid:process.pid,...value}) + "\\n");
 record({event:"factory"});
 ${failCandidate && version === "v2" ? 'throw new Error("Deliberately broken candidate");' : ""}
 export default function(pi) {
@@ -598,7 +760,7 @@ export default function(pi) {
 	});
 	pi.on("session_start", (_event,ctx) => {
 		resumed = ctx.sessionManager.getBranch().some(entry => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "bash");
-		record({event:"start",resumed,sessionId:ctx.sessionManager.getSessionId(),sessionFile:ctx.sessionManager.getSessionFile(),cwd:ctx.cwd});
+		record({event:"start",resumed,sessionId:ctx.sessionManager.getSessionId(),sessionFile:ctx.sessionManager.getSessionFile(),leafId:ctx.sessionManager.getLeafId(),cwd:ctx.cwd,model:ctx.model && [ctx.model.provider,ctx.model.id],activeTools:pi.getActiveTools()});
 		faux.setResponses(resumed ? [
 			fauxAssistantMessage(fauxToolCall("version_probe",{}),{stopReason:"toolUse"}),
 			fauxAssistantMessage("Verified resumed capability")
@@ -613,7 +775,7 @@ export default function(pi) {
 		record({event:"settled",pendingInputs:ctx.getPendingInputCount()});
 		if(resumed) ctx.shutdown();
 	});
-	pi.on("session_shutdown", (_event,ctx) => { record({event:"shutdown",sessionFile:ctx.sessionManager.getSessionFile(),calls:faux.state.callCount}); });
+	pi.on("session_shutdown", (_event,ctx) => { record({event:"shutdown",sessionFile:ctx.sessionManager.getSessionFile(),leafId:ctx.sessionManager.getLeafId(),activeTools:pi.getActiveTools(),calls:faux.state.callCount}); });
 }
 `;
 			writeFileSync(first, extension("v1"));
@@ -648,9 +810,14 @@ export default function(pi) {
 						JSON.parse(line) as {
 							event: string;
 							version: string;
+							runtimeVersion: string;
+							packageDir: string;
 							pid: number;
 							sessionId?: string;
 							sessionFile?: string;
+							leafId?: string;
+							model?: [string, string];
+							activeTools?: string[];
 							text?: string;
 							cwd?: string;
 							pendingInputs?: number;
@@ -663,8 +830,22 @@ export default function(pi) {
 			expect(starts[1].pid).not.toBe(starts[0].pid);
 			expect(starts[1].version).toBe(failCandidate ? "v1" : "v2");
 			expect(starts[1].cwd).toBe(starts[0].cwd);
+			expect(starts[0].runtimeVersion).toBe(originalVersion);
+			expect(realpathSync(starts[0].packageDir)).toBe(realpathSync(initialPackageDir));
+			const candidateFactory = events.find((event) => event.event === "factory" && event.version === "v2");
+			expect(candidateFactory?.runtimeVersion).toBe(candidateVersion);
+			expect(realpathSync(candidateFactory!.packageDir)).toBe(realpathSync(candidateRuntime));
+			expect(starts[1].runtimeVersion).toBe(failCandidate ? originalVersion : candidateVersion);
+			expect(realpathSync(starts[1].packageDir)).toBe(
+				realpathSync(failCandidate ? initialPackageDir : candidateRuntime),
+			);
+			const firstShutdown = events.find((event) => event.event === "shutdown" && event.version === "v1");
+			expect(starts[1].leafId).toBe(firstShutdown?.leafId);
+			expect(starts[1].model).toEqual(starts[0].model);
+			expect(starts[1].activeTools).toEqual(firstShutdown?.activeTools);
 			const prompts = events.filter((event) => event.event === "prompt");
 			expect(prompts).toHaveLength(3);
+			expect(prompts.filter((event) => event.text?.includes("[Pi restart continuation]"))).toHaveLength(1);
 			expect(prompts[0].text).toBe("Exercise the update path once");
 			expect(prompts[1].text).toBe("Finish the second startup prompt before restarting");
 			expect(prompts[2].text).toContain("[Pi restart continuation]");
