@@ -356,19 +356,23 @@ describe.skipIf(process.platform === "win32")("selected installation restarts", 
 		expect(trace.slice(1).every((entry) => !entry.args.includes("original task"))).toBe(true);
 	});
 
-	it("follows the installer-managed current-version pointer after its release bin has been resolved", () => {
-		const f = selectorFixture(true);
-		f.release("1.0.0", "1.0.0", 'select("2.0.0"); restart();');
-		f.release("2.0.0", "2.0.0", 'select("3.0.0"); restart();');
-		f.release("3.0.0", "3.0.0", "readyExit();");
-		f.select("1.0.0");
-		const trace = f.run();
-		expect(trace.map((entry) => entry.version)).toEqual(["1.0.0", "2.0.0", "3.0.0"]);
-		expect(trace.map((entry) => entry.packageDir)).toEqual(
-			["1.0.0", "2.0.0", "3.0.0"].map((version) => realpathSync(f.packagePath(version))),
-		);
-		expect(new Set(trace.map((entry) => entry.pid)).size).toBe(3);
-	});
+	it.each(["1.0.0", "2.0.0"])(
+		"follows the managed selector from an owned release bin (initial selection: %s)",
+		(initialSelection) => {
+			const f = selectorFixture(true);
+			f.release("1.0.0", "1.0.0", 'select("2.0.0"); restart();');
+			f.release("2.0.0", "2.0.0", 'select("3.0.0"); restart();');
+			f.release("3.0.0", "3.0.0", "readyExit();");
+			f.select(initialSelection);
+			// An older release's .bin/pi with the inherited managed root is also an installation entrypoint.
+			const trace = f.run();
+			expect(trace.map((entry) => entry.version)).toEqual(["1.0.0", "2.0.0", "3.0.0"]);
+			expect(trace.map((entry) => entry.packageDir)).toEqual(
+				["1.0.0", "2.0.0", "3.0.0"].map((version) => realpathSync(f.packagePath(version))),
+			);
+			expect(new Set(trace.map((entry) => entry.pid)).size).toBe(3);
+		},
+	);
 
 	it.each(["direct release", "source checkout"])(
 		"keeps a %s on its own runtime despite an inherited managed root",

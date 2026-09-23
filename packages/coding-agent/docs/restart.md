@@ -2,7 +2,9 @@
 
 The Node CLI can restart its agent process and resume the same saved session. A small launcher stays outside the agent process, so applying extension or runtime code changes does not require the user to restart Pi manually.
 
-By default, each restart loads the release selected by the original CLI invocation: for example, a changed npm package symlink or an installer-managed `current-version` pointer. A source checkout or directly launched release stays at its original location.
+By default, each restart loads the release selected by the original CLI invocation: for example, a changed npm package symlink or an installer-managed `current-version` pointer. Source/worktree entrypoints and a release's concrete `dist/bundle/cli.js` stay at their original location.
+
+The standard installer identifies its release `.bin/pi` entrypoint through `PI_MANAGED_INSTALL_ROOT`. Running that same entrypoint from a managed Pi shell also follows `current-version` on restart. To stay on a specific release, use `--runtime <package-dir>` or launch its concrete `dist/bundle/cli.js`.
 
 This is different from `/reload`, which refreshes resources but retains cached extension code.
 

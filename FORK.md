@@ -116,8 +116,8 @@ loads a newly selected release even when its version string is unchanged.
 Use `pi restart --runtime <printed-packageDir>` only to try a staged release
 without changing the selector or to deliberately pin that concrete worker.
 The pin survives later ordinary restarts until another explicit runtime is
-selected or Pi is fully launched again. Source/worktree and direct release
-launches stay at their own location.
+selected or Pi is fully launched again. Source/worktree entrypoints and a
+release's concrete `dist/bundle/cli.js` stay at their own location.
 
 Restart acknowledgment means queued, not ready. Verify the replacement process,
 loaded package directory, same session identity, tools and real provider operation.

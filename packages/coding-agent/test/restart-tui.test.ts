@@ -64,11 +64,10 @@ function terminalFixture() {
 		agentDir,
 		temporary,
 		status,
-		start(args: string[], env: string[] = [], discoverExtensions = false, managed = true, launcher?: string) {
+		start(args: string[], env: string[] = [], discoverExtensions = false, managed = true) {
 			const launch = join(root, "launch.sh");
-			const launcherArgs = launcher
-				? [launcher]
-				: managed && process.env.PI_TEST_CLI
+			const launcherArgs =
+				managed && process.env.PI_TEST_CLI
 					? [process.env.PI_TEST_CLI]
 					: ["--import", sourceResolver, managed ? sourceLauncher : join(packageDir, "src", "cli.ts")];
 			const command = [
@@ -647,7 +646,8 @@ export default function(pi) {
 							calls?: number;
 						},
 				);
-		terminal.start(["-e", extension, "Save the initial prompt once"], [], false, true, cli);
+		vi.stubEnv("PI_TEST_CLI", cli);
+		terminal.start(["-e", extension, "Save the initial prompt once"]);
 		try {
 			await vi.waitFor(() => expect(events().filter((event) => event.event === "settled")).toHaveLength(1), {
 				timeout: 12_000,
@@ -845,7 +845,6 @@ export default function(pi) {
 			expect(starts[1].activeTools).toEqual(firstShutdown?.activeTools);
 			const prompts = events.filter((event) => event.event === "prompt");
 			expect(prompts).toHaveLength(3);
-			expect(prompts.filter((event) => event.text?.includes("[Pi restart continuation]"))).toHaveLength(1);
 			expect(prompts[0].text).toBe("Exercise the update path once");
 			expect(prompts[1].text).toBe("Finish the second startup prompt before restarting");
 			expect(prompts[2].text).toContain("[Pi restart continuation]");
