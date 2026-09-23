@@ -350,6 +350,61 @@ async function runLoop(
 		// Native async splits one response into execution batches; all siblings must succeed.
 		return !signal?.aborted && !failedScopes.has(pending.scope) ? pending.request : undefined;
 	};
+	const finishToolCalls = async (
+		message: AssistantMessage,
+		scope: object,
+	): Promise<ExecutedToolCallBatch | undefined> => {
+		const calls = message.content.filter(
+			(call): call is AgentToolCall => call.type === "toolCall" && !startedCalls.has(call.id),
+		);
+		const sequential =
+			config.toolExecution === "sequential" ||
+			calls.some((call) => findTool(currentContext.tools ?? [], call)?.executionMode === "sequential");
+		const batches: ExecutedToolCallBatch[] = [];
+		for (let index = 0; index < calls.length; ) {
+			const call = calls[index];
+			if (message.stopReason !== "length" && isNativeAsyncCall(call, currentContext, config)) {
+				await startAsyncCall(message, call, scope);
+				index++;
+				continue;
+			}
+			const start = index++;
+			while (
+				index < calls.length &&
+				(message.stopReason === "length" || !isNativeAsyncCall(calls[index], currentContext, config))
+			)
+				index++;
+			const synchronousCalls = calls.slice(start, index);
+			if (exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope))
+				await exclusiveCall.task;
+			if (sequential) await joinPendingCalls(scope);
+			for (const call of synchronousCalls) startedCalls.add(call.id);
+			const batch =
+				message.stopReason === "length"
+					? await failToolCallsFromTruncatedMessage(synchronousCalls, emit)
+					: await executeToolCalls(
+							currentContext,
+							message,
+							sequential ? { ...config, toolExecution: "sequential" } : config,
+							signal,
+							emit,
+							synchronousCalls,
+						);
+			for (const result of batch.messages) {
+				currentContext.messages.push(result);
+				newMessages.push(result);
+				savedResults.push(result);
+			}
+			batches.push(batch);
+			recordNewContext(batch, scope);
+		}
+		if (batches.length === 0) return undefined;
+		return {
+			messages: batches.flatMap((batch) => batch.messages),
+			terminate: batches.every((batch) => batch.terminate),
+			newContext: batches.find((batch) => batch.newContext)?.newContext,
+		};
+	};
 	try {
 		for (const message of currentContext.messages.slice()) {
 			if (message.role !== "assistant") continue;
@@ -487,31 +542,27 @@ async function runLoop(
 							if (message.role === "toolResult") deliveredResults.add(message.toolCallId);
 						return streamFunction(model, context, options);
 					},
-					startAsyncCall,
-					async (message, scope) => {
-						const calls = message.content.filter(
-							(call): call is AgentToolCall => call.type === "toolCall" && !startedCalls.has(call.id),
-						);
-						if (calls.length === 0) return;
-						if (exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope))
-							await exclusiveCall.task;
+					async (message, call, scope, partial) => {
+						const calls = partial.content.filter((block): block is AgentToolCall => block.type === "toolCall");
+						// Synchronous siblings wait for response end; ordered async calls must not overtake them.
 						if (
-							config.toolExecution === "sequential" ||
-							calls.some((call) => findTool(currentContext.tools ?? [], call)?.executionMode === "sequential")
+							calls
+								.slice(
+									0,
+									calls.findIndex((sibling) => sibling.id === call.id),
+								)
+								.some((sibling) => !startedCalls.has(sibling.id)) &&
+							(config.toolExecution === "sequential" ||
+								calls.some(
+									(sibling) => findTool(currentContext.tools ?? [], sibling)?.executionMode === "sequential",
+								))
 						)
-							await joinPendingCalls(scope);
-						for (const call of calls) startedCalls.add(call.id);
-						const batch =
-							message.stopReason === "length"
-								? await failToolCallsFromTruncatedMessage(calls, emit)
-								: await executeToolCalls(currentContext, message, config, signal, emit, calls);
-						for (const result of batch.messages) {
-							currentContext.messages.push(result);
-							newMessages.push(result);
-							savedResults.push(result);
-						}
-						readyBatches.push(batch);
-						recordNewContext(batch, scope);
+							return;
+						await startAsyncCall(message, call, scope);
+					},
+					async (message, scope) => {
+						const batch = await finishToolCalls(message, scope);
+						if (batch) readyBatches.push(batch);
 						if (pendingNewContext) retireForNewContext();
 						else activeControl?.submitToolResults(savedResults);
 					},
@@ -531,32 +582,12 @@ async function runLoop(
 					return;
 				}
 
-				const toolCalls = message.content.filter(
-					(c): c is AgentToolCall => c.type === "toolCall" && !startedCalls.has(c.id),
-				);
 				const toolResults: ToolResultMessage[] = [];
 				hasMoreToolCalls = streamed.needsContinuation;
-				if (toolCalls.length > 0) {
-					if (exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope))
-						await exclusiveCall.task;
-					if (
-						config.toolExecution === "sequential" ||
-						toolCalls.some((call) => findTool(currentContext.tools ?? [], call)?.executionMode === "sequential")
-					)
-						await joinPendingCalls(scope);
-					for (const call of toolCalls) startedCalls.add(call.id);
-					// A length stop can leave apparently valid but truncated arguments; never execute them.
-					const executedToolBatch =
-						message.stopReason === "length"
-							? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-							: await executeToolCalls(currentContext, message, config, signal, emit, toolCalls);
+				const executedToolBatch = await finishToolCalls(message, scope);
+				if (executedToolBatch) {
 					toolResults.push(...executedToolBatch.messages);
-					recordNewContext(executedToolBatch, scope);
 					hasMoreToolCalls = !executedToolBatch.terminate || executedToolBatch.newContext !== undefined;
-					for (const result of toolResults) {
-						currentContext.messages.push(result);
-						newMessages.push(result);
-					}
 				}
 
 				const newContext = await takeNewContext();
@@ -660,6 +691,18 @@ function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage
 
 const NO_CHANGES: ToolStateChanges = { toolsAdded: [], toolsRemoved: [] };
 
+function isNativeAsyncCall(call: AgentToolCall, context: AgentContext, config: AgentLoopConfig): boolean {
+	return (
+		call.async === true &&
+		call.responsesItem?.async === true &&
+		findTool(context.tools ?? [], call)?.async === true &&
+		(config.model.api === "openai-responses" || config.model.api === "openai-codex-responses") &&
+		!!config.model.compat &&
+		"supportsAsyncTools" in config.model.compat &&
+		config.model.compat.supportsAsyncTools === true
+	);
+}
+
 /** Copy a system message with its tool fields replaced by `changes`; empty lists omit the field. */
 function withToolChanges(message: SystemMessage, { toolsAdded, toolsRemoved }: ToolStateChanges): SystemMessage {
 	const { toolsAdded: _added, toolsRemoved: _removed, ...rest } = message;
@@ -681,7 +724,12 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
-	startAsyncCall: (message: AssistantMessage, call: AgentToolCall, scope: object) => Promise<void>,
+	startAsyncCall: (
+		message: AssistantMessage,
+		call: AgentToolCall,
+		scope: object,
+		partial: AssistantMessage,
+	) => Promise<void>,
 	finishIntermediateResponse: (message: AssistantMessage, scope: object) => Promise<void>,
 ): Promise<{ message: AssistantMessage; needsContinuation: boolean; scope: object }> {
 	let messages = context.messages;
@@ -773,23 +821,12 @@ async function streamAssistantResponse(
 					if (event.type === "text_end" || event.type === "thinking_end" || event.type === "toolcall_end")
 						completeContent.add(event.contentIndex);
 					if (event.type !== "toolcall_end") break;
-					const tool = findTool(context.tools ?? [], event.toolCall);
-					if (!event.toolCall.async || !tool?.async) break;
-					if (
-						!event.toolCall.responsesItem?.async ||
-						(config.model.api !== "openai-responses" && config.model.api !== "openai-codex-responses") ||
-						!(
-							config.model.compat &&
-							"supportsAsyncTools" in config.model.compat &&
-							config.model.compat.supportsAsyncTools
-						)
-					)
-						break;
+					if (!isNativeAsyncCall(event.toolCall, context, config)) break;
 					const checkpoint = {
 						...partialMessage,
 						content: partialMessage.content.filter((_block, index) => completeContent.has(index)),
 					};
-					await startAsyncCall(checkpoint, event.toolCall, scope);
+					await startAsyncCall(checkpoint, event.toolCall, scope, partialMessage);
 					break;
 				}
 				case "done":

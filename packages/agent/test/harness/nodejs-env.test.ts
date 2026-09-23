@@ -1,16 +1,19 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, promises as nativeFs, readFileSync } from "node:fs";
+import * as fs from "node:fs/promises";
 import { access, chmod, realpath, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "../../src/harness/context.ts";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { FileError, getOrThrow, type ShellExecOptions, type ShellOutputView } from "../../src/harness/types.ts";
 import { applyShellOutputUpdate } from "../../src/harness/utils/output-capture.ts";
 import { executeShellWithCapture } from "../../src/harness/utils/shell-output.ts";
 import { createTempDir } from "./session-test-utils.ts";
+
+vi.mock("node:fs/promises", { spy: true });
 
 const chmodRestorePaths: string[] = [];
 
@@ -93,6 +96,7 @@ class FailingSpillExecutionEnv extends NodeExecutionEnv {
 }
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const path of chmodRestorePaths.splice(0)) {
 		try {
 			await access(path);
@@ -239,6 +243,28 @@ describe("NodeExecutionEnv", () => {
 		expect(getOrThrow(await env.readTextFile("new/nested/file.txt", BACKGROUND_CONTEXT))).toBe("ab");
 	});
 
+	it("rejects append cancellation during parent-directory creation without writing", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		const controller = new AbortController();
+		vi.mocked(fs.mkdir).mockImplementationOnce(async (path, options) => {
+			const result = await nativeFs.mkdir(path, options);
+			controller.abort();
+			return result;
+		});
+		vi.mocked(fs.appendFile).mockClear();
+
+		const result = await env.appendFile(
+			"new/nested/file.txt",
+			"not written",
+			withAbortSignal(controller.signal, BACKGROUND_CONTEXT),
+		);
+
+		expect(result).toMatchObject({ ok: false, error: { code: "aborted" } });
+		expect(fs.appendFile).not.toHaveBeenCalled();
+		expect(existsSync(join(root, "new/nested/file.txt"))).toBe(false);
+	});
+
 	it("atomically renames a file and replaces the destination", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
@@ -309,6 +335,8 @@ describe("NodeExecutionEnv", () => {
 			env.readTextLines("file.txt", undefined, context),
 			env.readBinaryFile("file.txt", context),
 			env.writeFile("other.txt", "hello", context),
+			env.appendFile("file.txt", "not written", context),
+			env.appendFile("new/nested.txt", "not written", context),
 			env.renameFile("file.txt", "renamed.txt", context),
 			env.listDir(".", context),
 		]);
@@ -316,6 +344,8 @@ describe("NodeExecutionEnv", () => {
 			expect(result.ok).toBe(false);
 			if (!result.ok) expect(result.error).toMatchObject({ code: "aborted" });
 		}
+		expect(readFileSync(join(root, "file.txt"), "utf8")).toBe("hello");
+		expect(existsSync(join(root, "new"))).toBe(false);
 	});
 
 	it("cleanup is best-effort", async () => {

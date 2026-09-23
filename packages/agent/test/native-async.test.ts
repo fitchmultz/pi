@@ -581,6 +581,159 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it.each(
+		(["stream end", "response end"] as const).flatMap((boundary) =>
+			(
+				[
+					{ global: "parallel", before: "sequential", native: "parallel", incomplete: false },
+					{ global: "parallel", before: "parallel", native: "sequential", incomplete: false },
+					{ global: "sequential", before: "parallel", native: "parallel", incomplete: false },
+					{ global: "parallel", before: "sequential", native: "parallel", incomplete: true },
+					{ global: "sequential", before: "parallel", native: "parallel", incomplete: true },
+				] as const
+			).map((modes) => ({ boundary, ...modes })),
+		),
+	)(
+		"orders synchronous and native async siblings ($boundary, global=$global, before=$before, native=$native, incomplete=$incomplete)",
+		async ({ boundary, global, before, native, incomplete }) => {
+			const work = deferred<AgentToolResult>();
+			const order: string[] = [];
+			let cwd = "original";
+			const { agent, streams, events, tool } = setup(
+				async () => {
+					order.push(`write:${cwd}`);
+					return work.promise;
+				},
+				{ executionMode: native },
+			);
+			agent.toolExecution = global;
+			agent.state.tools = [
+				tool,
+				{
+					...tool,
+					name: "change_dir",
+					async: false,
+					executionMode: before,
+					execute: async () => {
+						cwd = "requested";
+						order.push("change_dir");
+						return result;
+					},
+				},
+			];
+			const provider = agent.streamFunction;
+			agent.streamFunction = async (...args) => {
+				const response = await provider(...args);
+				if (streams.length > 1) finish(response, assistant(`answer-${streams.length}`));
+				return response;
+			};
+			const run = agent.prompt("change directory, then write");
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("mixed");
+			const change: ToolCall = {
+				type: "toolCall",
+				id: "change",
+				name: "change_dir",
+				arguments: { path: "requested" },
+			};
+			if (incomplete) {
+				first.content.push(change);
+				streams[0].push({ type: "start", partial: first });
+				streams[0].push({ type: "toolcall_start", contentIndex: 0, partial: first });
+			} else await emitCall(streams[0], first, change);
+			const write = call("write");
+			first.content.push(write);
+			streams[0].push({ type: "toolcall_end", contentIndex: 1, toolCall: write, partial: first });
+			try {
+				await vi.waitFor(() => expect(events.filter((event) => event.type === "message_update")).toHaveLength(2));
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				expect.soft(order).toEqual([]);
+				if (incomplete)
+					streams[0].push({ type: "toolcall_end", contentIndex: 0, toolCall: change, partial: first });
+				if (boundary === "response end") {
+					first.stopReason = "toolUse";
+					streams[0].push({ type: "response_end", message: first });
+					const successor = assistant("successor", [{ type: "text", text: "while write runs" }]);
+					streams[0].push({ type: "start", partial: successor });
+					finish(streams[0], successor);
+					await vi.waitFor(() =>
+						expect(
+							events.some(
+								(event) =>
+									event.type === "message_end" &&
+									event.message.role === "assistant" &&
+									event.message.responseId === "successor",
+							),
+						).toBe(true),
+					);
+				} else {
+					finish(streams[0], first);
+					agent.steer({ role: "user", content: "independent question", timestamp: 2 });
+					await vi.waitFor(() => expect(streams.length).toBeGreaterThan(1));
+				}
+				expect(order).toEqual(["change_dir", "write:requested"]);
+			} finally {
+				work.resolve(result);
+				await run;
+			}
+			expect(agent.state.messages.filter((message) => message.role === "toolResult")).toHaveLength(2);
+		},
+	);
+
+	it.each(["blocked", "error", "length"] as const)(
+		"preserves mixed-call failure behavior when the synchronous predecessor is %s",
+		async (outcome) => {
+			const execute = vi.fn(async () => result);
+			const { agent, streams, events, tool } = setup(execute);
+			agent.state.tools = [
+				tool,
+				{
+					...tool,
+					name: "change_dir",
+					async: false,
+					executionMode: "sequential",
+					execute: async () => {
+						throw new Error("directory unavailable");
+					},
+				},
+			];
+			agent.beforeToolCall = async ({ toolCall }) =>
+				outcome === "blocked" && toolCall.name === "change_dir" ? { block: true } : undefined;
+			const provider = agent.streamFunction;
+			agent.streamFunction = async (...args) => {
+				const response = await provider(...args);
+				if (streams.length > 1) finish(response, assistant(`answer-${streams.length}`));
+				return response;
+			};
+			const run = agent.prompt("change directory, then write");
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("mixed");
+			await emitCall(streams[0], first, {
+				type: "toolCall",
+				id: "change",
+				name: "change_dir",
+				arguments: { path: "requested" },
+			});
+			const write = call("write");
+			first.content.push(write);
+			streams[0].push({ type: "toolcall_end", contentIndex: 1, toolCall: write, partial: first });
+			if (outcome === "length") {
+				first.stopReason = "length";
+				streams[0].push({ type: "done", reason: "length", message: first });
+				streams[0].end();
+			} else finish(streams[0], first);
+			await run;
+			expect(execute).toHaveBeenCalledTimes(outcome === "length" ? 0 : 1);
+			expect(events.filter((event) => event.type === "tool_execution_end").map((event) => event.toolCallId)).toEqual(
+				["change", write.id],
+			);
+			expect(agent.state.messages.filter((message) => message.role === "toolResult")).toMatchObject([
+				{ toolCallId: "change", isError: true },
+				{ toolCallId: write.id, isError: outcome === "length" },
+			]);
+		},
+	);
+
 	it("detaches only after abort, preserves the anchor, then resumes once with admitted args", async () => {
 		const execute = vi.fn(async (_id, _args, signal?: AbortSignal) => {
 			await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
