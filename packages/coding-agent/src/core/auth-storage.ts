@@ -29,7 +29,6 @@ type LockResult<T> = {
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
 async function publishStoredFile(path: string, content: string, signal?: AbortSignal): Promise<void> {
-	signal?.throwIfAborted();
 	const target = await resolveLocalFileTarget(resolveLocalOperationPath(process.cwd(), path));
 	const previous = await lstat(target).catch((error: NodeJS.ErrnoException) => {
 		if (error.code === "ENOENT") return undefined;
