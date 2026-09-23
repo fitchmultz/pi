@@ -1154,6 +1154,7 @@ export class SessionManager {
 	private flushed: boolean = false;
 	/** A failed write may have left missing entries or a partial JSONL record. */
 	private needsRewrite = false;
+	private failedAppendIndex: number | undefined;
 	private fileEntries: FileEntry[] = [];
 	private entriesRevision = 0;
 	private byId: Map<string, SessionEntry> = new Map();
@@ -1290,7 +1291,7 @@ export class SessionManager {
 
 	private _rewriteFile(flag: "w" | "wx" = "w"): void {
 		if (!this.persist || !this.sessionFile) return;
-		this.needsRewrite = true;
+		if (flag === "w") this.needsRewrite = true;
 		let destination = this.sessionFile;
 		let mode: number | undefined;
 		if (flag === "w" && existsSync(destination)) {
@@ -1302,6 +1303,7 @@ export class SessionManager {
 		}
 		const temporary = flag === "w" ? `${destination}.${randomUUID()}.tmp` : undefined;
 		const fd = openSync(temporary ?? destination, "wx", mode);
+		this.needsRewrite = true;
 		// Only a successful exclusive creation authorizes repairing an initial file.
 		// Keep open outside cleanup so a collision never removes someone else's file.
 		if (!temporary) this.flushed = true;
@@ -1338,6 +1340,23 @@ export class SessionManager {
 		if (this.needsRewrite || (!this.flushed && this._hasPersistableEntries())) {
 			this._rewriteFile(this.flushed ? "w" : "wx");
 		}
+		if (this.failedAppendIndex !== undefined && this.sessionFile) {
+			// Repair only missing appends; replacing our stale snapshot would erase other writers.
+			// Loading also terminates an incomplete final line before new entries are appended.
+			if (!existsSync(this.sessionFile)) {
+				this._rewriteFile("wx");
+			} else {
+				const entries = loadEntriesFromFile(this.sessionFile);
+				if (entries.length === 0) {
+					throw new Error(`Session file is not a valid ${APP_NAME} session: ${this.sessionFile}`);
+				}
+				const saved = new Set(entries.map((entry) => entry.id));
+				for (const entry of this.fileEntries.slice(this.failedAppendIndex)) {
+					if (!saved.has(entry.id)) appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				}
+			}
+			this.failedAppendIndex = undefined;
+		}
 	}
 
 	isPersisted(): boolean {
@@ -1367,15 +1386,15 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		if (!this.flushed || this.needsRewrite) {
+		if (!this.flushed || this.needsRewrite || this.failedAppendIndex !== undefined) {
 			// The newly accepted entry is already in fileEntries; publish or repair all entries once.
 			this.flush();
 			return;
 		}
 
-		this.needsRewrite = true;
+		this.failedAppendIndex = this.fileEntries.length - 1;
 		appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-		this.needsRewrite = false;
+		this.failedAppendIndex = undefined;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {

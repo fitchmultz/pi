@@ -41,23 +41,19 @@ export async function isInsideGitRepo(searchPath: string): Promise<boolean> {
 	}
 }
 
-export function expandPath(filePath: string): string {
-	return normalizePath(filePath, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
-}
-
 /**
  * Resolve a path relative to the given cwd.
  * Handles ~ expansion and absolute paths without changing literal filename characters.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
-	return resolveLocalOperationPath(cwd, normalizePath(filePath, { stripAtPrefix: true, expandTilde: false }));
+	return resolveLocalOperationPath(cwd, normalizePath(filePath, { expandTilde: false }));
 }
 
 // Filename conveniences are read-only fallbacks, never preferred over an exact path.
 function* readPathFallbacks(filePath: string, cwd: string): Generator<string> {
 	const resolved = resolveLocalOperationPath(
 		cwd,
-		normalizePath(filePath, { normalizeUnicodeSpaces: true, stripAtPrefix: true, expandTilde: false }),
+		normalizePath(filePath, { normalizeUnicodeSpaces: true, expandTilde: false }),
 	);
 	yield resolved;
 

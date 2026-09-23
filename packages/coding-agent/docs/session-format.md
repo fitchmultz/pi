@@ -257,9 +257,9 @@ The compaction summary replaces entries before `firstKeptEntryId`. Pre-compactio
 
 ## Persistence failures
 
-Appends accept entries in memory before journal I/O. An I/O error retains the entry, ID, parent, leaf, revision, and indexes; do not append again to retry saving. `flush()` and later appends reconcile failed/partial persistence from the complete native entry list. Errors propagate until saving succeeds.
+Appends accept entries in memory before journal I/O. An I/O error retains the entry, ID, parent, leaf, revision, and indexes; do not append again to retry saving. `flush()` and later appends retry missing entries without replacing the journal, preserving entries saved by other writers. An incomplete final line is terminated and skipped during parsing; entries already saved are not duplicated. Errors propagate until saving succeeds.
 
-Full rewrites stage a complete sibling temporary file and rename only after writes/close succeed. Journals opened through symlinks replace the resolved target while preserving the alias and permission mode. Failed staging preserves old bytes and removes temporary output. Repair needs a writable journal and parent; new journals retain exclusive collision protection.
+Full rewrites stage a complete sibling temporary file and rename only after writes/close succeed. Journals opened through symlinks replace the resolved target while preserving the alias and permission mode. Failed staging preserves old bytes and removes temporary output. Full rewrites need a writable journal and parent; new journals retain exclusive collision protection.
 
 `flush()` changes no entries/revisions/leaf and emits no events. It is a no-op for in-memory sessions and deferred journals with no assistant response, usage, or custom entry. Session replacement flushes failed persistence first. Retain the process after failed saving; this is not a filesystem freeze or power-loss guarantee.
 

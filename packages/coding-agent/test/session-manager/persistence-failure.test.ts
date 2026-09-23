@@ -12,6 +12,7 @@ vi.mock("fs", async (importOriginal) => {
 	return {
 		...actual,
 		appendFileSync: vi.fn(actual.appendFileSync),
+		existsSync: vi.fn(actual.existsSync),
 		writeFileSync: vi.fn(actual.writeFileSync),
 		closeSync: vi.fn(actual.closeSync),
 		renameSync: vi.fn(actual.renameSync),
@@ -28,6 +29,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 	vi.mocked(fs.appendFileSync).mockRestore();
+	vi.mocked(fs.existsSync).mockRestore();
 	vi.mocked(fs.writeFileSync).mockRestore();
 	vi.mocked(fs.closeSync).mockRestore();
 	vi.mocked(fs.renameSync).mockRestore();
@@ -148,6 +150,68 @@ it("retries failed branch publication without exposing a partial usage journal",
 
 const permissionTest = it.skipIf(process.platform === "win32" || process.getuid?.() === 0);
 
+it.each(["before", "partial", "complete"] as const)(
+	"keeps another writer's saved conversation when repairing an append that failed %s writing",
+	async (failurePoint) => {
+		const actual = await vi.importActual<typeof fs>("node:fs");
+		const first = SessionManager.create(directory, directory);
+		first.appendMessage(fauxAssistantMessage("shared response"));
+		const file = first.getSessionFile()!;
+		const second = SessionManager.open(file);
+		const prompt = second.appendMessage({ role: "user", content: "other prompt", timestamp: 1 });
+		const answer = second.appendMessage(fauxAssistantMessage("other answer"));
+		const failure = new Error("append failed");
+		vi.mocked(fs.appendFileSync).mockImplementationOnce((path, data) => {
+			if (failurePoint !== "before") {
+				actual.appendFileSync(path, failurePoint === "partial" ? String(data).slice(0, 20) : data);
+			}
+			throw failure;
+		});
+		expect(() => first.appendCustomEntry("retained", {})).toThrow(failure);
+		const accepted = first.getLeafEntry()!;
+		const beforeRepair = fs.readFileSync(file);
+		first.flush();
+
+		expect(fs.readFileSync(file).subarray(0, beforeRepair.length)).toEqual(beforeRepair);
+		const reopened = SessionManager.open(file);
+		expect(reopened.getEntry(prompt)).toEqual(second.getEntry(prompt));
+		expect(reopened.getEntry(answer)).toEqual(second.getEntry(answer));
+		expect(reopened.getEntries().filter((entry) => entry.id === accepted.id)).toEqual([accepted]);
+	},
+);
+
+it.each(["missing", "invalid", "collision"] as const)("retains failed appends when the journal is %s", async (kind) => {
+	const actual = await vi.importActual<typeof fs>("node:fs");
+	const sm = SessionManager.create(directory, directory);
+	sm.appendMessage(fauxAssistantMessage("saved response"));
+	const file = sm.getSessionFile()!;
+	const original = fs.readFileSync(file);
+	const failure = new Error("append failed");
+	vi.mocked(fs.appendFileSync).mockImplementationOnce(() => {
+		throw failure;
+	});
+	expect(() => sm.appendCustomEntry("retained", {})).toThrow(failure);
+	if (kind === "invalid") fs.writeFileSync(file, "unrelated file\n");
+	else fs.unlinkSync(file);
+	if (kind === "collision") {
+		vi.mocked(fs.existsSync).mockImplementationOnce(() => {
+			actual.writeFileSync(file, original);
+			return false;
+		});
+		expect(() => sm.flush()).toThrow(/EEXIST/);
+		expect(fs.readFileSync(file)).toEqual(original);
+	}
+	if (kind === "invalid") {
+		for (let retry = 0; retry < 2; retry++) {
+			expect(() => sm.flush()).toThrow(/not a valid/);
+			expect(fs.readFileSync(file, "utf8")).toBe("unrelated file\n");
+		}
+		fs.writeFileSync(file, original);
+	}
+	sm.flush();
+	expect(SessionManager.open(file).getEntries()).toEqual(sm.getEntries());
+});
+
 permissionTest.each([false, true])(
 	"repairs failed appends and label indexes on the next append (assistant: %s)",
 	(assistant) => {
@@ -214,12 +278,12 @@ permissionTest.each(["relative", "absolute"] as const)(
 		const entries = sm.getEntries();
 		const revision = sm.getEntriesRevision();
 		const failure = new Error("controlled partial repair failure");
-		vi.mocked(fs.writeFileSync).mockImplementationOnce((fd, data) => {
-			actual.writeFileSync(fd, String(data).slice(0, 20));
+		vi.mocked(fs.appendFileSync).mockImplementationOnce((path, data) => {
+			actual.appendFileSync(path, String(data).slice(0, 20));
 			throw failure;
 		});
 		expect(() => sm.flush()).toThrow(failure);
-		expect(fs.readFileSync(target)).toEqual(before);
+		expect(fs.readFileSync(target).subarray(0, before.length)).toEqual(before);
 		expect(fs.readlinkSync(alias)).toBe(link);
 		expect(fs.readdirSync(targetDir)).toEqual(files);
 		const previousUmask = process.umask(0o077);
@@ -285,7 +349,7 @@ it.each(["initial", "usage", "append", "close"] as const)(
 		const actual = await vi.importActual<typeof fs>("node:fs");
 		const sm = SessionManager.create(directory, directory);
 		sm.appendMessage({ role: "user", content: "retained user", timestamp: 1 });
-		if (kind !== "initial" && kind !== "usage") sm.appendMessage(fauxAssistantMessage("first response"));
+		if (kind === "append") sm.appendMessage(fauxAssistantMessage("first response"));
 		const failure = Object.assign(new Error("controlled write failure"), { code: "ENOSPC" });
 		if (kind === "initial" || kind === "usage") {
 			vi.mocked(fs.writeFileSync).mockImplementationOnce((file, data) => {
@@ -298,8 +362,8 @@ it.each(["initial", "usage", "append", "close"] as const)(
 				throw failure;
 			});
 		} else {
-			// First make the journal dirty; the retry below will fail after writing all bytes.
-			vi.mocked(fs.appendFileSync).mockImplementationOnce(() => {
+			vi.mocked(fs.closeSync).mockImplementationOnce((fd) => {
+				actual.closeSync(fd);
 				throw failure;
 			});
 		}
@@ -314,10 +378,16 @@ it.each(["initial", "usage", "append", "close"] as const)(
 		const priorBytes = fs.readFileSync(file);
 		const priorFiles = fs.readdirSync(directory);
 		// PR68: a failed repair must not truncate even a partially written journal.
-		vi.mocked(fs.writeFileSync).mockImplementationOnce((fd, data) => {
-			actual.writeFileSync(fd, String(data).slice(0, 20));
-			throw failure;
-		});
+		if (kind === "append") {
+			vi.mocked(fs.appendFileSync).mockImplementationOnce(() => {
+				throw failure;
+			});
+		} else {
+			vi.mocked(fs.writeFileSync).mockImplementationOnce((fd, data) => {
+				actual.writeFileSync(fd, String(data).slice(0, 20));
+				throw failure;
+			});
+		}
 		expect(() => sm.flush()).toThrow(failure);
 		expect(fs.readFileSync(file)).toEqual(priorBytes);
 		expect(fs.readdirSync(directory)).toEqual(priorFiles);
@@ -355,16 +425,17 @@ it.each(["assistant", "usage"] as const)("does not overwrite a collided initial 
 	expect(fs.readdirSync(directory)).toEqual([file.slice(directory.length + 1)]);
 });
 
-it.each(["collision", "rename"] as const)("preserves the journal on temporary-file %s failure", (kind) => {
+it.each(["collision", "rename"] as const)("preserves the journal on temporary-file %s failure", async (kind) => {
+	const actual = await vi.importActual<typeof fs>("node:fs");
 	const sm = SessionManager.create(directory, directory);
-	sm.appendMessage(fauxAssistantMessage("persisted response"));
-	const file = sm.getSessionFile()!;
-	const before = fs.readFileSync(file);
 	const failure = new Error("controlled persistence failure");
-	vi.mocked(fs.appendFileSync).mockImplementationOnce(() => {
+	vi.mocked(fs.closeSync).mockImplementationOnce((fd) => {
+		actual.closeSync(fd);
 		throw failure;
 	});
-	expect(() => sm.appendCustomEntry("retained", {})).toThrow(failure);
+	expect(() => sm.appendMessage(fauxAssistantMessage("persisted response"))).toThrow(failure);
+	const file = sm.getSessionFile()!;
+	const before = fs.readFileSync(file);
 	const uuid = "00000000-0000-4000-8000-000000000000";
 	const temporary = `${file}.${uuid}.tmp`;
 	vi.mocked(crypto.randomUUID).mockReturnValueOnce(uuid);

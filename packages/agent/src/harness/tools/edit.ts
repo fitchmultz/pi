@@ -11,7 +11,6 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
-import { resolveToolPath } from "./path-utils.ts";
 import type { ExecutionToolContext } from "./tool-context.ts";
 
 const replaceEditSchema = Type.Object(
@@ -101,19 +100,18 @@ export function createEditTool<TContext extends ExecutionToolContext = Execution
 		prepareArguments: prepareEditArguments,
 		async execute(_toolCallId, input, _onUpdate, { env }, _invocation, context) {
 			const { path, edits } = validateEditInput(input);
-			const absolutePath = await resolveToolPath(env, path, context);
 			return withFileMutationQueue(
 				env,
-				absolutePath,
+				path,
 				async () => {
 					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
-					const info = await env.fileInfo(absolutePath, context);
+					const info = await env.fileInfo(path, context);
 					if (!info.ok) throw editAccessError(path, info.error);
 					if (info.value.kind !== "file" && info.value.kind !== "symlink") {
 						throw new Error(`Could not edit file: ${path}. Path is not a file.`);
 					}
 
-					const readResult = await env.readTextFile(absolutePath, context);
+					const readResult = await env.readTextFile(path, context);
 					if (!readResult.ok) throw editAccessError(path, readResult.error);
 					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
 
@@ -127,7 +125,7 @@ export function createEditTool<TContext extends ExecutionToolContext = Execution
 					const diffResult = generateDiffString(baseContent, newContent);
 					const patch = generateUnifiedPatch(path, baseContent, newContent);
 					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
-					const writeResult = await env.writeFile(absolutePath, finalContent, context);
+					const writeResult = await env.writeFile(path, finalContent, context);
 					if (!writeResult.ok) throw editAccessError(path, writeResult.error);
 					return {
 						content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${path}.` }],

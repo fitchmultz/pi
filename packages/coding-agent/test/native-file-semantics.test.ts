@@ -76,6 +76,25 @@ function tools(root: string, kind: "legacy" | "harness") {
 }
 
 describe.each(["legacy", "harness"] as const)("%s native operation paths", (kind) => {
+	it.each([false, true])("keeps leading @ literal when the target already exists: %s", async (exists) => {
+		const root = await fixture();
+		const api = tools(root, kind);
+		await mkdir(join(root, "@scope/pkg"), { recursive: true });
+		await mkdir(join(root, "scope/pkg"), { recursive: true });
+		const target = "@scope/pkg/config.json";
+		const neighbor = join(root, "scope/pkg/config.json");
+		await writeFile(neighbor, "UNRELATED");
+		if (exists) await writeFile(join(root, target), "ORIGINAL");
+
+		await api.write(target, "WRITTEN");
+		expect(await readFile(join(root, target), "utf8")).toBe("WRITTEN");
+		await api.edit(target, "WRITTEN", "EDITED");
+		expect((await api.read(target)).content).toContainEqual(
+			expect.objectContaining({ text: expect.stringContaining("EDITED") }),
+		);
+		expect(await readFile(join(root, target), "utf8")).toBe("EDITED");
+		expect(await readFile(neighbor, "utf8")).toBe("UNRELATED");
+	});
 	it("reads and edits the same target as native traversal while keeping lexical APIs", async () => {
 		const root = await fixture();
 		const env = new NodeExecutionEnv({ cwd: root });
