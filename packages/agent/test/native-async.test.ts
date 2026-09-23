@@ -1,6 +1,7 @@
 import type { AssistantMessage, Message, Model, ToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
+import { createResponsesControl } from "../../ai/src/api/openai-responses-control.ts";
 import { AssistantMessageEventStream } from "../../ai/src/utils/event-stream.ts";
 import { Agent } from "../src/agent.ts";
 import { getPendingToolCalls } from "../src/agent-loop.ts";
@@ -288,6 +289,13 @@ describe("native async lifecycle", () => {
 				}
 				throw new Error("FAILED_SIBLING_MARKER");
 			});
+			const retire = vi.fn();
+			const provider = agent.streamFunction;
+			agent.streamFunction = (requestModel, context, options) => {
+				const { control } = createResponsesControl(model, { model: model.id }, vi.fn(), vi.fn(), retire);
+				options?.onResponseControl?.(control);
+				return provider(requestModel, context, options);
+			};
 			const prepared: unknown[] = [];
 			agent.prepareNextTurnWithContext = async ({ newContext, context }) => {
 				prepared.push(newContext);
@@ -320,6 +328,8 @@ describe("native async lifecycle", () => {
 					),
 				).toBe(true),
 			);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(retire).toHaveBeenCalledTimes(sameResponse ? 0 : 1);
 			finish(streams[1], second);
 			await answer(streams, 2);
 			await run;

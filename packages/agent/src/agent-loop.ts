@@ -255,7 +255,7 @@ async function runLoop(
 	const failedScopes = new WeakSet<object>();
 	const recordNewContext = (batch: ExecutedToolCallBatch, scope: object): void => {
 		if (batch.messages.some((message) => message.isError)) failedScopes.add(scope);
-		if (batch.newContext) pendingNewContext ??= { request: batch.newContext, scope };
+		if (batch.newContext && !failedScopes.has(scope)) pendingNewContext ??= { request: batch.newContext, scope };
 	};
 	let responseRetired = false;
 	const retireForNewContext = (): void => {
