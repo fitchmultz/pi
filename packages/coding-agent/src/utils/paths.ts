@@ -13,8 +13,6 @@ export interface PathInputOptions {
 	expandTilde?: boolean;
 	/** Home directory used for `~` expansion. Defaults to `os.homedir()`. */
 	homeDir?: string;
-	/** Strip a leading `@`, used for CLI @file paths. */
-	stripAtPrefix?: boolean;
 	/** Normalize unicode space variants to regular spaces. */
 	normalizeUnicodeSpaces?: boolean;
 }
@@ -76,9 +74,6 @@ export function normalizePath(input: string, options: PathInputOptions = {}): st
 	let normalized = options.trim ? input.trim() : input;
 	if (options.normalizeUnicodeSpaces) {
 		normalized = normalized.replace(UNICODE_SPACES, " ");
-	}
-	if (options.stripAtPrefix && normalized.startsWith("@")) {
-		normalized = normalized.slice(1);
 	}
 	if (process.platform === "win32") {
 		normalized = normalizeWindowsShellPath(normalized);

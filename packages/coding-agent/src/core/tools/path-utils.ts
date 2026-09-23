@@ -41,10 +41,6 @@ export async function isInsideGitRepo(searchPath: string): Promise<boolean> {
 	}
 }
 
-export function expandPath(filePath: string): string {
-	return normalizePath(filePath, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
-}
-
 /**
  * Resolve a path relative to the given cwd.
  * Handles ~ expansion and absolute paths without changing literal filename characters.
