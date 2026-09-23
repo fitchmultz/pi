@@ -260,6 +260,26 @@ describe("AuthStorage", () => {
 		expect(acl()).toContain("group:everyone allow read");
 	});
 
+	test.skipIf(process.platform !== "linux")("does not inherit a parent's default ACL", async () => {
+		const parent = join(tempDir, "acl-parent");
+		const path = join(parent, "auth.json");
+		mkdirSync(parent, { mode: 0o755 });
+		const setAcl = (...args: string[]) => {
+			const result = spawnSync("/usr/bin/setfacl", args, { encoding: "utf8" });
+			expect(result.status, result.stderr).toBe(0);
+		};
+		setAcl("-m", "u:nobody:rx", parent);
+		setAcl("-d", "-m", "u:nobody:r", parent);
+		writeFileSync(path, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o640 });
+		setAcl("-b", path);
+		const getAcl = () => spawnSync("/usr/bin/getfacl", ["-c", path], { encoding: "utf8" }).stdout;
+		expect(getAcl()).not.toContain("user:nobody:");
+
+		await AuthStorage.create(path).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+
+		expect(getAcl()).not.toContain("user:nobody:");
+	});
+
 	test.skipIf(process.platform === "win32")("does not run a project cp during credential saves", async () => {
 		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
 		const bin = join(tempDir, "bin");

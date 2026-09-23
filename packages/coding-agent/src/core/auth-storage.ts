@@ -42,6 +42,7 @@ async function publishStoredFile(path: string, content: string, signal?: AbortSi
 	signal?.throwIfAborted();
 	const stageDir = await mkdtemp(join(dirname(target), ".pi-auth-"));
 	try {
+		if (process.platform === "linux") execFileSync("/usr/bin/setfacl", ["-k", stageDir]);
 		const stage = join(stageDir, "file");
 		if (previous) {
 			if (process.platform === "win32") {

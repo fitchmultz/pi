@@ -17,6 +17,8 @@ Run `/logout` and select a provider to remove its stored credential. This does n
 
 `auth.json` can contain API keys and OAuth tokens. Keep it private and do not commit it.
 
+On Linux, install the `acl` package so Pi can preserve file permissions when saving credentials. The directory containing `auth.json` must be writable; a single-file bind mount cannot be replaced atomically.
+
 Radius authentication uses its gateway catalog and caches refreshed model metadata for later offline startup. A custom Radius gateway configured in `models.json` uses its own catalog rather than inheriting the public `radius.pi.dev` catalog.
 
 ## Use an API key from the environment
