@@ -940,6 +940,7 @@ describe("Coding Agent Tools", () => {
 			const fullOutput = readFileSync(fullOutputPath!, "utf-8");
 			expect(fullOutput).toContain("1\n2\n3");
 			expect(fullOutput).toContain("2998\n2999\n3000");
+			if (process.platform !== "win32") expect(statSync(fullOutputPath!).mode & 0o077).toBe(0);
 		});
 	});
 
