@@ -167,6 +167,17 @@ describe("JSONL share export", () => {
 		fs.symlinkSync(join(tempDir, "sessions"), aliasDir);
 		expect(() => exportSessionToJsonl(manager, join(aliasDir, basename(source)))).toThrow(/source session file/);
 		expect(fs.existsSync(source)).toBe(false);
+		const caseAlias = join(tempDir, "sessions", basename(source).replace("T", "t"));
+		const probe = join(tempDir, "CaseProbe");
+		writeFileSync(probe, "probe");
+		const ignoresCase = fs.existsSync(join(tempDir, "caseprobe"));
+		fs.rmSync(probe);
+		if (ignoresCase) {
+			expect(() => exportSessionToJsonl(manager, caseAlias)).toThrow(/source session file/);
+		} else {
+			expect(exportSessionToJsonl(manager, caseAlias)).toBe(caseAlias);
+		}
+		expect(fs.existsSync(source)).toBe(false);
 		manager.appendMessage(assistantMsg("first persisted response"));
 		expect(readFileSync(source, "utf8")).toContain("first persisted response");
 	});

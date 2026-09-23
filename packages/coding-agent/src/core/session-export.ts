@@ -74,11 +74,20 @@ export function assertDistinctExportTarget(sourceFile: string | undefined, outpu
 	const samePath = resolvePath(sourceFile) === resolvePath(outputPath);
 	const source = statSync(sourceFile, { throwIfNoEntry: false });
 	const output = statSync(outputPath, { throwIfNoEntry: false });
-	if (
-		samePath ||
-		(source && output && source.dev === output.dev && source.ino === output.ino) ||
-		(!source && resolveExportFileTarget(sourceFile) === resolveExportFileTarget(outputPath))
-	) {
+	let samePendingTarget = false;
+	if (!source) {
+		const sourceTarget = resolveExportFileTarget(sourceFile);
+		const outputTarget = resolveExportFileTarget(outputPath);
+		// ponytail: Case-only names on case-sensitive macOS/Windows volumes are conservatively blocked
+		// until the journal exists; use a per-volume case-sensitivity check if that use case matters.
+		samePendingTarget =
+			sourceTarget === outputTarget ||
+			((process.platform === "darwin" || process.platform === "win32") &&
+				dirname(sourceTarget) === dirname(outputTarget) &&
+				basename(sourceTarget).normalize("NFD").toLowerCase() ===
+					basename(outputTarget).normalize("NFD").toLowerCase());
+	}
+	if (samePath || (source && output && source.dev === output.dev && source.ino === output.ino) || samePendingTarget) {
 		throw new Error(`Cannot export over the source session file: ${outputPath}`);
 	}
 }
