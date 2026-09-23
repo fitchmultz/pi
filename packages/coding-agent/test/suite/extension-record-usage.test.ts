@@ -195,7 +195,7 @@ describe("extension recordUsage", () => {
 		const manager = SessionManager.create(dir, dir);
 		const { api } = await open(manager);
 		const value = contribution();
-		manager.appendCustomEntry("deferred", { retained: true });
+		manager.appendSessionInfo("deferred");
 		expect(existsSync(manager.getSessionFile()!)).toBe(false);
 		api.recordUsage(value);
 		const file = manager.getSessionFile()!;

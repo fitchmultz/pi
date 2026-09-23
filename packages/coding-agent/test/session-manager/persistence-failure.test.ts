@@ -44,10 +44,53 @@ const usage = {
 	cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 1 },
 };
 
+it("persists custom-only entries before an assistant response", () => {
+	const sm = SessionManager.create(directory, directory);
+	const file = sm.getSessionFile()!;
+	expect(fs.existsSync(file)).toBe(false);
+	const id = sm.appendCustomEntry("stash", { note: "save before first turn" });
+	const entries = sm.getEntries();
+	expect(entries).toHaveLength(1);
+	expect(fs.existsSync(file)).toBe(true);
+	const reopened = SessionManager.open(file);
+	expect(reopened.getEntry(id)).toEqual(entries[0]);
+	expect(reopened.getEntries()).toEqual(entries);
+	expect(reopened.buildSessionContext().messages).toEqual([]);
+});
+
+it.each(["branch", "fork"] as const)("persists pre-assistant %s with custom entries", (kind) => {
+	const sm = SessionManager.create(directory, directory);
+	sm.appendMessage({ role: "user", content: "first turn", timestamp: 1 });
+	const id = sm.appendCustomEntry("stash", { note: "before assistant" });
+	const entries = sm.getEntries();
+	const source = sm.getSessionFile()!;
+	const copy =
+		kind === "branch"
+			? sm.createBranchedSession(id)!
+			: SessionManager.forkFrom(source, directory, directory).getSessionFile()!;
+	expect(copy).not.toBe(source);
+	expect(fs.existsSync(copy)).toBe(true);
+	const reopened = SessionManager.open(copy);
+	expect(reopened.getEntries()).toEqual(entries);
+	expect(reopened.getBranch()).toEqual(entries);
+	expect(reopened.getHeader()?.parentSession).toBe(source);
+});
+
+it("does not duplicate saved custom entries when the first assistant responds", () => {
+	const sm = SessionManager.create(directory, directory);
+	sm.appendCustomEntry("stash", { note: "before assistant" });
+	const file = sm.getSessionFile()!;
+	expect(SessionManager.open(file).getEntries()).toEqual(sm.getEntries());
+	sm.appendMessage(fauxAssistantMessage("response"));
+	const entries = sm.getEntries();
+	expect(fs.readFileSync(file, "utf8").trim().split("\n")).toHaveLength(entries.length + 1);
+	expect(SessionManager.open(file).getEntries()).toEqual(entries);
+});
+
 it("persists usage before any assistant response and retains it across a new session", () => {
 	const sm = SessionManager.create(directory, directory);
 	const file = sm.getSessionFile()!;
-	sm.appendCustomEntry("before-usage", { kept: true });
+	sm.appendModelChange("test-provider", "test-model");
 	expect(fs.existsSync(file)).toBe(false);
 	const entry = sm.appendUsage("child_work", "test-provider", "test-model", usage, "slash command");
 	expect(fs.existsSync(file)).toBe(true);
@@ -223,9 +266,9 @@ permissionTest.each([false, true])("does not own an initial symlink collision (d
 
 permissionTest("retries initial creation after a real directory permission failure", () => {
 	const sm = SessionManager.create(directory, directory);
-	sm.appendCustomEntry("before-assistant", { kept: true });
 	fs.chmodSync(directory, 0o500);
 	try {
+		expect(() => sm.appendCustomEntry("before-assistant", { kept: true })).toThrow(/EACCES/);
 		expect(() => sm.appendMessage(fauxAssistantMessage("first response"))).toThrow(/EACCES/);
 		expect(() => sm.flush()).toThrow(/EACCES/);
 		expect(fs.existsSync(sm.getSessionFile()!)).toBe(false);
@@ -388,11 +431,8 @@ permissionTest.each(["new", "switch", "branch"] as const)(
 	},
 );
 
-it("flush leaves ordinary deferred and in-memory entries alone", () => {
+it("flush defers user-only journals and never writes in-memory sessions", () => {
 	for (const sm of [SessionManager.create(directory, directory), SessionManager.inMemory(directory)]) {
-		sm.flush();
-		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
-		sm.appendCustomEntry("deferred", {});
 		sm.flush();
 		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
 		const user = sm.appendMessage({ role: "user", content: "deferred user", timestamp: 1 });
@@ -401,6 +441,10 @@ it("flush leaves ordinary deferred and in-memory entries alone", () => {
 		sm.createBranchedSession(user);
 		sm.flush();
 		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
+		sm.appendCustomEntry("saved", {});
+		sm.flush();
+		if (sm.isPersisted()) expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual(sm.getEntries());
+		else expect(sm.getSessionFile()).toBeUndefined();
 		sm.appendUsage("child_work", "test-provider", "test-model", usage);
 		sm.flush();
 		if (sm.isPersisted()) expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual(sm.getEntries());

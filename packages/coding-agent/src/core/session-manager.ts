@@ -1325,14 +1325,14 @@ export class SessionManager {
 
 	private _hasPersistableEntries(): boolean {
 		return this.fileEntries.some(
-			(e) => e.type === "usage" || (e.type === "message" && e.message.role === "assistant"),
+			(e) => e.type === "custom" || e.type === "usage" || (e.type === "message" && e.message.role === "assistant"),
 		);
 	}
 
 	/**
 	 * Persist accepted entries without appending entries or moving the leaf.
 	 * Throws while persistence still fails. In-memory sessions remain untouched;
-	 * new journals wait for an assistant response or usage entry.
+	 * new journals wait for an assistant response, usage entry, or custom entry.
 	 */
 	flush(): void {
 		if (this.needsRewrite || (!this.flushed && this._hasPersistableEntries())) {

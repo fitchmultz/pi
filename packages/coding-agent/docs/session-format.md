@@ -177,7 +177,7 @@ Extension state persistence. Does NOT participate in LLM context.
 {"type":"custom","id":"h8i9j0k1","parentId":"g7h8i9j0","timestamp":"2024-12-03T14:20:00.000Z","customType":"my-extension","data":{"count":42}}
 ```
 
-Use `customType` to identify your extension's entries on reload. Interactive mode can render custom entries via `pi.registerEntryRenderer(customType, renderer)`, but they still do not participate in LLM context.
+Use `customType` to identify your extension's entries on reload. The first custom entry saves a file-backed session even before an assistant response, including earlier deferred entries; copied branches containing custom entries are saved immediately. Interactive mode can render custom entries via `pi.registerEntryRenderer(customType, renderer)`, but they still do not participate in LLM context.
 
 ### CustomMessageEntry
 
@@ -261,7 +261,7 @@ Appends accept entries in memory before journal I/O. An I/O error retains the en
 
 Full rewrites stage a complete sibling temporary file and rename only after writes/close succeed. Journals opened through symlinks replace the resolved target while preserving the alias and permission mode. Failed staging preserves old bytes and removes temporary output. Repair needs a writable journal and parent; new journals retain exclusive collision protection.
 
-`flush()` changes no entries/revisions/leaf and emits no events. It is a no-op for in-memory sessions and deferred journals with no assistant response or usage. Session replacement flushes failed persistence first. Retain the process after failed saving; this is not a filesystem freeze or power-loss guarantee.
+`flush()` changes no entries/revisions/leaf and emits no events. It is a no-op for in-memory sessions and deferred journals with no assistant response, usage, or custom entry. Session replacement flushes failed persistence first. Retain the process after failed saving; this is not a filesystem freeze or power-loss guarantee.
 
 `getEntriesRevision()` changes on append or session replacement, not leaf-only navigation; use it for file-wide derived-data caches. Session listing methods accept optional abort signals. See the exported [`SessionManager`](../src/core/session-manager.ts) declarations for signatures.
 
