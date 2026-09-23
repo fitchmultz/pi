@@ -702,6 +702,7 @@ export default function(pi) {
 		const journal = readFileSync(starts[0].sessionFile!, "utf8")
 			.trim()
 			.split("\n")
+			.filter(Boolean)
 			.map((line) => JSON.parse(line));
 		expect(journal.filter((entry) => entry.type === "message" && entry.message.role === "user")).toHaveLength(2);
 	});
@@ -860,6 +861,7 @@ export default function(pi) {
 			const entries = readFileSync(starts[0].sessionFile!, "utf8")
 				.trim()
 				.split("\n")
+				.filter(Boolean)
 				.map((line) => JSON.parse(line));
 			const messages = entries.filter((entry) => entry.type === "message").map((entry) => entry.message);
 			expect(

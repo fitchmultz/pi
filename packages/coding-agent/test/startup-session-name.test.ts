@@ -59,6 +59,7 @@ function readSessionInfoNames(sessionFile: string): string[] {
 	return readFileSync(sessionFile, "utf8")
 		.trim()
 		.split("\n")
+		.filter(Boolean)
 		.map((line) => JSON.parse(line) as { type?: string; name?: string })
 		.filter((entry) => entry.type === "session_info")
 		.map((entry) => entry.name ?? "");
