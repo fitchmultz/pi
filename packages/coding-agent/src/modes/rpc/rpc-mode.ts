@@ -454,6 +454,18 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		unsubscribe?.();
+		unsubscribeBackpressure?.();
+		unsubscribe = session.subscribe((event) => {
+			output(toJsonEvent(event));
+			if (event.type === "agent_settled") {
+				void checkShutdownRequested();
+			}
+		});
+		unsubscribeBackpressure = session.agent.subscribe(async () => {
+			await waitForRawStdoutBackpressure();
+		});
+
 		await session.bindExtensions({
 			uiContext: createExtensionUIContext(),
 			mode: frontend,
@@ -498,17 +510,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			},
 		});
 
-		unsubscribe?.();
-		unsubscribeBackpressure?.();
-		unsubscribe = session.subscribe((event) => {
-			output(toJsonEvent(event));
-			if (event.type === "agent_settled") {
-				void checkShutdownRequested();
-			}
-		});
-		unsubscribeBackpressure = session.agent.subscribe(async () => {
-			await waitForRawStdoutBackpressure();
-		});
 		await interactiveMode?.rebindHostedSession();
 	};
 

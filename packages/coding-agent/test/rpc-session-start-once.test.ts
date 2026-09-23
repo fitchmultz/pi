@@ -26,7 +26,6 @@ export default function (pi) {
 		cwd: root,
 		env: {
 			PI_CODING_AGENT_DIR: join(root, "agent"),
-			PI_OFFLINE: "1",
 			NODE_OPTIONS: process.env.PI_TEST_CLI
 				? ""
 				: `--import=${JSON.stringify(resolve(__dirname, "../src/experimental/source-resolver.ts"))}`,
@@ -58,6 +57,16 @@ export default function (pi) {
 		const seed = originalEntries.entries.find((entry) => entry.type === "message" && entry.message.role === "user");
 		expect(seed).toBeDefined();
 		expect(starts()).toEqual([{ reason: "startup", sessionId: original.sessionId }]);
+		const entryEvents: unknown[] = [];
+		client.onEvent((event) => {
+			if (
+				event.type === "entry_appended" &&
+				event.entry.type === "custom" &&
+				event.entry.customType === "startup-action"
+			) {
+				entryEvents.push(event.entry.data);
+			}
+		});
 
 		expect(await client.newSession()).toEqual({ cancelled: false });
 		const created = await client.getState();
@@ -66,6 +75,7 @@ export default function (pi) {
 			{ reason: "startup", sessionId: original.sessionId },
 			{ reason: "new", sessionId: created.sessionId },
 		]);
+		expect(entryEvents).toEqual([{ reason: "new" }]);
 		expect(
 			(await client.getEntries()).entries.filter(
 				(entry) => entry.type === "custom" && entry.customType === "startup-action",
@@ -76,17 +86,23 @@ export default function (pi) {
 		expect((await client.getState()).sessionId).toBe(original.sessionId);
 		expect(starts().at(-1)).toEqual({ reason: "resume", sessionId: original.sessionId });
 		expect(starts()).toHaveLength(3);
+		expect(entryEvents.at(-1)).toEqual({ reason: "resume" });
+		expect(entryEvents).toHaveLength(2);
 
 		expect(await client.fork(seed!.id)).toEqual({ text: "seed", cancelled: false });
 		const forked = await client.getState();
 		expect(starts().at(-1)).toEqual({ reason: "fork", sessionId: forked.sessionId });
 		expect(starts()).toHaveLength(4);
+		expect(entryEvents.at(-1)).toEqual({ reason: "fork" });
+		expect(entryEvents).toHaveLength(3);
 
 		expect(await client.clone()).toEqual({ cancelled: false });
 		const cloned = await client.getState();
 		expect(cloned.sessionId).not.toBe(forked.sessionId);
 		expect(starts().at(-1)).toEqual({ reason: "fork", sessionId: cloned.sessionId });
 		expect(starts()).toHaveLength(5);
+		expect(entryEvents.at(-1)).toEqual({ reason: "fork" });
+		expect(entryEvents).toHaveLength(4);
 	} finally {
 		await client.stop();
 		rmSync(root, { recursive: true, force: true });
