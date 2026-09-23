@@ -122,7 +122,10 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 	it.each([false, true])(
 		"preserves an accepted response across replacement when persistence still fails: %s",
 		async (stillFailing) => {
-			const { runtimeHost } = await createRuntimeHost(() => {});
+			const shutdown = vi.fn();
+			const { runtimeHost } = await createRuntimeHost((pi) => {
+				pi.on("session_shutdown", shutdown);
+			});
 			await runtimeHost.session.prompt("first");
 			const outgoing = runtimeHost.session;
 			const journal = outgoing.sessionFile!;
@@ -152,17 +155,50 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			const invalidate = vi.fn();
 			runtimeHost.setBeforeSessionInvalidate(invalidate);
 			if (stillFailing) {
-				await expect(runtimeHost.newSession()).rejects.toThrow(writeError);
+				await expect(runtimeHost.newSession()).rejects.toMatchObject({
+					name: "SessionReplacementPersistenceError",
+					cause: writeError,
+				});
 				expect(runtimeHost.session).toBe(outgoing);
 				expect(invalidate).not.toHaveBeenCalled();
+				expect(shutdown.mock.calls.length).toBe(0);
 				expect(outgoing.extensionRunner.createContext().cwd).toBe(outgoing.sessionManager.getCwd());
 			}
 			vi.mocked(fs.appendFileSync).mockRestore();
 			await expect(runtimeHost.newSession()).resolves.toEqual({ cancelled: false });
 			expect(invalidate).toHaveBeenCalledOnce();
+			expect(shutdown).toHaveBeenCalledOnce();
 			expect(runtimeHost.session).not.toBe(outgoing);
 			expect(SessionManager.open(journal).getEntry(accepted.id)).toEqual(accepted);
 			runtimeHost.setBeforeSessionInvalidate(undefined);
+		},
+	);
+
+	it.each([false, true])(
+		"flushes shutdown entries without treating a shutdown save failure as recoverable: %s",
+		async (stillFailing) => {
+			const writeError = new Error("shutdown write failed");
+			const { runtimeHost } = await createRuntimeHost((pi) => {
+				pi.on("session_shutdown", (event) => {
+					if (event.reason !== "new") return;
+					const fail = () => {
+						throw writeError;
+					};
+					if (stillFailing) vi.mocked(fs.appendFileSync).mockImplementation(fail);
+					else vi.mocked(fs.appendFileSync).mockImplementationOnce(fail);
+					pi.appendEntry("shutdown-state", { saved: true });
+				});
+			});
+			await runtimeHost.session.prompt("first");
+			const outgoing = runtimeHost.session;
+			if (stillFailing) {
+				await expect(runtimeHost.newSession()).rejects.toBe(writeError);
+			} else {
+				await expect(runtimeHost.newSession()).resolves.toEqual({ cancelled: false });
+				expect(SessionManager.open(outgoing.sessionFile!).getEntries()).toContainEqual(
+					expect.objectContaining({ type: "custom", customType: "shutdown-state", data: { saved: true } }),
+				);
+			}
 		},
 	);
 

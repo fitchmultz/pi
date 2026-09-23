@@ -17,7 +17,7 @@ type ImportCommandContext = {
 	showExtensionConfirm: (title: string, message: string) => Promise<boolean>;
 	handleRuntimeSessionChange: () => Promise<void>;
 	renderCurrentSessionState: () => void;
-	handleFatalRuntimeError: (prefix: string, error: unknown) => Promise<never>;
+	handleRuntimeReplacementError: (prefix: string, error: unknown) => Promise<{ cancelled: boolean }>;
 	promptForMissingSessionCwd: (error: unknown) => Promise<string | undefined>;
 	getPathCommandArgument: (text: string, command: PathCommand) => string | undefined;
 };
@@ -64,7 +64,7 @@ describe("InteractiveMode /import parsing", () => {
 			showExtensionConfirm,
 			handleRuntimeSessionChange: vi.fn(async () => {}),
 			renderCurrentSessionState: vi.fn(),
-			handleFatalRuntimeError: vi.fn(async () => {
+			handleRuntimeReplacementError: vi.fn(async () => {
 				throw new Error("unexpected fatal error");
 			}),
 			promptForMissingSessionCwd: vi.fn(async () => undefined),
@@ -96,7 +96,7 @@ describe("InteractiveMode /import parsing", () => {
 			showExtensionConfirm,
 			handleRuntimeSessionChange: vi.fn(async () => {}),
 			renderCurrentSessionState: vi.fn(),
-			handleFatalRuntimeError: vi.fn(async () => {
+			handleRuntimeReplacementError: vi.fn(async () => {
 				throw new Error("unexpected fatal error");
 			}),
 			promptForMissingSessionCwd: vi.fn(async () => undefined),
@@ -117,7 +117,7 @@ describe("InteractiveMode /import parsing", () => {
 		const showExtensionConfirm = vi.fn(async () => true);
 		const showStatus = vi.fn();
 		const showError = vi.fn();
-		const handleFatalRuntimeError = vi.fn(async () => {
+		const handleRuntimeReplacementError = vi.fn(async () => {
 			throw new Error("unexpected fatal error");
 		});
 
@@ -129,7 +129,7 @@ describe("InteractiveMode /import parsing", () => {
 			showExtensionConfirm,
 			handleRuntimeSessionChange: vi.fn(async () => {}),
 			renderCurrentSessionState: vi.fn(),
-			handleFatalRuntimeError,
+			handleRuntimeReplacementError,
 			promptForMissingSessionCwd: vi.fn(async () => undefined),
 			getPathCommandArgument: interactiveModePrototype.getPathCommandArgument,
 		};
@@ -138,6 +138,6 @@ describe("InteractiveMode /import parsing", () => {
 
 		expect(showError).toHaveBeenCalledWith("Failed to import session: File not found: /tmp/missing-session.jsonl");
 		expect(showStatus).not.toHaveBeenCalled();
-		expect(handleFatalRuntimeError).not.toHaveBeenCalled();
+		expect(handleRuntimeReplacementError).not.toHaveBeenCalled();
 	});
 });
