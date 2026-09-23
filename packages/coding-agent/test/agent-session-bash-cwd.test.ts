@@ -319,7 +319,7 @@ describe.skipIf(process.platform === "win32")("AgentSession Bash cwd hooks", () 
 		},
 	);
 
-	it("leaves baseToolsOverride Bash factories and their deliberate cwd remaps unchanged", async () => {
+	it("keeps baseToolsOverride Bash out of built-in adapters and preserves its cwd remap", async () => {
 		let cwdHookRan = false;
 		const tool = Object.freeze(
 			createTool("bash", originalCwd, {
@@ -336,20 +336,31 @@ describe.skipIf(process.platform === "win32")("AgentSession Bash cwd hooks", () 
 		);
 		const session = await createSession(
 			[
-				(pi) =>
+				(pi) => {
 					pi.registerBashCwdHook(() => {
 						cwdHookRan = true;
 						return join(root, "must-not-use");
-					}),
+					});
+					pi.on("session_start", () => {
+						if (pi.getAllTools().some((tool) => tool.name === "bash" && tool.sourceInfo.source === "builtin")) {
+							pi.registerTool(createBashToolDefinition(originalCwd));
+						}
+					});
+				},
 			],
 			{ baseToolsOverride: { bash: tool } },
 		);
+		await session.bindExtensions({});
 		rmdirSync(originalCwd);
 		const bash = session.agent.state.tools.find((candidate) => candidate.name === "bash")!;
 		expect((await bash.execute("base", { command })).content).toEqual([
 			{ type: "text", text: `${selectedCwd}\nconfigured-shell\nbase-prefix\ninherited-env\n\n` },
 		]);
 		expect(cwdHookRan).toBe(false);
+		expect(session.getAllTools().find((tool) => tool.name === "bash")?.sourceInfo).toMatchObject({
+			path: "<sdk:bash>",
+			source: "sdk",
+		});
 	});
 
 	it("reinitializes and removes registrations on reload without retaining old callbacks", async () => {
