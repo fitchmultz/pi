@@ -3,9 +3,10 @@
  * Provider auth orchestration belongs to ModelRuntime and pi-ai Models.
  */
 
+import { publishLocalFile } from "@earendil-works/pi-agent-core/node";
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import lockfile from "proper-lockfile";
 import { setTimeout as sleep } from "timers/promises";
 import { getAgentDir } from "../config.ts";
@@ -22,7 +23,7 @@ type LockResult<T> = {
 	next?: string;
 };
 
-// The mode applies only on creation so administrator-managed modes and ACLs remain intact.
+// New files are owner-only; replacements retain ordinary mode and ownership.
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
 type AuthFileReload = {
@@ -196,7 +197,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			throwIfCompromised();
 			options?.signal?.throwIfAborted();
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
+				await publishLocalFile(resolve(this.authPath), next, options?.signal);
 			}
 			throwIfCompromised();
 			return result;

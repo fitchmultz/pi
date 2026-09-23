@@ -1,6 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { type CredentialStore, createModels, type Provider } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -169,6 +171,46 @@ describe("AuthStorage", () => {
 			anthropic: { type: "api_key", key: "new" },
 			openai: { type: "api_key", key: "external" },
 		});
+	});
+
+	test.skipIf(process.platform === "win32")("a failed write keeps all previously saved credentials", () => {
+		const original = {
+			anthropic: { type: "api_key", key: "old" },
+			openai: { type: "api_key", key: "unrelated" },
+		};
+		writeAuthJson(original);
+		const resolver = fileURLToPath(new URL("../src/experimental/source-resolver.ts", import.meta.url));
+		const fixture = fileURLToPath(new URL("./fixtures/auth-storage-file-limit.ts", import.meta.url));
+		const child = spawnSync(
+			"/bin/bash",
+			[
+				"-c",
+				'ulimit -f 2; exec "$@"',
+				"auth-storage",
+				process.execPath,
+				"--import",
+				resolver,
+				fixture,
+				authJsonPath,
+			],
+			{
+				cwd: tempDir,
+				env: {
+					PATH: process.env.PATH,
+					HOME: tempDir,
+					PI_CODING_AGENT_DIR: tempDir,
+					PI_OFFLINE: "1",
+					PI_TELEMETRY: "0",
+					NODE_DISABLE_COMPILE_CACHE: "1",
+				},
+				encoding: "utf8",
+				timeout: 30_000,
+			},
+		);
+		expect(child.error).toBeUndefined();
+		expect(child.status, child.stderr).toBe(0);
+		expect(JSON.parse(child.stdout)).toEqual({ success: false, error: expect.stringContaining("EFBIG") });
+		expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual(original);
 	});
 
 	test("modify with undefined leaves the current credential unchanged", async () => {
