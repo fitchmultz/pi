@@ -1,7 +1,7 @@
 import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, parse, resolve } from "node:path";
 import { raceWithAbortSignal } from "../utils/abort.ts";
-import { resolvePath } from "../utils/paths.ts";
+import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
 import type { ShutdownCheckpoint } from "./checkpoint.ts";
@@ -179,6 +179,26 @@ export class AgentSessionRuntime {
 		this.session.dispose();
 	}
 
+	private reloadIfCurrentSession(
+		sessionManager: SessionManager,
+		previousSessionFile?: string,
+		cwdOverride?: string,
+	): SessionManager {
+		const targetSessionFile = sessionManager.getSessionFile();
+		if (
+			previousSessionFile &&
+			targetSessionFile &&
+			canonicalizePath(previousSessionFile) === canonicalizePath(targetSessionFile)
+		) {
+			return SessionManager.open(
+				targetSessionFile,
+				sessionManager.getSessionDir(),
+				cwdOverride ?? (existsSync(targetSessionFile) ? undefined : this.cwd),
+			);
+		}
+		return sessionManager;
+	}
+
 	private apply(result: CreateAgentSessionRuntimeResult): void {
 		this._session = result.session;
 		this._services = result.services;
@@ -209,9 +229,10 @@ export class AgentSessionRuntime {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
+		let sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
+		sessionManager = this.reloadIfCurrentSession(sessionManager, previousSessionFile, options?.cwdOverride);
 		this.apply(
 			await this.createRuntime({
 				cwd: sessionManager.getCwd(),
@@ -371,8 +392,13 @@ export class AgentSessionRuntime {
 			mkdirSync(sessionDir, { recursive: true });
 		}
 
-		let destinationPath = join(sessionDir, basename(resolvedPath));
-		const sourceAlreadyStored = resolve(destinationPath) === resolvedPath;
+		const currentSessionFile = this.session.sessionFile;
+		const currentSourcePath =
+			currentSessionFile && canonicalizePath(resolvedPath) === canonicalizePath(currentSessionFile)
+				? currentSessionFile
+				: undefined;
+		let destinationPath = currentSourcePath ?? join(sessionDir, basename(resolvedPath));
+		const sourceAlreadyStored = currentSourcePath !== undefined || resolve(destinationPath) === resolvedPath;
 		if (!sourceAlreadyStored) {
 			const { name, ext } = parse(destinationPath);
 			let suffix = 1;
@@ -390,9 +416,10 @@ export class AgentSessionRuntime {
 			copyFileSync(resolvedPath, destinationPath, constants.COPYFILE_EXCL);
 		}
 
-		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
+		let sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
+		sessionManager = this.reloadIfCurrentSession(sessionManager, previousSessionFile, cwdOverride);
 		this.apply(
 			await this.createRuntime({
 				cwd: sessionManager.getCwd(),
