@@ -411,7 +411,7 @@ it.each(["error", "aborted"] as const)(
 );
 
 describe.each([false, true])("native steering (Codex=%s)", (codex) => {
-	it.each(["completed", "steered", "pending", "pending-multiple", "disconnect"] as const)(
+	it.each(["completed", "steered", "pending", "pending-multiple", "rejected", "disconnect"] as const)(
 		"handles %s parent and preserves per-response usage",
 		async (mode) => {
 			const pending = mode === "pending" || mode === "pending-multiple";
@@ -438,7 +438,17 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 							usage,
 						},
 					});
-					if (mode === "disconnect") request.socket!.close();
+					if (mode === "disconnect") request.socket!.close(1000);
+					else if (mode === "rejected")
+						request.send({
+							type: "response.steer.failed",
+							steer: { ...steer, input: body.input },
+							error: {
+								type: "invalid_request_error",
+								code: "successor_creation_failed",
+								message: "prompt_cache_options is not supported on this model",
+							},
+						});
 					else if (pending)
 						request.send({
 							type: "response.steer.pending",
@@ -523,7 +533,16 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 					message: { endTurn: false },
 				});
 				expect(events.find((event) => event.type === "start")).not.toHaveProperty("continuationInput");
-				if (mode !== "disconnect") {
+				if (mode === "rejected") {
+					expect(message).toMatchObject({
+						stopReason: "stop",
+						rawStopReason: "incomplete.steered",
+						endTurn: false,
+						usage: { input: 65, output: 10, cacheRead: 30, cacheWrite: 5 },
+					});
+					expect(events.filter((event) => event.type === "start")).toHaveLength(1);
+					expect(events.some((event) => event.type === "error")).toBe(false);
+				} else if (mode !== "disconnect") {
 					expect(message.endTurn).toBe(true);
 					expect(events.filter((event) => event.type === "start")[1]).toMatchObject({
 						continuationInput: [
@@ -548,13 +567,17 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 				expect(statuses).toEqual(
 					mode === "disconnect"
 						? ["queued", "accepted", "unknown"]
-						: mode === "pending-multiple"
-							? ["queued", "queued", "accepted", "accepted", "pending", "pending", "applied", "applied"]
-							: pending
-								? ["queued", "accepted", "pending", "applied"]
-								: ["queued", "accepted", "applied"],
+						: mode === "rejected"
+							? ["queued", "accepted", "failed"]
+							: mode === "pending-multiple"
+								? ["queued", "queued", "accepted", "accepted", "pending", "pending", "applied", "applied"]
+								: pending
+									? ["queued", "accepted", "pending", "applied"]
+									: ["queued", "accepted", "applied"],
 				);
-				expect(message.responseId).toBe(mode === "disconnect" ? undefined : "successor");
+				expect(message.responseId).toBe(
+					mode === "disconnect" ? undefined : mode === "rejected" ? "parent" : "successor",
+				);
 				expect(message.usage.totalTokens).toBe(mode === "disconnect" ? 0 : 110);
 				expect(fixture.requests).toHaveLength(mode === "pending-multiple" ? 4 : pending ? 3 : 2);
 			} finally {

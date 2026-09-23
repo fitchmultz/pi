@@ -1124,12 +1124,11 @@ export async function processResponsesStream<TApi extends Api>(
 			output.stopReason = "stop";
 			output.rawStopReason = "context_replaced";
 		}
-		options.onResponseStart?.(output);
-		return;
-	}
-	if (!sawTerminalResponseEvent) {
+	} else if (!sawTerminalResponseEvent) {
 		throw new Error("OpenAI Responses stream ended before a terminal response event");
 	}
+	// Rejected steering can end the stream without ever creating the expected successor.
+	options?.onResponseStart?.(output);
 }
 
 function mapStopReason(
