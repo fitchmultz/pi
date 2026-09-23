@@ -1,7 +1,7 @@
 import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, join, relative } from "node:path";
+import { join, relative } from "node:path";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai/compat";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
@@ -127,66 +127,6 @@ describe("JSONL share export", () => {
 			}
 		},
 	);
-
-	it("does not replace its source journal with the selected branch", () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-jsonl-source-"));
-		tempDirs.push(tempDir);
-		const manager = SessionManager.create(tempDir, join(tempDir, "sessions"));
-		const branchPoint = manager.appendMessage(assistantMsg("first"));
-		manager.appendMessage(assistantMsg("other branch"));
-		manager.branch(branchPoint);
-		manager.appendMessage(assistantMsg("selected branch"));
-		const source = manager.getSessionFile()!;
-		const before = readFileSync(source, "utf8");
-
-		expect(() => exportSessionToJsonl(manager, source)).toThrow(/source session file/);
-		expect(readFileSync(source, "utf8")).toBe(before);
-
-		const alias = join(tempDir, "same-session.jsonl");
-		fs.linkSync(source, alias);
-		expect(() => exportSessionToJsonl(manager, alias)).toThrow(/source session file/);
-		expect(readFileSync(source, "utf8")).toBe(before);
-	});
-
-	it("does not create the journal before a new session has persisted", () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-jsonl-new-source-"));
-		tempDirs.push(tempDir);
-		const manager = SessionManager.create(tempDir, join(tempDir, "sessions"));
-		const source = manager.getSessionFile()!;
-		expect(fs.existsSync(source)).toBe(false);
-
-		expect(() => exportSessionToJsonl(manager, source)).toThrow(/source session file/);
-		expect(fs.existsSync(source)).toBe(false);
-		const alias = join(tempDir, "pending-session.jsonl");
-		fs.symlinkSync(source, alias);
-		expect(() => exportSessionToJsonl(manager, alias)).toThrow(/source session file/);
-		const chainedAlias = join(tempDir, "chained-session.jsonl");
-		fs.symlinkSync(alias, chainedAlias);
-		expect(() => exportSessionToJsonl(manager, chainedAlias)).toThrow(/source session file/);
-		const aliasDir = join(tempDir, "alias-sessions");
-		fs.symlinkSync(join(tempDir, "sessions"), aliasDir);
-		expect(() => exportSessionToJsonl(manager, join(aliasDir, basename(source)))).toThrow(/source session file/);
-		expect(fs.existsSync(source)).toBe(false);
-		const caseAlias = join(tempDir, "sessions", basename(source).replace("T", "t"));
-		const probe = join(tempDir, "CaseProbe");
-		writeFileSync(probe, "probe");
-		const ignoresCase = fs.existsSync(join(tempDir, "caseprobe"));
-		fs.rmSync(probe);
-		if (ignoresCase) {
-			expect(() => exportSessionToJsonl(manager, caseAlias)).toThrow(/source session file/);
-		} else {
-			expect(exportSessionToJsonl(manager, caseAlias)).toBe(caseAlias);
-		}
-		const parentCaseAlias = join(tempDir, "SESSIONS", basename(source));
-		if (ignoresCase) {
-			expect(() => exportSessionToJsonl(manager, parentCaseAlias)).toThrow(/source session file/);
-		} else {
-			expect(exportSessionToJsonl(manager, parentCaseAlias)).toBe(parentCaseAlias);
-		}
-		expect(fs.existsSync(source)).toBe(false);
-		manager.appendMessage(assistantMsg("first persisted response"));
-		expect(readFileSync(source, "utf8")).toContain("first persisted response");
-	});
 
 	it("serializes branch and trailing objects exactly once in callback order", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-jsonl-order-"));

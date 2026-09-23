@@ -49,7 +49,6 @@ describe("shareSession", () => {
 			session: {
 				sessionManager: {
 					getSessionId: () => name,
-					getSessionFile: () => undefined,
 					getCwd: () => "/tmp",
 					getBranch: () => [],
 				},
