@@ -1,4 +1,14 @@
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readSync, rmSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
@@ -37,6 +47,15 @@ export function serializeSessionBranch(
 	return Array.from(sessionBranchLines(sessionManager, createTrailingEntries)).join("");
 }
 
+export function assertDistinctExportTarget(sourceFile: string | undefined, outputPath: string): void {
+	if (!sourceFile) return;
+	const source = statSync(sourceFile, { throwIfNoEntry: false });
+	const output = statSync(outputPath, { throwIfNoEntry: false });
+	if (source && output && source.dev === output.dev && source.ino === output.ino) {
+		throw new Error(`Cannot export over the source session file: ${outputPath}`);
+	}
+}
+
 /** Write the current session branch and optional export-only entries as JSONL. */
 export function exportSessionToJsonl(
 	sessionManager: SessionManager,
@@ -47,6 +66,7 @@ export function exportSessionToJsonl(
 		outputPath ?? `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
 		process.cwd(),
 	);
+	assertDistinctExportTarget(sessionManager.getSessionFile(), filePath);
 	const dir = dirname(filePath);
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 	// Serialize once, in order, before opening the destination: callbacks and toJSON can fail.

@@ -128,6 +128,26 @@ describe("JSONL share export", () => {
 		},
 	);
 
+	it("does not replace its source journal with the selected branch", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-jsonl-source-"));
+		tempDirs.push(tempDir);
+		const manager = SessionManager.create(tempDir, join(tempDir, "sessions"));
+		const branchPoint = manager.appendMessage(assistantMsg("first"));
+		manager.appendMessage(assistantMsg("other branch"));
+		manager.branch(branchPoint);
+		manager.appendMessage(assistantMsg("selected branch"));
+		const source = manager.getSessionFile()!;
+		const before = readFileSync(source, "utf8");
+
+		expect(() => exportSessionToJsonl(manager, source)).toThrow(/source session file/);
+		expect(readFileSync(source, "utf8")).toBe(before);
+
+		const alias = join(tempDir, "same-session.jsonl");
+		fs.linkSync(source, alias);
+		expect(() => exportSessionToJsonl(manager, alias)).toThrow(/source session file/);
+		expect(readFileSync(source, "utf8")).toBe(before);
+	});
+
 	it("serializes branch and trailing objects exactly once in callback order", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-jsonl-order-"));
 		tempDirs.push(tempDir);

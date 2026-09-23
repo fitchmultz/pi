@@ -1,11 +1,12 @@
 import type { AgentState } from "@earendil-works/pi-agent-core";
 import type { ToolCall, ToolReference } from "@earendil-works/pi-ai";
-import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { assertDistinctExportTarget } from "../session-export.ts";
 import type { SessionEntry } from "../session-manager.ts";
 import { SessionManager } from "../session-manager.ts";
 
@@ -261,11 +262,7 @@ function preRenderCustomTools(
 }
 
 function writeExport(sourceFile: string, outputPath: string, html: string): string {
-	const source = statSync(sourceFile);
-	const output = statSync(outputPath, { throwIfNoEntry: false });
-	if (output && output.dev === source.dev && output.ino === source.ino) {
-		throw new Error(`Cannot export HTML over the source session file: ${outputPath}`);
-	}
+	assertDistinctExportTarget(sourceFile, outputPath);
 	writeFileSync(outputPath, html, "utf8");
 	return outputPath;
 }
