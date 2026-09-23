@@ -251,7 +251,12 @@ async function runLoop(
 	let asyncFailure: unknown;
 	let activeControl: ResponseControl | undefined;
 	let exclusiveCall: { scope: object; task: Promise<ExecutedToolCallBatch> } | undefined;
-	let pendingNewContext: NewContextRequest | undefined;
+	let pendingNewContext: { request: NewContextRequest; scope: object } | undefined;
+	const failedScopes = new WeakSet<object>();
+	const recordNewContext = (batch: ExecutedToolCallBatch, scope: object): void => {
+		if (batch.messages.some((message) => message.isError)) failedScopes.add(scope);
+		if (batch.newContext && !failedScopes.has(scope)) pendingNewContext ??= { request: batch.newContext, scope };
+	};
 	let responseRetired = false;
 	const retireForNewContext = (): void => {
 		if (!activeControl) return;
@@ -263,8 +268,10 @@ async function runLoop(
 	const needsResultTurn = (batch: ExecutedToolCallBatch): boolean =>
 		!!batch.newContext ||
 		(!batch.terminate && batch.messages.some((message) => !deliveredResults.has(message.toolCallId)));
-	const resultIds = new Set(
-		currentContext.messages.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
+	const restoredResults = new Map(
+		currentContext.messages.flatMap((message) =>
+			message.role === "toolResult" ? [[message.toolCallId, message] as const] : [],
+		),
 	);
 	const pendingTasks = (scope?: object): Promise<ExecutedToolCallBatch>[] =>
 		[...pendingCalls.values()]
@@ -315,7 +322,7 @@ async function runLoop(
 			.then(
 				(batch) => {
 					readyBatches.push(batch);
-					pendingNewContext ??= batch.newContext;
+					recordNewContext(batch, scope);
 					if (pendingNewContext) retireForNewContext();
 					else activeControl?.submitToolResults(savedResults);
 				},
@@ -335,13 +342,24 @@ async function runLoop(
 		await Promise.allSettled(pendingTasks(scope));
 		if (asyncFailure) throw asyncFailure;
 	};
+	const takeNewContext = async (): Promise<NewContextRequest | undefined> => {
+		if (!pendingNewContext) return undefined;
+		await joinPendingCalls();
+		const pending = pendingNewContext;
+		pendingNewContext = undefined;
+		// Native async splits one response into execution batches; all siblings must succeed.
+		return !signal?.aborted && !failedScopes.has(pending.scope) ? pending.request : undefined;
+	};
 	try {
 		for (const message of currentContext.messages.slice()) {
 			if (message.role !== "assistant") continue;
 			for (const call of message.content) {
 				if (call.type !== "toolCall") continue;
-				if (resultIds.has(call.id)) startedCalls.add(call.id);
-				else if (call.executionStarted || (call.async && call.responsesItem))
+				const result = restoredResults.get(call.id);
+				if (result) {
+					startedCalls.add(call.id);
+					if (result.isError) failedScopes.add(message);
+				} else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
 			}
 		}
@@ -358,9 +376,7 @@ async function runLoop(
 				if (lastCompletedTurn) {
 					if (config.getTools) currentContext = { ...currentContext, tools: [...config.getTools()] };
 					if (pendingNewContext) {
-						await joinPendingCalls();
-						lastCompletedTurn.newContext ??= pendingNewContext;
-						pendingNewContext = undefined;
+						lastCompletedTurn.newContext ??= await takeNewContext();
 					}
 					const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
 					if (nextTurnSnapshot) {
@@ -495,7 +511,7 @@ async function runLoop(
 							savedResults.push(result);
 						}
 						readyBatches.push(batch);
-						pendingNewContext ??= batch.newContext;
+						recordNewContext(batch, scope);
 						if (pendingNewContext) retireForNewContext();
 						else activeControl?.submitToolResults(savedResults);
 					},
@@ -519,7 +535,6 @@ async function runLoop(
 					(c): c is AgentToolCall => c.type === "toolCall" && !startedCalls.has(c.id),
 				);
 				const toolResults: ToolResultMessage[] = [];
-				let newContext: NewContextRequest | undefined;
 				hasMoreToolCalls = streamed.needsContinuation;
 				if (toolCalls.length > 0) {
 					if (exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope))
@@ -536,17 +551,16 @@ async function runLoop(
 							? await failToolCallsFromTruncatedMessage(toolCalls, emit)
 							: await executeToolCalls(currentContext, message, config, signal, emit, toolCalls);
 					toolResults.push(...executedToolBatch.messages);
-					newContext = executedToolBatch.newContext;
-					hasMoreToolCalls = !executedToolBatch.terminate || newContext !== undefined;
+					recordNewContext(executedToolBatch, scope);
+					hasMoreToolCalls = !executedToolBatch.terminate || executedToolBatch.newContext !== undefined;
 					for (const result of toolResults) {
 						currentContext.messages.push(result);
 						newMessages.push(result);
 					}
 				}
 
-				if (newContext) await joinPendingCalls();
+				const newContext = await takeNewContext();
 				toolResults.push(...readyBatches.flatMap((batch) => batch.messages));
-				newContext ??= pendingNewContext ?? readyBatches.find((batch) => batch.newContext)?.newContext;
 				hasMoreToolCalls ||= newContext !== undefined || readyBatches.some(needsResultTurn);
 				lastCompletedTurn = { message, toolResults, context: currentContext, newMessages, newContext };
 				const decision = await config.finishTurn?.(lastCompletedTurn, signal);
@@ -554,7 +568,8 @@ async function runLoop(
 
 				if ((decision?.action === "end" && !newContext) || signal?.aborted) {
 					await joinPendingCalls();
-					if (!pendingNewContext || signal?.aborted) {
+					lastCompletedTurn.newContext = await takeNewContext();
+					if (!lastCompletedTurn.newContext || signal?.aborted) {
 						await emit({ type: "agent_end", messages: newMessages });
 						return;
 					}
