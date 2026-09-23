@@ -280,6 +280,21 @@ describe("AuthStorage", () => {
 		expect(getAcl()).not.toContain("user:nobody:");
 	});
 
+	test.skipIf(process.platform !== "linux")("saves when a default ACL removes staging owner write", async () => {
+		const parent = join(tempDir, "restricted-default");
+		const path = join(parent, "auth.json");
+		mkdirSync(parent);
+		writeFileSync(path, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o600 });
+		const acl = spawnSync("/usr/bin/setfacl", ["-d", "-m", "u::r--,u:nobody:r,g::---,m::r--,o::---", parent], {
+			encoding: "utf8",
+		});
+		expect(acl.status, acl.stderr).toBe(0);
+
+		await AuthStorage.create(path).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+
+		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ anthropic: { type: "api_key", key: "new" } });
+	});
+
 	test.skipIf(process.platform === "win32")("does not run a project cp during credential saves", async () => {
 		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
 		const bin = join(tempDir, "bin");

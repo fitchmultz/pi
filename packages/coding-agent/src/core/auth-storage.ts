@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { resolveLocalFileTarget, resolveLocalOperationPath } from "@earendil-works/pi-agent-core/node";
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 import { constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { access, lstat, mkdtemp, rename, rm, writeFile } from "fs/promises";
+import { access, chmod, lstat, mkdtemp, rename, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { setTimeout as sleep } from "timers/promises";
@@ -41,7 +41,10 @@ async function publishStoredFile(path: string, content: string, signal?: AbortSi
 	signal?.throwIfAborted();
 	const stageDir = await mkdtemp(join(dirname(target), ".pi-auth-"));
 	try {
-		if (process.platform === "linux") execFileSync("/usr/bin/setfacl", ["-k", stageDir]);
+		if (process.platform === "linux") {
+			await chmod(stageDir, 0o700);
+			execFileSync("/usr/bin/setfacl", ["-k", stageDir]);
+		}
 		const stage = join(stageDir, "file");
 		if (previous) {
 			if (process.platform === "win32") {
