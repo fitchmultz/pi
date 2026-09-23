@@ -49,9 +49,10 @@ export function serializeSessionBranch(
 
 export function assertDistinctExportTarget(sourceFile: string | undefined, outputPath: string): void {
 	if (!sourceFile) return;
+	const samePath = resolvePath(sourceFile) === resolvePath(outputPath);
 	const source = statSync(sourceFile, { throwIfNoEntry: false });
 	const output = statSync(outputPath, { throwIfNoEntry: false });
-	if (source && output && source.dev === output.dev && source.ino === output.ino) {
+	if (samePath || (source && output && source.dev === output.dev && source.ino === output.ino)) {
 		throw new Error(`Cannot export over the source session file: ${outputPath}`);
 	}
 }

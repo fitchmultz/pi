@@ -1,4 +1,4 @@
-import { linkSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -32,6 +32,28 @@ describe("HTML export", () => {
 			await expect(exportSession(manager, output)).resolves.toBe(output);
 			expect(readFileSync(output, "utf8")).toContain("<!DOCTYPE html>");
 			expect(readFileSync(source, "utf8")).toBe(before);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a legacy hardlink before migration changes its file identity", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-export-legacy-"));
+		try {
+			const manager = SessionManager.create(dir, join(dir, "sessions"));
+			manager.appendMessage(fauxAssistantMessage("saved conversation"));
+			const source = manager.getSessionFile()!;
+			const lines = readFileSync(source, "utf8").trimEnd().split("\n");
+			const header = JSON.parse(lines[0]) as { version: number };
+			lines[0] = JSON.stringify({ ...header, version: 2 });
+			const before = `${lines.join("\n")}\n`;
+			writeFileSync(source, before);
+			const alias = join(dir, "legacy.jsonl");
+			linkSync(source, alias);
+
+			await expect(exportFromFile(alias, source)).rejects.toThrow(/source session file/);
+			expect(readFileSync(source, "utf8")).toBe(before);
+			expect(readFileSync(alias, "utf8")).toBe(before);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

@@ -335,6 +335,13 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw new Error(`File not found: ${resolvedInputPath}`);
 	}
 
+	let outputPath = opts.outputPath ? normalizePath(opts.outputPath) : undefined;
+	if (!outputPath) {
+		const inputBasename = basename(resolvedInputPath, ".jsonl");
+		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
+	}
+	assertDistinctExportTarget(resolvedInputPath, outputPath);
+
 	const sm = SessionManager.open(resolvedInputPath);
 
 	const sessionData: SessionData = {
@@ -346,12 +353,6 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 	};
 
 	const html = generateHtml(sessionData, opts.themeName);
-
-	let outputPath = opts.outputPath ? normalizePath(opts.outputPath) : undefined;
-	if (!outputPath) {
-		const inputBasename = basename(resolvedInputPath, ".jsonl");
-		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
-	}
 
 	return writeExport(resolvedInputPath, outputPath, html);
 }

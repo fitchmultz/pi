@@ -148,6 +148,19 @@ describe("JSONL share export", () => {
 		expect(readFileSync(source, "utf8")).toBe(before);
 	});
 
+	it("does not create the journal before a new session has persisted", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-jsonl-new-source-"));
+		tempDirs.push(tempDir);
+		const manager = SessionManager.create(tempDir, join(tempDir, "sessions"));
+		const source = manager.getSessionFile()!;
+		expect(fs.existsSync(source)).toBe(false);
+
+		expect(() => exportSessionToJsonl(manager, source)).toThrow(/source session file/);
+		expect(fs.existsSync(source)).toBe(false);
+		manager.appendMessage(assistantMsg("first persisted response"));
+		expect(readFileSync(source, "utf8")).toContain("first persisted response");
+	});
+
 	it("serializes branch and trailing objects exactly once in callback order", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-jsonl-order-"));
 		tempDirs.push(tempDir);
