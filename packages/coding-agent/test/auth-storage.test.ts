@@ -1,6 +1,9 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import childProcess, { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { type CredentialStore, createModels, type Provider } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -169,6 +172,199 @@ describe("AuthStorage", () => {
 			anthropic: { type: "api_key", key: "new" },
 			openai: { type: "api_key", key: "external" },
 		});
+	});
+
+	test.skipIf(process.platform === "win32")("a failed write keeps all previously saved credentials", () => {
+		const original = {
+			anthropic: { type: "api_key", key: "old" },
+			openai: { type: "api_key", key: "unrelated" },
+		};
+		writeAuthJson(original);
+		const resolver = fileURLToPath(new URL("../src/experimental/source-resolver.ts", import.meta.url));
+		const fixture = fileURLToPath(new URL("./fixtures/auth-storage-file-limit.ts", import.meta.url));
+		const child = spawnSync(
+			"/bin/bash",
+			[
+				"-c",
+				'ulimit -f 2; exec "$@"',
+				"auth-storage",
+				process.execPath,
+				"--import",
+				resolver,
+				fixture,
+				authJsonPath,
+			],
+			{
+				cwd: tempDir,
+				env: {
+					PATH: process.env.PATH,
+					HOME: tempDir,
+					PI_CODING_AGENT_DIR: tempDir,
+					PI_OFFLINE: "1",
+					PI_TELEMETRY: "0",
+					NODE_DISABLE_COMPILE_CACHE: "1",
+				},
+				encoding: "utf8",
+				timeout: 30_000,
+			},
+		);
+		expect(child.error).toBeUndefined();
+		expect(child.status, child.stderr).toBe(0);
+		expect(JSON.parse(child.stdout)).toEqual({ success: false, error: expect.stringContaining("EFBIG") });
+		expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual(original);
+	});
+
+	test.skipIf(process.platform === "win32")("keeps a symlinked parent and .. path on the original file", async () => {
+		const entry = join(tempDir, "entry");
+		const targetDirectory = join(tempDir, "actual");
+		mkdirSync(entry);
+		mkdirSync(join(targetDirectory, "child"), { recursive: true });
+		symlinkSync("../actual/child", join(entry, "link"), "dir");
+		const target = join(targetDirectory, "auth.json");
+		const unrelated = join(entry, "auth.json");
+		writeFileSync(target, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }));
+		writeFileSync(unrelated, JSON.stringify({ openai: { type: "api_key", key: "unrelated" } }));
+
+		await AuthStorage.create(`${entry}/link/../auth.json`).modify("anthropic", async () => ({
+			type: "api_key",
+			key: "updated",
+		}));
+
+		expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({ anthropic: { type: "api_key", key: "updated" } });
+		expect(JSON.parse(readFileSync(unrelated, "utf8"))).toEqual({ openai: { type: "api_key", key: "unrelated" } });
+	});
+
+	test.skipIf(process.platform === "win32")("keeps a recreated auth file owner-only", async () => {
+		writeFileSync(authJsonPath, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o600 });
+		const storage = AuthStorage.create(authJsonPath);
+		const previousUmask = process.umask(0o022);
+		try {
+			await storage.modify("anthropic", async () => {
+				rmSync(authJsonPath);
+				return { type: "api_key", key: "new" };
+			});
+		} finally {
+			process.umask(previousUmask);
+		}
+		expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+	});
+
+	test.skipIf(process.platform !== "darwin")("preserves a custom auth file ACL", async () => {
+		writeFileSync(authJsonPath, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o600 });
+		const grant = spawnSync("/bin/chmod", ["+a", "group:everyone allow read", authJsonPath]);
+		expect(grant.status, grant.stderr.toString()).toBe(0);
+		const acl = () => spawnSync("/bin/ls", ["-le", authJsonPath], { encoding: "utf8" }).stdout;
+		expect(acl()).toContain("group:everyone allow read");
+
+		await AuthStorage.create(authJsonPath).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+
+		expect(acl()).toContain("group:everyone allow read");
+	});
+
+	test.skipIf(process.platform !== "darwin")("keeps inherited ACLs off temporary credentials", async () => {
+		const parent = join(tempDir, "inherited-acl");
+		const path = join(parent, "auth.json");
+		mkdirSync(parent);
+		writeFileSync(path, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o600 });
+		const grant = spawnSync("/bin/chmod", [
+			"+a",
+			"group:everyone allow read,execute,readattr,readextattr,readsecurity,file_inherit,directory_inherit",
+			parent,
+		]);
+		expect(grant.status, grant.stderr.toString()).toBe(0);
+		const execute = childProcess.execFileSync;
+		let stageAcl: string | undefined;
+		const spy = vi.spyOn(childProcess, "execFileSync").mockImplementation((command, args, options) => {
+			if (command === "/bin/cp" && args) {
+				const stage = args[2];
+				if (typeof stage === "string") {
+					stageAcl = spawnSync("/bin/ls", ["-lde", dirname(stage)], { encoding: "utf8" }).stdout;
+				}
+			}
+			return execute(command, args, options);
+		});
+		syncBuiltinESMExports();
+		try {
+			await AuthStorage.create(path).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+		} finally {
+			spy.mockRestore();
+			syncBuiltinESMExports();
+		}
+		expect(stageAcl).toBeDefined();
+		expect(stageAcl).not.toContain("group:everyone");
+	});
+
+	test.skipIf(process.platform !== "linux")("keeps staged files private under a default ACL", async () => {
+		const parent = join(tempDir, "acl-parent");
+		const path = join(parent, "auth.json");
+		mkdirSync(parent, { mode: 0o755 });
+		const setAcl = (...args: string[]) => {
+			const result = spawnSync("/usr/bin/setfacl", args, { encoding: "utf8" });
+			expect(result.status, result.stderr).toBe(0);
+		};
+		setAcl("-m", "u:nobody:rx", parent);
+		setAcl("-d", "-m", "u:nobody:rwx", parent);
+		writeFileSync(path, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o640 });
+		setAcl("-b", path);
+		const getAcl = () => spawnSync("/usr/bin/getfacl", ["-c", path], { encoding: "utf8" }).stdout;
+		expect(getAcl()).not.toContain("user:nobody:");
+
+		await AuthStorage.create(path).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+
+		expect(getAcl()).not.toContain("user:nobody:");
+	});
+
+	test.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/setfattr"))(
+		"preserves an existing auth file extended attribute",
+		async () => {
+			writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
+			const set = spawnSync("/usr/bin/setfattr", ["-n", "user.pi-test", "-v", "present", authJsonPath], {
+				encoding: "utf8",
+			});
+			expect(set.status, set.stderr).toBe(0);
+
+			await AuthStorage.create(authJsonPath).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+
+			const get = spawnSync("/usr/bin/getfattr", ["--only-values", "-n", "user.pi-test", authJsonPath], {
+				encoding: "utf8",
+			});
+			expect(get.status, get.stderr).toBe(0);
+			expect(get.stdout).toBe("present");
+		},
+	);
+
+	test.skipIf(process.platform !== "linux")("saves when a default ACL removes staging owner write", async () => {
+		const parent = join(tempDir, "restricted-default");
+		const path = join(parent, "auth.json");
+		mkdirSync(parent);
+		writeFileSync(path, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o600 });
+		const acl = spawnSync("/usr/bin/setfacl", ["-d", "-m", "u::r--,u:nobody:r,g::---,m::r--,o::---", parent], {
+			encoding: "utf8",
+		});
+		expect(acl.status, acl.stderr).toBe(0);
+
+		await AuthStorage.create(path).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+
+		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ anthropic: { type: "api_key", key: "new" } });
+	});
+
+	test.skipIf(process.platform === "win32")("does not run a project cp during credential saves", async () => {
+		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
+		const bin = join(tempDir, "bin");
+		const marker = join(tempDir, "called");
+		mkdirSync(bin);
+		writeFileSync(join(bin, "cp"), '#!/bin/sh\nprintf called > "$(dirname "$0")/../called"\nexec /bin/cp "$@"\n', {
+			mode: 0o755,
+		});
+		const previousPath = process.env.PATH;
+		process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+		try {
+			await AuthStorage.create(authJsonPath).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+		} finally {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+		}
+		expect(existsSync(marker)).toBe(false);
 	});
 
 	test("modify with undefined leaves the current credential unchanged", async () => {

@@ -3,8 +3,11 @@
  * Provider auth orchestration belongs to ModelRuntime and pi-ai Models.
  */
 
+import { execFileSync } from "node:child_process";
+import { resolveLocalFileTarget, resolveLocalOperationPath } from "@earendil-works/pi-agent-core/node";
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { access, chmod, lstat, mkdtemp, rename, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { setTimeout as sleep } from "timers/promises";
@@ -24,6 +27,82 @@ type LockResult<T> = {
 
 // The mode applies only on creation so administrator-managed modes and ACLs remain intact.
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
+
+async function publishStoredFile(path: string, content: string, signal?: AbortSignal): Promise<void> {
+	const target = await resolveLocalFileTarget(resolveLocalOperationPath(process.cwd(), path));
+	const previous = await lstat(target).catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	});
+	if (previous) {
+		if (!previous.isFile()) throw new Error(`Cannot save a non-regular file: ${target}`);
+		await access(target, constants.W_OK);
+	}
+	signal?.throwIfAborted();
+	const stageDir = await mkdtemp(join(dirname(target), ".pi-auth-"));
+	try {
+		// A parent ACL must not grant access to the temporary copy of the credentials.
+		if (process.platform === "darwin") execFileSync("/bin/chmod", ["-N", stageDir]);
+		// Keep mkdtemp's zero ACL mask while restoring owner access and removing inherited defaults.
+		if (process.platform === "linux") {
+			execFileSync("/usr/bin/setfacl", ["-n", "-m", "u::rwx", "-k", stageDir]);
+			if ((await lstat(stageDir)).mode & 0o077) throw new Error("Staging directory permissions widened");
+		}
+		const stage = join(stageDir, "file");
+		if (previous) {
+			if (process.platform === "win32") {
+				await writeFile(stage, "", { flag: "wx", mode: 0o600 });
+				const source = target.replaceAll("'", "''");
+				const destination = stage.replaceAll("'", "''");
+				const script = `$ErrorActionPreference = 'Stop'; $acl = Get-Acl -LiteralPath '${source}'; Set-Acl -LiteralPath '${destination}' -AclObject $acl`;
+				const powershell = join(
+					process.env.SystemRoot ?? "C:\\Windows",
+					"System32",
+					"WindowsPowerShell",
+					"v1.0",
+					"powershell.exe",
+				);
+				execFileSync(
+					powershell,
+					["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+					{ windowsHide: true },
+				);
+			} else {
+				if (process.platform === "linux") {
+					// An empty sibling inherits the parent's setgid group even if repairing stageDir clears its setgid bit.
+					const sibling = `${stageDir}.file`;
+					try {
+						await writeFile(sibling, "", { flag: "wx", mode: 0o600 });
+						await rename(sibling, stage);
+					} finally {
+						await rm(sibling, { force: true }).catch(() => {});
+					}
+					execFileSync("/usr/bin/setfacl", ["-b", stage]);
+					await chmod(stage, 0o600);
+				}
+				// Linux security labels are extended attributes; -p alone does not copy them.
+				execFileSync(
+					"/bin/cp",
+					process.platform === "linux" ? ["-p", "--preserve=xattr", target, stage] : ["-p", target, stage],
+				);
+				const staged = await lstat(stage);
+				if (
+					staged.uid !== previous.uid ||
+					staged.gid !== previous.gid ||
+					(staged.mode & 0o7777) !== (previous.mode & 0o7777)
+				) {
+					throw new Error(`Could not preserve file ownership and mode: ${target}`);
+				}
+			}
+		}
+		signal?.throwIfAborted();
+		await writeFile(stage, content, { encoding: "utf-8", mode: 0o600, flag: previous ? "w" : "wx", signal });
+		signal?.throwIfAborted();
+		await rename(stage, target);
+	} finally {
+		await rm(stageDir, { recursive: true, force: true }).catch(() => {});
+	}
+}
 
 type AuthFileReload = {
 	controller: AbortController;
@@ -196,7 +275,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			throwIfCompromised();
 			options?.signal?.throwIfAborted();
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
+				await publishStoredFile(this.authPath, next, options?.signal);
 			}
 			throwIfCompromised();
 			return result;
