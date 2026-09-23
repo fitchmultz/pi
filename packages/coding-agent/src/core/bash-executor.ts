@@ -71,7 +71,7 @@ export async function executeBashWithOperations(
 		}
 		const id = randomBytes(8).toString("hex");
 		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
-		tempFileStream = createWriteStream(tempFilePath);
+		tempFileStream = createWriteStream(tempFilePath, { flags: "wx", mode: 0o600 });
 		tempFileCompletion = finished(tempFileStream, { cleanup: true });
 		void tempFileCompletion.catch(() => {});
 		for (const chunk of outputChunks) {
