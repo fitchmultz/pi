@@ -931,6 +931,15 @@ async function executeToolCallsParallel(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallEntry[] = [];
+	const errors: unknown[] = [];
+	// Completed operations still need receipts when a completion listener or journal write fails.
+	const emitCompletedEvent: AgentEventSink = async (event) => {
+		try {
+			await emit(event);
+		} catch (error) {
+			errors.push(error);
+		}
+	};
 
 	for (const toolCall of toolCalls) {
 		await emit({
@@ -963,7 +972,7 @@ async function executeToolCallsParallel(
 					result: createErrorToolResult("Operation aborted"),
 					isError: true,
 				} satisfies FinalizedToolCallOutcome;
-				await emitToolExecutionEnd(finalized, emit);
+				await emitToolExecutionEnd(finalized, emitCompletedEvent);
 				return finalized;
 			}
 			const executed = await executePreparedToolCall(preparation, assistantMessage, signal, emit);
@@ -975,7 +984,7 @@ async function executeToolCallsParallel(
 				config,
 				signal,
 			);
-			await emitToolExecutionEnd(finalized, emit);
+			await emitToolExecutionEnd(finalized, emitCompletedEvent);
 			return finalized;
 		});
 		if (signal?.aborted) {
@@ -984,15 +993,19 @@ async function executeToolCallsParallel(
 	}
 
 	const tasks = finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry)));
-	// A rejected listener does not stop sibling tools; join them before ending the run.
-	const orderedFinalizedCalls = await Promise.all(tasks).finally(() => Promise.allSettled(tasks));
+	const orderedFinalizedCalls: FinalizedToolCallOutcome[] = [];
+	for (const outcome of await Promise.allSettled(tasks)) {
+		if (outcome.status === "fulfilled") orderedFinalizedCalls.push(outcome.value);
+		else errors.push(outcome.reason);
+	}
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
 		if (finalized.detached) continue;
 		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, emit);
+		await emitToolResultMessage(toolResultMessage, emitCompletedEvent);
 		messages.push(toolResultMessage);
 	}
+	if (errors.length > 0) throw errors[0];
 
 	return {
 		messages,
