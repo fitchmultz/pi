@@ -159,6 +159,28 @@ describe.each([
 });
 
 describe.each(["coding-agent", "harness"] as const)("%s file mutation regressions", (kind) => {
+	it("rejects non-UTF-8 edits without changing unrelated bytes", async () => {
+		const tools = await setup(kind);
+		const path = join(tools.cwd, "file.txt");
+		const original = Buffer.from("name=caf\xe9\nmode=old\n", "latin1");
+		const edits = [{ oldText: "mode=old", newText: "mode=new" }];
+		await writeFile(path, original);
+
+		await expect(tools.edit(edits)).rejects.toThrow(/utf-8/i);
+		expect(await readFile(path)).toEqual(original);
+		expect(await computeEditsDiff("file.txt", edits, tools.cwd)).toMatchObject({
+			error: expect.stringMatching(/utf-8/i),
+		});
+	});
+
+	it("preserves valid UTF-8, BOM, and CRLF when editing", async () => {
+		const tools = await setup(kind);
+		const path = join(tools.cwd, "file.txt");
+		await writeFile(path, "\uFEFFname=café\r\nmode=old\r\n");
+		await tools.edit([{ oldText: "mode=old", newText: "mode=new" }]);
+		expect(await readFile(path)).toEqual(Buffer.from("\uFEFFname=café\r\nmode=new\r\n"));
+	});
+
 	it.each(["new.txt", "missing/nested/new.txt"])(
 		"serializes writes through a symlinked ancestor to %s",
 		async (suffix) => {

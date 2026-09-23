@@ -45,9 +45,9 @@ function delay(ms: number): Promise<void> {
 }
 
 class SlowReadExecutionEnv extends NodeExecutionEnv {
-	override async readTextFile(path: string, context: Context): Promise<Result<string, FileError>> {
+	override async readBinaryFile(path: string, context: Context): Promise<Result<Uint8Array, FileError>> {
 		await delay(20);
-		return super.readTextFile(path, context);
+		return super.readBinaryFile(path, context);
 	}
 }
 

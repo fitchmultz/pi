@@ -1352,7 +1352,7 @@ export class SessionManager {
 				}
 				const saved = new Set(entries.map((entry) => entry.id));
 				for (const entry of this.fileEntries.slice(this.failedAppendIndex)) {
-					if (!saved.has(entry.id)) appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+					if (!saved.has(entry.id)) appendFileSync(this.sessionFile, `\n${JSON.stringify(entry)}\n`);
 				}
 			}
 			this.failedAppendIndex = undefined;
@@ -1393,7 +1393,8 @@ export class SessionManager {
 		}
 
 		this.failedAppendIndex = this.fileEntries.length - 1;
-		appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+		// The leading newline isolates this entry from another writer's partial record.
+		appendFileSync(this.sessionFile, `\n${JSON.stringify(entry)}\n`);
 		this.failedAppendIndex = undefined;
 	}
 
@@ -2136,7 +2137,7 @@ export class SessionManager {
 		// Copy all non-header entries from source
 		for (const entry of sourceEntries) {
 			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+				appendFileSync(newSessionFile, `\n${JSON.stringify(entry)}\n`);
 			}
 		}
 

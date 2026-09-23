@@ -407,7 +407,7 @@ describe("native working-session checkpoint", () => {
 		hold.release();
 	});
 
-	it("rejects differing or empty existing journals without modifying their bytes", async () => {
+	it("rejects differing, empty, or malformed journals without modifying their bytes", async () => {
 		const h = await setup();
 		h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
 		const hold = await h.session.acquireCheckpoint();
@@ -419,6 +419,10 @@ describe("native working-session checkpoint", () => {
 		writeFileSync(h.session.sessionFile!, "");
 		expect(() => openSessionCheckpoint(hold.checkpoint)).toThrow("differs");
 		expect(readFileSync(h.session.sessionFile!, "utf8")).toBe("");
+		const malformed = `${newer}\n{"type":`;
+		writeFileSync(h.session.sessionFile!, malformed);
+		expect(() => openSessionCheckpoint(hold.checkpoint)).toThrow(SyntaxError);
+		expect(readFileSync(h.session.sessionFile!, "utf8")).toBe(malformed);
 	});
 
 	it("waits for settlement handlers and their deferred run before capturing", async () => {

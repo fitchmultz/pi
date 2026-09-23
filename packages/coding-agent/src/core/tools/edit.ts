@@ -183,7 +183,7 @@ export function createEditToolDefinition(
 
 				// Read the file.
 				const buffer = await ops.readFile(absolutePath);
-				const rawContent = buffer.toString("utf-8");
+				const rawContent = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer);
 				throwIfAborted();
 
 				// Strip BOM before matching. The model will not include an invisible BOM in oldText.

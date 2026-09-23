@@ -111,11 +111,12 @@ export function createEditTool<TContext extends ExecutionToolContext = Execution
 						throw new Error(`Could not edit file: ${path}. Path is not a file.`);
 					}
 
-					const readResult = await env.readTextFile(path, context);
+					const readResult = await env.readBinaryFile(path, context);
 					if (!readResult.ok) throw editAccessError(path, readResult.error);
 					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
 
-					const { bom, text: content } = stripBom(readResult.value);
+					const rawContent = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readResult.value);
+					const { bom, text: content } = stripBom(rawContent);
 					const originalEnding = detectLineEnding(content);
 					const normalizedContent = normalizeToLF(content);
 					const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
