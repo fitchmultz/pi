@@ -255,20 +255,32 @@ describe("session_before_auto_compact", () => {
 	});
 
 	it.each([
-		{ hook: "session_before_auto_compact", completeDuringHook: false },
-		{ hook: "session_before_compact", completeDuringHook: false },
-		{ hook: "session_before_auto_compact", completeDuringHook: true },
-		{ hook: "session_before_compact", completeDuringHook: true },
+		{ hook: "session_before_auto_compact", completion: "afterHook" },
+		{ hook: "session_before_compact", completion: "afterHook" },
+		{ hook: "session_before_auto_compact", completion: "duringHook" },
+		{ hook: "session_before_compact", completion: "duringHook" },
+		{ hook: "session_before_auto_compact", completion: "duringMessageEnd" },
+		{ hook: "session_before_compact", completion: "duringMessageEnd" },
 	] as const)(
-		"captures a fresh $hook handoff after pending async tools finish (complete during hook=$completeDuringHook)",
-		async ({ hook, completeDuringHook }) => {
+		"captures a fresh $hook handoff after pending async tools finish (completion=$completion)",
+		async ({ hook, completion }) => {
 			let release!: () => void;
 			const gate = new Promise<void>((resolve) => {
 				release = resolve;
 			});
+			let messageEndStarted!: () => void;
+			const messageEndStart = new Promise<void>((resolve) => {
+				messageEndStarted = resolve;
+			});
+			let releaseMessageEnd!: () => void;
+			const messageEndGate = new Promise<void>((resolve) => {
+				releaseMessageEnd = resolve;
+			});
 			const owner = "NEW_OWNER_DECISION: work only on the revised request";
 			const receipt = "LATE_RECEIPT";
 			const handoffs: string[] = [];
+			let pendingAtFirstHook: number | undefined;
+			let runningAtFirstHook: number | undefined;
 			const harness = await createHarness({
 				models: [{ id: "small", contextWindow: 100_000, maxTokens: 1000 }],
 				settings: {
@@ -294,12 +306,26 @@ describe("session_before_auto_compact", () => {
 						parameters: Type.Object({}),
 						execute: async () => {
 							await harness.session.steer(owner);
+							if (completion === "duringMessageEnd") {
+								release();
+								await messageEndStart;
+							}
 							return { content: [{ type: "text", text: "x".repeat(340_000) }], details: {} };
 						},
 					},
 				],
 				extensionFactories: [
 					(pi) => {
+						pi.on("message_end", async (event) => {
+							if (
+								completion === "duringMessageEnd" &&
+								event.message.role === "toolResult" &&
+								event.message.toolName === "slow"
+							) {
+								messageEndStarted();
+								await messageEndGate;
+							}
+						});
 						const claim = async (event: SessionBeforeAutoCompactEvent | SessionBeforeCompactEvent) => {
 							const handoff = event.branchEntries
 								.flatMap((entry) =>
@@ -307,9 +333,22 @@ describe("session_before_auto_compact", () => {
 								)
 								.join("\n");
 							handoffs.push(handoff);
-							if (completeDuringHook && handoffs.length === 1) {
-								release();
-								await vi.waitFor(() => expect(harness.session.getPendingToolCalls()).toEqual([]));
+							if (handoffs.length === 1) {
+								pendingAtFirstHook = harness.session.getPendingToolCalls().length;
+								runningAtFirstHook = harness.session.agent.state.pendingToolCalls.size;
+								if (completion !== "afterHook") {
+									release();
+									releaseMessageEnd();
+									await vi.waitFor(() =>
+										expect(
+											harness.sessionManager
+												.getBranch()
+												.some(
+													(entry) => entry.type === "message" && getMessageText(entry.message) === receipt,
+												),
+										).toBe(true),
+									);
+								}
 							}
 							return { newContext: { handoff } };
 						};
@@ -354,16 +393,21 @@ describe("session_before_auto_compact", () => {
 
 			try {
 				await harness.session.prompt("Run both tools and check their receipts");
-				if (completeDuringHook) await harness.session.prompt("Check the receipt in the fresh window");
+				if (completion !== "afterHook") await harness.session.prompt("Check the receipt in the fresh window");
 			} finally {
 				release();
+				releaseMessageEnd();
 			}
 
 			expect(observations).toHaveLength(2);
-			if (completeDuringHook) expect(observations[0].text).toContain(receipt);
+			if (completion === "duringMessageEnd") {
+				expect(pendingAtFirstHook).toBe(0);
+				expect(runningAtFirstHook).toBe(0);
+			}
+			if (completion !== "afterHook") expect(observations[0].text).toContain(receipt);
 			expect(observations[0]).toMatchObject({
 				windows: 0,
-				pending: completeDuringHook ? 0 : 1,
+				pending: completion === "afterHook" ? 1 : 0,
 				text: expect.stringContaining(owner),
 			});
 			expect(observations[1]).toMatchObject({ windows: 1, pending: 0, text: expect.stringContaining(owner) });

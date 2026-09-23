@@ -3842,9 +3842,11 @@ export class AgentSession {
 				return false;
 			}
 
-			// A tool completing while an async hook runs is still absent from its snapshot.
+			// Live state can include a result whose message_end handlers still precede persistence.
+			// Require completed calls in the journal before capturing the automatic handoff.
 			const canStartContextWindow =
-				this.agent.state.pendingToolCalls.size === 0 && this.getPendingToolCalls().length === 0;
+				this.agent.state.pendingToolCalls.size === 0 &&
+				getPendingToolCalls(this.sessionManager.buildSessionProjection().messages).length === 0;
 			const pathEntries = this.sessionManager.getBranch();
 			abortController = new AbortController();
 			this._autoCompactionAbortController = abortController;
