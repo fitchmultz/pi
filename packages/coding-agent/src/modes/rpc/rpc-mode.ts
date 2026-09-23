@@ -454,6 +454,18 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		unsubscribe?.();
+		unsubscribeBackpressure?.();
+		unsubscribe = session.subscribe((event) => {
+			output(toJsonEvent(event));
+			if (event.type === "agent_settled") {
+				void checkShutdownRequested();
+			}
+		});
+		unsubscribeBackpressure = session.agent.subscribe(async () => {
+			await waitForRawStdoutBackpressure();
+		});
+
 		await session.bindExtensions({
 			uiContext: createExtensionUIContext(),
 			mode: frontend,
@@ -498,17 +510,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			},
 		});
 
-		unsubscribe?.();
-		unsubscribeBackpressure?.();
-		unsubscribe = session.subscribe((event) => {
-			output(toJsonEvent(event));
-			if (event.type === "agent_settled") {
-				void checkShutdownRequested();
-			}
-		});
-		unsubscribeBackpressure = session.agent.subscribe(async () => {
-			await waitForRawStdoutBackpressure();
-		});
 		await interactiveMode?.rebindHostedSession();
 	};
 
@@ -596,9 +597,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			case "new_session": {
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
 				const result = await runtimeHost.newSession(options);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "new_session", result);
 			}
 
@@ -750,17 +748,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 			case "switch_session": {
 				const result = await runtimeHost.switchSession(command.sessionPath);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "switch_session", result);
 			}
 
 			case "fork": {
 				const result = await runtimeHost.fork(command.entryId);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
 			}
 
@@ -770,9 +762,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					return error(id, "clone", "Cannot clone session: no current entry selected");
 				}
 				const result = await runtimeHost.fork(leafId, { position: "at" });
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "clone", { cancelled: result.cancelled });
 			}
 
