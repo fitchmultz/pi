@@ -206,6 +206,128 @@ describe("native async lifecycle", () => {
 		expect(prepared).toEqual([{ handoff: "carry" }]);
 	});
 
+	it.each(
+		(["stream end", "response end", "async item"] as const).flatMap((boundary) =>
+			[false, true].map((fails) => ({ boundary, fails })),
+		),
+	)(
+		"requires the full native batch to succeed before resetting ($boundary, fails=$fails)",
+		async ({ boundary, fails }) => {
+			const work = deferred<void>();
+			const reset = deferred<void>();
+			const resetExecuted = deferred<void>();
+			const { agent, streams, inputs, events } = setup(async (_id, args) => {
+				if ((args as { path: string }).path === "reset") {
+					if (boundary === "async item") await reset.promise;
+					resetExecuted.resolve();
+					return { ...result, newContext: { handoff: "fresh handoff" } };
+				}
+				await work.promise;
+				if (fails) throw new Error("FAILED_SIBLING_MARKER");
+				return result;
+			});
+			const prepared: unknown[] = [];
+			agent.prepareNextTurnWithContext = async ({ newContext, context }) => {
+				prepared.push(newContext);
+				return newContext
+					? {
+							context: {
+								...context,
+								messages: [{ role: "user", content: newContext.handoff ?? "", timestamp: 3 }],
+							},
+						}
+					: undefined;
+			};
+			const run = agent.prompt("go");
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("first");
+			await emitCall(streams[0], first, call());
+			const resetCall: ToolCall =
+				boundary === "async item"
+					? { ...call("reset"), arguments: { path: "reset" } }
+					: { type: "toolCall", id: "reset", name: "work", arguments: { path: "reset" } };
+			first.content.push(resetCall);
+			streams[0].push({ type: "toolcall_end", contentIndex: 1, toolCall: resetCall, partial: first });
+			if (boundary === "response end") {
+				first.stopReason = "toolUse";
+				streams[0].push({ type: "response_end", message: first });
+			} else {
+				finish(streams[0], first);
+			}
+			if (boundary === "async item") {
+				await vi.waitFor(() => expect(events.some((event) => event.type === "turn_end")).toBe(true));
+				reset.resolve();
+			}
+			await resetExecuted.promise;
+			expect(prepared).toEqual([]);
+			if (boundary === "response end") {
+				const successor = assistant("successor");
+				streams[0].push({ type: "start", partial: successor });
+				finish(streams[0], successor);
+			}
+			work.resolve();
+			await answer(streams, 1);
+			await run;
+			expect(prepared).toEqual([fails ? undefined : { handoff: "fresh handoff" }]);
+			expect(JSON.stringify(inputs[1])).toContain(fails ? "FAILED_SIBLING_MARKER" : "fresh handoff");
+			expect(inputs[1].filter((message) => message.role === "toolResult")).toHaveLength(fails ? 2 : 0);
+			expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
+		},
+	);
+
+	it.each([true, false])(
+		"checks late reset errors in their original response (sameResponse=%s)",
+		async (sameResponse) => {
+			const reset = deferred<AgentToolResult>();
+			const resetExecuted = deferred<void>();
+			const { agent, streams, inputs, events } = setup(async (_id, args) => {
+				if ((args as { path: string }).path === "reset") {
+					const value = await reset.promise;
+					resetExecuted.resolve();
+					return value;
+				}
+				throw new Error("FAILED_SIBLING_MARKER");
+			});
+			const prepared: unknown[] = [];
+			agent.prepareNextTurnWithContext = async ({ newContext, context }) => {
+				prepared.push(newContext);
+				return newContext ? { context: { ...context, messages: [] } } : undefined;
+			};
+			const run = agent.prompt("go");
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("first");
+			await emitCall(streams[0], first, call());
+			const resetCall = { ...call("reset"), arguments: { path: "reset" } };
+			if (sameResponse) {
+				first.content.push(resetCall);
+				streams[0].push({ type: "toolcall_end", contentIndex: 1, toolCall: resetCall, partial: first });
+			}
+			finish(streams[0], first);
+			await vi.waitFor(() => expect(streams).toHaveLength(2));
+			expect(JSON.stringify(inputs[1])).toContain("FAILED_SIBLING_MARKER");
+			const second = assistant("second");
+			if (!sameResponse) await emitCall(streams[1], second, resetCall);
+			else streams[1].push({ type: "start", partial: second });
+			reset.resolve({ ...result, newContext: { handoff: "late" } });
+			await resetExecuted.promise;
+			await vi.waitFor(() =>
+				expect(
+					events.some(
+						(event) =>
+							event.type === "message_end" &&
+							event.message.role === "toolResult" &&
+							event.message.toolCallId === resetCall.id,
+					),
+				).toBe(true),
+			);
+			finish(streams[1], second);
+			await answer(streams, 2);
+			await run;
+			expect(prepared).toEqual([undefined, sameResponse ? undefined : { handoff: "late" }]);
+			expect(JSON.stringify(inputs[2]).includes("FAILED_SIBLING_MARKER")).toBe(sameResponse);
+		},
+	);
+
 	it("executes only a completed item after preflight and the durable started barrier, while the response remains open", async () => {
 		const invoked = vi.fn<AgentTool["execute"]>(async () => result);
 		const { agent, streams, events } = setup(invoked);
