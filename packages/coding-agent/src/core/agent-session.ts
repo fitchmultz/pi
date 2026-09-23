@@ -3842,6 +3842,9 @@ export class AgentSession {
 				return false;
 			}
 
+			// A tool completing while an async hook runs is still absent from its snapshot.
+			const canStartContextWindow =
+				this.agent.state.pendingToolCalls.size === 0 && this.getPendingToolCalls().length === 0;
 			const pathEntries = this.sessionManager.getBranch();
 			abortController = new AbortController();
 			this._autoCompactionAbortController = abortController;
@@ -3869,7 +3872,7 @@ export class AgentSession {
 				});
 				signal.throwIfAborted();
 				if (claim?.newContext) {
-					const contextWindowStarted = !!this._consumeNewContext(claim.newContext);
+					const contextWindowStarted = canStartContextWindow && !!this._consumeNewContext(claim.newContext);
 					this._emit({
 						type: "compaction_end",
 						reason,
@@ -3912,7 +3915,8 @@ export class AgentSession {
 				signal.throwIfAborted();
 
 				if (extensionResult?.newContext) {
-					const contextWindowStarted = !!this._consumeNewContext(extensionResult.newContext);
+					const contextWindowStarted =
+						canStartContextWindow && !!this._consumeNewContext(extensionResult.newContext);
 					this._emit({
 						type: "compaction_end",
 						reason,

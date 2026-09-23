@@ -38,6 +38,8 @@ Before a provider request, Pi checks the canonical projected context together wi
 
 The fork's `session_before_auto_compact` hook runs before summary preparation and authentication. An extension can return `{ newContext: { handoff } }` to start a native context window without generating a summary. The original journal remains intact, and pending input follows the new window. Manual `/compact` keeps its ordinary summarization behavior.
 
+An automatic context window cannot start while native tool calls remain unresolved. Pi discards that automatic handoff and reevaluates the hook at the next compaction check, so the eventual handoff uses current input and completed results. This also applies to `newContext` returned by `session_before_compact`. Ordinary summary compaction can still proceed while tools are pending; its projection preserves their original calls.
+
 A provider context-overflow error or an early final `stopReason: "length"` can select one compact-and-retry recovery attempt. Length responses with tool calls retain their synthetic failed tool results and follow the ordinary tool/queue scheduler rather than forcing the run to end.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
