@@ -133,6 +133,9 @@ describe("buildSystemPrompt", () => {
 				"- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory",
 			);
 			expect(prompt).toContain("environment variables (docs/environment-variables.md)");
+			expect(prompt).toContain("task-relevant docs and examples from the running or target Pi version");
+			expect(prompt).toContain("the owner explicitly requests full reading");
+			expect(prompt).not.toContain("Always read pi .md files completely");
 		});
 	});
 
