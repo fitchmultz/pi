@@ -2128,23 +2128,26 @@ export class AgentSession {
 			if (!started) controller.signal.throwIfAborted();
 			throw error;
 		} finally {
-			if (controller.signal.aborted) this._pendingNewContext = undefined;
-			this._skipNextProviderRequestPreflight = false;
-			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
-			this._runSystemPromptOptions = undefined;
-			if (!started) this._baseSystemPromptBaseline = previousBaseSystemPromptBaseline;
-			// No further retry or continuation can deliver these messages. Recover both queued
-			// and drained-but-undelivered customs without starting another turn.
-			this._preserveUndeliveredCustomMessages(true);
-			this._flushPendingProviderMessages();
-			this._flushPendingBashMessages();
-			this._flushPendingCustomMessages();
-			this._promptAbortController = undefined;
-			if (started) {
-				await this._emitAgentSettled();
-			} else {
-				this._isAgentRunActive = false;
-				this._resolveIdleWaitIfIdle();
+			try {
+				if (controller.signal.aborted) this._pendingNewContext = undefined;
+				this._skipNextProviderRequestPreflight = false;
+				if (this._agentRunAbortRequested) await this._finishCancelledRetry();
+				this._runSystemPromptOptions = undefined;
+				if (!started) this._baseSystemPromptBaseline = previousBaseSystemPromptBaseline;
+				// No further retry or continuation can deliver these messages. Recover both queued
+				// and drained-but-undelivered customs without starting another turn.
+				this._preserveUndeliveredCustomMessages(true);
+				this._flushPendingProviderMessages();
+				this._flushPendingBashMessages();
+				this._flushPendingCustomMessages();
+			} finally {
+				this._promptAbortController = undefined;
+				if (started) {
+					await this._emitAgentSettled();
+				} else {
+					this._isAgentRunActive = false;
+					this._resolveIdleWaitIfIdle();
+				}
 			}
 		}
 	}
@@ -2728,12 +2731,9 @@ export class AgentSession {
 	 * Called once the current turn's tool results are in agent state and session history.
 	 */
 	private _flushPendingCustomMessages(): void {
-		if (this._pendingCustomMessages.length === 0) return;
-
-		const pending = this._pendingCustomMessages;
-		this._pendingCustomMessages = [];
-		for (const appMessage of pending) {
-			this._appendCustomMessage(appMessage);
+		while (this._pendingCustomMessages.length > 0) {
+			// SessionManager owns the attempted entry even if persistence fails.
+			this._appendCustomMessage(this._pendingCustomMessages.shift()!);
 		}
 	}
 
@@ -4768,10 +4768,10 @@ export class AgentSession {
 	private _flushPendingBashMessages(): void {
 		if (this._pendingBashMessages.length === 0) return;
 
-		for (const bashMessage of this._pendingBashMessages) {
-			this.sessionManager.appendMessage(bashMessage);
+		while (this._pendingBashMessages.length > 0) {
+			// SessionManager owns the attempted entry even if persistence fails.
+			this.sessionManager.appendMessage(this._pendingBashMessages.shift()!);
 		}
-		this._pendingBashMessages = [];
 		this._refreshFinalizedContext();
 	}
 
