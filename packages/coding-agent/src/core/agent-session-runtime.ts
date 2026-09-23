@@ -175,6 +175,7 @@ export class AgentSessionRuntime {
 			reason,
 			targetSessionFile,
 		});
+		this.session.sessionManager.flush();
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
 	}

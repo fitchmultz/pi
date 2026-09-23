@@ -17,7 +17,7 @@ export function detectLineEnding(content: string): "\r\n" | "\n" {
 }
 
 export function normalizeToLF(text: string): string {
-	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	return text.replace(/\r\n/g, "\n");
 }
 
 export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string {
