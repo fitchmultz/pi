@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -212,6 +212,83 @@ describe("AgentSessionRuntime characterization", () => {
 			toolName: "block",
 			content: [{ type: "text", text: "tool aborted" }],
 		});
+	});
+
+	it.each(["resume", "import"] as const)(
+		"keeps shutdown entries on the active branch when %s selects the current session",
+		async (operation) => {
+			let shutdownEntryId: string | null = null;
+			let restoredBranch: string[] = [];
+			const { runtime } = await createRuntimeForTest((pi) => {
+				pi.on("session_shutdown", (event, ctx) => {
+					if (event.reason !== "resume") return;
+					pi.appendEntry("shutdown-state", {});
+					shutdownEntryId = ctx.sessionManager.getLeafId();
+				});
+				pi.on("session_start", (event, ctx) => {
+					if (event.reason === "resume") {
+						restoredBranch = ctx.sessionManager.getBranch().map((entry) => entry.id);
+					}
+				});
+			});
+			await runtime.session.prompt("hello");
+			const sessionFile = runtime.session.sessionFile!;
+
+			if (operation === "resume") await runtime.switchSession(sessionFile);
+			else await runtime.importFromJsonl(sessionFile);
+			await runtime.session.bindExtensions({});
+
+			expect(shutdownEntryId).toBeTruthy();
+			expect(SessionManager.open(sessionFile).getEntry(shutdownEntryId!)).toBeDefined();
+			expect(restoredBranch).toContain(shutdownEntryId);
+
+			runtime.session.sessionManager.appendCustomEntry("next-turn");
+			expect(
+				SessionManager.open(sessionFile)
+					.getBranch()
+					.map((entry) => entry.id),
+			).toContain(shutdownEntryId);
+		},
+	);
+
+	it("keeps the session cwd when self-resuming before its first journal write", async () => {
+		let shutdownEntryId: string | null = null;
+		const { runtime, tempDir } = await createRuntimeForTest((pi) => {
+			pi.on("session_shutdown", (event, ctx) => {
+				if (event.reason !== "resume") return;
+				pi.appendEntry("shutdown-state", {});
+				shutdownEntryId = ctx.sessionManager.getLeafId();
+			});
+		});
+		const sessionFile = runtime.session.sessionFile!;
+		expect(existsSync(sessionFile)).toBe(false);
+
+		await runtime.switchSession(sessionFile);
+		await runtime.session.bindExtensions({});
+
+		expect(runtime.cwd).toBe(tempDir);
+		expect(runtime.session.sessionManager.getBranch().map((entry) => entry.id)).toContain(shutdownEntryId);
+	});
+
+	it.skipIf(process.platform === "win32")("imports an alias of the current journal after shutdown", async () => {
+		let shutdownEntryId: string | null = null;
+		const { runtime, tempDir } = await createRuntimeForTest((pi) => {
+			pi.on("session_shutdown", (event, ctx) => {
+				if (event.reason !== "resume") return;
+				pi.appendEntry("shutdown-state", {});
+				shutdownEntryId = ctx.sessionManager.getLeafId();
+			});
+		});
+		await runtime.session.prompt("hello");
+		const sessionFile = runtime.session.sessionFile!;
+		const alias = join(tempDir, "alias.jsonl");
+		symlinkSync(sessionFile, alias);
+
+		await runtime.importFromJsonl(alias);
+		await runtime.session.bindExtensions({});
+
+		expect(runtime.session.sessionFile).toBe(sessionFile);
+		expect(runtime.session.sessionManager.getBranch().map((entry) => entry.id)).toContain(shutdownEntryId);
 	});
 
 	it("preserves an existing session when importing a file with the same name", async () => {
