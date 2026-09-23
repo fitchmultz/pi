@@ -211,7 +211,7 @@ export class OutputAccumulator {
 			return;
 		}
 		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
-		this.tempFileStream = createWriteStream(this.tempFilePath);
+		this.tempFileStream = createWriteStream(this.tempFilePath, { flags: "wx", mode: 0o600 });
 		this.tempFileCompletion = finished(this.tempFileStream, { cleanup: true });
 		// Retain early storage failures for closeTempFile without an unhandled rejection.
 		void this.tempFileCompletion.catch(() => {});
