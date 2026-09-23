@@ -3,10 +3,12 @@
  * Provider auth orchestration belongs to ModelRuntime and pi-ai Models.
  */
 
-import { publishLocalFile } from "@earendil-works/pi-agent-core/node";
+import { execFileSync } from "node:child_process";
+import { resolveLocalFileTarget, resolveLocalOperationPath } from "@earendil-works/pi-agent-core/node";
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, join, resolve } from "path";
+import { constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { access, lstat, mkdtemp, rename, rm, writeFile } from "fs/promises";
+import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { setTimeout as sleep } from "timers/promises";
 import { getAgentDir } from "../config.ts";
@@ -23,8 +25,62 @@ type LockResult<T> = {
 	next?: string;
 };
 
-// New files are owner-only; replacements retain ordinary mode and ownership.
+// The mode applies only on creation so administrator-managed modes and ACLs remain intact.
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
+
+async function publishStoredFile(path: string, content: string, signal?: AbortSignal): Promise<void> {
+	signal?.throwIfAborted();
+	const target = await resolveLocalFileTarget(resolveLocalOperationPath(process.cwd(), path));
+	const previous = await lstat(target).catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	});
+	if (previous) {
+		if (!previous.isFile()) throw new Error(`Cannot save a non-regular file: ${target}`);
+		await access(target, constants.W_OK);
+	}
+	signal?.throwIfAborted();
+	const stageDir = await mkdtemp(join(dirname(target), ".pi-auth-"));
+	try {
+		const stage = join(stageDir, "file");
+		if (previous) {
+			if (process.platform === "win32") {
+				await writeFile(stage, "", { flag: "wx", mode: 0o600 });
+				const source = target.replaceAll("'", "''");
+				const destination = stage.replaceAll("'", "''");
+				const script = `$ErrorActionPreference = 'Stop'; $acl = Get-Acl -LiteralPath '${source}'; Set-Acl -LiteralPath '${destination}' -AclObject $acl`;
+				const powershell = join(
+					process.env.SystemRoot ?? "C:\\Windows",
+					"System32",
+					"WindowsPowerShell",
+					"v1.0",
+					"powershell.exe",
+				);
+				execFileSync(
+					powershell,
+					["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+					{ windowsHide: true },
+				);
+			} else {
+				execFileSync(process.platform === "darwin" ? "/bin/cp" : "/usr/bin/cp", ["-p", target, stage]);
+				const staged = await lstat(stage);
+				if (
+					staged.uid !== previous.uid ||
+					staged.gid !== previous.gid ||
+					(staged.mode & 0o7777) !== (previous.mode & 0o7777)
+				) {
+					throw new Error(`Could not preserve file ownership and mode: ${target}`);
+				}
+			}
+		}
+		signal?.throwIfAborted();
+		await writeFile(stage, content, { encoding: "utf-8", mode: 0o600, flag: previous ? "w" : "wx", signal });
+		signal?.throwIfAborted();
+		await rename(stage, target);
+	} finally {
+		await rm(stageDir, { recursive: true, force: true }).catch(() => {});
+	}
+}
 
 type AuthFileReload = {
 	controller: AbortController;
@@ -197,7 +253,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			throwIfCompromised();
 			options?.signal?.throwIfAborted();
 			if (next !== undefined) {
-				await publishLocalFile(resolve(this.authPath), next, options?.signal);
+				await publishStoredFile(this.authPath, next, options?.signal);
 			}
 			throwIfCompromised();
 			return result;

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type CredentialStore, createModels, type Provider } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
@@ -211,6 +211,72 @@ describe("AuthStorage", () => {
 		expect(child.status, child.stderr).toBe(0);
 		expect(JSON.parse(child.stdout)).toEqual({ success: false, error: expect.stringContaining("EFBIG") });
 		expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual(original);
+	});
+
+	test.skipIf(process.platform === "win32")("keeps a symlinked parent and .. path on the original file", async () => {
+		const entry = join(tempDir, "entry");
+		const targetDirectory = join(tempDir, "actual");
+		mkdirSync(entry);
+		mkdirSync(join(targetDirectory, "child"), { recursive: true });
+		symlinkSync("../actual/child", join(entry, "link"), "dir");
+		const target = join(targetDirectory, "auth.json");
+		const unrelated = join(entry, "auth.json");
+		writeFileSync(target, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }));
+		writeFileSync(unrelated, JSON.stringify({ openai: { type: "api_key", key: "unrelated" } }));
+
+		await AuthStorage.create(`${entry}/link/../auth.json`).modify("anthropic", async () => ({
+			type: "api_key",
+			key: "updated",
+		}));
+
+		expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({ anthropic: { type: "api_key", key: "updated" } });
+		expect(JSON.parse(readFileSync(unrelated, "utf8"))).toEqual({ openai: { type: "api_key", key: "unrelated" } });
+	});
+
+	test.skipIf(process.platform === "win32")("keeps a recreated auth file owner-only", async () => {
+		writeFileSync(authJsonPath, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o600 });
+		const storage = AuthStorage.create(authJsonPath);
+		const previousUmask = process.umask(0o022);
+		try {
+			await storage.modify("anthropic", async () => {
+				rmSync(authJsonPath);
+				return { type: "api_key", key: "new" };
+			});
+		} finally {
+			process.umask(previousUmask);
+		}
+		expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+	});
+
+	test.skipIf(process.platform !== "darwin")("preserves a custom auth file ACL", async () => {
+		writeFileSync(authJsonPath, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o600 });
+		const grant = spawnSync("/bin/chmod", ["+a", "group:everyone allow read", authJsonPath]);
+		expect(grant.status, grant.stderr.toString()).toBe(0);
+		const acl = () => spawnSync("/bin/ls", ["-le", authJsonPath], { encoding: "utf8" }).stdout;
+		expect(acl()).toContain("group:everyone allow read");
+
+		await AuthStorage.create(authJsonPath).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+
+		expect(acl()).toContain("group:everyone allow read");
+	});
+
+	test.skipIf(process.platform === "win32")("does not run a project cp during credential saves", async () => {
+		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
+		const bin = join(tempDir, "bin");
+		const marker = join(tempDir, "called");
+		mkdirSync(bin);
+		writeFileSync(join(bin, "cp"), '#!/bin/sh\nprintf called > "$(dirname "$0")/../called"\nexec /bin/cp "$@"\n', {
+			mode: 0o755,
+		});
+		const previousPath = process.env.PATH;
+		process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+		try {
+			await AuthStorage.create(authJsonPath).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+		} finally {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+		}
+		expect(existsSync(marker)).toBe(false);
 	});
 
 	test("modify with undefined leaves the current credential unchanged", async () => {
