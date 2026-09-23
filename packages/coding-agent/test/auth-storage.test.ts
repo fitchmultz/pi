@@ -314,6 +314,25 @@ describe("AuthStorage", () => {
 		expect(getAcl()).not.toContain("user:nobody:");
 	});
 
+	test.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/setfattr"))(
+		"preserves an existing auth file extended attribute",
+		async () => {
+			writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
+			const set = spawnSync("/usr/bin/setfattr", ["-n", "user.pi-test", "-v", "present", authJsonPath], {
+				encoding: "utf8",
+			});
+			expect(set.status, set.stderr).toBe(0);
+
+			await AuthStorage.create(authJsonPath).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+
+			const get = spawnSync("/usr/bin/getfattr", ["--only-values", "-n", "user.pi-test", authJsonPath], {
+				encoding: "utf8",
+			});
+			expect(get.status, get.stderr).toBe(0);
+			expect(get.stdout).toBe("present");
+		},
+	);
+
 	test.skipIf(process.platform !== "linux")("saves when a default ACL removes staging owner write", async () => {
 		const parent = join(tempDir, "restricted-default");
 		const path = join(parent, "auth.json");

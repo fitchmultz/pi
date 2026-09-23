@@ -80,7 +80,11 @@ async function publishStoredFile(path: string, content: string, signal?: AbortSi
 					execFileSync("/usr/bin/setfacl", ["-b", stage]);
 					await chmod(stage, 0o600);
 				}
-				execFileSync(process.platform === "darwin" ? "/bin/cp" : "/usr/bin/cp", ["-p", target, stage]);
+				// Linux security labels are extended attributes; -p alone does not copy them.
+				execFileSync(
+					process.platform === "darwin" ? "/bin/cp" : "/usr/bin/cp",
+					process.platform === "darwin" ? ["-p", target, stage] : ["-p", "--preserve=xattr", target, stage],
+				);
 				const staged = await lstat(stage);
 				if (
 					staged.uid !== previous.uid ||
