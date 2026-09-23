@@ -1,7 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { realpathSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { constants } from "node:os";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { getActiveManagedInstallRoot } from "./managed-install.ts";
 import {
 	MANAGED_CLI_ENV,
 	parseRestartCommand,
@@ -15,6 +16,13 @@ import {
 interface Launch {
 	worker: string;
 	args: string[];
+	/** A successful --runtime selection stays pinned until another explicit selection. */
+	selectedRuntime?: string;
+}
+
+interface InstallationSelector {
+	launcherPath: string;
+	managedRoot?: string;
 }
 
 export function getCliWorkerPath(launcherPath: string): string {
@@ -30,13 +38,54 @@ export function getRestartRuntimeWorker(runtime: string): string {
 	return worker;
 }
 
+function getManagedRootForInvocation(invocationPath: string, concreteLauncher: string): string | undefined {
+	const root = process.env.PI_MANAGED_INSTALL_ROOT?.trim();
+	if (!root) return undefined;
+	// The install.sh wrapper execs this concrete release bin with the root in its environment.
+	// Direct release CLI files and source entries do not opt into its moving version pointer.
+	const parts = relative(join(resolve(root), "releases"), invocationPath).split(sep);
+	if (
+		parts.length !== 4 ||
+		!parts[0] ||
+		parts[0] === "." ||
+		parts[0] === ".." ||
+		!/^[0-9A-Za-z._+-]+$/.test(parts[0]) ||
+		parts[1] !== "node_modules" ||
+		parts[2] !== ".bin" ||
+		parts[3] !== "pi"
+	) {
+		return undefined;
+	}
+	return getActiveManagedInstallRoot(concreteLauncher, root);
+}
+
+function resolveSelectedWorker(selector: InstallationSelector): string {
+	let launcherPath = selector.launcherPath;
+	if (selector.managedRoot) {
+		const currentFile = join(selector.managedRoot, "current-version");
+		const version = readFileSync(currentFile, "utf8").split("\n", 1)[0];
+		if (!version || version === "." || version === ".." || !/^[0-9A-Za-z._+-]+$/.test(version)) {
+			throw new Error(`Managed Pi version file is invalid: ${currentFile}`);
+		}
+		launcherPath = join(selector.managedRoot, "releases", version, "node_modules", ".bin", "pi");
+	}
+	// Resolve the launcher first: an npm bin/pi symlink is not beside cli-worker.js.
+	return realpathSync(getCliWorkerPath(realpathSync(launcherPath)));
+}
+
 /** Only this parent owns process replacement. Normal exits and signals never restart a worker. */
 export async function superviseCli(
 	worker: string,
 	args: string[],
-	options: { startupTimeoutMs?: number; env?: NodeJS.ProcessEnv; execArgv?: string[] } = {},
+	options: {
+		startupTimeoutMs?: number;
+		env?: NodeJS.ProcessEnv;
+		execArgv?: string[];
+		selector?: InstallationSelector;
+	} = {},
 ): Promise<number> {
-	let launch: Launch = { worker: realpathSync(worker), args };
+	const initialWorker = realpathSync(worker);
+	let launch: Launch = { worker: initialWorker, args };
 	let fallback: Launch | undefined;
 	let handoff: RestartHandoff | undefined;
 	let child: ChildProcess | undefined;
@@ -127,12 +176,18 @@ export async function superviseCli(
 				const previous: Launch = {
 					worker: launch.worker,
 					args: [...resumeArgs, ...restart.extensions.flatMap((path) => ["-e", path])],
+					selectedRuntime: launch.selectedRuntime,
 				};
 				try {
 					const extensions = restart.request.extensions ?? restart.extensions;
+					const selectedRuntime = restart.request.runtime
+						? getRestartRuntimeWorker(restart.request.runtime)
+						: launch.selectedRuntime;
 					launch = {
-						worker: restart.request.runtime ? getRestartRuntimeWorker(restart.request.runtime) : previous.worker,
+						worker:
+							selectedRuntime ?? (options.selector ? resolveSelectedWorker(options.selector) : initialWorker),
 						args: [...resumeArgs, ...extensions.flatMap((path) => ["-e", path])],
+						selectedRuntime,
 					};
 					fallback = previous;
 					handoff = {
@@ -176,7 +231,7 @@ export async function runCliLauncher(args: string[], launcherPath: string): Prom
 	if (args[0] === "restart") {
 		if (args.length === 2 && (args[1] === "--help" || args[1] === "-h")) {
 			console.log(
-				"Usage: pi restart [--message <continuation>] [--runtime <built-package-dir>] [-e <extension> ...]\nOmit -e to keep the current explicit extensions; supplying -e replaces that list. Run inside a managed Pi shell tool.",
+				"Usage: pi restart [--message <continuation>] [--runtime <built-package-dir>] [-e <extension> ...]\nWithout --runtime, Pi follows the original installation selector or keeps the last explicit runtime. --runtime pins a built package for later restarts. Omit -e to keep the current explicit extensions; supplying -e replaces that list. Run inside a managed Pi shell tool.",
 			);
 			return 0;
 		}
@@ -187,5 +242,12 @@ export async function runCliLauncher(args: string[], launcherPath: string): Prom
 		console.log(await requestRestart(socket, request));
 		return 0;
 	}
-	return superviseCli(getCliWorkerPath(launcherPath), args);
+	const invocationPath = resolve(launcherPath);
+	const concreteLauncher = realpathSync(invocationPath);
+	return superviseCli(getCliWorkerPath(concreteLauncher), args, {
+		selector: {
+			launcherPath: invocationPath,
+			managedRoot: getManagedRootForInvocation(invocationPath, concreteLauncher),
+		},
+	});
 }

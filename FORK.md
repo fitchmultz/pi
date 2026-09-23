@@ -98,12 +98,11 @@ includes the commit, catalog digest, Node version, platform and architecture.
 Existing releases are never rebuilt or overwritten. Deployed delivery uses the
 locally qualified frozen archive.
 
-Select the printed identity, then activate its printed package directory:
+Select the printed identity, then restart through the installed `pi` command:
 
 ```sh
 npm run install:fork -- --activate <identity>
-pi restart --runtime <printed-packageDir> \
-  --message "Verify the updated runtime and continue"
+pi restart --message "Verify the selected runtime and continue"
 ```
 
 Without `--stage`, installation validates and selects in one command. Selection
@@ -112,16 +111,29 @@ previous target is retained at that symlink's `.previous` sibling. Settings,
 credentials, extensions and real session journals under `~/.pi` are unchanged.
 Never use `npm link` to select a mutable checkout.
 
+An ordinary restart re-resolves the original installed package symlink, so it
+loads a newly selected release even when its version string is unchanged.
+Use `pi restart --runtime <printed-packageDir>` only to try a staged release
+without changing the selector or to deliberately pin that concrete worker.
+The pin survives later ordinary restarts until another explicit runtime is
+selected or Pi is fully launched again. Source/worktree entrypoints and a
+release's concrete `dist/bundle/cli.js` stay at their own location.
+
 Restart acknowledgment means queued, not ready. Verify the replacement process,
 loaded package directory, same session identity, tools and real provider operation.
-Omitting `-e` preserves explicit extensions. `/reload` does not apply code changes.
-Launcher changes take effect at the next full CLI launch. See
+Omitting `-e` preserves explicit extensions. A failed or unready candidate
+returns to the exact prior worker, extensions and selection policy once; it
+does not undo file edits. `/reload` does not apply code changes. A running older
+launcher needs one full CLI launch to acquire this behavior; launcher changes
+also take effect only at a full launch. See
 [Managed Restarts](packages/coding-agent/docs/restart.md).
 
 To return to an earlier installer-validated release, use `--rollback <identity>`
-and native restart with its package directory. Keep previous runtimes and extension
-files intact. Legacy releases without receipts remain untouched; their previous
-selector target is preserved for manual selection and native startup rollback.
+and an ordinary restart when following the selector. If an explicit runtime is
+pinned, use `--runtime <rolled-back-packageDir>` or fully relaunch Pi. Keep
+previous runtimes and extension files intact. Legacy releases without receipts
+remain untouched; their previous selector target is preserved for manual
+selection and native startup rollback.
 
 ## Fork patch intent
 

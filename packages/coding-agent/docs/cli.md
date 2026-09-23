@@ -251,7 +251,7 @@ Add `--force` to reinstall Pi when the selected update includes Pi.
 
 ## Restart the running session
 
-From a Pi shell tool, `pi restart --message "Continue the task"` queues a managed restart of the Node CLI worker. `--runtime <package-dir>` selects a separately staged runtime; repeated `-e <path>` options replace the explicit extension list. Omitting `-e` preserves it, including extension-discovery restrictions.
+From a Pi shell tool, `pi restart --message "Continue the task"` queues a managed restart of the Node CLI worker. Without `--runtime`, it follows the originally invoked installation selector or retains an earlier explicit runtime. `--runtime <package-dir>` selects and pins a separately staged worker for later restarts. Repeated `-e <path>` options replace the explicit extension list; omitting `-e` preserves it, including extension-discovery restrictions.
 
 The command acknowledges queueing. Verify the replacement runtime after startup. Keep previous runtime and extension files intact for rollback. See [Managed Restarts](restart.md) for the idle boundary, readiness, and recovery contract.
 

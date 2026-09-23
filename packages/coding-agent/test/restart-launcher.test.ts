@@ -1,8 +1,20 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { transformSync } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import { getCliWorkerPath, superviseCli } from "../src/cli/launcher.ts";
@@ -102,6 +114,133 @@ const cleanEnv = {
 	PI_RESTART_SOCKET: "outer-session-endpoint",
 };
 
+function selectorFixture(managed = false) {
+	const root = mkdtempSync(join(tmpdir(), "pi-restart-selector-"));
+	directories.push(root);
+	const trace = join(root, "trace.jsonl");
+	const managedRoot = join(root, "managed");
+	const selector = managed ? join(managedRoot, "current-version") : join(root, "selected");
+	const packagePath = (name: string) =>
+		managed
+			? join(managedRoot, "releases", name, "node_modules", "@earendil-works", "pi-coding-agent")
+			: join(root, "releases", name);
+	const launcherModule = pathToFileURL(resolve(__dirname, "../src/cli/launcher.ts")).href;
+	const launcherSource = transformSync(
+		readFileSync(resolve(__dirname, "../src/cli-launcher.ts"), "utf8").replace(
+			'from "./cli/launcher.ts"',
+			`from ${JSON.stringify(launcherModule)}`,
+		),
+		{ loader: "ts", format: "esm" },
+	).code;
+	const checkpoint: RestartCheckpoint = {
+		sessionFile: join(root, "session.jsonl"),
+		sessionId: "selector-session",
+		cwd: root,
+		leafId: "selected-leaf",
+		model: { provider: "faux", id: "faux-1" },
+		thinkingLevel: "off",
+		activeTools: ["bash"],
+		knownTools: ["bash"],
+	};
+	if (managed) {
+		mkdirSync(managedRoot, { recursive: true });
+		writeFileSync(
+			join(managedRoot, "managed-install.json"),
+			JSON.stringify({ kind: "pi-managed-install", schemaVersion: 1, layout: "releases-v1" }),
+		);
+	} else {
+		const bin = join(root, "bin");
+		mkdirSync(bin);
+		symlinkSync("../selected/dist/bundle/cli.js", join(bin, "pi"));
+	}
+	return {
+		root,
+		trace,
+		selector,
+		checkpoint,
+		packagePath,
+		release(name: string, version: string, body: string, source = false) {
+			const directory = source ? join(root, "source", name) : packagePath(name);
+			const subdir = source ? "src" : "dist/bundle";
+			const entry = join(directory, subdir, source ? "cli-launcher.ts" : "cli.js");
+			const worker = join(directory, subdir, source ? "cli.ts" : "cli-worker.js");
+			mkdirSync(dirname(entry), { recursive: true });
+			writeFileSync(join(directory, "package.json"), JSON.stringify({ type: "module", version }));
+			writeFileSync(entry, launcherSource);
+			chmodSync(entry, 0o755);
+			writeFileSync(
+				worker,
+				`
+import { appendFileSync, existsSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+const loaded = fileURLToPath(import.meta.url);
+const packageDir = ${source ? "dirname(dirname(loaded))" : "dirname(dirname(dirname(loaded)))"};
+const handoff = process.env.PI_RESTART_HANDOFF ? JSON.parse(process.env.PI_RESTART_HANDOFF) : undefined;
+appendFileSync(${JSON.stringify(trace)}, JSON.stringify({
+	name: ${JSON.stringify(name)}, pid: process.pid, loaded, packageDir,
+	version: JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")).version,
+	args: process.argv.slice(2), handoff, socket: process.env.PI_RESTART_SOCKET
+}) + "\\n");
+const select = (name) => {
+	const temporary = ${JSON.stringify(selector)} + ".tmp." + process.pid;
+	${managed ? `writeFileSync(temporary, name + "\\n");` : `symlinkSync(${JSON.stringify(join(root, "releases"))} + "/" + name, temporary);`}
+	renameSync(temporary, ${JSON.stringify(selector)});
+};
+const readyExit = () => process.send({ type: "pi:ready" }, () => process.exit(0));
+const restart = (request = {}, extensions = [${JSON.stringify(join(root, "old.ts"))}]) =>
+	process.send({ type: "pi:ready" }, () => process.send({
+		type: "pi:restart", request: { message: "Resume work", ...request },
+		checkpoint: ${JSON.stringify(checkpoint)}, args: ["-ne"], extensions
+	}, () => process.exit(0)));
+${body}
+`,
+			);
+			if (managed && !source) {
+				const bin = join(managedRoot, "releases", name, "node_modules", ".bin");
+				mkdirSync(bin, { recursive: true });
+				symlinkSync("../@earendil-works/pi-coding-agent/dist/bundle/cli.js", join(bin, "pi"));
+			}
+			return { directory, entry, worker };
+		},
+		select(name: string) {
+			const temporary = `${selector}.tmp`;
+			if (managed) writeFileSync(temporary, `${name}\n`);
+			else symlinkSync(packagePath(name), temporary);
+			renameSync(temporary, selector);
+		},
+		run(
+			entry = managed
+				? join(managedRoot, "releases", "1.0.0", "node_modules", ".bin", "pi")
+				: join(root, "bin", "pi"),
+		) {
+			const result = spawnSync(entry, ["original task", "@original.md"], {
+				env: { ...cleanEnv, ...(managed ? { PI_MANAGED_INSTALL_ROOT: managedRoot } : {}) },
+				encoding: "utf8",
+				timeout: 12_000,
+			});
+			expect(result.error).toBeUndefined();
+			expect(result.status, result.stderr).toBe(0);
+			return readFileSync(trace, "utf8")
+				.trim()
+				.split("\n")
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							name: string;
+							pid: number;
+							loaded: string;
+							packageDir: string;
+							version: string;
+							args: string[];
+							handoff?: RestartHandoff;
+							socket?: string;
+						},
+				);
+		},
+	};
+}
+
 describe("restart arguments and validation", () => {
 	it("captures only persistent options with the real CLI parser", () => {
 		expect(
@@ -194,6 +333,133 @@ describe("restart arguments and validation", () => {
 		);
 		expect(getCliWorkerPath(join(root, "dist", "cli-launcher.js"))).toBe(join(root, "dist", "cli.js"));
 		expect(getCliWorkerPath(join(root, "src", "cli-launcher.ts"))).toBe(join(root, "src", "cli.ts"));
+	});
+});
+
+describe.skipIf(process.platform === "win32")("selected installation restarts", () => {
+	it("follows the original CLI symlink through A, B, then C with equal-version releases", () => {
+		const f = selectorFixture();
+		f.release("A", "1.0.0", 'if (!handoff) { select("B"); restart(); } else readyExit();');
+		const b = f.release("B", "2.0.0", 'select("C"); restart();');
+		const c = f.release("C", "2.0.0", "readyExit();");
+		f.select("A");
+		const trace = f.run();
+		expect(trace.map((entry) => entry.name)).toEqual(["A", "B", "C"]);
+		expect(trace.map((entry) => entry.packageDir)).toEqual(
+			[f.packagePath("A"), b.directory, c.directory].map((directory) => realpathSync(directory)),
+		);
+		expect(trace.map((entry) => entry.version)).toEqual(["1.0.0", "2.0.0", "2.0.0"]);
+		expect(new Set(trace.map((entry) => entry.pid)).size).toBe(3);
+		expect(trace[1].handoff?.checkpoint).toEqual(f.checkpoint);
+		expect(trace[2].handoff?.checkpoint).toEqual(f.checkpoint);
+		expect(trace.every((entry) => entry.socket === undefined)).toBe(true);
+		expect(trace.slice(1).every((entry) => !entry.args.includes("original task"))).toBe(true);
+	});
+
+	it.each(["1.0.0", "2.0.0"])(
+		"follows the managed selector from an owned release bin (initial selection: %s)",
+		(initialSelection) => {
+			const f = selectorFixture(true);
+			f.release("1.0.0", "1.0.0", 'select("2.0.0"); restart();');
+			f.release("2.0.0", "2.0.0", 'select("3.0.0"); restart();');
+			f.release("3.0.0", "3.0.0", "readyExit();");
+			f.select(initialSelection);
+			// An older release's .bin/pi with the inherited managed root is also an installation entrypoint.
+			const trace = f.run();
+			expect(trace.map((entry) => entry.version)).toEqual(["1.0.0", "2.0.0", "3.0.0"]);
+			expect(trace.map((entry) => entry.packageDir)).toEqual(
+				["1.0.0", "2.0.0", "3.0.0"].map((version) => realpathSync(f.packagePath(version))),
+			);
+			expect(new Set(trace.map((entry) => entry.pid)).size).toBe(3);
+		},
+	);
+
+	it.each(["direct release", "source checkout"])(
+		"keeps a %s on its own runtime despite an inherited managed root",
+		(kind) => {
+			const f = selectorFixture(true);
+			const body = 'if (!handoff) { select("2.0.0"); restart(); } else readyExit();';
+			const direct = f.release("1.0.0", "1.0.0", body);
+			const source = f.release("checkout", "source", body, true);
+			f.release("2.0.0", "2.0.0", "readyExit();");
+			f.select("1.0.0");
+			const selected = kind === "source checkout" ? source : direct;
+			const trace = f.run(selected.entry);
+			expect(trace.map((entry) => entry.packageDir)).toEqual([
+				realpathSync(selected.directory),
+				realpathSync(selected.directory),
+			]);
+			expect(trace[1].pid).not.toBe(trace[0].pid);
+			expect(readFileSync(f.selector, "utf8")).toBe("2.0.0\n");
+		},
+	);
+
+	it("keeps an explicit --runtime worker after a later ordinary restart moves the original selector", () => {
+		const f = selectorFixture();
+		const b = f.packagePath("B");
+		const marker = join(f.root, "b-restarted");
+		f.release("A", "1.0.0", `select("C"); restart({ runtime: ${JSON.stringify(b)} });`);
+		f.release(
+			"B",
+			"2.0.0",
+			`if (!existsSync(${JSON.stringify(marker)})) { writeFileSync(${JSON.stringify(marker)}, ""); restart(); } else readyExit();`,
+		);
+		f.release("C", "3.0.0", "readyExit();");
+		f.select("A");
+		const trace = f.run();
+		expect(trace.map((entry) => entry.name)).toEqual(["A", "B", "B"]);
+		expect(trace[2].packageDir).toBe(realpathSync(b));
+		expect(new Set(trace.map((entry) => entry.pid)).size).toBe(3);
+	});
+
+	it("rolls back to the exact previous worker and extensions after a failed selected update", () => {
+		const f = selectorFixture();
+		f.release("A", "1.0.0", 'if (!handoff) { select("B"); restart({ extensions: ["/new.ts"] }); } else restart();');
+		f.release("B", "2.0.0", 'select("C"); process.exit(17);');
+		f.release("C", "3.0.0", "readyExit();");
+		f.select("A");
+		const trace = f.run();
+		expect(trace.map((entry) => entry.name)).toEqual(["A", "B", "A", "C"]);
+		expect(trace[1].args.at(-1)).toBe("/new.ts");
+		expect(trace[2].args.at(-1)).toBe(join(f.root, "old.ts"));
+		expect(trace[3].args.at(-1)).toBe(join(f.root, "old.ts"));
+		expect(trace[2].handoff?.failure).toBe("Updated Pi failed during startup.");
+		expect(trace[2].loaded).toBe(trace[0].loaded);
+		expect(trace[3].packageDir).toBe(realpathSync(f.packagePath("C")));
+	});
+
+	it("recovers the old explicit selection when a later explicit candidate fails", () => {
+		const f = selectorFixture();
+		const b = f.packagePath("B");
+		const c = f.packagePath("C");
+		const marker = join(f.root, "b-recovered");
+		f.release("A", "1.0.0", `restart({ runtime: ${JSON.stringify(b)} });`);
+		f.release(
+			"B",
+			"2.0.0",
+			`if (existsSync(${JSON.stringify(marker)})) readyExit();
+else if (!handoff?.failure) restart({ runtime: ${JSON.stringify(c)}, extensions: ["/new.ts"] });
+else { writeFileSync(${JSON.stringify(marker)}, ""); restart(); }`,
+		);
+		f.release("C", "3.0.0", 'select("D"); process.exit(17);');
+		f.release("D", "4.0.0", "readyExit();");
+		f.select("A");
+		const trace = f.run();
+		expect(trace.map((entry) => entry.name)).toEqual(["A", "B", "C", "B", "B"]);
+		expect(trace[2].args.at(-1)).toBe("/new.ts");
+		expect(trace[3].args.at(-1)).toBe(join(f.root, "old.ts"));
+		expect(trace[4].packageDir).toBe(realpathSync(b));
+		expect(realpathSync(f.selector)).toBe(realpathSync(f.packagePath("D")));
+	});
+
+	it("reuses the previous worker when the newly selected release is missing", () => {
+		const f = selectorFixture();
+		f.release("A", "1.0.0", 'if (!handoff) { select("missing"); restart(); } else readyExit();');
+		f.select("A");
+		const trace = f.run();
+		expect(trace.map((entry) => entry.name)).toEqual(["A", "A"]);
+		expect(trace[1].handoff?.failure).toContain("Could not select the updated runtime");
+		expect(trace[1].args.at(-1)).toBe(join(f.root, "old.ts"));
 	});
 });
 

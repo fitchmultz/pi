@@ -2,7 +2,7 @@
 import { fileURLToPath } from "node:url";
 import { runCliLauncher } from "./cli/launcher.ts";
 
-runCliLauncher(process.argv.slice(2), fileURLToPath(import.meta.url)).then(
+runCliLauncher(process.argv.slice(2), process.argv[1] ?? fileURLToPath(import.meta.url)).then(
 	(code) => {
 		process.exitCode = code;
 	},
