@@ -56,7 +56,7 @@ function resolveExportFileTarget(filePath: string): string {
 	for (;;) {
 		let parent: string;
 		try {
-			parent = realpathSync(dirname(target));
+			parent = realpathSync.native(dirname(target));
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return target;
 			throw error;
@@ -69,6 +69,20 @@ function resolveExportFileTarget(filePath: string): string {
 	}
 }
 
+/** A pending journal has no inode, so check the actual destination directory's case behavior. */
+function directoryIgnoresCase(directory: string): boolean {
+	const probe = mkdtempSync(join(directory, ".pi-export-case-"));
+	try {
+		const original = statSync(probe);
+		const alternate = statSync(join(directory, basename(probe).replace(".pi-", ".PI-")), {
+			throwIfNoEntry: false,
+		});
+		return alternate?.dev === original.dev && alternate?.ino === original.ino;
+	} finally {
+		rmSync(probe, { recursive: true, force: true });
+	}
+}
+
 export function assertDistinctExportTarget(sourceFile: string | undefined, outputPath: string): void {
 	if (!sourceFile) return;
 	const samePath = resolvePath(sourceFile) === resolvePath(outputPath);
@@ -78,14 +92,23 @@ export function assertDistinctExportTarget(sourceFile: string | undefined, outpu
 	if (!source) {
 		const sourceTarget = resolveExportFileTarget(sourceFile);
 		const outputTarget = resolveExportFileTarget(outputPath);
-		// ponytail: Case-only names on case-sensitive macOS/Windows volumes are conservatively blocked
-		// until the journal exists; use a per-volume case-sensitivity check if that use case matters.
-		samePendingTarget =
-			sourceTarget === outputTarget ||
-			((process.platform === "darwin" || process.platform === "win32") &&
-				dirname(sourceTarget) === dirname(outputTarget) &&
-				basename(sourceTarget).normalize("NFD").toLowerCase() ===
-					basename(outputTarget).normalize("NFD").toLowerCase());
+		samePendingTarget = sourceTarget === outputTarget;
+		if (
+			!samePendingTarget &&
+			!output &&
+			basename(sourceTarget).normalize("NFD").toLowerCase() === basename(outputTarget).normalize("NFD").toLowerCase()
+		) {
+			const sourceParent = statSync(dirname(sourceTarget), { throwIfNoEntry: false });
+			const outputParent = statSync(dirname(outputTarget), { throwIfNoEntry: false });
+			if (
+				sourceParent &&
+				outputParent &&
+				sourceParent.dev === outputParent.dev &&
+				sourceParent.ino === outputParent.ino
+			) {
+				samePendingTarget = directoryIgnoresCase(dirname(sourceTarget));
+			}
+		}
 	}
 	if (samePath || (source && output && source.dev === output.dev && source.ino === output.ino) || samePendingTarget) {
 		throw new Error(`Cannot export over the source session file: ${outputPath}`);

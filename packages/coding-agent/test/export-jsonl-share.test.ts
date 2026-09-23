@@ -177,6 +177,12 @@ describe("JSONL share export", () => {
 		} else {
 			expect(exportSessionToJsonl(manager, caseAlias)).toBe(caseAlias);
 		}
+		const parentCaseAlias = join(tempDir, "SESSIONS", basename(source));
+		if (ignoresCase) {
+			expect(() => exportSessionToJsonl(manager, parentCaseAlias)).toThrow(/source session file/);
+		} else {
+			expect(exportSessionToJsonl(manager, parentCaseAlias)).toBe(parentCaseAlias);
+		}
 		expect(fs.existsSync(source)).toBe(false);
 		manager.appendMessage(assistantMsg("first persisted response"));
 		expect(readFileSync(source, "utf8")).toContain("first persisted response");
