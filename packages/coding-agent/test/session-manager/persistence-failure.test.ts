@@ -150,6 +150,42 @@ it("retries failed branch publication without exposing a partial usage journal",
 
 const permissionTest = it.skipIf(process.platform === "win32" || process.getuid?.() === 0);
 
+it.each(["header", "entry", "close"] as const)(
+	"keeps another writer's saved conversation after an initial %s failure",
+	async (failurePoint) => {
+		const actual = await vi.importActual<typeof fs>("node:fs");
+		const first = SessionManager.create(directory, directory);
+		const file = first.getSessionFile()!;
+		const failure = Object.assign(new Error("initial save failed"), { code: "ENOSPC" });
+		if (failurePoint === "close") {
+			vi.mocked(fs.closeSync).mockImplementationOnce((fd) => {
+				actual.closeSync(fd);
+				throw failure;
+			});
+		} else {
+			if (failurePoint === "entry") vi.mocked(fs.writeFileSync).mockImplementationOnce(actual.writeFileSync);
+			vi.mocked(fs.writeFileSync).mockImplementationOnce((fd, data) => {
+				actual.writeFileSync(fd, failurePoint === "entry" ? String(data).slice(0, 20) : data);
+				throw failure;
+			});
+		}
+		expect(() => first.appendCustomEntry("retained", {})).toThrow(failure);
+		const accepted = first.getLeafEntry()!;
+		const second = SessionManager.open(file);
+		const prompt = second.appendMessage({ role: "user", content: "other prompt", timestamp: 1 });
+		const answer = second.appendMessage(fauxAssistantMessage("other answer"));
+		const beforeRepair = fs.readFileSync(file);
+		first.flush();
+		first.flush();
+
+		expect(fs.readFileSync(file).subarray(0, beforeRepair.length)).toEqual(beforeRepair);
+		const reopened = SessionManager.open(file);
+		expect(reopened.getEntry(prompt)).toEqual(second.getEntry(prompt));
+		expect(reopened.getBranch(answer)).toEqual(second.getBranch(answer));
+		expect(reopened.getEntries().filter((entry) => entry.id === accepted.id)).toEqual([accepted]);
+	},
+);
+
 it.each(["before", "partial", "complete"] as const)(
 	"keeps another writer's saved conversation when repairing an append that failed %s writing",
 	async (failurePoint) => {
@@ -380,7 +416,7 @@ permissionTest("retries initial creation after a real directory permission failu
 	expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual(sm.getEntries());
 });
 
-it.each(["initial", "usage", "append", "close"] as const)(
+it.each(["initial", "usage", "append"] as const)(
 	"repairs a failed %s write without duplicate records",
 	async (kind) => {
 		const actual = await vi.importActual<typeof fs>("node:fs");
@@ -393,14 +429,9 @@ it.each(["initial", "usage", "append", "close"] as const)(
 				actual.writeFileSync(file, String(data).slice(0, 20));
 				throw failure;
 			});
-		} else if (kind === "append") {
+		} else {
 			vi.mocked(fs.appendFileSync).mockImplementationOnce((file, data) => {
 				actual.appendFileSync(file, String(data).slice(0, 20));
-				throw failure;
-			});
-		} else {
-			vi.mocked(fs.closeSync).mockImplementationOnce((fd) => {
-				actual.closeSync(fd);
 				throw failure;
 			});
 		}
@@ -428,7 +459,7 @@ it.each(["initial", "usage", "append", "close"] as const)(
 		expect(() => sm.flush()).toThrow(failure);
 		expect(fs.readFileSync(file)).toEqual(priorBytes);
 		expect(fs.readdirSync(directory)).toEqual(priorFiles);
-		if (kind === "close") {
+		if (kind === "initial") {
 			vi.mocked(fs.closeSync).mockImplementationOnce((fd) => {
 				actual.closeSync(fd);
 				throw failure;
@@ -466,8 +497,8 @@ it.each(["collision", "rename"] as const)("preserves the journal on temporary-fi
 	const actual = await vi.importActual<typeof fs>("node:fs");
 	const sm = SessionManager.create(directory, directory);
 	const failure = new Error("controlled persistence failure");
-	vi.mocked(fs.closeSync).mockImplementationOnce((fd) => {
-		actual.closeSync(fd);
+	vi.mocked(fs.writeFileSync).mockImplementationOnce((fd, data) => {
+		actual.writeFileSync(fd, String(data).slice(0, 20));
 		throw failure;
 	});
 	expect(() => sm.appendMessage(fauxAssistantMessage("persisted response"))).toThrow(failure);
