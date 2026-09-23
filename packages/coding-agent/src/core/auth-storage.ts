@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { resolveLocalFileTarget, resolveLocalOperationPath } from "@earendil-works/pi-agent-core/node";
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 import { constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { access, lstat, mkdtemp, rename, rm, writeFile } from "fs/promises";
+import { access, chmod, lstat, mkdtemp, rename, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { setTimeout as sleep } from "timers/promises";
@@ -68,6 +68,18 @@ async function publishStoredFile(path: string, content: string, signal?: AbortSi
 					{ windowsHide: true },
 				);
 			} else {
+				if (process.platform === "linux") {
+					// An empty sibling inherits the parent's setgid group even if repairing stageDir clears its setgid bit.
+					const sibling = `${stageDir}.file`;
+					try {
+						await writeFile(sibling, "", { flag: "wx", mode: 0o600 });
+						await rename(sibling, stage);
+					} finally {
+						await rm(sibling, { force: true }).catch(() => {});
+					}
+					execFileSync("/usr/bin/setfacl", ["-b", stage]);
+					await chmod(stage, 0o600);
+				}
 				execFileSync(process.platform === "darwin" ? "/bin/cp" : "/usr/bin/cp", ["-p", target, stage]);
 				const staged = await lstat(stage);
 				if (
