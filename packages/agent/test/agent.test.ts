@@ -626,6 +626,70 @@ describe("Agent", () => {
 		expect(events.filter((event) => event.type === "tool_execution_update")).toHaveLength(0);
 	});
 
+	it("waits for running parallel tools after a completion listener fails", async () => {
+		const slowStarted = createDeferred();
+		const releaseSlow = createDeferred();
+		const listenerFailed = createDeferred();
+		const events: string[] = [];
+		const tool: AgentTool = {
+			...createTool("work"),
+			async execute(id) {
+				if (id === "slow") {
+					slowStarted.resolve();
+					await releaseSlow.promise;
+					events.push("slow effect");
+				} else {
+					await slowStarted.promise;
+				}
+				return { content: [], details: {}, terminate: true };
+			},
+		};
+		const agent = new Agent({
+			initialState: { tools: [tool] },
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: createAssistantToolUseMessage([
+						{ type: "toolCall", id: "fast", name: "work", arguments: {} },
+						{ type: "toolCall", id: "slow", name: "work", arguments: {} },
+					]),
+				});
+				return stream;
+			},
+		});
+		agent.subscribe((event) => {
+			events.push(event.type);
+			if (event.type === "tool_execution_end" && event.toolCallId === "fast") {
+				listenerFailed.resolve();
+				throw new Error("completion listener failed");
+			}
+		});
+		let promptResolved = false;
+		let idleResolved = false;
+		const prompt = agent.prompt("run tools").then(() => {
+			promptResolved = true;
+		});
+		const idle = agent.waitForIdle().then(() => {
+			idleResolved = true;
+		});
+		try {
+			await listenerFailed.promise;
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(promptResolved).toBe(false);
+			expect(idleResolved).toBe(false);
+			expect(agent.state.isStreaming).toBe(true);
+			expect(events).not.toContain("agent_end");
+		} finally {
+			releaseSlow.resolve();
+			await Promise.all([prompt, idle]);
+		}
+		expect(events.indexOf("slow effect")).toBeLessThan(events.indexOf("agent_end"));
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.state.errorMessage).toBe("completion listener failed");
+	});
+
 	it("should update state with mutators", () => {
 		const agent = new Agent({ streamFn: unusedStreamFunction });
 
