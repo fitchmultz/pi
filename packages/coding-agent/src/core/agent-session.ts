@@ -2094,6 +2094,11 @@ export class AgentSession {
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
 		}
+		if (this.isCompacting) {
+			throw new Error(
+				"Cannot submit a prompt while compaction or tree navigation is in progress. Wait for it to finish and retry.",
+			);
+		}
 		this._agentRunAbortRequested = false;
 		this._isAgentRunActive = true;
 		const controller = new AbortController();

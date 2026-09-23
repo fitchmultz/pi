@@ -836,8 +836,8 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			const afterMkdirAbort = abortResult<void>(signal, resolved);
 			if (afterMkdirAbort) return afterMkdirAbort;
 			await appendFile(resolved, content);
-			const afterAppendAbort = abortResult<void>(signal, resolved);
-			return afterAppendAbort ?? ok(undefined);
+			// Appended bytes are committed; late cancellation must not report a retryable failure.
+			return ok(undefined);
 		} catch (error) {
 			return err(toFileError(error, resolved));
 		}
