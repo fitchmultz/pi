@@ -55,6 +55,14 @@ export class SessionImportFileNotFoundError extends Error {
 	}
 }
 
+/** The outgoing session could not be saved and remains active for recovery. */
+export class SessionReplacementPersistenceError extends Error {
+	constructor(cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause), { cause });
+		this.name = "SessionReplacementPersistenceError";
+	}
+}
+
 function extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
 	if (typeof content === "string") {
 		return content;
@@ -170,11 +178,19 @@ export class AgentSessionRuntime {
 		// Settle any active response first so the aborted turn (including tool
 		// results) is persisted to the outgoing session before it is replaced.
 		await this.session.abort();
+		// Reject pending save failures before shutdown handlers tear down the live session.
+		try {
+			this.session.sessionManager.flush();
+		} catch (error) {
+			throw new SessionReplacementPersistenceError(error);
+		}
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",
 			reason,
 			targetSessionFile,
 		});
+		// Handlers may append state. Failures here cannot promise an intact live session.
+		this.session.sessionManager.flush();
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
 	}

@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
-import { afterEach, describe, expect, it } from "vitest";
+import * as fs from "fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -20,6 +21,11 @@ import type {
 	SessionStartEvent,
 } from "../src/index.ts";
 
+vi.mock("fs", async (importOriginal) => {
+	const original = await importOriginal<typeof fs>();
+	return { ...original, appendFileSync: vi.fn(original.appendFileSync) };
+});
+
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
 	| SessionBeforeForkEvent
@@ -30,6 +36,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
 	afterEach(async () => {
+		vi.mocked(fs.appendFileSync).mockRestore();
 		while (cleanups.length > 0) {
 			await cleanups.pop()?.();
 		}
@@ -111,6 +118,89 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		return { runtimeHost, faux };
 	}
+
+	it.each([false, true])(
+		"preserves an accepted response across replacement when persistence still fails: %s",
+		async (stillFailing) => {
+			const shutdown = vi.fn();
+			const { runtimeHost } = await createRuntimeHost((pi) => {
+				pi.on("session_shutdown", shutdown);
+			});
+			await runtimeHost.session.prompt("first");
+			const outgoing = runtimeHost.session;
+			const journal = outgoing.sessionFile!;
+			const writeError = Object.assign(new Error("journal write failed"), { code: "EACCES" });
+			const unsubscribe = outgoing.subscribe((event) => {
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					vi.mocked(fs.appendFileSync).mockImplementation(() => {
+						throw writeError;
+					});
+				}
+			});
+			try {
+				await outgoing.prompt("second").catch(() => {});
+			} finally {
+				unsubscribe();
+			}
+			const accepted = outgoing.sessionManager
+				.getEntries()
+				.find(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.content.some((part) => part.type === "text" && part.text === "two"),
+				)!;
+			expect(accepted).toMatchObject({ message: { content: [{ type: "text", text: "two" }] } });
+			expect(SessionManager.open(journal).getEntry(accepted.id)).toBeUndefined();
+			const invalidate = vi.fn();
+			runtimeHost.setBeforeSessionInvalidate(invalidate);
+			if (stillFailing) {
+				await expect(runtimeHost.newSession()).rejects.toMatchObject({
+					name: "SessionReplacementPersistenceError",
+					cause: writeError,
+				});
+				expect(runtimeHost.session).toBe(outgoing);
+				expect(invalidate).not.toHaveBeenCalled();
+				expect(shutdown.mock.calls.length).toBe(0);
+				expect(outgoing.extensionRunner.createContext().cwd).toBe(outgoing.sessionManager.getCwd());
+			}
+			vi.mocked(fs.appendFileSync).mockRestore();
+			await expect(runtimeHost.newSession()).resolves.toEqual({ cancelled: false });
+			expect(invalidate).toHaveBeenCalledOnce();
+			expect(shutdown).toHaveBeenCalledOnce();
+			expect(runtimeHost.session).not.toBe(outgoing);
+			expect(SessionManager.open(journal).getEntry(accepted.id)).toEqual(accepted);
+			runtimeHost.setBeforeSessionInvalidate(undefined);
+		},
+	);
+
+	it.each([false, true])(
+		"flushes shutdown entries without treating a shutdown save failure as recoverable: %s",
+		async (stillFailing) => {
+			const writeError = new Error("shutdown write failed");
+			const { runtimeHost } = await createRuntimeHost((pi) => {
+				pi.on("session_shutdown", (event) => {
+					if (event.reason !== "new") return;
+					const fail = () => {
+						throw writeError;
+					};
+					if (stillFailing) vi.mocked(fs.appendFileSync).mockImplementation(fail);
+					else vi.mocked(fs.appendFileSync).mockImplementationOnce(fail);
+					pi.appendEntry("shutdown-state", { saved: true });
+				});
+			});
+			await runtimeHost.session.prompt("first");
+			const outgoing = runtimeHost.session;
+			if (stillFailing) {
+				await expect(runtimeHost.newSession()).rejects.toBe(writeError);
+			} else {
+				await expect(runtimeHost.newSession()).resolves.toEqual({ cancelled: false });
+				expect(SessionManager.open(outgoing.sessionFile!).getEntries()).toContainEqual(
+					expect.objectContaining({ type: "custom", customType: "shutdown-state", data: { saved: true } }),
+				);
+			}
+		},
+	);
 
 	it("emits session_before_switch and session_start for new and resume flows", async () => {
 		const events: RecordedSessionEvent[] = [];

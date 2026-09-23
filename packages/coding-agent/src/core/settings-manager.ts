@@ -2,7 +2,19 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_MAX_AGENT_RETRY_DELAY_MS, type Model, type Transport } from "@earendil-works/pi-ai";
 import type { TuiMode as RendererTuiMode, ScrollViewScrollbar, TerminalCapabilities } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import {
+	closeSync,
+	existsSync,
+	fchmodSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
@@ -292,7 +304,23 @@ export class FileSettingsStorage implements SettingsStorage {
 			const next = fn(current);
 			if (next !== undefined) {
 				if (options.readOnly) throw new Error("Cannot write settings in read-only mode");
-				writeFileSync(path, next, "utf-8");
+				// Follow even dangling symlinks and check writability without truncating existing settings.
+				closeSync(openSync(path, "a"));
+				const destination = realpathSync(path);
+				const mode = statSync(destination).mode & 0o777;
+				const temporary = `${destination}.${randomUUID()}.tmp`;
+				const fd = openSync(temporary, "wx", mode);
+				try {
+					try {
+						fchmodSync(fd, mode);
+						writeFileSync(fd, next, "utf-8");
+					} finally {
+						closeSync(fd);
+					}
+					renameSync(temporary, destination);
+				} finally {
+					rmSync(temporary, { force: true });
+				}
 			}
 		} finally {
 			if (release) {

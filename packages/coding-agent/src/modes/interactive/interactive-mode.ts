@@ -70,7 +70,11 @@ import {
 	type ExtensionBindings,
 	parseSkillBlock,
 } from "../../core/agent-session.ts";
-import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import {
+	type AgentSessionRuntime,
+	SessionImportFileNotFoundError,
+	SessionReplacementPersistenceError,
+} from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
 import {
 	CACHE_TTL_MS,
@@ -1953,7 +1957,7 @@ export class InteractiveMode {
 					try {
 						return await this.runtimeHost.newSession(options);
 					} catch (error: unknown) {
-						return this.handleFatalRuntimeError("Failed to create session", error);
+						return this.handleRuntimeReplacementError("Failed to create session", error);
 					}
 				},
 				fork: async (entryId, options) => {
@@ -1965,7 +1969,7 @@ export class InteractiveMode {
 						}
 						return { cancelled: result.cancelled };
 					} catch (error: unknown) {
-						return this.handleFatalRuntimeError("Failed to fork session", error);
+						return this.handleRuntimeReplacementError("Failed to fork session", error);
 					}
 				},
 				navigateTree: async (targetId, options) => {
@@ -2077,8 +2081,12 @@ export class InteractiveMode {
 		this.updateTerminalTitle();
 	}
 
-	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
+	private async handleRuntimeReplacementError(prefix: string, error: unknown): Promise<{ cancelled: boolean }> {
 		const message = error instanceof Error ? error.message : String(error);
+		if (error instanceof SessionReplacementPersistenceError) {
+			this.showError(`${prefix}: ${message}. Current session kept open; fix the save error and retry.`);
+			return { cancelled: true };
+		}
 		this.showError(`${prefix}: ${message}`);
 		const extensionHint = this.getCrashExtensionHint(error);
 		if (extensionHint) {
@@ -6105,18 +6113,22 @@ export class InteractiveMode {
 					this.showStatus("Resume cancelled");
 					return { cancelled: true };
 				}
-				const result = await this.runtimeHost.switchSession(sessionPath, {
-					cwdOverride: selectedCwd,
-					withSession: options?.withSession,
-					projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
-				});
+				const result = await this.runtimeHost
+					.switchSession(sessionPath, {
+						cwdOverride: selectedCwd,
+						withSession: options?.withSession,
+						projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
+					})
+					.catch((retryError: unknown) =>
+						this.handleRuntimeReplacementError("Failed to resume session", retryError),
+					);
 				if (result.cancelled) {
 					return result;
 				}
 				this.showStatus("Resumed session in current cwd");
 				return result;
 			}
-			return this.handleFatalRuntimeError("Failed to resume session", error);
+			return this.handleRuntimeReplacementError("Failed to resume session", error);
 		}
 	}
 
@@ -6837,7 +6849,11 @@ export class InteractiveMode {
 					this.showStatus("Import cancelled");
 					return;
 				}
-				const result = await this.runtimeHost.importFromJsonl(inputPath, selectedCwd);
+				const result = await this.runtimeHost
+					.importFromJsonl(inputPath, selectedCwd)
+					.catch((retryError: unknown) =>
+						this.handleRuntimeReplacementError("Failed to import session", retryError),
+					);
 				if (result.cancelled) {
 					this.showStatus("Import cancelled");
 					return;
@@ -6849,7 +6865,7 @@ export class InteractiveMode {
 				this.showError(`Failed to import session: ${error.message}`);
 				return;
 			}
-			await this.handleFatalRuntimeError("Failed to import session", error);
+			await this.handleRuntimeReplacementError("Failed to import session", error);
 		}
 	}
 
@@ -7170,7 +7186,7 @@ export class InteractiveMode {
 			this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
 			this.ui.requestRender();
 		} catch (error: unknown) {
-			await this.handleFatalRuntimeError("Failed to create session", error);
+			await this.handleRuntimeReplacementError("Failed to create session", error);
 		}
 	}
 

@@ -181,6 +181,15 @@ describe.each(["coding-agent", "harness"] as const)("%s file mutation regression
 		expect(await readFile(path)).toEqual(Buffer.from("\uFEFFname=café\r\nmode=new\r\n"));
 	});
 
+	it.each(["\n", "\r\n"])("preserves literal carriage returns with %j line endings", async (ending) => {
+		const tools = await setup(kind);
+		const path = join(tools.cwd, "file.txt");
+		const original = `printf 'left\rright'${ending}# old${ending}`;
+		await writeFile(path, original);
+		await tools.edit([{ oldText: "# old\n", newText: "# new\n" }]);
+		expect(await readFile(path)).toEqual(Buffer.from(`printf 'left\rright'${ending}# new${ending}`));
+	});
+
 	it.each(["new.txt", "missing/nested/new.txt"])(
 		"serializes writes through a symlinked ancestor to %s",
 		async (suffix) => {
