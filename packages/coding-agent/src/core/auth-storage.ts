@@ -41,6 +41,8 @@ async function publishStoredFile(path: string, content: string, signal?: AbortSi
 	signal?.throwIfAborted();
 	const stageDir = await mkdtemp(join(dirname(target), ".pi-auth-"));
 	try {
+		// A parent ACL must not grant access to the temporary copy of the credentials.
+		if (process.platform === "darwin") execFileSync("/bin/chmod", ["-N", stageDir]);
 		// Keep mkdtemp's zero ACL mask while restoring owner access and removing inherited defaults.
 		if (process.platform === "linux") {
 			execFileSync("/usr/bin/setfacl", ["-n", "-m", "u::rwx", "-k", stageDir]);

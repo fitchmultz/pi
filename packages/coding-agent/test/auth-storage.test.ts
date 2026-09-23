@@ -1,7 +1,8 @@
-import { spawnSync } from "node:child_process";
+import childProcess, { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type CredentialStore, createModels, type Provider } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
@@ -258,6 +259,39 @@ describe("AuthStorage", () => {
 		await AuthStorage.create(authJsonPath).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
 
 		expect(acl()).toContain("group:everyone allow read");
+	});
+
+	test.skipIf(process.platform !== "darwin")("keeps inherited ACLs off temporary credentials", async () => {
+		const parent = join(tempDir, "inherited-acl");
+		const path = join(parent, "auth.json");
+		mkdirSync(parent);
+		writeFileSync(path, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o600 });
+		const grant = spawnSync("/bin/chmod", [
+			"+a",
+			"group:everyone allow read,execute,readattr,readextattr,readsecurity,file_inherit,directory_inherit",
+			parent,
+		]);
+		expect(grant.status, grant.stderr.toString()).toBe(0);
+		const execute = childProcess.execFileSync;
+		let stageAcl: string | undefined;
+		const spy = vi.spyOn(childProcess, "execFileSync").mockImplementation((command, args, options) => {
+			if (command === "/bin/cp" && args) {
+				const stage = args[2];
+				if (typeof stage === "string") {
+					stageAcl = spawnSync("/bin/ls", ["-lde", dirname(stage)], { encoding: "utf8" }).stdout;
+				}
+			}
+			return execute(command, args, options);
+		});
+		syncBuiltinESMExports();
+		try {
+			await AuthStorage.create(path).modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+		} finally {
+			spy.mockRestore();
+			syncBuiltinESMExports();
+		}
+		expect(stageAcl).toBeDefined();
+		expect(stageAcl).not.toContain("group:everyone");
 	});
 
 	test.skipIf(process.platform !== "linux")("keeps staged files private under a default ACL", async () => {
