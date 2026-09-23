@@ -328,6 +328,80 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it.each([false, true])("checks persisted sibling results before a restored reset (fails=%s)", async (fails) => {
+		const reset = deferred<AgentToolResult>();
+		const execute = vi.fn(async () => result);
+		const resume = vi.fn(async () => reset.promise);
+		const { agent, streams, inputs, events } = setup(execute, { resume });
+		const savedCall = call("saved");
+		const resetCall = { ...call("reset"), executionStarted: true };
+		agent.state.messages = [
+			assistant("saved", [resetCall, savedCall]),
+			{
+				role: "toolResult",
+				toolCallId: savedCall.id,
+				toolName: "work",
+				content: [{ type: "text", text: fails ? "FAILED_SIBLING_MARKER" : "saved success" }],
+				isError: fails,
+				timestamp: 2,
+			},
+		];
+		const prepared: unknown[] = [];
+		agent.prepareNextTurnWithContext = async ({ newContext, context }) => {
+			prepared.push(newContext);
+			return newContext ? { context: { ...context, messages: [] } } : undefined;
+		};
+		const run = agent.continue();
+		await answer(streams, 0);
+		await vi.waitFor(() => expect(events.some((event) => event.type === "turn_end")).toBe(true));
+		reset.resolve({ ...result, newContext: { handoff: "restored" } });
+		await answer(streams, 1);
+		await run;
+		expect(execute).not.toHaveBeenCalled();
+		expect(resume).toHaveBeenCalledOnce();
+		expect(prepared).toEqual([fails ? undefined : { handoff: "restored" }]);
+		expect(JSON.stringify(inputs[1]).includes("FAILED_SIBLING_MARKER")).toBe(fails);
+		expect(inputs[1].filter((message) => message.role === "toolResult")).toHaveLength(fails ? 2 : 0);
+	});
+
+	it.each([false, true])("only a successful late reset overrides finishTurn end (fails=%s)", async (fails) => {
+		const reset = deferred<AgentToolResult>();
+		const atEnd = deferred<void>();
+		const { agent, streams } = setup(async (id) => {
+			if (id === "reset|fc_reset") return reset.promise;
+			if (fails) throw new Error("FAILED_SIBLING_MARKER");
+			return result;
+		});
+		const provider = agent.streamFunction;
+		agent.streamFunction = async (...args) => {
+			const response = await provider(...args);
+			if (streams.length > 1) finish(response, assistant("answer"));
+			return response;
+		};
+		const prepared: unknown[] = [];
+		agent.prepareNextTurnWithContext = async ({ newContext }) => {
+			prepared.push(newContext);
+			return undefined;
+		};
+		agent.finishTurn = () => {
+			atEnd.resolve();
+			return { action: "end" };
+		};
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const first = assistant("first");
+		await emitCall(streams[0], first, call("reset"));
+		first.content.push({ type: "toolCall", id: "sibling", name: "work", arguments: { path: "original" } });
+		finish(streams[0], first);
+		await atEnd.promise;
+		expect(prepared).toEqual([]);
+		reset.resolve({ ...result, newContext: { handoff: "late" } });
+		await run;
+		expect(streams).toHaveLength(fails ? 1 : 2);
+		expect(prepared).toEqual(fails ? [] : [{ handoff: "late" }]);
+		expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
+	});
+
 	it("executes only a completed item after preflight and the durable started barrier, while the response remains open", async () => {
 		const invoked = vi.fn<AgentTool["execute"]>(async () => result);
 		const { agent, streams, events } = setup(invoked);

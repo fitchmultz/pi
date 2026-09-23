@@ -268,8 +268,10 @@ async function runLoop(
 	const needsResultTurn = (batch: ExecutedToolCallBatch): boolean =>
 		!!batch.newContext ||
 		(!batch.terminate && batch.messages.some((message) => !deliveredResults.has(message.toolCallId)));
-	const resultIds = new Set(
-		currentContext.messages.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
+	const restoredResults = new Map(
+		currentContext.messages.flatMap((message) =>
+			message.role === "toolResult" ? [[message.toolCallId, message] as const] : [],
+		),
 	);
 	const pendingTasks = (scope?: object): Promise<ExecutedToolCallBatch>[] =>
 		[...pendingCalls.values()]
@@ -353,8 +355,11 @@ async function runLoop(
 			if (message.role !== "assistant") continue;
 			for (const call of message.content) {
 				if (call.type !== "toolCall") continue;
-				if (resultIds.has(call.id)) startedCalls.add(call.id);
-				else if (call.executionStarted || (call.async && call.responsesItem))
+				const result = restoredResults.get(call.id);
+				if (result) {
+					startedCalls.add(call.id);
+					if (result.isError) failedScopes.add(message);
+				} else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
 			}
 		}
@@ -563,7 +568,8 @@ async function runLoop(
 
 				if ((decision?.action === "end" && !newContext) || signal?.aborted) {
 					await joinPendingCalls();
-					if (!pendingNewContext || signal?.aborted) {
+					lastCompletedTurn.newContext = await takeNewContext();
+					if (!lastCompletedTurn.newContext || signal?.aborted) {
 						await emit({ type: "agent_end", messages: newMessages });
 						return;
 					}
