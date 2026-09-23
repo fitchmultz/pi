@@ -184,7 +184,10 @@ export function openSessionCheckpoint(checkpoint: SessionCheckpoint): SessionMan
 		// SessionManager.open initializes empty files and migrates old journals. Validate bytes
 		// first, so a rejected restore cannot modify an unrelated or damaged journal.
 		const text = readFileSync(selection.sessionFile, "utf8").trim();
-		const existing: unknown[] = text ? text.split("\n").map((line) => JSON.parse(line)) : [];
+		const existing: unknown[] = text
+			.split("\n")
+			.filter((line) => line.trim())
+			.map((line) => JSON.parse(line));
 		if (JSON.stringify(existing) !== JSON.stringify([header, ...entries])) {
 			throw new Error("Checkpoint journal differs from saved state; restore its filesystem archive first");
 		}

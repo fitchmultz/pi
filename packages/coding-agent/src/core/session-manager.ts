@@ -23,7 +23,6 @@ import {
 	createReadStream,
 	existsSync,
 	fchmodSync,
-	fstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -1353,7 +1352,7 @@ export class SessionManager {
 				}
 				const saved = new Set(entries.map((entry) => entry.id));
 				for (const entry of this.fileEntries.slice(this.failedAppendIndex)) {
-					if (!saved.has(entry.id)) appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+					if (!saved.has(entry.id)) appendFileSync(this.sessionFile, `\n${JSON.stringify(entry)}\n`);
 				}
 			}
 			this.failedAppendIndex = undefined;
@@ -1394,20 +1393,8 @@ export class SessionManager {
 		}
 
 		this.failedAppendIndex = this.fileEntries.length - 1;
-		// Another writer may have left a partial record. Keep this entry on its own line.
-		let separator = "";
-		const fd = openSync(this.sessionFile, "r");
-		try {
-			const size = fstatSync(fd).size;
-			if (size > 0) {
-				const lastByte = Buffer.alloc(1);
-				readSync(fd, lastByte, 0, 1, size - 1);
-				if (lastByte[0] !== 0x0a) separator = "\n";
-			}
-		} finally {
-			closeSync(fd);
-		}
-		appendFileSync(this.sessionFile, `${separator}${JSON.stringify(entry)}\n`);
+		// The leading newline isolates this entry from another writer's partial record.
+		appendFileSync(this.sessionFile, `\n${JSON.stringify(entry)}\n`);
 		this.failedAppendIndex = undefined;
 	}
 
@@ -2150,7 +2137,7 @@ export class SessionManager {
 		// Copy all non-header entries from source
 		for (const entry of sourceEntries) {
 			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+				appendFileSync(newSessionFile, `\n${JSON.stringify(entry)}\n`);
 			}
 		}
 
