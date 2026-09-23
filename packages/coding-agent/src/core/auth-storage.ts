@@ -82,7 +82,7 @@ async function publishStoredFile(path: string, content: string, signal?: AbortSi
 				}
 				// Linux security labels are extended attributes; -p alone does not copy them.
 				execFileSync(
-					process.platform === "darwin" ? "/bin/cp" : "/usr/bin/cp",
+					process.platform === "linux" ? "/usr/bin/cp" : "/bin/cp",
 					process.platform === "linux" ? ["-p", "--preserve=xattr", target, stage] : ["-p", target, stage],
 				);
 				const staged = await lstat(stage);
