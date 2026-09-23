@@ -983,9 +983,9 @@ async function executeToolCallsParallel(
 		}
 	}
 
-	const orderedFinalizedCalls = await Promise.all(
-		finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
-	);
+	const tasks = finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry)));
+	// A rejected listener does not stop sibling tools; join them before ending the run.
+	const orderedFinalizedCalls = await Promise.all(tasks).finally(() => Promise.allSettled(tasks));
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
 		if (finalized.detached) continue;
