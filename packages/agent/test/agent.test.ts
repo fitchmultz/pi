@@ -631,9 +631,11 @@ describe("Agent", () => {
 		const releaseSlow = createDeferred();
 		const listenerFailed = createDeferred();
 		const events: string[] = [];
+		const executions: string[] = [];
 		const tool: AgentTool = {
 			...createTool("work"),
 			async execute(id) {
+				executions.push(id);
 				if (id === "slow") {
 					slowStarted.resolve();
 					await releaseSlow.promise;
@@ -641,7 +643,7 @@ describe("Agent", () => {
 				} else {
 					await slowStarted.promise;
 				}
-				return { content: [], details: {}, terminate: true };
+				return { content: [{ type: "text", text: `Completed ${id}` }], details: { id }, terminate: true };
 			},
 		};
 		const agent = new Agent({
@@ -659,10 +661,11 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
-		agent.subscribe((event) => {
+		agent.subscribe(async (event) => {
 			events.push(event.type);
 			if (event.type === "tool_execution_end" && event.toolCallId === "fast") {
 				listenerFailed.resolve();
+				await Promise.resolve();
 				throw new Error("completion listener failed");
 			}
 		});
@@ -688,6 +691,21 @@ describe("Agent", () => {
 		expect(events.indexOf("slow effect")).toBeLessThan(events.indexOf("agent_end"));
 		expect(agent.state.isStreaming).toBe(false);
 		expect(agent.state.errorMessage).toBe("completion listener failed");
+		expect(executions).toEqual(["fast", "slow"]);
+		expect(agent.state.messages.filter((message) => message.role === "toolResult")).toMatchObject([
+			{
+				toolCallId: "fast",
+				content: [{ type: "text", text: "Completed fast" }],
+				details: { id: "fast" },
+				isError: false,
+			},
+			{
+				toolCallId: "slow",
+				content: [{ type: "text", text: "Completed slow" }],
+				details: { id: "slow" },
+				isError: false,
+			},
+		]);
 	});
 
 	it("should update state with mutators", () => {
