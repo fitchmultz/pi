@@ -1,16 +1,19 @@
 import {
 	closeSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	openSync,
+	readlinkSync,
 	readSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
 import { CURRENT_SESSION_VERSION, type SessionHeader, type SessionManager } from "./session-manager.ts";
 
@@ -47,12 +50,35 @@ export function serializeSessionBranch(
 	return Array.from(sessionBranchLines(sessionManager, createTrailingEntries)).join("");
 }
 
+function resolveExportFileTarget(filePath: string): string {
+	let target = resolvePath(filePath);
+	const links = new Set<string>();
+	for (;;) {
+		let parent: string;
+		try {
+			parent = realpathSync(dirname(target));
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return target;
+			throw error;
+		}
+		target = join(parent, basename(target));
+		if (!lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) return target;
+		if (links.has(target)) throw new Error(`Symlink cycle: ${target}`);
+		links.add(target);
+		target = resolve(parent, readlinkSync(target));
+	}
+}
+
 export function assertDistinctExportTarget(sourceFile: string | undefined, outputPath: string): void {
 	if (!sourceFile) return;
 	const samePath = resolvePath(sourceFile) === resolvePath(outputPath);
 	const source = statSync(sourceFile, { throwIfNoEntry: false });
 	const output = statSync(outputPath, { throwIfNoEntry: false });
-	if (samePath || (source && output && source.dev === output.dev && source.ino === output.ino)) {
+	if (
+		samePath ||
+		(source && output && source.dev === output.dev && source.ino === output.ino) ||
+		(!source && resolveExportFileTarget(sourceFile) === resolveExportFileTarget(outputPath))
+	) {
 		throw new Error(`Cannot export over the source session file: ${outputPath}`);
 	}
 }

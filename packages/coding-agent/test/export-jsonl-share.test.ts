@@ -1,7 +1,7 @@
 import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai/compat";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
@@ -156,6 +156,16 @@ describe("JSONL share export", () => {
 		expect(fs.existsSync(source)).toBe(false);
 
 		expect(() => exportSessionToJsonl(manager, source)).toThrow(/source session file/);
+		expect(fs.existsSync(source)).toBe(false);
+		const alias = join(tempDir, "pending-session.jsonl");
+		fs.symlinkSync(source, alias);
+		expect(() => exportSessionToJsonl(manager, alias)).toThrow(/source session file/);
+		const chainedAlias = join(tempDir, "chained-session.jsonl");
+		fs.symlinkSync(alias, chainedAlias);
+		expect(() => exportSessionToJsonl(manager, chainedAlias)).toThrow(/source session file/);
+		const aliasDir = join(tempDir, "alias-sessions");
+		fs.symlinkSync(join(tempDir, "sessions"), aliasDir);
+		expect(() => exportSessionToJsonl(manager, join(aliasDir, basename(source)))).toThrow(/source session file/);
 		expect(fs.existsSync(source)).toBe(false);
 		manager.appendMessage(assistantMsg("first persisted response"));
 		expect(readFileSync(source, "utf8")).toContain("first persisted response");
