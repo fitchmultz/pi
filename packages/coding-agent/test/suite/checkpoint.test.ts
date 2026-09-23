@@ -396,7 +396,7 @@ describe("native working-session checkpoint", () => {
 
 	it("saves an initialized session before its first assistant/file exists", async () => {
 		const h = await setup();
-		h.sessionManager.appendCustomEntry("state", { beforeFirstTurn: true });
+		h.sessionManager.appendSessionInfo("beforeFirstTurn");
 		await h.session.steer("accepted", [image]);
 		expect(existsSync(h.session.sessionFile!)).toBe(false);
 		const hold = await h.session.acquireCheckpoint();
