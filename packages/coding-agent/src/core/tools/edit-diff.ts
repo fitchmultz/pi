@@ -489,7 +489,9 @@ export async function computeEditsDiff(
 		}
 
 		// Read the file
-		const rawContent = await readFile(absolutePath, "utf-8");
+		const rawContent = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+			await readFile(absolutePath),
+		);
 
 		// Strip BOM before matching (LLM won't include invisible BOM in oldText)
 		const { text: content } = splitBom(rawContent);

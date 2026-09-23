@@ -180,6 +180,31 @@ it.each(["before", "partial", "complete"] as const)(
 	},
 );
 
+it("preserves another writer's successful append after a partial write failure", async () => {
+	const actual = await vi.importActual<typeof fs>("node:fs");
+	const first = SessionManager.create(directory, directory);
+	first.appendMessage(fauxAssistantMessage("shared response"));
+	const file = first.getSessionFile()!;
+	const second = SessionManager.open(file);
+	const failure = Object.assign(new Error("partial append"), { code: "ENOSPC" });
+	vi.mocked(fs.appendFileSync).mockImplementationOnce((path, data) => {
+		actual.appendFileSync(path, String(data).slice(0, 20));
+		throw failure;
+	});
+	expect(() => first.appendCustomEntry("retained", {})).toThrow(failure);
+	const accepted = first.getLeafEntry()!;
+
+	const prompt = second.appendMessage({ role: "user", content: "other prompt", timestamp: 1 });
+	const answer = second.appendMessage(fauxAssistantMessage("other answer"));
+	first.flush();
+	second.flush();
+
+	const reopened = SessionManager.open(file);
+	expect(reopened.getEntry(prompt)).toEqual(second.getEntry(prompt));
+	expect(reopened.getBranch(answer)).toEqual(second.getBranch(answer));
+	expect(reopened.getEntries().filter((entry) => entry.id === accepted.id)).toEqual([accepted]);
+});
+
 it.each(["missing", "invalid", "collision"] as const)("retains failed appends when the journal is %s", async (kind) => {
 	const actual = await vi.importActual<typeof fs>("node:fs");
 	const sm = SessionManager.create(directory, directory);

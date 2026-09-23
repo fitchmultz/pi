@@ -388,6 +388,22 @@ describe("AuthStorage", () => {
 		});
 	});
 
+	test.skipIf(process.platform === "win32")("serializes saves through an auth file symlink", async () => {
+		writeAuthJson({});
+		const alias = join(tempDir, "linked-auth.json");
+		symlinkSync(authJsonPath, alias);
+		const first = AuthStorage.create(authJsonPath);
+		const second = AuthStorage.create(alias);
+		await Promise.all([
+			first.modify("anthropic", async () => ({ type: "api_key", key: "anthropic-key" })),
+			second.modify("openai", async () => ({ type: "api_key", key: "openai-key" })),
+		]);
+		expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({
+			anthropic: { type: "api_key", key: "anthropic-key" },
+			openai: { type: "api_key", key: "openai-key" },
+		});
+	});
+
 	test("delete removes one credential while preserving others", async () => {
 		writeAuthJson({
 			anthropic: { type: "api_key", key: "anthropic-key" },

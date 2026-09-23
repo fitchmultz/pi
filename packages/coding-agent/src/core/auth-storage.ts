@@ -156,7 +156,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
-				return lockfile.lockSync(path, { realpath: false });
+				return lockfile.lockSync(path);
 			} catch (error) {
 				const code =
 					typeof error === "object" && error !== null && "code" in error
@@ -210,7 +210,6 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			let release: (() => Promise<void>) | undefined;
 			try {
 				release = await lockfile.lock(this.authPath, {
-					realpath: false,
 					retries: 0,
 					stale: staleMs,
 					onCompromised,

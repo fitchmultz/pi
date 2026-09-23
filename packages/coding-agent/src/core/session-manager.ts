@@ -23,6 +23,7 @@ import {
 	createReadStream,
 	existsSync,
 	fchmodSync,
+	fstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -1393,7 +1394,20 @@ export class SessionManager {
 		}
 
 		this.failedAppendIndex = this.fileEntries.length - 1;
-		appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+		// Another writer may have left a partial record. Keep this entry on its own line.
+		let separator = "";
+		const fd = openSync(this.sessionFile, "r");
+		try {
+			const size = fstatSync(fd).size;
+			if (size > 0) {
+				const lastByte = Buffer.alloc(1);
+				readSync(fd, lastByte, 0, 1, size - 1);
+				if (lastByte[0] !== 0x0a) separator = "\n";
+			}
+		} finally {
+			closeSync(fd);
+		}
+		appendFileSync(this.sessionFile, `${separator}${JSON.stringify(entry)}\n`);
 		this.failedAppendIndex = undefined;
 	}
 
