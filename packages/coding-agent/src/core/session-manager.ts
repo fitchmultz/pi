@@ -1153,7 +1153,7 @@ export class SessionManager {
 	private persist: boolean;
 	private flushed: boolean = false;
 	/** A failed write may have left missing entries or a partial JSONL record. */
-	private needsRewrite = false;
+	private needsRewrite: "w" | "wx" | undefined;
 	private failedAppendIndex: number | undefined;
 	private fileEntries: FileEntry[] = [];
 	private entriesRevision = 0;
@@ -1291,7 +1291,7 @@ export class SessionManager {
 
 	private _rewriteFile(flag: "w" | "wx" = "w"): void {
 		if (!this.persist || !this.sessionFile) return;
-		if (flag === "w") this.needsRewrite = true;
+		if (flag === "w") this.needsRewrite = flag;
 		let destination = this.sessionFile;
 		let mode: number | undefined;
 		if (flag === "w" && existsSync(destination)) {
@@ -1303,7 +1303,7 @@ export class SessionManager {
 		}
 		const temporary = flag === "w" ? `${destination}.${randomUUID()}.tmp` : undefined;
 		const fd = openSync(temporary ?? destination, "wx", mode);
-		this.needsRewrite = true;
+		this.needsRewrite = flag;
 		// Only a successful exclusive creation authorizes repairing an initial file.
 		// Keep open outside cleanup so a collision never removes someone else's file.
 		if (!temporary) this.flushed = true;
@@ -1319,7 +1319,7 @@ export class SessionManager {
 			// Never truncate prior journal bytes when a repair write or close fails.
 			if (temporary) renameSync(temporary, destination);
 			this.flushed = true;
-			this.needsRewrite = false;
+			this.needsRewrite = undefined;
 		} finally {
 			if (temporary) rmSync(temporary, { force: true });
 		}
@@ -1337,6 +1337,12 @@ export class SessionManager {
 	 * new journals wait for an assistant response, usage entry, or custom entry.
 	 */
 	flush(): void {
+		// An initial save may have exposed a valid journal that another writer resumed.
+		// Recover its missing entries through the append path instead of replacing it.
+		if (this.needsRewrite === "wx" && this.sessionFile && loadEntriesFromFile(this.sessionFile).length > 0) {
+			this.needsRewrite = undefined;
+			this.failedAppendIndex = 1;
+		}
 		if (this.needsRewrite || (!this.flushed && this._hasPersistableEntries())) {
 			this._rewriteFile(this.flushed ? "w" : "wx");
 		}
