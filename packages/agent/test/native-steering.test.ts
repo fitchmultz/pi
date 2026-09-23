@@ -14,7 +14,7 @@ import {
 import { Agent } from "../src/agent.ts";
 import type { AgentEvent, AgentTool } from "../src/types.ts";
 
-it.each(["pending", "disconnect", "fresh"] as const)(
+it.each(["pending", "rejected", "disconnect", "fresh"] as const)(
 	"normal Agent completes native steer %s without repeating accepted input or effects",
 	async (mode) => {
 		let parent: LocalResponsesRequest | undefined;
@@ -67,6 +67,12 @@ it.each(["pending", "disconnect", "fresh"] as const)(
 					},
 				});
 				if (mode === "disconnect") request.socket!.close();
+				else if (mode === "rejected")
+					request.send({
+						type: "response.steer.failed",
+						steer: { id: "steer", previous_response_id: "parent", input: body.input },
+						error: { code: "successor_creation_failed", message: "Could not create successor" },
+					});
 				else
 					request.send({
 						type: "response.steer.pending",
@@ -84,7 +90,8 @@ it.each(["pending", "disconnect", "fresh"] as const)(
 						})),
 					);
 				} else {
-					expect(request.connection).not.toBe(parent.connection);
+					if (mode === "rejected") expect(request.connection).toBe(parent.connection);
+					else expect(request.connection).not.toBe(parent.connection);
 					expect(body.previous_response_id).toBeUndefined();
 					const input = Array.isArray(body.input) ? body.input : [];
 					expect(
@@ -93,9 +100,11 @@ it.each(["pending", "disconnect", "fresh"] as const)(
 								"role" in item && item.role === "user" && JSON.stringify(item).includes("steering input"),
 						),
 					).toHaveLength(1);
-					expect(input.filter((item) => item.type === "function_call")).toHaveLength(mode === "fresh" ? 0 : 1);
+					expect(input.filter((item) => item.type === "function_call")).toHaveLength(
+						mode === "fresh" ? 0 : calls.length,
+					);
 					expect(input.filter((item) => item.type === "function_call_output")).toHaveLength(
-						mode === "fresh" ? 0 : 1,
+						mode === "fresh" ? 0 : calls.length,
 					);
 					if (mode === "fresh") expect(JSON.stringify(input)).toContain("fresh handoff");
 				}
@@ -168,7 +177,7 @@ it.each(["pending", "disconnect", "fresh"] as const)(
 			expect(
 				events.filter((event) => event.type === "message_end" && event.message.role === "toolResult"),
 			).toHaveLength(calls.length);
-			if (mode === "fresh")
+			if (mode === "fresh" || mode === "rejected")
 				expect(
 					events.some(
 						(event) =>
@@ -199,6 +208,11 @@ it.each(["pending", "disconnect", "fresh"] as const)(
 						replay.filter((item) => item.type === "function_call_output" && item.call_id === call.call_id),
 					).toEqual([{ type: "function_call_output", call_id: call.call_id, output: `actual ${call.call_id}` }]);
 				}
+			}
+			if (mode === "rejected") {
+				const messages = agent.state.messages.filter((message) => message.role === "assistant");
+				expect(messages.map((message) => message.responseId)).toEqual(["parent", "successor"]);
+				expect(messages.reduce((total, message) => total + message.usage.totalTokens, 0)).toBe(122);
 			}
 			expect(fixture.requests).toHaveLength(3);
 		} finally {
