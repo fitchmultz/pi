@@ -1,6 +1,6 @@
 import type { AgentState } from "@earendil-works/pi-agent-core";
 import type { ToolCall, ToolReference } from "@earendil-works/pi-ai";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
@@ -260,6 +260,16 @@ function preRenderCustomTools(
 	return renderedTools;
 }
 
+function writeExport(sourceFile: string, outputPath: string, html: string): string {
+	const source = statSync(sourceFile);
+	const output = statSync(outputPath, { throwIfNoEntry: false });
+	if (output && output.dev === source.dev && output.ino === source.ino) {
+		throw new Error(`Cannot export HTML over the source session file: ${outputPath}`);
+	}
+	writeFileSync(outputPath, html, "utf8");
+	return outputPath;
+}
+
 /**
  * Export session to HTML using SessionManager and AgentState.
  * Used by TUI's /export command.
@@ -313,8 +323,7 @@ export async function exportSessionToHtml(
 		outputPath = `${APP_NAME}-session-${sessionBasename}.html`;
 	}
 
-	writeFileSync(outputPath, html, "utf8");
-	return outputPath;
+	return writeExport(sessionFile, outputPath, html);
 }
 
 /**
@@ -347,6 +356,5 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
 	}
 
-	writeFileSync(outputPath, html, "utf8");
-	return outputPath;
+	return writeExport(resolvedInputPath, outputPath, html);
 }
