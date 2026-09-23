@@ -1447,46 +1447,48 @@ export class AgentSession {
 			};
 		}
 
-		this._emit(
-			event.type === "agent_end"
-				? {
-						...event,
-						willRetry: this._willRetryAfterAgentEnd(event),
-						...(this.getPendingToolCalls().length ? { pendingToolCalls: this.getPendingToolCalls() } : {}),
-					}
-				: event,
-		);
-
-		// Handle session persistence
-		if (event.type === "message_end") {
-			if (
-				this._isAgentRunActive &&
-				(event.message.role === "system" || event.message.role === "user" || event.message.role === "custom")
-			) {
-				this._pendingProviderMessages.push(event.message);
-				if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
-			} else {
-				this._persistMessage(event.message);
+		try {
+			this._emit(
+				event.type === "agent_end"
+					? {
+							...event,
+							willRetry: this._willRetryAfterAgentEnd(event),
+							...(this.getPendingToolCalls().length ? { pendingToolCalls: this.getPendingToolCalls() } : {}),
+						}
+					: event,
+			);
+		} finally {
+			// A throwing subscriber must not skip persistence of the completed message.
+			if (event.type === "message_end") {
+				if (
+					this._isAgentRunActive &&
+					(event.message.role === "system" || event.message.role === "user" || event.message.role === "custom")
+				) {
+					this._pendingProviderMessages.push(event.message);
+					if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
+				} else {
+					this._persistMessage(event.message);
+				}
+				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 			}
-			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
+		}
 
-			if (event.message.role === "assistant") {
-				const assistantMsg = event.message as AssistantMessage;
-				this._lastAssistantMessage = assistantMsg;
-				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
-					this._overflowRecoveryAttempted = false;
-				}
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			const assistantMsg = event.message as AssistantMessage;
+			this._lastAssistantMessage = assistantMsg;
+			if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
+				this._overflowRecoveryAttempted = false;
+			}
 
-				// Reset retry counter immediately on successful assistant response
-				// This prevents accumulation across multiple LLM calls within a turn
-				if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
-					await this._emitRetryEvent({
-						type: "auto_retry_end",
-						success: true,
-						attempt: this._retryAttempt,
-					});
-					this._retryAttempt = 0;
-				}
+			// Reset retry counter immediately on successful assistant response
+			// This prevents accumulation across multiple LLM calls within a turn
+			if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
+				await this._emitRetryEvent({
+					type: "auto_retry_end",
+					success: true,
+					attempt: this._retryAttempt,
+				});
+				this._retryAttempt = 0;
 			}
 		}
 

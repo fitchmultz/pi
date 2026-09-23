@@ -50,14 +50,14 @@ export function expandPath(filePath: string): string {
  * Handles ~ expansion and absolute paths without changing literal filename characters.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
-	return resolveLocalOperationPath(cwd, normalizePath(filePath, { stripAtPrefix: true, expandTilde: false }));
+	return resolveLocalOperationPath(cwd, normalizePath(filePath, { expandTilde: false }));
 }
 
 // Filename conveniences are read-only fallbacks, never preferred over an exact path.
 function* readPathFallbacks(filePath: string, cwd: string): Generator<string> {
 	const resolved = resolveLocalOperationPath(
 		cwd,
-		normalizePath(filePath, { normalizeUnicodeSpaces: true, stripAtPrefix: true, expandTilde: false }),
+		normalizePath(filePath, { normalizeUnicodeSpaces: true, expandTilde: false }),
 	);
 	yield resolved;
 

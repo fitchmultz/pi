@@ -110,6 +110,55 @@ describe("AgentSession last answer", () => {
 		expect(seen).toEqual([{ answer: "newer", persisted: ["older"] }]);
 	});
 
+	it("persists a completed response when a session subscriber throws", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-last-answer-"));
+		onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+		const harness = await createHarness({
+			tools: [],
+			settings,
+			sessionManager: SessionManager.create(directory, directory),
+		});
+		onTestFinished(() => harness.cleanup());
+		harness.setResponses([
+			fauxAssistantMessage("older"),
+			fauxAssistantMessage("finished", { responseId: "completed-response" }),
+		]);
+		await harness.session.prompt("first");
+		const sessionFile = harness.session.sessionFile!;
+		harness.session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				getMessageText(event.message) === "finished"
+			) {
+				throw new Error("session subscriber failed");
+			}
+		});
+		await harness.session.prompt("second");
+
+		const reopened = SessionManager.open(sessionFile);
+		const completedEntries = reopened
+			.getEntries()
+			.filter(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "assistant" &&
+					getMessageText(entry.message) === "finished",
+			);
+		expect(completedEntries).toHaveLength(1);
+		expect(completedEntries[0]).toMatchObject({ message: { responseId: "completed-response" } });
+		expect(
+			reopened
+				.buildSessionContext()
+				.messages.some(
+					(message) =>
+						message.role === "assistant" &&
+						message.responseId === "completed-response" &&
+						getMessageText(message) === "finished",
+				),
+		).toBe(true);
+	});
+
 	it.each([
 		{ name: "empty completed response", response: fauxAssistantMessage([]), expected: undefined },
 		{ name: "whitespace response", response: fauxAssistantMessage(" \n "), expected: undefined },

@@ -44,7 +44,7 @@ describe("path-utils", () => {
 		it("should resolve tilde-prefixed filenames against cwd", () => {
 			const cwd = join(tmpdir(), "pi-path-utils-cwd");
 			expect(resolveToCwd("~draft.md", cwd)).toBe(resolve(cwd, "~draft.md"));
-			expect(resolveToCwd("@~draft.md", cwd)).toBe(resolve(cwd, "~draft.md"));
+			expect(resolveToCwd("@~draft.md", cwd)).toBe(resolve(cwd, "@~draft.md"));
 		});
 	});
 
@@ -76,9 +76,9 @@ describe("path-utils", () => {
 			const other = "report final.txt";
 			writeFileSync(join(tempDir, exact), "intended");
 			writeFileSync(join(tempDir, other), "unrelated");
-			expect(await resolveRead(`@${exact}`, tempDir)).toBe(join(tempDir, exact));
+			expect(await resolveRead(exact, tempDir)).toBe(join(tempDir, exact));
 			unlinkSync(join(tempDir, exact));
-			expect(await resolveRead(`@${exact}`, tempDir)).toBe(join(tempDir, other));
+			expect(await resolveRead(exact, tempDir)).toBe(join(tempDir, other));
 		});
 
 		it("keeps typography fallbacks after Unicode-space normalization", async () => {
@@ -102,8 +102,8 @@ describe("path-utils", () => {
 			expect(await resolveRead(input, tempDir)).toBe(curly);
 		});
 
-		it("expands tilde and @ while retaining missing literal paths", async () => {
-			expect(await resolveRead("@~/pi-missing\u00a0file.txt", tempDir)).toBe(
+		it("expands tilde while retaining missing literal paths", async () => {
+			expect(await resolveRead("~/pi-missing\u00a0file.txt", tempDir)).toBe(
 				join(homedir(), "pi-missing\u00a0file.txt"),
 			);
 		});

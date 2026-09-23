@@ -32,11 +32,12 @@ it("links to the native tool target without changing styled display text", async
 });
 
 it("retains exact Unicode and @-prefixed tool addressing in the link", async () => {
-	const filename = "space\u00a0name";
+	const filename = "@space\u00a0name";
 	await writeFile(join(root, filename), "EXACT");
-	await writeFile(join(root, "space name"), "NEIGHBOR");
+	await writeFile(join(root, "space\u00a0name"), "UNPREFIXED");
+	await writeFile(join(root, "@space name"), "NEIGHBOR");
 	const url = pathToFileURL(await realpath(join(root, filename))).href;
-	expect(linkPath("display", `@${filename}`, root)).toContain(url);
+	expect(linkPath("display", filename, root)).toContain(url);
 });
 
 it("keeps representable new-file links and omits links whose traversal cannot be represented", () => {
