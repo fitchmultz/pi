@@ -260,7 +260,7 @@ describe("AuthStorage", () => {
 		expect(acl()).toContain("group:everyone allow read");
 	});
 
-	test.skipIf(process.platform !== "linux")("does not inherit a parent's default ACL", async () => {
+	test.skipIf(process.platform !== "linux")("keeps staged files private under a default ACL", async () => {
 		const parent = join(tempDir, "acl-parent");
 		const path = join(parent, "auth.json");
 		mkdirSync(parent, { mode: 0o755 });
@@ -269,7 +269,7 @@ describe("AuthStorage", () => {
 			expect(result.status, result.stderr).toBe(0);
 		};
 		setAcl("-m", "u:nobody:rx", parent);
-		setAcl("-d", "-m", "u:nobody:r", parent);
+		setAcl("-d", "-m", "u:nobody:rwx", parent);
 		writeFileSync(path, JSON.stringify({ anthropic: { type: "api_key", key: "old" } }), { mode: 0o640 });
 		setAcl("-b", path);
 		const getAcl = () => spawnSync("/usr/bin/getfacl", ["-c", path], { encoding: "utf8" }).stdout;

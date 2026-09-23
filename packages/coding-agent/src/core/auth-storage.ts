@@ -41,7 +41,11 @@ async function publishStoredFile(path: string, content: string, signal?: AbortSi
 	signal?.throwIfAborted();
 	const stageDir = await mkdtemp(join(dirname(target), ".pi-auth-"));
 	try {
-		if (process.platform === "linux") execFileSync("/usr/bin/setfacl", ["-m", "u::rwx", "-k", stageDir]);
+		// Keep mkdtemp's zero ACL mask while restoring owner access and removing inherited defaults.
+		if (process.platform === "linux") {
+			execFileSync("/usr/bin/setfacl", ["-n", "-m", "u::rwx", "-k", stageDir]);
+			if ((await lstat(stageDir)).mode & 0o077) throw new Error("Staging directory permissions widened");
+		}
 		const stage = join(stageDir, "file");
 		if (previous) {
 			if (process.platform === "win32") {
