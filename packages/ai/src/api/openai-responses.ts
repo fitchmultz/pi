@@ -33,6 +33,7 @@ import {
 	createResponsesDiagnostics,
 	diagnosticServiceTier,
 	finishResponsesDiagnostics,
+	recordResponsesRequest,
 } from "./openai-responses-diagnostics.ts";
 import {
 	convertResponsesMessages,
@@ -179,12 +180,16 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 				getDeclaredTools(normalizedContext.messages),
 				compat.supportsOpenAIGrammarTools,
 			);
+			const requestFetch = options?.fetch ?? globalThis.fetch;
 			const client = createClient(
 				model,
 				normalizedContext,
 				apiKey,
 				options?.headers,
-				options?.fetch,
+				(input, init) => {
+					if (typeof init?.body === "string") recordResponsesRequest(diagnostics, init.body);
+					return requestFetch.call(undefined, input, init);
+				},
 				cacheSessionId,
 			);
 			let params = buildParams(model, normalizedContext, options, compat, grammarToolInputProperties);

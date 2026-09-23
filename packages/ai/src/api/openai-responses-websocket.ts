@@ -10,7 +10,7 @@ import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { normalizeContext } from "../utils/transcript.ts";
 import type { OpenAIResponsesOptions } from "./openai-responses.ts";
 import { createResponsesControl } from "./openai-responses-control.ts";
-import type { ResponsesDiagnostics } from "./openai-responses-diagnostics.ts";
+import { type ResponsesDiagnostics, recordResponsesRequest } from "./openai-responses-diagnostics.ts";
 import { convertResponsesMessages, type ResponsesEvent } from "./openai-responses-shared.ts";
 
 const TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
@@ -168,6 +168,17 @@ export async function* streamResponsesWebSocket(
 		const { stream: _stream, input, ...body } = params;
 		const request = JSON.stringify(body);
 		const fullInput = Array.isArray(input) ? input.map((item) => JSON.stringify(item)) : undefined;
+		// Reuse continuation-key JSON instead of re-evaluating hook-supplied getters or toJSON methods.
+		if (typeof request === "string" && (fullInput || input === undefined || typeof input === "string")) {
+			recordResponsesRequest(
+				diagnostics,
+				JSON.stringify({
+					...JSON.parse(request),
+					input: fullInput ? fullInput.map((item) => (item === undefined ? null : JSON.parse(item))) : input,
+				}),
+				"websocket_logical_body",
+			);
+		}
 		const previous = active.continuation;
 		const event: ResponsesClientEvent.ResponseCreate = { ...body, input, type: "response.create" };
 		const incremental = options.transport !== "websocket" && !body.previous_response_id && !body.conversation;
