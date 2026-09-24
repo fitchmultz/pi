@@ -324,7 +324,9 @@ export async function main(args = process.argv.slice(2)) {
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
 			const packages = getPublicWorkspacePackages(join(source, "packages"));
 			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { npm: tools.npm, env });
-			installCodingAgentConsumer(directory, tarballs, tools.npm, { env });
+			installCodingAgentConsumer(directory, tarballs, tools.npm, {
+				env, lockDirectory: join(source, "packages/coding-agent/install-lock"),
+			});
 			smokeTestInstalledRuntime(directory, tools, env);
 			run(tools.node, [join(source, "node_modules/vitest/vitest.mjs"), "run", "test/restart-tui.test.ts", "--maxWorkers=1"], {
 				cwd: join(source, "packages/coding-agent"),
