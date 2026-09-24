@@ -1,4 +1,4 @@
-import type { Api, Model, ProviderId } from "./types.ts";
+import type { Api, Model, OpenAIResponsesCompat, ProviderId } from "./types.ts";
 
 export type ModelGroups = Record<string, Record<string, object>>;
 
@@ -19,9 +19,34 @@ export type ModelCatalog<TGroups extends ModelGroups, TProvider extends Provider
 	};
 };
 
+/** Older and upstream catalogs can omit the fork's supported Astra lifecycle capabilities. */
+export function withAstraLifecycleDefaults(model: Model<Api>): Model<Api> {
+	if (
+		model.id !== "gpt-6-astra" ||
+		!(
+			((model.provider === "openai" || model.provider === "cloudflare-ai-gateway") &&
+				model.api === "openai-responses") ||
+			(model.provider === "openai-codex" && model.api === "openai-codex-responses")
+		)
+	)
+		return model;
+	const compat = model.compat as OpenAIResponsesCompat | undefined;
+	return {
+		...model,
+		compat: {
+			...compat,
+			supportsAsyncTools: compat?.supportsAsyncTools ?? true,
+			supportsSteering: compat?.supportsSteering ?? true,
+			supportsReasoningEffortUpdates: compat?.supportsReasoningEffortUpdates ?? true,
+		},
+	};
+}
+
 export function flattenModelCatalog<const TProvider extends ProviderId, const TGroups extends ModelGroups>(
 	_provider: TProvider,
 	groups: TGroups,
 ): ModelCatalog<TGroups, TProvider> {
-	return Object.assign({}, ...Object.values(groups)) as ModelCatalog<TGroups, TProvider>;
+	const catalog = Object.assign({}, ...Object.values(groups)) as Record<string, Model<Api>>;
+	for (const [id, model] of Object.entries(catalog)) catalog[id] = withAstraLifecycleDefaults(model);
+	return catalog as ModelCatalog<TGroups, TProvider>;
 }
