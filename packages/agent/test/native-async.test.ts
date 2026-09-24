@@ -533,6 +533,93 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it.each(["queued", "wake", "none"] as const)(
+		"handles %s steering while ordered siblings wait for a native child",
+		async (steering) => {
+			const work = deferred<AgentToolResult>();
+			const invoked = vi.fn(async () => work.promise);
+			const changed = vi.fn(async () => result);
+			const { agent, streams, inputs, events, tool } = setup(invoked);
+			agent.state.tools = [
+				tool,
+				{ ...tool, name: "change_dir", async: false, executionMode: "sequential", execute: changed },
+			];
+			const provider = agent.streamFunction;
+			agent.streamFunction = async (...args) => {
+				const response = await provider(...args);
+				if (streams.length > 1) finish(response, assistant(`answer-${streams.length}`));
+				return response;
+			};
+			const run = agent.prompt("delegate, change directory, then write");
+			try {
+				await vi.waitFor(() => expect(streams).toHaveLength(1));
+				const first = assistant("ordered");
+				await emitCall(streams[0], first, call());
+				await vi.waitFor(() => expect(invoked).toHaveBeenCalledOnce());
+				const suffix: ToolCall[] = [
+					{ type: "toolCall", id: "change", name: "change_dir", arguments: { path: "requested" } },
+					call("write"),
+					{ type: "toolCall", id: "search", name: "work", arguments: { path: "search" } },
+				];
+				for (const sibling of suffix) {
+					first.content.push(sibling);
+					streams[0].push({
+						type: "toolcall_end",
+						contentIndex: first.content.length - 1,
+						toolCall: sibling,
+						partial: first,
+					});
+				}
+				if (steering === "queued") agent.steer({ role: "user", content: "child question", timestamp: 2 });
+				finish(streams[0], first);
+				await vi.waitFor(() =>
+					expect(
+						events.some(
+							(event) =>
+								event.type === "message_end" &&
+								event.message.role === "assistant" &&
+								event.message.responseId === "ordered",
+						),
+					).toBe(true),
+				);
+				if (steering === "wake") agent.steer({ role: "user", content: "child question", timestamp: 2 });
+				if (steering === "none") {
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					expect(changed).not.toHaveBeenCalled();
+					expect(invoked).toHaveBeenCalledOnce();
+				} else {
+					await vi.waitFor(() => expect(streams.length).toBeGreaterThan(1), { timeout: 300 });
+					expect(changed).not.toHaveBeenCalled();
+					expect(invoked).toHaveBeenCalledOnce();
+					expect(inputs[1].filter((message) => message.role === "toolResult")).toMatchObject(
+						suffix.map((call) => ({
+							toolCallId: call.id,
+							isError: true,
+							content: [{ type: "text", text: expect.stringContaining("not executed") }],
+						})),
+					);
+					expect(getPendingToolCalls(agent.state.messages)).toMatchObject([
+						{ toolCallId: call().id, state: "started" },
+					]);
+				}
+			} finally {
+				work.resolve(result);
+				await run;
+			}
+			expect(changed).toHaveBeenCalledTimes(steering === "none" ? 1 : 0);
+			expect(invoked).toHaveBeenCalledTimes(steering === "none" ? 3 : 1);
+			const receipts = agent.state.messages.filter((message) => message.role === "toolResult");
+			expect(receipts).toHaveLength(4);
+			expect(receipts.filter((message) => message.toolCallId === call().id)).toMatchObject([
+				{ isError: false, content: result.content },
+			]);
+			expect(
+				agent.state.messages.filter((message) => message.role === "user" && message.content === "child question"),
+			).toHaveLength(steering === "none" ? 0 : 1);
+			expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
+		},
+	);
+
 	it.each([
 		{ boundary: "async item", earlier: "parallel", global: false },
 		{ boundary: "async item", earlier: "sequential", global: false },
