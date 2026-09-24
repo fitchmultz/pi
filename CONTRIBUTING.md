@@ -2,6 +2,10 @@
 
 This guide exists to save both sides time.
 
+## Scope
+
+The contributor gate applies wherever its workflows are enabled, including upstream `earendil-works/pi` and fork `fitchmultz/pi`. Each repository reads its own `.github/APPROVED_CONTRIBUTORS` from its default branch; approval in one does not grant approval in the other. Non-bot collaborators with `admin`, `maintain`, or `write` access bypass the gate. Task authorization alone does not grant repository access. Shared development, verification, and issue/PR procedures still apply.
+
 ## Philosophy
 
 First things first: **pi's core is minimal**.
@@ -20,7 +24,7 @@ If you use an agent, run it from the `pi` root directory so it picks up `AGENTS.
 
 ## Contribution Gate
 
-All issues and PRs from new contributors are auto-closed by default.
+Issues and PRs from contributors without the required approval or repository access are auto-closed by default. The workflows also exempt their explicitly trusted bots.
 
 Issues submitted Friday through Sunday are not guaranteed to be reviewed.  If something is urgent, ask on Discord: https://discord.com/invite/3cU7Bz4UPx
 
@@ -55,9 +59,9 @@ If you send a large volume of issues through automation, your GitHub account wil
 
 ## Before Submitting a PR
 
-Do not open a PR unless you have already been approved by a maintainer using `lgtm` in the command position described above.
+Unless you have `admin`, `maintain`, or `write` access to the target repository, do not open a PR until a maintainer of that repository has approved you using `lgtm` in the command position described above.
 
-Before submitting a PR:
+Before submitting a PR to either upstream or the fork:
 
 ```bash
 npm run check
@@ -66,9 +70,9 @@ npm run check
 
 Both must pass.
 
-Do not edit `CHANGELOG.md`. Changelog entries are added by maintainers.
+Contributors must not edit `CHANGELOG.md`. Authorized maintainers follow the [changelog procedures in AGENTS.md](AGENTS.md#changelog).
 
-If you are adding a new provider to `packages/ai`, see `AGENTS.md` for required tests.
+If you are adding a new provider to `packages/ai`, follow the [provider checklist](.pi/skills/add-llm-provider.md), including its required test matrix.
 
 ## Questions?
 
