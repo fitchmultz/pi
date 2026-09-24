@@ -609,7 +609,12 @@ async function runLoop(
 
 				explicitContinuation = decision?.action === "continue";
 				pendingMessages = (await config.getSteeringMessages?.()) || [];
-				while (!hasMoreToolCalls && pendingMessages.length === 0 && pendingCalls.size > 0) {
+				while (
+					!explicitContinuation &&
+					!hasMoreToolCalls &&
+					pendingMessages.length === 0 &&
+					pendingCalls.size > 0
+				) {
 					let unsubscribe: (() => void) | undefined;
 					const input = new Promise<void>((resolve) => {
 						unsubscribe = config.subscribeSteering?.(resolve);

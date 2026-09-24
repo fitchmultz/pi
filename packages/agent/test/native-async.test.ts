@@ -477,6 +477,38 @@ describe("native async lifecycle", () => {
 		expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
 	});
 
+	it.each([false, true])("honors explicit continuation while native work runs (end next turn=%s)", async (end) => {
+		const work = deferred<AgentToolResult>();
+		const { agent, streams, inputs, events } = setup(async () => work.promise);
+		const provider = agent.streamFunction;
+		agent.streamFunction = async (...args) => {
+			const response = await provider(...args);
+			if (streams.length > 1) finish(response, assistant(`answer-${streams.length}`));
+			return response;
+		};
+		agent.finishTurn = ({ message }) =>
+			message.responseId === "first" ? { action: "continue" } : end ? { action: "end" } : undefined;
+		const run = agent.prompt("start work and continue independently");
+		try {
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("first");
+			await emitCall(streams[0], first, call());
+			await vi.waitFor(() => expect(agent.state.pendingToolCalls.size).toBe(1));
+			finish(streams[0], first);
+			await vi.waitFor(() => expect(streams).toHaveLength(2));
+			expect(inputs[1].some((entry) => entry.role === "toolResult")).toBe(false);
+			expect(events.some((event) => event.type === "agent_end")).toBe(false);
+			expect(agent.state.isStreaming).toBe(true);
+		} finally {
+			work.resolve(result);
+			await run;
+		}
+		expect(streams).toHaveLength(end ? 2 : 3);
+		expect(agent.state.messages.filter((entry) => entry.role === "toolResult")).toHaveLength(1);
+		expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
 	it.each(["sequential", "parallel"] as const)(
 		"keeps local %s ordering separate from native async",
 		async (executionMode) => {

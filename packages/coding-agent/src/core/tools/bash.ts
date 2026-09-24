@@ -111,8 +111,10 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			if (child.pid) trackDetachedChildPid(child.pid);
 			let timedOut = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
+			const cancellation = new AbortController();
 			const onAbort = () => {
 				if (child.pid) killProcessTree(child.pid);
+				cancellation.abort();
 			};
 			let outputError: unknown;
 			let acceptingOutput = true;
@@ -148,7 +150,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				if (timeoutMs !== undefined) {
 					timeoutHandle = setTimeout(() => {
 						timedOut = true;
-						if (child.pid) killProcessTree(child.pid);
+						onAbort();
 					}, timeoutMs);
 				}
 				// Stream stdout and stderr.
@@ -165,7 +167,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				}
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
-				const exitCode = await waitForChildProcess(child);
+				const exitCode = await waitForChildProcess(child, cancellation.signal);
 				end("stdout");
 				end("stderr");
 				if (outputError) throw outputError;
