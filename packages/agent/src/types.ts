@@ -447,7 +447,7 @@ export interface AgentToolResult<T = JsonValue | undefined> {
 	details: T;
 	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
 	usage?: Usage;
-	/** Start the next turn in a fresh context window after the full tool batch succeeds. */
+	/** Start the next turn in a fresh context window after ordinary tool siblings succeed; native async work can continue. */
 	newContext?: NewContextRequest;
 	/**
 	 * Hint that the agent should stop after the current tool batch.

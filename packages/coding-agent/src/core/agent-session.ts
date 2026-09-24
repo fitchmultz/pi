@@ -417,7 +417,12 @@ function withoutUndefined(value: unknown): unknown {
 function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
 	return convertToLlm(messages.filter((message) => message.role !== "system")).map((message) => {
 		if (message.role !== "assistant") return withoutUndefined({ ...message, timestamp: 0 });
-		const { usage: _usage, diagnostics: _diagnostics, ...response } = message;
+		const {
+			usage: _usage,
+			diagnostics: _diagnostics,
+			toolExecutionFailed: _toolExecutionFailed,
+			...response
+		} = message;
 		return withoutUndefined({
 			...response,
 			timestamp: 0,
@@ -433,6 +438,21 @@ function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
 			}),
 		});
 	});
+}
+
+function providerToolResultIds(conversation: readonly unknown[]): Set<string> {
+	return new Set(
+		conversation.flatMap((message) =>
+			message &&
+			typeof message === "object" &&
+			"role" in message &&
+			message.role === "toolResult" &&
+			"toolCallId" in message &&
+			typeof message.toolCallId === "string"
+				? [message.toolCallId]
+				: [],
+		),
+	);
 }
 
 // ============================================================================
@@ -788,24 +808,68 @@ export class AgentSession {
 		)
 			return undefined;
 
-		if (this.agent.state.pendingToolCalls.size > 0 || this.getPendingToolCalls().length > 0) {
-			this._pendingNewContext = next;
-			return undefined;
-		}
 		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
 		const usage = this.getContextUsage();
-		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null);
+		const projection = this.sessionManager.buildSessionProjection();
+		const nativeCallIds = new Set(
+			projection.messages.flatMap((message) =>
+				message.role === "assistant"
+					? message.content.flatMap((block) =>
+							block.type === "toolCall" && block.async && block.responsesItem ? [block.id] : [],
+						)
+					: [],
+			),
+		);
+		// A prepared or failed request must not hide earlier proof of consumed input.
+		const prefix = [this._providerRequestPrefix, this._reportedUsagePrefix].find(
+			(candidate) => candidate?.response && ["stop", "length", "toolUse"].includes(candidate.response.stopReason),
+		);
+		const consumedResultIds = providerToolResultIds(prefix?.conversation ?? []);
+		const consumedEntryIds = new Set(
+			this.sessionManager
+				.getBranch()
+				.flatMap((entry) => (entry.type === "message" ? (entry.consumedToolResultIds ?? []) : [])),
+		);
+		const retainedToolResultIds = projection.entries.flatMap((entry) =>
+			!consumedEntryIds.has(entry.sourceEntry.id) &&
+			entry.messages.some(
+				(message) =>
+					message.role === "toolResult" &&
+					nativeCallIds.has(message.toolCallId) &&
+					!consumedResultIds.has(message.toolCallId),
+			)
+				? [entry.sourceEntry.id]
+				: [],
+		);
+		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null, retainedToolResultIds);
 		this._reportedUsagePrefix = null;
-		this._refreshFinalizedContext();
-		const messages = this.agent.state.messages;
-
-		const marker = messages.find((message) => message.role === "custom" && message.customType === "context-window")!;
-		this._emit({ type: "message_start", message: marker });
-		this._emit({ type: "message_end", message: marker });
-		this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
+		const appended: SessionEntry[] = [];
+		try {
+			this._extensionRunner.runContextWindowHooks(
+				() => ({
+					contextEntries: this.sessionManager.buildSessionProjection().entries,
+					pendingMessages: this._pendingProviderMessages.slice(),
+				}),
+				(drafts) => {
+					this._createBoundaryPreviewManager(drafts);
+					appended.push(...this._applyBoundaryDrafts(this.sessionManager, drafts));
+				},
+			);
+		} finally {
+			// The marker and accepted edits are committed even when a later hook stops dispatch.
+			this._refreshFinalizedContext();
+			this._restorePendingProviderMessages(this.agent.state);
+			for (const entry of appended) this._emit({ type: "entry_appended", entry });
+			const marker = this.agent.state.messages.find(
+				(message) => message.role === "custom" && message.customType === "context-window",
+			)!;
+			this._emit({ type: "message_start", message: marker });
+			this._emit({ type: "message_end", message: marker });
+			this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
+		}
 
 		return {
-			messages: messages.slice(),
+			messages: this.agent.state.messages.slice(),
 			tools: this.agent.state.tools.slice(),
 		};
 	}
@@ -1093,7 +1157,9 @@ export class AgentSession {
 			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
 			if (entry.type === "context_window") return { hasPostCompactionUsage: true, useReportedUsage: false };
 			if (isContextUsageInvalidatingEntry(entry)) invalidated = true;
-			if (model && entry.type === "message" && entry.message.role === "assistant") {
+			// Execution checkpoints can arrive after a window boundary. Only the original
+			// final response anchors measured usage; keep walking to it or the boundary.
+			if (model && entry.type === "message" && !entry.checkpoint && entry.message.role === "assistant") {
 				const message = entry.message;
 				const entryId = entry.id;
 				if (
@@ -1164,7 +1230,7 @@ export class AgentSession {
 		return context;
 	}
 
-	private _persistMessage(message: AgentMessage): void {
+	private _persistMessage(message: AgentMessage, consumedToolResultIds?: string[]): void {
 		let entryId: string | undefined;
 		if (message.role === "custom") {
 			entryId = this.sessionManager.appendCustomMessageEntry(
@@ -1183,6 +1249,8 @@ export class AgentSession {
 				message.role === "assistant" && message.content.some((block) => block.type === "toolCall" && block.async)
 					? structuredClone(message)
 					: message,
+				false,
+				consumedToolResultIds,
 			);
 		}
 		if (entryId) this._entryIdsByMessage.set(message, entryId);
@@ -1409,6 +1477,26 @@ export class AgentSession {
 		}
 		const requestEnded = event.type === "message_end" && event.message.role === "assistant";
 		const requestPrefix = requestEnded ? this._providerRequestPrefix : undefined;
+		// Capture proof before message_end handlers can change context. Journal order cannot
+		// distinguish a result in this request from one completed while it was streaming.
+		const consumedCallIds =
+			requestPrefix &&
+			event.type === "message_end" &&
+			event.message.role === "assistant" &&
+			["stop", "length", "toolUse"].includes(event.message.stopReason)
+				? providerToolResultIds(requestPrefix.conversation)
+				: undefined;
+		const consumedToolResultIds = consumedCallIds?.size
+			? this.sessionManager
+					.getBranch()
+					.flatMap((entry) =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						consumedCallIds.has(entry.message.toolCallId)
+							? [entry.id]
+							: [],
+					)
+			: undefined;
 		const responseSnapshot =
 			event.type === "message_end" && event.message.role === "assistant"
 				? snapshotProviderConversation([event.message])[0]
@@ -1416,12 +1504,13 @@ export class AgentSession {
 		if (requestEnded) this._skipNextProviderRequestPreflight = false;
 		if (event.type === "agent_end") this._providerRequestPrefix = undefined;
 		if (event.type === "message_start" && event.message.role === "assistant") {
-			if (this._providerRequestPrefix && event.continuationInput !== undefined) {
+			if (this._providerRequestPrefix) {
 				this._providerRequestPrefix = {
 					...this._providerRequestPrefix,
+					response: undefined,
 					conversation: [
 						...this._providerRequestPrefix.conversation,
-						...snapshotProviderConversation([...event.continuationInput]),
+						...snapshotProviderConversation([...(event.continuationInput ?? [])]),
 					],
 				};
 			}
@@ -1477,6 +1566,7 @@ export class AgentSession {
 			}
 			this._providerRequestPrefix = {
 				...requestPrefix,
+				response: message,
 				conversation: [...requestPrefix.conversation, responseSnapshot],
 			};
 		}
@@ -1501,7 +1591,7 @@ export class AgentSession {
 					this._pendingProviderMessages.push(event.message);
 					if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
 				} else {
-					this._persistMessage(event.message);
+					this._persistMessage(event.message, consumedToolResultIds);
 				}
 				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 			}
@@ -3884,17 +3974,13 @@ export class AgentSession {
 		let fromExtension = false;
 		let signal: AbortSignal | undefined;
 		let cancelledByExtension = false;
+		let claimedWindow = false;
 
 		try {
 			if (!model) {
 				return false;
 			}
 
-			// Live state can include a result whose message_end handlers still precede persistence.
-			// Require completed calls in the journal before capturing the automatic handoff.
-			const canStartContextWindow =
-				this.agent.state.pendingToolCalls.size === 0 &&
-				getPendingToolCalls(this.sessionManager.buildSessionProjection().messages).length === 0;
 			const pathEntries = this.sessionManager.getBranch();
 			abortController = new AbortController();
 			this._autoCompactionAbortController = abortController;
@@ -3922,7 +4008,8 @@ export class AgentSession {
 				});
 				signal.throwIfAborted();
 				if (claim?.newContext) {
-					const contextWindowStarted = canStartContextWindow && !!this._consumeNewContext(claim.newContext);
+					claimedWindow = true;
+					const contextWindowStarted = !!this._consumeNewContext(claim.newContext);
 					this._emit({
 						type: "compaction_end",
 						reason,
@@ -3965,8 +4052,8 @@ export class AgentSession {
 				signal.throwIfAborted();
 
 				if (extensionResult?.newContext) {
-					const contextWindowStarted =
-						canStartContextWindow && !!this._consumeNewContext(extensionResult.newContext);
+					claimedWindow = true;
+					const contextWindowStarted = !!this._consumeNewContext(extensionResult.newContext);
 					this._emit({
 						type: "compaction_end",
 						reason,
@@ -4091,6 +4178,7 @@ export class AgentSession {
 					fromExtension,
 				});
 			}
+			if (claimedWindow) throw error;
 			return false;
 		} finally {
 			if (signal?.aborted) this._pendingNewContext = undefined;

@@ -205,6 +205,71 @@ describe("AgentSession context usage estimate", () => {
 		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThan(0);
 	});
 
+	it("does not revive old measured usage from a late native checkpoint after reopening a fresh window", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-late-checkpoint-usage-"));
+		const harness = await createHarness({
+			tools: [],
+			sessionManager: SessionManager.create(directory, directory),
+			settings: { compaction: { enabled: false } },
+		});
+		harnesses.push(harness);
+		try {
+			const response: AssistantMessage = {
+				...fauxAssistantMessage(
+					[
+						{
+							type: "toolCall",
+							id: "call|fc_call",
+							name: "work",
+							arguments: {},
+							async: true,
+							responsesItem: {
+								type: "function_call",
+								id: "fc_call",
+								call_id: "call",
+								name: "work",
+								arguments: "{}",
+								async: true,
+								status: "completed",
+							},
+						},
+					],
+					{ responseId: "old-response", stopReason: "toolUse" },
+				),
+				api: harness.getModel().api,
+				usage: { ...usage(500_000), cost: { input: 2, output: 0, cacheRead: 0, cacheWrite: 0, total: 2 } },
+			};
+			const manager = harness.sessionManager;
+			manager.appendMessage(response);
+			manager.appendContextWindow("continue the pending work", 500_000);
+			manager.appendMessage({ ...structuredClone(response), stopReason: "pending" }, true);
+			const { session } = await createAgentSession({
+				cwd: harness.tempDir,
+				agentDir: directory,
+				model: harness.getModel(),
+				modelRuntime: harness.session.modelRuntime,
+				settingsManager: harness.settingsManager,
+				resourceLoader: createTestResourceLoader(),
+				sessionManager: SessionManager.open(manager.getSessionFile()!),
+				tools: [],
+			});
+			try {
+				expect(session.getPendingToolCalls()).toMatchObject([{ toolCallId: "call|fc_call" }]);
+				expect(session.getContextUsage()).toMatchObject({ source: "estimated" });
+				expect(session.getContextUsage()!.tokens!).toBeLessThan(10_000);
+				expect(session.getSessionStats()).toMatchObject({
+					assistantMessages: 1,
+					tokens: { total: 500_000 },
+					cost: 2,
+				});
+			} finally {
+				session.dispose();
+			}
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("counts the system prompt and tool definitions before the model reports usage", async () => {
 		const tool: AgentTool = {
 			name: "lookup",

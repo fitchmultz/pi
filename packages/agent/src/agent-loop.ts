@@ -254,7 +254,6 @@ async function runLoop(
 	let pendingNewContext: { request: NewContextRequest; scope: object } | undefined;
 	const failedScopes = new WeakSet<object>();
 	const recordNewContext = (batch: ExecutedToolCallBatch, scope: object): void => {
-		if (batch.messages.some((message) => message.isError)) failedScopes.add(scope);
 		if (batch.newContext && !failedScopes.has(scope)) pendingNewContext ??= { request: batch.newContext, scope };
 	};
 	let responseRetired = false;
@@ -344,10 +343,9 @@ async function runLoop(
 	};
 	const takeNewContext = async (): Promise<NewContextRequest | undefined> => {
 		if (!pendingNewContext) return undefined;
-		await joinPendingCalls();
 		const pending = pendingNewContext;
 		pendingNewContext = undefined;
-		// Native async splits one response into execution batches; all siblings must succeed.
+		// Ordinary checkpoint siblings must succeed; independent native work can finish in the new window.
 		return !signal?.aborted && !failedScopes.has(pending.scope) ? pending.request : undefined;
 	};
 	const finishToolCalls = async (
@@ -433,6 +431,7 @@ async function runLoop(
 				savedResults.push(result);
 			}
 			batches.push(batch);
+			if (batch.messages.some((message) => message.isError)) failedScopes.add(scope);
 			recordNewContext(batch, scope);
 		}
 		if (batches.length === 0) return undefined;
@@ -445,12 +444,14 @@ async function runLoop(
 	try {
 		for (const message of currentContext.messages.slice()) {
 			if (message.role !== "assistant") continue;
+			if (message.toolExecutionFailed) failedScopes.add(message);
 			for (const call of message.content) {
 				if (call.type !== "toolCall") continue;
 				const result = restoredResults.get(call.id);
 				if (result) {
 					startedCalls.add(call.id);
-					if (result.isError) failedScopes.add(message);
+					if (result.isError && (result.executionSkipped || !(call.async && call.responsesItem?.async)))
+						failedScopes.add(message);
 				} else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
 			}
@@ -924,6 +925,7 @@ async function failToolCalls(
 		};
 		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
+		toolResultMessage.executionSkipped = true;
 		await emitToolResultMessage(toolResultMessage, emit);
 		messages.push(toolResultMessage);
 	}

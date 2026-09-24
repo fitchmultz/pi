@@ -141,12 +141,15 @@ interface AssistantMessage {
   deferred?: DeferredHandle;
   errorMessage?: string;
   rawStopReason?: string;
+  toolExecutionFailed?: boolean;
   endTurn?: boolean;
   timestamp: number;
 }
 ```
 
 `responseModel` records a concrete provider response model when it differs from the requested model. `responseId`, `providerThinkingLevel`, `diagnostics`, and `rawStopReason` preserve provider or runtime details.
+
+`toolExecutionFailed` is local execution bookkeeping derived by session projection from the original response's foreground failure receipts on the active branch. It preserves that response's fresh-window veto when those receipts leave model context. It is not provider input.
 
 `"pending"` appears during streaming and in durable assistant snapshots marked `checkpoint: true`. Completed responses use ordinary message entries with terminal stop reasons. Checkpoints are not additional billable responses; see [session snapshots](session-format.md#sessionmessageentry).
 
@@ -175,6 +178,7 @@ interface ToolResultMessage<TDetails = any> {
   toolCallKind?: "toolSearch";
   toolsAdded?: Tool[];
   elapsedMs?: number;
+  executionSkipped?: boolean;
   content: (TextContent | ImageContent)[];
   details?: TDetails;
   usage?: Usage;
@@ -184,6 +188,8 @@ interface ToolResultMessage<TDetails = any> {
 ```
 
 `details` is tool-specific. Optional `usage` reports nested model work and contributes to full-session statistics, separately from the main model call. `elapsedMs` measures executor time only; blocked calls omit it. `toolsAdded` holds core-resolved discovery declarations, including `[]` for an empty native search result.
+
+`executionSkipped: true` identifies a foreground scheduling failure, such as truncated arguments or interrupted ordered execution. Its error vetoes a sibling fresh-window request after restore just as it does live. Native background failures, including preflight blocks, do not acquire that veto. Older results without the field retain their existing classification.
 
 ### Provider request diagnostics
 

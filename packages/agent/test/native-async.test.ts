@@ -187,7 +187,7 @@ describe("native async lifecycle", () => {
 		).toBe(false);
 	});
 
-	it("retains a late new-window request until all native work drains", async () => {
+	it("honors a late new-window request from native work", async () => {
 		const work = deferred<AgentToolResult>();
 		const { agent, streams } = setup(async () => work.promise);
 		const prepared: unknown[] = [];
@@ -208,77 +208,100 @@ describe("native async lifecycle", () => {
 	});
 
 	it.each(
-		(["stream end", "response end", "async item"] as const).flatMap((boundary) =>
+		(["stream end", "response end", "async item", "earlier response"] as const).flatMap((boundary) =>
 			[false, true].map((fails) => ({ boundary, fails })),
 		),
-	)(
-		"requires the full native batch to succeed before resetting ($boundary, fails=$fails)",
-		async ({ boundary, fails }) => {
-			const work = deferred<void>();
-			const reset = deferred<void>();
-			const resetExecuted = deferred<void>();
-			const { agent, streams, inputs, events } = setup(async (_id, args) => {
-				if ((args as { path: string }).path === "reset") {
-					if (boundary === "async item") await reset.promise;
-					resetExecuted.resolve();
-					return { ...result, newContext: { handoff: "fresh handoff" } };
-				}
-				await work.promise;
-				if (fails) throw new Error("FAILED_SIBLING_MARKER");
-				return result;
-			});
-			const prepared: unknown[] = [];
-			agent.prepareNextTurnWithContext = async ({ newContext, context }) => {
-				prepared.push(newContext);
-				return newContext
-					? {
-							context: {
-								...context,
-								messages: [{ role: "user", content: newContext.handoff ?? "", timestamp: 3 }],
-							},
-						}
-					: undefined;
-			};
-			const run = agent.prompt("go");
+	)("starts a fresh window before native work completes ($boundary, fails=$fails)", async ({ boundary, fails }) => {
+		const work = deferred<void>();
+		const reset = deferred<void>();
+		const invoked = vi.fn<AgentTool["execute"]>(async (_id, args) => {
+			if ((args as { path: string }).path === "reset") {
+				if (boundary === "async item") await reset.promise;
+				return { ...result, newContext: { handoff: "fresh handoff" } };
+			}
+			await work.promise;
+			if (fails) throw new Error("FAILED_CHILD_MARKER");
+			return result;
+		});
+		const { agent, streams, inputs, events } = setup(invoked);
+		const prepared: unknown[] = [];
+		agent.prepareNextTurnWithContext = async ({ newContext, context }) => {
+			prepared.push(newContext);
+			return newContext
+				? {
+						context: {
+							...context,
+							messages: [{ role: "user", content: newContext.handoff ?? "", timestamp: 3 }],
+						},
+					}
+				: undefined;
+		};
+		const provider = agent.streamFunction;
+		agent.streamFunction = async (...args) => {
+			const response = await provider(...args);
+			if (streams.length > (boundary === "earlier response" ? 2 : 1))
+				finish(response, assistant(`answer-${streams.length}`));
+			return response;
+		};
+		const run = agent.prompt("old conversation");
+		try {
 			await vi.waitFor(() => expect(streams).toHaveLength(1));
 			const first = assistant("first");
 			await emitCall(streams[0], first, call());
+			await vi.waitFor(() => expect(invoked).toHaveBeenCalledOnce());
+			let resetMessage = first;
+			let resetStream = streams[0];
+			if (boundary === "earlier response") {
+				finish(streams[0], first);
+				agent.steer({ role: "user", content: "reset now", timestamp: 2 });
+				await vi.waitFor(() => expect(streams).toHaveLength(2));
+				resetStream = streams[1];
+				resetMessage = assistant("reset-response");
+				resetStream.push({ type: "start", partial: resetMessage });
+			}
 			const resetCall: ToolCall =
 				boundary === "async item"
 					? { ...call("reset"), arguments: { path: "reset" } }
 					: { type: "toolCall", id: "reset", name: "work", arguments: { path: "reset" } };
-			first.content.push(resetCall);
-			streams[0].push({ type: "toolcall_end", contentIndex: 1, toolCall: resetCall, partial: first });
+			resetMessage.content.push(resetCall);
+			resetStream.push({
+				type: "toolcall_end",
+				contentIndex: resetMessage.content.length - 1,
+				toolCall: resetCall,
+				partial: resetMessage,
+			});
 			if (boundary === "response end") {
-				first.stopReason = "toolUse";
-				streams[0].push({ type: "response_end", message: first });
-			} else {
-				finish(streams[0], first);
-			}
+				resetMessage.stopReason = "toolUse";
+				resetStream.push({ type: "response_end", message: resetMessage });
+				const successor = assistant("successor");
+				resetStream.push({ type: "start", partial: successor });
+				finish(resetStream, successor);
+			} else finish(resetStream, resetMessage);
 			if (boundary === "async item") {
 				await vi.waitFor(() => expect(events.some((event) => event.type === "turn_end")).toBe(true));
 				reset.resolve();
 			}
-			await resetExecuted.promise;
-			expect(prepared).toEqual([]);
-			if (boundary === "response end") {
-				const successor = assistant("successor");
-				streams[0].push({ type: "start", partial: successor });
-				finish(streams[0], successor);
-			}
+			const nextIndex = boundary === "earlier response" ? 2 : 1;
+			await vi.waitFor(() => expect(streams).toHaveLength(nextIndex + 1));
+			expect(prepared).toContainEqual({ handoff: "fresh handoff" });
+			expect(JSON.stringify(inputs[nextIndex])).toContain("fresh handoff");
+			expect(inputs[nextIndex].some((message) => message.role === "toolResult")).toBe(false);
+			expect(agent.state.pendingToolCalls).toEqual(new Set([call().id]));
+			expect(agent.state.isStreaming).toBe(true);
+		} finally {
 			work.resolve();
-			await answer(streams, 1);
 			await run;
-			expect(prepared).toEqual([fails ? undefined : { handoff: "fresh handoff" }]);
-			expect(JSON.stringify(inputs[1])).toContain(fails ? "FAILED_SIBLING_MARKER" : "fresh handoff");
-			expect(inputs[1].filter((message) => message.role === "toolResult")).toHaveLength(fails ? 2 : 0);
-			expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
-		},
-	);
+		}
+		expect(invoked).toHaveBeenCalledTimes(2);
+		const receipts = inputs.at(-1)?.filter((message) => message.role === "toolResult");
+		expect(receipts).toMatchObject([{ toolCallId: call().id, isError: fails }]);
+		expect(receipts).toHaveLength(1);
+		expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
+	});
 
-	it.each([true, false])(
-		"checks late reset errors in their original response (sameResponse=%s)",
-		async (sameResponse) => {
+	it.each([true, false].flatMap((sameResponse) => [false, true].map((native) => ({ sameResponse, native }))))(
+		"only synchronous checkpoint errors veto their own reset (sameResponse=$sameResponse, native=$native)",
+		async ({ sameResponse, native }) => {
 			const reset = deferred<AgentToolResult>();
 			const resetExecuted = deferred<void>();
 			const { agent, streams, inputs, events } = setup(async (_id, args) => {
@@ -304,7 +327,18 @@ describe("native async lifecycle", () => {
 			const run = agent.prompt("go");
 			await vi.waitFor(() => expect(streams).toHaveLength(1));
 			const first = assistant("first");
-			await emitCall(streams[0], first, call());
+			await emitCall(
+				streams[0],
+				first,
+				native
+					? call()
+					: {
+							type: "toolCall",
+							id: "checkpoint",
+							name: "work",
+							arguments: { path: "original" },
+						},
+			);
 			const resetCall = { ...call("reset"), arguments: { path: "reset" } };
 			if (sameResponse) {
 				first.content.push(resetCall);
@@ -329,49 +363,170 @@ describe("native async lifecycle", () => {
 				).toBe(true),
 			);
 			await new Promise<void>((resolve) => setImmediate(resolve));
-			expect(retire).toHaveBeenCalledTimes(sameResponse ? 0 : 1);
+			expect(retire).toHaveBeenCalledTimes(sameResponse && !native ? 0 : 1);
 			finish(streams[1], second);
 			await answer(streams, 2);
 			await run;
-			expect(prepared).toEqual([undefined, sameResponse ? undefined : { handoff: "late" }]);
-			expect(JSON.stringify(inputs[2]).includes("FAILED_SIBLING_MARKER")).toBe(sameResponse);
+			expect(prepared).toEqual([undefined, sameResponse && !native ? undefined : { handoff: "late" }]);
+			expect(JSON.stringify(inputs[2]).includes("FAILED_SIBLING_MARKER")).toBe(sameResponse && !native);
 		},
 	);
 
-	it.each([false, true])("checks persisted sibling results before a restored reset (fails=%s)", async (fails) => {
-		const reset = deferred<AgentToolResult>();
-		const execute = vi.fn(async () => result);
-		const resume = vi.fn(async () => reset.promise);
-		const { agent, streams, inputs, events } = setup(execute, { resume });
-		const savedCall = call("saved");
-		const resetCall = { ...call("reset"), executionStarted: true };
-		agent.state.messages = [
-			assistant("saved", [resetCall, savedCall]),
-			{
-				role: "toolResult",
-				toolCallId: savedCall.id,
-				toolName: "work",
-				content: [{ type: "text", text: fails ? "FAILED_SIBLING_MARKER" : "saved success" }],
-				isError: fails,
-				timestamp: 2,
-			},
-		];
+	it.each([false, true].flatMap((native) => [false, true].map((fails) => ({ native, fails }))))(
+		"checks persisted checkpoint results before a restored reset (native=$native, fails=$fails)",
+		async ({ native, fails }) => {
+			const reset = deferred<AgentToolResult>();
+			const execute = vi.fn(async () => result);
+			const resume = vi.fn(async () => reset.promise);
+			const { agent, streams, inputs, events } = setup(execute, { resume });
+			const savedCall = native
+				? call("saved")
+				: { type: "toolCall" as const, id: "saved", name: "work", arguments: { path: "original" } };
+			const resetCall = { ...call("reset"), executionStarted: true };
+			agent.state.messages = [
+				assistant("saved", [resetCall, savedCall]),
+				{
+					role: "toolResult",
+					toolCallId: savedCall.id,
+					toolName: "work",
+					content: [{ type: "text", text: fails ? "FAILED_SIBLING_MARKER" : "saved success" }],
+					isError: fails,
+					timestamp: 2,
+				},
+			];
+			const prepared: unknown[] = [];
+			agent.prepareNextTurnWithContext = async ({ newContext, context }) => {
+				prepared.push(newContext);
+				return newContext ? { context: { ...context, messages: [] } } : undefined;
+			};
+			const run = agent.continue();
+			await answer(streams, 0);
+			await vi.waitFor(() => expect(events.some((event) => event.type === "turn_end")).toBe(true));
+			reset.resolve({ ...result, newContext: { handoff: "restored" } });
+			await answer(streams, 1);
+			await run;
+			expect(execute).not.toHaveBeenCalled();
+			expect(resume).toHaveBeenCalledOnce();
+			expect(prepared).toEqual([fails && !native ? undefined : { handoff: "restored" }]);
+			expect(JSON.stringify(inputs[1]).includes("FAILED_SIBLING_MARKER")).toBe(fails && !native);
+			expect(inputs[1].filter((message) => message.role === "toolResult")).toHaveLength(fails && !native ? 2 : 0);
+		},
+	);
+
+	it.each(["skipped", "blocked", "failed"] as const)(
+		"preserves a length-terminal sibling's reset veto after restore (%s)",
+		async (failure) => {
+			const reset = deferred<AgentToolResult>();
+			const execute = vi.fn<AgentTool["execute"]>(async (id) => {
+				if (id === call("reset").id) return reset.promise;
+				throw new Error("background failure");
+			});
+			const { agent, streams, events } = setup(execute);
+			agent.beforeToolCall = async ({ toolCall }) =>
+				failure === "blocked" && toolCall.id === call("sibling").id
+					? { block: true, reason: "background preflight denied" }
+					: undefined;
+			const provider = agent.streamFunction;
+			agent.streamFunction = async (...args) => {
+				const stream = await provider(...args);
+				if (streams.length > 1) finish(stream, assistant("answer"));
+				return stream;
+			};
+			let saved: typeof agent.state.messages = [];
+			const prepared: unknown[] = [];
+			agent.prepareNextTurnWithContext = async ({ newContext }) => {
+				if (newContext) prepared.push(newContext);
+				return undefined;
+			};
+			agent.finishTurn = ({ message }) => {
+				if (message.responseId === "length") {
+					// Snapshot the real persisted-message shape before the in-flight reset finishes.
+					saved = structuredClone(agent.state.messages);
+					reset.resolve({ ...result, newContext: { handoff: "resume" } });
+				}
+				return { action: "end" };
+			};
+			const run = agent.prompt("save then reset");
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("length");
+			await emitCall(streams[0], first, call("reset"));
+			await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+			first.content.push(call("sibling"));
+			if (failure !== "skipped") {
+				streams[0].push({
+					type: "toolcall_end",
+					contentIndex: 1,
+					toolCall: first.content[1] as ToolCall,
+					partial: first,
+				});
+				await vi.waitFor(() => expect(events.some((event) => event.type === "tool_execution_end")).toBe(true));
+			}
+			first.stopReason = "length";
+			streams[0].push({ type: "done", reason: "length", message: first });
+			streams[0].end();
+			await run;
+			expect(prepared).toEqual(failure === "skipped" ? [] : [{ handoff: "resume" }]);
+			expect(saved.filter((message) => message.role === "toolResult")).toMatchObject([
+				{ toolCallId: call("sibling").id, isError: true },
+			]);
+			expect(execute).toHaveBeenCalledTimes(failure === "failed" ? 2 : 1);
+
+			const resumed = vi.fn(async () => ({ ...result, newContext: { handoff: "resume" } }));
+			const reexecute = vi.fn(async () => result);
+			const restored = setup(reexecute, { resume: resumed });
+			restored.agent.state.messages = saved;
+			const restoredProvider = restored.agent.streamFunction;
+			restored.agent.streamFunction = async (...args) => {
+				const stream = await restoredProvider(...args);
+				finish(stream, assistant("restored-answer"));
+				return stream;
+			};
+			const restoredWindows: unknown[] = [];
+			restored.agent.prepareNextTurnWithContext = async ({ newContext }) => {
+				if (newContext) restoredWindows.push(newContext);
+				return undefined;
+			};
+			await restored.agent.continue();
+			expect(reexecute).not.toHaveBeenCalled();
+			expect(resumed).toHaveBeenCalledOnce();
+			expect(restoredWindows).toEqual(failure === "skipped" ? [] : [{ handoff: "resume" }]);
+		},
+	);
+
+	it("vetoes an already-completed native reset when a later synchronous checkpoint fails", async () => {
+		const { agent, streams, events, inputs } = setup(async (_id, args) => {
+			if ((args as { path: string }).path === "reset")
+				return { ...result, newContext: { handoff: "must not reset" } };
+			throw new Error("checkpoint failed");
+		});
 		const prepared: unknown[] = [];
-		agent.prepareNextTurnWithContext = async ({ newContext, context }) => {
+		agent.prepareNextTurnWithContext = async ({ newContext }) => {
 			prepared.push(newContext);
-			return newContext ? { context: { ...context, messages: [] } } : undefined;
+			return undefined;
 		};
-		const run = agent.continue();
-		await answer(streams, 0);
-		await vi.waitFor(() => expect(events.some((event) => event.type === "turn_end")).toBe(true));
-		reset.resolve({ ...result, newContext: { handoff: "restored" } });
+		const run = agent.prompt("save then reset");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const first = assistant("first");
+		const reset = { ...call("reset"), arguments: { path: "reset" } };
+		await emitCall(streams[0], first, reset);
+		await vi.waitFor(() =>
+			expect(
+				events.some(
+					(event) =>
+						event.type === "message_end" &&
+						event.message.role === "toolResult" &&
+						event.message.toolCallId === reset.id,
+				),
+			).toBe(true),
+		);
+		first.content.push({ type: "toolCall", id: "checkpoint", name: "work", arguments: { path: "notes" } });
+		finish(streams[0], first);
 		await answer(streams, 1);
 		await run;
-		expect(execute).not.toHaveBeenCalled();
-		expect(resume).toHaveBeenCalledOnce();
-		expect(prepared).toEqual([fails ? undefined : { handoff: "restored" }]);
-		expect(JSON.stringify(inputs[1]).includes("FAILED_SIBLING_MARKER")).toBe(fails);
-		expect(inputs[1].filter((message) => message.role === "toolResult")).toHaveLength(fails ? 2 : 0);
+		expect(prepared).toEqual([undefined]);
+		expect(inputs[1]).toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: "checkpoint", isError: true }),
+		);
 	});
 
 	it.each([false, true])("only a successful late reset overrides finishTurn end (fails=%s)", async (fails) => {
