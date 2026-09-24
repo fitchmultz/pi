@@ -221,3 +221,158 @@ it.each(["pending", "rejected", "disconnect", "fresh"] as const)(
 		}
 	},
 );
+
+it.each(["accepted", "pending", "rejected"] as const)(
+	"retires ordered siblings on native %s steering without waiting for the child",
+	async (mode) => {
+		let parent: LocalResponsesRequest | undefined;
+		let release!: () => void;
+		const work = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const calls = [
+			{
+				type: "function_call",
+				id: "fc_child",
+				call_id: "child",
+				name: "work",
+				arguments: "{}",
+				async: true,
+				status: "completed",
+			},
+			{
+				type: "function_call",
+				id: "fc_change",
+				call_id: "change",
+				name: "change_dir",
+				arguments: "{}",
+				status: "completed",
+			},
+			{
+				type: "function_call",
+				id: "fc_write",
+				call_id: "write",
+				name: "work",
+				arguments: "{}",
+				async: true,
+				status: "completed",
+			},
+		];
+		let freshRequests = 0;
+		const fixture = await createResponsesServer((request) => {
+			const body = request.body as ResponsesClientEvent;
+			if (body.type === "response.steer") {
+				request.send({ type: "response.steer.accepted", steer: { id: "steer", previous_response_id: "parent" } });
+				parent!.send({
+					type: "response.incomplete",
+					response: {
+						id: "parent",
+						status: "incomplete",
+						incomplete_details: { reason: "steered" },
+						output: calls,
+					},
+				});
+				if (mode === "pending")
+					request.send({
+						type: "response.steer.pending",
+						steer: { id: "steer", previous_response_id: "parent" },
+						required_input: calls.map((call) => ({ type: "function_call_output", call_id: call.call_id })),
+					});
+				if (mode === "rejected")
+					request.send({
+						type: "response.steer.failed",
+						steer: { id: "steer", previous_response_id: "parent", input: body.input },
+						error: { code: "successor_creation_failed", message: "Could not create successor" },
+					});
+			} else if (body.type === "response.create" && parent) {
+				freshRequests++;
+				const input = Array.isArray(body.input) ? body.input : [];
+				const outputs = input.filter((item) => item.type === "function_call_output");
+				expect(outputs.filter((item) => item.call_id === "child")).toEqual(
+					freshRequests === 1 ? [] : [{ type: "function_call_output", call_id: "child", output: "actual child" }],
+				);
+				if (freshRequests === 1) {
+					expect(body.previous_response_id).toBeUndefined();
+					expect(
+						input.filter(
+							(item) =>
+								"role" in item && item.role === "user" && JSON.stringify(item).includes("child question"),
+						),
+					).toHaveLength(1);
+					for (const id of ["change", "write"])
+						expect(outputs.filter((item) => item.call_id === id)).toMatchObject([
+							{ output: expect.stringContaining("not executed") },
+						]);
+				}
+				expect(JSON.stringify(input)).not.toContain("No result provided");
+				replyWithOutput(request, `answer-${freshRequests}`, [textOutput(`answer-${freshRequests}`, "answer")]);
+			} else {
+				parent = request;
+				request.send({ type: "response.created", response: { id: "parent", status: "in_progress" } });
+				for (const [output_index, item] of calls.entries()) {
+					request.send({ type: "response.output_item.added", output_index, item });
+					request.send({ type: "response.output_item.done", output_index, item });
+				}
+			}
+		});
+		let run: Promise<void> | undefined;
+		try {
+			const aborted = vi.fn();
+			const execute = vi.fn<AgentTool["execute"]>(async (_id, _args, signal) => {
+				signal?.addEventListener("abort", aborted, { once: true });
+				await work;
+				return { content: [{ type: "text", text: "actual child" }], details: undefined };
+			});
+			const changed = vi.fn<AgentTool["execute"]>(async () => ({ content: [], details: undefined }));
+			const tool: AgentTool = {
+				name: "work",
+				label: "Work",
+				description: "Work",
+				parameters: Type.Object({}),
+				async: true,
+				execute,
+			};
+			const agent = new Agent({
+				initialState: {
+					model: { ...fixture.model, compat: { supportsSteering: true, supportsAsyncTools: true } },
+					tools: [
+						tool,
+						{ ...tool, name: "change_dir", async: false, executionMode: "sequential", execute: changed },
+					],
+				},
+				sessionId: `ordered-steer-${mode}`,
+				streamFn: (model, context, options) =>
+					streamSimple(model as typeof fixture.model, context, {
+						...options,
+						apiKey: "local",
+						timeoutMs: 1500,
+					}),
+			});
+			run = agent.prompt("go");
+			await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+			agent.steer({ role: "user", content: "child question", timestamp: 2 });
+			await vi.waitFor(() => expect(freshRequests).toBe(1), { timeout: 500 });
+			expect(agent.state.pendingToolCalls.size).toBe(1);
+			expect(aborted).not.toHaveBeenCalled();
+			release();
+			await run;
+			expect(fixture.errors).toEqual([]);
+			expect(freshRequests).toBe(2);
+			expect(execute).toHaveBeenCalledOnce();
+			expect(changed).not.toHaveBeenCalled();
+			expect(
+				agent.state.messages.filter((message) => message.role === "user" && message.content === "child question"),
+			).toHaveLength(1);
+			expect(agent.state.messages.filter((message) => message.role === "toolResult")).toMatchObject([
+				{ toolCallId: "change|fc_change", isError: true },
+				{ toolCallId: "write|fc_write", isError: true },
+				{ toolCallId: "child|fc_child", isError: false },
+			]);
+		} finally {
+			release();
+			await run;
+			cleanupSessionResources();
+			await fixture.close();
+		}
+	},
+);

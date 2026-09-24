@@ -543,6 +543,7 @@ export class Agent {
 			},
 			subscribeSteering: (listener) => {
 				this.steeringListeners.add(listener);
+				if (this.steeringQueue.hasItems()) listener();
 				return () => this.steeringListeners.delete(listener);
 			},
 			transport: this.transport,

@@ -533,6 +533,153 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it.each(["queued", "wake", "none"] as const)(
+		"handles %s steering while ordered siblings wait for a native child",
+		async (steering) => {
+			const work = deferred<AgentToolResult>();
+			const invoked = vi.fn(async () => work.promise);
+			const changed = vi.fn(async () => result);
+			const { agent, streams, inputs, events, tool } = setup(invoked);
+			agent.state.tools = [
+				tool,
+				{ ...tool, name: "change_dir", async: false, executionMode: "sequential", execute: changed },
+			];
+			const provider = agent.streamFunction;
+			agent.streamFunction = async (...args) => {
+				const response = await provider(...args);
+				if (streams.length > 1) finish(response, assistant(`answer-${streams.length}`));
+				return response;
+			};
+			const run = agent.prompt("delegate, change directory, then write");
+			try {
+				await vi.waitFor(() => expect(streams).toHaveLength(1));
+				const first = assistant("ordered");
+				await emitCall(streams[0], first, call());
+				await vi.waitFor(() => expect(invoked).toHaveBeenCalledOnce());
+				const suffix: ToolCall[] = [
+					{ type: "toolCall", id: "change", name: "change_dir", arguments: { path: "requested" } },
+					call("write"),
+					{ type: "toolCall", id: "search", name: "work", arguments: { path: "search" } },
+				];
+				for (const sibling of suffix) {
+					first.content.push(sibling);
+					streams[0].push({
+						type: "toolcall_end",
+						contentIndex: first.content.length - 1,
+						toolCall: sibling,
+						partial: first,
+					});
+				}
+				if (steering === "queued") agent.steer({ role: "user", content: "child question", timestamp: 2 });
+				finish(streams[0], first);
+				await vi.waitFor(() =>
+					expect(
+						events.some(
+							(event) =>
+								event.type === "message_end" &&
+								event.message.role === "assistant" &&
+								event.message.responseId === "ordered",
+						),
+					).toBe(true),
+				);
+				if (steering === "wake") agent.steer({ role: "user", content: "child question", timestamp: 2 });
+				if (steering === "none") {
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					expect(changed).not.toHaveBeenCalled();
+					expect(invoked).toHaveBeenCalledOnce();
+				} else {
+					await vi.waitFor(() => expect(streams.length).toBeGreaterThan(1), { timeout: 300 });
+					expect(changed).not.toHaveBeenCalled();
+					expect(invoked).toHaveBeenCalledOnce();
+					expect(inputs[1].filter((message) => message.role === "toolResult")).toMatchObject(
+						suffix.map((call) => ({
+							toolCallId: call.id,
+							isError: true,
+							content: [{ type: "text", text: expect.stringContaining("not executed") }],
+						})),
+					);
+					expect(getPendingToolCalls(agent.state.messages)).toMatchObject([
+						{ toolCallId: call().id, state: "started" },
+					]);
+				}
+			} finally {
+				work.resolve(result);
+				await run;
+			}
+			expect(changed).toHaveBeenCalledTimes(steering === "none" ? 1 : 0);
+			expect(invoked).toHaveBeenCalledTimes(steering === "none" ? 3 : 1);
+			const receipts = agent.state.messages.filter((message) => message.role === "toolResult");
+			expect(receipts).toHaveLength(4);
+			expect(receipts.filter((message) => message.toolCallId === call().id)).toMatchObject([
+				{ isError: false, content: result.content },
+			]);
+			expect(
+				agent.state.messages.filter((message) => message.role === "user" && message.content === "child question"),
+			).toHaveLength(steering === "none" ? 0 : 1);
+			expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
+		},
+	);
+
+	it.each(["end", "abort"] as const)(
+		"retains queued steering when an interrupted ordered wait exits via %s",
+		async (exit) => {
+			const work = deferred<AgentToolResult>();
+			const execute = vi.fn(async () => work.promise);
+			const changed = vi.fn(async () => result);
+			const { agent, streams, inputs, events, tool } = setup(execute);
+			agent.state.tools = [
+				tool,
+				{ ...tool, name: "change_dir", async: false, executionMode: "sequential", execute: changed },
+			];
+			if (exit === "end") agent.finishTurn = () => ({ action: "end" });
+			agent.subscribe((event) => {
+				if (event.type === "tool_execution_end" && event.toolCallId === "change") {
+					if (exit === "abort") agent.abort();
+					work.resolve(result);
+				}
+			});
+			const run = agent.prompt("delegate, then change directory");
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("ordered");
+			await emitCall(streams[0], first, call());
+			await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+			first.content.push({
+				type: "toolCall",
+				id: "change",
+				name: "change_dir",
+				arguments: { path: "requested" },
+			});
+			const question = { role: "user", content: "child question", timestamp: 2 } as const;
+			agent.steer(question);
+			finish(streams[0], first);
+			await run;
+			expect(streams).toHaveLength(1);
+			expect(changed).not.toHaveBeenCalled();
+			expect(agent.getQueuedMessages().steering).toEqual([question]);
+			expect(agent.state.messages).not.toContainEqual(question);
+			expect(agent.state.messages.filter((message) => message.role === "toolResult")).toMatchObject([
+				{ toolCallId: "change", isError: true },
+				{ toolCallId: call().id, isError: false, content: result.content },
+			]);
+			const continuation = agent.continue();
+			await answer(streams, 1);
+			await continuation;
+			expect(inputs[1].filter((message) => message.role === "user" && message.content === question.content)).toEqual(
+				[question],
+			);
+			expect(
+				events.filter(
+					(event) =>
+						event.type === "message_end" &&
+						event.message.role === "user" &&
+						event.message.content === question.content,
+				),
+			).toHaveLength(1);
+			expect(agent.getQueuedMessages().steering).toEqual([]);
+			expect(execute).toHaveBeenCalledOnce();
+		},
+	);
+
 	it.each([
 		{ boundary: "async item", earlier: "parallel", global: false },
 		{ boundary: "async item", earlier: "sequential", global: false },
