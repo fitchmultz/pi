@@ -54,8 +54,11 @@ async function setup(
 		extensionFactories: [...(options.extra ?? []), control.extension],
 	});
 	harnesses.push(harness);
-	// Only the UI methods used by restart control are needed; this does not emulate terminal rendering.
-	const uiContext = { notify, getEditorText: () => editor.text } as unknown as ExtensionUIContext;
+	const uiContext: ExtensionUIContext = {
+		...harness.session.extensionRunner.getUIContext(),
+		notify,
+		getEditorText: () => editor.text,
+	};
 	await harness.session.bindExtensions({ mode: "tui", uiContext, shutdownHandler: shutdown });
 	await control.ready();
 	const socket = process.env[RESTART_SOCKET_ENV]!;

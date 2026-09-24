@@ -379,6 +379,8 @@ describe("AgentSession context usage estimate", () => {
 				return loader;
 			};
 			const harness = await createHarness({
+				// Fix the starting tool budget; resume must still restore it from the transcript.
+				initialActiveToolNames: ["read", "bash", "edit", "write"],
 				models: [{ id: "faux-1", contextWindow: 5000, maxTokens: 100 }],
 				settings: { compaction: { enabled: true, reserveTokens: 2500, keepRecentTokens: 100 } },
 				resourceLoader: await makeLoader(),

@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import subagentExtension from "../../../examples/extensions/subagent/index.ts";
-import type { ExtensionUIContext } from "../../../src/core/extensions/index.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -36,7 +35,7 @@ async function runProjectAgent(options: RunOptions): Promise<{ confirmCalls: num
 		harness.settingsManager.setProjectTrusted(options.trusted);
 
 		await harness.session.bindExtensions({
-			uiContext: { confirm } as unknown as ExtensionUIContext,
+			uiContext: { ...harness.session.extensionRunner.getUIContext(), confirm },
 			mode: "tui",
 		});
 
