@@ -506,7 +506,7 @@ describe("AgentSessionRuntime characterization", () => {
 		).toEqual(beforeMessages);
 	});
 
-	it("duplicates the current active branch in-memory when forking at the current position", async () => {
+	it("preserves in-memory storage when forking and starting a new session", async () => {
 		const tempDir = join(tmpdir(), `pi-runtime-suite-in-memory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -566,10 +566,11 @@ describe("AgentSessionRuntime characterization", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
+		const sessionDir = join(tempDir, "job-artifacts");
 		const runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(tempDir),
+			sessionManager: SessionManager.inMemory(tempDir, { sessionDir }),
 		});
 		await runtime.session.bindExtensions({});
 		cleanups.push(async () => {
@@ -616,6 +617,17 @@ describe("AgentSessionRuntime characterization", () => {
 						: undefined,
 			})),
 		).toEqual(beforeMessages);
+		expect(runtime.session.sessionManager.getSessionDir()).toBe(sessionDir);
+
+		const previousSessionId = runtime.session.sessionId;
+		expect(await runtime.newSession()).toEqual({ cancelled: false });
+		expect(runtime.session.sessionId).not.toBe(previousSessionId);
+		expect(runtime.session.messages).toEqual([]);
+		expect(runtime.session.sessionManager.getSessionDir()).toBe(sessionDir);
+		expect(runtime.session.sessionManager.isPersisted()).toBe(false);
+		await runtime.session.prompt("new work");
+		expect(runtime.session.sessionFile).toBeUndefined();
+		expect(existsSync(sessionDir)).toBe(false);
 	});
 
 	it.each(["at", "before"] as const)("preserves the active cwd when forking %s a saved entry", async (position) => {
