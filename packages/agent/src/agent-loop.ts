@@ -252,7 +252,6 @@ async function runLoop(
 	let activeControl: ResponseControl | undefined;
 	let exclusiveCall: { scope: object; task: Promise<ExecutedToolCallBatch> } | undefined;
 	let pendingNewContext: { request: NewContextRequest; scope: object } | undefined;
-	let pendingMessages: AgentMessage[] = [];
 	const failedScopes = new WeakSet<object>();
 	const recordNewContext = (batch: ExecutedToolCallBatch, scope: object): void => {
 		if (batch.messages.some((message) => message.isError)) failedScopes.add(scope);
@@ -393,14 +392,11 @@ async function runLoop(
 					});
 				});
 				try {
-					// Live steering may already own the input, so the queue alone cannot detect it.
-					if (pendingMessages.length === 0) pendingMessages = (await config.getSteeringMessages?.()) || [];
-					interrupted =
-						steered || inputReceived || pendingMessages.length > 0 || !!activeControl?.waitingForSuccessor;
+					// Observe input without draining it: finishTurn or abort may still end this run.
+					interrupted = steered || inputReceived || !!activeControl?.waitingForSuccessor;
 					if (!interrupted) {
 						await Promise.race([Promise.all(predecessors), input]);
-						if (pendingMessages.length === 0) pendingMessages = (await config.getSteeringMessages?.()) || [];
-						interrupted = inputReceived || pendingMessages.length > 0 || !!activeControl?.waitingForSuccessor;
+						interrupted = inputReceived || !!activeControl?.waitingForSuccessor;
 					}
 					if (asyncFailure) throw asyncFailure;
 				} finally {
@@ -460,7 +456,7 @@ async function runLoop(
 			}
 		}
 		// Check for steering messages at start (user may have typed while waiting)
-		pendingMessages = (await config.getSteeringMessages?.()) || [];
+		let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
 		// Outer loop: continues when queued follow-up messages arrive after agent would stop
 		while (true) {
@@ -650,7 +646,7 @@ async function runLoop(
 				}
 
 				explicitContinuation = decision?.action === "continue";
-				if (pendingMessages.length === 0) pendingMessages = (await config.getSteeringMessages?.()) || [];
+				pendingMessages = (await config.getSteeringMessages?.()) || [];
 				while (
 					!explicitContinuation &&
 					!hasMoreToolCalls &&

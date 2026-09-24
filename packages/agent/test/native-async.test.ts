@@ -620,6 +620,66 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it.each(["end", "abort"] as const)(
+		"retains queued steering when an interrupted ordered wait exits via %s",
+		async (exit) => {
+			const work = deferred<AgentToolResult>();
+			const execute = vi.fn(async () => work.promise);
+			const changed = vi.fn(async () => result);
+			const { agent, streams, inputs, events, tool } = setup(execute);
+			agent.state.tools = [
+				tool,
+				{ ...tool, name: "change_dir", async: false, executionMode: "sequential", execute: changed },
+			];
+			if (exit === "end") agent.finishTurn = () => ({ action: "end" });
+			agent.subscribe((event) => {
+				if (event.type === "tool_execution_end" && event.toolCallId === "change") {
+					if (exit === "abort") agent.abort();
+					work.resolve(result);
+				}
+			});
+			const run = agent.prompt("delegate, then change directory");
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("ordered");
+			await emitCall(streams[0], first, call());
+			await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+			first.content.push({
+				type: "toolCall",
+				id: "change",
+				name: "change_dir",
+				arguments: { path: "requested" },
+			});
+			const question = { role: "user", content: "child question", timestamp: 2 } as const;
+			agent.steer(question);
+			finish(streams[0], first);
+			await run;
+			expect(streams).toHaveLength(1);
+			expect(changed).not.toHaveBeenCalled();
+			expect(agent.getQueuedMessages().steering).toEqual([question]);
+			expect(agent.state.messages).not.toContainEqual(question);
+			expect(agent.state.messages.filter((message) => message.role === "toolResult")).toMatchObject([
+				{ toolCallId: "change", isError: true },
+				{ toolCallId: call().id, isError: false, content: result.content },
+			]);
+			const continuation = agent.continue();
+			await answer(streams, 1);
+			await continuation;
+			expect(inputs[1].filter((message) => message.role === "user" && message.content === question.content)).toEqual(
+				[question],
+			);
+			expect(
+				events.filter(
+					(event) =>
+						event.type === "message_end" &&
+						event.message.role === "user" &&
+						event.message.content === question.content,
+				),
+			).toHaveLength(1);
+			expect(agent.getQueuedMessages().steering).toEqual([]);
+			expect(execute).toHaveBeenCalledOnce();
+		},
+	);
+
 	it.each([
 		{ boundary: "async item", earlier: "parallel", global: false },
 		{ boundary: "async item", earlier: "sequential", global: false },

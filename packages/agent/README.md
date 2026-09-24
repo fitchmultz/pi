@@ -425,9 +425,11 @@ agent.clearAllQueues();
 Use clearSteeringQueue, clearFollowUpQueue, or clearAllQueues to drop queued messages. `hasQueuedSteeringMessages()` inspects only pending steering; `hasQueuedMessages()` includes follow-ups. Neither query consumes messages.
 
 When steering messages are detected after a turn completes:
-1. All tool calls from the current assistant message have already finished
+1. Synchronous tool calls have finished or received explicit not-executed errors
 2. Steering messages are injected
 3. The LLM responds on the next turn
+
+Native asynchronous calls can remain running. If steering interrupts an ordered sibling's wait for an earlier native call, the untouched suffix receives not-executed errors and can be reissued in a later response. Already-running calls retain their original results. Detecting queued input at this wait does not consume it: `finishTurn` returning `{ action: "end" }` or cancellation leaves it queued.
 
 Follow-up messages are checked only when there are no more tool calls and no steering messages. If any are queued, they are injected and another turn runs.
 

@@ -285,16 +285,20 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *
-	 * Called after the current assistant turn finishes executing its tool calls, unless `finishTurn` ends the run.
+	 * Polled before requests and after turns, unless `finishTurn` or cancellation ends the run.
 	 * If messages are returned, they are added to the context before the next LLM call.
-	 * Tool calls from the current assistant message are not skipped.
+	 * Native async work may still be running. Steering can interrupt an ordered sibling wait;
+	 * untouched calls then receive not-executed errors.
 	 *
 	 * Use this for "steering" the agent while it's working.
 	 *
 	 * Return [] when no steering messages are available.
 	 */
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
-	/** Wake the pending-tool wait when new steering input arrives. */
+	/**
+	 * Wake pending-tool waits without consuming input. Notify immediately if steering is already
+	 * queued, then whenever new input arrives. Return a function that removes the listener.
+	 */
 	subscribeSteering?: (listener: () => void) => () => void;
 
 	/**
