@@ -3,6 +3,7 @@
  *
  * Demonstrates delegating tool operations to a remote machine via SSH.
  * When --ssh is provided, read/write/edit/bash run on the remote.
+ * Background starts are blocked: detached workers cannot serialize the SSH backend.
  *
  * Usage:
  *   pi -e ./ssh.ts --ssh user@host
@@ -22,6 +23,7 @@ import {
 	createReadTool,
 	createWriteTool,
 	type EditOperations,
+	isToolCallEventType,
 	type ReadOperations,
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
@@ -154,6 +156,13 @@ export default function (pi: ExtensionAPI) {
 	let resolvedSsh: { remote: string; remoteCwd: string } | null = null;
 
 	const getSsh = () => resolvedSsh;
+
+	// Detached workers execute locally; they cannot serialize this custom SSH backend.
+	pi.on("tool_call", (event) => {
+		if (getSsh() && isToolCallEventType("background_command", event) && event.input.action === "start") {
+			return { block: true, reason: "Background commands do not support SSH mode. Use the remote bash tool." };
+		}
+	});
 
 	pi.registerTool({
 		...localRead,

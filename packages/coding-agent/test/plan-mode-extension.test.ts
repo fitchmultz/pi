@@ -105,7 +105,7 @@ function setup(options: { activeTools?: string[]; selectChoice?: string; editorT
 describe("plan-mode example extension", () => {
 	it("preserves custom active tools while toggling plan mode", async () => {
 		const { activeTools, runCommand, setActiveTools } = setup({
-			activeTools: ["read", "bash", "edit", "write", "echo_tool"],
+			activeTools: ["read", "bash", "background_command", "edit", "write", "echo_tool"],
 		});
 
 		await runCommand("plan");
@@ -123,8 +123,15 @@ describe("plan-mode example extension", () => {
 
 		await runCommand("plan");
 
-		expect(activeTools()).toEqual(["read", "bash", "edit", "write", "echo_tool"]);
-		expect(setActiveTools).toHaveBeenLastCalledWith(["read", "bash", "edit", "write", "echo_tool"]);
+		expect(activeTools()).toEqual(["read", "bash", "background_command", "edit", "write", "echo_tool"]);
+		expect(setActiveTools).toHaveBeenLastCalledWith([
+			"read",
+			"bash",
+			"background_command",
+			"edit",
+			"write",
+			"echo_tool",
+		]);
 	});
 
 	it("does not prompt when the assistant response contains no plan", async () => {

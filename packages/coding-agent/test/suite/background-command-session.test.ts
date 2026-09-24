@@ -1,11 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { getApiProvider, registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ENV_SESSION_DIR } from "../../src/config.ts";
 import type { AgentSession } from "../../src/core/agent-session.ts";
 import { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import {
@@ -35,7 +37,7 @@ async function until(condition: () => boolean) {
 	}
 	throw new Error("Timed out waiting for native background completion");
 }
-function jobFrom(messages: AgentMessage[]): BackgroundCommandJob {
+function jobFrom(messages: AgentMessage[]): BackgroundCommandJob & { guidance?: string } {
 	const result = [...messages]
 		.reverse()
 		.find((message) => message.role === "toolResult" && message.toolName === "background_command");
@@ -102,11 +104,14 @@ describe("session-owned background completion", () => {
 		}
 		for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 		vi.restoreAllMocks();
+		syncBuiltinESMExports();
+		vi.unstubAllEnvs();
 		expect(failures).toEqual([]);
 	});
 
-	it("delivers after the whole foreground batch without extension binding", async () => {
+	it.each(["SDK", "TUI"])("delivers after the whole foreground batch in %s", async (mode) => {
 		const h = await harness();
+		if (mode === "TUI") h.session.setExtensionMode("tui");
 		const { release, command } = held(h);
 		expect(h.session.getActiveToolNames()).toContain("background_command");
 		expect(h.session.getAllTools().find((tool) => tool.name === "background_command")?.sourceInfo.source).toBe(
@@ -119,6 +124,7 @@ describe("session-owned background completion", () => {
 			async (context) => {
 				const job = jobFrom(context.messages);
 				expect(job.status).toBe("running");
+				expect(job.guidance).toBeUndefined();
 				await finish(h, job, release);
 				return fauxAssistantMessage(
 					[fauxToolCall("bash", { command: "printf first" }), fauxToolCall("bash", { command: "printf second" })],
@@ -135,6 +141,7 @@ describe("session-owned background completion", () => {
 					"toolResult",
 				]);
 				expect(getMessageText(context.messages[notice])).toContain('"exitCode": 7');
+				expect(getMessageText(context.messages[notice])).toContain("Output tail:\nbackground result\n");
 				return fauxAssistantMessage("Completion consumed");
 			},
 		]);
@@ -144,6 +151,90 @@ describe("session-owned background completion", () => {
 		await h.session.reload();
 		await delay(1100);
 		expect(notices(h.session)).toHaveLength(1);
+		expect(h.faux.state.callCount).toBe(3);
+	});
+
+	it.each(["missing", "unreadable"])(
+		"delivers a healthy completion beside a partial job with %s output",
+		async (kind) => {
+			const h = await harness();
+			const { release, command } = held(h);
+			const broken = "00000000-0000-4000-8000-000000000003";
+			const brokenLog = join(backgroundCommandDirectory(h.sessionManager), broken, "output.log");
+			h.setResponses([
+				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+					stopReason: "toolUse",
+				}),
+				() => {
+					mkdirSync(join(backgroundCommandDirectory(h.sessionManager), broken));
+					if (kind === "unreadable") {
+						writeFileSync(brokenLog, "unreadable");
+						const open = fs.openSync;
+						vi.spyOn(fs, "openSync").mockImplementation((file, flags, mode) => {
+							if (file === brokenLog) throw Object.assign(new Error("denied"), { code: "EACCES" });
+							return open(file, flags, mode);
+						});
+						syncBuiltinESMExports();
+					}
+					return fauxAssistantMessage("Launched");
+				},
+				fauxAssistantMessage("Partial record reported"),
+				fauxAssistantMessage("Healthy result delivered"),
+			]);
+			await h.session.prompt("Start");
+			expect(notices(h.session)).toHaveLength(1);
+			expect(JSON.stringify(notices(h.session))).toContain("Cannot read background job record");
+			if (kind === "unreadable") expect(JSON.stringify(notices(h.session))).toContain("Output unavailable");
+			const job = listBackgroundCommands(backgroundCommandDirectory(h.sessionManager)).find(
+				(job) => job.id !== broken,
+			)!;
+			await finish(h, job, release);
+			await until(() => notices(h.session).length === 2 && h.session.isIdle);
+			expect(JSON.stringify(notices(h.session))).toContain("background result");
+			expect(h.faux.state.callCount).toBe(4);
+		},
+	);
+
+	it.each(["agent", "setting", "environment"])("freezes the SDK %s root for unsaved job monitoring", async (kind) => {
+		const h = await harness();
+		const agentDir = join(h.tempDir, "sdk-agent");
+		const sessionDir = kind === "agent" ? join(agentDir, "sessions") : join(h.tempDir, "custom-sessions");
+		if (kind === "environment") vi.stubEnv(ENV_SESSION_DIR, relative(process.cwd(), sessionDir));
+		const owner = SessionManager.inMemory(h.tempDir);
+		const { session } = await createAgentSession({
+			agentDir,
+			sessionManager: owner,
+			modelRuntime: h.session.modelRuntime,
+			model: h.getModel(),
+			settingsManager:
+				kind === "setting"
+					? SettingsManager.inMemory({
+							sessionDir: relative(process.cwd(), sessionDir),
+							compaction: { enabled: false },
+						})
+					: h.settingsManager,
+			resourceLoader: createTestResourceLoader(),
+		});
+		sessions.push(session);
+		const { release, command } = held(h);
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command, timeout: 10 }), {
+				stopReason: "toolUse",
+			}),
+			(context) => {
+				const job = jobFrom(context.messages);
+				expect(job.logFile.startsWith(join(sessionDir, "background-commands", owner.getSessionId()))).toBe(true);
+				expect(job.guidance).toBeUndefined();
+				// Model the SDK host changing its process cwd after launching the worker.
+				vi.spyOn(process, "cwd").mockReturnValue(h.tempDir);
+				writeFileSync(release, "go");
+				return fauxAssistantMessage("Started");
+			},
+			fauxAssistantMessage("SDK completion consumed"),
+		]);
+		await session.prompt("Start");
+		await until(() => notices(session).length === 1 && session.isIdle);
+		expect(owner.getSessionFile()).toBeUndefined();
 		expect(h.faux.state.callCount).toBe(3);
 	});
 
@@ -387,7 +478,10 @@ describe("session-owned background completion", () => {
 				stopReason: "toolUse",
 			}),
 			async (context) => {
-				await finish(h, jobFrom(context.messages), release);
+				const job = jobFrom(context.messages);
+				expect(job.guidance).toContain("This is a one-shot print/JSON invocation");
+				expect(job.guidance).toContain("will not wait automatically");
+				await finish(h, job, release);
 				return fauxAssistantMessage("First prompt done");
 			},
 			(context) => {

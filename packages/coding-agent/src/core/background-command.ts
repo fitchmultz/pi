@@ -12,10 +12,11 @@ import {
 	renameSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { stripVTControlCharacters } from "node:util";
-import { getBackgroundCommandWorker } from "../config.ts";
+import { ENV_SESSION_DIR, getBackgroundCommandWorker, getSessionsDir } from "../config.ts";
+import { resolvePath } from "../utils/paths.ts";
 import type { ReadonlySessionManager } from "./session-manager.ts";
 import { type BashSpawnContext, createLocalBashOperations } from "./tools/bash.ts";
 import { truncateTail } from "./tools/truncate.ts";
@@ -45,8 +46,12 @@ interface BackgroundCommandRecord {
 	launcherPid: number;
 }
 
-export function backgroundCommandDirectory(owner: BackgroundCommandOwner): string {
-	return join(owner.getSessionDir(), "background-commands", owner.getSessionId());
+export function backgroundCommandDirectory(owner: BackgroundCommandOwner, sessionDir?: string): string {
+	return join(
+		resolvePath(owner.getSessionDir() || sessionDir || process.env[ENV_SESSION_DIR] || getSessionsDir()),
+		"background-commands",
+		owner.getSessionId(),
+	);
 }
 
 export function backgroundCommandFinished(job: Pick<BackgroundCommandJob, "status">): boolean {
@@ -69,13 +74,23 @@ export function readBackgroundCommand(root: string, id: string): BackgroundComma
 	const job = record.job;
 	const state = join(directory, "state.json");
 	if (existsSync(state)) Object.assign(job, JSON.parse(readFileSync(state, "utf8")));
+	if (
+		!job ||
+		job.id !== id ||
+		typeof job.command !== "string" ||
+		typeof job.createdAt !== "string" ||
+		typeof job.logFile !== "string" ||
+		!["starting", "running", "succeeded", "failed", "cancelled", "timed_out", "unknown"].includes(job.status)
+	)
+		throw new Error("Invalid background job record");
 	if (!backgroundCommandFinished(job)) {
 		try {
 			process.kill(job.pid ?? record.launcherPid, 0);
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ESRCH" && code !== "EPERM") throw error;
 			job.status = "unknown";
-			job.error = "Background worker exited; command outcome is unknown. The command was not restarted.";
+			job.error = `Background worker ${code === "EPERM" ? "is inaccessible" : "exited"}; command outcome is unknown. The command was not restarted.`;
 		}
 	}
 	return job;
@@ -85,14 +100,30 @@ export function listBackgroundCommands(root: string): BackgroundCommandJob[] {
 	return existsSync(root)
 		? readdirSync(root, { withFileTypes: true })
 				.filter((entry) => entry.isDirectory() && /^[a-f0-9-]{36}$/.test(entry.name))
-				.map((entry) => readBackgroundCommand(root, entry.name))
+				.map((entry): BackgroundCommandJob => {
+					try {
+						return readBackgroundCommand(root, entry.name);
+					} catch (error) {
+						return {
+							id: entry.name,
+							command: "",
+							cwd: "",
+							createdAt: "",
+							logFile: join(root, entry.name, "output.log"),
+							status: "unknown",
+							error: `Cannot read background job record: ${String(error).slice(0, 512)}. Inspect ${join(root, entry.name)}. The command was not restarted.`,
+						};
+					}
+				})
 				.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 		: [];
 }
 
 export function backgroundCommandOutputTail(job: BackgroundCommandJob): string {
-	const fd = openSync(job.logFile, "r");
+	if (job.status === "unknown" && !existsSync(job.logFile)) return "";
+	let fd: number | undefined;
 	try {
+		fd = openSync(job.logFile, "r");
 		const size = fstatSync(fd).size;
 		const bytes = Buffer.alloc(Math.min(size, 16_384));
 		const read = readSync(fd, bytes, 0, bytes.length, size - bytes.length);
@@ -102,8 +133,10 @@ export function backgroundCommandOutputTail(job: BackgroundCommandJob): string {
 			stream: !backgroundCommandFinished(job),
 		});
 		return truncateTail(stripVTControlCharacters(text), { maxLines: 100, maxBytes: 16_384 }).content;
+	} catch (error) {
+		return `Output unavailable: ${String(error).slice(0, 512)}. Inspect logFile for this job.`;
 	} finally {
-		closeSync(fd);
+		if (fd !== undefined) closeSync(fd);
 	}
 }
 
@@ -114,6 +147,7 @@ export async function startBackgroundCommand(
 	options: { shellPath?: string; timeout?: number; signal?: AbortSignal } = {},
 ): Promise<BackgroundCommandJob> {
 	options.signal?.throwIfAborted();
+	root = resolve(root);
 	const id = randomUUID();
 	const directory = join(root, id);
 	mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -151,9 +185,8 @@ export async function startBackgroundCommand(
 		try {
 			await new Promise<void>((resolve, reject) => {
 				child.once("error", reject);
-				child.once("exit", () =>
-					reject(new Error(`Background worker exited before starting; inspect ${job.logFile}`)),
-				);
+				// Exit may arrive before ready. The worker's durable outcome remains authoritative.
+				child.once("exit", () => resolve());
 				child.once("message", () => resolve());
 			});
 		} finally {
@@ -162,11 +195,13 @@ export async function startBackgroundCommand(
 			child.unref();
 		}
 	} catch (error) {
-		saveJson(join(directory, "state.json"), {
-			status: options.signal?.aborted ? "cancelled" : "failed",
-			error: String(error),
-			finishedAt: new Date().toISOString(),
-		});
+		if (!existsSync(join(directory, "state.json"))) {
+			saveJson(join(directory, "state.json"), {
+				status: options.signal?.aborted ? "cancelled" : "failed",
+				error: String(error),
+				finishedAt: new Date().toISOString(),
+			});
+		}
 		throw error;
 	} finally {
 		closeSync(log);

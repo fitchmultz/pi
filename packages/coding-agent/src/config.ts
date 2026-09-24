@@ -403,7 +403,8 @@ export function getPackageDir(): string {
 
 /** Launch a detached shell worker in the same source, SDK, bundle, or standalone distribution. */
 export function getBackgroundCommandWorker(): { command: string; args: string[]; cwd: string } {
-	const cwd = getPackageDir();
+	// PI_PACKAGE_DIR selects assets, not executable code from another installation.
+	const cwd = isBunBinary ? dirname(process.execPath) : findNodePackageDir(__dirname);
 	if (isBunBinary) return { command: process.execPath, args: ["--internal-background-command"], cwd };
 	if (isBundledNode) {
 		return { command: process.execPath, args: [join(cwd, "dist", "bundle", "background-command-worker.js")], cwd };

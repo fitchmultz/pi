@@ -45,13 +45,17 @@ const backgroundCommandSchema = Type.Object({
 
 export type BackgroundCommandToolInput = Static<typeof backgroundCommandSchema>;
 export type BackgroundCommandToolDetails =
-	| (BackgroundCommandJob & { cancelRequested?: boolean; outputTail: string })
+	| (BackgroundCommandJob & { cancelRequested?: boolean; outputTail: string; guidance?: string })
 	| { jobs: ReturnType<typeof summarizeBackgroundCommand>[]; total: number; nextOffset: number | null };
 
 export interface BackgroundCommandToolOptions
 	extends Pick<BashToolOptions, "shellPath" | "commandPrefix" | "spawnHook" | "exposeSessionEnvironment"> {
 	/** Required for standalone factories; AgentSession supplies its native owner. */
 	sessionManager?: BackgroundCommandOwner;
+	/** Artifact storage fallback for owners without a journal directory. */
+	sessionDir?: string;
+	/** Native print/JSON hosts exit at idle rather than waiting for external jobs. */
+	isOneShot?: () => boolean;
 	/** Called when a job is launched so its owning session can monitor completion. */
 	onStart?: () => void;
 }
@@ -77,7 +81,7 @@ export function createBackgroundCommandToolDefinition(
 			signal?.throwIfAborted();
 			const owner = options?.sessionManager ?? ctx?.sessionManager;
 			if (!owner) throw new Error("background_command requires a sessionManager or native session context");
-			const root = backgroundCommandDirectory(owner);
+			const root = backgroundCommandDirectory(owner, options?.sessionDir);
 			let details: BackgroundCommandToolDetails;
 			if (params.action === "status" && !params.id) {
 				const jobs = listBackgroundCommands(root).filter(
@@ -120,6 +124,12 @@ export function createBackgroundCommandToolDefinition(
 					...job,
 					...(params.action === "cancel" && !backgroundCommandFinished(job) ? { cancelRequested: true } : {}),
 					outputTail: backgroundCommandOutputTail(job),
+					...(params.action === "start" && options?.isOneShot?.()
+						? {
+								guidance:
+									"This is a one-shot print/JSON invocation. It will not wait automatically for this job after the agent ends. Report a still-running job as pending, with its ID and logFile; do not promise a later reply from this invocation. Do not rerun this command to wait for it. For future commands, use bash when this invocation must wait for a result. A saved session can be resumed later; an unsaved session has only its job files.",
+							}
+						: {}),
 				};
 			}
 			return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };

@@ -1,12 +1,15 @@
-import { execFileSync } from "node:child_process";
+import childProcess, { ChildProcess, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parseArgs } from "../src/cli/args.ts";
+import { ENV_AGENT_DIR, ENV_SESSION_DIR } from "../src/config.ts";
 import {
+	backgroundCommandDirectory,
 	backgroundCommandFinished,
 	backgroundCommandOutputTail,
 	cancelBackgroundCommand,
@@ -14,7 +17,10 @@ import {
 	readBackgroundCommand,
 	startBackgroundCommand,
 } from "../src/core/background-command.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createBackgroundCommandTool } from "../src/core/tools/background-command.ts";
+import { createSessionManager } from "../src/main.ts";
 import { getShellEnv } from "../src/utils/shell.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
@@ -34,6 +40,9 @@ describe("native background shell worker", () => {
 		jobs = join(root, "jobs");
 	});
 	afterEach(async () => {
+		vi.restoreAllMocks();
+		syncBuiltinESMExports();
+		vi.unstubAllEnvs();
 		for (const job of listBackgroundCommands(jobs)) {
 			if (!backgroundCommandFinished(job)) await cancelBackgroundCommand(jobs, job.id);
 		}
@@ -41,6 +50,141 @@ describe("native background shell worker", () => {
 	});
 	const start = (command: string, options?: { timeout?: number; signal?: AbortSignal }) =>
 		startBackgroundCommand(jobs, command, { command, cwd: root, env: getShellEnv() }, options);
+
+	it.each([0, 7, undefined])("preserves exit %s when exit arrives before the IPC ready message", async (exitCode) => {
+		vi.spyOn(childProcess, "spawn").mockImplementation((_command, args) => {
+			const directory = (args as string[]).at(-1)!;
+			const child = new ChildProcess();
+			// No OS process is launched in this deterministic event-order reproduction.
+			Object.defineProperty(child, "pid", { value: 2_147_483_647 });
+			queueMicrotask(() => {
+				if (exitCode !== undefined) {
+					writeFileSync(
+						join(directory, "state.json"),
+						JSON.stringify({
+							status: exitCode === 0 ? "succeeded" : "failed",
+							exitCode,
+							finishedAt: new Date().toISOString(),
+						}),
+					);
+				} else {
+					writeFileSync(join(directory, "state.json"), JSON.stringify({ status: "running" }));
+				}
+				child.emit("exit", exitCode ?? 1, null);
+				queueMicrotask(() => child.emit("message", "ready"));
+			});
+			return child;
+		});
+		syncBuiltinESMExports();
+		const job = await start("possibly executed");
+		if (exitCode === undefined) {
+			expect(job).toMatchObject({ status: "unknown", error: expect.stringContaining("not restarted") });
+		} else {
+			expect(job).toMatchObject({ status: exitCode === 0 ? "succeeded" : "failed", exitCode });
+			expect(JSON.parse(readFileSync(join(dirname(job.logFile), "state.json"), "utf8")).exitCode).toBe(exitCode);
+		}
+	});
+
+	it.each([0, 7])("retains real fast-command output and exit %s", async (exitCode) => {
+		const job = await start(`printf 'fast result'; exit ${exitCode}`);
+		await until(() => backgroundCommandFinished(readBackgroundCommand(jobs, job.id)));
+		const result = readBackgroundCommand(jobs, job.id);
+		expect(result).toMatchObject({ status: exitCode === 0 ? "succeeded" : "failed", exitCode });
+		expect(backgroundCommandOutputTail(result)).toBe("fast result");
+	});
+
+	it.each(["agent", "session", "relative", "cli"] as const)(
+		"launches and cancels with a real %s-root session owner using absolute durable paths",
+		async (kind) => {
+			vi.stubEnv(ENV_AGENT_DIR, join(root, "agent"));
+			vi.stubEnv(ENV_SESSION_DIR, kind === "session" ? join(root, "sessions") : "");
+			const owner =
+				kind === "relative"
+					? SessionManager.create(root, relative(process.cwd(), join(root, "sessions")))
+					: kind === "cli"
+						? await createSessionManager(
+								parseArgs(["--no-session"]),
+								root,
+								join(root, "cli-sessions"),
+								SettingsManager.inMemory(),
+							)
+						: SessionManager.inMemory(root);
+			owner.appendCustomEntry("test-owner", {});
+			jobs = backgroundCommandDirectory(owner);
+			expect(isAbsolute(jobs)).toBe(true);
+			expect(jobs.startsWith(root)).toBe(true);
+			if (kind === "cli") expect(jobs.startsWith(join(root, "cli-sessions"))).toBe(true);
+			const tool = createBackgroundCommandTool(root, { sessionManager: owner });
+			const result = await tool.execute("launch", { action: "start", command: "sleep 600" });
+			const job = result.details as { id: string; logFile: string };
+			expect(isAbsolute(job.logFile)).toBe(true);
+			if (kind === "relative") {
+				expect(isAbsolute(owner.getSessionDir())).toBe(true);
+				vi.spyOn(process, "cwd").mockReturnValue(root);
+			}
+			const restored = kind === "relative" ? SessionManager.open(owner.getSessionFile()!) : owner;
+			const resumed = createBackgroundCommandTool(root, { sessionManager: restored });
+			expect((await resumed.execute("status", { action: "status", id: job.id })).details).toMatchObject({
+				id: job.id,
+				status: "running",
+			});
+			expect((await resumed.execute("cancel", { action: "cancel", id: job.id })).details).toMatchObject({
+				status: "cancelled",
+			});
+			if (kind !== "relative") expect(owner.getSessionFile()).toBeUndefined();
+		},
+	);
+
+	it("launches the running source worker despite an inherited package asset override", async () => {
+		const fixture = fileURLToPath(new URL("./fixtures/background-command-launch.ts", import.meta.url));
+		const loader = createRequire(import.meta.url).resolve("tsx/esm");
+		const output = execFileSync(process.execPath, ["--import", loader, fixture, jobs, root, "printf native"], {
+			env: { ...process.env, PI_PACKAGE_DIR: root },
+			encoding: "utf8",
+			timeout: 10000,
+		});
+		const id = output.trim();
+		await until(() => backgroundCommandFinished(readBackgroundCommand(jobs, id)));
+		expect(readBackgroundCommand(jobs, id).status).toBe("succeeded");
+		expect(backgroundCommandOutputTail(readBackgroundCommand(jobs, id))).toBe("native");
+	});
+
+	it("reports inaccessible workers as unknown without signalling them or hiding healthy jobs", async () => {
+		const job = await start("printf healthy");
+		await until(() => backgroundCommandFinished(readBackgroundCommand(jobs, job.id)));
+		const staleId = "00000000-0000-4000-8000-000000000001";
+		mkdirSync(join(jobs, staleId));
+		writeFileSync(
+			join(jobs, staleId, "job.json"),
+			JSON.stringify({ job: { ...job, id: staleId, pid: 123456, status: "running" }, launcherPid: 123456 }),
+		);
+		const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+			throw Object.assign(new Error("inaccessible"), { code: "EPERM" });
+		});
+		expect(await cancelBackgroundCommand(jobs, staleId)).toMatchObject({
+			status: "unknown",
+			error: expect.stringContaining("inaccessible"),
+		});
+		expect(existsSync(join(jobs, staleId, "cancel"))).toBe(false);
+		expect(kill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+		expect(listBackgroundCommands(jobs)).toEqual(
+			expect.arrayContaining([expect.objectContaining({ id: job.id, status: "succeeded" })]),
+		);
+	});
+
+	it.each(["missing", "invalid", "shape"])("isolates a %s job record with a bounded diagnostic", async (kind) => {
+		const job = await start("printf healthy");
+		await until(() => backgroundCommandFinished(readBackgroundCommand(jobs, job.id)));
+		const broken = "00000000-0000-4000-8000-000000000002";
+		mkdirSync(join(jobs, broken));
+		if (kind !== "missing") writeFileSync(join(jobs, broken, "job.json"), kind === "shape" ? "{}" : "{");
+		const records = listBackgroundCommands(jobs);
+		expect(records).toEqual(expect.arrayContaining([expect.objectContaining({ id: job.id, status: "succeeded" })]));
+		const diagnostic = records.find((record) => record.id === broken)!;
+		expect(diagnostic).toMatchObject({ status: "unknown", error: expect.stringContaining("Cannot read") });
+		expect(diagnostic.error!.length).toBeLessThan(1024);
+		expect(backgroundCommandOutputTail(diagnostic)).toBe("");
+	});
 
 	it("returns while running and preserves both pipes and the real exit status", async () => {
 		const release = join(root, "release");

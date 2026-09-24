@@ -15,7 +15,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
 	Agent,
@@ -69,10 +69,11 @@ import {
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
 import { Clone } from "typebox/value";
-import { APP_NAME } from "../config.ts";
+import { APP_NAME, ENV_SESSION_DIR, getAgentDir } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { processImage } from "../utils/image-process.ts";
+import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
@@ -275,6 +276,8 @@ export interface AgentSessionConfig {
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	cwd: string;
+	/** App-data root for artifacts when the session has no journal directory. */
+	agentDir?: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	/** Resource loader for extensions, skills, prompts, themes, context files, and system prompt */
@@ -511,6 +514,7 @@ export class AgentSession {
 	private _backgroundTimer?: NodeJS.Timeout;
 	private _backgroundWakeSuppressed = false;
 	private _backgroundNotificationsReady: boolean;
+	private readonly _backgroundCommandSessionDir: string;
 	private _backgroundCheckpointPaused = false;
 	private readonly _backgroundPending = new Set<string>();
 
@@ -539,7 +543,7 @@ export class AgentSession {
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
-	private _extensionMode: ExtensionMode = "print";
+	private _extensionMode?: ExtensionMode;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
 	private _extensionGetQueuedInputCount?: () => number;
 	private _extensionAbortHandler?: () => void;
@@ -575,6 +579,11 @@ export class AgentSession {
 				this._backgroundWakeSuppressed = entry.data === true;
 		}
 		this.settingsManager = config.settingsManager;
+		this._backgroundCommandSessionDir = resolvePath(
+			process.env[ENV_SESSION_DIR] ||
+				this.settingsManager.getSessionDir() ||
+				join(config.agentDir ?? getAgentDir(), "sessions"),
+		);
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
@@ -4499,6 +4508,8 @@ export class AgentSession {
 					},
 					background_command: {
 						sessionManager: this.sessionManager,
+						sessionDir: this._backgroundCommandSessionDir,
+						isOneShot: () => this._extensionMode === "print" || this._extensionMode === "json",
 						commandPrefix: shellCommandPrefix,
 						shellPath,
 						spawnHook: (context) => ({ ...context, cwd: this._extensionRunner.resolveBashCwd(context.cwd) }),
@@ -4733,7 +4744,9 @@ export class AgentSession {
 			return;
 		let completedIds: string[] = [];
 		try {
-			const jobs = listBackgroundCommands(backgroundCommandDirectory(this.sessionManager));
+			const jobs = listBackgroundCommands(
+				backgroundCommandDirectory(this.sessionManager, this._backgroundCommandSessionDir),
+			);
 			const running = jobs.filter((job) => !backgroundCommandFinished(job)).length;
 			this._extensionUIContext?.setStatus(
 				"background-command",
@@ -4786,14 +4799,12 @@ export class AgentSession {
 				await this.sendCustomMessage(
 					{
 						customType: BACKGROUND_COMMAND_NOTICE,
-						content: `Background commands finished:\n${JSON.stringify(
-							completed.map((job) => ({
-								...summarizeBackgroundCommand(job),
-								outputTail: backgroundCommandOutputTail(job),
-							})),
-							null,
-							2,
-						)}`,
+						content: `Background commands finished:\n${completed
+							.map(
+								(job) =>
+									`${JSON.stringify(summarizeBackgroundCommand(job), null, 2)}\nOutput tail:\n${backgroundCommandOutputTail(job)}`,
+							)
+							.join("\n\n")}`,
 						display: true,
 						details: { jobIds: completedIds },
 					},
@@ -4811,7 +4822,7 @@ export class AgentSession {
 			this._extensionRunner.emitError({
 				extensionPath: "<background-command>",
 				event: "completion",
-				error: `Background command monitoring failed: ${String(error)}. Results remain in ${backgroundCommandDirectory(this.sessionManager)}.`,
+				error: `Background command monitoring failed: ${String(error)}. Results remain in ${backgroundCommandDirectory(this.sessionManager, this._backgroundCommandSessionDir)}.`,
 			});
 		}
 	}
