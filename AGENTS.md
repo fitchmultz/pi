@@ -73,7 +73,7 @@ If rebase conflicts occur:
 
 ## Issues and PRs
 
-For issue creation or PR submission, read and follow [CONTRIBUTING.md](CONTRIBUTING.md) for upstream-contributor versus fork-maintainer scope, the upstream contributor gate (auto-close workflows, `lgtm`/`lgtmi`), quality bar, and shared verification.
+For issue creation or PR submission, read and follow [CONTRIBUTING.md](CONTRIBUTING.md) for contributor versus maintainer scope, the target repository's contributor gate (auto-close workflows, `lgtm`/`lgtmi`), quality bar, and shared verification.
 
 When reviewing PRs:
 
