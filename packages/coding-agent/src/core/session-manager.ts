@@ -722,6 +722,7 @@ export function buildSessionProjection(
 			if (sourceEntry.type !== "message" || sourceEntry.message.role !== "assistant") return [];
 			const message = projectContextEntry(sourceEntry, edits.get(sourceEntry.id))[0];
 			if (message?.role !== "assistant") return [];
+			// Keep replay signatures without text that another model would convert back to old prose.
 			const content = filterAssistantOutputs(
 				message.content,
 				(call) =>
@@ -729,7 +730,7 @@ export function buildSessionProjection(
 					!!call.async &&
 					!retainedCalls.has(call.id) &&
 					(retainedResults.has(call.id) || !allResults.has(call.id)),
-			);
+			).map((block) => (block.type === "thinking" ? { ...block, thinking: "" } : block));
 			return content.some((block) => block.type === "toolCall")
 				? [{ sourceEntry, messages: [{ ...message, content }] }]
 				: [];

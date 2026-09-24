@@ -461,6 +461,12 @@ it.each(
 		};
 		const pending = toolCall("pending");
 		const retained = toolCall("retained");
+		const thinkingText = "OLD_REASONING_SUMMARY";
+		const signedReasoning = {
+			type: "reasoning",
+			id: "rs_pending",
+			summary: [{ type: "summary_text", text: thinkingText }],
+		};
 		const response: AssistantMessage = {
 			...assistant(completed),
 			api: model.api,
@@ -477,8 +483,8 @@ it.each(
 				completed,
 				{
 					type: "thinking",
-					thinking: "",
-					thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_pending", summary: [] }),
+					thinking: thinkingText,
+					thinkingSignature: JSON.stringify(signedReasoning),
 				},
 				completedShared,
 				pending,
@@ -527,8 +533,12 @@ it.each(
 		harness.session.refreshContext();
 		const pendingBefore = harness.session.getPendingToolCalls();
 		const wireInputs: ReturnType<typeof convertResponsesMessages>[] = [];
+		const switchedInputs: ReturnType<typeof convertResponsesMessages>[] = [];
 		harness.session.agent.streamFunction = (requestModel, context) => {
 			wireInputs.push(convertResponsesMessages(requestModel, context, new Set([requestModel.provider])));
+			switchedInputs.push(
+				convertResponsesMessages({ ...requestModel, id: "other-model" }, context, new Set([requestModel.provider])),
+			);
 			const answer: AssistantMessage = {
 				...fauxAssistantMessage("continued"),
 				api: requestModel.api,
@@ -565,7 +575,8 @@ it.each(
 				(item) => item.type === "function_call" && item.call_id === "pending",
 			);
 			expect(wireInputs[0][pendingIndex]).toEqual(pending.responsesItem);
-			expect(wireInputs[0][pendingIndex - 1]).toEqual({ type: "reasoning", id: "rs_pending", summary: [] });
+			expect(wireInputs[0][pendingIndex - 1]).toEqual(signedReasoning);
+			expect(JSON.stringify(switchedInputs).includes(thinkingText)).toBe(omission !== "context window");
 			expect(JSON.stringify(harness.session.messages)).not.toContain("outcome is unknown");
 			expect(readFileSync(file, "utf8").startsWith(saved)).toBe(true);
 		} finally {
