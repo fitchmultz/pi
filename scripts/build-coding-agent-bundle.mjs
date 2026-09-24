@@ -167,6 +167,7 @@ const mainResult = await build({
 		"cli-runtime": join(codingAgentDistDir, "cli.js"),
 		index: join(codingAgentDistDir, "index.js"),
 		"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
+		"background-command-worker": join(codingAgentDistDir, "background-command-worker.js"),
 	},
 	outdir: bundleDir,
 	chunkNames: "chunks/[name]-[hash]",

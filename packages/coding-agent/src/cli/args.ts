@@ -290,7 +290,7 @@ export function printHelp(extensionFlags?: ExtensionFlag[]): void {
 					})
 					.join("\n")}\n`
 			: "";
-	console.log(`${chalk.bold(APP_NAME)} - AI coding assistant with read, bash, edit, write tools
+	console.log(`${chalk.bold(APP_NAME)} - AI coding assistant with file and shell tools
 
 ${chalk.bold("Usage:")}
   ${APP_NAME} [options] [--] [@files...] [messages...]
@@ -471,13 +471,14 @@ ${chalk.bold("Environment Variables:")}
   PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
 
 ${chalk.bold("Built-in Tool Names:")}
-  read       - Read file contents
-  bash       - Execute bash commands
-  powershell - Execute PowerShell commands on Windows
-  edit       - Edit files with find/replace
-  write      - Write files (creates/overwrites)
-  grep       - Search file contents (read-only, off by default)
-  find       - Find files by glob pattern (read-only, off by default)
-  ls         - List directory contents (read-only, off by default)
+  read               - Read file contents
+  bash               - Execute bash commands
+  background_command - Start, inspect, or cancel durable background shell commands
+  powershell         - Execute PowerShell commands on Windows
+  edit               - Edit files with find/replace
+  write              - Write files (creates/overwrites)
+  grep               - Search file contents (read-only, off by default)
+  find               - Find files by glob pattern (read-only, off by default)
+  ls                 - List directory contents (read-only, off by default)
 `);
 }

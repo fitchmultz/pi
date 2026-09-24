@@ -81,6 +81,8 @@ import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } fro
 import type { BashOperations } from "../tools/bash.ts";
 import type { EditToolDetails } from "../tools/edit.ts";
 import type {
+	BackgroundCommandToolDetails,
+	BackgroundCommandToolInput,
 	BashToolDetails,
 	BashToolInput,
 	EditToolInput,
@@ -1091,6 +1093,11 @@ export interface BashToolCallEvent extends ToolCallEventBase {
 	input: BashToolInput;
 }
 
+export interface BackgroundCommandToolCallEvent extends ToolCallEventBase {
+	toolName: "background_command";
+	input: BackgroundCommandToolInput;
+}
+
 export interface PowerShellToolCallEvent extends ToolCallEventBase {
 	toolName: "powershell";
 	input: PowerShellToolInput;
@@ -1139,6 +1146,7 @@ export interface CustomToolCallEvent extends ToolCallEventBase {
  */
 export type ToolCallEvent =
 	| BashToolCallEvent
+	| BackgroundCommandToolCallEvent
 	| PowerShellToolCallEvent
 	| ReadToolCallEvent
 	| EditToolCallEvent
@@ -1162,6 +1170,11 @@ interface ToolResultEventBase {
 export interface BashToolResultEvent extends ToolResultEventBase {
 	toolName: "bash";
 	details: BashToolDetails | undefined;
+}
+
+export interface BackgroundCommandToolResultEvent extends ToolResultEventBase {
+	toolName: "background_command";
+	details: BackgroundCommandToolDetails | undefined;
 }
 
 export interface PowerShellToolResultEvent extends ToolResultEventBase {
@@ -1207,6 +1220,7 @@ export interface CustomToolResultEvent extends ToolResultEventBase {
 /** Fired after a tool executes. Can modify result. */
 export type ToolResultEvent =
 	| BashToolResultEvent
+	| BackgroundCommandToolResultEvent
 	| PowerShellToolResultEvent
 	| ReadToolResultEvent
 	| EditToolResultEvent
@@ -1217,6 +1231,9 @@ export type ToolResultEvent =
 	| CustomToolResultEvent;
 
 // Type guards for ToolResultEvent
+export function isBackgroundCommandToolResult(e: ToolResultEvent): e is BackgroundCommandToolResultEvent {
+	return e.namespace === undefined && e.toolName === "background_command";
+}
 export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
 	return e.namespace === undefined && e.toolName === "bash";
 }
@@ -1263,6 +1280,10 @@ export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
  * CustomToolCallEvent.toolName is `string` which overlaps with all literals.
  */
 export function isToolCallEventType(toolName: "bash", event: ToolCallEvent): event is BashToolCallEvent;
+export function isToolCallEventType(
+	toolName: "background_command",
+	event: ToolCallEvent,
+): event is BackgroundCommandToolCallEvent;
 export function isToolCallEventType(toolName: "powershell", event: ToolCallEvent): event is PowerShellToolCallEvent;
 export function isToolCallEventType(toolName: "read", event: ToolCallEvent): event is ReadToolCallEvent;
 export function isToolCallEventType(toolName: "edit", event: ToolCallEvent): event is EditToolCallEvent;

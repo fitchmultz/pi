@@ -935,6 +935,7 @@ export async function main(args: string[], options?: MainOptions) {
 			services,
 			sessionManager,
 			sessionStartEvent,
+			deferBackgroundCommandNotifications: true,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,

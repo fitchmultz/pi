@@ -131,18 +131,21 @@ See [Settings](settings.md#tools) for configuring the default tool selection.
 - `-nt`, `--no-tools`<br>
   Starts with all built-in, extension, and custom tools disabled.
 
-Default enabled tools are `read`, `bash`, `edit`, and `write`, unless `defaultTools` changes them.
+Default enabled tools for new sessions are `read`, `bash`, `background_command`, `edit`, and `write`, unless `defaultTools` changes them.
 
 | Built-in | Purpose |
 |---|---|
 | `read` | Read text files and images, or [select JSON before truncation](sdk.md#json-selection-with-read) |
 | `bash` | Run shell commands |
+| `background_command` | Start, inspect, or cancel [durable background shell commands](sdk.md#background-commands) |
 | `powershell` | Run PowerShell commands on Windows |
 | `edit` | Apply exact text replacements to an existing file |
 | `write` | Create or overwrite a file |
 | `grep` | Search file contents |
 | `find` | Find paths using glob patterns |
 | `ls` | List directory contents |
+
+Resumed sessions retain their saved tool selection. To enable a new built-in explicitly, pass `--session <file> --tools <complete desired tool list>`; the allowlist replaces the whole selection.
 
 <a id="resource-options"></a>
 
