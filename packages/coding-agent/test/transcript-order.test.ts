@@ -203,8 +203,7 @@ function createMode(tuiMode: TuiMode) {
 		statusContainer: status,
 		checkpointUIActivity: new CheckpointActivity(),
 		editorContainer,
-		transcriptScrollView: viewport.transcript,
-		fullscreenLayoutRoot: viewport.root,
+		chatViewport: viewport,
 		transcriptOrder: "oldest-first",
 		tuiModeBeforeNewestFirst: undefined,
 		isInitialized: true,
@@ -298,6 +297,9 @@ describe("native top view", () => {
 		for (let i = 0; i < 25; i++) chatContainer.addChild(new Text(`message ${i}\nsecond line ${i}`, 0, 0));
 		editor.setText("unsent draft\nsecond draft line");
 		const draft = editor.saveDraft();
+		const normalRoot = [...(viewport.root as Container).children];
+		const dock = normalRoot[1] as Container;
+		const normalDock = [...dock.children];
 		context.renderer.start();
 		try {
 			await terminal.waitForRender();
@@ -307,36 +309,48 @@ describe("native top view", () => {
 			expect(context.ui.mode).toBe("fullscreen");
 			expect(context.renderer.getFocusedComponent()).toBe(editor);
 			expect(editor.saveDraft()).toEqual(draft);
+			expect((viewport.root as Container).children).toEqual([...normalRoot].reverse());
+			expect(dock.children).toEqual([...normalDock].reverse());
 			expect(viewport.transcript.scrollTop).toBe(0);
-			expect(terminal.getViewport()[0]).toContain("message 24");
-			for (const text of ["NATIVE FOOTER", "WIDGET ABOVE", "WIDGET BELOW", "unsent draft"])
-				expect(terminal.getViewport().join("\n")).toContain(text);
+			const screen = terminal.getViewport();
+			expect(screen[0]).toContain("NATIVE FOOTER");
+			expect(screen[1]).toContain("WIDGET BELOW");
+			const draftY = screen.findIndex((line) => line.includes("unsent draft"));
+			expect(draftY).toBeGreaterThan(1);
+			expect(screen[draftY + 1]).toContain("second draft line");
+			const aboveY = screen.findIndex((line) => line.includes("WIDGET ABOVE"));
+			expect(aboveY).toBeGreaterThan(draftY + 1);
+			const transcriptY = aboveY + 1;
+			expect(screen[transcriptY]).toContain("message 24");
+			expect(screen[transcriptY + 1]).toContain("second line 24");
+			expect(terminal.getCursorPosition().y).toBe(draftY + 1);
 			expect(terminal.getViewport().join("\n")).not.toContain("STARTUP HEADER");
 			chatContainer.addChild(new Text("live newest\nlive second line", 0, 0));
 			context.ui.requestRender();
 			await terminal.waitForRender();
-			expect(terminal.getViewport()[0]).toContain("live newest");
-			expect(terminal.getViewport()[1]).toContain("live second line");
-			viewport.transcript.scrollBy(5);
+			expect(terminal.getViewport()[transcriptY]).toContain("live newest");
+			expect(terminal.getViewport()[transcriptY + 1]).toContain("live second line");
+			terminal.sendInput(`\x1b[<73;1;${transcriptY + 1}M`);
 			await terminal.waitForRender();
-			expect(terminal.getViewport()[0]).toContain("↑ Jump to latest message");
-			const reading = terminal.getViewport().slice(1, 3);
+			expect(viewport.transcript.scrollTop).toBe(5);
+			expect(terminal.getViewport()[transcriptY]).toContain("↑ Jump to latest message");
+			const reading = terminal.getViewport().slice(transcriptY + 1, transcriptY + 3);
 			const streaming = new Text("new while reading\nfirst line", 0, 0);
 			chatContainer.addChild(streaming);
 			context.ui.requestRender();
 			await terminal.waitForRender();
 			expect(viewport.transcript.scrollTop).toBe(7);
-			expect(terminal.getViewport().slice(1, 3)).toEqual(reading);
+			expect(terminal.getViewport().slice(transcriptY + 1, transcriptY + 3)).toEqual(reading);
 			streaming.setText("new while reading\nfirst line\nsecond line");
 			context.ui.requestRender();
 			await terminal.waitForRender();
 			expect(viewport.transcript.scrollTop).toBe(8);
-			expect(terminal.getViewport().slice(1, 3)).toEqual(reading);
-			terminal.sendInput("\x1b[<0;40;1M");
-			terminal.sendInput("\x1b[<0;40;1m");
+			expect(terminal.getViewport().slice(transcriptY + 1, transcriptY + 3)).toEqual(reading);
+			terminal.sendInput(`\x1b[<0;40;${transcriptY + 1}M`);
+			terminal.sendInput(`\x1b[<0;40;${transcriptY + 1}m`);
 			await terminal.waitForRender();
 			expect(viewport.transcript.scrollTop).toBe(0);
-			expect(terminal.getViewport()[0]).toContain("new while reading");
+			expect(terminal.getViewport()[transcriptY]).toContain("new while reading");
 			context.setTranscriptOrder("oldest-first");
 			await terminal.waitForRender();
 			expect(context.transcriptOrder).toBe("oldest-first");
@@ -344,6 +358,77 @@ describe("native top view", () => {
 			expect(editor.saveDraft()).toEqual(draft);
 			expect(documentContainer.children).toEqual([headerContainer, loadedResourcesContainer, chatContainer]);
 			expect(viewport.transcript.followEnd).toBe(true);
+			expect((viewport.root as Container).children).toEqual(normalRoot);
+			expect(dock.children).toEqual(normalDock);
+			const restored = terminal.getViewport();
+			expect(restored.findIndex((line) => line.includes("NATIVE FOOTER"))).toBeGreaterThan(
+				restored.findIndex((line) => line.includes("unsent draft")),
+			);
+		} finally {
+			context.renderer.stop();
+		}
+	});
+
+	test("keeps native Activity clicks and editor input aligned below the mirrored dock across resizes", async () => {
+		const { context, terminal, chatContainer, editor } = createMode("fullscreen");
+		chatContainer.setCompactView(true);
+		const tool = new ToolExecutionComponent(
+			"read",
+			"read-file",
+			{},
+			{ compactView: true },
+			{
+				renderCall: () => new Text("READ FILE", 0, 0),
+				renderResult: () => new Text("result first\nresult second\nresult third", 0, 0),
+			},
+			context.ui,
+			process.cwd(),
+		);
+		tool.updateResult({ content: [], isError: false });
+		chatContainer.addChild(tool);
+		editor.setText("draft");
+		context.renderer.start();
+		try {
+			context.setTranscriptOrder("newest-first");
+			await terminal.waitForRender();
+			const activityY = terminal.getViewport().findIndex((line) => line.includes("Activity"));
+			const editorY = terminal.getViewport().findIndex((line) => line.includes("draft"));
+			expect(activityY).toBeGreaterThan(editorY);
+			terminal.sendInput(`\x1b[<0;2;${activityY + 1}M`);
+			terminal.sendInput(`\x1b[<0;2;${activityY + 1}m`);
+			await terminal.waitForRender();
+			const callY = terminal.getViewport().findIndex((line) => line.includes("READ FILE"));
+			expect(callY).toBeGreaterThan(activityY);
+			terminal.sendInput(`\x1b[<0;2;${callY + 1}M`);
+			terminal.sendInput(`\x1b[<0;2;${callY + 1}m`);
+			await terminal.waitForRender();
+			const result = terminal.getViewport().filter((line) => line.includes("result "));
+			expect(result.map((line) => line.trim())).toEqual(["result first", "result second", "result third"]);
+			terminal.sendInput(`\x1b[<0;1;${editorY + 1}M`);
+			terminal.sendInput(`\x1b[<0;1;${editorY + 1}m`);
+			terminal.sendInput("x");
+			await terminal.waitForRender();
+			expect(editor.getText()).toBe("xdraft");
+			expect(terminal.getCursorPosition().y).toBe(editorY);
+			for (const [width, height] of [
+				[12, 8],
+				[1, 1],
+				[80, 18],
+			] as const) {
+				terminal.resize(width, height);
+				await terminal.waitForRender();
+				expect(editor.getText()).toBe("xdraft");
+				expect(terminal.getViewport()).toHaveLength(height);
+				// A one-row terminal clips the editor; check its caret when it is visible.
+				if (height > 1) {
+					expect(terminal.getViewport().join("\n")).toContain("xdraft");
+					const cursor = terminal.getCursorPosition();
+					expect(cursor.x).toBeLessThan(width);
+					expect(cursor.y).toBeLessThan(height);
+				}
+			}
+			expect(terminal.getViewport()[0]).toContain("NATIVE FOOTER");
+			expect(terminal.getViewport().join("\n")).toContain("result third");
 		} finally {
 			context.renderer.stop();
 		}
