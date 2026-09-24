@@ -138,7 +138,7 @@ import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { reportBug } from "./bug-report.ts";
-import { createChatViewport } from "./chat-viewport.ts";
+import { type ChatViewport, createChatViewport } from "./chat-viewport.ts";
 import { ChatContainer } from "./components/activity.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
@@ -461,10 +461,9 @@ export class InteractiveMode {
 	private loadedResourcesContainer: Container;
 	private chatContainer: ChatContainer;
 	private documentContainer: Container;
-	private transcriptScrollView: TuiLayouts.ScrollView | undefined;
+	private chatViewport: ChatViewport | undefined;
 	private transcriptOrder: "oldest-first" | "newest-first" = "oldest-first";
 	private tuiModeBeforeNewestFirst: TuiMode | undefined;
-	private fullscreenLayoutRoot: Component | undefined;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
@@ -890,8 +889,8 @@ export class InteractiveMode {
 	private mountInteractiveTui(tui: TuiMainScreen | TuiAltScreen, components: readonly Component[]): void {
 		for (const component of components) tui.addChild(component);
 		if (TuiLayouts.isViewportTUI(tui)) {
-			if (!this.fullscreenLayoutRoot) throw new Error("Fullscreen layout is not initialized");
-			tui.setLayoutRoot(this.fullscreenLayoutRoot);
+			if (!this.chatViewport) throw new Error("Fullscreen layout is not initialized");
+			tui.setLayoutRoot(this.chatViewport.root);
 		}
 	}
 
@@ -912,7 +911,8 @@ export class InteractiveMode {
 			order === "newest-first"
 				? [this.chatContainer, this.headerContainer, this.loadedResourcesContainer]
 				: [this.headerContainer, this.loadedResourcesContainer, this.chatContainer];
-		this.transcriptScrollView?.setFollow(order === "newest-first" ? "start" : "end");
+		this.chatViewport?.setInverted(order === "newest-first");
+		this.chatViewport?.transcript.setFollow(order === "newest-first" ? "start" : "end");
 		if (this.renderer instanceof TuiAltScreen) this.renderer.resetTranscriptNavigation();
 	}
 
@@ -1007,7 +1007,7 @@ export class InteractiveMode {
 
 		// Keep one component tree and remount it when changing renderers.
 		this.renderWidgets(); // Initialize with default spacer
-		const viewport = createChatViewport({
+		this.chatViewport = createChatViewport({
 			document: this.documentContainer,
 			pendingMessages: this.pendingMessagesContainer,
 			status: this.statusContainer,
@@ -1019,8 +1019,6 @@ export class InteractiveMode {
 			scrollbarTrackStyle: (text) => theme.fg("scrollbarTrack", text),
 			scrollbarThumbStyle: (text) => theme.fg("scrollbarThumb", text),
 		});
-		this.transcriptScrollView = viewport.transcript;
-		this.fullscreenLayoutRoot = viewport.root;
 		this.mountInteractiveTui(this.renderer, [
 			this.documentContainer,
 			this.pendingMessagesContainer,
@@ -2075,7 +2073,7 @@ export class InteractiveMode {
 	}
 
 	private applyFullscreenScrollbarSetting(): void {
-		this.transcriptScrollView?.setScrollbar(this.settingsManager.getFullscreenScrollbar());
+		this.chatViewport?.transcript.setScrollbar(this.settingsManager.getFullscreenScrollbar());
 	}
 
 	private applyRuntimeSettings(): void {
