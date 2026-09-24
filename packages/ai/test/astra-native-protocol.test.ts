@@ -533,7 +533,7 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 					message: { endTurn: false },
 				});
 				expect(events.find((event) => event.type === "start")).not.toHaveProperty("continuationInput");
-				if (mode === "rejected") {
+				if (mode === "rejected" || (codex && mode === "disconnect")) {
 					expect(message).toMatchObject({
 						stopReason: "stop",
 						rawStopReason: "incomplete.steered",
@@ -576,9 +576,13 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 									: ["queued", "accepted", "applied"],
 				);
 				expect(message.responseId).toBe(
-					mode === "disconnect" ? undefined : mode === "rejected" ? "parent" : "successor",
+					mode === "disconnect" && !codex
+						? undefined
+						: mode === "rejected" || mode === "disconnect"
+							? "parent"
+							: "successor",
 				);
-				expect(message.usage.totalTokens).toBe(mode === "disconnect" ? 0 : 110);
+				expect(message.usage.totalTokens).toBe(mode === "disconnect" && !codex ? 0 : 110);
 				expect(fixture.requests).toHaveLength(mode === "pending-multiple" ? 4 : pending ? 3 : 2);
 			} finally {
 				await fixture.close();

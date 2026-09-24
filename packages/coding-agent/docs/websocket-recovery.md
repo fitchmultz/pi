@@ -4,6 +4,8 @@ Keep `transport: "auto"` to prefer persistent WebSockets and incremental convers
 
 After live steering, Pi sends the next request with full current input, including saved steering and tool results. That response establishes a new baseline for incremental requests on the same connection.
 
+If the connection closes cleanly after the parent response finishes but before a successor starts, Pi keeps the completed response and continues unresolved steering on a fresh connection without showing a failed response. Saved tool results are reused; completed tools are not rerun. A close before completion, after a successor starts, or with a transport or protocol error remains a failure.
+
 If Codex rejects a missing previous response ID, Pi retries once on a fresh connection with full current input. Response and rate-limit metadata alone do not prevent this recovery, even if the stream-start notification was already delivered. Output items, completed responses, and submitted steering prevent replay. A second missing-ID rejection ends the request.
 
 A connection that drops after only response or rate-limit metadata reconnects once with full current input. If that attempt fails too, Pi uses HTTP for the request. Local timeouts go directly to HTTP rather than doubling the timeout. Provider errors and cancellation do not trigger this transport retry.
