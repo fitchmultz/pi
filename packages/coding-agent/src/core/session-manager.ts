@@ -647,6 +647,26 @@ function projectContextEntry(entry: SessionEntry, edit: ContextEditEntry | undef
 	});
 }
 
+/** Keep each surviving output with its reasoning group, which may also cover other outputs. */
+function filterAssistantOutputs(
+	content: AssistantMessage["content"],
+	keep: (block: AssistantMessage["content"][number]) => boolean,
+): AssistantMessage["content"] {
+	const filtered: AssistantMessage["content"] = [];
+	const reasoning: AssistantMessage["content"] = [];
+	let removed = false;
+	for (const [index, block] of content.entries()) {
+		if (block.type === "thinking") {
+			if (content[index - 1]?.type !== "thinking") reasoning.length = 0;
+			reasoning.push(block);
+		} else if (keep(block)) {
+			filtered.push(...reasoning, block);
+			reasoning.length = 0;
+		} else removed = true;
+	}
+	return removed ? filtered : content;
+}
+
 /** Build provenance-preserving, compaction-aware model context. */
 export function buildSessionProjection(
 	entries: SessionEntry[],
@@ -702,14 +722,17 @@ export function buildSessionProjection(
 			if (sourceEntry.type !== "message" || sourceEntry.message.role !== "assistant") return [];
 			const message = projectContextEntry(sourceEntry, edits.get(sourceEntry.id))[0];
 			if (message?.role !== "assistant") return [];
-			const calls = message.content.filter(
+			const content = filterAssistantOutputs(
+				message.content,
 				(call) =>
 					call.type === "toolCall" &&
-					call.async &&
+					!!call.async &&
 					!retainedCalls.has(call.id) &&
 					(retainedResults.has(call.id) || !allResults.has(call.id)),
 			);
-			return calls.length > 0 ? [{ sourceEntry, messages: [{ ...message, content: calls }] }] : [];
+			return content.some((block) => block.type === "toolCall")
+				? [{ sourceEntry, messages: [{ ...message, content }] }]
+				: [];
 		});
 		projectedEntries.splice(1, 0, ...carried);
 		// An explicit call omission also omits its dependent output; never resurrect the removed call.
@@ -758,24 +781,17 @@ export function buildSessionProjection(
 			undefined;
 		entry.messages = entry.messages.map((message) => {
 			if (message.role !== "assistant") return message;
-			const content: AssistantMessage["content"] = [];
-			for (const block of message.content) {
-				if (
-					block.type === "toolCall" &&
-					(block.executionStarted || (block.async && block.responsesItem)) &&
-					allResults.has(block.id) &&
-					!retainedResults.has(block.id)
-				) {
-					// Omitted outcomes are still completed work. Remove their call and attached reasoning,
-					// rather than restoring execution or sending an orphaned provider item.
-					while (content.at(-1)?.type === "thinking") content.pop();
-				} else content.push(block);
-			}
-			if (content.length !== message.content.length) {
-				while (content.at(-1)?.type === "thinking") content.pop();
-			}
-			if (content.length === message.content.length && message.toolExecutionFailed === toolExecutionFailed)
-				return message;
+			const content = filterAssistantOutputs(
+				message.content,
+				(block) =>
+					!(
+						block.type === "toolCall" &&
+						(block.executionStarted || (block.async && block.responsesItem)) &&
+						allResults.has(block.id) &&
+						!retainedResults.has(block.id)
+					),
+			);
+			if (content === message.content && message.toolExecutionFailed === toolExecutionFailed) return message;
 			return { ...message, content, toolExecutionFailed };
 		});
 	}

@@ -423,7 +423,9 @@ it.each(
 		{ executionStarted: false, resumeAvailable: false },
 		{ executionStarted: true, resumeAvailable: true },
 		{ executionStarted: true, resumeAvailable: false },
-	].flatMap((admission) => (["compaction", "context edit"] as const).map((omission) => ({ ...admission, omission }))),
+	].flatMap((admission) =>
+		(["compaction", "context edit", "context window"] as const).map((omission) => ({ ...admission, omission })),
+	),
 )(
 	"does not replay completed native calls after $omission omits their receipt (started=$executionStarted, resume=$resumeAvailable)",
 	async ({ executionStarted, resumeAvailable, omission }) => {
@@ -453,6 +455,10 @@ it.each(
 		};
 		harness.session.agent.state.model = model;
 		const completed = { ...toolCall("completed"), ...(executionStarted ? { executionStarted: true } : {}) };
+		const completedShared = {
+			...toolCall("completed-shared"),
+			...(executionStarted ? { executionStarted: true } : {}),
+		};
 		const pending = toolCall("pending");
 		const retained = toolCall("retained");
 		const response: AssistantMessage = {
@@ -469,14 +475,15 @@ it.each(
 					thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_completed", summary: [] }),
 				},
 				completed,
-				{ type: "text", text: "kept prose after" },
 				{
 					type: "thinking",
 					thinking: "",
 					thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_pending", summary: [] }),
 				},
+				completedShared,
 				pending,
 				retained,
+				{ type: "text", text: "kept prose after" },
 			],
 		};
 		if (omission === "compaction") {
@@ -484,14 +491,16 @@ it.each(
 			manager.appendContextWindow("fresh", 100);
 		}
 		manager.appendMessage({ ...response, stopReason: "pending" }, true);
-		const resultId = manager.appendMessage({
-			role: "toolResult",
-			toolCallId: completed.id,
-			toolName: "work",
-			content: [{ type: "text", text: "OMITTED_RECEIPT" }],
-			isError: false,
-			timestamp: 1,
-		});
+		const resultIds = [completed, completedShared].map((call) =>
+			manager.appendMessage({
+				role: "toolResult",
+				toolCallId: call.id,
+				toolName: "work",
+				content: [{ type: "text", text: "OMITTED_RECEIPT" }],
+				isError: false,
+				timestamp: 1,
+			}),
+		);
 		const anchorId =
 			omission === "compaction"
 				? manager.appendMessage(
@@ -500,7 +509,7 @@ it.each(
 					)
 				: undefined;
 		manager.appendMessage(response);
-		manager.appendMessage({
+		const retainedResultId = manager.appendMessage({
 			role: "toolResult",
 			toolCallId: retained.id,
 			toolName: "work",
@@ -510,7 +519,8 @@ it.each(
 		});
 		manager.appendMessage({ role: "user", content: "kept tail", timestamp: 3 });
 		if (anchorId) manager.appendCompaction("earlier outcomes summarized", anchorId, 100);
-		else manager.appendContextEdit(resultId, null);
+		else if (omission === "context window") manager.appendContextWindow("fresh", 100, [retainedResultId]);
+		else for (const resultId of resultIds) manager.appendContextEdit(resultId, null);
 		const file = manager.getSessionFile()!;
 		const saved = readFileSync(file, "utf8");
 		manager.setSessionFile(file);
@@ -540,6 +550,7 @@ it.each(
 			expect(harness.session.getPendingToolCalls()).toEqual([]);
 			const wire = JSON.stringify(wireInputs);
 			expect(wire).not.toContain('"call_id":"completed"');
+			expect(wire).not.toContain('"call_id":"completed-shared"');
 			expect(wire).not.toContain("rs_completed");
 			expect(wire).not.toContain("OMITTED_RECEIPT");
 			expect(wire).not.toContain("outcome is unknown");
@@ -548,8 +559,13 @@ it.each(
 			expect(wire).toContain("rs_pending");
 			expect(wire).toContain('"call_id":"retained"');
 			expect(wire).toContain("RETAINED_RECEIPT");
-			expect(wire).toContain("kept prose before");
-			expect(wire).toContain("kept prose after");
+			expect(wire.includes("kept prose before")).toBe(omission !== "context window");
+			expect(wire.includes("kept prose after")).toBe(omission !== "context window");
+			const pendingIndex = wireInputs[0].findIndex(
+				(item) => item.type === "function_call" && item.call_id === "pending",
+			);
+			expect(wireInputs[0][pendingIndex]).toEqual(pending.responsesItem);
+			expect(wireInputs[0][pendingIndex - 1]).toEqual({ type: "reasoning", id: "rs_pending", summary: [] });
 			expect(JSON.stringify(harness.session.messages)).not.toContain("outcome is unknown");
 			expect(readFileSync(file, "utf8").startsWith(saved)).toBe(true);
 		} finally {
