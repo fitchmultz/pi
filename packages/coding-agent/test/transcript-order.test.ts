@@ -200,6 +200,7 @@ function createMode(tuiMode: TuiMode) {
 		loadedResourcesContainer,
 		editor,
 		defaultEditor: editor,
+		statusContainer: status,
 		checkpointUIActivity: new CheckpointActivity(),
 		editorContainer,
 		transcriptScrollView: viewport.transcript,
@@ -370,6 +371,32 @@ describe("native top view", () => {
 			terminal.sendInput("\x1b");
 			await terminal.waitForRender();
 			expect(terminal.getViewport().join("\n")).toContain("Use /topview off");
+		} finally {
+			context.renderer.stop();
+		}
+	});
+
+	test("keeps an explicit fullscreen preference when top view is disabled", async () => {
+		const { context, terminal, submit, settingsManager } = createMode("regular");
+		context.renderer.start();
+		try {
+			await submit("/topview on");
+			await terminal.waitForRender();
+			expect(context.ui.mode).toBe("fullscreen");
+			expect(settingsManager.getTuiMode()).toBe("regular");
+			context.showSettingsSelector();
+			const list = context.renderer.getFocusedComponent() as unknown as {
+				onChange(id: string, value: string): void;
+			};
+			list.onChange("tui-mode", "fullscreen");
+			expect(settingsManager.getTuiMode()).toBe("fullscreen");
+			terminal.sendInput("\x1b");
+			await terminal.waitForRender();
+			await submit("/topview off");
+			await terminal.waitForRender();
+			expect(context.transcriptOrder).toBe("oldest-first");
+			expect(context.ui.mode).toBe("fullscreen");
+			expect(settingsManager.getTuiMode()).toBe("fullscreen");
 		} finally {
 			context.renderer.stop();
 		}

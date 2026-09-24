@@ -5504,6 +5504,7 @@ export class InteractiveMode {
 							return;
 						}
 						this.settingsManager.setTuiMode(mode);
+						if (this.transcriptOrder === "newest-first") this.tuiModeBeforeNewestFirst = mode;
 						if (!this.activeStatusIndicator) this.statusContainer.clear();
 						this.showStatus(`TUI mode: ${mode}`);
 					},
