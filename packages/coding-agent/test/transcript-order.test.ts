@@ -350,7 +350,7 @@ describe("native top view", () => {
 	});
 
 	test("rejects settings changes that would leave newest-first without its viewport", async () => {
-		const { context, terminal, settingsManager } = createMode("regular");
+		const { context, terminal, settingsManager } = createMode("fullscreen");
 		context.renderer.start();
 		try {
 			await terminal.waitForRender();
@@ -362,12 +362,12 @@ describe("native top view", () => {
 				.find((child) => child instanceof SettingsSelectorComponent);
 			expect(selector).toBeInstanceOf(SettingsSelectorComponent);
 			expect(focused).toBe((selector as SettingsSelectorComponent).getSettingsList());
-			const list = focused as unknown as { onChange(id: string, value: string): void };
-			list.onChange("tui-mode", "regular");
+			terminal.sendInput("TUI mode");
+			terminal.sendInput("\r");
 			await terminal.waitForRender();
 			expect(context.ui.mode).toBe("fullscreen");
 			expect(context.transcriptOrder).toBe("newest-first");
-			expect(settingsManager.getTuiMode()).toBe("regular");
+			expect(settingsManager.getTuiMode()).toBe("fullscreen");
 			terminal.sendInput("\x1b");
 			await terminal.waitForRender();
 			expect(terminal.getViewport().join("\n")).toContain("Use /topview off");
@@ -385,10 +385,9 @@ describe("native top view", () => {
 			expect(context.ui.mode).toBe("fullscreen");
 			expect(settingsManager.getTuiMode()).toBe("regular");
 			context.showSettingsSelector();
-			const list = context.renderer.getFocusedComponent() as unknown as {
-				onChange(id: string, value: string): void;
-			};
-			list.onChange("tui-mode", "fullscreen");
+			terminal.sendInput("TUI mode");
+			terminal.sendInput("\r");
+			await terminal.waitForRender();
 			expect(settingsManager.getTuiMode()).toBe("fullscreen");
 			terminal.sendInput("\x1b");
 			await terminal.waitForRender();

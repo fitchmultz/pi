@@ -209,6 +209,31 @@ interface Expandable {
 	setExpanded(expanded: boolean): void;
 }
 
+/** Keep the native skill card and its trailing prompt together when transcript blocks are reordered. */
+class SkillMessageGroup extends Container implements Expandable {
+	private readonly skill: SkillInvocationMessageComponent;
+	private readonly prompt: UserMessageComponent | undefined;
+
+	constructor(skill: SkillInvocationMessageComponent, prompt?: UserMessageComponent) {
+		super();
+		this.skill = skill;
+		this.prompt = prompt;
+		this.addChild(skill);
+		if (prompt) {
+			this.addChild(new Spacer(1));
+			this.addChild(prompt);
+		}
+	}
+
+	setExpanded(expanded: boolean): void {
+		this.skill.setExpanded(expanded);
+	}
+
+	setOutputPad(padding: number): void {
+		this.prompt?.setOutputPad(padding);
+	}
+}
+
 interface WorkingStatusEditor extends EditorComponent {
 	readonly embedWorkingStatus: boolean;
 	setWorkingStatusIndicator(indicator: StatusIndicator | undefined): void;
@@ -4207,18 +4232,15 @@ export class InteractiveMode {
 							this.getMarkdownThemeWithSettings(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
-						// Render user message separately if present
-						if (skillBlock.userMessage) {
-							this.chatContainer.addChild(new Spacer(1));
-							const userComponent = new UserMessageComponent(
-								skillBlock.userMessage,
-								this.getMarkdownThemeWithSettings(),
-								this.outputPad,
-								this.getMarkdownTransformers(),
-							);
-							this.chatContainer.addChild(userComponent);
-						}
+						const userComponent = skillBlock.userMessage
+							? new UserMessageComponent(
+									skillBlock.userMessage,
+									this.getMarkdownThemeWithSettings(),
+									this.outputPad,
+									this.getMarkdownTransformers(),
+								)
+							: undefined;
+						this.chatContainer.addChild(new SkillMessageGroup(component, userComponent));
 					} else {
 						const userComponent = new UserMessageComponent(
 							textContent,
@@ -5328,7 +5350,7 @@ export class InteractiveMode {
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
-					tuiMode: this.ui.mode,
+					tuiMode: this.tuiModeBeforeNewestFirst ?? this.ui.mode,
 					fullscreenExitOutput: this.settingsManager.getFullscreenExitOutput(),
 					fullscreenScrollbar: this.settingsManager.getFullscreenScrollbar(),
 					fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
@@ -5462,7 +5484,8 @@ export class InteractiveMode {
 								if (
 									child instanceof AssistantMessageComponent ||
 									child instanceof CustomMessageComponent ||
-									child instanceof UserMessageComponent
+									child instanceof UserMessageComponent ||
+									child instanceof SkillMessageGroup
 								) {
 									child.setOutputPad(padding);
 								}
