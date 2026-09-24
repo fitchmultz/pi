@@ -444,6 +444,7 @@ async function runLoop(
 	try {
 		for (const message of currentContext.messages.slice()) {
 			if (message.role !== "assistant") continue;
+			if (message.toolExecutionFailed) failedScopes.add(message);
 			for (const call of message.content) {
 				if (call.type !== "toolCall") continue;
 				const result = restoredResults.get(call.id);

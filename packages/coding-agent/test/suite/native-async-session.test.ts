@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
+import { convertResponsesMessages } from "../../../ai/src/api/openai-responses-shared.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness } from "./harness.ts";
 
@@ -415,6 +416,211 @@ describe("native journal projection", () => {
 		expect(manager.buildSessionProjection().messages.some((message) => message.role === "assistant")).toBe(false);
 		expect(manager.buildSessionProjection().messages.some((message) => message.role === "toolResult")).toBe(false);
 	});
+});
+
+it.each(
+	[
+		{ executionStarted: false, resumeAvailable: false },
+		{ executionStarted: true, resumeAvailable: true },
+		{ executionStarted: true, resumeAvailable: false },
+	].flatMap((admission) => (["compaction", "context edit"] as const).map((omission) => ({ ...admission, omission }))),
+)(
+	"does not replay completed native calls after $omission omits their receipt (started=$executionStarted, resume=$resumeAvailable)",
+	async ({ executionStarted, resumeAvailable, omission }) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-native-omitted-outcome-"));
+		const manager = SessionManager.create(directory, directory);
+		const execute = vi.fn<AgentTool["execute"]>(async () => result);
+		const resume = vi.fn<NonNullable<AgentTool["resume"]>>(async () => result);
+		const harness = await createHarness({
+			sessionManager: manager,
+			settings: { compaction: { enabled: false }, retry: { enabled: false } },
+			tools: [
+				{
+					name: "work",
+					label: "Work",
+					description: "Work",
+					parameters: Type.Object({ path: Type.String() }),
+					async: true,
+					execute,
+					resume: resumeAvailable ? resume : undefined,
+				},
+			],
+		});
+		const model: Model<"openai-responses"> = {
+			...harness.getModel(),
+			api: "openai-responses",
+			compat: { supportsAsyncTools: true },
+		};
+		harness.session.agent.state.model = model;
+		const completed = { ...toolCall("completed"), ...(executionStarted ? { executionStarted: true } : {}) };
+		const pending = toolCall("pending");
+		const retained = toolCall("retained");
+		const response: AssistantMessage = {
+			...assistant(completed),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			responseId: "kept-response",
+			content: [
+				{ type: "text", text: "kept prose before" },
+				{
+					type: "thinking",
+					thinking: "",
+					thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_completed", summary: [] }),
+				},
+				completed,
+				{ type: "text", text: "kept prose after" },
+				{
+					type: "thinking",
+					thinking: "",
+					thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_pending", summary: [] }),
+				},
+				pending,
+				retained,
+			],
+		};
+		if (omission === "compaction") {
+			manager.appendMessage(fauxAssistantMessage("old prose", { responseId: "old-response" }));
+			manager.appendContextWindow("fresh", 100);
+		}
+		manager.appendMessage({ ...response, stopReason: "pending" }, true);
+		const resultId = manager.appendMessage({
+			role: "toolResult",
+			toolCallId: completed.id,
+			toolName: "work",
+			content: [{ type: "text", text: "OMITTED_RECEIPT" }],
+			isError: false,
+			timestamp: 1,
+		});
+		const anchorId =
+			omission === "compaction"
+				? manager.appendMessage(
+						fauxAssistantMessage("", { responseId: "old-response", stopReason: "pending" }),
+						true,
+					)
+				: undefined;
+		manager.appendMessage(response);
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: retained.id,
+			toolName: "work",
+			content: [{ type: "text", text: "RETAINED_RECEIPT" }],
+			isError: false,
+			timestamp: 2,
+		});
+		manager.appendMessage({ role: "user", content: "kept tail", timestamp: 3 });
+		if (anchorId) manager.appendCompaction("earlier outcomes summarized", anchorId, 100);
+		else manager.appendContextEdit(resultId, null);
+		const file = manager.getSessionFile()!;
+		const saved = readFileSync(file, "utf8");
+		manager.setSessionFile(file);
+		harness.session.refreshContext();
+		const pendingBefore = harness.session.getPendingToolCalls();
+		const wireInputs: ReturnType<typeof convertResponsesMessages>[] = [];
+		harness.session.agent.streamFunction = (requestModel, context) => {
+			wireInputs.push(convertResponsesMessages(requestModel, context, new Set([requestModel.provider])));
+			const answer: AssistantMessage = {
+				...fauxAssistantMessage("continued"),
+				api: requestModel.api,
+				provider: requestModel.provider,
+				model: requestModel.id,
+			};
+			const stream = createAssistantMessageEventStream();
+			stream.push({ type: "start", partial: answer });
+			stream.push({ type: "done", reason: "stop", message: answer });
+			stream.end();
+			return stream;
+		};
+		try {
+			await harness.session.prompt("continue without repeating completed work");
+			expect(execute.mock.calls.map(([id]) => id)).toEqual([pending.id]);
+			expect(resume).not.toHaveBeenCalled();
+			expect(pendingBefore).toMatchObject([{ toolCallId: pending.id }]);
+			expect(pendingBefore).toHaveLength(1);
+			expect(harness.session.getPendingToolCalls()).toEqual([]);
+			const wire = JSON.stringify(wireInputs);
+			expect(wire).not.toContain('"call_id":"completed"');
+			expect(wire).not.toContain("rs_completed");
+			expect(wire).not.toContain("OMITTED_RECEIPT");
+			expect(wire).not.toContain("outcome is unknown");
+			expect(wire).not.toContain("toolExecutionFailed");
+			expect(wire).toContain('"call_id":"pending"');
+			expect(wire).toContain("rs_pending");
+			expect(wire).toContain('"call_id":"retained"');
+			expect(wire).toContain("RETAINED_RECEIPT");
+			expect(wire).toContain("kept prose before");
+			expect(wire).toContain("kept prose after");
+			expect(JSON.stringify(harness.session.messages)).not.toContain("outcome is unknown");
+			expect(readFileSync(file, "utf8").startsWith(saved)).toBe(true);
+		} finally {
+			harness.cleanup();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	},
+);
+
+it.each(
+	(["ordinary", "skipped", "background"] as const).flatMap((failure) =>
+		(["compaction", "context window", "context edit"] as const).map((omission) => ({ failure, omission })),
+	),
+)("preserves a $failure failure's reset veto after $omission omits its receipt", async ({ failure, omission }) => {
+	const execute = vi.fn<AgentTool["execute"]>(async () => result);
+	const resume = vi.fn<NonNullable<AgentTool["resume"]>>(async () => ({
+		...result,
+		newContext: { handoff: "resumed reset" },
+	}));
+	const harness = await createHarness({
+		settings: { compaction: { enabled: false }, retry: { enabled: false } },
+		tools: [
+			{
+				name: "work",
+				label: "Work",
+				description: "Work",
+				parameters: Type.Object({ path: Type.String() }),
+				async: true,
+				execute,
+				resume,
+			},
+		],
+	});
+	harness.session.agent.state.model = {
+		...harness.getModel(),
+		api: "openai-responses",
+		compat: { supportsAsyncTools: true },
+	} as Model<"openai-responses">;
+	const stream = harness.session.agent.streamFunction;
+	const wireInputs: ReturnType<typeof convertResponsesMessages>[] = [];
+	harness.session.agent.streamFunction = (model, context, options) => {
+		wireInputs.push(convertResponsesMessages(model, context, new Set([model.provider])));
+		return stream(harness.getModel(), context, options);
+	};
+	const reset = { ...toolCall("reset"), executionStarted: true };
+	const failed = failure === "ordinary" ? { ...toolCall("failed"), async: false } : toolCall("failed");
+	harness.sessionManager.appendMessage({ ...assistant(reset), content: [reset, failed] });
+	const receiptId = harness.sessionManager.appendMessage({
+		role: "toolResult",
+		toolCallId: failed.id,
+		toolName: "work",
+		content: [{ type: "text", text: "omitted failure" }],
+		isError: true,
+		...(failure === "skipped" ? { executionSkipped: true } : {}),
+		timestamp: 2,
+	});
+	if (omission === "compaction") harness.sessionManager.appendCompaction("outcomes summarized", null, 100);
+	else if (omission === "context window") harness.sessionManager.appendContextWindow("fresh", 100);
+	else harness.sessionManager.appendContextEdit(receiptId, null);
+	harness.session.refreshContext();
+	harness.setResponses([fauxAssistantMessage("continued"), fauxAssistantMessage("continued after reset")]);
+	try {
+		await harness.session.prompt("resume pending work");
+		expect(execute).not.toHaveBeenCalled();
+		expect(resume).toHaveBeenCalledOnce();
+		expect(harness.eventsOfType("context_window_started")).toHaveLength(failure === "background" ? 1 : 0);
+		expect(harness.session.getPendingToolCalls()).toEqual([]);
+		expect(JSON.stringify(wireInputs)).not.toContain("toolExecutionFailed");
+	} finally {
+		harness.cleanup();
+	}
 });
 
 it.each(["stop", "error"] as const)(

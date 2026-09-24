@@ -417,7 +417,12 @@ function withoutUndefined(value: unknown): unknown {
 function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
 	return convertToLlm(messages.filter((message) => message.role !== "system")).map((message) => {
 		if (message.role !== "assistant") return withoutUndefined({ ...message, timestamp: 0 });
-		const { usage: _usage, diagnostics: _diagnostics, ...response } = message;
+		const {
+			usage: _usage,
+			diagnostics: _diagnostics,
+			toolExecutionFailed: _toolExecutionFailed,
+			...response
+		} = message;
 		return withoutUndefined({
 			...response,
 			timestamp: 0,

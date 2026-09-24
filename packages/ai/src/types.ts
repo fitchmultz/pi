@@ -577,6 +577,8 @@ export interface AssistantMessage {
 	deferred?: DeferredHandle;
 	errorMessage?: string;
 	rawStopReason?: string;
+	/** Projection-derived foreground tool failure in this response; preserves its reset veto when receipts are omitted. */
+	toolExecutionFailed?: boolean;
 	/**
 	 * Provider indication of whether the model explicitly ended its turn.
 	 * Preserved for debugging and does not currently affect agent control flow.

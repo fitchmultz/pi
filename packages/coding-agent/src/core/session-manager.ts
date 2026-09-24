@@ -656,6 +656,13 @@ export function buildSessionProjection(
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
 	const contextEntries = buildContextEntries(entries, leafId, byId);
+	const allResults = new Map(
+		path.flatMap((entry) =>
+			entry.type === "message" && entry.message.role === "toolResult"
+				? [[entry.message.toolCallId, entry.message] as const]
+				: [],
+		),
+	);
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of path) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
@@ -690,11 +697,6 @@ export function buildSessionProjection(
 		);
 		const retainedResults = new Set(
 			retained.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
-		);
-		const allResults = new Set(
-			branchEntries.flatMap((entry) =>
-				entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
-			),
 		);
 		const carried = branchEntries.flatMap((sourceEntry): ProjectedSessionEntry[] => {
 			if (sourceEntry.type !== "message" || sourceEntry.message.role !== "assistant") return [];
@@ -737,6 +739,45 @@ export function buildSessionProjection(
 			);
 			if (retainedIds.has(entry.sourceEntry.id)) entry.messages = withoutToolSearchState(entry.messages);
 		}
+	}
+	const retainedResults = new Set(
+		projectedEntries.flatMap((entry) =>
+			entry.messages.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
+		),
+	);
+	for (const entry of projectedEntries) {
+		const source = entry.sourceEntry;
+		const toolExecutionFailed =
+			(source.type === "message" &&
+				source.message.role === "assistant" &&
+				source.message.content?.some((call) => {
+					if (call.type !== "toolCall") return false;
+					const result = allResults.get(call.id);
+					return result?.isError && (result.executionSkipped || !(call.async && call.responsesItem?.async));
+				})) ||
+			undefined;
+		entry.messages = entry.messages.map((message) => {
+			if (message.role !== "assistant") return message;
+			const content: AssistantMessage["content"] = [];
+			for (const block of message.content) {
+				if (
+					block.type === "toolCall" &&
+					(block.executionStarted || (block.async && block.responsesItem)) &&
+					allResults.has(block.id) &&
+					!retainedResults.has(block.id)
+				) {
+					// Omitted outcomes are still completed work. Remove their call and attached reasoning,
+					// rather than restoring execution or sending an orphaned provider item.
+					while (content.at(-1)?.type === "thinking") content.pop();
+				} else content.push(block);
+			}
+			if (content.length !== message.content.length) {
+				while (content.at(-1)?.type === "thinking") content.pop();
+			}
+			if (content.length === message.content.length && message.toolExecutionFailed === toolExecutionFailed)
+				return message;
+			return { ...message, content, toolExecutionFailed };
+		});
 	}
 	return {
 		entries: projectedEntries,

@@ -249,6 +249,8 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 
 Across compaction and context-window boundaries, projection also carries native asynchronous call items from the selected branch when they remain unresolved or have a retained result. Carried items preserve their original source entry, provider item, namespace, call ID, and admitted execution arguments/state. Context edits still apply: omitting a call also omits its dependent output. Results on other branches do not resolve calls on the selected branch. Reopening the journal uses the same projection.
 
+When a native result is omitted by compaction or a context edit, projection removes its completed call and attached reasoning from retained assistant content too. The raw outcome still proves completion, so the call is not executed or resumed again. Other prose, unresolved calls, and retained call/result pairs remain. Projection also derives `toolExecutionFailed` from the original response's foreground failures, preserving their reset veto without restoring omitted receipts to model input.
+
 `buildSessionContext()` builds on that projection to produce the message list for the LLM:
 
 1. Extracts current model and thinking level settings from the full path
