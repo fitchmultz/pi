@@ -181,6 +181,12 @@ mkdirSync(cwd);
 const agentDir = process.env.PI_CODING_AGENT_DIR;
 const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
 const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, allowModelNetwork: false });
+for (const provider of ["openai", "openai-codex"]) {
+  const compat = modelRuntime.getModel(provider, "gpt-6-astra")?.compat;
+  for (const capability of ["supportsAsyncTools", "supportsSteering", "supportsReasoningEffortUpdates"]) {
+    assert.equal(compat?.[capability], true, provider + "/gpt-6-astra: " + capability);
+  }
+}
 async function create(checkpoint) {
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
     additionalExtensionPaths: [${JSON.stringify(extension)}], noSkills: true, noPromptTemplates: true, noThemes: true });
@@ -210,7 +216,7 @@ try {
   assert.equal(restored.model, undefined);
   assert.deepEqual(restored.getActiveToolNames(), checkpoint.selection.activeTools);
 } finally { restored.dispose(); }
-console.log("Installed SDK, extension identity and native checkpoint restore passed.");
+console.log("Installed SDK, Astra capabilities, extension identity and native checkpoint restore passed.");
 `);
 		run(tools.node, [entry], { cwd: env.HOME, env, timeout: 60_000 });
 	} finally {
@@ -324,7 +330,9 @@ export async function main(args = process.argv.slice(2)) {
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
 			const packages = getPublicWorkspacePackages(join(source, "packages"));
 			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { npm: tools.npm, env });
-			installCodingAgentConsumer(directory, tarballs, tools.npm, { env });
+			installCodingAgentConsumer(directory, tarballs, tools.npm, {
+				env, lockDirectory: join(source, "packages/coding-agent/install-lock"),
+			});
 			smokeTestInstalledRuntime(directory, tools, env);
 			run(tools.node, [join(source, "node_modules/vitest/vitest.mjs"), "run", "test/restart-tui.test.ts", "--maxWorkers=1"], {
 				cwd: join(source, "packages/coding-agent"),

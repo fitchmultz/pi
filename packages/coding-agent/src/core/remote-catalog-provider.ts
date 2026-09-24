@@ -1,4 +1,10 @@
-import type { Api, Model, ModelsStoreEntry, Provider } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	type Model,
+	type ModelsStoreEntry,
+	type Provider,
+	withAstraLifecycleDefaults,
+} from "@earendil-works/pi-ai";
 import { VERSION } from "../config.ts";
 import { fetchWithRetry } from "../utils/management-http.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
@@ -52,7 +58,7 @@ export function withRemoteCatalog(
 
 	return {
 		...provider,
-		getModels: () => mergeModels(provider.getModels(), dynamicModels),
+		getModels: () => mergeModels(provider.getModels(), dynamicModels).map(withAstraLifecycleDefaults),
 		refreshModels: async (context) => {
 			const stored = context.stored;
 			const restored = remoteModels(stored, localGeneratedAt).filter((model) => model.provider === provider.id);

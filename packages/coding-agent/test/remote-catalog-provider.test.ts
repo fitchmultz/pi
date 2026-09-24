@@ -72,6 +72,78 @@ async function refreshProvider(
 afterEach(() => vi.restoreAllMocks());
 
 describe("remote catalog provider", () => {
+	it.each([
+		["openai", "openai-responses"],
+		["openai-codex", "openai-codex-responses"],
+		["cloudflare-ai-gateway", "openai-responses"],
+	] as const)("retains Astra capabilities through cached and refreshed %s catalogs", async (id, api) => {
+		const astra = { ...model("gpt-6-astra"), provider: id, api, compat: { supportsStrictMode: true } };
+		const provider = withRemoteCatalog(
+			createProvider({
+				id,
+				auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
+				models: [astra],
+				api: {
+					stream: () => {
+						throw new Error("not used");
+					},
+					streamSimple: () => {
+						throw new Error("not used");
+					},
+				},
+			}),
+			"https://pi.dev",
+			1,
+		);
+		const store = new InMemoryModelsStore();
+		await store.write(id, { models: [{ ...astra, contextWindow: 2000 }], lastModified: 2 });
+		await refreshProvider(provider, store, { allowNetwork: false });
+		expect(provider.getModels()[0]).toMatchObject({
+			contextWindow: 2000,
+			compat: {
+				supportsStrictMode: true,
+				supportsAsyncTools: true,
+				supportsSteering: true,
+				supportsReasoningEffortUpdates: true,
+			},
+		});
+
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					astra: { ...astra, contextWindow: 3000, compat: { supportsStrictMode: false } },
+				}),
+				{ headers: { "last-modified": new Date(3000).toUTCString() } },
+			),
+		);
+		await refreshProvider(provider, store, { force: true });
+		expect(provider.getModels()[0]).toMatchObject({
+			contextWindow: 3000,
+			compat: {
+				supportsStrictMode: false,
+				supportsAsyncTools: true,
+				supportsSteering: true,
+				supportsReasoningEffortUpdates: true,
+			},
+		});
+
+		await store.write(id, {
+			models: [
+				{
+					...astra,
+					compat: { supportsAsyncTools: false, supportsSteering: false, supportsReasoningEffortUpdates: false },
+				},
+			],
+			lastModified: 4,
+		});
+		await refreshProvider(provider, store, { allowNetwork: false });
+		expect(provider.getModels()[0].compat).toEqual({
+			supportsAsyncTools: false,
+			supportsSteering: false,
+			supportsReasoningEffortUpdates: false,
+		});
+	});
+
 	it("parses keyed catalogs, sends version headers, observes the refresh TTL, and supports forced refreshes", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			async () =>

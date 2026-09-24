@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -8,13 +9,31 @@ import { installCodingAgentConsumer, packReleasePackages, smokeTestCodingAgentCo
 const codingAgentName = "@earendil-works/pi-coding-agent";
 const devPackages = ["pi-client", "pi-protocol", "pi-server"].map((name) => `@earendil-works/${name}`);
 
-function createFixture(t, { importServer = false, declareServer = false } = {}) {
+function createFixture(t, { importServer = false, declareServer = false, frozenExternal = false } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "pi-consumer-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const packages = [codingAgentName, "@earendil-works/chord", ...devPackages].map((name) => ({
 		name,
 		directory: join(root, "packages", name.split("/")[1]),
 	}));
+	const lockDirectory = join(root, "install-lock");
+	const installer = {
+		private: true,
+		dependencies: { [codingAgentName]: "1.0.0" },
+		overrides: { protobufjs: "7.6.6" },
+	};
+	const lock = { lockfileVersion: 3, requires: true, packages: { "": installer } };
+	if (frozenExternal) {
+		const external = { name: "pi-consumer-external", directory: join(root, "external") };
+		mkdirSync(external.directory);
+		writeFileSync(join(external.directory, "package.json"), JSON.stringify({ name: external.name, version: "1.0.0" }));
+		const tarball = packReleasePackages([external], join(root, "external-tarballs")).get(external.name);
+		lock.packages[`node_modules/${external.name}`] = {
+			version: "1.0.0",
+			resolved: `file:${tarball}`,
+			integrity: `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`,
+		};
+	}
 	for (const pkg of packages) {
 		const isAgent = pkg.name === codingAgentName;
 		const manifest = {
@@ -30,11 +49,20 @@ function createFixture(t, { importServer = false, declareServer = false } = {}) 
 				bin: { pi: "dist/bundle/cli.js" },
 				dependencies: {
 					"@earendil-works/chord": "1.0.0",
+					...(frozenExternal ? { "pi-consumer-external": "^1.0.0" } : {}),
 					...(declareServer ? { "@earendil-works/pi-server": "1.0.0" } : {}),
 				},
 				devDependencies: Object.fromEntries(devPackages.map((name) => [name, "1.0.0"])),
 			} : {}),
 		};
+		if (!devPackages.includes(pkg.name) || (declareServer && pkg.name === "@earendil-works/pi-server")) {
+			lock.packages[`node_modules/${pkg.name}`] = {
+				version: manifest.version,
+				dependencies: manifest.dependencies,
+				bin: manifest.bin,
+				resolved: `https://registry.npmjs.org/${pkg.name}/-/unused.tgz`,
+			};
+		}
 		const files = {
 			"package.json": JSON.stringify(manifest),
 			"dist/index.js": isAgent ? `
@@ -54,10 +82,22 @@ export class ModelRuntime { static create() {} }
 			mkdirSync(dirname(join(pkg.directory, path)), { recursive: true });
 			writeFileSync(join(pkg.directory, path), content);
 		}
+		if (isAgent && frozenExternal) {
+			writeFileSync(join(pkg.directory, "npm-shrinkwrap.json"), JSON.stringify({
+				lockfileVersion: 3,
+				packages: { "": manifest, "node_modules/pi-consumer-external": lock.packages["node_modules/pi-consumer-external"] },
+			}));
+		}
 	}
+	mkdirSync(lockDirectory);
+	writeFileSync(join(lockDirectory, "package.json"), JSON.stringify(installer));
+	writeFileSync(join(lockDirectory, "package-lock.json"), JSON.stringify(lock));
 	const tarballs = packReleasePackages(packages, join(root, "tarballs"));
 	const directory = join(root, "consumer");
-	installCodingAgentConsumer(directory, tarballs);
+	installCodingAgentConsumer(directory, tarballs, "npm", {
+		lockDirectory,
+		env: { ...process.env, npm_config_offline: "true", npm_config_cache: join(root, "cache") },
+	});
 	return directory;
 }
 
@@ -81,6 +121,18 @@ test("installs only coding-agent directly and uses overrides only for declared r
 	const experimental = join(directory, "node_modules", codingAgentName, "dist/experimental");
 	mkdirSync(experimental);
 	assert.throws(() => smokeTestCodingAgentConsumer(directory), /contains development-only code/);
+});
+
+test("consumes frozen external resolutions instead of resolving a local tarball's semver dependencies again", (t) => {
+	// npm's local-file metadata omits hasShrinkwrap, so the nested shrinkwrap alone is insufficient.
+	const directory = createFixture(t, { frozenExternal: true });
+	const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+	const lock = JSON.parse(readFileSync(join(directory, "package-lock.json"), "utf8"));
+	assert.equal(manifest.overrides.protobufjs, "7.6.6");
+	assert.equal(lock.packages["node_modules/pi-consumer-external"].version, "1.0.0");
+	assert.equal(JSON.parse(readFileSync(join(directory, "node_modules/pi-consumer-external/package.json"), "utf8")).version, "1.0.0");
+	assert.ok(existsSync(join(directory, "node_modules", codingAgentName, "npm-shrinkwrap.json")));
+	smokeTestCodingAgentConsumer(directory);
 });
 
 // #9132: smoke-test the public SDK, not just a bundled CLI that hides missing imports.
