@@ -134,22 +134,42 @@ it("validates a final-window edit batch before publishing any of it", async () =
 });
 
 describe("native journal projection", () => {
-	it("keeps an unsummarized tail whose compaction anchor was coalesced before the window", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-native-kept-tail-"));
-		try {
-			const manager = SessionManager.create(directory, directory);
-			manager.appendMessage(assistant());
-			manager.appendContextWindow("fresh", 100);
-			const checkpointId = manager.appendMessage({ ...assistant(), stopReason: "pending" }, true);
-			const tailId = manager.appendMessage({ role: "user", content: "unsummarized tail", timestamp: 2 });
-			const summaryId = manager.appendCompaction("older material", checkpointId, 100);
-			const reopened = SessionManager.open(manager.getSessionFile()!);
-			expect(reopened.buildContextEntries().map((entry) => entry.id)).toEqual([summaryId, tailId]);
-			expect(reopened.getEntries()).toEqual(manager.getEntries());
-		} finally {
-			rmSync(directory, { recursive: true, force: true });
-		}
-	});
+	it.each([false, true])(
+		"keeps only the raw tail after a coalesced compaction anchor (straddling=%s)",
+		(straddling) => {
+			const directory = mkdtempSync(join(tmpdir(), "pi-native-kept-tail-"));
+			try {
+				const manager = SessionManager.create(directory, directory);
+				const original = assistant();
+				original.content.push({ type: "text", text: "old response prose" });
+				manager.appendMessage(original);
+				manager.appendContextWindow("fresh", 100);
+				const second = { ...assistant(toolCall("second")), responseId: "second-response" };
+				if (straddling) {
+					manager.appendMessage({ ...second, stopReason: "pending" }, true);
+					manager.appendMessage({
+						role: "toolResult",
+						toolCallId: toolCall("second").id,
+						toolName: "work",
+						content: [{ type: "text", text: "already summarized receipt" }],
+						isError: false,
+						timestamp: 1,
+					});
+				}
+				const checkpointId = manager.appendMessage({ ...assistant(), stopReason: "pending" }, true);
+				// The final entry belongs to the kept raw range, but coalesces ahead of the summarized receipt.
+				const finalIds = straddling ? [manager.appendMessage(second)] : [];
+				const tailId = manager.appendMessage({ role: "user", content: "unsummarized tail", timestamp: 2 });
+				const summaryId = manager.appendCompaction("older material", checkpointId, 100);
+				const reopened = SessionManager.open(manager.getSessionFile()!);
+				expect(reopened.buildContextEntries().map((entry) => entry.id)).toEqual([summaryId, ...finalIds, tailId]);
+				expect(JSON.stringify(reopened.buildSessionProjection().messages)).not.toContain("old response prose");
+				expect(reopened.getEntries()).toEqual(manager.getEntries());
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("coalesces late execution checkpoints without losing later response content or usage", () => {
 		const manager = SessionManager.inMemory();

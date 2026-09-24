@@ -602,14 +602,16 @@ export function buildContextEntries(
 				entry.message.role === "assistant" &&
 				entry.message.responseId === firstKeptResponseId),
 	);
+	let rawKeptIds: Set<string> | undefined;
 	if (firstKeptIndex < 0 && firstKept) {
 		// A saved checkpoint anchor may have coalesced into a response before this window.
-		const keptIds = new Set(fullPath.slice(fullPath.indexOf(firstKept)).map((entry) => entry.id));
-		firstKeptIndex = path.findIndex((entry) => keptIds.has(entry.id));
+		// Other final responses can move before that anchor too; select each entry by its raw position.
+		rawKeptIds = new Set(fullPath.slice(fullPath.indexOf(firstKept)).map((entry) => entry.id));
+		firstKeptIndex = 0;
 	}
 	for (let i = firstKeptIndex; i >= 0 && i < compactionIdx; i++) {
 		const entry = path[i];
-		if (!(entry.type === "message" && entry.message.role === "system")) {
+		if ((!rawKeptIds || rawKeptIds.has(entry.id)) && !(entry.type === "message" && entry.message.role === "system")) {
 			contextEntries.push(entry);
 		}
 	}
