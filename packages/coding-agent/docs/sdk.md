@@ -86,6 +86,22 @@ SDK hosts can supply `getQueuedInputCount` through `bindExtensions()` for their 
 
 `sendCustomMessage(message, { deliverAs: "steer", persistOnCancel: true })` opts undelivered streamed customs into once-only persistence before settlement, without requesting another turn. `clearQueue()` preserves opted-in messages, deferring append until a safe boundary while streaming, and returns queued user texts only. The default remains false; `nextTurn` asides survive queue clearing and reload.
 
+### Background commands
+
+The built-in `background_command` tool starts long shell commands without blocking a tool batch. For example, `{ action: "start", command: "gh pr checks --watch --fail-fast" }` returns a job ID and `logFile`. Completion carries the real exit status and a readable tail bounded to 16KB/100 lines. Use `read` for the complete raw log. `status` accepts a job `id`, or lists up to 20 jobs with `offset` and optional `activeOnly`. `cancel` requires an `id` and stops the native shell process tree; a pending cancellation is reported explicitly.
+
+Jobs use the session's effective shell path, command prefix, environment, and native Bash cwd hooks. An optional `cwd` resolves relative to that selected directory. Each detached worker writes its job record, atomic state, and raw output beneath `<sessionDir>/background-commands/<sessionId>/<jobId>/`. Workers survive session disposal and Pi exit. Resume discovers existing work without replaying commands; a vanished or inaccessible worker reports an unknown outcome. Unreadable job records appear as bounded diagnostics without suppressing healthy jobs. In-memory sessions also retain job files, but have no saved conversation to resume automatically. Without a session directory, jobs use `PI_CODING_AGENT_SESSION_DIR`, the `sessionDir` setting, or `<agentDir>/sessions/` (in that order), still partitioned by the actual session ID. `--no-session --session-dir <path>` and `SessionManager.inMemory(cwd, { sessionDir })` select artifact storage without saving a conversation. Job and log paths are absolute, including with relative SDK session directories.
+
+`AgentSession` owns notifications without requiring `bindExtensions()`. Completed jobs enter after the foreground tool batch or during idle, giving queued input and user Bash priority. Terminal status results and completion entries acknowledge jobs across reload/resume. Cancelling the agent leaves commands running and preserves their results without waking the model; a new admitted run clears that suppression. `background_command cancel` instead cancels the command itself.
+
+`waitForIdle()` does not wait for external jobs. Print/JSON invocations can exit before completion; use synchronous `bash` when that invocation must consume the result. Checkpoint holds pause native notification writes, and checkpoint restore waits for explicit input. The host still owns external process quiescence.
+
+Standalone `createBackgroundCommandTool(cwd, { sessionManager, ...shellOptions })` requires an explicit owner (or native execution context). `createCodingTools` and `createAllTools` accept that owner under `background_command`; automatic notifications belong to `AgentSession`. Hosts that collect startup input asynchronously can set `deferBackgroundCommandNotifications: true`, then bind their `getQueuedInputCount` before admitting prompts. Native CLI modes do this themselves.
+
+Background workers use the running Pi code, independently of the `PI_PACKAGE_DIR` asset override. They support native local shell execution, not custom `BashOperations` backends. Shell permission guards and Bash overrides must also handle `background_command` with `action: "start"`; overriding or excluding `bash` alone does not intercept or disable this separate tool. The shipped sandbox and SSH examples block background starts while their custom backend is active; status and cancellation remain available.
+
+New sessions include this tool by default. Existing saved selections and explicit allowlists are preserved. SDK hosts can enable it with `session.setActiveToolsByName([...session.getActiveToolNames(), "background_command"])` when the permitted registry includes it.
+
 ### Native asynchronous tools and steering
 
 Set `async: true` on a `ToolDefinition` for capable Responses routes. Execution begins only after an authoritative completed async call, argument preparation, validation, and `tool_call` hooks. The journal records the original provider item and admitted arguments before side effects. `executionMode` still controls local sequential/parallel execution.
@@ -214,7 +230,7 @@ Publication follows existing/dangling final symlinks, checks target write access
 
 Custom `BashOperations` and `PowerShellOperations` producers must call `onData(data, source)` with unchanged Buffer bytes and `stdout`/`stderr` identity, then `onEnd(source)` once after each pipe's final data, including errors. Stop callbacks before resolving/rejecting `exec`; cancellation alone is not EOF. Each pipe is decoded independently so interleaved output preserves split UTF-8. Cross-pipe ordering is not guaranteed. Wrappers forwarding options unchanged need no adaptation.
 
-`pi.registerBashCwdHook((cwd) => nextCwd)` changes cwd before built-in Bash preflight and native user Bash operations. Synchronous hooks chain in extension load/registration order and are replaced on reload/session replacement; errors stop execution. This does not change session headers, project resources, other tools, overridden Bash tools, or factory spawn hooks. Detect support by method presence.
+`pi.registerBashCwdHook((cwd) => nextCwd)` changes cwd before built-in Bash and background-command preflight and native user Bash operations. Synchronous hooks chain in extension load/registration order and are replaced on reload/session replacement; errors stop execution. This does not change session headers, project resources, other tools, overridden Bash tools, or factory spawn hooks. Detect support by method presence.
 
 ## Examples
 

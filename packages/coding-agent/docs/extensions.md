@@ -104,6 +104,8 @@ Events cover resource discovery, sessions, agent and message lifecycle, provider
 
 `message_end` can replace a finalized message while preserving its role. `tool_call` can mutate input or block execution. `tool_result` handlers compose, with each handler seeing prior changes.
 
+Shell guards must check both `bash` and `background_command` starts. Use `isToolCallEventType()` to match native, unnamespaced tools. A Bash override or `user_bash` handler does not intercept background jobs: detached workers cannot serialize a custom execution backend. The sandbox and SSH examples explicitly block unsupported starts while active, leaving status and cancellation available. Tool exclusions are literal: exclude both IDs to disable both shell paths.
+
 <a id="context_with_system"></a>
 
 `context` transforms conversation messages without prompt and tool system messages; Pi restores that state afterward. Use `context_with_system` only when a request-local transformation must own the complete transcript, and keep a system message at index zero.

@@ -48,7 +48,13 @@ describe("system prompt updates", () => {
 			if (head?.role !== "system") throw new Error("expected system message");
 			expect(head.content).toBe("");
 			expect(Object.keys(head.sections ?? {})).toEqual(["preamble", "tools", "rules", "docs", "cwd"]);
-			expect(head.toolsAdded?.map((tool) => tool.name)).toEqual(["read", "bash", "edit", "write"]);
+			expect(head.toolsAdded?.map((tool) => tool.name)).toEqual([
+				"read",
+				"bash",
+				"background_command",
+				"edit",
+				"write",
+			]);
 			expect(getSystemMessageText(head)).toBe(harness.session.systemPrompt);
 		} finally {
 			harness.cleanup();
@@ -202,7 +208,7 @@ describe("system prompt updates", () => {
 			expect(getCurrentTools(harness.session.messages).map((tool) => tool.name)).toEqual(["read"]);
 			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "custom"]);
 			await harness.session.navigateTree(baseLeaf);
-			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "background_command", "edit", "write"]);
 			await harness.session.navigateTree(windowLeaf);
 			expect(harness.session.getActiveToolNames()).toEqual(["read"]);
 			expect(harness.session.systemPrompt).toBe(getCurrentSystemPrompt(harness.session.messages));

@@ -36,6 +36,8 @@ export type {
 	AutocompleteProviderFactory,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	BackgroundCommandToolCallEvent,
+	BackgroundCommandToolResultEvent,
 	BashCwdHook,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
@@ -211,6 +213,7 @@ export type {
 // Type guards
 export {
 	defineTool,
+	isBackgroundCommandToolResult,
 	isBashToolResult,
 	isEditToolResult,
 	isFindToolResult,

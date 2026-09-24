@@ -129,10 +129,14 @@ describe("RPC TUI handoff", () => {
 		const previousFactory: EditorFactory = () => {
 			throw new Error("The hidden TUI must not instantiate editors");
 		};
+		const interactiveUI: ExtensionUIContext = {
+			...harness.session.extensionRunner.getUIContext(),
+			getEditorComponent: () => previousFactory,
+		};
 		const interactiveMode = {
 			host: vi.fn(),
 			getQueuedInputCount: () => 0,
-			getExtensionUIContext: () => ({ getEditorComponent: () => previousFactory }),
+			getExtensionUIContext: () => interactiveUI,
 			rebindHostedSession: vi.fn(async () => {}),
 		} as unknown as InteractiveMode;
 		try {
@@ -294,7 +298,10 @@ describe("RPC TUI handoff", () => {
 				opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
 			});
 		});
-		const interactiveUI = { input: tuiInput } as unknown as ExtensionUIContext;
+		const interactiveUI: ExtensionUIContext = {
+			...harness.session.extensionRunner.getUIContext(),
+			input: tuiInput,
+		};
 		const activateHosted = vi.fn(async () => {});
 		let queuedInputCount = 1;
 		const interactiveMode = {

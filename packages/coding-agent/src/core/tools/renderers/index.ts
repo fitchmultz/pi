@@ -8,6 +8,7 @@
 
 import type { ToolDefinition } from "../../extensions/types.ts";
 import type { ToolName } from "../index.ts";
+import { backgroundCommandRenderers } from "./background-command.ts";
 import { createShellRenderers } from "./bash.ts";
 import { editRenderers } from "./edit.ts";
 import { findRenderers } from "./find.ts";
@@ -33,6 +34,7 @@ export function createAllToolRenderers(): Record<ToolName, ToolRenderers> {
 	return {
 		read: readRenderers,
 		bash: createShellRenderers("$"),
+		background_command: backgroundCommandRenderers,
 		powershell: createShellRenderers("PS>"),
 		edit: editRenderers,
 		write: writeRenderers,

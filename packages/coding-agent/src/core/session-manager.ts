@@ -1171,7 +1171,7 @@ export class SessionManager {
 		preloadedFileEntries?: FileEntry[],
 	) {
 		this.cwd = resolvePath(cwd);
-		this.sessionDir = normalizePath(sessionDir);
+		this.sessionDir = sessionDir ? resolvePath(sessionDir) : "";
 		this.persist = persist;
 		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
 			mkdirSync(this.sessionDir, { recursive: true });
@@ -2083,9 +2083,13 @@ export class SessionManager {
 		return new SessionManager(cwd, dir, undefined, true);
 	}
 
-	/** Create an in-memory session (no file persistence), optionally from entries held outside the filesystem. */
-	static inMemory(cwd: string = process.cwd(), options?: NewSessionOptions, entries?: FileEntry[]): SessionManager {
-		return new SessionManager(cwd, "", undefined, false, options, entries);
+	/** No journal persistence. sessionDir optionally locates durable artifacts such as background jobs. */
+	static inMemory(
+		cwd: string = process.cwd(),
+		options?: NewSessionOptions & { sessionDir?: string },
+		entries?: FileEntry[],
+	): SessionManager {
+		return new SessionManager(cwd, options?.sessionDir ?? "", undefined, false, options, entries);
 	}
 
 	/**

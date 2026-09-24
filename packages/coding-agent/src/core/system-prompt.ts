@@ -11,7 +11,7 @@ export interface BuildSystemPromptOptions {
 	customPrompt?: string;
 	/** Exact full prompt replacement set by a before_agent_start handler. */
 	forceSystemPrompt?: string;
-	/** Tools to include in prompt. Default: [read, bash, edit, write]. */
+	/** Tools to include in prompt. Default: [read, bash, background_command, edit, write]. */
 	selectedTools?: ToolSelection[];
 	/** Optional one-line tool snippets keyed by tool name. */
 	toolSnippets?: Record<string, string>;
@@ -55,7 +55,7 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 	return {
 		customPrompt: input.customPrompt,
 		forceSystemPrompt: input.forceSystemPrompt,
-		selectedTools: (input.selectedTools ?? ["read", "bash", "edit", "write"]).map((tool) =>
+		selectedTools: (input.selectedTools ?? ["read", "bash", "background_command", "edit", "write"]).map((tool) =>
 			typeof tool === "string" ? tool : tool.namespace === undefined ? tool.name : { ...tool },
 		),
 		toolSnippets: { ...(input.toolSnippets ?? {}) },

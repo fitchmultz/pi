@@ -8,6 +8,8 @@
  * Note: this example intentionally overrides the built-in `bash` tool to show
  * how built-in tools can be replaced. Alternatively, you could sandbox `bash`
  * via `tool_call` input mutation without replacing the tool.
+ * Background starts are blocked while enabled: detached workers cannot serialize
+ * this process's sandbox backend. Status and cancellation remain available.
  *
  * Config files (merged, project takes precedence):
  * - ~/.pi/agent/extensions/sandbox.json (global)
@@ -46,7 +48,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { type BashOperations, CONFIG_DIR_NAME, createBashTool, getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+	type BashOperations,
+	CONFIG_DIR_NAME,
+	createBashTool,
+	getAgentDir,
+	isToolCallEventType,
+} from "@earendil-works/pi-coding-agent";
 
 interface SandboxConfig extends SandboxRuntimeConfig {
 	enabled?: boolean;
@@ -229,6 +237,16 @@ export default function (pi: ExtensionAPI) {
 
 	let sandboxEnabled = false;
 	let sandboxInitialized = false;
+
+	// Detached workers cannot serialize this process's custom sandbox backend.
+	pi.on("tool_call", (event) => {
+		if (sandboxEnabled && isToolCallEventType("background_command", event) && event.input.action === "start") {
+			return {
+				block: true,
+				reason: "Background commands do not support this sandbox. Use the sandboxed bash tool.",
+			};
+		}
+	});
 
 	pi.registerTool({
 		...localBash,

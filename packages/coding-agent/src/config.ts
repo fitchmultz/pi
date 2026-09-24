@@ -1,7 +1,8 @@
+import { createRequire } from "node:module";
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
 import { stripBom } from "./utils/text.ts";
@@ -398,6 +399,28 @@ export function getPackageDir(): string {
 		return dirname(process.execPath);
 	}
 	return findNodePackageDir(__dirname);
+}
+
+/** Launch a detached shell worker in the same source, SDK, bundle, or standalone distribution. */
+export function getBackgroundCommandWorker(): { command: string; args: string[]; cwd: string } {
+	// PI_PACKAGE_DIR selects assets, not executable code from another installation.
+	const cwd = isBunBinary ? dirname(process.execPath) : findNodePackageDir(__dirname);
+	if (isBunBinary) return { command: process.execPath, args: ["--internal-background-command"], cwd };
+	if (isBundledNode) {
+		return { command: process.execPath, args: [join(cwd, "dist", "bundle", "background-command-worker.js")], cwd };
+	}
+	if (__filename.endsWith(".ts")) {
+		const loader = createRequire(import.meta.url).resolve("tsx/esm");
+		return {
+			command: process.execPath,
+			args: [
+				...(isBunRuntime ? [] : ["--import", pathToFileURL(loader).href]),
+				join(cwd, "src", "background-command-worker.ts"),
+			],
+			cwd,
+		};
+	}
+	return { command: process.execPath, args: [join(cwd, "dist", "background-command-worker.js")], cwd };
 }
 
 /**
