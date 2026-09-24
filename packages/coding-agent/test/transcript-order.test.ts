@@ -12,6 +12,7 @@ import {
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { CheckpointActivity } from "../src/core/checkpoint.ts";
+import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
 import { SettingsManager, type TuiMode } from "../src/core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { createChatViewport } from "../src/modes/interactive/chat-viewport.ts";
@@ -169,8 +170,10 @@ function createMode(tuiMode: TuiMode) {
 	const editorContainer = new Container();
 	editorContainer.addChild(editor);
 	const footer = new Text("NATIVE FOOTER", 0, 0);
-	const above = new Text("WIDGET ABOVE", 0, 0);
-	const below = new Text("WIDGET BELOW", 0, 0);
+	const above = new Container();
+	above.addChild(new Text("WIDGET ABOVE", 0, 0));
+	const below = new Container();
+	below.addChild(new Text("WIDGET BELOW", 0, 0));
 	const pending = new Container();
 	const status = new Container();
 	const viewport = createChatViewport({
@@ -222,6 +225,9 @@ function createMode(tuiMode: TuiMode) {
 		setupEditorSubmitHandler(): void;
 		showSettingsSelector(): void;
 		resetExtensionUI(): void;
+		renderWidgets(): void;
+		clearExtensionWidgets(): void;
+		getExtensionUIContext(): ExtensionUIContext;
 		activateHosted(): Promise<void>;
 		mountInteractiveTui(renderer: ReturnType<typeof createInteractiveTui>, components: readonly Component[]): void;
 	};
@@ -243,10 +249,82 @@ function createMode(tuiMode: TuiMode) {
 		headerContainer,
 		loadedResourcesContainer,
 		settingsManager,
+		above,
+		below,
 	};
 }
 
 describe("native top view", () => {
+	test("removes one layout-owned widget row only in top view through toggles and widget lifecycle changes", async () => {
+		const { context, terminal, chatContainer, editor, above, below } = createMode("fullscreen");
+		Object.assign(context, {
+			widgetContainerAbove: above,
+			widgetContainerBelow: below,
+			extensionWidgetsAbove: new Map<string, Component>(),
+			extensionWidgetsBelow: new Map<string, Component>(),
+		});
+		context.renderWidgets();
+		for (let i = 0; i < 20; i++) chatContainer.addChild(new Text(`older message ${i}`, 0, 0));
+		const latest = new AssistantMessageComponent(fauxAssistantMessage("LATEST RESPONSE"));
+		chatContainer.addChild(latest);
+		const nativeMessageRows = latest.render(80);
+		editor.setText("DRAFT");
+		const ui = context.getExtensionUIContext();
+		const gap = () => {
+			const screen = terminal.getViewport();
+			return (
+				screen.findIndex((line) => line.includes("LATEST RESPONSE")) -
+				screen.findIndex((line) => line.includes("DRAFT"))
+			);
+		};
+		context.renderer.start();
+		try {
+			await terminal.waitForRender();
+			const ordinary = terminal.getViewport();
+			expect(above.render(80)).toEqual([""]);
+			context.setTranscriptOrder("newest-first");
+			await terminal.waitForRender();
+			// Editor bottom border + native assistant spacing; no extra empty-widget row.
+			expect(gap()).toBe(3);
+			expect(above.render(80)).toEqual([]);
+			context.setTranscriptOrder("oldest-first");
+			await terminal.waitForRender();
+			expect(terminal.getViewport()).toEqual(ordinary);
+			expect(above.render(80)).toEqual([""]);
+
+			context.setTranscriptOrder("newest-first");
+			ui.setWidget("above", () => new Text("widget first\n\nwidget second", 0, 0));
+			ui.setWidget("below", ["below widget"], { placement: "belowEditor" });
+			await terminal.waitForRender();
+			expect(gap()).toBe(6);
+			const aboveRows = above.render(80);
+			const belowRows = below.render(80);
+			expect(aboveRows.map((line) => stripAnsi(line).trim())).toEqual(["widget first", "", "widget second"]);
+			expect(belowRows.map((line) => stripAnsi(line).trim())).toEqual(["below widget"]);
+			context.setTranscriptOrder("oldest-first");
+			expect(above.render(80)).toEqual(["", ...aboveRows]);
+			expect(below.render(80)).toEqual(belowRows);
+			context.setTranscriptOrder("newest-first");
+			expect(above.render(80)).toEqual(aboveRows);
+			ui.setWidget("above", undefined);
+			await terminal.waitForRender();
+			expect(gap()).toBe(3);
+			ui.setWidget("above", ["widget again"]);
+			context.clearExtensionWidgets();
+			await terminal.waitForRender();
+			expect(gap()).toBe(3);
+			expect(above.render(80)).toEqual([]);
+			expect(below.render(80)).toEqual([]);
+			expect(latest.render(80)).toEqual(nativeMessageRows);
+			expect(editor.getText()).toBe("DRAFT");
+			context.setTranscriptOrder("oldest-first");
+			await terminal.waitForRender();
+			expect(terminal.getViewport()).toEqual(ordinary);
+		} finally {
+			context.renderer.stop();
+		}
+	});
+
 	test("discovers and handles /topview locally, including toggle, explicit values and invalid arguments", async () => {
 		const { context, terminal, submit, editor, chatContainer } = createMode("regular");
 		expect(BUILTIN_SLASH_COMMANDS).toContainEqual({

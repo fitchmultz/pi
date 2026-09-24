@@ -906,6 +906,7 @@ export class InteractiveMode {
 
 	private updateTranscriptOrderPresentation(order: "oldest-first" | "newest-first"): void {
 		this.transcriptOrder = order;
+		this.renderWidgets();
 		this.chatContainer.setTranscriptOrder(order);
 		this.documentContainer.children =
 			order === "newest-first"
@@ -2494,7 +2495,8 @@ export class InteractiveMode {
 	 */
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
+		const addSpacer = this.transcriptOrder !== "newest-first";
+		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, addSpacer, addSpacer);
 		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
 		this.ui.requestRender();
 	}
