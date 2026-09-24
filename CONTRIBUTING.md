@@ -2,6 +2,10 @@
 
 This guide exists to save both sides time.
 
+## Scope
+
+The contributor gate below governs upstream contributions to `earendil-works/pi`. Authorized maintainers delivering changes to `fitchmultz/pi` use that repository's permissions and the user's explicit or standing authorization; fork authorization does not grant upstream contributor approval. Shared development, verification, and issue/PR procedures still apply.
+
 ## Philosophy
 
 First things first: **pi's core is minimal**.
@@ -18,9 +22,9 @@ Using AI to write code is fine. Submitting AI-generated slop without understandi
 
 If you use an agent, run it from the `pi` root directory so it picks up `AGENTS.md` automatically. Your agent must follow the rules and guidelines in that file.
 
-## Contribution Gate
+## Upstream Contribution Gate
 
-All issues and PRs from new contributors are auto-closed by default.
+Upstream issues and PRs from new contributors are auto-closed by default.
 
 Issues submitted Friday through Sunday are not guaranteed to be reviewed.  If something is urgent, ask on Discord: https://discord.com/invite/3cU7Bz4UPx
 
@@ -55,9 +59,9 @@ If you send a large volume of issues through automation, your GitHub account wil
 
 ## Before Submitting a PR
 
-Do not open a PR unless you have already been approved by a maintainer using `lgtm` in the command position described above.
+Do not open an upstream PR unless you have already been approved by an upstream maintainer using `lgtm` in the command position described above.
 
-Before submitting a PR:
+Before submitting a PR to either upstream or the fork:
 
 ```bash
 npm run check
@@ -66,9 +70,9 @@ npm run check
 
 Both must pass.
 
-Do not edit `CHANGELOG.md`. Changelog entries are added by maintainers.
+Contributors must not edit `CHANGELOG.md`. Authorized maintainers follow the [changelog procedures in AGENTS.md](AGENTS.md#changelog).
 
-If you are adding a new provider to `packages/ai`, see `AGENTS.md` for required tests.
+If you are adding a new provider to `packages/ai`, follow the [provider checklist](.pi/skills/add-llm-provider.md), including its required test matrix.
 
 ## Questions?
 
