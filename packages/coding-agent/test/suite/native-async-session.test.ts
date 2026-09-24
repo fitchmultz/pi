@@ -79,9 +79,20 @@ it("finalizes synchronous window edits in registration order without rewriting h
 });
 
 it("validates a final-window edit batch before publishing any of it", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "pi-native-window-hook-failure-"));
 	const harness = await createHarness({
+		sessionManager: SessionManager.create(directory, directory),
 		extensionFactories: [
 			(pi) => {
+				pi.registerContextWindowHook((event) => [
+					{
+						type: "context_edit",
+						targetId: event.contextEntries.find((entry) =>
+							entry.messages.some((message) => message.role === "toolResult"),
+						)!.sourceEntry.id,
+						replacement: { content: "accepted excerpt" },
+					},
+				]);
 				pi.registerContextWindowHook((event) => {
 					const targetId = event.contextEntries.find((entry) =>
 						entry.messages.some((message) => message.role === "toolResult"),
@@ -105,15 +116,41 @@ it("validates a final-window edit batch before publishing any of it", async () =
 			isError: false,
 			timestamp: 1,
 		});
+		harness.session.refreshContext();
 		expect(() => harness.session.newContext()).toThrow();
-		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "context_edit")).toHaveLength(0);
-		expect(harness.eventsOfType("context_window_started")).toHaveLength(0);
+		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "context_edit")).toMatchObject([
+			{ replacement: { content: [{ type: "text", text: "accepted excerpt" }] } },
+		]);
+		expect(harness.eventsOfType("entry_appended")).toHaveLength(1);
+		expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionProjection().messages);
+		expect(harness.session.messages).toEqual(
+			SessionManager.open(harness.sessionManager.getSessionFile()!).buildSessionProjection().messages,
+		);
+		expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
 	} finally {
 		harness.cleanup();
+		rmSync(directory, { recursive: true, force: true });
 	}
 });
 
 describe("native journal projection", () => {
+	it("keeps an unsummarized tail whose compaction anchor was coalesced before the window", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-native-kept-tail-"));
+		try {
+			const manager = SessionManager.create(directory, directory);
+			manager.appendMessage(assistant());
+			manager.appendContextWindow("fresh", 100);
+			const checkpointId = manager.appendMessage({ ...assistant(), stopReason: "pending" }, true);
+			const tailId = manager.appendMessage({ role: "user", content: "unsummarized tail", timestamp: 2 });
+			const summaryId = manager.appendCompaction("older material", checkpointId, 100);
+			const reopened = SessionManager.open(manager.getSessionFile()!);
+			expect(reopened.buildContextEntries().map((entry) => entry.id)).toEqual([summaryId, tailId]);
+			expect(reopened.getEntries()).toEqual(manager.getEntries());
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("coalesces late execution checkpoints without losing later response content or usage", () => {
 		const manager = SessionManager.inMemory();
 		const original = assistant();
@@ -606,6 +643,151 @@ it("uses the last successful prefix after a failed response without dropping a n
 		harness.cleanup();
 	}
 });
+
+it.each(["reopen", "compact", "navigation", "fork", "continuation", "failed continuation"] as const)(
+	"remembers consumed receipts after %s without discarding filtered or late receipts",
+	async (boundary) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-native-consumed-"));
+		const manager = SessionManager.create(directory, directory);
+		const consumed = toolCall("consumed");
+		const filtered = toolCall("filtered");
+		const late = toolCall("late");
+		const original = assistant(consumed);
+		original.content.push(filtered, late);
+		manager.appendMessage({ role: "user", content: "old request", timestamp: 1 });
+		manager.appendMessage(original);
+		let consumedId = "";
+		for (const call of [consumed, filtered]) {
+			const id = manager.appendMessage({
+				role: "toolResult",
+				toolCallId: call.id,
+				toolName: call.name,
+				content: result.content,
+				isError: false,
+				timestamp: 2,
+			});
+			if (call === consumed) consumedId = id;
+		}
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let persisted!: () => void;
+		const receiptPersisted = new Promise<void>((resolve) => {
+			persisted = resolve;
+		});
+		const execute = vi.fn(async () => {
+			await gate;
+			return result;
+		});
+		const harness = await createHarness({
+			sessionManager: manager,
+			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, retry: { enabled: false } },
+			tools: [
+				{
+					name: "work",
+					label: "Work",
+					description: "Work",
+					parameters: Type.Object({ path: Type.String() }),
+					async: true,
+					execute,
+				},
+			],
+			extensionFactories: [
+				(pi) => {
+					pi.on("context", (event) => ({
+						messages: event.messages.filter(
+							(message) => message.role !== "toolResult" || message.toolCallId !== filtered.id,
+						),
+					}));
+					pi.on("session_before_compact", () => ({
+						compaction: { summary: "summary", firstKeptEntryId: consumedId, tokensBefore: 100 },
+					}));
+				},
+			],
+		});
+		harness.session.refreshContext();
+		harness.session.agent.state.model = {
+			...harness.getModel(),
+			api: "openai-responses",
+			compat: { supportsAsyncTools: true },
+		} as Model<"openai-responses">;
+		harness.session.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "toolResult") persisted();
+		});
+		harness.session.agent.finishTurn = () => ({ action: "end" });
+		harness.session.agent.streamFunction = (model, context) => {
+			expect(context.messages).toContainEqual(
+				expect.objectContaining({ role: "toolResult", toolCallId: consumed.id }),
+			);
+			expect(context.messages).not.toContainEqual(
+				expect.objectContaining({ role: "toolResult", toolCallId: filtered.id }),
+			);
+			expect(context.messages).not.toContainEqual(
+				expect.objectContaining({ role: "toolResult", toolCallId: late.id }),
+			);
+			const response = {
+				...fauxAssistantMessage("completed without the late receipt", { responseId: "successful" }),
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+			};
+			const stream = createAssistantMessageEventStream();
+			void (async () => {
+				stream.push({ type: "start", partial: response });
+				release();
+				await receiptPersisted;
+				if (boundary === "continuation" || boundary === "failed continuation") {
+					stream.push({ type: "response_end", message: response });
+					const successor = { ...response, responseId: "successor" };
+					const receipt = manager
+						.getBranch()
+						.reverse()
+						.find((entry) => entry.type === "message" && entry.message.role === "toolResult");
+					if (receipt?.type !== "message" || receipt.message.role !== "toolResult")
+						throw new Error("late receipt was not persisted");
+					stream.push({ type: "start", partial: successor, continuationInput: [receipt.message] });
+					if (boundary === "failed continuation") {
+						successor.stopReason = "error";
+						successor.errorMessage = "successor failed";
+						stream.push({ type: "error", reason: "error", error: successor });
+					} else stream.push({ type: "done", reason: "stop", message: successor });
+				} else stream.push({ type: "done", reason: "stop", message: response });
+				stream.end();
+			})();
+			return stream;
+		};
+		let restored: Awaited<ReturnType<typeof createHarness>> | undefined;
+		try {
+			await harness.session.prompt("consume only the provided receipt");
+			expect(execute).toHaveBeenCalledOnce();
+			const leafId = manager.getLeafId()!;
+			let session = harness.session;
+			if (boundary === "compact") await session.compact();
+			else if (boundary === "navigation") {
+				await session.navigateTree(consumedId);
+				session.newContext();
+				expect(session.messages).toContainEqual(
+					expect.objectContaining({ role: "toolResult", toolCallId: consumed.id }),
+				);
+				await session.navigateTree(leafId);
+			} else {
+				const file = boundary === "fork" ? manager.createBranchedSession(leafId)! : manager.getSessionFile()!;
+				restored = await createHarness({ sessionManager: SessionManager.open(file) });
+				session = restored.session;
+			}
+			session.newContext();
+			expect(
+				session.messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
+			).toEqual(boundary === "continuation" ? [filtered.id] : [filtered.id, late.id]);
+		} finally {
+			release();
+			restored?.cleanup();
+			harness.cleanup();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	},
+);
 
 it("normal AgentSession persists admission before effects, detaches, and reattaches with original identity", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "pi-native-async-journal-"));

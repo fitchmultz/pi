@@ -81,6 +81,8 @@ A message in the conversation. The `message` field contains an `AgentMessage`. S
 
 Assistant entries with `checkpoint: true` record completed native items before async tool side effects and when execution detaches/resumes. They are non-billable snapshots of the same `responseId`. Preserve their usage for context projection but exclude them from billing, response counts, and cache-request statistics. Context reconstruction coalesces them with final response content/usage. `responsesItem` retains the provider item; `executionStarted`, `executionArguments`, and `executionDetached` record admitted local execution. Missing results do not prove an operation never happened; recovery uses `resume`, never a repeated started `execute`.
 
+Optional `consumedToolResultIds` on a completed assistant entry names original tool-result entries included in that successful response's captured request or native continuation input. This branch-local proof survives reload, compaction, and forks. Journal ordering alone is not proof: a result can finish while an earlier request is streaming. Older entries without this metadata leave consumption unknown, so fresh windows conservatively retain those native receipts.
+
 A forced `before_agent_start` prompt affects provider requests for that run only; the transcript and context checkpoints retain structured state. Older full-prompt records with `replace: true` clear preceding prompt/tools during replay. The next run writes a structured replacement baseline rather than accumulating opaque prompt text.
 
 ```json

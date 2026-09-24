@@ -935,11 +935,24 @@ describe("session_before_auto_compact", () => {
 			await harness.session.prompt("q".repeat(28_000));
 			expect(harness.faux.state.callCount).toBe(1);
 			expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
-			expect(harness.eventsOfType("context_window_started")).toHaveLength(0);
+			expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionProjection().messages);
+			expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
 			expect(countType(harness, "context_edit")).toBe(0);
 			expect(harness.eventsOfType("compaction_end")).toMatchObject([
 				{ errorMessage: expect.stringContaining("Auto-compaction failed:") },
 			]);
+			harness.session.setAutoCompactionEnabled(false);
+			harness.setResponses([
+				(context) => {
+					const text = context.messages.map(getMessageText).join("\n");
+					expect(text).toContain("q".repeat(28_000));
+					expect(text).not.toContain("p".repeat(36_000));
+					expect(text).toContain("Context window");
+					return fauxAssistantMessage("continued after the committed cut");
+				},
+			]);
+			await harness.session.prompt("continue");
+			expect(harness.faux.state.callCount).toBe(2);
 		},
 	);
 

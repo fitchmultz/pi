@@ -413,6 +413,86 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it.each(["skipped", "blocked", "failed"] as const)(
+		"preserves a length-terminal sibling's reset veto after restore (%s)",
+		async (failure) => {
+			const reset = deferred<AgentToolResult>();
+			const execute = vi.fn<AgentTool["execute"]>(async (id) => {
+				if (id === call("reset").id) return reset.promise;
+				throw new Error("background failure");
+			});
+			const { agent, streams, events } = setup(execute);
+			agent.beforeToolCall = async ({ toolCall }) =>
+				failure === "blocked" && toolCall.id === call("sibling").id
+					? { block: true, reason: "background preflight denied" }
+					: undefined;
+			const provider = agent.streamFunction;
+			agent.streamFunction = async (...args) => {
+				const stream = await provider(...args);
+				if (streams.length > 1) finish(stream, assistant("answer"));
+				return stream;
+			};
+			let saved: typeof agent.state.messages = [];
+			const prepared: unknown[] = [];
+			agent.prepareNextTurnWithContext = async ({ newContext }) => {
+				if (newContext) prepared.push(newContext);
+				return undefined;
+			};
+			agent.finishTurn = ({ message }) => {
+				if (message.responseId === "length") {
+					// Snapshot the real persisted-message shape before the in-flight reset finishes.
+					saved = structuredClone(agent.state.messages);
+					reset.resolve({ ...result, newContext: { handoff: "resume" } });
+				}
+				return { action: "end" };
+			};
+			const run = agent.prompt("save then reset");
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("length");
+			await emitCall(streams[0], first, call("reset"));
+			await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+			first.content.push(call("sibling"));
+			if (failure !== "skipped") {
+				streams[0].push({
+					type: "toolcall_end",
+					contentIndex: 1,
+					toolCall: first.content[1] as ToolCall,
+					partial: first,
+				});
+				await vi.waitFor(() => expect(events.some((event) => event.type === "tool_execution_end")).toBe(true));
+			}
+			first.stopReason = "length";
+			streams[0].push({ type: "done", reason: "length", message: first });
+			streams[0].end();
+			await run;
+			expect(prepared).toEqual(failure === "skipped" ? [] : [{ handoff: "resume" }]);
+			expect(saved.filter((message) => message.role === "toolResult")).toMatchObject([
+				{ toolCallId: call("sibling").id, isError: true },
+			]);
+			expect(execute).toHaveBeenCalledTimes(failure === "failed" ? 2 : 1);
+
+			const resumed = vi.fn(async () => ({ ...result, newContext: { handoff: "resume" } }));
+			const reexecute = vi.fn(async () => result);
+			const restored = setup(reexecute, { resume: resumed });
+			restored.agent.state.messages = saved;
+			const restoredProvider = restored.agent.streamFunction;
+			restored.agent.streamFunction = async (...args) => {
+				const stream = await restoredProvider(...args);
+				finish(stream, assistant("restored-answer"));
+				return stream;
+			};
+			const restoredWindows: unknown[] = [];
+			restored.agent.prepareNextTurnWithContext = async ({ newContext }) => {
+				if (newContext) restoredWindows.push(newContext);
+				return undefined;
+			};
+			await restored.agent.continue();
+			expect(reexecute).not.toHaveBeenCalled();
+			expect(resumed).toHaveBeenCalledOnce();
+			expect(restoredWindows).toEqual(failure === "skipped" ? [] : [{ handoff: "resume" }]);
+		},
+	);
+
 	it("vetoes an already-completed native reset when a later synchronous checkpoint fails", async () => {
 		const { agent, streams, events, inputs } = setup(async (_id, args) => {
 			if ((args as { path: string }).path === "reset")

@@ -449,7 +449,8 @@ async function runLoop(
 				const result = restoredResults.get(call.id);
 				if (result) {
 					startedCalls.add(call.id);
-					if (result.isError && !(call.async && call.responsesItem?.async)) failedScopes.add(message);
+					if (result.isError && (result.executionSkipped || !(call.async && call.responsesItem?.async)))
+						failedScopes.add(message);
 				} else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
 			}
@@ -923,6 +924,7 @@ async function failToolCalls(
 		};
 		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
+		toolResultMessage.executionSkipped = true;
 		await emitToolResultMessage(toolResultMessage, emit);
 		messages.push(toolResultMessage);
 	}

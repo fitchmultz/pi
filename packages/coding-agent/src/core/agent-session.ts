@@ -435,6 +435,21 @@ function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
 	});
 }
 
+function providerToolResultIds(conversation: readonly unknown[]): Set<string> {
+	return new Set(
+		conversation.flatMap((message) =>
+			message &&
+			typeof message === "object" &&
+			"role" in message &&
+			message.role === "toolResult" &&
+			"toolCallId" in message &&
+			typeof message.toolCallId === "string"
+				? [message.toolCallId]
+				: [],
+		),
+	);
+}
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -804,21 +819,14 @@ export class AgentSession {
 		const prefix = [this._providerRequestPrefix, this._reportedUsagePrefix].find(
 			(candidate) => candidate?.response && ["stop", "length", "toolUse"].includes(candidate.response.stopReason),
 		);
-		const consumedResultIds = new Set(
-			prefix
-				? prefix.conversation.flatMap((message) =>
-						message &&
-						typeof message === "object" &&
-						"role" in message &&
-						message.role === "toolResult" &&
-						"toolCallId" in message &&
-						typeof message.toolCallId === "string"
-							? [message.toolCallId]
-							: [],
-					)
-				: [],
+		const consumedResultIds = providerToolResultIds(prefix?.conversation ?? []);
+		const consumedEntryIds = new Set(
+			this.sessionManager
+				.getBranch()
+				.flatMap((entry) => (entry.type === "message" ? (entry.consumedToolResultIds ?? []) : [])),
 		);
 		const retainedToolResultIds = projection.entries.flatMap((entry) =>
+			!consumedEntryIds.has(entry.sourceEntry.id) &&
 			entry.messages.some(
 				(message) =>
 					message.role === "toolResult" &&
@@ -831,27 +839,32 @@ export class AgentSession {
 		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null, retainedToolResultIds);
 		this._reportedUsagePrefix = null;
 		const appended: SessionEntry[] = [];
-		this._extensionRunner.runContextWindowHooks(
-			() => ({
-				contextEntries: this.sessionManager.buildSessionProjection().entries,
-				pendingMessages: this._pendingProviderMessages.slice(),
-			}),
-			(drafts) => {
-				this._createBoundaryPreviewManager(drafts);
-				appended.push(...this._applyBoundaryDrafts(this.sessionManager, drafts));
-			},
-		);
-		this._refreshFinalizedContext();
-		for (const entry of appended) this._emit({ type: "entry_appended", entry });
-		const messages = this.agent.state.messages;
-
-		const marker = messages.find((message) => message.role === "custom" && message.customType === "context-window")!;
-		this._emit({ type: "message_start", message: marker });
-		this._emit({ type: "message_end", message: marker });
-		this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
+		try {
+			this._extensionRunner.runContextWindowHooks(
+				() => ({
+					contextEntries: this.sessionManager.buildSessionProjection().entries,
+					pendingMessages: this._pendingProviderMessages.slice(),
+				}),
+				(drafts) => {
+					this._createBoundaryPreviewManager(drafts);
+					appended.push(...this._applyBoundaryDrafts(this.sessionManager, drafts));
+				},
+			);
+		} finally {
+			// The marker and accepted edits are committed even when a later hook stops dispatch.
+			this._refreshFinalizedContext();
+			this._restorePendingProviderMessages(this.agent.state);
+			for (const entry of appended) this._emit({ type: "entry_appended", entry });
+			const marker = this.agent.state.messages.find(
+				(message) => message.role === "custom" && message.customType === "context-window",
+			)!;
+			this._emit({ type: "message_start", message: marker });
+			this._emit({ type: "message_end", message: marker });
+			this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
+		}
 
 		return {
-			messages: messages.slice(),
+			messages: this.agent.state.messages.slice(),
 			tools: this.agent.state.tools.slice(),
 		};
 	}
@@ -1212,7 +1225,7 @@ export class AgentSession {
 		return context;
 	}
 
-	private _persistMessage(message: AgentMessage): void {
+	private _persistMessage(message: AgentMessage, consumedToolResultIds?: string[]): void {
 		let entryId: string | undefined;
 		if (message.role === "custom") {
 			entryId = this.sessionManager.appendCustomMessageEntry(
@@ -1231,6 +1244,8 @@ export class AgentSession {
 				message.role === "assistant" && message.content.some((block) => block.type === "toolCall" && block.async)
 					? structuredClone(message)
 					: message,
+				false,
+				consumedToolResultIds,
 			);
 		}
 		if (entryId) this._entryIdsByMessage.set(message, entryId);
@@ -1457,6 +1472,26 @@ export class AgentSession {
 		}
 		const requestEnded = event.type === "message_end" && event.message.role === "assistant";
 		const requestPrefix = requestEnded ? this._providerRequestPrefix : undefined;
+		// Capture proof before message_end handlers can change context. Journal order cannot
+		// distinguish a result in this request from one completed while it was streaming.
+		const consumedCallIds =
+			requestPrefix &&
+			event.type === "message_end" &&
+			event.message.role === "assistant" &&
+			["stop", "length", "toolUse"].includes(event.message.stopReason)
+				? providerToolResultIds(requestPrefix.conversation)
+				: undefined;
+		const consumedToolResultIds = consumedCallIds?.size
+			? this.sessionManager
+					.getBranch()
+					.flatMap((entry) =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						consumedCallIds.has(entry.message.toolCallId)
+							? [entry.id]
+							: [],
+					)
+			: undefined;
 		const responseSnapshot =
 			event.type === "message_end" && event.message.role === "assistant"
 				? snapshotProviderConversation([event.message])[0]
@@ -1551,7 +1586,7 @@ export class AgentSession {
 					this._pendingProviderMessages.push(event.message);
 					if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
 				} else {
-					this._persistMessage(event.message);
+					this._persistMessage(event.message, consumedToolResultIds);
 				}
 				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 			}

@@ -601,6 +601,8 @@ export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails>
 			usage?: Usage;
 			/** Actual executor time, excluding validation, preflight and result hooks. Absent when never executed. */
 			elapsedMs?: number;
+			/** Foreground scheduling skipped this call (for example, truncated arguments), rather than native work failing. */
+			executionSkipped?: boolean;
 			isError: boolean;
 			timestamp: number; // Unix timestamp in milliseconds
 		}

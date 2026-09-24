@@ -75,6 +75,8 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	message: AgentMessage;
 	/** Non-billable completed-item snapshot saved before an early tool effect. */
 	checkpoint?: boolean;
+	/** Original result entry IDs present in this successful assistant response's request input. */
+	consumedToolResultIds?: string[];
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -587,24 +589,27 @@ export function buildContextEntries(
 	}
 
 	const contextEntries: SessionEntry[] = [compaction];
-	let foundFirstKept = false;
 	const firstKept = fullPath.find((entry) => entry.id === compaction.firstKeptEntryId);
 	const firstKeptResponseId =
 		firstKept?.type === "message" && firstKept.message.role === "assistant"
 			? firstKept.message.responseId
 			: undefined;
-	for (let i = 0; i < compactionIdx; i++) {
-		const entry = path[i];
-		if (
+	let firstKeptIndex = path.findIndex(
+		(entry) =>
 			entry.id === compaction.firstKeptEntryId ||
 			(firstKeptResponseId &&
 				entry.type === "message" &&
 				entry.message.role === "assistant" &&
-				entry.message.responseId === firstKeptResponseId)
-		) {
-			foundFirstKept = true;
-		}
-		if (foundFirstKept && !(entry.type === "message" && entry.message.role === "system")) {
+				entry.message.responseId === firstKeptResponseId),
+	);
+	if (firstKeptIndex < 0 && firstKept) {
+		// A saved checkpoint anchor may have coalesced into a response before this window.
+		const keptIds = new Set(fullPath.slice(fullPath.indexOf(firstKept)).map((entry) => entry.id));
+		firstKeptIndex = path.findIndex((entry) => keptIds.has(entry.id));
+	}
+	for (let i = firstKeptIndex; i >= 0 && i < compactionIdx; i++) {
+		const entry = path[i];
+		if (!(entry.type === "message" && entry.message.role === "system")) {
 			contextEntries.push(entry);
 		}
 	}
@@ -1441,7 +1446,11 @@ export class SessionManager {
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(message: Message | CustomMessage | BashExecutionMessage, checkpoint = false): string {
+	appendMessage(
+		message: Message | CustomMessage | BashExecutionMessage,
+		checkpoint = false,
+		consumedToolResultIds?: string[],
+	): string {
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
@@ -1449,6 +1458,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			message,
 			...(checkpoint ? { checkpoint: true } : {}),
+			...(consumedToolResultIds?.length ? { consumedToolResultIds: [...consumedToolResultIds] } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
