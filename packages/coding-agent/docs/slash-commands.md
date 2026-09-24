@@ -10,6 +10,7 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 |---|---|
 | `/settings` | Open settings |
 | `/compact-view [on\|off\|toggle]` | Group tools and updates into Activity rows; remember the default for future starts |
+| `/topview [on\|off]` | Toggle newest-first conversation display; temporarily uses fullscreen |
 | `/model [provider/model]` | Select a model |
 | `/thinking [level]` | Set the thinking level |
 | `/scoped-models` | Configure the models used by interactive cycling |

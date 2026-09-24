@@ -437,6 +437,8 @@ export class InteractiveMode {
 	private chatContainer: ChatContainer;
 	private documentContainer: Container;
 	private transcriptScrollView: TuiLayouts.ScrollView | undefined;
+	private transcriptOrder: "oldest-first" | "newest-first" = "oldest-first";
+	private tuiModeBeforeNewestFirst: TuiMode | undefined;
 	private fullscreenLayoutRoot: Component | undefined;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
@@ -843,21 +845,21 @@ export class InteractiveMode {
 		if (this.chatContainer.children.length > 0) {
 			this.chatContainer.addChild(new Spacer(1));
 		}
-		this.chatContainer.addChild(new DynamicBorder());
+		const panel = new Container();
+		panel.addChild(new DynamicBorder());
 		if (this.settingsManager.getCollapseChangelog()) {
 			const versionMatch = this.changelogMarkdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
 			const latestVersion = versionMatch ? versionMatch[1] : this.version;
 			const condensedText = `Updated to v${latestVersion}. Use ${theme.bold("/changelog")} to view full changelog.`;
-			this.chatContainer.addChild(new Text(condensedText, 1, 0));
+			panel.addChild(new Text(condensedText, 1, 0));
 		} else {
-			this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(
-				new Markdown(this.changelogMarkdown.trim(), 1, 0, this.getMarkdownThemeWithSettings()),
-			);
-			this.chatContainer.addChild(new Spacer(1));
+			panel.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+			panel.addChild(new Spacer(1));
+			panel.addChild(new Markdown(this.changelogMarkdown.trim(), 1, 0, this.getMarkdownThemeWithSettings()));
+			panel.addChild(new Spacer(1));
 		}
-		this.chatContainer.addChild(new DynamicBorder());
+		panel.addChild(new DynamicBorder());
+		this.chatContainer.addChild(panel);
 	}
 
 	private mountInteractiveTui(tui: TuiMainScreen | TuiAltScreen, components: readonly Component[]): void {
@@ -871,10 +873,35 @@ export class InteractiveMode {
 	private stopInteractiveTui(fullscreenExitOutput: FullscreenExitOutput): void {
 		if (this.renderer.mode === "fullscreen" && fullscreenExitOutput === "transcript") {
 			while (this.renderer.hasOverlayEntries) this.renderer.hideOverlay();
+			this.updateTranscriptOrderPresentation("oldest-first");
 			this.switchTuiMode("regular", false, false);
 			this.renderer.renderNow();
 		}
 		this.ui.stop({ preserveScreen: this.renderer.mode === "fullscreen" });
+	}
+
+	private updateTranscriptOrderPresentation(order: "oldest-first" | "newest-first"): void {
+		this.transcriptOrder = order;
+		this.chatContainer.setTranscriptOrder(order);
+		this.documentContainer.children =
+			order === "newest-first"
+				? [this.chatContainer, this.headerContainer, this.loadedResourcesContainer]
+				: [this.headerContainer, this.loadedResourcesContainer, this.chatContainer];
+		this.transcriptScrollView?.setFollow(order === "newest-first" ? "start" : "end");
+		if (this.renderer instanceof TuiAltScreen) this.renderer.resetTranscriptNavigation();
+	}
+
+	private setTranscriptOrder(order: "oldest-first" | "newest-first"): void {
+		if (order === this.transcriptOrder) return;
+		const previousMode = this.renderer.mode;
+		const targetMode = order === "newest-first" ? "fullscreen" : (this.tuiModeBeforeNewestFirst ?? previousMode);
+		if (!this.switchTuiMode(targetMode)) {
+			throw new Error("Close active overlays before changing transcript order");
+		}
+		this.tuiModeBeforeNewestFirst = order === "newest-first" ? previousMode : undefined;
+		this.updateTranscriptOrderPresentation(order);
+		this.ui.invalidate();
+		this.ui.requestRender(true);
 	}
 
 	private switchTuiMode(mode: TuiMode, restoreProgress = true, startRenderer = true): boolean {
@@ -3205,7 +3232,8 @@ export class InteractiveMode {
 	showExtensionError(extensionPath: string, error: string, stack?: string): void {
 		const errorMsg = `Extension "${extensionPath}" error: ${error}`;
 		const errorText = new Text(theme.fg("error", errorMsg), 1, 0);
-		this.chatContainer.addChild(errorText);
+		const panel = new Container();
+		panel.addChild(errorText);
 		if (stack) {
 			// Show stack trace in dim color, indented
 			const stackLines = stack
@@ -3214,9 +3242,10 @@ export class InteractiveMode {
 				.map((line) => theme.fg("dim", `  ${line.trim()}`))
 				.join("\n");
 			if (stackLines) {
-				this.chatContainer.addChild(new Text(stackLines, 1, 0));
+				panel.addChild(new Text(stackLines, 1, 0));
 			}
 		}
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 
@@ -3360,6 +3389,21 @@ export class InteractiveMode {
 			if (!text) return;
 
 			// Handle commands
+			if (/^\/topview(?:\s|$)/.test(text)) {
+				const action = text.slice("/topview".length).trim();
+				this.editor.setText("");
+				if (action !== "" && action !== "on" && action !== "off") {
+					this.showWarning("Usage: /topview [on|off]");
+					return;
+				}
+				const enabled = action === "on" || (action === "" && this.transcriptOrder === "oldest-first");
+				try {
+					this.setTranscriptOrder(enabled ? "newest-first" : "oldest-first");
+				} catch (error) {
+					this.showWarning(error instanceof Error ? error.message : String(error));
+				}
+				return;
+			}
 			if (/^\/compact-view(?:\s|$)/.test(text)) {
 				const action = text.slice("/compact-view".length).trim() || "toggle";
 				this.editor.setText("");
@@ -5006,21 +5050,21 @@ export class InteractiveMode {
 		const note = release.note?.trim();
 
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
-		this.chatContainer.addChild(
-			new Text(`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`, 1, 0),
-		);
+		const panel = new Container();
+		panel.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		panel.addChild(new Text(`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`, 1, 0));
 		if (note) {
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(
+			panel.addChild(new Spacer(1));
+			panel.addChild(
 				new Markdown(note, 1, 0, this.getMarkdownThemeWithSettings(), {
 					color: (text) => theme.fg("muted", text),
 				}),
 			);
-			this.chatContainer.addChild(new Spacer(1));
+			panel.addChild(new Spacer(1));
 		}
-		this.chatContainer.addChild(new Text(changelogLine, 1, 0));
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		panel.addChild(new Text(changelogLine, 1, 0));
+		panel.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 
@@ -5030,15 +5074,17 @@ export class InteractiveMode {
 		const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
 
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
-		this.chatContainer.addChild(
+		const panel = new Container();
+		panel.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		panel.addChild(
 			new Text(
 				`${theme.bold(theme.fg("warning", "Package Updates Available"))}\n${updateInstruction}\n${theme.fg("muted", "Packages:")}\n${packageLines}`,
 				1,
 				0,
 			),
 		);
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		panel.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 
@@ -5447,6 +5493,11 @@ export class InteractiveMode {
 						this.settingsManager.setShowTerminalProgress(enabled);
 					},
 					onTuiModeChange: (mode) => {
+						if (mode === "regular" && this.transcriptOrder === "newest-first") {
+							selector?.getSettingsList().updateValue("tui-mode", this.ui.mode);
+							this.showStatus("Use /topview off before leaving fullscreen mode");
+							return;
+						}
 						if (!this.switchTuiMode(mode)) {
 							selector?.getSettingsList().updateValue("tui-mode", this.ui.mode);
 							this.showStatus("Close active overlays before changing TUI mode");
@@ -7036,11 +7087,13 @@ export class InteractiveMode {
 				: "No changelog entries found.";
 
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(changelogMarkdown, 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new DynamicBorder());
+		const panel = new Container();
+		panel.addChild(new DynamicBorder());
+		panel.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+		panel.addChild(new Spacer(1));
+		panel.addChild(new Markdown(changelogMarkdown, 1, 1, this.getMarkdownThemeWithSettings()));
+		panel.addChild(new DynamicBorder());
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 
@@ -7167,11 +7220,13 @@ export class InteractiveMode {
 		}
 
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(hotkeys.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new DynamicBorder());
+		const panel = new Container();
+		panel.addChild(new DynamicBorder());
+		panel.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
+		panel.addChild(new Spacer(1));
+		panel.addChild(new Markdown(hotkeys.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
+		panel.addChild(new DynamicBorder());
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 

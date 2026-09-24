@@ -16,6 +16,20 @@ import { CustomEntryComponent } from "./custom-entry.ts";
 import { CustomMessageComponent } from "./custom-message.ts";
 import { ToolExecutionComponent } from "./tool-execution.ts";
 
+/** Reverse component blocks, keeping each block's leading spacing and rendered lines intact. */
+function newestFirst(children: readonly Component[]): Component[] {
+	const blocks: Component[][] = [];
+	let block: Component[] = [];
+	for (const child of children) {
+		block.push(child);
+		if (!(child instanceof Spacer)) {
+			blocks.push(block);
+			block = [];
+		}
+	}
+	return [...blocks.reverse().flat(), ...block];
+}
+
 class ActivityComponent extends Container {
 	readonly content = new Container();
 	private expanded: boolean;
@@ -70,6 +84,7 @@ class ActivityComponent extends Container {
 /** Keep transcript children flat for insertion, live updates and settings; group only their presentation. */
 export class ChatContainer extends Container {
 	private compactView = false;
+	private transcriptOrder: "oldest-first" | "newest-first" = "oldest-first";
 	private expanded = false;
 	private readonly activity = new WeakSet<Component>();
 	private groups = new Map<Component, ActivityComponent>();
@@ -84,6 +99,10 @@ export class ChatContainer extends Container {
 		this.compactView = compactView;
 	}
 
+	setTranscriptOrder(order: "oldest-first" | "newest-first"): void {
+		this.transcriptOrder = order;
+	}
+
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		for (const group of this.groups.values()) group.setExpanded(expanded);
@@ -96,7 +115,11 @@ export class ChatContainer extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (!this.compactView) return super.render(width);
+		if (!this.compactView) {
+			if (this.transcriptOrder === "oldest-first") return super.render(width);
+			this.presentation.children = newestFirst(this.children);
+			return this.presentation.render(width);
+		}
 		this.presentation.clear();
 		const groups = new Map<Component, ActivityComponent>();
 		let group: ActivityComponent | undefined;
@@ -132,10 +155,18 @@ export class ChatContainer extends Container {
 		}
 		this.presentation.children.push(...spacers);
 		this.groups = groups;
+		if (this.transcriptOrder === "newest-first") {
+			this.presentation.children = newestFirst(this.presentation.children);
+			for (const activity of groups.values()) {
+				activity.content.children = newestFirst(activity.content.children);
+			}
+		}
 		return this.presentation.render(width);
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
-		return this.compactView ? this.presentation.handleMouse(event) : super.handleMouse(event);
+		return this.compactView || this.transcriptOrder === "newest-first"
+			? this.presentation.handleMouse(event)
+			: super.handleMouse(event);
 	}
 }
