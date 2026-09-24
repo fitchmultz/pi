@@ -1524,7 +1524,12 @@ async function* parseWebSocket(
 
 	const onClose: WebSocketListener = (event) => {
 		recordWebSocketClose(diagnostics, event);
-		if (sawCompletion && !control?.waiting) {
+		// A clean successor gap leaves the parent complete; unresolved steering can continue on a fresh request.
+		if (
+			sawCompletion &&
+			(!control?.waiting ||
+				(!failed && diagnostics.details.closeCode === 1000 && diagnostics.details.closeWasClean === true))
+		) {
 			done = true;
 			wake();
 			return;
