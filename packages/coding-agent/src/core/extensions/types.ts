@@ -1041,6 +1041,18 @@ export interface ThinkingLevelSelectEvent {
 /** Synchronously resolve the working directory for native Bash execution. */
 export type BashCwdHook = (cwd: string) => string;
 
+/** Final fresh-window projection, before canonical refresh or provider dispatch. */
+export interface ContextWindowHookEvent {
+	contextEntries: ProjectedSessionEntry[];
+	pendingMessages: AgentMessage[];
+}
+
+/** Synchronous content edits; originals remain recoverable from the session journal. */
+export type ContextWindowHook = (
+	event: ContextWindowHookEvent,
+	ctx: ExtensionContext,
+) => ContextEditEntryDraft[] | undefined;
+
 /** Fired when user executes a bash command via ! or !! prefix */
 export interface UserBashEvent {
 	type: "user_bash";
@@ -1616,6 +1628,9 @@ export interface ExtensionAPI {
 	 */
 	registerBashCwdHook(hook: BashCwdHook): void;
 
+	/** Shape the final fresh window synchronously using validated context edits. Errors stop rollover. */
+	registerContextWindowHook(hook: ContextWindowHook): void;
+
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
 	// =========================================================================
@@ -2126,6 +2141,7 @@ export interface Extension {
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool>;
 	bashCwdHooks?: BashCwdHook[];
+	contextWindowHooks?: ContextWindowHook[];
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;

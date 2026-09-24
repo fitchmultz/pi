@@ -14,16 +14,16 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness } from "./harness.ts";
 
-const toolCall = (): ToolCall => ({
+const toolCall = (id = "call"): ToolCall => ({
 	type: "toolCall",
-	id: "call|fc_call",
+	id: `${id}|fc_${id}`,
 	name: "work",
 	arguments: { path: "original" },
 	async: true,
 	responsesItem: {
 		type: "function_call",
-		id: "fc_call",
-		call_id: "call",
+		id: `fc_${id}`,
+		call_id: id,
 		name: "work",
 		arguments: '{"path":"original"}',
 		async: true,
@@ -33,6 +33,85 @@ const toolCall = (): ToolCall => ({
 const assistant = (call = toolCall()): AssistantMessage =>
 	structuredClone(fauxAssistantMessage([call], { responseId: "response", stopReason: "toolUse" }));
 const result: AgentToolResult = { content: [{ type: "text", text: "real result" }], details: undefined };
+
+it("finalizes synchronous window edits in registration order without rewriting history", async () => {
+	const observed: string[] = [];
+	const harness = await createHarness({
+		extensionFactories: [
+			(pi) => {
+				for (const text of ["first excerpt", "final excerpt"]) {
+					pi.registerContextWindowHook((event) => {
+						const entry = event.contextEntries.find((entry) =>
+							entry.messages.some((message) => message.role === "toolResult"),
+						)!;
+						observed.push(JSON.stringify(entry.messages));
+						return [{ type: "context_edit", targetId: entry.sourceEntry.id, replacement: { content: text } }];
+					});
+				}
+			},
+		],
+	});
+	try {
+		harness.sessionManager.appendMessage(assistant());
+		const id = harness.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: toolCall().id,
+			toolName: "work",
+			content: result.content,
+			isError: true,
+			timestamp: 1,
+		});
+		harness.session.newContext({ handoff: "continue" });
+		expect(observed[0]).toContain("real result");
+		expect(observed[1]).toContain("first excerpt");
+		expect(harness.session.messages).toContainEqual(
+			expect.objectContaining({
+				role: "toolResult",
+				toolCallId: toolCall().id,
+				isError: true,
+				content: [{ type: "text", text: "final excerpt" }],
+			}),
+		);
+		expect(harness.sessionManager.getEntry(id)).toMatchObject({ message: { content: result.content } });
+	} finally {
+		harness.cleanup();
+	}
+});
+
+it("validates a final-window edit batch before publishing any of it", async () => {
+	const harness = await createHarness({
+		extensionFactories: [
+			(pi) => {
+				pi.registerContextWindowHook((event) => {
+					const targetId = event.contextEntries.find((entry) =>
+						entry.messages.some((message) => message.role === "toolResult"),
+					)!.sourceEntry.id;
+					return [targetId, "missing"].map((id) => ({
+						type: "context_edit",
+						targetId: id,
+						replacement: { content: "excerpt" },
+					}));
+				});
+			},
+		],
+	});
+	try {
+		harness.sessionManager.appendMessage(assistant());
+		harness.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: toolCall().id,
+			toolName: "work",
+			content: result.content,
+			isError: false,
+			timestamp: 1,
+		});
+		expect(() => harness.session.newContext()).toThrow();
+		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "context_edit")).toHaveLength(0);
+		expect(harness.eventsOfType("context_window_started")).toHaveLength(0);
+	} finally {
+		harness.cleanup();
+	}
+});
 
 describe("native journal projection", () => {
 	it("coalesces late execution checkpoints without losing later response content or usage", () => {
@@ -416,6 +495,117 @@ it.each(["stop", "error"] as const)(
 		}
 	},
 );
+
+it("uses the last successful prefix after a failed response without dropping a newly completed result", async () => {
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let resultWritten!: () => void;
+	const completed = new Promise<void>((resolve) => {
+		resultWritten = resolve;
+	});
+	const consumedCall = toolCall("consumed");
+	const lateCall = toolCall("late");
+	const harness = await createHarness({
+		settings: { compaction: { enabled: false }, retry: { enabled: false } },
+		tools: [
+			{
+				name: "work",
+				label: "Work",
+				description: "Work",
+				parameters: Type.Object({ path: Type.String() }),
+				async: true,
+				execute: async () => {
+					await gate;
+					return result;
+				},
+			},
+		],
+	});
+	harness.session.agent.state.model = {
+		...harness.getModel(),
+		api: "openai-responses",
+		compat: { supportsAsyncTools: true },
+	} as Model<"openai-responses">;
+	harness.sessionManager.appendMessage(assistant(consumedCall));
+	harness.sessionManager.appendMessage({
+		role: "toolResult",
+		toolCallId: consumedCall.id,
+		toolName: "work",
+		content: result.content,
+		isError: false,
+		timestamp: 1,
+	});
+	harness.session.refreshContext();
+	harness.session.subscribe((event) => {
+		if (
+			event.type === "message_end" &&
+			event.message.role === "toolResult" &&
+			event.message.toolCallId === lateCall.id
+		)
+			resultWritten();
+	});
+	const finishTurn = harness.session.agent.finishTurn;
+	harness.session.agent.finishTurn = async (turn, signal) => {
+		await finishTurn?.(turn, signal);
+		if (turn.message.responseId === "success") return { action: "continue" };
+		if (turn.message.responseId === "failed") harness.session.newContext({ handoff: "continue with the new result" });
+		return undefined;
+	};
+	const inputs: Array<unknown[]> = [];
+	harness.session.agent.streamFunction = (model, context) => {
+		inputs.push(structuredClone(context.messages));
+		const request = inputs.length;
+		const stopReason = request === 1 ? "toolUse" : request === 2 ? "error" : "stop";
+		const message: AssistantMessage = {
+			...fauxAssistantMessage(request === 1 ? [lateCall] : "answer", {
+				responseId: request === 1 ? "success" : request === 2 ? "failed" : "fresh",
+				stopReason,
+			}),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			errorMessage: request === 2 ? "response failed" : undefined,
+		};
+		message.usage = { ...message.usage, input: 100, totalTokens: 100 };
+		const stream = createAssistantMessageEventStream();
+		void (async () => {
+			stream.push({ type: "start", partial: message });
+			if (request === 1)
+				stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: lateCall, partial: message });
+			if (request === 2) {
+				release();
+				await completed;
+				// Failed native steering continues in a new request, before agent_end clears the failed prefix.
+				stream.push({
+					type: "steering",
+					message: { role: "user", content: "continue", timestamp: 2 },
+					status: "failed",
+				});
+				stream.push({ type: "error", reason: "error", error: message });
+			} else stream.push({ type: "done", reason: request === 1 ? "toolUse" : "stop", message });
+			stream.end();
+		})();
+		return stream;
+	};
+	try {
+		await harness.session.prompt("consume the old result and start new work");
+		expect(inputs).toHaveLength(3);
+		expect(inputs[0]).toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: consumedCall.id }));
+		expect(inputs[1]).not.toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: lateCall.id }));
+		expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
+		expect(inputs[2]).toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: lateCall.id, content: result.content }),
+		);
+		expect(inputs[2]).not.toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: consumedCall.id }),
+		);
+	} finally {
+		release();
+		harness.cleanup();
+	}
+});
 
 it("normal AgentSession persists admission before effects, detaches, and reattaches with original identity", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "pi-native-async-journal-"));

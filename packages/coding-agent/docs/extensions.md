@@ -126,6 +126,10 @@ A `user_bash` handler that returns `undefined` passes the command to the next ha
 
 `session_before_auto_compact` runs before automatic threshold/overflow summary preparation and authentication. `event.pendingMessages` contains provider-bound inputs not yet in `branchEntries`; `reason`, `willRetry`, and `signal` describe the trigger. Return `{ newContext: { handoff } }` to start a native `context_window` instead of a summary. The last handler result wins; one extension should own this policy. Manual `/compact` does not fire this hook. See [Compaction](compaction.md).
 
+`pi.registerContextWindowHook((event, ctx) => drafts)` synchronously shapes every fresh window after its marker and final retained tool receipts are selected. `event.contextEntries` contains the projected messages and their journal provenance; `event.pendingMessages` contains provider-bound inputs not yet journaled. Return only `ContextEditEntryDraft[]` or `undefined`. Each hook sees preceding hooks' edits. Use projected content for excerpts and `sourceEntry.id` as the edit target; original entries remain in history.
+
+Pi validates each hook's entire draft batch before appending its edits, then refreshes canonical context before provider dispatch. Promises, invalid drafts, and thrown errors stop the operation; the window marker and earlier hooks' accepted edits may already be persisted. Hooks cannot request another window or continuation. This synchronous boundary also sees receipts completed during an awaited automatic-compaction handler.
+
 `session_checkpoint` is the optional awaited persistence barrier for [working-session checkpoints](checkpoint.md). Use its signal and invalidation callback to keep owned background work quiescent while a receipt is held. It does not run shutdown just to save.
 
 ### Retry notifications

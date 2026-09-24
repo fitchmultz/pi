@@ -40,9 +40,11 @@ import type {
 	CacheWarmingDecisionEvent,
 	CacheWarmingDecisionEventResult,
 	CompactOptions,
+	ContextEditEntryDraft,
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
+	ContextWindowHookEvent,
 	ContextWithSystemEvent,
 	EntryRenderer,
 	Extension,
@@ -1022,6 +1024,30 @@ export class ExtensionRunner {
 			return this.reloadHandler();
 		};
 		return context;
+	}
+
+	runContextWindowHooks(
+		buildEvent: () => ContextWindowHookEvent,
+		apply: (drafts: ContextEditEntryDraft[]) => void,
+	): void {
+		const ctx = this.createContext();
+		for (const extension of this.extensions) {
+			for (const hook of extension.contextWindowHooks ?? []) {
+				const result: unknown = hook(buildEvent(), ctx);
+				if (result === undefined) continue;
+				if (result instanceof Promise) {
+					void result.catch(() => {});
+					throw new Error("Context window hooks must return synchronously");
+				}
+				if (
+					!Array.isArray(result) ||
+					result.some((draft) => !draft || typeof draft !== "object" || draft.type !== "context_edit")
+				) {
+					throw new Error("Context window hooks may only return context_edit drafts");
+				}
+				apply(result);
+			}
+		}
 	}
 
 	emitBoundary(

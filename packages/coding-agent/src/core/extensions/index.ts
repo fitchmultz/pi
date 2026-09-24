@@ -62,6 +62,8 @@ export type {
 	// Event Results
 	ContextEventResult,
 	ContextUsage,
+	ContextWindowHook,
+	ContextWindowHookEvent,
 	ContextWithSystemEvent,
 	CustomEntryDraft,
 	CustomMessageEntryDraft,

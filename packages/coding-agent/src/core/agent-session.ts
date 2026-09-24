@@ -800,10 +800,12 @@ export class AgentSession {
 					: [],
 			),
 		);
-		const prefix = this._providerRequestPrefix ?? this._reportedUsagePrefix;
-		// A prepared or failed request is not proof the model consumed its input.
+		// A prepared or failed request must not hide earlier proof of consumed input.
+		const prefix = [this._providerRequestPrefix, this._reportedUsagePrefix].find(
+			(candidate) => candidate?.response && ["stop", "length", "toolUse"].includes(candidate.response.stopReason),
+		);
 		const consumedResultIds = new Set(
-			prefix?.response && ["stop", "length", "toolUse"].includes(prefix.response.stopReason)
+			prefix
 				? prefix.conversation.flatMap((message) =>
 						message &&
 						typeof message === "object" &&
@@ -828,7 +830,19 @@ export class AgentSession {
 		);
 		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null, retainedToolResultIds);
 		this._reportedUsagePrefix = null;
+		const appended: SessionEntry[] = [];
+		this._extensionRunner.runContextWindowHooks(
+			() => ({
+				contextEntries: this.sessionManager.buildSessionProjection().entries,
+				pendingMessages: this._pendingProviderMessages.slice(),
+			}),
+			(drafts) => {
+				this._createBoundaryPreviewManager(drafts);
+				appended.push(...this._applyBoundaryDrafts(this.sessionManager, drafts));
+			},
+		);
 		this._refreshFinalizedContext();
+		for (const entry of appended) this._emit({ type: "entry_appended", entry });
 		const messages = this.agent.state.messages;
 
 		const marker = messages.find((message) => message.role === "custom" && message.customType === "context-window")!;
@@ -3920,6 +3934,7 @@ export class AgentSession {
 		let fromExtension = false;
 		let signal: AbortSignal | undefined;
 		let cancelledByExtension = false;
+		let claimedWindow = false;
 
 		try {
 			if (!model) {
@@ -3953,6 +3968,7 @@ export class AgentSession {
 				});
 				signal.throwIfAborted();
 				if (claim?.newContext) {
+					claimedWindow = true;
 					const contextWindowStarted = !!this._consumeNewContext(claim.newContext);
 					this._emit({
 						type: "compaction_end",
@@ -3996,6 +4012,7 @@ export class AgentSession {
 				signal.throwIfAborted();
 
 				if (extensionResult?.newContext) {
+					claimedWindow = true;
 					const contextWindowStarted = !!this._consumeNewContext(extensionResult.newContext);
 					this._emit({
 						type: "compaction_end",
@@ -4121,6 +4138,7 @@ export class AgentSession {
 					fromExtension,
 				});
 			}
+			if (claimedWindow) throw error;
 			return false;
 		} finally {
 			if (signal?.aborted) this._pendingNewContext = undefined;

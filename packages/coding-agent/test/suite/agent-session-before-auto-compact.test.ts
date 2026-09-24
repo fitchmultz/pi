@@ -318,6 +318,21 @@ describe("session_before_auto_compact", () => {
 				],
 				extensionFactories: [
 					(pi) => {
+						pi.registerContextWindowHook((event) =>
+							event.contextEntries.flatMap((entry) =>
+								entry.messages.some(
+									(message) => message.role === "toolResult" && message.toolCallId === call.id,
+								)
+									? [
+											{
+												type: "context_edit" as const,
+												targetId: entry.sourceEntry.id,
+												replacement: { content: `${receipt} shaped at final cut` },
+											},
+										]
+									: [],
+							),
+						);
 						pi.on("message_end", async (event) => {
 							if (
 								completion === "duringMessageEnd" &&
@@ -413,7 +428,7 @@ describe("session_before_auto_compact", () => {
 			});
 			expect(observations[1]).toMatchObject({ windows: 1, pending: 0, text: expect.stringContaining(owner) });
 			if (completion === "afterHook") expect(observations[0].text).not.toContain(receipt);
-			else expect(observations[0].text).toContain(receipt);
+			else expect(observations[0].text).toContain(`${receipt} shaped at final cut`);
 			expect(observations[1].text).toContain(receipt);
 			expect(execute).toHaveBeenCalledOnce();
 			expect(
@@ -889,13 +904,44 @@ describe("session_before_auto_compact", () => {
 			throw new Error("disk full");
 		});
 
-		await expect(runAutoCompaction(harness)("threshold", false)).resolves.toBe(false);
+		await expect(runAutoCompaction(harness)("threshold", false)).rejects.toThrow("disk full");
 
 		expect(harness.eventsOfType("compaction_end")).toEqual([
 			expect.objectContaining({ errorMessage: "Auto-compaction failed: disk full" }),
 		]);
 		expect(failures).toEqual(["Auto-compaction failed: disk full"]);
 	});
+
+	it.each(["promise", "invalid draft", "exception"] as const)(
+		"stops provider dispatch when final-window shaping returns %s",
+		async (failure) => {
+			const harness = await createHarness({
+				models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
+				settings: { compaction: { reserveTokens: 5000 }, retry: { enabled: false } },
+				extensionFactories: [
+					claimRollover(),
+					(pi) => {
+						pi.registerContextWindowHook(() => {
+							if (failure === "exception") throw new Error("receipt capacity exhausted");
+							// Exercise runtime validation for extensions loaded without typechecking.
+							return (failure === "promise" ? Promise.resolve([]) : [{ type: "custom" }]) as never;
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("must not dispatch")]);
+			await harness.session.prompt("p".repeat(36_000));
+			await harness.session.prompt("q".repeat(28_000));
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+			expect(harness.eventsOfType("context_window_started")).toHaveLength(0);
+			expect(countType(harness, "context_edit")).toBe(0);
+			expect(harness.eventsOfType("compaction_end")).toMatchObject([
+				{ errorMessage: expect.stringContaining("Auto-compaction failed:") },
+			]);
+		},
+	);
 
 	it("retries an overflow exactly once", async () => {
 		const seen: Array<{ reason: string; willRetry: boolean }> = [];
