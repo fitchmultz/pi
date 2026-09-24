@@ -156,7 +156,8 @@ function layoutComponent(
 		);
 		const contentHeight = childBox.rect.height;
 		const viewportHeight = height === undefined ? contentHeight : Math.max(0, Math.floor(height));
-		node.state.updateLayout(contentHeight, viewportHeight, context.requestRender);
+		const contentLines = renderCached(context, node.component, contentWidth);
+		node.state.updateLayout(contentHeight, viewportHeight, context.requestRender, contentLines);
 		translateBox(childBox, previousScrollTop - node.state.scrollTop);
 		const scrollView = node.state as ScrollView;
 		if (node.state.primary || !context.primaryScrollView) context.primaryScrollView = scrollView;
@@ -168,7 +169,7 @@ function layoutComponent(
 			clip: childClip,
 			children: [childBox],
 			scrollView,
-			scrollContentLines: renderCached(context, node.component, contentWidth),
+			scrollContentLines: contentLines,
 			layer: 0,
 		};
 		childBox.parent = box;

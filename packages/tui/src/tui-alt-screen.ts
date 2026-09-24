@@ -137,7 +137,7 @@ interface ScrollbarTarget {
 	geometry: ScrollbarGeometry;
 }
 
-interface ScrollToEndIndicatorRect {
+interface ScrollToLatestIndicatorRect {
 	row: number;
 	column: number;
 	width: number;
@@ -179,6 +179,8 @@ export interface TuiAltScreenOptions {
 	 * primary scroll view while that view is scrolled away from its end.
 	 */
 	scrollToEndIndicator?: () => string;
+	/** Render a clickable jump-to-start label on the first row of a scrolled-away follow-start primary view. */
+	scrollToStartIndicator?: () => string;
 	/** Open an OSC 8 hyperlink activated with a primary-button click. */
 	openUrl?: (url: string) => void;
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
@@ -221,7 +223,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private selectionPressActive = false;
 	private scrollbarDrag?: ScrollbarDrag;
 	private scrollbarHover?: ScrollView;
-	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
+	private scrollToLatestIndicatorRect?: ScrollToLatestIndicatorRect;
 	private activeSearch?: ActiveSearch;
 	private pressedUrl?: string;
 	private selectionDragged = false;
@@ -242,6 +244,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly searchCurrentMatchStyle: (text: string) => string;
 	private readonly searchNavigationButtonStyle: (text: string, hovered: boolean) => string;
 	private readonly scrollToEndIndicator?: () => string;
+	private readonly scrollToStartIndicator?: () => string;
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
 	private copyOnSelect: boolean;
@@ -269,6 +272,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.searchNavigationButtonStyle = options.searchNavigationButtonStyle ?? ((text) => text);
 		this.scrollToEndIndicator = options.scrollToEndIndicator;
+		this.scrollToStartIndicator = options.scrollToStartIndicator;
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copyOnSelect = options.copyOnSelect ?? true;
@@ -281,7 +285,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	get isFollowingOutput(): boolean {
-		return this.getPrimaryScrollView().isFollowingEnd;
+		const scrollView = this.getPrimaryScrollView();
+		return scrollView.isFollowingStart || scrollView.isFollowingEnd;
 	}
 
 	getCopyOnSelect(): boolean {
@@ -481,6 +486,23 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.requestRender();
 	}
 
+	/** Clear navigation tied to the old transcript order and return to the configured follow edge. */
+	resetTranscriptNavigation(): void {
+		const scrollView = this.getPrimaryScrollView();
+		this.closeSearch();
+		this.clearTextSelection();
+		this.stopScrollbarHover();
+		this.stopScrollbarDrag();
+		this.clearComponentMouseGesture();
+		this.lastClick = undefined;
+		this.lastComponentClick = undefined;
+		this.scrollToLatestIndicatorRect = undefined;
+		if (scrollView.followStart) scrollView.scrollToStart();
+		else scrollView.scrollToEnd();
+		this.resetRenderState();
+		this.requestRender();
+	}
+
 	private scrollToPrompt(direction: -1 | 1): void {
 		if (!this.currentLayout) return;
 		const scrollView = this.getPrimaryScrollView();
@@ -574,6 +596,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const search = this.activeSearch;
 		if (!search) return false;
 		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
+		if (scrollView.followStart) {
+			search.anchorRow = scrollView.rebaseContentRow(search.anchorRow) ?? search.anchorRow;
+			const selected = search.matches[search.selectedIndex];
+			if (selected) {
+				const segments = selected.segments.flatMap((segment) => {
+					const row = scrollView.rebaseContentRow(segment.row);
+					return row === undefined ? [] : [{ ...segment, row }];
+				});
+				search.selectedKey =
+					segments.length === selected.segments.length ? getAltScreenSearchMatchKey({ segments }) : undefined;
+			}
+		}
 		const box = getScrollViewBox(layout, scrollView);
 		const lines = box?.scrollContentLines;
 		if (!lines || !search.query.trim()) {
@@ -913,7 +947,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		const overlay = this.dispatchMouseToOverlay(event);
 		if (!overlay.hit) {
-			if (this.handleScrollToEndIndicatorMouseEvent(raw)) return;
+			if (this.handleScrollToLatestIndicatorMouseEvent(raw)) return;
 			const scrollbarHandled = this.handleScrollbarMouseEvent(raw);
 			if (!this.scrollbarDrag) this.updateScrollbarHover(raw.x, raw.y);
 			if (scrollbarHandled) return;
@@ -1015,11 +1049,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return true;
 	}
 
-	private handleScrollToEndIndicatorMouseEvent(event: SgrMouseEvent): boolean {
-		const rect = this.scrollToEndIndicatorRect;
+	private handleScrollToLatestIndicatorMouseEvent(event: SgrMouseEvent): boolean {
+		const rect = this.scrollToLatestIndicatorRect;
 		if (!rect || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
 		if (event.y !== rect.row || event.x < rect.column || event.x >= rect.column + rect.width) return false;
-		this.scrollToBottom();
+		if (this.getPrimaryScrollView().followStart) this.scrollToTop();
+		else this.scrollToBottom();
 		return true;
 	}
 
@@ -1620,17 +1655,22 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data) || (data.length === 6 && data.startsWith("\x1b[M"));
 	}
 
-	private compositeScrollToEndIndicator(screen: string[], layout: LayoutFrame, width: number): string[] {
-		this.scrollToEndIndicatorRect = undefined;
+	private compositeScrollToLatestIndicator(screen: string[], layout: LayoutFrame, width: number): string[] {
+		this.scrollToLatestIndicatorRect = undefined;
 		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
-		if (!this.scrollToEndIndicator || !scrollView.followEnd || scrollView.isFollowingEnd) return screen;
+		const indicator = scrollView.followStart
+			? this.scrollToStartIndicator
+			: scrollView.followEnd
+				? this.scrollToEndIndicator
+				: undefined;
+		if (!indicator || scrollView.isFollowingStart || scrollView.isFollowingEnd) return screen;
 		const box = getScrollViewBox(layout, scrollView);
 		const clip = box?.clip;
 		if (!clip || clip.width <= 0 || clip.height <= 0) return screen;
-		const row = clip.y + clip.height - 1;
+		const row = scrollView.followStart ? clip.y : clip.y + clip.height - 1;
 		if (row >= screen.length || isImageLine(screen[row] ?? "")) return screen;
 		const scrollbarColumn = box ? getScrollbarGeometry(box)?.column : undefined;
-		const label = truncateToWidth(this.scrollToEndIndicator(), clip.width, "");
+		const label = truncateToWidth(indicator(), clip.width, "");
 		const labelWidth = visibleWidth(label);
 		const column = clip.x + Math.floor((clip.width - labelWidth) / 2);
 		const rightEdge = scrollbarColumn ?? clip.x + clip.width;
@@ -1640,7 +1680,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (textWidth === 0) return screen;
 		const result = [...screen];
 		result[row] = compositeTuiLine(result[row] ?? "", text, column, textWidth, width);
-		this.scrollToEndIndicatorRect = { row, column, width: textWidth };
+		this.scrollToLatestIndicatorRect = { row, column, width: textWidth };
 		return result;
 	}
 
@@ -1664,12 +1704,28 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const height = Math.max(1, this.terminal.rows);
 		const root = this.layoutRoot ?? this.implicitScrollView;
 		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
+		for (const point of new Set([
+			this.selectionAnchor,
+			this.selectionFocus,
+			this.selectionInitialRange?.start,
+			this.selectionInitialRange?.end,
+			this.lastClick,
+		])) {
+			if (!point?.scrollView?.followStart) continue;
+			const row = point.scrollView.rebaseContentRow(point.row);
+			if (row === undefined) {
+				this.clearTextSelection();
+				this.lastClick = undefined;
+				break;
+			}
+			point.row = row;
+		}
 		if (this.refreshSearch(nextLayout)) {
 			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
 		}
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		screen = this.applySearchHighlights(screen, nextLayout);
-		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
+		screen = this.compositeScrollToLatestIndicator(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
 		screen = this.applySelection(screen, nextLayout);
