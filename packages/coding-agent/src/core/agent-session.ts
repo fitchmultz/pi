@@ -788,13 +788,45 @@ export class AgentSession {
 		)
 			return undefined;
 
-		if (this.agent.state.pendingToolCalls.size > 0 || this.getPendingToolCalls().length > 0) {
-			this._pendingNewContext = next;
-			return undefined;
-		}
 		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
 		const usage = this.getContextUsage();
-		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null);
+		const projection = this.sessionManager.buildSessionProjection();
+		const nativeCallIds = new Set(
+			projection.messages.flatMap((message) =>
+				message.role === "assistant"
+					? message.content.flatMap((block) =>
+							block.type === "toolCall" && block.async && block.responsesItem ? [block.id] : [],
+						)
+					: [],
+			),
+		);
+		const prefix = this._providerRequestPrefix ?? this._reportedUsagePrefix;
+		// A prepared or failed request is not proof the model consumed its input.
+		const consumedResultIds = new Set(
+			prefix?.response && ["stop", "length", "toolUse"].includes(prefix.response.stopReason)
+				? prefix.conversation.flatMap((message) =>
+						message &&
+						typeof message === "object" &&
+						"role" in message &&
+						message.role === "toolResult" &&
+						"toolCallId" in message &&
+						typeof message.toolCallId === "string"
+							? [message.toolCallId]
+							: [],
+					)
+				: [],
+		);
+		const retainedToolResultIds = projection.entries.flatMap((entry) =>
+			entry.messages.some(
+				(message) =>
+					message.role === "toolResult" &&
+					nativeCallIds.has(message.toolCallId) &&
+					!consumedResultIds.has(message.toolCallId),
+			)
+				? [entry.sourceEntry.id]
+				: [],
+		);
+		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null, retainedToolResultIds);
 		this._reportedUsagePrefix = null;
 		this._refreshFinalizedContext();
 		const messages = this.agent.state.messages;
@@ -1093,7 +1125,9 @@ export class AgentSession {
 			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
 			if (entry.type === "context_window") return { hasPostCompactionUsage: true, useReportedUsage: false };
 			if (isContextUsageInvalidatingEntry(entry)) invalidated = true;
-			if (model && entry.type === "message" && entry.message.role === "assistant") {
+			// Execution checkpoints can arrive after a window boundary. Only the original
+			// final response anchors measured usage; keep walking to it or the boundary.
+			if (model && entry.type === "message" && !entry.checkpoint && entry.message.role === "assistant") {
 				const message = entry.message;
 				const entryId = entry.id;
 				if (
@@ -1416,12 +1450,13 @@ export class AgentSession {
 		if (requestEnded) this._skipNextProviderRequestPreflight = false;
 		if (event.type === "agent_end") this._providerRequestPrefix = undefined;
 		if (event.type === "message_start" && event.message.role === "assistant") {
-			if (this._providerRequestPrefix && event.continuationInput !== undefined) {
+			if (this._providerRequestPrefix) {
 				this._providerRequestPrefix = {
 					...this._providerRequestPrefix,
+					response: undefined,
 					conversation: [
 						...this._providerRequestPrefix.conversation,
-						...snapshotProviderConversation([...event.continuationInput]),
+						...snapshotProviderConversation([...(event.continuationInput ?? [])]),
 					],
 				};
 			}
@@ -1477,6 +1512,7 @@ export class AgentSession {
 			}
 			this._providerRequestPrefix = {
 				...requestPrefix,
+				response: message,
 				conversation: [...requestPrefix.conversation, responseSnapshot],
 			};
 		}
@@ -3890,11 +3926,6 @@ export class AgentSession {
 				return false;
 			}
 
-			// Live state can include a result whose message_end handlers still precede persistence.
-			// Require completed calls in the journal before capturing the automatic handoff.
-			const canStartContextWindow =
-				this.agent.state.pendingToolCalls.size === 0 &&
-				getPendingToolCalls(this.sessionManager.buildSessionProjection().messages).length === 0;
 			const pathEntries = this.sessionManager.getBranch();
 			abortController = new AbortController();
 			this._autoCompactionAbortController = abortController;
@@ -3922,7 +3953,7 @@ export class AgentSession {
 				});
 				signal.throwIfAborted();
 				if (claim?.newContext) {
-					const contextWindowStarted = canStartContextWindow && !!this._consumeNewContext(claim.newContext);
+					const contextWindowStarted = !!this._consumeNewContext(claim.newContext);
 					this._emit({
 						type: "compaction_end",
 						reason,
@@ -3965,8 +3996,7 @@ export class AgentSession {
 				signal.throwIfAborted();
 
 				if (extensionResult?.newContext) {
-					const contextWindowStarted =
-						canStartContextWindow && !!this._consumeNewContext(extensionResult.newContext);
+					const contextWindowStarted = !!this._consumeNewContext(extensionResult.newContext);
 					this._emit({
 						type: "compaction_end",
 						reason,

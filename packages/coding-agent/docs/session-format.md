@@ -116,6 +116,10 @@ Emitted when the user changes the thinking/reasoning level.
 
 A `context_window` starts fresh model context without deleting history. It stores optional `handoff`, `tokensBefore` (null when unknown), and an optional `systemMessage` checkpoint of the current prompt/tools. Replay places the checkpoint before the visible `context-window` custom-message marker, preserving tool selection without bringing earlier conversation into the new window.
 
+Native asynchronous work survives the boundary. Projection retains unresolved call items and the original calls needed by results in the new window, with their exact identities and admitted execution state. It does not retain old prose or already-consumed call/result pairs from previous windows.
+
+Optional `retainedToolResultIds` names original result entry IDs whose consumption by a successful provider response is not yet confirmed. This preserves receipts that arrive while a handoff is being prepared. Replay selects only matching earlier tool-result entries on the active branch, without copying messages or adding billable entries. A later window retains them only if its own list includes them; a later compaction can summarize or keep them normally.
+
 ### UsageEntry
 
 Records model-attributed usage that is not an assistant message and does not participate in LLM context. `kind` is an arbitrary string identifying the operation; for example, cache warming uses `"cache_warm"`.
@@ -231,8 +235,8 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 
 `buildContextEntries()` walks from the current leaf to the root, producing the active entry list while honoring compaction:
 
-1. Collects the path starting at the latest `ContextWindowEntry`, when present
-2. Coalesces execution snapshots by response identity, retaining final content/usage and latest admitted-call state
+1. Collects the full selected branch and coalesces execution snapshots by response identity, retaining final content/usage and latest admitted-call state at the original response position
+2. Selects the path starting at the latest `ContextWindowEntry`, when present, and inserts its explicitly retained tool-result entries after the marker; late checkpoints from older responses do not reintroduce their conversation
 3. Applies the latest remaining `CompactionEntry`:
    - Includes the compaction entry first
    - Includes non-system entries from `firstKeptEntryId` up to, but not including, the compaction entry
@@ -240,6 +244,8 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 4. Preserves non-message entries in the selected range for rendering
 
 `buildSessionProjection()` then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. The raw selected entries are not modified.
+
+Across compaction and context-window boundaries, projection also carries native asynchronous call items from the selected branch when they remain unresolved or have a retained result. Carried items preserve their original source entry, provider item, namespace, call ID, and admitted execution arguments/state. Context edits still apply: omitting a call also omits its dependent output. Results on other branches do not resolve calls on the selected branch. Reopening the journal uses the same projection.
 
 `buildSessionContext()` builds on that projection to produce the message list for the LLM:
 

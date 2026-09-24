@@ -75,7 +75,166 @@ describe("native journal projection", () => {
 		});
 	});
 
-	it("carries a delayed result's call across compaction, respects context edits, and stays branch/window local", () => {
+	it("carries native calls across windows and compaction without reviving old response content on reopen", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-native-window-projection-"));
+		try {
+			let manager = SessionManager.create(directory, directory);
+			const call = { ...toolCall(), namespace: "jobs" };
+			const completed = { ...toolCall(), id: "completed|fc_completed" };
+			const original = assistant(call);
+			original.content.push({ type: "text", text: "old response prose" }, completed);
+			const originalId = manager.appendMessage(original);
+			manager.appendMessage({
+				role: "toolResult",
+				toolCallId: completed.id,
+				toolName: "work",
+				content: result.content,
+				isError: false,
+				timestamp: 1,
+			});
+			manager.appendContextWindow("first window", 100);
+			// Preflight can finish after rollover; its prefix still belongs to the old response.
+			const admitted = { ...call, executionStarted: true, executionArguments: { path: "admitted" } };
+			manager.appendMessage(
+				{ ...original, content: [admitted, ...original.content.slice(1)], stopReason: "pending" },
+				true,
+			);
+			const file = manager.getSessionFile()!;
+			manager = SessionManager.open(file);
+			let projection = manager.buildSessionProjection();
+			expect(projection.messages.filter((message) => message.role === "assistant")).toMatchObject([
+				{ content: [admitted] },
+			]);
+			expect(
+				projection.entries.find((entry) => entry.messages.some((message) => message.role === "assistant"))
+					?.sourceEntry.id,
+			).toBe(originalId);
+			expect(manager.buildContextEntries().some((entry) => entry.type === "message")).toBe(false);
+
+			manager.appendContextWindow("second window", 100);
+			const detached = { ...admitted, executionDetached: true };
+			manager.appendMessage(
+				{ ...original, content: [detached, ...original.content.slice(1)], stopReason: "pending" },
+				true,
+			);
+			manager.appendCompaction("summary", null, 100);
+			manager = SessionManager.open(file);
+			projection = manager.buildSessionProjection();
+			expect(projection.messages.filter((message) => message.role === "assistant")).toMatchObject([
+				{ content: [detached] },
+			]);
+			expect(projection.messages.some((message) => message.role === "toolResult")).toBe(false);
+
+			const resultId = manager.appendMessage({
+				role: "toolResult",
+				toolCallId: call.id,
+				toolName: "work",
+				content: result.content,
+				isError: false,
+				timestamp: 2,
+			});
+			manager.appendCompaction("result retained", resultId, 100);
+			manager = SessionManager.open(file);
+			projection = manager.buildSessionProjection();
+			expect(projection.messages.filter((message) => message.role === "assistant")).toMatchObject([
+				{ content: [detached] },
+			]);
+			expect(projection.messages.filter((message) => message.role === "toolResult")).toMatchObject([
+				{ toolCallId: call.id, content: result.content },
+			]);
+			manager.appendContextWindow("finished", 100);
+			expect(
+				SessionManager.open(file)
+					.buildSessionProjection()
+					.messages.map((message) => message.role),
+			).toEqual(["custom"]);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("reopens explicitly retained receipts with original provenance and honors later windows, compaction, and edits", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-native-retained-receipt-"));
+		try {
+			let manager = SessionManager.create(directory, directory);
+			const call = { ...toolCall(), executionStarted: true, executionArguments: { path: "admitted" } };
+			const original = assistant(call);
+			original.content.push({ type: "text", text: "old response prose" });
+			const callId = manager.appendMessage(original);
+			const receipt = {
+				role: "toolResult" as const,
+				toolCallId: call.id,
+				toolName: "work",
+				content: result.content,
+				isError: false,
+				timestamp: 2,
+			};
+			const resultId = manager.appendMessage(receipt);
+			manager.appendContextWindow("receipt arrived during handoff", 100, [resultId]);
+			const file = manager.getSessionFile()!;
+			manager = SessionManager.open(file);
+			let projection = manager.buildSessionProjection();
+			expect(projection.messages.filter((message) => message.role === "toolResult")).toEqual([receipt]);
+			expect(projection.messages.filter((message) => message.role === "assistant")).toMatchObject([
+				{ content: [call] },
+			]);
+			expect(projection.entries.slice(1).map((entry) => entry.sourceEntry.id)).toEqual([callId, resultId]);
+
+			const secondWindow = manager.appendContextWindow("receipt still unconsumed", 100, [resultId]);
+			manager = SessionManager.open(file);
+			expect(manager.buildSessionProjection().messages.filter((message) => message.role === "toolResult")).toEqual([
+				receipt,
+			]);
+			expect(manager.getEntries().filter((entry) => entry.type === "message")).toHaveLength(2);
+
+			manager.appendContextEdit(resultId, { content: [{ type: "text", text: "edited receipt" }] });
+			expect(
+				SessionManager.open(file)
+					.buildSessionProjection()
+					.messages.filter((message) => message.role === "toolResult"),
+			).toMatchObject([{ content: [{ type: "text", text: "edited receipt" }] }]);
+			for (const omittedId of [callId, resultId]) {
+				manager.branch(secondWindow);
+				manager.appendContextEdit(omittedId, null);
+				expect(
+					SessionManager.open(file)
+						.buildSessionProjection()
+						.messages.map((message) => message.role),
+				).toEqual(["custom"]);
+			}
+
+			manager.branch(secondWindow);
+			manager.appendCompaction("retain the receipt", resultId, 100);
+			projection = SessionManager.open(file).buildSessionProjection();
+			expect(projection.messages.filter((message) => message.role === "toolResult")).toEqual([receipt]);
+			expect(projection.entries.slice(1).map((entry) => entry.sourceEntry.id)).toEqual([callId, resultId]);
+			manager.appendCompaction("receipt summarized", null, 100);
+			expect(
+				SessionManager.open(file)
+					.buildSessionProjection()
+					.messages.map((message) => message.role),
+			).toEqual(["compactionSummary"]);
+
+			manager.branch(secondWindow);
+			manager.appendContextWindow("receipt consumed", 100);
+			expect(
+				SessionManager.open(file)
+					.buildSessionProjection()
+					.messages.map((message) => message.role),
+			).toEqual(["custom"]);
+			manager.branch(callId);
+			manager.appendContextWindow("other branch", 100, [resultId]);
+			expect(
+				SessionManager.open(file)
+					.buildSessionProjection()
+					.messages.filter((message) => message.role === "toolResult"),
+			).toEqual([]);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("carries a delayed result's call across compaction and windows, respecting branch-local context edits", () => {
 		const manager = SessionManager.inMemory();
 		const callId = manager.appendMessage(assistant({ ...toolCall(), executionStarted: true }));
 		const laterId = manager.appendMessage(fauxAssistantMessage("later answer", { responseId: "later" }));
@@ -96,6 +255,7 @@ describe("native journal projection", () => {
 		).toHaveLength(1);
 		manager.appendContextEdit(callId, null);
 		messages = manager.buildSessionProjection().messages;
+		expect(messages.some((message) => message.role === "toolResult")).toBe(false);
 		expect(
 			messages.some(
 				(message) => message.role === "assistant" && message.content.some((block) => block.type === "toolCall"),
@@ -104,9 +264,158 @@ describe("native journal projection", () => {
 		manager.branch(callId);
 		expect(manager.buildSessionProjection().messages).toHaveLength(1);
 		manager.appendContextWindow("fresh", 100);
+		expect(manager.buildSessionProjection().messages.filter((message) => message.role === "assistant")).toMatchObject(
+			[{ content: [{ ...toolCall(), executionStarted: true }] }],
+		);
+		manager.appendContextEdit(callId, null);
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call|fc_call",
+			toolName: "work",
+			content: result.content,
+			isError: false,
+			timestamp: 3,
+		});
 		expect(manager.buildSessionProjection().messages.some((message) => message.role === "assistant")).toBe(false);
+		expect(manager.buildSessionProjection().messages.some((message) => message.role === "toolResult")).toBe(false);
 	});
 });
+
+it.each(["stop", "error"] as const)(
+	"starts an explicit fresh window and preserves the late native result until a successful response (%s)",
+	async (outcome) => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let started!: () => void;
+		const executing = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		let workSignal: AbortSignal | undefined;
+		const execute = vi.fn<AgentTool["execute"]>(async (_id, _args, signal) => {
+			workSignal = signal;
+			started();
+			await gate;
+			return result;
+		});
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 600_000 }],
+			settings: {
+				compaction: { enabled: false },
+				retry: { enabled: false },
+			},
+			tools: [
+				{
+					name: "work",
+					label: "Work",
+					description: "Work",
+					parameters: Type.Object({ path: Type.String() }),
+					async: true,
+					execute,
+				},
+				{
+					name: "reset",
+					label: "Reset",
+					description: "Start a fresh context",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [], details: undefined, newContext: { handoff: "continue work" } }),
+				},
+			],
+		});
+		harness.session.agent.state.model = {
+			...harness.getModel(),
+			api: "openai-responses",
+			compat: { supportsAsyncTools: true },
+		} as Model<"openai-responses">;
+		harness.session.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "assistant" && event.message.responseId === "first")
+				harness.session.agent.steer({ role: "user", content: "queued input", timestamp: Date.now() });
+		});
+		const requests: Array<unknown[]> = [];
+		harness.session.agent.streamFunction = (model, context) => {
+			requests.push(structuredClone(context.messages));
+			const first = requests.length === 1;
+			const stopReason = first ? "toolUse" : requests.length === 3 ? outcome : "stop";
+			const message: AssistantMessage = {
+				...fauxAssistantMessage(
+					first
+						? [
+								{ type: "text", text: "old response prose" },
+								toolCall(),
+								{ type: "toolCall", id: "reset", name: "reset", arguments: {} },
+							]
+						: "new window answer",
+					{ responseId: first ? "first" : `response-${requests.length}`, stopReason },
+				),
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				errorMessage: stopReason === "error" ? "provider failed" : undefined,
+			};
+			message.usage = { ...message.usage, input: 100, totalTokens: 100 };
+			const stream = createAssistantMessageEventStream();
+			void (async () => {
+				stream.push({ type: "start", partial: message });
+				if (first) {
+					stream.push({ type: "toolcall_end", partial: message, toolCall: toolCall(), contentIndex: 1 });
+					await executing;
+				}
+				if (stopReason === "error") stream.push({ type: "error", reason: "error", error: message });
+				else stream.push({ type: "done", reason: stopReason, message });
+				stream.end();
+			})();
+			return stream;
+		};
+		const run = harness.session.prompt("old user input");
+		try {
+			await vi.waitFor(() => expect(requests).toHaveLength(2));
+			expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
+			expect(harness.session.getPendingToolCalls()).toMatchObject([{ toolCallId: toolCall().id }]);
+			expect(workSignal?.aborted).toBe(false);
+			expect(requests[1]).toContainEqual(expect.objectContaining({ role: "user", content: "queued input" }));
+			expect(requests[1]).toContainEqual(
+				expect.objectContaining({
+					role: "assistant",
+					content: [expect.objectContaining({ id: toolCall().id, responsesItem: toolCall().responsesItem })],
+				}),
+			);
+			expect(JSON.stringify(requests[1])).not.toContain("old response prose");
+			expect(JSON.stringify(requests[1])).not.toContain("old user input");
+			release();
+			await run;
+			expect(execute).toHaveBeenCalledOnce();
+			expect(requests).toHaveLength(3);
+			expect(requests[2]).toContainEqual(
+				expect.objectContaining({
+					role: "toolResult",
+					toolCallId: toolCall().id,
+					content: result.content,
+					isError: false,
+				}),
+			);
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.filter(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "toolResult" &&
+							entry.message.toolCallId === toolCall().id,
+					),
+			).toHaveLength(1);
+			expect(harness.session.getPendingToolCalls()).toEqual([]);
+			harness.session.newContext({ handoff: "next task" });
+			expect(harness.session.messages.filter((message) => message.role === "toolResult")).toHaveLength(
+				outcome === "error" ? 1 : 0,
+			);
+		} finally {
+			release();
+			await run;
+			harness.cleanup();
+		}
+	},
+);
 
 it("normal AgentSession persists admission before effects, detaches, and reattaches with original identity", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "pi-native-async-journal-"));
@@ -194,6 +503,8 @@ it("normal AgentSession persists admission before effects, detaches, and reattac
 		expect(harness.eventsOfType("tool_execution_detached")).toHaveLength(1);
 		expect(harness.session.getPendingToolCalls()).toMatchObject([{ toolCallId: "call|fc_call", state: "detached" }]);
 		expect(harness.eventsOfType("agent_settled").at(-1)).toMatchObject({ pendingToolCalls: [{ state: "detached" }] });
+		harness.session.newContext({ handoff: "resume the detached work" });
+		expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
 		const reopened = SessionManager.open(manager.getSessionFile()!);
 		harness.session.agent.state.messages = reopened.buildSessionProjection().messages;
 		await harness.session.prompt("continue");

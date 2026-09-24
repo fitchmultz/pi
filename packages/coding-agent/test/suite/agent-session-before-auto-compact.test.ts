@@ -262,7 +262,7 @@ describe("session_before_auto_compact", () => {
 		{ hook: "session_before_auto_compact", completion: "duringMessageEnd" },
 		{ hook: "session_before_compact", completion: "duringMessageEnd" },
 	] as const)(
-		"captures a fresh $hook handoff after pending async tools finish (completion=$completion)",
+		"starts the claimed $hook window while native work completes (completion=$completion)",
 		async ({ hook, completion }) => {
 			let release!: () => void;
 			const gate = new Promise<void>((resolve) => {
@@ -278,6 +278,11 @@ describe("session_before_auto_compact", () => {
 			});
 			const owner = "NEW_OWNER_DECISION: work only on the revised request";
 			const receipt = "LATE_RECEIPT";
+			const call = nativeSlowCall();
+			const execute = vi.fn(async () => {
+				await gate;
+				return { content: [{ type: "text" as const, text: receipt }], details: {} };
+			});
 			const handoffs: string[] = [];
 			let pendingAtFirstHook: number | undefined;
 			let runningAtFirstHook: number | undefined;
@@ -294,10 +299,7 @@ describe("session_before_auto_compact", () => {
 						description: "Return a delayed receipt",
 						parameters: Type.Object({}),
 						async: true,
-						execute: async () => {
-							await gate;
-							return { content: [{ type: "text", text: receipt }], details: {} };
-						},
+						execute,
 					},
 					{
 						name: "dump",
@@ -368,7 +370,7 @@ describe("session_before_auto_compact", () => {
 				stream(harness.getModel(), context, options);
 			const observations: Array<{ windows: number; pending: number; text: string }> = [];
 			harness.setResponses([
-				fauxAssistantMessage([nativeSlowCall(), fauxToolCall("dump", {})], {
+				fauxAssistantMessage([call, fauxToolCall("dump", {})], {
 					responseId: "pending",
 					stopReason: "toolUse",
 				}),
@@ -404,23 +406,32 @@ describe("session_before_auto_compact", () => {
 				expect(pendingAtFirstHook).toBe(0);
 				expect(runningAtFirstHook).toBe(0);
 			}
-			if (completion !== "afterHook") expect(observations[0].text).toContain(receipt);
 			expect(observations[0]).toMatchObject({
-				windows: 0,
+				windows: 1,
 				pending: completion === "afterHook" ? 1 : 0,
 				text: expect.stringContaining(owner),
 			});
 			expect(observations[1]).toMatchObject({ windows: 1, pending: 0, text: expect.stringContaining(owner) });
+			if (completion === "afterHook") expect(observations[0].text).not.toContain(receipt);
+			else expect(observations[0].text).toContain(receipt);
 			expect(observations[1].text).toContain(receipt);
-			expect(handoffs).toHaveLength(2);
+			expect(execute).toHaveBeenCalledOnce();
+			expect(
+				harness.sessionManager
+					.getBranch()
+					.filter(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "toolResult" &&
+							entry.message.toolCallId === call.id,
+					),
+			).toMatchObject([
+				{ message: { toolCallId: call.id, content: [{ type: "text", text: receipt }], isError: false } },
+			]);
+			expect(handoffs).toHaveLength(1);
 			expect(handoffs[0]).not.toContain(owner);
 			expect(handoffs[0]).not.toContain(receipt);
-			expect(handoffs[1]).toContain(owner);
-			expect(handoffs[1]).toContain(receipt);
-			expect(harness.eventsOfType("compaction_end")).toMatchObject([
-				{ contextWindowStarted: false },
-				{ contextWindowStarted: true },
-			]);
+			expect(harness.eventsOfType("compaction_end")).toMatchObject([{ contextWindowStarted: true }]);
 		},
 	);
 
@@ -964,44 +975,6 @@ describe("session_before_auto_compact", () => {
 		expect(countType(harness, "context_window")).toBe(0);
 		expect(harness.session.getPendingToolCalls()).toMatchObject([{ toolCallId: call.id }]);
 		expect(harness.getPendingResponseCount()).toBe(0);
-	});
-
-	it("preserves an explicit deferred request when an automatic handoff cannot start", async () => {
-		const harness = await createHarness({ extensionFactories: [claimRollover()] });
-		harnesses.push(harness);
-		const call = nativeSlowCall();
-		harness.sessionManager.appendMessage(
-			fauxAssistantMessage(call, { responseId: "pending", stopReason: "toolUse" }),
-		);
-		harness.session.refreshContext();
-		harness.session.newContext({ handoff: "explicit handoff" });
-
-		await runAutoCompaction(harness)("threshold", false);
-
-		expect(countType(harness, "context_window")).toBe(0);
-		harness.sessionManager.appendMessage({
-			role: "toolResult",
-			toolCallId: call.id,
-			toolName: call.name,
-			content: [{ type: "text", text: "completed" }],
-			isError: false,
-			timestamp: Date.now(),
-		});
-		harness.session.refreshContext();
-		let requestTexts: string[] = [];
-		harness.setResponses([
-			(context) => {
-				requestTexts = context.messages.map(getMessageText);
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		await harness.session.prompt("continue");
-
-		expect(countType(harness, "context_window")).toBe(1);
-		expect(requestTexts).toContainEqual(expect.stringContaining("explicit handoff"));
-		expect(requestTexts).toContain("continue");
-		expect(requestTexts.join("\n")).not.toContain("handoff after threshold");
 	});
 
 	it("does not fire for manual compaction", async () => {

@@ -92,6 +92,8 @@ export interface ContextWindowEntry extends SessionEntryBase {
 	type: "context_window";
 	/** Optional continuation state supplied by the previous window. */
 	handoff?: string;
+	/** Original result entry IDs not yet consumed by a completed provider response. */
+	retainedToolResultIds?: string[];
 	/** Active context size immediately before the window transition, when known. */
 	tokensBefore: number | null;
 	/** Prompt and tool state retained while earlier conversation is dropped. */
@@ -541,15 +543,32 @@ export function buildContextEntries(
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
 	const fullPath = buildSessionPath(entries, leafId, byId);
+	// Late execution checkpoints update the original response, not the window
+	// in which they were saved. Coalesce before cutting away older conversation.
+	const coalescedPath = coalesceAssistantCheckpoints(fullPath);
 	let contextWindowIndex = -1;
-	for (let i = fullPath.length - 1; i >= 0; i--) {
-		if (fullPath[i].type === "context_window") {
+	for (let i = coalescedPath.length - 1; i >= 0; i--) {
+		if (coalescedPath[i].type === "context_window") {
 			contextWindowIndex = i;
 			break;
 		}
 	}
-	const windowPath = contextWindowIndex === -1 ? fullPath : fullPath.slice(contextWindowIndex);
-	const path = coalesceAssistantCheckpoints(windowPath);
+	const path = contextWindowIndex === -1 ? coalescedPath : coalescedPath.slice(contextWindowIndex);
+	const window = path[0];
+	if (window?.type === "context_window" && window.retainedToolResultIds?.length) {
+		const retainedIds = new Set(window.retainedToolResultIds);
+		// Retain the original receipts before applying compaction, so a later summary
+		// can keep or drop them like ordinary results without reopening old prose.
+		path.splice(
+			1,
+			0,
+			...coalescedPath
+				.slice(0, contextWindowIndex)
+				.filter(
+					(entry) => entry.type === "message" && entry.message.role === "toolResult" && retainedIds.has(entry.id),
+				),
+		);
+	}
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -569,7 +588,7 @@ export function buildContextEntries(
 
 	const contextEntries: SessionEntry[] = [compaction];
 	let foundFirstKept = false;
-	const firstKept = windowPath.find((entry) => entry.id === compaction.firstKeptEntryId);
+	const firstKept = fullPath.find((entry) => entry.id === compaction.firstKeptEntryId);
 	const firstKeptResponseId =
 		firstKept?.type === "message" && firstKept.message.role === "assistant"
 			? firstKept.message.responseId
@@ -650,17 +669,10 @@ export function buildSessionProjection(
 						),
 		}),
 	);
-	// Async result dependencies span turns. Carry only their original call items across
-	// compaction; a fresh context-window boundary deliberately excludes older operations.
-	if (contextEntries[0]?.type === "compaction") {
-		let windowIndex = -1;
-		for (let index = path.length - 1; index >= 0; index--) {
-			if (path[index].type === "context_window") {
-				windowIndex = index;
-				break;
-			}
-		}
-		const windowEntries = coalesceAssistantCheckpoints(path.slice(Math.max(0, windowIndex)));
+	// Async work outlives conversation. Carry only unresolved call items and the
+	// originals needed by retained results across compactions and fresh windows.
+	if (contextEntries[0]?.type === "compaction" || contextEntries[0]?.type === "context_window") {
+		const branchEntries = coalesceAssistantCheckpoints(path);
 		const retained = projectedEntries.flatMap((entry) => entry.messages);
 		const retainedCalls = new Set(
 			retained.flatMap((message) =>
@@ -673,11 +685,11 @@ export function buildSessionProjection(
 			retained.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
 		);
 		const allResults = new Set(
-			windowEntries.flatMap((entry) =>
+			branchEntries.flatMap((entry) =>
 				entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
 			),
 		);
-		const carried = windowEntries.flatMap((sourceEntry): ProjectedSessionEntry[] => {
+		const carried = branchEntries.flatMap((sourceEntry): ProjectedSessionEntry[] => {
 			if (sourceEntry.type !== "message" || sourceEntry.message.role !== "assistant") return [];
 			const message = projectContextEntry(sourceEntry, edits.get(sourceEntry.id))[0];
 			if (message?.role !== "assistant") return [];
@@ -693,7 +705,7 @@ export function buildSessionProjection(
 		projectedEntries.splice(1, 0, ...carried);
 		// An explicit call omission also omits its dependent output; never resurrect the removed call.
 		const omittedCalls = new Set<string>();
-		for (const source of windowEntries) {
+		for (const source of branchEntries) {
 			if (source.type !== "message" || source.message.role !== "assistant" || !edits.has(source.id)) continue;
 			const visible = projectContextEntry(source, edits.get(source.id))[0];
 			const visibleIds = new Set(
@@ -1470,7 +1482,11 @@ export class SessionManager {
 	}
 
 	/** Append a fresh context-window boundary as child of current leaf, then advance leaf. Returns entry id. */
-	appendContextWindow(handoff: string | undefined, tokensBefore: number | null): string {
+	appendContextWindow(
+		handoff: string | undefined,
+		tokensBefore: number | null,
+		retainedToolResultIds?: string[],
+	): string {
 		const timestamp = new Date().toISOString();
 		const systemMessage = getCurrentSystemMessage(this.buildSessionContext().messages);
 		const entry: ContextWindowEntry = {
@@ -1480,6 +1496,7 @@ export class SessionManager {
 			timestamp,
 			handoff,
 			tokensBefore,
+			...(retainedToolResultIds?.length ? { retainedToolResultIds: [...retainedToolResultIds] } : {}),
 			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
 		};
 		this._appendEntry(entry);
