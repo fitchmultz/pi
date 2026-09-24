@@ -88,10 +88,15 @@ optional `--source-archive` reuses a separately frozen archive with an adjacent
 `source.commit`, checking its source tree against the selected commit. The
 installer validates model data, builds in a temporary source directory, packs
 native workspace tarballs and installs a production npm consumer into a new
-release. Installed SDK, CLI, extension imports, native checkpoint restore and
+release using the frozen production dependency lock and those local tarballs.
+Installed SDK, CLI, extension imports, native checkpoint restore and
 real-terminal restart tests must pass before the release receives a validation
 receipt. It retains the archive, commit, tarballs and build identity. No
 hand-made workspace dependency links are used.
+
+Astra's supported lifecycle capabilities are applied when loading built-in and
+remote catalogs, so older or upstream data cannot silently omit them. Explicit
+capability values and user model overrides retain precedence.
 
 Releases live under `~/.local/share/pi-fork/releases/<identity>`, where identity
 includes the commit, catalog digest, Node version, platform and architecture.
