@@ -181,6 +181,12 @@ mkdirSync(cwd);
 const agentDir = process.env.PI_CODING_AGENT_DIR;
 const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
 const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, allowModelNetwork: false });
+for (const provider of ["openai", "openai-codex"]) {
+  const compat = modelRuntime.getModel(provider, "gpt-6-astra")?.compat;
+  for (const capability of ["supportsAsyncTools", "supportsSteering", "supportsReasoningEffortUpdates"]) {
+    assert.equal(compat?.[capability], true, provider + "/gpt-6-astra: " + capability);
+  }
+}
 async function create(checkpoint) {
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
     additionalExtensionPaths: [${JSON.stringify(extension)}], noSkills: true, noPromptTemplates: true, noThemes: true });
@@ -210,7 +216,7 @@ try {
   assert.equal(restored.model, undefined);
   assert.deepEqual(restored.getActiveToolNames(), checkpoint.selection.activeTools);
 } finally { restored.dispose(); }
-console.log("Installed SDK, extension identity and native checkpoint restore passed.");
+console.log("Installed SDK, Astra capabilities, extension identity and native checkpoint restore passed.");
 `);
 		run(tools.node, [entry], { cwd: env.HOME, env, timeout: 60_000 });
 	} finally {
