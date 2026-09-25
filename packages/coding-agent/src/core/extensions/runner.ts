@@ -879,7 +879,7 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
-	createContext(): ExtensionContext {
+	createContext(sessionManager = this.sessionManager): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
 		const getScopedModels = this.getScopedModels;
@@ -902,7 +902,7 @@ export class ExtensionRunner {
 			},
 			get sessionManager() {
 				runner.assertActive();
-				return runner.sessionManager;
+				return sessionManager;
 			},
 			get modelRegistry() {
 				runner.assertActive();
@@ -1029,8 +1029,9 @@ export class ExtensionRunner {
 	runContextWindowHooks(
 		buildEvent: () => ContextWindowHookEvent,
 		apply: (drafts: ContextEditEntryDraft[]) => void,
+		sessionManager: SessionManager,
 	): void {
-		const ctx = this.createContext();
+		const ctx = this.createContext(sessionManager);
 		for (const extension of this.extensions) {
 			for (const hook of extension.contextWindowHooks ?? []) {
 				const result: unknown = hook(buildEvent(), ctx);

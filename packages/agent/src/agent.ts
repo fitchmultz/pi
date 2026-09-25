@@ -1,4 +1,5 @@
 import {
+	collapseSystemMessages,
 	createInitialSystemMessage,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
@@ -13,6 +14,8 @@ import {
 	type Transport,
 	toToolDeclaration,
 } from "@earendil-works/pi-ai";
+import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages";
+import { assertContextFits } from "@earendil-works/pi-ai/utils/estimate";
 import { getPendingToolCalls, runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
@@ -219,6 +222,8 @@ export class Agent {
 	/** Shared invocation boundary for agent turns and host-owned requests such as summaries. */
 	public readonly streamResponse: StreamFn = (model, context, options) => {
 		this.requestAdmissionSignal?.throwIfAborted();
+		// Provider-independent floor for custom streams; native adapters also admit their resolved input.
+		assertContextFits(model, transformMessages(collapseSystemMessages(context).messages, model));
 		const streamFunction = this.streamFunction;
 		return streamFunction(model, context, options);
 	};

@@ -31,6 +31,7 @@ import type {
 	ToolResultMessage,
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
+import { assertContextFits } from "../utils/estimate.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
@@ -1053,6 +1054,8 @@ function buildParams(
 		compat.supportsMidConvoToolChanges &&
 		initialTools.length > 0 &&
 		!hasToolRedefinitions(context.messages);
+	const requestTools = nativeToolChanges ? getDeclaredTools(context.messages) : getCurrentTools(context.messages);
+	assertContextFits(model, transformedMessages, requestTools);
 	const converted = convertMessages(
 		conversationMessages,
 		isOAuthToken,
@@ -1118,7 +1121,7 @@ function buildParams(
 		// tools stay declared and are withdrawn by `tool_removal`. The request-level list
 		// therefore only grows, keeping the cached prefix intact across tool changes.
 		const initialNames = new Set(initialTools.map((tool) => tool.name));
-		const laterTools = getDeclaredTools(context.messages).filter((tool) => !initialNames.has(tool.name));
+		const laterTools = requestTools.filter((tool) => !initialNames.has(tool.name));
 		params.tools = [
 			...convertTools(
 				initialTools,
@@ -1136,10 +1139,9 @@ function buildParams(
 			).map((tool) => ({ ...tool, defer_loading: true })),
 		];
 	} else {
-		const tools = getCurrentTools(context.messages);
-		if (tools.length > 0) {
+		if (requestTools.length > 0) {
 			params.tools = convertTools(
-				tools,
+				requestTools,
 				isOAuthToken,
 				compat.supportsEagerToolInputStreaming,
 				compat.supportsStrictTools,

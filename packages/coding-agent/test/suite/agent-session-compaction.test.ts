@@ -497,8 +497,8 @@ describe("AgentSession compaction characterization", () => {
 
 	it("compacts and resumes after a signed length stop below the desired output limit", async () => {
 		const harness = await createHarness({
-			// Leave room for the real prompt/tool checkpoint after the oversized input is compacted.
-			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
+			// The first request must fit to exercise the provider's signed length stop.
+			models: [{ id: "faux-1", contextWindow: 20_000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -793,8 +793,8 @@ describe("AgentSession compaction characterization", () => {
 
 	it("keeps overflow wording when a repeated length stop fills the context window", async () => {
 		const harness = await createHarness({
-			// Deliberately too small even after compaction: the second real request still overflows.
-			models: [{ id: "faux-1", contextWindow: 100, maxTokens: 100 }],
+			// Local input fits; the provider reports a filled context on both length responses.
+			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -811,6 +811,15 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction");
+		harness.session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.stopReason === "length"
+			) {
+				event.message.usage = createUsage(10_000);
+			}
+		});
 		// A context-filling length stop has zero output (the provider has no room to generate).
 		harness.setResponses([
 			fauxAssistantMessage("", { stopReason: "length" }),
@@ -925,7 +934,7 @@ describe("AgentSession compaction characterization", () => {
 	it("compacts successful overflow responses without retrying", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
-			models: [{ id: "faux-1", contextWindow: 1, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => ({
@@ -940,6 +949,11 @@ describe("AgentSession compaction characterization", () => {
 			],
 		});
 		harnesses.push(harness);
+		// Reported provider usage can exceed the local estimate even on a successful response.
+		harness.session.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "assistant")
+				event.message.usage = createUsage(10_001);
+		});
 		harness.setResponses([fauxAssistantMessage("completed answer")]);
 
 		await expect(harness.session.prompt("hello")).resolves.toBeUndefined();
