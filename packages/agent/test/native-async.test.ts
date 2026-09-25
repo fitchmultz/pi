@@ -938,10 +938,10 @@ describe("native async lifecycle", () => {
 	it.each([
 		{ order: ["change_dir", "work"], finished: false, starts: false },
 		{ order: ["change_dir", "work"], finished: true, starts: true },
-		// Admitted mid-stream, before the sequential call streamed.
-		{ order: ["read", "work", "change_dir"], finished: false, starts: true },
+		// Admission may already have seen the later sequential call and deferred the native call.
+		{ order: ["read", "work", "change_dir"], finished: false, starts: false },
 	])(
-		"starts a restored native call only where mid-stream admission would ($order, finished=$finished)",
+		"starts a restored native call only after its ordered predecessors finished ($order, finished=$finished)",
 		async ({ order, finished, starts }) => {
 			const work = deferred<AgentToolResult>();
 			const execute = vi.fn<AgentTool["execute"]>(async () => work.promise);

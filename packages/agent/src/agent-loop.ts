@@ -479,8 +479,8 @@ async function runLoop(
 					!call.executionStarted &&
 					(message.stopReason === "error" ||
 						message.stopReason === "aborted" ||
-						// Judge only the calls streamed up to it, as mid-stream admission did.
-						waitsForEarlierSiblings(calls.slice(0, calls.indexOf(call) + 1), call))
+						// Admission may already have seen later siblings, so judge the whole response.
+						waitsForEarlierSiblings(calls, call))
 				) {
 					// Its response ended, or an ordered sibling never finished, before it ran (for example, the process
 					// stopped). Starting it now could undo an abort or run it out of order.
