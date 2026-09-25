@@ -26,9 +26,7 @@ const backgroundCommandSchema = Type.Object({
 	cwd: Type.Optional(
 		Type.String({ minLength: 1, description: "Absolute, ~, or relative to the current Bash working directory" }),
 	),
-	timeout: Type.Optional(
-		Type.Number({ exclusiveMinimum: 0, maximum: 2_147_483.647, description: "Timeout in seconds; no default" }),
-	),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds; no default" })),
 	id: Type.Optional(
 		Type.String({
 			pattern: "^[a-f0-9-]{36}$",
@@ -38,9 +36,7 @@ const backgroundCommandSchema = Type.Object({
 	activeOnly: Type.Optional(
 		Type.Boolean({ description: "Status lists only: show starting/running jobs; default false" }),
 	),
-	offset: Type.Optional(
-		Type.Integer({ minimum: 0, description: "List offset after filtering; up to 20 jobs, newest first" }),
-	),
+	offset: Type.Optional(Type.Integer({ description: "List offset after filtering; up to 20 jobs, newest first" })),
 });
 
 export type BackgroundCommandToolInput = Static<typeof backgroundCommandSchema>;
@@ -79,6 +75,7 @@ export function createBackgroundCommandToolDefinition(
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(_callId, params, signal, _onUpdate, ctx) {
 			signal?.throwIfAborted();
+			if ((params.offset ?? 0) < 0) throw new Error("offset must be >= 0");
 			const owner = options?.sessionManager ?? ctx?.sessionManager;
 			if (!owner) throw new Error("background_command requires a sessionManager or native session context");
 			const root = backgroundCommandDirectory(owner, options?.sessionDir);
