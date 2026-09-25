@@ -25,6 +25,16 @@ export type ResponsesDiagnostics = {
 		sseAttempts: number;
 		websocketAttempts: number;
 		fullBodyBytes?: number;
+		requestShapeScope?: "full_request" | "websocket_logical_body";
+		requestShape?: {
+			instructionsBytes: number;
+			toolsBytes: number;
+			inputBytes: number;
+			inputItems: number;
+			inputBytesByKind: Record<string, number>;
+			toolCount: number;
+			toolDefinitionBytes: number[];
+		};
 		sseSendBytes?: number;
 		sseCompressed?: boolean;
 		websocketSendBytes?: number;
@@ -49,6 +59,82 @@ export type ResponsesDiagnostics = {
 		localTimeoutMs?: number;
 	};
 };
+
+function jsonBytes(value: unknown): number {
+	const json = JSON.stringify(value);
+	return json === undefined ? 0 : new TextEncoder().encode(json).byteLength;
+}
+
+function inputKind(value: unknown): string {
+	const item = value as { type?: unknown; role?: unknown } | null;
+	if (!item || typeof item !== "object" || Array.isArray(item)) return "other";
+	switch (item.type) {
+		case undefined:
+		case "message":
+			switch (item.role) {
+				case "system":
+				case "developer":
+				case "user":
+				case "assistant":
+					return item.role;
+				default:
+					return "other";
+			}
+		case "reasoning":
+		case "function_call":
+		case "function_call_output":
+		case "custom_tool_call":
+		case "custom_tool_call_output":
+		case "tool_search_call":
+		case "tool_search_output":
+		case "item_reference":
+			return item.type;
+		default:
+			return "other";
+	}
+}
+
+/**
+ * Full logical post-hook JSON, before transport compression or WebSocket delta selection.
+ * Value sizes include JSON quoting/escaping, not enclosing keys/separators, and are not token counts.
+ */
+export function recordResponsesRequest(
+	diagnostics: ResponsesDiagnostics,
+	bodyJson: string,
+	scope: "full_request" | "websocket_logical_body" = "full_request",
+): void {
+	let body: { instructions?: unknown; tools?: unknown; input?: unknown } | null;
+	try {
+		body = JSON.parse(bodyJson);
+	} catch {
+		// A hook can supply a raw non-JSON SDK body; diagnostics must not prevent its submission.
+		return;
+	}
+	diagnostics.details.fullBodyBytes = new TextEncoder().encode(bodyJson).byteLength;
+	diagnostics.details.requestShapeScope = scope;
+	if (!body || typeof body !== "object" || Array.isArray(body)) return;
+	const inputBytesByKind: Record<string, number> = {};
+	const input = body.input;
+	if (Array.isArray(input)) {
+		for (const item of input) {
+			const kind = inputKind(item);
+			inputBytesByKind[kind] = (inputBytesByKind[kind] ?? 0) + jsonBytes(item);
+		}
+	} else if (input !== undefined) {
+		inputBytesByKind[typeof input === "string" ? "user" : "other"] = jsonBytes(input);
+	}
+	const tools = Array.isArray(body.tools) ? body.tools : [];
+	diagnostics.details.requestShape = {
+		instructionsBytes: jsonBytes(body.instructions),
+		toolsBytes: jsonBytes(body.tools),
+		inputBytes: jsonBytes(input),
+		inputItems: Array.isArray(input) ? input.length : input === undefined ? 0 : 1,
+		inputBytesByKind,
+		toolCount: tools.length,
+		// Ordinals preserve declaration order without persisting names or schemas; bound diagnostic size.
+		toolDefinitionBytes: tools.slice(0, 128).map(jsonBytes),
+	};
+}
 
 export function diagnosticServiceTier(
 	value: unknown,

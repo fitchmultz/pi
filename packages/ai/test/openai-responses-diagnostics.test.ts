@@ -6,6 +6,7 @@ import { stream as streamOpenAI } from "../src/api/openai-responses.ts";
 import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts";
 import type { Model, StreamOptions } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
+import { createResponsesServer, replyWithOutput } from "./responses-websocket-server.ts";
 
 const model: Model<"openai-responses"> = {
 	id: "test-model",
@@ -36,6 +37,202 @@ function request(provider: (typeof providers)[number], options: StreamOptions & 
 afterEach(() => vi.restoreAllMocks());
 
 describe("Responses request diagnostics", () => {
+	it.each(["openai", "openai-codex"] as const)("measures in-place payload hook changes for %s", async (provider) => {
+		const result = await request(provider, {
+			apiKey,
+			transport: "sse",
+			onPayload: (payload) => {
+				Object.assign(payload as object, { instructions: "雪😀", input: [], tools: [] });
+			},
+			fetch: async () =>
+				new Response(
+					`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed" } })}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details?.requestShape).toEqual({
+			instructionsBytes: 9,
+			inputBytes: 2,
+			toolsBytes: 2,
+			inputItems: 0,
+			inputBytesByKind: {},
+			toolCount: 0,
+			toolDefinitionBytes: [],
+		});
+	});
+
+	it.each(["sse", "websocket"] as const)("does not re-evaluate toJSON or getters for OpenAI %s", async (transport) => {
+		const server = await createResponsesServer((request) => replyWithOutput(request, "response", []));
+		let serializations = 0;
+		let reads = 0;
+		try {
+			const result = await streamOpenAI(server.model, context, {
+				apiKey,
+				transport,
+				env: { NO_PROXY: "*" },
+				onPayload: () => ({
+					model: server.model.id,
+					stream: true,
+					instructions: "雪😀",
+					input: [
+						{
+							toJSON() {
+								serializations++;
+								return {
+									role: "user",
+									get content() {
+										return `private-content-${++reads} 雪`;
+									},
+								};
+							},
+						},
+					],
+				}),
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			// WebSocket already serializes input for its continuation key, then for sending.
+			expect(serializations).toBe(transport === "sse" ? 1 : 2);
+			expect(reads).toBe(serializations);
+			expect(server.requests).toHaveLength(1);
+			expect(server.requests[0].body.input).toEqual([{ role: "user", content: `private-content-${reads} 雪` }]);
+			const details = result.diagnostics?.find((entry) => entry.type === "provider_request")?.details;
+			expect(details).toMatchObject({
+				requestShapeScope: transport === "sse" ? "full_request" : "websocket_logical_body",
+				requestShape: {
+					instructionsBytes: 9,
+					inputBytes: Buffer.byteLength(JSON.stringify([{ role: "user", content: "private-content-1 雪" }])),
+				},
+			});
+			expect(JSON.stringify(details)).not.toContain("private-content");
+		} finally {
+			await server.close();
+		}
+		expect(server.errors).toEqual([]);
+	});
+
+	it.each(["openai", "openai-codex"] as const)(
+		"measures only the final overridden JSON without changing it or retaining content for %s",
+		async (provider) => {
+			const input = [
+				{ role: "system", content: "system-secret" },
+				{ role: "developer", content: "developer-secret" },
+				{ type: "message", role: "user", content: "user-secret 雪😀" },
+				{ type: "message", role: "assistant", content: "assistant-secret" },
+				{ type: "reasoning", encrypted_content: "reasoning-secret", summary: [] },
+				{ type: "function_call", name: "call-secret", arguments: "arguments-secret", call_id: "id-secret" },
+				{ type: "function_call_output", output: "output-secret", call_id: "id-secret" },
+				{ type: "custom_tool_call", name: "custom-secret", input: "custom-input-secret" },
+				{ type: "custom_tool_call_output", output: "custom-output-secret" },
+				{ type: "tool_search_call", arguments: "search-secret" },
+				{ type: "tool_search_output", tools: [{ name: "discovered-secret" }] },
+				{ type: "item_reference", id: "reference-secret" },
+				{ type: "private-type-secret", role: "private-role-secret", content: "other-secret" },
+				{ role: "private-role-secret", content: "other-message-secret" },
+			];
+			const tools = [
+				{
+					type: "function",
+					name: "declared_tool_one",
+					description: "schema-secret 雪",
+					parameters: { type: "object" },
+				},
+				{ type: "custom", name: "declared_tool_two", format: { type: "grammar", definition: "grammar-secret" } },
+			];
+			const payload = Object.freeze({
+				model: "override-model",
+				stream: true,
+				instructions: "雪😀",
+				input: Object.freeze(input),
+				tools: Object.freeze(tools),
+				reasoning: { effort: "high" },
+				include: ["reasoning.encrypted_content"],
+				prompt_cache_key: "cache-secret",
+			});
+			const originalJson = JSON.stringify(payload);
+			const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+				const body = init!.body!;
+				const sentJson = typeof body === "string" ? body : zstdDecompressSync(body as Uint8Array).toString("utf8");
+				expect(sentJson).toBe(originalJson);
+				return new Response(
+					`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed" } })}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			});
+			const result = await request(provider, {
+				apiKey,
+				transport: "sse",
+				onPayload: () => payload,
+				fetch,
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			expect(fetch).toHaveBeenCalledOnce();
+			expect(JSON.stringify(payload)).toBe(originalJson);
+			const details = result.diagnostics?.find((entry) => entry.type === "provider_request")?.details;
+			const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+			expect(details).toMatchObject({
+				fullBodyBytes: Buffer.byteLength(originalJson, "utf8"),
+				requestShape: {
+					instructionsBytes: 9,
+					toolsBytes: bytes(tools),
+					inputBytes: bytes(input),
+					inputItems: input.length,
+					inputBytesByKind: {
+						system: bytes(input[0]),
+						developer: bytes(input[1]),
+						user: bytes(input[2]),
+						assistant: bytes(input[3]),
+						reasoning: bytes(input[4]),
+						function_call: bytes(input[5]),
+						function_call_output: bytes(input[6]),
+						custom_tool_call: bytes(input[7]),
+						custom_tool_call_output: bytes(input[8]),
+						tool_search_call: bytes(input[9]),
+						tool_search_output: bytes(input[10]),
+						item_reference: bytes(input[11]),
+						other: bytes(input[12]) + bytes(input[13]),
+					},
+					toolCount: 2,
+					toolDefinitionBytes: tools.map(bytes),
+				},
+			});
+			expect(JSON.stringify(details)).not.toMatch(/secret|雪|😀|override-model|declared_tool/);
+			expect(
+				JSON.stringify(
+					convertResponsesMessages(model, normalizeContext({ messages: [result] }), new Set([provider])),
+				),
+			).not.toMatch(/requestShape|fullBodyBytes|toolDefinitionBytes/);
+		},
+	);
+
+	it("bounds per-tool measurements and handles string input", async () => {
+		const tools = Array.from({ length: 130 }, (_, index) => ({
+			type: "function",
+			name: `tool_${index}`,
+			parameters: { type: "object" },
+		}));
+		const result = await request("openai", {
+			apiKey,
+			transport: "sse",
+			onPayload: () => ({ model: model.id, stream: true, input: "雪😀", tools }),
+			fetch: async () =>
+				new Response(
+					`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed" } })}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details?.requestShape).toEqual({
+			instructionsBytes: 0,
+			toolsBytes: Buffer.byteLength(JSON.stringify(tools)),
+			inputBytes: 9,
+			inputItems: 1,
+			inputBytesByKind: { user: 9 },
+			toolCount: 130,
+			toolDefinitionBytes: tools.slice(0, 128).map((tool) => Buffer.byteLength(JSON.stringify(tool))),
+		});
+	});
+
 	it.each(providers)("preserves the post-hook and raw fast tier verbatim for %s", async (provider) => {
 		const result = await request(provider, {
 			apiKey,
@@ -279,7 +476,9 @@ describe("Responses request diagnostics", () => {
 		const encoded = JSON.stringify(diagnostic);
 		expect(encoded).not.toContain("secret");
 		expect(
-			Object.values(diagnostic!.details!).every((value) => ["string", "number", "boolean"].includes(typeof value)),
+			Object.entries(diagnostic!.details!)
+				.filter(([key]) => key !== "requestShape")
+				.every(([, value]) => ["string", "number", "boolean"].includes(typeof value)),
 		).toBe(true);
 		expect(
 			JSON.stringify(convertResponsesMessages(model, normalizeContext({ messages: [result] }), new Set([provider]))),

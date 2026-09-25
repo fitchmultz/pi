@@ -23,6 +23,13 @@ function mergeModels(baseline: readonly Model<Api>[], dynamic: readonly Model<Ap
 	return merged;
 }
 
+// pi.dev serves models.dev's dotted gateway Claude IDs; Cloudflare's /anthropic passthrough needs Anthropic's.
+function withCloudflareAnthropicModelId(model: Model<Api>): Model<Api> {
+	return model.provider === "cloudflare-ai-gateway" && model.api === "anthropic-messages"
+		? { ...model, id: model.id.replaceAll(".", "-") }
+		: model;
+}
+
 function parseCatalog(providerId: string, value: unknown): Model<Api>[] {
 	const entries = Array.isArray(value)
 		? value
@@ -58,7 +65,10 @@ export function withRemoteCatalog(
 
 	return {
 		...provider,
-		getModels: () => mergeModels(provider.getModels(), dynamicModels).map(withAstraLifecycleDefaults),
+		getModels: () =>
+			mergeModels(provider.getModels(), dynamicModels.map(withCloudflareAnthropicModelId)).map(
+				withAstraLifecycleDefaults,
+			),
 		refreshModels: async (context) => {
 			const stored = context.stored;
 			const restored = remoteModels(stored, localGeneratedAt).filter((model) => model.provider === provider.id);

@@ -7,6 +7,7 @@ import {
 	getCurrentTools,
 	type ToolReference,
 	type ToolResultMessage,
+	type TranscriptContext,
 	toolId,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -19,6 +20,7 @@ import { createHarness, type Harness } from "./harness.ts";
 
 const left: ToolReference = { namespace: "left", name: "lookup" };
 const right: ToolReference = { namespace: "right", name: "lookup" };
+const note = { role: "custom", customType: "note", content: "Note", display: false, timestamp: 0 } as const;
 let harness: Harness | undefined;
 afterEach(() => harness?.cleanup());
 
@@ -31,6 +33,19 @@ function registerLookup(pi: ExtensionAPI, reference: ToolReference, onExecute = 
 		async execute() {
 			onExecute();
 			return { content: [{ type: "text", text: reference.namespace ?? "bare" }], details: {} };
+		},
+	});
+}
+
+function registerDiscover(pi: ExtensionAPI) {
+	pi.registerToolSearch({
+		name: "discover",
+		label: "Discover",
+		description: "Find tools",
+		parameters: Type.Object({}),
+		async execute() {
+			pi.setActiveToolReferences([...pi.getActiveToolReferences(), right]);
+			return { content: [], details: {}, tools: [right] };
 		},
 	});
 }
@@ -303,6 +318,67 @@ it.each([false, true])(
 	},
 );
 
+it("keeps the leading system message stable when a context hook changes a conversation with loaded search tools", async () => {
+	harness = await createHarness({
+		tools: [],
+		extensionFactories: [
+			(pi) => {
+				registerLookup(pi, right);
+				registerDiscover(pi);
+				pi.on("context", (event) => ({ messages: [...event.messages, note] }));
+			},
+		],
+	});
+	harness.session.setActiveToolsByName(["discover"]);
+	const requests: TranscriptContext[] = [];
+	harness.setResponses([
+		(context) => {
+			requests.push(context);
+			return fauxAssistantMessage(fauxToolCall("discover", {}), { stopReason: "toolUse" });
+		},
+		(context) => {
+			requests.push(context);
+			return fauxAssistantMessage("Done");
+		},
+	]);
+	await harness.session.prompt("Find");
+	expect(requests[1].messages[0]).toEqual(requests[0].messages[0]);
+	expect(getCurrentTools(requests[1].messages).map((tool) => tool.description)).toContain("right");
+});
+
+it("does not redeclare search-loaded tools cleared by a later prompt replacement", async () => {
+	harness = await createHarness({
+		tools: [],
+		extensionFactories: [
+			(pi) => {
+				pi.on("context", (event) => ({ messages: [...event.messages, note] }));
+			},
+		],
+	});
+	// A content prompt is replaced by prompt sections at the next run, clearing earlier tools.
+	harness.sessionManager.appendMessage({ role: "system", content: "Base", timestamp: 0 });
+	harness.sessionManager.appendMessage({
+		role: "toolResult",
+		toolCallId: "old-search",
+		toolName: "discover",
+		toolCallKind: "toolSearch",
+		toolsAdded: [{ ...right, description: "right", parameters: Type.Object({}) }],
+		content: [],
+		isError: false,
+		timestamp: 1,
+	});
+	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+	const requests: TranscriptContext[] = [];
+	harness.setResponses([
+		(context) => {
+			requests.push(context);
+			return fauxAssistantMessage("Done");
+		},
+	]);
+	await harness.session.prompt("Continue");
+	expect(getCurrentTools(requests[0].messages)).toEqual([]);
+});
+
 it("reports denied search references without publishing a declaration", async () => {
 	harness = await createHarness({
 		tools: [],
@@ -310,16 +386,7 @@ it("reports denied search references without publishing a declaration", async ()
 		extensionFactories: [
 			(pi) => {
 				registerLookup(pi, right);
-				pi.registerToolSearch({
-					name: "discover",
-					label: "Discover",
-					description: "Find tools",
-					parameters: Type.Object({}),
-					async execute() {
-						pi.setActiveToolReferences([...pi.getActiveToolReferences(), right]);
-						return { content: [], details: {}, tools: [right] };
-					},
-				});
+				registerDiscover(pi);
 			},
 		],
 	});

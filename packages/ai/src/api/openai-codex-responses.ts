@@ -56,6 +56,7 @@ import {
 	finishResponsesDiagnostics,
 	type ResponsesDiagnostics,
 	recordResponsesEvent,
+	recordResponsesRequest,
 } from "./openai-responses-diagnostics.ts";
 import {
 	convertResponsesMessages,
@@ -339,7 +340,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 				websocketRequestId,
 			);
 			const bodyJson = JSON.stringify(body);
-			details.fullBodyBytes = utf8ByteLength(bodyJson);
+			recordResponsesRequest(diagnostics, bodyJson);
 			details.requestReadyMs = performance.now() - diagnostics.startedAt;
 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
@@ -1839,10 +1840,12 @@ async function processWebSocketStream(
 					grammarToolInputProperties,
 				},
 			).filter(
+				// Placeholder results for this response's calls are not response items; tool search adds a user message too.
 				(item) =>
 					item.type !== "function_call_output" &&
 					item.type !== "custom_tool_call_output" &&
-					item.type !== "tool_search_output",
+					item.type !== "tool_search_output" &&
+					!("role" in item && item.role === "user"),
 			);
 			entry.continuation = {
 				lastRequestBody: fullBody,
