@@ -540,6 +540,8 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	/** A failed response whose retry was already decided during its run, so post-run handling must not retry it again. */
+	private _inRunRetryMessage: AssistantMessage | undefined;
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
@@ -1038,6 +1040,16 @@ export class AgentSession {
 				await this._inspectBackgroundCommands(true);
 			if (this._shutdownAbortController.signal.aborted) return { action: "end" };
 			if (previousDecision?.action === "end") return previousDecision;
+			// Running native work keeps the run open, so a failed response retries here. Omitting the attempt could hide a
+			// native call that starts after the omission, and replay already drops the attempt's unfinished output.
+			if (
+				turn.message.stopReason === "error" &&
+				this.agent.state.pendingToolCalls.size > 0 &&
+				this._isRetryableError(turn.message)
+			) {
+				this._inRunRetryMessage = turn.message;
+				if (await this._prepareRetry(turn.message, false)) return { action: "continue" };
+			}
 			if (extensionContinue || previousDecision?.action === "continue") return { action: "continue" };
 			return undefined;
 		};
@@ -1668,7 +1680,7 @@ export class AgentSession {
 		for (let i = event.messages.length - 1; i >= 0; i--) {
 			const message = event.messages[i];
 			if (message.role === "assistant") {
-				return this._isRetryableError(message as AssistantMessage);
+				return message !== this._inRunRetryMessage && this._isRetryableError(message as AssistantMessage);
 			}
 		}
 		return false;
@@ -2364,7 +2376,11 @@ export class AgentSession {
 			return message.stopReason !== "stop" || this.agent.hasQueuedMessages();
 		}
 
-		if (this._isRetryableError(message) && (await this._prepareRetry(message))) {
+		if (
+			message !== this._inRunRetryMessage &&
+			this._isRetryableError(message) &&
+			(await this._prepareRetry(message))
+		) {
 			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
 			return !this._agentRunAbortRequested;
 		}
@@ -4770,7 +4786,7 @@ export class AgentSession {
 	 * Prepare a retryable error for continuation with exponential backoff.
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
-	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
+	private async _prepareRetry(message: AssistantMessage, omit = true): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) {
 			return false;
@@ -4798,7 +4814,7 @@ export class AgentSession {
 			});
 
 			// Keep raw history while durably omitting the selected attempt from future requests.
-			this._omitRecoveryAttempt(message);
+			if (omit) this._omitRecoveryAttempt(message);
 
 			await sleep(delayMs, this._retryAbortController.signal);
 			this._retryAbortController.signal.throwIfAborted();
