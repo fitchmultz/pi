@@ -5,6 +5,7 @@
  * and provides a transformer to convert them to LLM-compatible messages.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
 
@@ -135,6 +136,28 @@ export function createCustomMessage(
 		details,
 		timestamp: new Date(timestamp).getTime(),
 	};
+}
+
+/** Match an unchanged message or one with extra content blocks appended; all other fields must match. */
+export function isMessagePreserved(original: unknown, returned: unknown): boolean {
+	if (isDeepStrictEqual(original, returned)) return true;
+	if (
+		!original ||
+		!returned ||
+		typeof original !== "object" ||
+		typeof returned !== "object" ||
+		!("content" in original) ||
+		!("content" in returned) ||
+		!Array.isArray(original.content) ||
+		!Array.isArray(returned.content)
+	)
+		return false;
+	const { content: originalContent, ...originalFields } = original;
+	const { content, ...fields } = returned;
+	return (
+		isDeepStrictEqual(originalFields, fields) &&
+		isDeepStrictEqual(originalContent, content.slice(0, originalContent.length))
+	);
 }
 
 /**

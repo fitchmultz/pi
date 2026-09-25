@@ -318,66 +318,78 @@ it.each([false, true])(
 	},
 );
 
-it("keeps the leading system message stable when a context hook changes a conversation with loaded search tools", async () => {
-	harness = await createHarness({
-		tools: [],
-		extensionFactories: [
-			(pi) => {
-				registerLookup(pi, right);
-				registerDiscover(pi);
-				pi.on("context", (event) => ({ messages: [...event.messages, note] }));
+it.each([false, true])(
+	"keeps the leading system message stable with loaded search tools (prune user=%s)",
+	async (pruneUser) => {
+		harness = await createHarness({
+			tools: [],
+			extensionFactories: [
+				(pi) => {
+					registerLookup(pi, right);
+					registerDiscover(pi);
+					pi.on("context", (event) => ({
+						messages: [...event.messages.filter((message) => !pruneUser || message.role !== "user"), note],
+					}));
+				},
+			],
+		});
+		harness.session.setActiveToolsByName(["discover"]);
+		const requests: TranscriptContext[] = [];
+		harness.setResponses([
+			(context) => {
+				requests.push(context);
+				return fauxAssistantMessage(fauxToolCall("discover", {}), { stopReason: "toolUse" });
 			},
-		],
-	});
-	harness.session.setActiveToolsByName(["discover"]);
-	const requests: TranscriptContext[] = [];
-	harness.setResponses([
-		(context) => {
-			requests.push(context);
-			return fauxAssistantMessage(fauxToolCall("discover", {}), { stopReason: "toolUse" });
-		},
-		(context) => {
-			requests.push(context);
-			return fauxAssistantMessage("Done");
-		},
-	]);
-	await harness.session.prompt("Find");
-	expect(requests[1].messages[0]).toEqual(requests[0].messages[0]);
-	expect(getCurrentTools(requests[1].messages).map((tool) => tool.description)).toContain("right");
-});
+			(context) => {
+				requests.push(context);
+				return fauxAssistantMessage("Done");
+			},
+		]);
+		await harness.session.prompt("Find");
+		expect(requests[1].messages[0]).toEqual(requests[0].messages[0]);
+		expect(getCurrentTools(requests[1].messages).map((tool) => tool.description)).toContain("right");
+		if (pruneUser) expect(JSON.stringify(requests[1].messages)).not.toContain('"Find"');
+	},
+);
 
-it("does not redeclare search-loaded tools cleared by a later prompt replacement", async () => {
-	harness = await createHarness({
-		tools: [],
-		extensionFactories: [
-			(pi) => {
-				pi.on("context", (event) => ({ messages: [...event.messages, note] }));
+it.each([false, true])(
+	"does not redeclare search-loaded tools cleared by a later prompt replacement (prune user=%s)",
+	async (pruneUser) => {
+		harness = await createHarness({
+			tools: [],
+			extensionFactories: [
+				(pi) => {
+					pi.on("context", (event) => ({
+						messages: [...event.messages.filter((message) => !pruneUser || message.role !== "user"), note],
+					}));
+				},
+			],
+		});
+		// A content prompt is replaced by prompt sections at the next run, clearing earlier tools.
+		harness.sessionManager.appendMessage({ role: "system", content: "Base", timestamp: 0 });
+		harness.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "old-search",
+			toolName: "discover",
+			toolCallKind: "toolSearch",
+			toolsAdded: [{ ...right, description: "right", parameters: Type.Object({}) }],
+			content: [],
+			isError: false,
+			timestamp: 1,
+		});
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+		const requests: TranscriptContext[] = [];
+		harness.setResponses([
+			(context) => {
+				requests.push(context);
+				return fauxAssistantMessage("Done");
 			},
-		],
-	});
-	// A content prompt is replaced by prompt sections at the next run, clearing earlier tools.
-	harness.sessionManager.appendMessage({ role: "system", content: "Base", timestamp: 0 });
-	harness.sessionManager.appendMessage({
-		role: "toolResult",
-		toolCallId: "old-search",
-		toolName: "discover",
-		toolCallKind: "toolSearch",
-		toolsAdded: [{ ...right, description: "right", parameters: Type.Object({}) }],
-		content: [],
-		isError: false,
-		timestamp: 1,
-	});
-	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-	const requests: TranscriptContext[] = [];
-	harness.setResponses([
-		(context) => {
-			requests.push(context);
-			return fauxAssistantMessage("Done");
-		},
-	]);
-	await harness.session.prompt("Continue");
-	expect(getCurrentTools(requests[0].messages)).toEqual([]);
-});
+		]);
+		await harness.session.prompt("Continue");
+		expect(getCurrentTools(requests[0].messages)).toEqual([]);
+		if (pruneUser) expect(JSON.stringify(requests[0].messages)).not.toContain('"Continue"');
+	},
+);
 
 it("reports denied search references without publishing a declaration", async () => {
 	harness = await createHarness({

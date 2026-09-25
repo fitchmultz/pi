@@ -149,7 +149,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
+import { type BashExecutionMessage, type CustomMessage, convertToLlm, isMessagePreserved } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -383,8 +383,11 @@ interface ProviderRequestPrefix {
 	/** Structured prompt at dispatch; idle usage stays valid when a request-only force ends. */
 	transcriptSystemPrompt: string;
 	toolKeys: readonly string[];
-	/** Dispatch-time conversation and prefix estimate; opaque content is covered by response usage. */
-	conversation: unknown[];
+	/** Immutable pre-transform input; measured usage applies only while this baseline is unchanged. */
+	canonicalConversation: unknown[];
+	conversationPreserved: boolean;
+	/** Only results actually sent can be retired at a context boundary. */
+	toolResultIds: ReadonlySet<string>;
 	systemTokens: number;
 	response?: AssistantMessage;
 	responseSnapshot?: unknown;
@@ -438,6 +441,16 @@ function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
 			}),
 		});
 	});
+}
+
+/** Request decorations may insert messages or append blocks, but must retain the original input in order. */
+function providerConversationCovers(canonical: readonly unknown[], sent: readonly unknown[]): boolean {
+	let index = 0;
+	for (const message of sent) {
+		if (index === canonical.length) break;
+		if (isMessagePreserved(canonical[index], message)) index++;
+	}
+	return index === canonical.length;
 }
 
 function providerToolResultIds(conversation: readonly unknown[]): Set<string> {
@@ -812,7 +825,7 @@ export class AgentSession {
 		const prefix = [this._providerRequestPrefix, this._reportedUsagePrefix].find(
 			(candidate) => candidate?.response && ["stop", "length", "toolUse"].includes(candidate.response.stopReason),
 		);
-		const consumedResultIds = providerToolResultIds(prefix?.conversation ?? []);
+		const consumedResultIds = prefix?.toolResultIds;
 		const consumedEntryIds = new Set(
 			this.sessionManager
 				.getBranch()
@@ -824,7 +837,7 @@ export class AgentSession {
 				(message) =>
 					message.role === "toolResult" &&
 					nativeCallIds.has(message.toolCallId) &&
-					!consumedResultIds.has(message.toolCallId),
+					!consumedResultIds?.has(message.toolCallId),
 			)
 				? [entry.sourceEntry.id]
 				: [],
@@ -951,7 +964,9 @@ export class AgentSession {
 			this._refreshFinalizedContext();
 			const model = this.model;
 			const systemPrompt = getCurrentSystemPrompt(messages);
+			const canonicalConversation = snapshotProviderConversation(messages);
 			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
+			const sentConversation = snapshotProviderConversation(transformed);
 			this._providerRequestPrefix = model
 				? {
 						provider: model.provider,
@@ -960,7 +975,9 @@ export class AgentSession {
 						systemPrompt: getCurrentSystemPrompt(transformed),
 						transcriptSystemPrompt: systemPrompt,
 						toolKeys: this.agent.state.tools.map((tool) => this._captureToolPrefix(tool)),
-						conversation: snapshotProviderConversation(transformed),
+						canonicalConversation,
+						conversationPreserved: providerConversationCovers(canonicalConversation, sentConversation),
+						toolResultIds: providerToolResultIds(sentConversation),
 						systemTokens: this._projectEstimatedMessages(transformed).reduce(
 							(sum, message) => sum + (message.role === "system" ? estimateTokens(message) : 0),
 							0,
@@ -1116,6 +1133,7 @@ export class AgentSession {
 		const model = this.model;
 		if (
 			!prefix?.response ||
+			!prefix.conversationPreserved ||
 			!model ||
 			prefix.provider !== model.provider ||
 			prefix.api !== model.api ||
@@ -1130,7 +1148,10 @@ export class AgentSession {
 				snapshotProviderConversation([context.messages[lastUsageIndex]])[0],
 				prefix.responseSnapshot,
 			) &&
-			isDeepStrictEqual(snapshotProviderConversation(context.messages.slice(0, lastUsageIndex)), prefix.conversation)
+			isDeepStrictEqual(
+				snapshotProviderConversation(context.messages.slice(0, lastUsageIndex)),
+				prefix.canonicalConversation,
+			)
 		);
 	}
 
@@ -1492,7 +1513,7 @@ export class AgentSession {
 			event.type === "message_end" &&
 			event.message.role === "assistant" &&
 			["stop", "length", "toolUse"].includes(event.message.stopReason)
-				? providerToolResultIds(requestPrefix.conversation)
+				? requestPrefix.toolResultIds
 				: undefined;
 		const consumedToolResultIds = consumedCallIds?.size
 			? this.sessionManager
@@ -1513,13 +1534,15 @@ export class AgentSession {
 		if (event.type === "agent_end") this._providerRequestPrefix = undefined;
 		if (event.type === "message_start" && event.message.role === "assistant") {
 			if (this._providerRequestPrefix) {
+				const continuation = snapshotProviderConversation([...(event.continuationInput ?? [])]);
 				this._providerRequestPrefix = {
 					...this._providerRequestPrefix,
 					response: undefined,
-					conversation: [
-						...this._providerRequestPrefix.conversation,
-						...snapshotProviderConversation([...(event.continuationInput ?? [])]),
-					],
+					canonicalConversation: [...this._providerRequestPrefix.canonicalConversation, ...continuation],
+					toolResultIds: new Set([
+						...this._providerRequestPrefix.toolResultIds,
+						...providerToolResultIds(continuation),
+					]),
 				};
 			}
 			this._flushPendingProviderMessages();
@@ -1575,7 +1598,7 @@ export class AgentSession {
 			this._providerRequestPrefix = {
 				...requestPrefix,
 				response: message,
-				conversation: [...requestPrefix.conversation, responseSnapshot],
+				canonicalConversation: [...requestPrefix.canonicalConversation, responseSnapshot],
 			};
 		}
 

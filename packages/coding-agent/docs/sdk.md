@@ -188,6 +188,8 @@ For factory-registered providers needed before selection, create services with `
 
 `getContextUsage()` is synchronous. It preserves matching measured usage, including opaque reasoning, and estimates changes to prompt/tools and trailing input relative to that total. It does not count earlier output again. Model/provider/API changes, edits, and context boundaries invalidate inapplicable measurements; ending a request-only forced prompt preserves idle usage.
 
+Request transforms may insert messages or append content blocks without losing measured usage, provided they preserve the original messages, fields, and content in order. Omissions, rewrites, truncation, and reordering invalidate that measurement.
+
 `source` is `reported`, `estimated`, or `unknown`; tokens may be null after compaction. Estimates are not exact provider counts. A resumed session without a captured request prefix uses the larger of matching reported usage and visible-context estimates. Extensions should use `ctx.getCompactionSettings()` for current effective per-model thresholds rather than rereading files.
 
 ### Settings and reload
