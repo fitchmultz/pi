@@ -229,10 +229,12 @@ export async function* streamResponsesWebSocket(
 				supportsToolSearch: model.compat?.supportsToolSearch,
 				grammarToolInputProperties,
 			}).filter(
+				// Placeholder results for this response's calls are not response items; tool search adds a user message too.
 				(item) =>
 					item.type !== "function_call_output" &&
 					item.type !== "custom_tool_call_output" &&
-					item.type !== "tool_search_output",
+					item.type !== "tool_search_output" &&
+					!("role" in item && item.role === "user"),
 			);
 			active.continuation = {
 				request,
