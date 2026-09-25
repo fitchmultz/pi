@@ -1461,3 +1461,89 @@ it.each([false, true])(
 		}
 	},
 );
+
+it("reaches the model while native work outlives a failed response", async () => {
+	let started!: () => void;
+	const executing = new Promise<void>((resolve) => {
+		started = resolve;
+	});
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const unfinished = vi.fn<AgentTool["execute"]>(async () => result);
+	const harness = await createHarness({
+		settings: { compaction: { enabled: false }, retry: { enabled: false } },
+		tools: [
+			{
+				name: "work",
+				label: "Work",
+				description: "Work",
+				parameters: Type.Object({ path: Type.String() }),
+				async: true,
+				execute: async () => {
+					started();
+					await gate;
+					return { ...result, newContext: { handoff: "fresh" } };
+				},
+			},
+			{ name: "other", label: "Other", description: "Other", parameters: Type.Object({}), execute: unfinished },
+		],
+	});
+	harness.session.agent.state.model = {
+		...harness.getModel(),
+		api: "openai-responses",
+		compat: { supportsAsyncTools: true },
+	} as Model<"openai-responses">;
+	// Work blocked on its caller, such as a subagent question, can only be answered through steering.
+	harness.session.subscribe((event) => {
+		if (event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason === "error")
+			harness.session.agent.steer({ role: "user", content: "child question", timestamp: Date.now() });
+	});
+	const inputs: Array<unknown[]> = [];
+	harness.session.agent.streamFunction = (model, context) => {
+		inputs.push(structuredClone(context.messages));
+		const request = inputs.length;
+		const message: AssistantMessage = {
+			...fauxAssistantMessage(
+				request === 1
+					? [toolCall(), { type: "toolCall", id: "unfinished", name: "other", arguments: {} }]
+					: "answer",
+				{ responseId: `response-${request}`, stopReason: request === 1 ? "error" : "stop" },
+			),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			errorMessage: request === 1 ? "WebSocket closed 1012" : undefined,
+		};
+		const stream = createAssistantMessageEventStream();
+		void (async () => {
+			stream.push({ type: "start", partial: message });
+			if (request === 1) {
+				stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCall(), partial: message });
+				await executing;
+				stream.push({ type: "error", reason: "error", error: message });
+			} else stream.push({ type: "done", reason: "stop", message });
+			stream.end();
+		})();
+		return stream;
+	};
+	const run = harness.session.prompt("start work");
+	try {
+		await vi.waitFor(() => expect(inputs).toHaveLength(2));
+		expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "user", content: "child question" }));
+		release();
+		await run;
+		expect(inputs).toHaveLength(3);
+		expect(inputs[2]).toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: toolCall().id, content: result.content }),
+		);
+		expect(unfinished).not.toHaveBeenCalled();
+		// Like its unfinished calls, the failed response's native work cannot start a fresh window.
+		expect(harness.eventsOfType("context_window_started")).toEqual([]);
+	} finally {
+		release();
+		await run;
+		harness.cleanup();
+	}
+});
