@@ -2538,6 +2538,108 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
+	it("continues a client tool search with only its output in websocket-cached mode", async () => {
+		const search = {
+			type: "tool_search_call",
+			id: "tsc_1",
+			call_id: "search_1",
+			execution: "client",
+			status: "completed",
+			arguments: { query: "records" },
+		};
+		const { sentBodies } = mockWebSocketTransport((socket) => {
+			const id = `resp_${sentBodies.length}`;
+			const events = [
+				{ type: "response.created", response: { id } },
+				...(sentBodies.length === 1
+					? [
+							{
+								type: "response.output_item.added",
+								output_index: 0,
+								item: { ...search, status: "in_progress" },
+							},
+							{ type: "response.output_item.done", output_index: 0, item: search },
+						]
+					: []),
+				{
+					type: "response.completed",
+					response: {
+						id,
+						status: "completed",
+						usage: {
+							input_tokens: 5,
+							output_tokens: 3,
+							total_tokens: 8,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			];
+			for (const event of events) socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
+		});
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+			compat: { supportsToolSearch: true },
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Find records", timestamp: 1 }],
+			tools: [
+				{
+					name: "discover",
+					description: "Discover tools",
+					parameters: Type.Object({ query: Type.String() }),
+					toolSearch: true,
+				},
+			],
+		};
+		const options = { apiKey: mockToken(), sessionId: "tool-search-session", transport: "websocket-cached" as const };
+
+		const first = await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
+		await streamOpenAICodexResponses(
+			model,
+			normalizeContext({
+				...context,
+				messages: [
+					...context.messages,
+					first,
+					{
+						role: "toolResult",
+						toolCallId: "search_1|tsc_1",
+						toolName: "discover",
+						toolCallKind: "toolSearch",
+						toolsAdded: [
+							{
+								name: "lookup",
+								namespace: "records",
+								description: "Find a record",
+								parameters: Type.Object({ id: Type.String() }),
+							},
+						],
+						content: [{ type: "text", text: "Loaded records.lookup" }],
+						isError: false,
+						timestamp: 2,
+					},
+				],
+			}),
+			options,
+		).result();
+
+		expect(sentBodies[1]).toMatchObject({ previous_response_id: "resp_1" });
+		expect((sentBodies[1].input as { type?: string; role?: string }[]).map((item) => item.type ?? item.role)).toEqual(
+			["tool_search_output", "user"],
+		);
+	});
+
 	it.each(["websocket", "sse"] as const)(
 		"recovers a missing cached websocket continuation via %s",
 		async (recoveryTransport) => {
