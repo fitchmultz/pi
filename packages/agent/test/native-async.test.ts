@@ -935,6 +935,48 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it("receipts a restored native call whose ordered predecessor never finished instead of starting it", async () => {
+		const work = vi.fn<AgentTool["execute"]>(async () => result);
+		const { agent, streams, inputs } = setup(work);
+		agent.state.tools = [
+			...agent.state.tools,
+			{
+				name: "change_dir",
+				label: "Change dir",
+				description: "Change dir",
+				parameters: Type.Object({}),
+				executionMode: "sequential",
+				execute: async () => result,
+			},
+		];
+		const changeDir: ToolCall = {
+			type: "toolCall",
+			id: "cd|fc_cd",
+			name: "change_dir",
+			arguments: {},
+			responsesItem: {
+				type: "function_call",
+				id: "fc_cd",
+				call_id: "cd",
+				name: "change_dir",
+				arguments: "{}",
+				status: "completed",
+			},
+		};
+		// The process stopped while change_dir ran, so neither call has a result.
+		agent.state.messages = [
+			{ role: "user", content: "go", timestamp: 1 },
+			{ ...assistant("first", [changeDir, call()]), stopReason: "toolUse" },
+		];
+		const run = agent.prompt("continue");
+		await answer(streams, 0);
+		expect(work).not.toHaveBeenCalled();
+		await run;
+		expect(inputs[0]).toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: call().id, isError: true }),
+		);
+	});
+
 	it.each([false, true])("honors explicit continuation while native work runs (end next turn=%s)", async (end) => {
 		const work = deferred<AgentToolResult>();
 		const { agent, streams, inputs, events } = setup(async () => work.promise);
