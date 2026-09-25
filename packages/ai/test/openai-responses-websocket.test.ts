@@ -208,11 +208,7 @@ describe("native direct Responses WebSockets", () => {
 			arguments: { query: "records" },
 		};
 		const server = await createResponsesServer((request) =>
-			replyWithOutput(
-				request,
-				`resp_${server.requests.length}`,
-				server.requests.length === 1 ? [search] : [textOutput("2")],
-			),
+			replyWithOutput(request, `resp_${server.requests.length}`, [search]),
 		);
 		servers.push(server);
 		const model = { ...server.model, compat: { supportsToolSearch: true } };

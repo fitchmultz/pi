@@ -20,6 +20,7 @@ import { createHarness, type Harness } from "./harness.ts";
 
 const left: ToolReference = { namespace: "left", name: "lookup" };
 const right: ToolReference = { namespace: "right", name: "lookup" };
+const note = { role: "custom", customType: "note", content: "Note", display: false, timestamp: 0 } as const;
 let harness: Harness | undefined;
 afterEach(() => harness?.cleanup());
 
@@ -324,12 +325,7 @@ it("keeps the leading system message stable when a context hook changes a conver
 			(pi) => {
 				registerLookup(pi, right);
 				registerDiscover(pi);
-				pi.on("context", (event) => ({
-					messages: [
-						...event.messages,
-						{ role: "custom", customType: "note", content: "Note", display: false, timestamp: 0 },
-					],
-				}));
+				pi.on("context", (event) => ({ messages: [...event.messages, note] }));
 			},
 		],
 	});
@@ -355,12 +351,7 @@ it("does not redeclare search-loaded tools cleared by a later prompt replacement
 		tools: [],
 		extensionFactories: [
 			(pi) => {
-				pi.on("context", (event) => ({
-					messages: [
-						...event.messages,
-						{ role: "custom", customType: "note", content: "Note", display: false, timestamp: 0 },
-					],
-				}));
+				pi.on("context", (event) => ({ messages: [...event.messages, note] }));
 			},
 		],
 	});

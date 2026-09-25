@@ -2583,35 +2583,24 @@ describe("openai-codex streaming", () => {
 		};
 		const options = { apiKey: mockToken(), sessionId: "tool-search-session", transport: "websocket-cached" as const };
 
-		const first = await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
-		await streamOpenAICodexResponses(
-			model,
-			normalizeContext({
-				...context,
-				messages: [
-					...context.messages,
-					first,
-					{
-						role: "toolResult",
-						toolCallId: "search_1|tsc_1",
-						toolName: "discover",
-						toolCallKind: "toolSearch",
-						toolsAdded: [
-							{
-								name: "lookup",
-								namespace: "records",
-								description: "Find a record",
-								parameters: Type.Object({ id: Type.String() }),
-							},
-						],
-						content: [{ type: "text", text: "Loaded records.lookup" }],
-						isError: false,
-						timestamp: 2,
-					},
-				],
-			}),
-			options,
-		).result();
+		context.messages.push(await streamOpenAICodexResponses(model, normalizeContext(context), options).result(), {
+			role: "toolResult",
+			toolCallId: "search_1|tsc_1",
+			toolName: "discover",
+			toolCallKind: "toolSearch",
+			toolsAdded: [
+				{
+					name: "lookup",
+					namespace: "records",
+					description: "Find a record",
+					parameters: Type.Object({ id: Type.String() }),
+				},
+			],
+			content: [{ type: "text", text: "Loaded records.lookup" }],
+			isError: false,
+			timestamp: 2,
+		});
+		await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
 
 		expect(sentBodies[1]).toMatchObject({ previous_response_id: "resp_1" });
 		expect((sentBodies[1].input as { type?: string; role?: string }[]).map((item) => item.type ?? item.role)).toEqual(
