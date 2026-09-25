@@ -1128,6 +1128,93 @@ describe("AgentSession context usage estimate", () => {
 		expect(session.getContextUsage()).toMatchObject({ tokens: 500_400, source: "estimated" });
 	});
 
+	it.each([
+		"tool-result block",
+		"whole message",
+		"block rewrite",
+		"block truncation",
+		"block reorder",
+		"message reorder",
+		"field edit",
+	] as const)("checks preservation of opaque reported usage with a %s request decoration", async (decoration) => {
+		const harness = await createHarness({
+			tools: [
+				{
+					name: "lookup",
+					label: "Lookup",
+					description: "Lookup",
+					parameters: Type.Object({}),
+					execute: async () => ({
+						content: [
+							{ type: "text", text: "original result" },
+							{ type: "text", text: "second block" },
+						],
+						details: {},
+					}),
+				},
+			],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("context", (event) => {
+						if (decoration !== "whole message") {
+							if (
+								decoration === "message reorder" &&
+								event.messages.some((message) => message.role === "toolResult")
+							)
+								event.messages.reverse();
+							for (const message of event.messages) {
+								if (message.role !== "toolResult") continue;
+								if (decoration === "tool-result block")
+									message.content.push({ type: "text", text: "Duration: 1s" });
+								if (decoration === "block rewrite") message.content[1] = { type: "text", text: "rewritten" };
+								if (decoration === "block truncation") message.content.pop();
+								if (decoration === "block reorder") message.content.reverse();
+								if (decoration === "field edit") message.isError = true;
+							}
+							return { messages: event.messages };
+						}
+						return {
+							messages: [
+								{ role: "user", content: "Session name: context-usage", timestamp: 0 },
+								...event.messages,
+							],
+						};
+					});
+					pi.on("message_end", (event) => {
+						if (event.message.role === "assistant") event.message.usage = usage(500_000);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		let sent = "";
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("lookup", {}), { stopReason: "toolUse" }),
+			(context) => {
+				sent = JSON.stringify(context.messages);
+				return fauxAssistantMessage([
+					{ type: "thinking", thinking: "", thinkingSignature: "opaque-test" },
+					{ type: "text", text: "done" },
+				]);
+			},
+		]);
+		await harness.session.prompt("look up the result");
+		expect(sent).toContain("original result");
+		if (decoration !== "tool-result block" && decoration !== "whole message") {
+			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
+			expect(harness.session.getContextUsage()!.tokens!).toBeLessThan(500_000);
+			return;
+		}
+		expect(sent).toContain(decoration === "tool-result block" ? "Duration: 1s" : "Session name: context-usage");
+		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 500_000, source: "reported" });
+		harness.session.refreshContext();
+		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 500_000, source: "reported" });
+		expect(JSON.stringify(harness.session.messages)).not.toContain(
+			decoration === "tool-result block" ? "Duration: 1s" : "Session name: context-usage",
+		);
+	});
+
 	it.each(["context", "message_end"])(
 		"does not apply reported usage to conversation omitted by a %s hook",
 		async (hook) => {

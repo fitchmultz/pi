@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed context usage and automatic rollover losing measured reasoning tokens when request transforms add messages or append content blocks.
+
 ## [0.87.1] - 2026-09-22
 
 ### New Features

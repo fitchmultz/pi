@@ -215,6 +215,69 @@ describe("session_before_auto_compact", () => {
 		expect(entryTypes(harness)).toEqual(["message", "message", "message", "context_window", "message"]);
 	});
 
+	it.each(["request preflight", "settlement threshold", "settlement overflow"] as const)(
+		"rolls over decorated opaque context at %s",
+		async (boundary) => {
+			const seen: Array<{ reason: string; willRetry: boolean }> = [];
+			let responses = 0;
+			const measured =
+				boundary === "request preflight" ? 430_000 : boundary === "settlement threshold" ? 447_778 : 510_000;
+			const harness = await createHarness({
+				tools: [],
+				models: [{ id: "faux-1", contextWindow: 500_000, maxTokens: 1000 }],
+				settings: { compaction: { enabled: true, reserveTokens: 64_000 } },
+				extensionFactories: [
+					claimRollover(seen),
+					(pi) => {
+						pi.on("context", (event) => ({
+							messages: [
+								{ role: "user", content: "Recovered todo: finish the task", timestamp: 0 },
+								...event.messages,
+							],
+						}));
+						pi.on("message_end", (event) => {
+							if (event.message.role === "assistant" && responses++ === 0) event.message.usage = usage(measured);
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				fauxAssistantMessage([
+					{ type: "thinking", thinking: "", thinkingSignature: "opaque-test" },
+					{ type: "text", text: "completed answer" },
+				]),
+			]);
+			await harness.session.prompt("original request");
+			if (boundary === "request preflight") {
+				expect(seen).toEqual([]);
+				expect(harness.session.getContextUsage()).toMatchObject({ tokens: measured, source: "reported" });
+				const next = `next request ${"n".repeat(28_000)}`;
+				harness.setResponses([
+					(context) => {
+						expect(seen).toEqual([{ reason: "threshold", willRetry: false }]);
+						const texts = context.messages.map(getMessageText);
+						expect(texts).toContain(next);
+						expect(texts).not.toContain("original request");
+						return fauxAssistantMessage("next answer");
+					},
+				]);
+				await harness.session.prompt(next);
+			}
+			expect(seen).toEqual([
+				{ reason: boundary === "settlement overflow" ? "overflow" : "threshold", willRetry: false },
+			]);
+			expect(countType(harness, "context_window")).toBe(1);
+			expect(countType(harness, "compaction")).toBe(0);
+			expect(harness.faux.state.callCount).toBe(boundary === "request preflight" ? 2 : 1);
+			expect(
+				harness.sessionManager
+					.getBranch()
+					.some((entry) => entry.type === "message" && getMessageText(entry.message) === "completed answer"),
+			).toBe(true);
+		},
+	);
+
 	it("applies session_before_compact newContext before a mid-run provider request", async () => {
 		const bigTool: AgentTool = {
 			name: "dump",
