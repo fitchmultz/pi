@@ -21,7 +21,7 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createBackgroundCommandTool } from "../src/core/tools/background-command.ts";
 import { createSessionManager } from "../src/main.ts";
-import { getShellEnv } from "../src/utils/shell.ts";
+import { getShellEnv, killProcessTree } from "../src/utils/shell.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 async function until(condition: () => boolean) {
@@ -223,6 +223,15 @@ describe("native background shell worker", () => {
 				return true;
 			}
 		});
+	});
+
+	it.skipIf(process.platform === "win32")("freezes the shell process group before killing it", () => {
+		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+		killProcessTree(4321);
+		expect(kill.mock.calls).toEqual([
+			[-4321, "SIGSTOP"],
+			[-4321, "SIGKILL"],
+		]);
 	});
 
 	it("honors cancellation during worker startup", async () => {
