@@ -695,6 +695,191 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it("gives a native result that settles while its turn ends a turn of its own", async () => {
+		const work = deferred<AgentToolResult>();
+		const { agent, streams, inputs } = setup(async () => work.promise);
+		agent.finishTurn = async () => {
+			// Settle after the turn's readiness check and before the loop decides whether to wait.
+			work.resolve(result);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			return undefined;
+		};
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const first = assistant("first");
+		await emitCall(streams[0], first, call());
+		finish(streams[0], first);
+		await answer(streams, 1);
+		await run;
+		expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "toolResult", content: result.content }));
+	});
+
+	it("delivers steering to a model without native async tools while native work runs", async () => {
+		const work = deferred<AgentToolResult>();
+		const { agent, streams, inputs } = setup(async () => work.promise);
+		agent.prepareNextTurn = async () => ({ model: { ...model, compat: {} } });
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const first = assistant("first");
+		await emitCall(streams[0], first, call());
+		await vi.waitFor(() => expect(agent.state.pendingToolCalls.size).toBe(1));
+		finish(streams[0], first);
+		// Work blocked on its caller, such as a subagent question, can only be answered through steering.
+		agent.steer({ role: "user", content: "child question", timestamp: 2 });
+		await vi.waitFor(() => expect(streams).toHaveLength(2));
+		expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "user", content: "child question" }));
+		work.resolve(result);
+		await answer(streams, 1);
+		await answer(streams, 2);
+		await run;
+		expect(inputs[2]).toContainEqual(expect.objectContaining({ role: "toolResult", content: result.content }));
+	});
+
+	it("lets steering end the wait for native work before a request to a model without native async tools", async () => {
+		const work = deferred<AgentToolResult>();
+		const running = call("running");
+		const done = call("done");
+		const { agent, streams, inputs, events } = setup(async (id) => (id === done.id ? result : work.promise));
+		agent.prepareNextTurn = async () => ({ model: { ...model, compat: {} } });
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const first = assistant("first");
+		await emitCall(streams[0], first, running);
+		first.content.push(done);
+		streams[0].push({ type: "toolcall_end", contentIndex: 1, toolCall: done, partial: first });
+		finish(streams[0], first);
+		// The finished call's result turn waits for the running one.
+		await vi.waitFor(() => expect(events.filter((event) => event.type === "turn_start")).toHaveLength(2));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(streams).toHaveLength(1);
+		agent.steer({ role: "user", content: "child question", timestamp: 2 });
+		await vi.waitFor(() => expect(streams).toHaveLength(2));
+		expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "user", content: "child question" }));
+		expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: done.id }));
+		expect(inputs[1]).not.toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: running.id }));
+		work.resolve(result);
+		await answer(streams, 1);
+		await answer(streams, 2);
+		await run;
+		expect(inputs[2]).toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: running.id }));
+	});
+
+	it("keeps continued steering one at a time across the wait for native work", async () => {
+		const work = deferred<AgentToolResult>();
+		const { agent, streams, inputs } = setup(async () => work.promise);
+		agent.state.model = { ...model, compat: {} };
+		agent.state.messages = [
+			{ role: "user", content: "go", timestamp: 1 },
+			{ ...assistant("first", [call()]), stopReason: "toolUse" },
+		];
+		agent.steer({ role: "user", content: "first steer", timestamp: 2 });
+		agent.steer({ role: "user", content: "second steer", timestamp: 3 });
+		const run = agent.continue();
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		expect(inputs[0]).toContainEqual(expect.objectContaining({ content: "first steer" }));
+		expect(inputs[0]).not.toContainEqual(expect.objectContaining({ content: "second steer" }));
+		await answer(streams, 0);
+		await vi.waitFor(() => expect(streams).toHaveLength(2));
+		expect(inputs[1]).toContainEqual(expect.objectContaining({ content: "second steer" }));
+		work.resolve(result);
+		await answer(streams, 1);
+		await answer(streams, 2);
+		await run;
+	});
+
+	it("never runs calls of an errored response that unconfirmed steering continues", async () => {
+		const other = vi.fn<AgentTool["execute"]>(async () => result);
+		const streams: AssistantMessageEventStream[] = [];
+		const inputs: Message[][] = [];
+		const resets: unknown[] = [];
+		const completed: ToolCall = {
+			type: "toolCall",
+			id: "completed|fc_completed",
+			name: "other",
+			arguments: {},
+			responsesItem: {
+				type: "function_call",
+				id: "fc_completed",
+				call_id: "completed",
+				name: "other",
+				arguments: "{}",
+				status: "completed",
+			},
+		};
+		const run = runAgentLoop(
+			[{ role: "user", content: "go", timestamp: 1 }],
+			{
+				messages: [],
+				tools: [
+					{
+						name: "work",
+						label: "Work",
+						description: "Work",
+						parameters: Type.Object({ path: Type.String() }),
+						async: true,
+						execute: async () => ({ ...result, newContext: { handoff: "fresh" } }),
+					},
+					{ name: "other", label: "Other", description: "Other", parameters: Type.Object({}), execute: other },
+				],
+			},
+			{
+				model,
+				convertToLlm: (messages) => messages as Message[],
+				prepareNextTurn: async (turn) => {
+					resets.push(turn.newContext);
+					return undefined;
+				},
+			},
+			() => {},
+			undefined,
+			(_model, context) => {
+				inputs.push(structuredClone(context.messages));
+				const stream = new AssistantMessageEventStream();
+				streams.push(stream);
+				return stream;
+			},
+		);
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const native = call();
+		const first = assistant("first", [
+			native,
+			completed,
+			{ type: "toolCall", id: "partial", name: "other", arguments: {} },
+		]);
+		streams[0].push({ type: "start", partial: first });
+		streams[0].push({ type: "toolcall_end", contentIndex: 0, toolCall: native, partial: first });
+		streams[0].push({
+			type: "steering",
+			message: { role: "user", content: "steer", timestamp: 2 },
+			status: "failed",
+		});
+		finish(streams[0], first, true);
+		await answer(streams, 1);
+		await run;
+		expect(other).not.toHaveBeenCalled();
+		expect(inputs[1]).toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: completed.id, isError: true }),
+		);
+		// Replay drops the partial call, so a receipt for it would have no call to answer.
+		expect(inputs.flat()).not.toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: "partial" }));
+		expect(resets.filter(Boolean)).toEqual([]);
+	});
+
+	it("receipts a failed response's never-started native call instead of starting it in a later run", async () => {
+		const work = vi.fn<AgentTool["execute"]>(async () => result);
+		const { agent, streams, inputs } = setup(work);
+		agent.state.messages = [
+			{ ...assistant("failed", [call()]), stopReason: "error", errorMessage: "WebSocket closed 1012" },
+		];
+		const run = agent.prompt("continue");
+		await answer(streams, 0);
+		await run;
+		expect(work).not.toHaveBeenCalled();
+		expect(inputs[0]).toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: call().id, isError: true }),
+		);
+	});
+
 	it.each([false, true])("honors explicit continuation while native work runs (end next turn=%s)", async (end) => {
 		const work = deferred<AgentToolResult>();
 		const { agent, streams, inputs, events } = setup(async () => work.promise);

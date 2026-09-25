@@ -3655,15 +3655,15 @@ export class InteractiveMode {
 			case "agent_start":
 				this.pendingTools.clear();
 				this.completedToolCalls.clear();
+				break;
+
+			case "turn_start":
 				// Restore main escape handler if retry handler is still active
-				// (retry success event fires later, but we need main handler now)
+				// (retry success event fires later, and a retry within the same run starts no new agent run)
 				if (this.retryEscapeHandler) {
 					this.defaultEditor.onEscape = this.retryEscapeHandler;
 					this.retryEscapeHandler = undefined;
 				}
-				break;
-
-			case "turn_start":
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3828,7 +3828,13 @@ export class InteractiveMode {
 							(block) => block.type === "toolCall" && block.executionStarted,
 						)
 							? []
-							: [this.streamingComponent, ...this.pendingTools.values()];
+							: [
+									this.streamingComponent,
+									// A tool still running from an earlier response keeps updating after a retry.
+									...[...this.pendingTools].flatMap(([id, component]) =>
+										this.session.state.pendingToolCalls.has(id) ? [] : [component],
+									),
+								];
 						this.failedAttemptMessage = this.streamingMessage;
 					}
 

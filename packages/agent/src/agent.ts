@@ -536,7 +536,9 @@ export class Agent {
 	}
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
-		let steeringPollsToSkip = options.skipInitialSteeringPoll ? (this.prepareRequest ? 2 : 1) : 0;
+		// continue() started this run with one steering message; a poll before its request would add another.
+		let skipSteeringPolls = options.skipInitialSteeringPoll === true;
+		const convertToLlm = this.convertToLlm;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
@@ -569,7 +571,11 @@ export class Agent {
 							return await this.prepareNextTurn?.(this.signal);
 						}
 					: undefined,
-			convertToLlm: this.convertToLlm,
+			convertToLlm: (messages) => {
+				// Runs once per request, as the request is built.
+				skipSteeringPolls = false;
+				return convertToLlm(messages);
+			},
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
@@ -579,10 +585,7 @@ export class Agent {
 				} finally {
 					if (this.steeringPreparation === preparation) this.steeringPreparation = undefined;
 				}
-				if (steeringPollsToSkip > 0) {
-					steeringPollsToSkip--;
-					return [];
-				}
+				if (skipSteeringPolls) return [];
 				return this.steeringQueue.drain();
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),

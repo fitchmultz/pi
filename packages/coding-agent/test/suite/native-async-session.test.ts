@@ -1605,3 +1605,99 @@ it("reaches the model while native work outlives a failed response", async () =>
 		harness.cleanup();
 	}
 });
+
+it.each([false, true])("retries a failed response while its native work runs (cancelled=%s)", async (cancelled) => {
+	let started!: () => void;
+	const executing = new Promise<void>((resolve) => {
+		started = resolve;
+	});
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const harness = await createHarness({
+		settings: {
+			compaction: { enabled: false },
+			retry: { enabled: true, maxRetries: 2, baseDelayMs: cancelled ? 60_000 : 0 },
+		},
+		tools: [
+			{
+				name: "work",
+				label: "Work",
+				description: "Work",
+				parameters: Type.Object({ path: Type.String() }),
+				async: true,
+				execute: async () => result,
+			},
+		],
+	});
+	harness.session.agent.state.model = {
+		...harness.getModel(),
+		api: "openai-responses",
+		compat: { supportsAsyncTools: true },
+	} as Model<"openai-responses">;
+	// Holding the call before execution records its start only after the failed response is committed.
+	const beforeToolCall = harness.session.agent.beforeToolCall;
+	harness.session.agent.beforeToolCall = async (context, signal) => {
+		started();
+		await gate;
+		return beforeToolCall?.(context, signal);
+	};
+	const inputs: Array<unknown[]> = [];
+	harness.session.agent.streamFunction = (model, context) => {
+		inputs.push(structuredClone(context.messages));
+		const request = inputs.length;
+		const message: AssistantMessage = {
+			...fauxAssistantMessage(request === 1 ? [toolCall()] : "answer", {
+				responseId: `response-${request}`,
+				stopReason: request === 1 ? "error" : "stop",
+			}),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			errorMessage: request === 1 ? "WebSocket closed 1012" : undefined,
+		};
+		const stream = createAssistantMessageEventStream();
+		void (async () => {
+			stream.push({ type: "start", partial: message });
+			if (request === 1) {
+				stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCall(), partial: message });
+				await executing;
+				stream.push({ type: "error", reason: "error", error: message });
+			} else stream.push({ type: "done", reason: "stop", message });
+			stream.end();
+		})();
+		return stream;
+	};
+	const run = harness.session.prompt("start work");
+	try {
+		if (cancelled) {
+			await vi.waitFor(() => expect(harness.session.isRetrying).toBe(true));
+			harness.session.abortRetry();
+			release();
+			await vi.waitFor(() => expect(harness.eventsOfType("agent_end")).toHaveLength(1));
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			// The cancelled failure is not retried again once its native work settles.
+			expect(harness.eventsOfType("auto_retry_start")).toHaveLength(1);
+			expect(harness.eventsOfType("agent_end")[0]).toMatchObject({ willRetry: false });
+			await run;
+			expect(inputs).toHaveLength(1);
+			return;
+		}
+		await vi.waitFor(() => expect(inputs).toHaveLength(2));
+		// The failed attempt's native call may still be starting, so its journal entry is left intact.
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_edit")).toEqual([]);
+		release();
+		await run;
+		expect(inputs).toHaveLength(3);
+		expect(inputs[2]).toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: toolCall().id, content: result.content }),
+		);
+		expect(harness.eventsOfType("auto_retry_end")).toMatchObject([{ success: true, attempt: 1 }]);
+	} finally {
+		harness.session.abortRetry();
+		release();
+		await run;
+		harness.cleanup();
+	}
+});
