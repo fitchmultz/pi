@@ -310,6 +310,7 @@ function restoreSystemMessages(
 	const kept = new Set(returned);
 	const anchored =
 		!hasNonAdditiveToolChanges(current) &&
+		!current.some((message, index) => index > 0 && message.role === "system" && message.replace) &&
 		current.every((message) => message.role !== "toolResult" || !message.toolsAdded || kept.has(message));
 	const head = getCurrentSystemMessage(anchored ? current.filter((message) => message.role === "system") : current);
 	return head ? [head, ...(anchored ? returned : withoutToolSearchState(returned))] : returned;

@@ -350,6 +350,44 @@ it("keeps the leading system message stable when a context hook changes a conver
 	expect(getCurrentTools(requests[1].messages).map((tool) => tool.description)).toContain("right");
 });
 
+it("does not redeclare search-loaded tools cleared by a later prompt replacement", async () => {
+	harness = await createHarness({
+		tools: [],
+		extensionFactories: [
+			(pi) => {
+				pi.on("context", (event) => ({
+					messages: [
+						...event.messages,
+						{ role: "custom", customType: "note", content: "Note", display: false, timestamp: 0 },
+					],
+				}));
+			},
+		],
+	});
+	// A content prompt is replaced by prompt sections at the next run, clearing earlier tools.
+	harness.sessionManager.appendMessage({ role: "system", content: "Base", timestamp: 0 });
+	harness.sessionManager.appendMessage({
+		role: "toolResult",
+		toolCallId: "old-search",
+		toolName: "discover",
+		toolCallKind: "toolSearch",
+		toolsAdded: [{ ...right, description: "right", parameters: Type.Object({}) }],
+		content: [],
+		isError: false,
+		timestamp: 1,
+	});
+	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+	const requests: TranscriptContext[] = [];
+	harness.setResponses([
+		(context) => {
+			requests.push(context);
+			return fauxAssistantMessage("Done");
+		},
+	]);
+	await harness.session.prompt("Continue");
+	expect(getCurrentTools(requests[0].messages)).toEqual([]);
+});
+
 it("reports denied search references without publishing a declaration", async () => {
 	harness = await createHarness({
 		tools: [],
