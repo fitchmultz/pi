@@ -2551,29 +2551,8 @@ describe("openai-codex streaming", () => {
 			const id = `resp_${sentBodies.length}`;
 			const events = [
 				{ type: "response.created", response: { id } },
-				...(sentBodies.length === 1
-					? [
-							{
-								type: "response.output_item.added",
-								output_index: 0,
-								item: { ...search, status: "in_progress" },
-							},
-							{ type: "response.output_item.done", output_index: 0, item: search },
-						]
-					: []),
-				{
-					type: "response.completed",
-					response: {
-						id,
-						status: "completed",
-						usage: {
-							input_tokens: 5,
-							output_tokens: 3,
-							total_tokens: 8,
-							input_tokens_details: { cached_tokens: 0 },
-						},
-					},
-				},
+				...(sentBodies.length === 1 ? [{ type: "response.output_item.done", item: search }] : []),
+				{ type: "response.completed", response: { id, status: "completed" } },
 			];
 			for (const event of events) socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
 		});

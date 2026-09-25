@@ -36,6 +36,19 @@ function registerLookup(pi: ExtensionAPI, reference: ToolReference, onExecute = 
 	});
 }
 
+function registerDiscover(pi: ExtensionAPI) {
+	pi.registerToolSearch({
+		name: "discover",
+		label: "Discover",
+		description: "Find tools",
+		parameters: Type.Object({}),
+		async execute() {
+			pi.setActiveToolReferences([...pi.getActiveToolReferences(), right]);
+			return { content: [], details: {}, tools: [right] };
+		},
+	});
+}
+
 describe("exact activation", () => {
 	it("round-trips every public ID, clears the complete set, and never resolves a bare duplicate leaf", async () => {
 		let api!: ExtensionAPI;
@@ -305,23 +318,12 @@ it.each([false, true])(
 );
 
 it("keeps the leading system message stable when a context hook changes a conversation with loaded search tools", async () => {
-	let api!: ExtensionAPI;
 	harness = await createHarness({
 		tools: [],
 		extensionFactories: [
 			(pi) => {
-				api = pi;
 				registerLookup(pi, right);
-				pi.registerToolSearch({
-					name: "discover",
-					label: "Discover",
-					description: "Find tools",
-					parameters: Type.Object({}),
-					async execute() {
-						pi.setActiveToolReferences([...pi.getActiveToolReferences(), right]);
-						return { content: [], details: {}, tools: [right] };
-					},
-				});
+				registerDiscover(pi);
 				pi.on("context", (event) => ({
 					messages: [
 						...event.messages,
@@ -331,7 +333,7 @@ it("keeps the leading system message stable when a context hook changes a conver
 			},
 		],
 	});
-	api.setActiveTools(["discover"]);
+	harness.session.setActiveToolsByName(["discover"]);
 	const requests: TranscriptContext[] = [];
 	harness.setResponses([
 		(context) => {
@@ -355,16 +357,7 @@ it("reports denied search references without publishing a declaration", async ()
 		extensionFactories: [
 			(pi) => {
 				registerLookup(pi, right);
-				pi.registerToolSearch({
-					name: "discover",
-					label: "Discover",
-					description: "Find tools",
-					parameters: Type.Object({}),
-					async execute() {
-						pi.setActiveToolReferences([...pi.getActiveToolReferences(), right]);
-						return { content: [], details: {}, tools: [right] };
-					},
-				});
+				registerDiscover(pi);
 			},
 		],
 	});
