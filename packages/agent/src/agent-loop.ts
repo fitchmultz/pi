@@ -442,6 +442,7 @@ async function runLoop(
 		};
 	};
 	try {
+		const unstarted: AgentToolCall[] = [];
 		for (const message of currentContext.messages.slice()) {
 			if (message.role !== "assistant") continue;
 			if (message.toolExecutionFailed) failedScopes.add(message);
@@ -452,9 +453,17 @@ async function runLoop(
 					startedCalls.add(call.id);
 					if (result.isError && (result.executionSkipped || !(call.async && call.responsesItem?.async)))
 						failedScopes.add(message);
-				} else if (call.executionStarted || (call.async && call.responsesItem))
+				} else if (message.stopReason === "error" && call.async && call.responsesItem && !call.executionStarted)
+					// Its synchronous siblings never ran, so starting it now could run it out of order.
+					unstarted.push(call);
+				else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
 			}
+		}
+		for (const result of (await failToolCalls(unstarted, emit, FAILED_RESPONSE_CALL)).messages) {
+			currentContext.messages.push(result);
+			newMessages.push(result);
+			savedResults.push(result);
 		}
 		// Check for steering messages at start (user may have typed while waiting)
 		let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
@@ -529,10 +538,32 @@ async function runLoop(
 						};
 					}
 					signal?.throwIfAborted();
-					if (!config.prepareRequest || !pollAfterRequestPreparation) break;
+					if (!pollAfterRequestPreparation) break;
+					// Other routes require adjacent synchronous pairs, so finish outstanding work before switching.
+					// That work may be waiting on steering (for example, a subagent's question), so input ends the wait.
+					if (
+						pendingCalls.size > 0 &&
+						((config.model.api !== "openai-responses" && config.model.api !== "openai-codex-responses") ||
+							!(
+								config.model.compat &&
+								"supportsAsyncTools" in config.model.compat &&
+								config.model.compat.supportsAsyncTools
+							))
+					) {
+						let unsubscribe: (() => void) | undefined;
+						const input = new Promise<void>((resolve) => {
+							unsubscribe = config.subscribeSteering?.(resolve);
+						});
+						try {
+							await Promise.race([Promise.allSettled(pendingTasks()), input]);
+						} finally {
+							unsubscribe?.();
+						}
+						if (asyncFailure) throw asyncFailure;
+					} else if (!config.prepareRequest) break;
 
-					// Pick up one steering drain that arrived during long request preparation, then
-					// prepare again with those messages included.
+					// Pick up one steering drain that arrived during long request preparation or the wait above,
+					// then prepare again with those messages included.
 					pendingMessages = (await config.getSteeringMessages?.()) || [];
 					if (pendingMessages.length === 0) break;
 					pollAfterRequestPreparation = false;
@@ -547,16 +578,6 @@ async function runLoop(
 					newMessages.push(message);
 				}
 
-				// Other routes require adjacent synchronous pairs, so finish outstanding work before switching.
-				if (
-					(config.model.api !== "openai-responses" && config.model.api !== "openai-codex-responses") ||
-					!(
-						config.model.compat &&
-						"supportsAsyncTools" in config.model.compat &&
-						config.model.compat.supportsAsyncTools
-					)
-				)
-					await joinPendingCalls();
 				// Results already in this request's context have been delivered; later completions wake another turn.
 				readyBatches.length = 0;
 				responseRetired = false;
@@ -611,7 +632,8 @@ async function runLoop(
 				streamed.needsContinuation ||= responseRetired;
 				if (asyncFailure) throw asyncFailure;
 
-				const failed = message.stopReason === "error" && !streamed.needsContinuation;
+				const errored = message.stopReason === "error";
+				const failed = errored && !streamed.needsContinuation;
 				if (message.stopReason === "aborted" || (failed && pendingCalls.size === 0)) {
 					await joinPendingCalls();
 					const toolResults = readyBatches.flatMap((batch) => batch.messages);
@@ -625,8 +647,8 @@ async function runLoop(
 				const toolResults: ToolResultMessage[] = [];
 				hasMoreToolCalls = streamed.needsContinuation;
 				// A failed response's unfinished calls never run and its native work cannot reset context, but that work may still need steering.
-				if (failed) failedScopes.add(scope);
-				const executedToolBatch = failed ? undefined : await finishToolCalls(message, scope, steered);
+				if (errored) failedScopes.add(scope);
+				const executedToolBatch = errored ? undefined : await finishToolCalls(message, scope, steered);
 				if (executedToolBatch) {
 					toolResults.push(...executedToolBatch.messages);
 					hasMoreToolCalls = !executedToolBatch.terminate || executedToolBatch.newContext !== undefined;
@@ -674,13 +696,15 @@ async function runLoop(
 					if (pendingMessages.length === 0) pendingMessages = (await config.getSteeringMessages?.()) || [];
 					hasMoreToolCalls = readyBatches.some(needsResultTurn);
 				}
+				// A result that settled after the check above skipped the wait but still needs a turn.
+				hasMoreToolCalls ||= readyBatches.some(needsResultTurn);
 				// Without new input, the host recovers the failed response after its native work settles.
 				if (failed && !explicitContinuation && pendingMessages.length === 0) {
 					await joinPendingCalls();
 					await emit({ type: "agent_end", messages: newMessages });
 					return;
 				}
-				if (failed) {
+				if (errored) {
 					// Continuing replays the failed response, so its completed calls that never started need not-executed receipts.
 					const receipts = await failToolCalls(
 						message.content.filter(
@@ -688,7 +712,7 @@ async function runLoop(
 								call.type === "toolCall" && !!call.responsesItem && !startedCalls.has(call.id),
 						),
 						emit,
-						"the response failed before it ran. Re-issue the call if it is still needed.",
+						FAILED_RESPONSE_CALL,
 					);
 					for (const result of receipts.messages) {
 						currentContext.messages.push(result);
@@ -1274,6 +1298,8 @@ async function prepareToolCall(
 
 const UNKNOWN_TOOL_OUTCOME =
 	"Previous tool execution was interrupted; its outcome is unknown. Do not assume the operation did not occur.";
+
+const FAILED_RESPONSE_CALL = "the response failed before it ran. Re-issue the call if it is still needed.";
 
 /** Only this call's execution state is current; sibling snapshots may predate their admission or detachment. */
 function createToolCallCheckpoint(message: AssistantMessage, toolCall: AgentToolCall): AssistantMessage {
