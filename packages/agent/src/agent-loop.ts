@@ -611,7 +611,8 @@ async function runLoop(
 				streamed.needsContinuation ||= responseRetired;
 				if (asyncFailure) throw asyncFailure;
 
-				if ((message.stopReason === "error" && !streamed.needsContinuation) || message.stopReason === "aborted") {
+				const failed = message.stopReason === "error" && !streamed.needsContinuation;
+				if (message.stopReason === "aborted" || (failed && pendingCalls.size === 0)) {
 					await joinPendingCalls();
 					const toolResults = readyBatches.flatMap((batch) => batch.messages);
 					lastCompletedTurn = { message, toolResults, context: currentContext, newMessages };
@@ -623,7 +624,9 @@ async function runLoop(
 
 				const toolResults: ToolResultMessage[] = [];
 				hasMoreToolCalls = streamed.needsContinuation;
-				const executedToolBatch = await finishToolCalls(message, scope, steered);
+				// A failed response's unfinished calls never run and its native work cannot reset context, but that work may still need steering.
+				if (failed) failedScopes.add(scope);
+				const executedToolBatch = failed ? undefined : await finishToolCalls(message, scope, steered);
 				if (executedToolBatch) {
 					toolResults.push(...executedToolBatch.messages);
 					hasMoreToolCalls = !executedToolBatch.terminate || executedToolBatch.newContext !== undefined;
@@ -650,7 +653,7 @@ async function runLoop(
 				pendingMessages = (await config.getSteeringMessages?.()) || [];
 				while (
 					!explicitContinuation &&
-					!hasMoreToolCalls &&
+					(failed || !hasMoreToolCalls) &&
 					pendingMessages.length === 0 &&
 					pendingCalls.size > 0
 				) {
@@ -661,13 +664,37 @@ async function runLoop(
 					try {
 						// Subscribe before polling again so an input arriving at this boundary cannot be missed.
 						pendingMessages = (await config.getSteeringMessages?.()) || [];
-						if (pendingMessages.length === 0) await Promise.race([...pendingTasks(), input]);
+						// The last running call can settle during the poll; racing steering alone could then wait forever.
+						if (pendingMessages.length === 0 && pendingCalls.size > 0)
+							await Promise.race([...pendingTasks(), input]);
 					} finally {
 						unsubscribe?.();
 					}
 					if (asyncFailure) throw asyncFailure;
 					if (pendingMessages.length === 0) pendingMessages = (await config.getSteeringMessages?.()) || [];
 					hasMoreToolCalls = readyBatches.some(needsResultTurn);
+				}
+				// Without new input, the host recovers the failed response after its native work settles.
+				if (failed && !explicitContinuation && pendingMessages.length === 0) {
+					await joinPendingCalls();
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+				if (failed) {
+					// Continuing replays the failed response, so its completed calls that never started need not-executed receipts.
+					const receipts = await failToolCalls(
+						message.content.filter(
+							(call): call is AgentToolCall =>
+								call.type === "toolCall" && !!call.responsesItem && !startedCalls.has(call.id),
+						),
+						emit,
+						"the response failed before it ran. Re-issue the call if it is still needed.",
+					);
+					for (const result of receipts.messages) {
+						currentContext.messages.push(result);
+						newMessages.push(result);
+						savedResults.push(result);
+					}
 				}
 				if (hasMoreToolCalls || pendingMessages.length > 0) explicitContinuation = false;
 			}

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createResponsesControl } from "../../ai/src/api/openai-responses-control.ts";
 import { AssistantMessageEventStream } from "../../ai/src/utils/event-stream.ts";
 import { Agent } from "../src/agent.ts";
-import { getPendingToolCalls } from "../src/agent-loop.ts";
+import { getPendingToolCalls, runAgentLoop } from "../src/agent-loop.ts";
 import type { AgentEvent, AgentTool, AgentToolResult, StreamFn } from "../src/types.ts";
 
 const model: Model<"openai-responses"> = {
@@ -631,6 +631,69 @@ describe("native async lifecycle", () => {
 		expect(inputs[2].filter((entry) => entry.role === "toolResult")).toHaveLength(1);
 		expect(getPendingToolCalls(agent.state.messages)).toEqual([]);
 	});
+
+	it.each([false, true])(
+		"stops waiting when the last native call settles during the steering poll (failed=%s)",
+		async (failed) => {
+			const work = deferred<AgentToolResult>();
+			const streams: AssistantMessageEventStream[] = [];
+			const inputs: Message[][] = [];
+			const events: AgentEvent[] = [];
+			let waiting = false;
+			const run = runAgentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				{
+					messages: [],
+					tools: [
+						{
+							name: "work",
+							label: "Work",
+							description: "Work",
+							parameters: Type.Object({ path: Type.String() }),
+							async: true,
+							execute: async () => work.promise,
+						},
+					],
+				},
+				{
+					model,
+					convertToLlm: (messages) => messages as Message[],
+					subscribeSteering: () => {
+						waiting = true;
+						return () => {};
+					},
+					getSteeringMessages: async () => {
+						if (waiting) {
+							waiting = false;
+							work.resolve(result);
+							await new Promise((resolve) => setTimeout(resolve, 0));
+						}
+						return [];
+					},
+				},
+				(event) => {
+					events.push(event);
+				},
+				undefined,
+				(_model, context) => {
+					inputs.push(structuredClone(context.messages));
+					const stream = new AssistantMessageEventStream();
+					streams.push(stream);
+					return stream;
+				},
+			);
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("first");
+			await emitCall(streams[0], first, call());
+			finish(streams[0], first, failed);
+			if (!failed) await answer(streams, 1);
+			await vi.waitFor(() => expect(events.some((event) => event.type === "agent_end")).toBe(true));
+			await run;
+			expect(inputs).toHaveLength(failed ? 1 : 2);
+			if (!failed)
+				expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "toolResult", content: result.content }));
+		},
+	);
 
 	it.each([false, true])("honors explicit continuation while native work runs (end next turn=%s)", async (end) => {
 		const work = deferred<AgentToolResult>();
