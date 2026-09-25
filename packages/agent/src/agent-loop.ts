@@ -680,6 +680,21 @@ async function runLoop(
 					await emit({ type: "agent_end", messages: newMessages });
 					return;
 				}
+				if (failed) {
+					// Continuing replays the failed response, so its completed synchronous calls need not-executed receipts.
+					const receipts = await failToolCalls(
+						message.content.filter(
+							(call): call is AgentToolCall => call.type === "toolCall" && !!call.responsesItem && !call.async,
+						),
+						emit,
+						"the response failed before it ran. Re-issue the call if it is still needed.",
+					);
+					for (const result of receipts.messages) {
+						currentContext.messages.push(result);
+						newMessages.push(result);
+						savedResults.push(result);
+					}
+				}
 				if (hasMoreToolCalls || pendingMessages.length > 0) explicitContinuation = false;
 			}
 

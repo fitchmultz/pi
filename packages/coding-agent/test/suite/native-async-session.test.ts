@@ -1472,6 +1472,20 @@ it("reaches the model while native work outlives a failed response", async () =>
 		release = resolve;
 	});
 	const unfinished = vi.fn<AgentTool["execute"]>(async () => result);
+	const completed: ToolCall = {
+		type: "toolCall",
+		id: "completed|fc_completed",
+		name: "other",
+		arguments: {},
+		responsesItem: {
+			type: "function_call",
+			id: "fc_completed",
+			call_id: "completed",
+			name: "other",
+			arguments: "{}",
+			status: "completed",
+		},
+	};
 	const harness = await createHarness({
 		settings: { compaction: { enabled: false }, retry: { enabled: false } },
 		tools: [
@@ -1507,7 +1521,7 @@ it("reaches the model while native work outlives a failed response", async () =>
 		const message: AssistantMessage = {
 			...fauxAssistantMessage(
 				request === 1
-					? [toolCall(), { type: "toolCall", id: "unfinished", name: "other", arguments: {} }]
+					? [toolCall(), completed, { type: "toolCall", id: "partial", name: "other", arguments: {} }]
 					: "answer",
 				{ responseId: `response-${request}`, stopReason: request === 1 ? "error" : "stop" },
 			),
@@ -1532,6 +1546,14 @@ it("reaches the model while native work outlives a failed response", async () =>
 	try {
 		await vi.waitFor(() => expect(inputs).toHaveLength(2));
 		expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "user", content: "child question" }));
+		expect(inputs[1]).toContainEqual(
+			expect.objectContaining({
+				role: "toolResult",
+				toolCallId: completed.id,
+				isError: true,
+				content: [expect.objectContaining({ text: expect.stringContaining("was not executed") })],
+			}),
+		);
 		release();
 		await run;
 		expect(inputs).toHaveLength(3);
@@ -1539,6 +1561,8 @@ it("reaches the model while native work outlives a failed response", async () =>
 			expect.objectContaining({ role: "toolResult", toolCallId: toolCall().id, content: result.content }),
 		);
 		expect(unfinished).not.toHaveBeenCalled();
+		// Replay drops the partial call, so a receipt for it would have no call to answer.
+		expect(inputs.flat()).not.toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: "partial" }));
 		// Like its unfinished calls, the failed response's native work cannot start a fresh window.
 		expect(harness.eventsOfType("context_window_started")).toEqual([]);
 	} finally {
