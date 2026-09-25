@@ -140,9 +140,17 @@ also take effect only at a full launch. See
 To return to an earlier installer-validated release, use `--rollback <identity>`
 and an ordinary restart when following the selector. If an explicit runtime is
 pinned, use `--runtime <rolled-back-packageDir>` or fully relaunch Pi. Keep
-previous runtimes and extension files intact. Legacy releases without receipts
-remain untouched; their previous selector target is preserved for manual
-selection and native startup rollback.
+previous runtimes and extension files intact outside explicit pruning. Legacy
+releases without receipts remain untouched; their previous selector target is
+preserved for manual selection and native startup rollback.
+
+To reclaim space, `npm run install:fork -- --prune --keep <count>` deletes
+validated releases older than the newest `<count>`. It keeps the selected and
+`.previous` releases, releases a running process visibly uses (open files,
+native modules, working directory or command path), and directories without a
+receipt, including legacy releases and installations in progress. A session
+that loaded only JavaScript through the selector is not visible, so keep enough
+releases for running sessions or restart them before pruning.
 
 ## Fork patch intent
 
