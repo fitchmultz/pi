@@ -1,0 +1,67 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const hiddenCredentials = [
+	"AI_GATEWAY_API_KEY",
+	"ANT_LING_API_KEY",
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"ANTHROPIC_OAUTH_TOKEN",
+	"AWS_ACCESS_KEY_ID",
+	"AWS_BEARER_TOKEN_BEDROCK",
+	"AWS_CONTAINER_CREDENTIALS_FULL_URI",
+	"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+	"AWS_PROFILE",
+	"AWS_SECRET_ACCESS_KEY",
+	"AWS_WEB_IDENTITY_TOKEN_FILE",
+	"AZURE_OPENAI_API_KEY",
+	"AZURE_OPENAI_BASE_URL",
+	"AZURE_OPENAI_RESOURCE_NAME",
+	"BASETEN_API_KEY",
+	"CEREBRAS_API_KEY",
+	"CLOUDFLARE_ACCOUNT_ID",
+	"CLOUDFLARE_API_KEY",
+	"CLOUDFLARE_GATEWAY_ID",
+	"COPILOT_GITHUB_TOKEN",
+	"DEEPSEEK_API_KEY",
+	"FIREWORKS_API_KEY",
+	"GCLOUD_PROJECT",
+	"GEMINI_API_KEY",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"GOOGLE_CLOUD_API_KEY",
+	"GOOGLE_CLOUD_LOCATION",
+	"GOOGLE_CLOUD_PROJECT",
+	"GROQ_API_KEY",
+	"HF_TOKEN",
+	"KIMI_API_KEY",
+	"META_API_KEY",
+	"MINIMAX_API_KEY",
+	"MINIMAX_CN_API_KEY",
+	"MISTRAL_API_KEY",
+	"MOONSHOT_API_KEY",
+	"NVIDIA_API_KEY",
+	"OPENAI_API_KEY",
+	"OPENCODE_API_KEY",
+	"OPENROUTER_API_KEY",
+	"QWEN_TOKEN_PLAN_API_KEY",
+	"QWEN_TOKEN_PLAN_CN_API_KEY",
+	"RADIUS_API_KEY",
+	"TOGETHER_API_KEY",
+	"XAI_API_KEY",
+	"XIAOMI_API_KEY",
+	"XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+	"XIAOMI_TOKEN_PLAN_CN_API_KEY",
+	"XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+	"ZAI_API_KEY",
+	"ZAI_CODING_CN_API_KEY",
+];
+
+/** Hide ambient provider credentials unless PI_LIVE_PROVIDER_TESTS=1. */
+export function offlineTestEnv(): Record<string, string> {
+	if (process.env.PI_LIVE_PROVIDER_TESTS === "1") return {};
+	const home = mkdtempSync(join(tmpdir(), "pi-vitest-home-"));
+	const env: Record<string, string> = { HOME: home, USERPROFILE: home };
+	for (const name of hiddenCredentials) env[name] = "";
+	return env;
+}
