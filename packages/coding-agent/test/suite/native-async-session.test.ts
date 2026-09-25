@@ -1472,6 +1472,22 @@ it("reaches the model while native work outlives a failed response", async () =>
 		release = resolve;
 	});
 	const unfinished = vi.fn<AgentTool["execute"]>(async () => result);
+	const deferred: ToolCall = {
+		type: "toolCall",
+		id: "deferred|fc_deferred",
+		name: "later",
+		arguments: {},
+		async: true,
+		responsesItem: {
+			type: "function_call",
+			id: "fc_deferred",
+			call_id: "deferred",
+			name: "later",
+			arguments: "{}",
+			async: true,
+			status: "completed",
+		},
+	};
 	const completed: ToolCall = {
 		type: "toolCall",
 		id: "completed|fc_completed",
@@ -1501,7 +1517,22 @@ it("reaches the model while native work outlives a failed response", async () =>
 					return { ...result, newContext: { handoff: "fresh" } };
 				},
 			},
-			{ name: "other", label: "Other", description: "Other", parameters: Type.Object({}), execute: unfinished },
+			{
+				name: "other",
+				label: "Other",
+				description: "Other",
+				parameters: Type.Object({}),
+				executionMode: "sequential",
+				execute: unfinished,
+			},
+			{
+				name: "later",
+				label: "Later",
+				description: "Later",
+				parameters: Type.Object({}),
+				async: true,
+				execute: unfinished,
+			},
 		],
 	});
 	harness.session.agent.state.model = {
@@ -1521,7 +1552,7 @@ it("reaches the model while native work outlives a failed response", async () =>
 		const message: AssistantMessage = {
 			...fauxAssistantMessage(
 				request === 1
-					? [toolCall(), completed, { type: "toolCall", id: "partial", name: "other", arguments: {} }]
+					? [toolCall(), completed, deferred, { type: "toolCall", id: "partial", name: "other", arguments: {} }]
 					: "answer",
 				{ responseId: `response-${request}`, stopReason: request === 1 ? "error" : "stop" },
 			),
@@ -1534,7 +1565,9 @@ it("reaches the model while native work outlives a failed response", async () =>
 		void (async () => {
 			stream.push({ type: "start", partial: message });
 			if (request === 1) {
-				stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCall(), partial: message });
+				// The sequential synchronous call defers the later native call until the response ends.
+				for (const [contentIndex, call] of [toolCall(), completed, deferred].entries())
+					stream.push({ type: "toolcall_end", contentIndex, toolCall: call, partial: message });
 				await executing;
 				stream.push({ type: "error", reason: "error", error: message });
 			} else stream.push({ type: "done", reason: "stop", message });
@@ -1546,14 +1579,15 @@ it("reaches the model while native work outlives a failed response", async () =>
 	try {
 		await vi.waitFor(() => expect(inputs).toHaveLength(2));
 		expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "user", content: "child question" }));
-		expect(inputs[1]).toContainEqual(
-			expect.objectContaining({
-				role: "toolResult",
-				toolCallId: completed.id,
-				isError: true,
-				content: [expect.objectContaining({ text: expect.stringContaining("was not executed") })],
-			}),
-		);
+		for (const call of [completed, deferred])
+			expect(inputs[1]).toContainEqual(
+				expect.objectContaining({
+					role: "toolResult",
+					toolCallId: call.id,
+					isError: true,
+					content: [expect.objectContaining({ text: expect.stringContaining("was not executed") })],
+				}),
+			);
 		release();
 		await run;
 		expect(inputs).toHaveLength(3);

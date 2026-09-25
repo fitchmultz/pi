@@ -681,10 +681,11 @@ async function runLoop(
 					return;
 				}
 				if (failed) {
-					// Continuing replays the failed response, so its completed synchronous calls need not-executed receipts.
+					// Continuing replays the failed response, so its completed calls that never started need not-executed receipts.
 					const receipts = await failToolCalls(
 						message.content.filter(
-							(call): call is AgentToolCall => call.type === "toolCall" && !!call.responsesItem && !call.async,
+							(call): call is AgentToolCall =>
+								call.type === "toolCall" && !!call.responsesItem && !startedCalls.has(call.id),
 						),
 						emit,
 						"the response failed before it ran. Re-issue the call if it is still needed.",
