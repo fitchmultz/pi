@@ -5,7 +5,7 @@ import { createResponsesControl } from "../../ai/src/api/openai-responses-contro
 import { AssistantMessageEventStream } from "../../ai/src/utils/event-stream.ts";
 import { Agent } from "../src/agent.ts";
 import { getPendingToolCalls, runAgentLoop } from "../src/agent-loop.ts";
-import type { AgentEvent, AgentTool, AgentToolResult, StreamFn } from "../src/types.ts";
+import type { AgentContext, AgentEvent, AgentTool, AgentToolResult, StreamFn } from "../src/types.ts";
 
 const model: Model<"openai-responses"> = {
 	id: "gpt-6-astra",
@@ -714,6 +714,36 @@ describe("native async lifecycle", () => {
 		expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "toolResult", content: result.content }));
 	});
 
+	it.each(["prepareNextTurnWithContext", "prepareRequest"] as const)(
+		"keeps a native result that settles during %s in the request",
+		async (hook) => {
+			const work = deferred<AgentToolResult>();
+			const { agent, streams, inputs } = setup(async () => work.promise);
+			// Build the request from a snapshot, as a session projection does, while the native result settles.
+			const prepare = async (context: AgentContext) => {
+				const messages = context.messages.slice();
+				if (inputs.length === 1) {
+					work.resolve(result);
+					await new Promise((resolve) => setTimeout(resolve, 0));
+				}
+				return { context: { ...context, messages } };
+			};
+			if (hook === "prepareRequest") agent.prepareRequest = (request) => prepare(request.context);
+			else agent.prepareNextTurnWithContext = (turn) => prepare(turn.context);
+			const run = agent.prompt("go");
+			await vi.waitFor(() => expect(streams).toHaveLength(1));
+			const first = assistant("first");
+			await emitCall(streams[0], first, call());
+			await vi.waitFor(() => expect(agent.state.pendingToolCalls.size).toBe(1));
+			finish(streams[0], first);
+			agent.steer({ role: "user", content: "next", timestamp: 2 });
+			await answer(streams, 1);
+			await run;
+			expect(inputs[1]).toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: call().id }));
+			expect(streams).toHaveLength(2);
+		},
+	);
+
 	it("delivers steering to a model without native async tools while native work runs", async () => {
 		const work = deferred<AgentToolResult>();
 		const { agent, streams, inputs } = setup(async () => work.promise);
@@ -865,20 +895,21 @@ describe("native async lifecycle", () => {
 		expect(resets.filter(Boolean)).toEqual([]);
 	});
 
-	it("receipts a failed response's never-started native call instead of starting it in a later run", async () => {
-		const work = vi.fn<AgentTool["execute"]>(async () => result);
-		const { agent, streams, inputs } = setup(work);
-		agent.state.messages = [
-			{ ...assistant("failed", [call()]), stopReason: "error", errorMessage: "WebSocket closed 1012" },
-		];
-		const run = agent.prompt("continue");
-		await answer(streams, 0);
-		await run;
-		expect(work).not.toHaveBeenCalled();
-		expect(inputs[0]).toContainEqual(
-			expect.objectContaining({ role: "toolResult", toolCallId: call().id, isError: true }),
-		);
-	});
+	it.each(["error", "aborted"] as const)(
+		"receipts the never-started native call of an %s response instead of starting it in a later run",
+		async (stopReason) => {
+			const work = vi.fn<AgentTool["execute"]>(async () => result);
+			const { agent, streams, inputs } = setup(work);
+			agent.state.messages = [{ ...assistant("ended", [call()]), stopReason }];
+			const run = agent.prompt("continue");
+			await answer(streams, 0);
+			await run;
+			expect(work).not.toHaveBeenCalled();
+			expect(inputs[0]).toContainEqual(
+				expect.objectContaining({ role: "toolResult", toolCallId: call().id, isError: true }),
+			);
+		},
+	);
 
 	it.each([false, true])("honors explicit continuation while native work runs (end next turn=%s)", async (end) => {
 		const work = deferred<AgentToolResult>();

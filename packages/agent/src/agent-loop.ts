@@ -348,6 +348,16 @@ async function runLoop(
 		// Ordinary checkpoint siblings must succeed; independent native work can finish in the new window.
 		return !signal?.aborted && !failedScopes.has(pending.scope) ? pending.request : undefined;
 	};
+	// Preparation may return a context snapshotted before these results arrived; they still belong in the request.
+	const keepResultsSavedSince = (count: number): void => {
+		for (const result of savedResults.slice(count))
+			if (
+				!currentContext.messages.some(
+					(message) => message.role === "toolResult" && message.toolCallId === result.toolCallId,
+				)
+			)
+				currentContext.messages.push(result);
+	};
 	const finishToolCalls = async (
 		message: AssistantMessage,
 		scope: object,
@@ -453,14 +463,19 @@ async function runLoop(
 					startedCalls.add(call.id);
 					if (result.isError && (result.executionSkipped || !(call.async && call.responsesItem?.async)))
 						failedScopes.add(message);
-				} else if (message.stopReason === "error" && call.async && call.responsesItem && !call.executionStarted)
-					// Its synchronous siblings never ran, so starting it now could run it out of order.
+				} else if (
+					(message.stopReason === "error" || message.stopReason === "aborted") &&
+					call.async &&
+					call.responsesItem &&
+					!call.executionStarted
+				)
+					// Its response ended before it ran, so starting it now could undo an abort or run it out of order.
 					unstarted.push(call);
 				else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
 			}
 		}
-		for (const result of (await failToolCalls(unstarted, emit, FAILED_RESPONSE_CALL)).messages) {
+		for (const result of (await failToolCalls(unstarted, emit, INTERRUPTED_RESPONSE_CALL)).messages) {
 			currentContext.messages.push(result);
 			newMessages.push(result);
 			savedResults.push(result);
@@ -480,9 +495,11 @@ async function runLoop(
 					if (pendingNewContext) {
 						lastCompletedTurn.newContext ??= await takeNewContext();
 					}
+					const resultsBeforeTurn = savedResults.length;
 					const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
 					if (nextTurnSnapshot) {
 						currentContext = nextTurnSnapshot.context ?? currentContext;
+						keepResultsSavedSince(resultsBeforeTurn);
 						preparedMessages = nextTurnSnapshot.messages ?? [];
 						config = {
 							...config,
@@ -516,6 +533,7 @@ async function runLoop(
 					preparedMessages = [];
 					pendingMessages = [];
 
+					const resultsBeforeRequest = savedResults.length;
 					const requestUpdate = await config.prepareRequest?.(
 						{
 							context: currentContext,
@@ -526,6 +544,7 @@ async function runLoop(
 					);
 					if (requestUpdate) {
 						currentContext = requestUpdate.context ?? currentContext;
+						keepResultsSavedSince(resultsBeforeRequest);
 						config = {
 							...config,
 							model: requestUpdate.model ?? config.model,
@@ -712,7 +731,7 @@ async function runLoop(
 								call.type === "toolCall" && !!call.responsesItem && !startedCalls.has(call.id),
 						),
 						emit,
-						FAILED_RESPONSE_CALL,
+						INTERRUPTED_RESPONSE_CALL,
 					);
 					for (const result of receipts.messages) {
 						currentContext.messages.push(result);
@@ -1299,7 +1318,8 @@ async function prepareToolCall(
 const UNKNOWN_TOOL_OUTCOME =
 	"Previous tool execution was interrupted; its outcome is unknown. Do not assume the operation did not occur.";
 
-const FAILED_RESPONSE_CALL = "the response failed before it ran. Re-issue the call if it is still needed.";
+const INTERRUPTED_RESPONSE_CALL =
+	"the response was interrupted before it ran. Re-issue the call if it is still needed.";
 
 /** Only this call's execution state is current; sibling snapshots may predate their admission or detachment. */
 function createToolCallCheckpoint(message: AssistantMessage, toolCall: AgentToolCall): AssistantMessage {
