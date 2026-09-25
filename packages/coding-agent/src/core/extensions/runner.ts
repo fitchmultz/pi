@@ -5,6 +5,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
+	hasNonAdditiveToolChanges,
 	type ImageContent,
 	type Model,
 	type Provider,
@@ -293,10 +294,9 @@ function sameMessages(left: AgentMessage[], right: AgentMessage[]): boolean {
 }
 
 /**
- * Re-attach the prompt and tool state after a `context` handler. Handlers only see the
- * conversation; the system messages belong to Pi. Additive transforms keep system and
- * tool-search anchors in place. Pruning or reordering gets one complete leading checkpoint
- * so the retained conversation cannot drop prompt sections or tool declarations.
+ * Restore Pi-owned system state after a conversation-only `context` handler. Additive
+ * transforms keep every system and search anchor. Other transforms fold system messages,
+ * keeping surviving search declarations in place only when tool history still replays safely.
  */
 function restoreSystemMessages(
 	current: AgentMessage[],
@@ -315,8 +315,16 @@ function restoreSystemMessages(
 			restored.push(returned[index++]);
 		}
 		if (index === returned.length) {
-			const head = getCurrentSystemMessage(current);
-			return head ? [head, ...withoutToolSearchState(returned)] : returned;
+			const anchored =
+				!hasNonAdditiveToolChanges(current) &&
+				!current.some((message, index) => index > 0 && message.role === "system" && message.replace) &&
+				current.every(
+					(message) => message.role !== "toolResult" || !message.toolsAdded || returned.includes(message),
+				);
+			const head = getCurrentSystemMessage(
+				anchored ? current.filter((message) => message.role === "system") : current,
+			);
+			return head ? [head, ...(anchored ? returned : withoutToolSearchState(returned))] : returned;
 		}
 		restored.push(returned[index++]);
 	}
