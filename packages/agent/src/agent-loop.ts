@@ -358,6 +358,16 @@ async function runLoop(
 			)
 				currentContext.messages.push(result);
 	};
+	// In an ordered batch, a call waits until every earlier sibling in its response has started.
+	const waitsForEarlierSiblings = (calls: AgentToolCall[], call: AgentToolCall): boolean =>
+		calls
+			.slice(
+				0,
+				calls.findIndex((sibling) => sibling.id === call.id),
+			)
+			.some((sibling) => !startedCalls.has(sibling.id)) &&
+		(config.toolExecution === "sequential" ||
+			calls.some((sibling) => findTool(currentContext.tools ?? [], sibling)?.executionMode === "sequential"));
 	const finishToolCalls = async (
 		message: AssistantMessage,
 		scope: object,
@@ -456,20 +466,24 @@ async function runLoop(
 		for (const message of currentContext.messages.slice()) {
 			if (message.role !== "assistant") continue;
 			if (message.toolExecutionFailed) failedScopes.add(message);
-			for (const call of message.content) {
-				if (call.type !== "toolCall") continue;
+			const calls = message.content.filter((block): block is AgentToolCall => block.type === "toolCall");
+			for (const call of calls) {
 				const result = restoredResults.get(call.id);
 				if (result) {
 					startedCalls.add(call.id);
 					if (result.isError && (result.executionSkipped || !(call.async && call.responsesItem?.async)))
 						failedScopes.add(message);
 				} else if (
-					(message.stopReason === "error" || message.stopReason === "aborted") &&
 					call.async &&
 					call.responsesItem &&
-					!call.executionStarted
+					!call.executionStarted &&
+					(message.stopReason === "error" ||
+						message.stopReason === "aborted" ||
+						// Admission may already have seen later siblings, so judge the whole response.
+						waitsForEarlierSiblings(calls, call))
 				) {
-					// Its response ended before it ran, so starting it now could undo an abort or run it out of order.
+					// Its response ended, or an ordered sibling never finished, before it ran (for example, the process
+					// stopped). Starting it now could undo an abort or run it out of order.
 					unstarted.push(call);
 					// Like its receipt once restored, the skipped call keeps sibling work from resetting context.
 					failedScopes.add(message);
@@ -477,7 +491,7 @@ async function runLoop(
 					await startAsyncCall(message, call, message);
 			}
 		}
-		for (const result of (await failToolCalls(unstarted, emit, INTERRUPTED_RESPONSE_CALL)).messages) {
+		for (const result of (await failToolCalls(unstarted, emit, INTERRUPTED_CALL)).messages) {
 			currentContext.messages.push(result);
 			newMessages.push(result);
 			savedResults.push(result);
@@ -625,19 +639,7 @@ async function runLoop(
 					async (message, call, scope, partial) => {
 						const calls = partial.content.filter((block): block is AgentToolCall => block.type === "toolCall");
 						// Synchronous siblings wait for response end; ordered async calls must not overtake them.
-						if (
-							calls
-								.slice(
-									0,
-									calls.findIndex((sibling) => sibling.id === call.id),
-								)
-								.some((sibling) => !startedCalls.has(sibling.id)) &&
-							(config.toolExecution === "sequential" ||
-								calls.some(
-									(sibling) => findTool(currentContext.tools ?? [], sibling)?.executionMode === "sequential",
-								))
-						)
-							return;
+						if (waitsForEarlierSiblings(calls, call)) return;
 						await startAsyncCall(message, call, scope);
 					},
 					async (message, scope, steered) => {
@@ -733,7 +735,7 @@ async function runLoop(
 								call.type === "toolCall" && !!call.responsesItem && !startedCalls.has(call.id),
 						),
 						emit,
-						INTERRUPTED_RESPONSE_CALL,
+						INTERRUPTED_CALL,
 					);
 					for (const result of receipts.messages) {
 						currentContext.messages.push(result);
@@ -1320,8 +1322,7 @@ async function prepareToolCall(
 const UNKNOWN_TOOL_OUTCOME =
 	"Previous tool execution was interrupted; its outcome is unknown. Do not assume the operation did not occur.";
 
-const INTERRUPTED_RESPONSE_CALL =
-	"the response was interrupted before it ran. Re-issue the call if it is still needed.";
+const INTERRUPTED_CALL = "it was interrupted before it started. Re-issue the call if it is still needed.";
 
 /** Only this call's execution state is current; sibling snapshots may predate their admission or detachment. */
 function createToolCallCheckpoint(message: AssistantMessage, toolCall: AgentToolCall): AssistantMessage {
