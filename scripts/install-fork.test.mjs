@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
 	existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
-	readdirSync, rmSync, symlinkSync, writeFileSync,
+	readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { installCodingAgentConsumer, packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
-import { activateRelease, installRelease, isolatedEnvironment, main, releaseIdentity, resolveBuildTools } from "./install-fork.mjs";
+import {
+	activateRelease, installRelease, isolatedEnvironment, main, pruneReleases, releaseIdentity, resolveBuildTools,
+} from "./install-fork.mjs";
 
 const name = "@earendil-works/pi-coding-agent";
 const tools = resolveBuildTools();
@@ -219,6 +221,51 @@ test("native selection replaces the link inode and leaves no temporary selectors
 		assert.equal(JSON.parse(readFileSync(join(f.selector, "package.json"), "utf8")).name, name);
 	}
 	assert.deepEqual(readdirSync(dirname(f.selector)).sort(), ["pi-coding-agent", "pi-coding-agent.previous"]);
+});
+
+function validatedRelease(f, commit, validatedAt) {
+	const directory = join(f.releases, releaseIdentity(receipt(commit)));
+	const pkg = join(directory, "node_modules", name);
+	mkdirSync(join(pkg, "dist/bundle"), { recursive: true });
+	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name }));
+	writeFileSync(join(pkg, "dist/bundle/cli-worker.js"), "");
+	writeFileSync(join(directory, "fork-release.json"), JSON.stringify({ ...receipt(commit), validated: true }));
+	utimesSync(join(directory, "fork-release.json"), validatedAt, validatedAt);
+	return { identity: basename(directory), directory };
+}
+
+test("prunes old validated releases except selected, previous and visibly running ones", (t) => {
+	const f = fixture(t);
+	const [previous, selected, running, old, newer, newest] = ["1", "2", "3", "4", "5", "6"]
+		.map((commit, index) => validatedRelease(f, commit, 1_000 + index));
+	activateRelease(f.releases, previous.identity, f.selector);
+	activateRelease(f.releases, selected.identity, f.selector);
+	const legacy = join(f.releases, "legacy-release");
+	const installing = join(f.releases, releaseIdentity(receipt("7")));
+	for (const directory of [legacy, installing]) mkdirSync(directory, { recursive: true });
+
+	const result = pruneReleases({ releases: f.releases, selector: f.selector, keep: 2 },
+		() => `p1\nn${running.directory}/node_modules/native.node\n`);
+
+	assert.deepEqual(result, { kept: 5, removed: [old.identity] });
+	assert.equal(existsSync(old.directory), false);
+	for (const directory of [previous, selected, running, newer, newest].map((release) => release.directory).concat(legacy, installing)) {
+		assert.ok(existsSync(directory), directory);
+	}
+	assert.equal(readlinkSync(f.selector), join(selected.directory, "node_modules", name));
+});
+
+test("prune is a separate operation and requires an explicit keep count", async (t) => {
+	const f = fixture(t);
+	const paths = ["--releases", f.releases, "--selector", f.selector];
+	await assert.rejects(main(["--prune", ...paths]), /Use --prune with --keep/);
+	await assert.rejects(main(["--keep", "1", ...paths]), /Use --prune with --keep/);
+	for (const keep of ["-1", "two", "1.5"]) {
+		await assert.rejects(main(["--prune", "--keep", keep, ...paths]), /non-negative integer/);
+	}
+	await assert.rejects(main(["--prune", "--keep", "1", "--stage", ...paths]), /cannot combine/);
+	await assert.rejects(main(["--prune", "--keep", "1", "--rollback", "x", ...paths]), /cannot combine/);
+	assertPreserved(f);
 });
 
 test("isolates ambient Pi/npm config and resolves native Node/npm before HOME changes", (t) => {

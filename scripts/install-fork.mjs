@@ -3,8 +3,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-	copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
-	realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+	copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
+	realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -115,6 +115,51 @@ export function activateRelease(releases, identity, selector) {
 	}
 	replaceSymlink(release.packageDir, selector);
 	return { ...release, previous, changed: true };
+}
+
+// lsof sees open files, mapped native modules and working directories; ps sees concrete command paths.
+// ponytail: a worker that loaded only JavaScript through the selector holds nothing open in its
+// release, so neither sees it and --keep is the guard. Exact protection needs a live-worker registry.
+function liveProcessPaths() {
+	const capture = (command, args) => run(command, args, { stdio: "pipe", maxBuffer: Infinity });
+	// Without -ww, procps truncates command lines to COLUMNS even when piped.
+	return `${capture("lsof", ["-Fn"])}\n${capture("ps", ["-axww", "-o", "args="])}`;
+}
+
+function resolvedLink(link) {
+	try {
+		return realpathSync(link);
+	} catch (error) {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+export function pruneReleases({ releases, selector, keep }, livePaths = liveProcessPaths) {
+	const selected = [selector, `${selector}.previous`].map(resolvedLink);
+	const live = livePaths();
+	const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
+	const validated = [];
+	for (const identity of readdirSync(releases)) {
+		const directory = join(releases, identity);
+		try {
+			readVerifiedRelease(directory);
+		} catch {
+			continue; // Legacy releases and installations still in progress have no valid receipt.
+		}
+		validated.push({ directory, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
+	}
+	validated.sort((a, b) => b.validatedAt - a.validatedAt);
+	const removed = [];
+	for (const { directory } of validated.slice(keep)) {
+		const real = realpathSync(directory);
+		if (selected.some((path) => path === real || path?.startsWith(`${real}/`)) || mentioned(directory) || mentioned(real)) {
+			continue;
+		}
+		rmSync(directory, { recursive: true, force: true });
+		removed.push(basename(directory));
+	}
+	return { kept: validated.length - removed.length, removed };
 }
 
 // The callback builds/installs/tests only a NEW candidate. The receipt is written
@@ -229,6 +274,7 @@ function printUsage() {
 	console.log(`Usage: node scripts/install-fork.mjs [--ref <commit>] [--source-archive <file>] [--stage]
        node scripts/install-fork.mjs --activate <identity>
        node scripts/install-fork.mjs --rollback <identity>
+       node scripts/install-fork.mjs --prune --keep <count>
 
 Builds an exact local commit (default HEAD) with the checkout's ALREADY hydrated
 model-data snapshot using create-source-archive.sh and build:offline. An optional
@@ -240,6 +286,8 @@ with npm installed alongside it, Git, tar, and tmux for real-terminal validation
 --stage                 Build/install/validate without changing the selector
 --activate <identity>   Select an existing validated release, without rebuilding
 --rollback <identity>   Select an older validated release (same native operation)
+--prune --keep <count>  Delete validated releases older than the newest <count>,
+                        except selected, .previous and visibly running ones
 --releases <directory>  Default: ~/.local/share/pi-fork/releases
 --selector <symlink>    Default: ~/.local/share/npm-global/lib/node_modules/${codingAgentName}
 --help                  Show this help
@@ -256,7 +304,7 @@ already-running older launcher needs one full CLI launch to follow selections.
 
 export async function main(args = process.argv.slice(2)) {
 	const options = {
-		ref: "HEAD", stage: false,
+		ref: "HEAD", stage: false, prune: false,
 		releases: join(homedir(), ".local/share/pi-fork/releases"),
 		selector: join(homedir(), ".local/share/npm-global/lib/node_modules", codingAgentName),
 	};
@@ -265,7 +313,8 @@ export async function main(args = process.argv.slice(2)) {
 		const arg = args[i];
 		if (arg === "--help") { printUsage(); return; }
 		if (arg === "--stage") { options.stage = true; continue; }
-		if (!["--ref", "--source-archive", "--releases", "--selector", "--activate", "--rollback"].includes(arg)) throw new Error(`Unknown option: ${arg}`);
+		if (arg === "--prune") { options.prune = true; continue; }
+		if (!["--ref", "--source-archive", "--releases", "--selector", "--activate", "--rollback", "--keep"].includes(arg)) throw new Error(`Unknown option: ${arg}`);
 		const value = args[++i];
 		if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
 		if (arg === "--activate" || arg === "--rollback") {
@@ -275,6 +324,16 @@ export async function main(args = process.argv.slice(2)) {
 	}
 	options.releases = resolve(options.releases);
 	options.selector = resolve(options.selector);
+	if (options.prune !== (options.keep !== undefined)) throw new Error("Use --prune with --keep <count>");
+	if (options.prune) {
+		if (selection || options.stage || args.includes("--ref") || options["source-archive"]) {
+			throw new Error("--prune cannot combine with installation or activation");
+		}
+		if (!/^\d+$/.test(options.keep)) throw new Error("--keep requires a non-negative integer");
+		const result = pruneReleases({ ...options, keep: Number(options.keep) });
+		console.log(JSON.stringify(result, null, 2));
+		return result;
+	}
 	if (selection && (options.stage || args.includes("--ref") || options["source-archive"])) {
 		throw new Error("Activation cannot combine with --stage, --ref or --source-archive");
 	}
