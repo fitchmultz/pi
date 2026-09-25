@@ -25,6 +25,7 @@ import type {
 	TranscriptContext,
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic, createAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
+import { assertContextFits } from "../utils/estimate.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
@@ -362,6 +363,7 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 
 	void (async () => {
 		try {
+			assertContextFits(model, context);
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
 				throw new Error(`No API key provided for provider "${model.provider}"`);

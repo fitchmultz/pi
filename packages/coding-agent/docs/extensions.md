@@ -104,6 +104,8 @@ Events cover resource discovery, sessions, agent and message lifecycle, provider
 
 `message_end` can replace a finalized message while preserving its role. `tool_call` can mutate input or block execution. `tool_result` handlers compose, with each handler seeing prior changes.
 
+Shell guards must check both `bash` and `background_command` starts. Use `isToolCallEventType()` to match native, unnamespaced tools. A Bash override or `user_bash` handler does not intercept background jobs: detached workers cannot serialize a custom execution backend. The sandbox and SSH examples explicitly block unsupported starts while active, leaving status and cancellation available. Tool exclusions are literal: exclude both IDs to disable both shell paths.
+
 <a id="context_with_system"></a>
 
 `context` transforms conversation messages without prompt and tool system messages; Pi restores that state afterward. Use `context_with_system` only when a request-local transformation must own the complete transcript, and keep a system message at index zero.
@@ -122,7 +124,11 @@ A `user_bash` handler that returns `undefined` passes the command to the next ha
 
 ### Context boundaries and persistence
 
-`session_before_auto_compact` runs before automatic threshold/overflow summary preparation and authentication. `event.pendingMessages` contains provider-bound inputs not yet in `branchEntries`; `reason`, `willRetry`, and `signal` describe the trigger. Return `{ newContext: { handoff } }` to start a native `context_window` instead of a summary. The last handler result wins; one extension should own this policy. Manual `/compact` does not fire this hook. See [Compaction](compaction.md).
+`session_before_auto_compact` runs before automatic threshold/overflow summary preparation and authentication. `event.pendingMessages` contains provider-bound inputs not yet in `branchEntries`; `event.retainedToolResultIds` identifies native receipts a fresh window would retain at this point, excluding receipts with consumption proof. Pi recomputes that selection after awaited handlers to include late results. `reason`, `willRetry`, and `signal` describe the trigger. Return `{ newContext: { handoff } }` to start a native `context_window` instead of a summary. The last handler result wins; one extension should own this policy. Manual `/compact` does not fire this hook. See [Compaction](compaction.md).
+
+`pi.registerContextWindowHook((event, ctx) => drafts)` synchronously prepares every fresh window after its prospective marker and final retained tool receipts are selected. `event.contextEntries` contains the projected messages and their journal provenance; `event.pendingMessages` contains provider-bound inputs not yet journaled. Return only `ContextEditEntryDraft[]` or `undefined`. Each hook sees preceding hooks' edits. Use projected content for excerpts and `sourceEntry.id` as the edit target; original entries remain in history.
+
+Hooks share an in-memory preview: both `event.contextEntries` and `ctx.sessionManager` reads include preceding hooks' edits. Pi validates all hooks before publishing the marker and edits, preserving their preview IDs and references. Promises, invalid drafts, and thrown errors stop preparation without publishing any part of the window. On success, canonical state and `context_window_started` reflect the committed cut. Journal I/O errors can still leave accepted entries; canonical state reflects those entries. Hooks cannot request another window or continuation. This synchronous boundary also sees receipts completed during an awaited automatic-compaction handler.
 
 `session_checkpoint` is the optional awaited persistence barrier for [working-session checkpoints](checkpoint.md). Use its signal and invalidation callback to keep owned background work quiescent while a receipt is held. It does not run shutdown just to save.
 

@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
+import { withAstraLifecycleDefaults } from "../src/model-catalog.ts";
 import { getEffortThinkingLevelMap, type ModelsDevReasoningOption } from "./models-dev-reasoning-options.ts";
 import {
 	getOpenRouterThinkingLevelMap,
@@ -959,20 +960,6 @@ function applyOpenAIExplicitPromptCacheMetadata(model: Model<Api>): void {
 	model.compat = {
 		...(model.compat as OpenAIResponsesCompat | undefined),
 		supportsExplicitPromptCacheMode: true,
-	};
-}
-
-function applyAstraLifecycleMetadata(model: Model<Api>): void {
-	if (model.id !== "gpt-6-astra") return;
-	if (!(
-		((model.provider === "openai" || model.provider === "cloudflare-ai-gateway") && model.api === "openai-responses") ||
-		(model.provider === "openai-codex" && model.api === "openai-codex-responses")
-	)) return;
-	model.compat = {
-		...(model.compat as OpenAIResponsesCompat | undefined),
-		supportsAsyncTools: true,
-		supportsSteering: true,
-		supportsReasoningEffortUpdates: true,
 	};
 }
 
@@ -1976,7 +1963,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				} else if (upstream === "anthropic") {
 					api = "anthropic-messages";
 					baseUrl = CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL;
-					id = nativeId;
+					// The /anthropic passthrough forwards the body unchanged; Anthropic rejects dotted IDs.
+					id = nativeId.replaceAll(".", "-");
 				} else if (upstream === "workers-ai") {
 					api = "openai-completions";
 					baseUrl = CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL;
@@ -3297,7 +3285,7 @@ async function generateModels() {
 		applyOpenAICompletionsTranscriptMetadata(model);
 		applyOpenAIResponsesTranscriptMetadata(model);
 		applyOpenAIExplicitPromptCacheMetadata(model);
-		applyAstraLifecycleMetadata(model);
+		model.compat = withAstraLifecycleDefaults(model).compat;
 		applyPromptCacheMetadata(model);
 		applyImageInputMetadata(model);
 	}

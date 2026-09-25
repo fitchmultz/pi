@@ -1269,6 +1269,7 @@ describe("ExtensionRunner", () => {
 				type: "session_before_auto_compact" as const,
 				branchEntries: [],
 				pendingMessages: [],
+				retainedToolResultIds: [],
 				reason: "threshold" as const,
 				willRetry: false,
 				signal: new AbortController().signal,

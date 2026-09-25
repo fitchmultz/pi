@@ -4,7 +4,7 @@ Read-only exploration mode for safe code analysis.
 
 ## Features
 
-- **Built-in write tools disabled**: Disables edit/write while preserving other active tools
+- **Built-in write tools disabled**: Disables edit/write/background_command while preserving other active tools
 - **Bash allowlist**: Only read-only bash commands are allowed
 - **Plan extraction**: Extracts numbered steps from `Plan:` sections
 - **Progress tracking**: Widget shows completion status during execution
@@ -37,7 +37,7 @@ Plan:
 ## How It Works
 
 ### Plan Mode (Read-Only)
-- Built-in edit/write tools disabled
+- Built-in edit/write/background_command tools disabled
 - Other active tools remain available
 - Bash commands filtered through allowlist
 - Agent creates a plan without making changes

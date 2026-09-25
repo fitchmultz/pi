@@ -374,7 +374,13 @@ export default function(pi) {
 	);
 
 	it.each([
-		{ name: "defaults", args: [], initialTools: ["read", "bash", "edit", "write"], todo: true, cold: false },
+		{
+			name: "defaults",
+			args: [],
+			initialTools: ["read", "bash", "background_command", "edit", "write"],
+			todo: true,
+			cold: false,
+		},
 		{
 			name: "cold checkpoint without builtin defaults",
 			args: ["--no-builtin-tools"],

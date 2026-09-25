@@ -395,14 +395,15 @@ describe("native direct Responses WebSockets", () => {
 		servers.push(server);
 		const text = "x".repeat(2 * 1024 * 1024);
 		const result = await streamSimple(
-			server.model,
+			// Exercise transport queueing with input that fits the model's physical context.
+			{ ...server.model, contextWindow: 1_000_000 },
 			{ messages: [{ role: "user", content: text, timestamp: 0 }] },
 			{
 				apiKey: "local-key",
 				sessionId: "large-session",
 			},
 		).result();
-		expect(result.stopReason).toBe("stop");
+		expect(result.stopReason, result.errorMessage).toBe("stop");
 		expect(server.requests.map((request) => request.transport)).toEqual(["websocket"]);
 		expect(server.requests[0].bytes).toBeGreaterThan(2 * 1024 * 1024);
 		expect(server.requests[0].body.input).toEqual([{ role: "user", content: [{ type: "input_text", text }] }]);

@@ -1725,90 +1725,9 @@ Compat is a strict superset of the root entrypoint, so a file can switch its imp
 
 ### Adding a New Provider
 
-Adding a new LLM provider requires changes across multiple files. The layered layout: API implementations live in `src/api/`, provider factories in `src/providers/`, stable generated catalog wrappers live in `src/providers/<id>.models.ts`, and `src/models.generated.ts` registers them. This checklist covers all necessary steps:
+Provider factories in `src/providers/` own catalogs and auth and compose API implementations from `src/api/` through lazy wrappers. Reuse an existing API implementation when the provider uses a supported wire protocol. Stable generated catalog wrappers live in `src/providers/<id>.models.ts`; update the model-generation scripts rather than editing generated catalogs directly.
 
-#### 1. Core Types (`src/types.ts`)
-
-- Add the API identifier to `KnownApi` (for example `"bedrock-converse-stream"`), if it is a new API
-- Add the provider name to `KnownProvider` (for example `"amazon-bedrock"`)
-- Add the options type to `ApiOptionsMap`
-
-#### 2. API Implementation (`src/api/<api-id>.ts`, only for a new API)
-
-Create a new API implementation file (for example `bedrock-converse-stream.ts`) that exports exactly `stream` and `streamSimple`, plus:
-
-- An options interface extending `StreamOptions` (for example `BedrockOptions`)
-- Message conversion functions to transform the `TranscriptContext` messages to provider format; read the prompt and tools from the transcript with `getInitialSystemMessage()`, `getCurrentTools()`, and `resolveTranscript()`
-- Tool conversion if the provider supports tools
-- Response parsing to emit standardized events (`text`, `tool_call`, `thinking`, `usage`, `stop`)
-
-Add a lazy wrapper `src/api/<api-id>.lazy.ts` (`<name>Api()` via `lazyApi()`) so providers can reference the implementation without importing its SDK. Add any root-level `export type` re-exports in `src/index.ts` that should remain available from `@earendil-works/pi-ai`.
-
-#### 3. Model Generation (`scripts/generate-models.ts`, `scripts/generate-image-models.ts`)
-
-- Add logic to fetch and parse models from the provider's source (e.g., models.dev API)
-- Map chat/tool-capable provider model data to the standardized `Model` interface via `scripts/generate-models.ts`; hydration groups the ignored `src/providers/data/<id>.json` values by API, while stable `src/providers/<id>.models.ts` wrappers derive exact model/API types directly from those JSON keys
-- Map image-generation provider model data to the standardized `ImagesModel` interface via `scripts/generate-image-models.ts`
-- Handle provider-specific quirks (pricing format, capability flags, model ID transformations)
-
-#### 4. Provider Factory (`src/providers/<id>.ts`)
-
-- `createProvider()` wiring catalog + auth + the lazy API wrapper
-- Auth: `envApiKeyAuth` for standard key providers, a custom `ApiKeyAuth` for ambient auth (AWS profiles, ADC), `lazyOAuth` where an OAuth flow exists
-- Register the factory in `src/providers/all.ts`
-- If it is a new API: register it in the builtin list in `src/compat.ts` and add the package subpath export in `package.json`
-
-#### 5. Tests (`test/`)
-
-Create or update test files to cover the new provider:
-
-- `stream.test.ts` - Basic streaming and tool use
-- `tokens.test.ts` - Token usage reporting
-- `abort.test.ts` - Request cancellation
-- `empty.test.ts` - Empty message handling
-- `context-overflow.test.ts` - Context limit errors
-- `image-limits.test.ts` - Image support (if applicable)
-- `unicode-surrogate.test.ts` - Unicode handling
-- `tool-call-without-result.test.ts` - Orphaned tool calls
-- `image-tool-result.test.ts` - Images in tool results
-- `total-tokens.test.ts` - Token counting accuracy
-- `cross-provider-handoff.test.ts` - Cross-provider context replay
-- `providers.test.ts` - Provider listing and auth resolution
-
-For `cross-provider-handoff.test.ts`, add at least one provider/model pair. If the provider exposes multiple model families (for example GPT and Claude), add at least one pair per family.
-
-For providers with non-standard auth (AWS, Google Vertex), create a utility like `bedrock-utils.ts` with credential detection helpers.
-
-#### 6. Coding Agent Integration (`../coding-agent/`)
-
-Update `src/core/model-resolver.ts`:
-
-- Add a default model ID for the provider in `DEFAULT_MODELS`
-
-Update `src/cli/args.ts`:
-
-- Add environment variable documentation in the help text
-
-Update `README.md`:
-
-- Add the provider to the providers section with setup instructions
-
-#### 7. Documentation
-
-Update `packages/ai/README.md`:
-
-- Add to the Supported Providers table
-- Document any provider-specific options or authentication requirements
-- Add environment variable to the Environment Variables section
-
-#### 8. Changelog
-
-Add an entry to `packages/ai/CHANGELOG.md` under `## [Unreleased]`:
-
-```markdown
-### Added
-- Added support for [Provider Name] provider ([#PR](link) by [@author](link))
-```
+Follow the [provider implementation checklist](https://github.com/fitchmultz/pi/blob/main/.pi/skills/add-llm-provider.md) ([source checkout](../../.pi/skills/add-llm-provider.md)) for the canonical implementation steps and required test matrix, including coding-agent integration. See [CONTRIBUTING.md](https://github.com/fitchmultz/pi/blob/main/CONTRIBUTING.md) ([source checkout](../../CONTRIBUTING.md)) for the contributor and maintainer workflow, including changelog ownership.
 
 ## License
 

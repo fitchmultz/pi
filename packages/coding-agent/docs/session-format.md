@@ -81,6 +81,8 @@ A message in the conversation. The `message` field contains an `AgentMessage`. S
 
 Assistant entries with `checkpoint: true` record completed native items before async tool side effects and when execution detaches/resumes. They are non-billable snapshots of the same `responseId`. Preserve their usage for context projection but exclude them from billing, response counts, and cache-request statistics. Context reconstruction coalesces them with final response content/usage. `responsesItem` retains the provider item; `executionStarted`, `executionArguments`, and `executionDetached` record admitted local execution. Missing results do not prove an operation never happened; recovery uses `resume`, never a repeated started `execute`.
 
+Optional `consumedToolResultIds` on a completed assistant entry names original tool-result entries included in that successful response's captured request or native continuation input. This branch-local proof survives reload, compaction, and forks. Journal ordering alone is not proof: a result can finish while an earlier request is streaming. Older entries without this metadata leave consumption unknown, so fresh windows conservatively retain those native receipts.
+
 A forced `before_agent_start` prompt affects provider requests for that run only; the transcript and context checkpoints retain structured state. Older full-prompt records with `replace: true` clear preceding prompt/tools during replay. The next run writes a structured replacement baseline rather than accumulating opaque prompt text.
 
 ```json
@@ -115,6 +117,10 @@ Emitted when the user changes the thinking/reasoning level.
 ### ContextWindowEntry
 
 A `context_window` starts fresh model context without deleting history. It stores optional `handoff`, `tokensBefore` (null when unknown), and an optional `systemMessage` checkpoint of the current prompt/tools. Replay places the checkpoint before the visible `context-window` custom-message marker, preserving tool selection without bringing earlier conversation into the new window.
+
+Native asynchronous work survives the boundary. Projection retains unresolved call items and the original calls needed by results in the new window, with their exact identities and admitted execution state. It does not retain old prose or already-consumed call/result pairs from previous windows.
+
+Optional `retainedToolResultIds` names original result entry IDs whose consumption by a successful provider response is not yet confirmed. This preserves receipts that arrive while a handoff is being prepared. Replay selects only matching earlier tool-result entries on the active branch, without copying messages or adding billable entries. A later window retains them only if its own list includes them; a later compaction can summarize or keep them normally.
 
 ### UsageEntry
 
@@ -231,8 +237,8 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 
 `buildContextEntries()` walks from the current leaf to the root, producing the active entry list while honoring compaction:
 
-1. Collects the path starting at the latest `ContextWindowEntry`, when present
-2. Coalesces execution snapshots by response identity, retaining final content/usage and latest admitted-call state
+1. Collects the full selected branch and coalesces execution snapshots by response identity, retaining final content/usage and latest admitted-call state at the original response position
+2. Selects the path starting at the latest `ContextWindowEntry`, when present, and inserts its explicitly retained tool-result entries after the marker; late checkpoints from older responses do not reintroduce their conversation
 3. Applies the latest remaining `CompactionEntry`:
    - Includes the compaction entry first
    - Includes non-system entries from `firstKeptEntryId` up to, but not including, the compaction entry
@@ -240,6 +246,10 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 4. Preserves non-message entries in the selected range for rendering
 
 `buildSessionProjection()` then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. The raw selected entries are not modified.
+
+Across compaction and context-window boundaries, projection also carries native asynchronous call items from the selected branch when they remain unresolved or have a retained result. Carried calls keep their original reasoning signatures but clear the separate thinking text, which another model would otherwise replay as old assistant prose. They preserve their original source entry, provider item, namespace, call ID, and admitted execution arguments/state. Context edits still apply: omitting a call also omits its dependent output. Results on other branches do not resolve calls on the selected branch. Reopening the journal uses the same projection.
+
+When a native result is omitted by compaction or a context edit, projection removes its completed call from retained assistant content too. Reasoning shared with surviving outputs remains in its original order; a reasoning group with no surviving output is omitted. The raw outcome still proves completion, so the call is not executed or resumed again. Other prose, unresolved calls, and retained call/result pairs remain. Projection also derives `toolExecutionFailed` from the original response's foreground failures, preserving their reset veto without restoring omitted receipts to model input.
 
 `buildSessionContext()` builds on that projection to produce the message list for the LLM:
 

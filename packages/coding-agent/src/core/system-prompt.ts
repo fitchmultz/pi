@@ -11,7 +11,7 @@ export interface BuildSystemPromptOptions {
 	customPrompt?: string;
 	/** Exact full prompt replacement set by a before_agent_start handler. */
 	forceSystemPrompt?: string;
-	/** Tools to include in prompt. Default: [read, bash, edit, write]. */
+	/** Tools to include in prompt. Default: [read, bash, background_command, edit, write]. */
 	selectedTools?: ToolSelection[];
 	/** Optional one-line tool snippets keyed by tool name. */
 	toolSnippets?: Record<string, string>;
@@ -55,7 +55,7 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 	return {
 		customPrompt: input.customPrompt,
 		forceSystemPrompt: input.forceSystemPrompt,
-		selectedTools: (input.selectedTools ?? ["read", "bash", "edit", "write"]).map((tool) =>
+		selectedTools: (input.selectedTools ?? ["read", "bash", "background_command", "edit", "write"]).map((tool) =>
 			typeof tool === "string" ? tool : tool.namespace === undefined ? tool.name : { ...tool },
 		),
 		toolSnippets: { ...(input.toolSnippets ?? {}) },
@@ -170,8 +170,8 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 - Examples: ${getExamplesPath()} (extensions, custom tools, SDK)
 - When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
 - When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
-- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
-- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;
+- For Pi work, inspect the version-matched documentation and examples for the affected APIs and behavior before implementing
+- Follow references needed to establish those contracts; use relevant sections of long references (e.g., tui.md for TUI API details)`;
 	}
 
 	if (appendSystemPrompt) promptSections.addendum = appendSystemPrompt;

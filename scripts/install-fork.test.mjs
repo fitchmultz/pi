@@ -70,11 +70,22 @@ export class ModelRuntime { static create() {} }
 	return packages;
 }
 
-function installFixture(f, options) {
+function installFixture(f, options = {}) {
 	const pkgs = packages(f, options);
 	return (directory) => {
+		const lockDirectory = join(f.root, "install-lock");
+		const manifest = { private: true, dependencies: { [name]: "1.0.0" } };
+		const lock = { lockfileVersion: 3, requires: true, packages: { "": manifest } };
+		for (const pkg of pkgs) {
+			const { version, dependencies, bin } = JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"));
+			lock.packages[`node_modules/${pkg.name}`] = { version, dependencies, bin };
+		}
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(join(lockDirectory, "package.json"), JSON.stringify(manifest));
+		writeFileSync(join(lockDirectory, "package-lock.json"), JSON.stringify(lock));
 		const tarballs = packReleasePackages(pkgs, join(directory, "tarballs"), { npm: tools.npm, env: f.env });
-		installCodingAgentConsumer(directory, tarballs, tools.npm, { env: f.env });
+		if (options.brokenTarball) writeFileSync(tarballs.get(name), "not an npm tarball");
+		installCodingAgentConsumer(directory, tarballs, tools.npm, { env: f.env, lockDirectory });
 		smokeTestCodingAgentConsumer(directory, tools.node, { path: tools.path });
 	};
 }
@@ -164,11 +175,7 @@ test("a real child build failure cannot select or leave a reusable success recei
 
 test("a real npm install failure leaves the selector unchanged", async (t) => {
 	const f = fixture(t);
-	await assert.rejects(installRelease({ ...f, receipt: receipt() }, (directory) => {
-		const tarball = join(directory, "broken.tgz");
-		writeFileSync(tarball, "not an npm tarball");
-		installCodingAgentConsumer(directory, new Map([[name, tarball]]), tools.npm, { env: f.env });
-	}), /Command failed/);
+	await assert.rejects(installRelease({ ...f, receipt: receipt() }, installFixture(f, { brokenTarball: true })), /Command failed/);
 	assertPreserved(f);
 	assert.deepEqual(readdirSync(f.releases), []);
 });

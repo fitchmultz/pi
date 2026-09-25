@@ -35,6 +35,7 @@ import type {
 	Usage,
 	UserMessage,
 } from "../types.ts";
+import { assertContextFits } from "../utils/estimate.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
@@ -322,6 +323,11 @@ export function convertResponsesMessages<TApi extends Api>(
 	const transcriptTools = resolveTranscriptTools(
 		normalizedContext.messages,
 		(options?.supportsAdditionalTools ?? false) || (options?.supportsToolSearch ?? false),
+	);
+	assertContextFits(
+		model,
+		transformedMessages,
+		transcriptTools.anchorsAdditions ? undefined : transcriptTools.requestTools,
 	);
 	const appendSystemToolAdditions = (message: Pick<SystemMessage, "toolsAdded">, seed: string): void => {
 		const tools = transcriptTools.anchorsAdditions ? (message.toolsAdded ?? []) : [];

@@ -22,7 +22,7 @@
 - In `packages/coding-agent`, resolve package assets through helpers in `src/config.ts`. Do not use `__dirname` directly; the helpers account for source checkouts, npm installations, and standalone binaries.
 - Never remove or downgrade code to fix type errors from outdated deps; upgrade the dep instead.
 - Use only erasable TypeScript syntax (Node strip-only mode) in code checked by the root config (`packages/*/src`, `packages/*/test`, `packages/coding-agent/examples`): no parameter properties, `enum`, `namespace`/`module`, `import =`, `export =`, or other constructs needing JS emit. Use explicit fields with constructor assignments.
-- Always ask before removing functionality or code that appears intentional.
+- Do not remove functionality or code that appears intentional without user authorization. Existing explicit or standing authorization counts; ask only if the removal is not already authorized.
 - Do not preserve backward compatibility unless the user asks for it.
 - Never hardcode key checks (e.g. `matchesKey(keyData, "ctrl+x")`). Add defaults to `DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS` so they stay configurable.
 - Never modify `packages/ai/src/models.generated.ts` directly; update `packages/ai/scripts/generate-models.ts` instead, then regenerate. Including the resulting `models.generated.ts` diff is always OK, even if regeneration includes unrelated upstream model metadata changes.
@@ -38,7 +38,7 @@
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
 - When regressions tests for fixing a github issue, add a comment with the github issue number next to the test.
 - For ad-hoc scripts, `write` them to a temp file (e.g. `/tmp`), run, edit if needed, remove when done. Don't embed multi-line scripts in `bash` commands.
-- Never commit unless the user asks.
+- Never commit without explicit or standing user authorization.
 
 ## Dependency and Install Security
 
@@ -73,7 +73,7 @@ If rebase conflicts occur:
 
 ## Issues and PRs
 
-See `CONTRIBUTING.md` for the contributor gate (auto-close workflows, `lgtm`/`lgtmi`, quality bar).
+For issue creation or PR submission, read and follow [CONTRIBUTING.md](CONTRIBUTING.md) for contributor versus maintainer scope, the target repository's contributor gate (auto-close workflows, `lgtm`/`lgtmi`), quality bar, and shared verification.
 
 When reviewing PRs:
 
@@ -101,6 +101,8 @@ For testing pi's interactive mode, load and follow [.pi/skills/interactive-testi
 
 ## Changelog
 
+Contributors leave changelogs alone. These procedures apply to authorized maintainers, including fork maintainers.
+
 Location: `packages/*/CHANGELOG.md` (one per package).
 
 Sections under `## [Unreleased]`: `### Breaking Changes` (API changes requiring migration), `### Added`, `### Changed`, `### Fixed`, `### Removed`.
@@ -109,9 +111,9 @@ Rules:
 
 - All new entries go under `## [Unreleased]`. Read the full section first and append to existing subsections; never duplicate them.
 - Released version sections (e.g. `## [0.12.2]`) are immutable; never modify them.
-- Do not create changelog entries when working on a branch other than `main` or pull request
+- Only create entries on `main` or a pull-request branch.
 
-Attribution:
+Attribution (use the issue or PR's repository in the link):
 
 - Internal (from issues): `Fixed foo bar ([#123](https://github.com/earendil-works/pi/issues/123))`
 - External contributions: `Added feature X ([#456](https://github.com/earendil-works/pi/pull/456) by [@username](https://github.com/username))`
@@ -122,4 +124,4 @@ For release preparation, publishing, verification, or recovery, load and follow 
 
 ## User Override
 
-If the user's instructions conflict with any rule in this document, ask for explicit confirmation before overriding. Only then execute their instructions.
+User instructions, including existing explicit or standing authorization, govern authorized work. Do not ask for confirmation already given; ask when the intended override or permission is unclear.

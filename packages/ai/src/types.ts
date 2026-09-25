@@ -577,6 +577,8 @@ export interface AssistantMessage {
 	deferred?: DeferredHandle;
 	errorMessage?: string;
 	rawStopReason?: string;
+	/** Projection-derived foreground tool failure in this response; preserves its reset veto when receipts are omitted. */
+	toolExecutionFailed?: boolean;
 	/**
 	 * Provider indication of whether the model explicitly ended its turn.
 	 * Preserved for debugging and does not currently affect agent control flow.
@@ -601,6 +603,8 @@ export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails>
 			usage?: Usage;
 			/** Actual executor time, excluding validation, preflight and result hooks. Absent when never executed. */
 			elapsedMs?: number;
+			/** Foreground scheduling skipped this call (for example, truncated arguments), rather than native work failing. */
+			executionSkipped?: boolean;
 			isError: boolean;
 			timestamp: number; // Unix timestamp in milliseconds
 		}

@@ -129,7 +129,7 @@ describe("createInteractiveTui", () => {
 			runtimeHost: { session: { settingsManager: { getFullscreenCopyOnSelect: () => boolean } } };
 			renderer: ReturnType<typeof createInteractiveTui>;
 			ui: TUI;
-			fullscreenLayoutRoot: Component;
+			chatViewport: { root: Component };
 			options: { tuiMode?: TuiMode };
 			themeController: { rebindTui: () => void };
 			extensionTerminalInputSubscriptions: Set<never>;
@@ -138,7 +138,7 @@ describe("createInteractiveTui", () => {
 			runtimeHost: { session: { settingsManager: { getFullscreenCopyOnSelect: () => true } } },
 			renderer,
 			ui: undefined as unknown as TUI,
-			fullscreenLayoutRoot: component,
+			chatViewport: { root: component },
 			options: { tuiMode: "regular" as TuiMode },
 			themeController: { rebindTui: () => {} },
 			extensionTerminalInputSubscriptions: new Set<never>(),

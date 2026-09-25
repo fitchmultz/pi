@@ -52,11 +52,13 @@ export async function execCommand(
 		let timeoutId: NodeJS.Timeout | undefined;
 		let forceKillId: NodeJS.Timeout | undefined;
 		const decoder = new ShellDecoder({ ignoreBOM: true });
+		const cancellation = new AbortController();
 
 		const killProcess = () => {
 			if (!killed && !settled) {
 				killed = true;
 				proc.kill("SIGTERM");
+				cancellation.abort();
 				// Force kill after 5 seconds if SIGTERM doesn't work
 				forceKillId = setTimeout(() => {
 					if (proc.exitCode === null && proc.signalCode === null) {
@@ -109,7 +111,7 @@ export async function execCommand(
 		proc.stderr.on("error", onReadError);
 
 		// Preserve the existing idle-pipe grace for detached descendants.
-		waitForChildProcess(proc).then(
+		waitForChildProcess(proc, cancellation.signal).then(
 			(code) => finalize(code ?? 0),
 			() => finalize(1),
 		);
