@@ -662,6 +662,8 @@ export interface SessionBeforeForkEvent {
 export interface SessionBeforeAutoCompactEvent {
 	type: "session_before_auto_compact";
 	branchEntries: SessionEntry[];
+	/** Original native receipt IDs a fresh window would retain now; recomputed after awaited handlers. */
+	retainedToolResultIds: string[];
 	/** Inputs included in the pending provider request but not yet persisted in branchEntries. */
 	pendingMessages: AgentMessage[];
 	reason: "threshold" | "overflow";

@@ -1573,6 +1573,22 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Publish a validated prospective window without regenerating its marker or edit IDs. */
+	appendPreparedContextWindow(preview: SessionManager, windowId: string): void {
+		const branch = preview.getBranch();
+		const index = branch.findIndex((entry) => entry.id === windowId && entry.type === "context_window");
+		if (preview.persist || preview.sessionId !== this.sessionId || index < 0)
+			throw new Error("Invalid context window preview");
+		const entries = branch.slice(index);
+		let parentId = this.leafId;
+		for (const [offset, entry] of entries.entries()) {
+			if (entry.parentId !== parentId || this.byId.has(entry.id) || (offset > 0 && entry.type !== "context_edit"))
+				throw new Error("Context window preview no longer extends the active branch");
+			parentId = entry.id;
+		}
+		for (const entry of entries) this._appendEntry(entry);
+	}
+
 	/** Append model-attributed usage that does not participate in LLM context. Returns the appended entry. */
 	appendUsage(
 		kind: string,

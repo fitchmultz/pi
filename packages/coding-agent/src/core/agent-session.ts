@@ -797,19 +797,7 @@ export class AgentSession {
 		};
 	}
 
-	private _consumeNewContext(request?: NewContextRequest): AgentContext | undefined {
-		const next = request ?? this._pendingNewContext;
-		this._pendingNewContext = undefined;
-		if (
-			!next ||
-			this._shutdownAbortController.signal.aborted ||
-			this.agent.signal?.aborted ||
-			this._autoCompactionAbortController?.signal.aborted
-		)
-			return undefined;
-
-		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
-		const usage = this.getContextUsage();
+	private _getRetainedToolResultIds(): string[] {
 		const projection = this.sessionManager.buildSessionProjection();
 		const nativeCallIds = new Set(
 			projection.messages.flatMap((message) =>
@@ -830,7 +818,7 @@ export class AgentSession {
 				.getBranch()
 				.flatMap((entry) => (entry.type === "message" ? (entry.consumedToolResultIds ?? []) : [])),
 		);
-		const retainedToolResultIds = projection.entries.flatMap((entry) =>
+		return projection.entries.flatMap((entry) =>
 			!consumedEntryIds.has(entry.sourceEntry.id) &&
 			entry.messages.some(
 				(message) =>
@@ -841,31 +829,51 @@ export class AgentSession {
 				? [entry.sourceEntry.id]
 				: [],
 		);
-		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null, retainedToolResultIds);
-		this._reportedUsagePrefix = null;
-		const appended: SessionEntry[] = [];
+	}
+
+	private _consumeNewContext(request?: NewContextRequest): AgentContext | undefined {
+		const next = request ?? this._pendingNewContext;
+		this._pendingNewContext = undefined;
+		if (
+			!next ||
+			this._shutdownAbortController.signal.aborted ||
+			this.agent.signal?.aborted ||
+			this._autoCompactionAbortController?.signal.aborted
+		)
+			return undefined;
+
+		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
+		const usage = this.getContextUsage();
+		const preview = this._createBoundaryPreviewManager([]);
+		const windowId = preview.appendContextWindow(handoff, usage?.tokens ?? null, this._getRetainedToolResultIds());
+		this._extensionRunner.runContextWindowHooks(
+			() => ({
+				contextEntries: preview.buildSessionProjection().entries,
+				pendingMessages: this._pendingProviderMessages.slice(),
+			}),
+			(drafts) => this._applyBoundaryDrafts(preview, drafts),
+			preview,
+		);
+		const prepared = preview.getBranch();
+		const edits = prepared.slice(prepared.findIndex((entry) => entry.id === windowId) + 1);
 		try {
-			this._extensionRunner.runContextWindowHooks(
-				() => ({
-					contextEntries: this.sessionManager.buildSessionProjection().entries,
-					pendingMessages: this._pendingProviderMessages.slice(),
-				}),
-				(drafts) => {
-					this._createBoundaryPreviewManager(drafts);
-					appended.push(...this._applyBoundaryDrafts(this.sessionManager, drafts));
-				},
-			);
+			this.sessionManager.appendPreparedContextWindow(preview, windowId);
 		} finally {
-			// The marker and accepted edits are committed even when a later hook stops dispatch.
-			this._refreshFinalizedContext();
-			this._restorePendingProviderMessages(this.agent.state);
-			for (const entry of appended) this._emit({ type: "entry_appended", entry });
-			const marker = this.agent.state.messages.find(
-				(message) => message.role === "custom" && message.customType === "context-window",
-			)!;
-			this._emit({ type: "message_start", message: marker });
-			this._emit({ type: "message_end", message: marker });
-			this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
+			// Publication can still fail at journal I/O; reflect only entries actually accepted.
+			if (this.sessionManager.getEntry(windowId)) {
+				this._reportedUsagePrefix = null;
+				this._refreshFinalizedContext();
+				this._restorePendingProviderMessages(this.agent.state);
+				for (const entry of edits) {
+					if (this.sessionManager.getEntry(entry.id)) this._emit({ type: "entry_appended", entry });
+				}
+				const marker = this.agent.state.messages.find(
+					(message) => message.role === "custom" && message.customType === "context-window",
+				)!;
+				this._emit({ type: "message_start", message: marker });
+				this._emit({ type: "message_end", message: marker });
+				this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
+			}
 		}
 
 		return {
@@ -4001,6 +4009,7 @@ export class AgentSession {
 				const claim = await this._extensionRunner.emit({
 					type: "session_before_auto_compact",
 					branchEntries: pathEntries,
+					retainedToolResultIds: this._getRetainedToolResultIds(),
 					pendingMessages: this._pendingProviderMessages.slice(),
 					reason,
 					willRetry,

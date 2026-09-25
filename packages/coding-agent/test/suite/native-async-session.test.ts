@@ -37,16 +37,31 @@ const result: AgentToolResult = { content: [{ type: "text", text: "real result" 
 
 it("finalizes synchronous window edits in registration order without rewriting history", async () => {
 	const observed: string[] = [];
+	let previewWindowId = "";
+	let previewEditId = "";
 	const harness = await createHarness({
 		extensionFactories: [
 			(pi) => {
 				for (const text of ["first excerpt", "final excerpt"]) {
-					pi.registerContextWindowHook((event) => {
+					pi.registerContextWindowHook((event, ctx) => {
+						if (text === "first excerpt") previewWindowId = ctx.sessionManager.getLeafId()!;
+						else {
+							previewEditId = ctx.sessionManager.getLeafId()!;
+							expect(ctx.sessionManager.getEntry(previewEditId)?.type).toBe("context_edit");
+						}
 						const entry = event.contextEntries.find((entry) =>
 							entry.messages.some((message) => message.role === "toolResult"),
 						)!;
 						observed.push(JSON.stringify(entry.messages));
-						return [{ type: "context_edit", targetId: entry.sourceEntry.id, replacement: { content: text } }];
+						return [
+							{
+								type: "context_edit",
+								targetId: entry.sourceEntry.id,
+								replacement: {
+									content: text === "first excerpt" ? text : `${text}: history read ${previewEditId}`,
+								},
+							},
+						];
 					});
 				}
 			},
@@ -70,9 +85,16 @@ it("finalizes synchronous window edits in registration order without rewriting h
 				role: "toolResult",
 				toolCallId: toolCall().id,
 				isError: true,
-				content: [{ type: "text", text: "final excerpt" }],
+				content: [{ type: "text", text: `final excerpt: history read ${previewEditId}` }],
 			}),
 		);
+		expect(harness.sessionManager.getEntry(previewWindowId)?.type).toBe("context_window");
+		expect(harness.sessionManager.getEntry(previewEditId)).toMatchObject({
+			type: "context_edit",
+			targetId: id,
+			replacement: { content: [{ type: "text", text: "first excerpt" }] },
+		});
+		expect(harness.eventsOfType("entry_appended")[0].entry.id).toBe(previewEditId);
 		expect(harness.sessionManager.getEntry(id)).toMatchObject({ message: { content: result.content } });
 	} finally {
 		harness.cleanup();
@@ -118,16 +140,15 @@ it("validates a final-window edit batch before publishing any of it", async () =
 			timestamp: 1,
 		});
 		harness.session.refreshContext();
+		const original = harness.sessionManager.getBranch();
 		expect(() => harness.session.newContext()).toThrow();
-		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "context_edit")).toMatchObject([
-			{ replacement: { content: [{ type: "text", text: "accepted excerpt" }] } },
-		]);
-		expect(harness.eventsOfType("entry_appended")).toHaveLength(1);
+		expect(harness.sessionManager.getBranch()).toEqual(original);
+		expect(harness.eventsOfType("entry_appended")).toHaveLength(0);
 		expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionProjection().messages);
 		expect(harness.session.messages).toEqual(
 			SessionManager.open(harness.sessionManager.getSessionFile()!).buildSessionProjection().messages,
 		);
-		expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
+		expect(harness.eventsOfType("context_window_started")).toHaveLength(0);
 	} finally {
 		harness.cleanup();
 		rmSync(directory, { recursive: true, force: true });

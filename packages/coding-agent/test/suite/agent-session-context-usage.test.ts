@@ -492,7 +492,7 @@ describe("AgentSession context usage estimate", () => {
 					if (change !== "unchanged") session.setAutoCompactionEnabled(false);
 					if (change === "prompt")
 						session.extensionRunner.createCommandContext().getSystemPromptOptions().customPrompt =
-							"Local edit ".repeat(2000);
+							"Local edit ".repeat(500);
 					expect(session.resourceLoader.getSkills().skills).toHaveLength(0);
 					await session.bindExtensions({ onError: () => {} });
 					expect(session.resourceLoader.getSkills().skills).toHaveLength(1);
@@ -1059,7 +1059,11 @@ describe("AgentSession context usage estimate", () => {
 	);
 
 	it("adjusts only the effective prefix after a persisted replacement", async () => {
-		const harness = await createHarness({ tools: [], settings: { compaction: { enabled: false } } });
+		const harness = await createHarness({
+			tools: [],
+			models: [{ id: "faux-1", contextWindow: 20_000 }],
+			settings: { compaction: { enabled: false } },
+		});
 		harnesses.push(harness);
 		harness.sessionManager.appendMessage({
 			role: "system",

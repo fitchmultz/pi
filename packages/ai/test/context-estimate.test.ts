@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildBaseOptions } from "../src/api/simple-options.ts";
 import type { AssistantMessage, Model, Usage } from "../src/types.ts";
-import { estimateContextTokens } from "../src/utils/estimate.ts";
+import { estimateContextTokens, estimateMessageTokens } from "../src/utils/estimate.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 function createUsage(totalTokens: number): Usage {
@@ -42,6 +42,26 @@ const model: Model<"openai-responses"> = {
 };
 
 describe("context token estimation", () => {
+	it("counts schemas delivered by native tool search in input and output allocation", () => {
+		const result = {
+			role: "toolResult" as const,
+			toolCallId: "search",
+			toolName: "search",
+			content: [{ type: "text" as const, text: "found" }],
+			isError: false,
+			timestamp: 1,
+			toolsAdded: [
+				{
+					name: "large",
+					description: "s".repeat(80_000),
+					parameters: { type: "object", properties: {} },
+				},
+			],
+		};
+		expect(estimateMessageTokens(result)).toBeGreaterThan(20_000);
+		expect(buildBaseOptions(model, normalizeContext({ messages: [result] })).maxTokens).toBe(1);
+	});
+
 	it("ignores stale assistant usage after a newer message is inserted before it", () => {
 		const context = normalizeContext({
 			systemPrompt: "system",
