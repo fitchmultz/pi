@@ -144,6 +144,40 @@ describe("remote catalog provider", () => {
 		});
 	});
 
+	it("merges dotted Cloudflare AI Gateway Claude IDs into their Anthropic IDs", async () => {
+		const opus = {
+			...model("claude-opus-5-5"),
+			provider: "cloudflare-ai-gateway",
+			api: "anthropic-messages" as const,
+		};
+		const provider = withRemoteCatalog(
+			createProvider({
+				id: "cloudflare-ai-gateway",
+				auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
+				models: [opus],
+				api: {
+					stream: () => {
+						throw new Error("not used");
+					},
+					streamSimple: () => {
+						throw new Error("not used");
+					},
+				},
+			}),
+			"https://pi.dev",
+			1,
+		);
+		const store = new InMemoryModelsStore();
+		await store.write(provider.id, {
+			models: [{ ...opus, id: "claude-opus-5.5", contextWindow: 2000 }],
+			lastModified: 2,
+		});
+		await refreshProvider(provider, store, { allowNetwork: false });
+		expect(provider.getModels().map(({ id, contextWindow }) => ({ id, contextWindow }))).toEqual([
+			{ id: "claude-opus-5-5", contextWindow: 2000 },
+		]);
+	});
+
 	it("parses keyed catalogs, sends version headers, observes the refresh TTL, and supports forced refreshes", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			async () =>
