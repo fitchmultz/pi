@@ -1131,12 +1131,20 @@ describe("AgentSession context usage estimate", () => {
 	it.each([
 		"tool-result block",
 		"whole message",
+		"whole message with tool search",
+		"whole message with cloned tool search",
+		"whole message and block with cloned tool search",
+		"tool search call kind removal",
+		"tool search result kind removal",
+		"tool search declarations rewrite",
 		"block rewrite",
 		"block truncation",
 		"block reorder",
 		"message reorder",
 		"field edit",
 	] as const)("checks preservation of opaque reported usage with a %s request decoration", async (decoration) => {
+		const toolSearch = decoration.includes("tool search");
+		let transformed = "";
 		const harness = await createHarness({
 			tools: [
 				{
@@ -1144,12 +1152,14 @@ describe("AgentSession context usage estimate", () => {
 					label: "Lookup",
 					description: "Lookup",
 					parameters: Type.Object({}),
+					...(toolSearch ? { toolSearch: true as const } : {}),
 					execute: async () => ({
 						content: [
 							{ type: "text", text: "original result" },
 							{ type: "text", text: "second block" },
 						],
 						details: {},
+						...(toolSearch ? { tools: [{ name: "lookup" }] } : {}),
 					}),
 				},
 			],
@@ -1157,7 +1167,7 @@ describe("AgentSession context usage estimate", () => {
 			extensionFactories: [
 				(pi) => {
 					pi.on("context", (event) => {
-						if (decoration !== "whole message") {
+						if (!decoration.startsWith("whole message")) {
 							if (
 								decoration === "message reorder" &&
 								event.messages.some((message) => message.role === "toolResult")
@@ -1174,12 +1184,29 @@ describe("AgentSession context usage estimate", () => {
 							}
 							return { messages: event.messages };
 						}
+						const messages = decoration.includes("cloned") ? structuredClone(event.messages) : event.messages;
+						if (decoration.includes("and block")) {
+							for (const message of messages) {
+								if (message.role === "toolResult") message.content.push({ type: "text", text: "Duration: 1s" });
+							}
+						}
 						return {
-							messages: [
-								{ role: "user", content: "Session name: context-usage", timestamp: 0 },
-								...event.messages,
-							],
+							messages: [{ role: "user", content: "Session name: context-usage", timestamp: 0 }, ...messages],
 						};
+					});
+					pi.on("context_with_system", (event) => {
+						for (const message of event.messages) {
+							if (decoration === "tool search call kind removal" && message.role === "assistant") {
+								for (const block of message.content) {
+									if (block.type === "toolCall") delete block.kind;
+								}
+							}
+							if (message.role !== "toolResult") continue;
+							if (decoration === "tool search result kind removal") delete message.toolCallKind;
+							if (decoration === "tool search declarations rewrite" && message.toolsAdded?.[0])
+								message.toolsAdded[0].description = "Changed declaration";
+						}
+						transformed = JSON.stringify(event.messages);
 					});
 					pi.on("message_end", (event) => {
 						if (event.message.role === "assistant") event.message.usage = usage(500_000);
@@ -1190,7 +1217,13 @@ describe("AgentSession context usage estimate", () => {
 		harnesses.push(harness);
 		let sent = "";
 		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("lookup", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage(
+				{
+					...fauxToolCall("lookup", {}),
+					...(toolSearch ? { kind: "toolSearch" as const } : {}),
+				},
+				{ stopReason: "toolUse" },
+			),
 			(context) => {
 				sent = JSON.stringify(context.messages);
 				return fauxAssistantMessage([
@@ -1201,7 +1234,22 @@ describe("AgentSession context usage estimate", () => {
 		]);
 		await harness.session.prompt("look up the result");
 		expect(sent).toContain("original result");
-		if (decoration !== "tool-result block" && decoration !== "whole message") {
+		if (toolSearch && decoration.startsWith("whole message")) {
+			expect(JSON.parse(transformed)).toContainEqual(
+				expect.objectContaining({
+					role: "toolResult",
+					toolCallKind: "toolSearch",
+					toolsAdded: [expect.objectContaining({ name: "lookup", description: "Lookup" })],
+				}),
+			);
+			expect(JSON.parse(transformed)).toContainEqual(
+				expect.objectContaining({
+					role: "assistant",
+					content: [expect.objectContaining({ type: "toolCall", kind: "toolSearch" })],
+				}),
+			);
+		}
+		if (decoration !== "tool-result block" && !decoration.startsWith("whole message")) {
 			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
 			expect(harness.session.getContextUsage()!.tokens!).toBeLessThan(500_000);
 			return;
@@ -1213,6 +1261,13 @@ describe("AgentSession context usage estimate", () => {
 		expect(JSON.stringify(harness.session.messages)).not.toContain(
 			decoration === "tool-result block" ? "Duration: 1s" : "Session name: context-usage",
 		);
+		if (decoration === "whole message with tool search") {
+			const result = harness.session.messages.find((message) => message.role === "toolResult");
+			if (result?.role !== "toolResult" || !result.toolsAdded?.[0]) throw new Error("Expected tool search result");
+			result.toolsAdded[0].description = "Edited after response";
+			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
+			expect(harness.session.getContextUsage()!.tokens!).toBeLessThan(500_000);
+		}
 	});
 
 	it.each(["context", "message_end"])(

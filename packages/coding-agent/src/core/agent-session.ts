@@ -149,7 +149,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
+import { type BashExecutionMessage, type CustomMessage, convertToLlm, isMessagePreserved } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -448,27 +448,7 @@ function providerConversationCovers(canonical: readonly unknown[], sent: readonl
 	let index = 0;
 	for (const message of sent) {
 		if (index === canonical.length) break;
-		const original = canonical[index];
-		if (isDeepStrictEqual(original, message)) {
-			index++;
-		} else if (
-			original &&
-			message &&
-			typeof original === "object" &&
-			typeof message === "object" &&
-			"content" in original &&
-			"content" in message &&
-			Array.isArray(original.content) &&
-			Array.isArray(message.content)
-		) {
-			const { content: originalContent, ...originalFields } = original;
-			const { content, ...fields } = message;
-			if (
-				isDeepStrictEqual(originalFields, fields) &&
-				isDeepStrictEqual(originalContent, content.slice(0, originalContent.length))
-			)
-				index++;
-		}
+		if (isMessagePreserved(canonical[index], message)) index++;
 	}
 	return index === canonical.length;
 }

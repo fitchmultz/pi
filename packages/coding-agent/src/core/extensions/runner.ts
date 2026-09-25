@@ -20,6 +20,7 @@ import { CheckpointActivity } from "../checkpoint.ts";
 import type { CompactionSettings } from "../compaction/index.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
+import { isMessagePreserved } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
 import type { SessionManager } from "../session-manager.ts";
@@ -293,11 +294,9 @@ function sameMessages(left: AgentMessage[], right: AgentMessage[]): boolean {
 
 /**
  * Re-attach the prompt and tool state after a `context` handler. Handlers only see the
- * conversation; the system messages belong to Pi. An unchanged conversation keeps every
- * system message in place, so models with mid-conversation support keep their cached
- * prefix. A changed one gets the replayed prompt sections and tool declarations as one
- * leading system message, so pruning, windowing, or slicing from a compaction summary
- * cannot drop them.
+ * conversation; the system messages belong to Pi. Additive transforms keep system and
+ * tool-search anchors in place. Pruning or reordering gets one complete leading checkpoint
+ * so the retained conversation cannot drop prompt sections or tool declarations.
  */
 function restoreSystemMessages(
 	current: AgentMessage[],
@@ -305,8 +304,23 @@ function restoreSystemMessages(
 	returned: AgentMessage[],
 ): AgentMessage[] {
 	if (sameMessages(returned, visible)) return current;
-	const head = getCurrentSystemMessage(current);
-	return head ? [head, ...withoutToolSearchState(returned)] : returned;
+	const restored: AgentMessage[] = [];
+	let index = 0;
+	for (const message of current) {
+		if (message.role === "system") {
+			restored.push(message);
+			continue;
+		}
+		while (index < returned.length && !isMessagePreserved(message, returned[index])) {
+			restored.push(returned[index++]);
+		}
+		if (index === returned.length) {
+			const head = getCurrentSystemMessage(current);
+			return head ? [head, ...withoutToolSearchState(returned)] : returned;
+		}
+		restored.push(returned[index++]);
+	}
+	return [...restored, ...returned.slice(index)];
 }
 
 export async function emitProjectTrustEvent(
