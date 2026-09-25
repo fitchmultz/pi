@@ -895,6 +895,30 @@ describe("native async lifecycle", () => {
 		expect(resets.filter(Boolean)).toEqual([]);
 	});
 
+	it("keeps resumed work from resetting context once its response's deferred call is receipted", async () => {
+		const resets: unknown[] = [];
+		const { agent, streams } = setup(async () => result, {
+			resume: async () => ({ ...result, newContext: { handoff: "fresh" } }),
+		});
+		agent.prepareNextTurnWithContext = (turn) => {
+			resets.push(turn.newContext);
+			return undefined;
+		};
+		agent.state.messages = [
+			{
+				...assistant("aborted", [{ ...call("started"), executionStarted: true }, call("deferred")]),
+				stopReason: "aborted",
+			},
+		];
+		const run = agent.prompt("continue");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		agent.steer({ role: "user", content: "next", timestamp: 2 });
+		await answer(streams, 0);
+		await answer(streams, 1);
+		await run;
+		expect(resets.filter(Boolean)).toEqual([]);
+	});
+
 	it.each(["error", "aborted"] as const)(
 		"receipts the never-started native call of an %s response instead of starting it in a later run",
 		async (stopReason) => {

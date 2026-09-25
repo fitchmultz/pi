@@ -468,10 +468,12 @@ async function runLoop(
 					call.async &&
 					call.responsesItem &&
 					!call.executionStarted
-				)
+				) {
 					// Its response ended before it ran, so starting it now could undo an abort or run it out of order.
 					unstarted.push(call);
-				else if (call.executionStarted || (call.async && call.responsesItem))
+					// Like its receipt once restored, the skipped call keeps sibling work from resetting context.
+					failedScopes.add(message);
+				} else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
 			}
 		}

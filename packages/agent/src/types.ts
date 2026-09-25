@@ -261,21 +261,23 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * tool batch requested a fresh context window. Cancellation always ends the run.
 	 * On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
 	 * follow-up scheduling can satisfy that request and adds no extra request; otherwise the loop continues once
-	 * with the current context. Returning undefined preserves normal scheduling. Error and aborted responses remain
-	 * hard exits.
+	 * with the current context. Returning undefined preserves normal scheduling. Aborted responses remain hard exits,
+	 * as do error responses unless steering must still be delivered or native work is still running.
 	 */
 	finishTurn?: FinishTurn;
 
 	/**
 	 * Called immediately before every conversational provider request, including the first.
 	 * Pending messages have already been appended. The returned context, model, and thinking level
-	 * replace the runtime values for this and later requests in the run. This hook does not poll queues.
+	 * replace the runtime values for this and later requests in the run. Tool results that arrive while it runs
+	 * are appended to a returned context that lacks them. This hook does not poll queues.
 	 */
 	prepareRequest?: PrepareRequest;
 
 	/**
 	 * Called after `turn_end` when the loop will continue, immediately before the next turn starts.
 	 * Return replacement context/model/thinking state or messages to append to affect that turn.
+	 * Tool results that arrive while it runs are appended to a returned context that lacks them.
 	 * Return undefined to keep using the current context/config.
 	 */
 	prepareNextTurn?: (
