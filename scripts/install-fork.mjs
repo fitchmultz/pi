@@ -122,7 +122,8 @@ export function activateRelease(releases, identity, selector) {
 // release, so neither sees it and --keep is the guard. Exact protection needs a live-worker registry.
 function liveProcessPaths() {
 	const capture = (command, args) => run(command, args, { stdio: "pipe", maxBuffer: Infinity });
-	return `${capture("lsof", ["-Fn"])}\n${capture("ps", ["-axo", "args="])}`;
+	// Without -ww, procps truncates command lines to COLUMNS even when piped.
+	return `${capture("lsof", ["-Fn"])}\n${capture("ps", ["-axww", "-o", "args="])}`;
 }
 
 function resolvedLink(link) {
