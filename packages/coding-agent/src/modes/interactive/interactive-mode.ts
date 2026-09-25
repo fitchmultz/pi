@@ -3828,7 +3828,13 @@ export class InteractiveMode {
 							(block) => block.type === "toolCall" && block.executionStarted,
 						)
 							? []
-							: [this.streamingComponent, ...this.pendingTools.values()];
+							: [
+									this.streamingComponent,
+									// A tool still running from an earlier response keeps updating after a retry.
+									...[...this.pendingTools].flatMap(([id, component]) =>
+										this.session.state.pendingToolCalls.has(id) ? [] : [component],
+									),
+								];
 						this.failedAttemptMessage = this.streamingMessage;
 					}
 

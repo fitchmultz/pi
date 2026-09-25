@@ -290,6 +290,36 @@ describe("InteractiveMode compaction events", () => {
 		expect(fakeThis.retryEscapeHandler).toBeUndefined();
 	});
 
+	test("keeps a tool that is still running out of a failed response's retry cleanup", async () => {
+		const streamingComponent = { updateContent: vi.fn() };
+		const running = { updateResult: vi.fn() };
+		const unfinished = { updateResult: vi.fn() };
+		const failed = { role: "assistant", content: [], stopReason: "error", errorMessage: "WebSocket closed 1012" };
+		const fakeThis = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			ui: { requestRender: vi.fn() },
+			streamingComponent: streamingComponent as typeof streamingComponent | undefined,
+			streamingMessage: failed as typeof failed | undefined,
+			pendingTools: new Map([
+				["running", running],
+				["unfinished", unfinished],
+			]),
+			session: { state: { pendingToolCalls: new Set(["running"]) } },
+			failedAttemptComponents: [] as unknown[],
+			failedAttemptMessage: undefined as unknown,
+			maybeSuggestBugReport: vi.fn(),
+		};
+		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+			this: typeof fakeThis,
+			event: { type: "message_end"; message: typeof failed },
+		) => Promise<void>;
+
+		await handleEvent.call(fakeThis, { type: "message_end", message: failed });
+
+		expect(fakeThis.failedAttemptComponents).toEqual([streamingComponent, unfinished]);
+	});
+
 	// Regression test for #9340.
 	test("routes interactive response aborts through AgentSession", () => {
 		const abort = vi.fn(async () => {});

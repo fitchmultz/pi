@@ -697,42 +697,14 @@ describe("native async lifecycle", () => {
 
 	it("gives a native result that settles while its turn ends a turn of its own", async () => {
 		const work = deferred<AgentToolResult>();
-		const streams: AssistantMessageEventStream[] = [];
-		const inputs: Message[][] = [];
-		const run = runAgentLoop(
-			[{ role: "user", content: "go", timestamp: 1 }],
-			{
-				messages: [],
-				tools: [
-					{
-						name: "work",
-						label: "Work",
-						description: "Work",
-						parameters: Type.Object({ path: Type.String() }),
-						async: true,
-						execute: async () => work.promise,
-					},
-				],
-			},
-			{
-				model,
-				convertToLlm: (messages) => messages as Message[],
-				finishTurn: async () => {
-					// Settle after the turn's readiness check and before the loop decides whether to wait.
-					work.resolve(result);
-					await new Promise((resolve) => setTimeout(resolve, 0));
-					return undefined;
-				},
-			},
-			() => {},
-			undefined,
-			(_model, context) => {
-				inputs.push(structuredClone(context.messages));
-				const stream = new AssistantMessageEventStream();
-				streams.push(stream);
-				return stream;
-			},
-		);
+		const { agent, streams, inputs } = setup(async () => work.promise);
+		agent.finishTurn = async () => {
+			// Settle after the turn's readiness check and before the loop decides whether to wait.
+			work.resolve(result);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			return undefined;
+		};
+		const run = agent.prompt("go");
 		await vi.waitFor(() => expect(streams).toHaveLength(1));
 		const first = assistant("first");
 		await emitCall(streams[0], first, call());
@@ -790,6 +762,29 @@ describe("native async lifecycle", () => {
 		await answer(streams, 2);
 		await run;
 		expect(inputs[2]).toContainEqual(expect.objectContaining({ role: "toolResult", toolCallId: running.id }));
+	});
+
+	it("keeps continued steering one at a time across the wait for native work", async () => {
+		const work = deferred<AgentToolResult>();
+		const { agent, streams, inputs } = setup(async () => work.promise);
+		agent.state.model = { ...model, compat: {} };
+		agent.state.messages = [
+			{ role: "user", content: "go", timestamp: 1 },
+			{ ...assistant("first", [call()]), stopReason: "toolUse" },
+		];
+		agent.steer({ role: "user", content: "first steer", timestamp: 2 });
+		agent.steer({ role: "user", content: "second steer", timestamp: 3 });
+		const run = agent.continue();
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		expect(inputs[0]).toContainEqual(expect.objectContaining({ content: "first steer" }));
+		expect(inputs[0]).not.toContainEqual(expect.objectContaining({ content: "second steer" }));
+		await answer(streams, 0);
+		await vi.waitFor(() => expect(streams).toHaveLength(2));
+		expect(inputs[1]).toContainEqual(expect.objectContaining({ content: "second steer" }));
+		work.resolve(result);
+		await answer(streams, 1);
+		await answer(streams, 2);
+		await run;
 	});
 
 	it("never runs calls of an errored response that unconfirmed steering continues", async () => {
@@ -872,38 +867,11 @@ describe("native async lifecycle", () => {
 
 	it("receipts a failed response's never-started native call instead of starting it in a later run", async () => {
 		const work = vi.fn<AgentTool["execute"]>(async () => result);
-		const streams: AssistantMessageEventStream[] = [];
-		const inputs: Message[][] = [];
-		const failedResponse: AssistantMessage = {
-			...assistant("failed", [call()]),
-			stopReason: "error",
-			errorMessage: "WebSocket closed 1012",
-		};
-		const run = runAgentLoop(
-			[{ role: "user", content: "continue", timestamp: 2 }],
-			{
-				messages: [failedResponse],
-				tools: [
-					{
-						name: "work",
-						label: "Work",
-						description: "Work",
-						parameters: Type.Object({ path: Type.String() }),
-						async: true,
-						execute: work,
-					},
-				],
-			},
-			{ model, convertToLlm: (messages) => messages as Message[] },
-			() => {},
-			undefined,
-			(_model, context) => {
-				inputs.push(structuredClone(context.messages));
-				const stream = new AssistantMessageEventStream();
-				streams.push(stream);
-				return stream;
-			},
-		);
+		const { agent, streams, inputs } = setup(work);
+		agent.state.messages = [
+			{ ...assistant("failed", [call()]), stopReason: "error", errorMessage: "WebSocket closed 1012" },
+		];
+		const run = agent.prompt("continue");
 		await answer(streams, 0);
 		await run;
 		expect(work).not.toHaveBeenCalled();

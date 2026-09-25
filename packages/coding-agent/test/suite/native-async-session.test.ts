@@ -1627,11 +1627,7 @@ it.each([false, true])("retries a failed response while its native work runs (ca
 				description: "Work",
 				parameters: Type.Object({ path: Type.String() }),
 				async: true,
-				execute: async () => {
-					started();
-					await gate;
-					return result;
-				},
+				execute: async () => result,
 			},
 		],
 	});
@@ -1640,6 +1636,13 @@ it.each([false, true])("retries a failed response while its native work runs (ca
 		api: "openai-responses",
 		compat: { supportsAsyncTools: true },
 	} as Model<"openai-responses">;
+	// Holding the call before execution records its start only after the failed response is committed.
+	const beforeToolCall = harness.session.agent.beforeToolCall;
+	harness.session.agent.beforeToolCall = async (context, signal) => {
+		started();
+		await gate;
+		return beforeToolCall?.(context, signal);
+	};
 	const inputs: Array<unknown[]> = [];
 	harness.session.agent.streamFunction = (model, context) => {
 		inputs.push(structuredClone(context.messages));

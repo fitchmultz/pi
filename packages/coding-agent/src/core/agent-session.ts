@@ -1680,7 +1680,11 @@ export class AgentSession {
 		for (let i = event.messages.length - 1; i >= 0; i--) {
 			const message = event.messages[i];
 			if (message.role === "assistant") {
-				return message !== this._inRunRetryMessage && this._isRetryableError(message as AssistantMessage);
+				// A late native checkpoint can replace this entry, so identify the response by its end event.
+				return (
+					this._lastAssistantMessage !== this._inRunRetryMessage &&
+					this._isRetryableError(message as AssistantMessage)
+				);
 			}
 		}
 		return false;
