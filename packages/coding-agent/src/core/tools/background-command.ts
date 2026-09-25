@@ -75,6 +75,7 @@ export function createBackgroundCommandToolDefinition(
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(_callId, params, signal, _onUpdate, ctx) {
 			signal?.throwIfAborted();
+			if ((params.offset ?? 0) < 0) throw new Error("offset must be >= 0");
 			const owner = options?.sessionManager ?? ctx?.sessionManager;
 			if (!owner) throw new Error("background_command requires a sessionManager or native session context");
 			const root = backgroundCommandDirectory(owner, options?.sessionDir);
