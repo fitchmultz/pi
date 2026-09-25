@@ -149,6 +149,7 @@ describe("remote catalog provider", () => {
 			...model("claude-opus-5-5"),
 			provider: "cloudflare-ai-gateway",
 			api: "anthropic-messages" as const,
+			compat: { sendSessionAffinityHeaders: true },
 		};
 		const provider = withRemoteCatalog(
 			createProvider({
