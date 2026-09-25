@@ -463,6 +463,7 @@ async function runLoop(
 	};
 	try {
 		const unstarted: AgentToolCall[] = [];
+		const interrupted: AgentToolCall[] = [];
 		for (const message of currentContext.messages.slice()) {
 			if (message.role !== "assistant") continue;
 			if (message.toolExecutionFailed) failedScopes.add(message);
@@ -489,9 +490,18 @@ async function runLoop(
 					failedScopes.add(message);
 				} else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
+				else if (message.stopReason === "toolUse") {
+					// A completed response runs its synchronous calls at once and does not journal them, so one without a
+					// result was cut off (for example, the process stopped) and may have partly run.
+					interrupted.push(call);
+					failedScopes.add(message);
+				}
 			}
 		}
-		for (const result of (await failToolCalls(unstarted, emit, INTERRUPTED_CALL)).messages) {
+		for (const result of [
+			...(await failToolCalls(interrupted, emit, UNKNOWN_TOOL_OUTCOME, false)).messages,
+			...(await failToolCalls(unstarted, emit, INTERRUPTED_CALL)).messages,
+		]) {
 			currentContext.messages.push(result);
 			newMessages.push(result);
 			savedResults.push(result);
@@ -982,6 +992,7 @@ async function failToolCalls(
 	toolCalls: AgentToolCall[],
 	emit: AgentEventSink,
 	reason: string,
+	executionSkipped = true,
 ): Promise<ExecutedToolCallBatch> {
 	const messages: ToolResultMessage[] = [];
 	for (const toolCall of toolCalls) {
@@ -994,12 +1005,14 @@ async function failToolCalls(
 		});
 		const finalized: FinalizedToolCallOutcome = {
 			toolCall,
-			result: createErrorToolResult(`Tool call "${toolCall.name}" was not executed: ${reason}`),
+			result: createErrorToolResult(
+				executionSkipped ? `Tool call "${toolCall.name}" was not executed: ${reason}` : reason,
+			),
 			isError: true,
 		};
 		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
-		toolResultMessage.executionSkipped = true;
+		if (executionSkipped) toolResultMessage.executionSkipped = true;
 		await emitToolResultMessage(toolResultMessage, emit);
 		messages.push(toolResultMessage);
 	}

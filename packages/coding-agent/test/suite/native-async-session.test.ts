@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -6,12 +6,14 @@ import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
+	type Message,
 	type Model,
 	type ToolCall,
 } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { convertResponsesMessages } from "../../../ai/src/api/openai-responses-shared.ts";
+import { transformMessages } from "../../../ai/src/api/transform-messages.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness } from "./harness.ts";
 
@@ -1699,5 +1701,66 @@ it.each([false, true])("retries a failed response while its native work runs (ca
 		release();
 		await run;
 		harness.cleanup();
+	}
+});
+
+it("tells the model a synchronous call cut off by a crash has an unknown outcome", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "pi-crashed-sync-call-"));
+	let started!: () => void;
+	const running = new Promise<void>((resolve) => {
+		started = resolve;
+	});
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const changeDir: AgentTool = {
+		name: "change_dir",
+		label: "Change dir",
+		description: "Change dir",
+		parameters: Type.Object({ path: Type.String() }),
+		execute: async () => {
+			started();
+			await gate;
+			return result;
+		},
+	};
+	const harness = await createHarness({
+		sessionManager: SessionManager.create(directory, directory),
+		tools: [changeDir],
+	});
+	harness.setResponses([
+		fauxAssistantMessage([{ type: "toolCall", id: "cd", name: "change_dir", arguments: { path: "/repo" } }], {
+			stopReason: "toolUse",
+		}),
+		fauxAssistantMessage("done"),
+	]);
+	const run = harness.session.prompt("change directory");
+	let restored: Awaited<ReturnType<typeof createHarness>> | undefined;
+	try {
+		await running;
+		// A crash now leaves exactly this file on disk.
+		const crashed = join(directory, "crashed.jsonl");
+		copyFileSync(harness.sessionManager.getSessionFile()!, crashed);
+		restored = await createHarness({ sessionManager: SessionManager.open(crashed), tools: [changeDir] });
+		let sent: Message[] = [];
+		restored.setResponses([
+			(context, _options, _state, model) => {
+				sent = transformMessages(context.messages, model);
+				return fauxAssistantMessage("continuing");
+			},
+		]);
+		restored.session.refreshContext();
+		await restored.session.prompt("continue");
+		expect(sent).toContainEqual(expect.objectContaining({ role: "assistant" }));
+		expect(sent.find((message) => message.role === "toolResult" && message.toolCallId === "cd")).toMatchObject({
+			content: [{ type: "text", text: expect.stringContaining("outcome is unknown") }],
+		});
+	} finally {
+		release();
+		await run;
+		restored?.cleanup();
+		harness.cleanup();
+		rmSync(directory, { recursive: true, force: true });
 	}
 });
