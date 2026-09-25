@@ -479,7 +479,8 @@ async function runLoop(
 					!call.executionStarted &&
 					(message.stopReason === "error" ||
 						message.stopReason === "aborted" ||
-						waitsForEarlierSiblings(calls, call))
+						// Judge only the calls streamed up to it, as mid-stream admission did.
+						waitsForEarlierSiblings(calls.slice(0, calls.indexOf(call) + 1), call))
 				) {
 					// Its response ended, or an ordered sibling never finished, before it ran (for example, the process
 					// stopped). Starting it now could undo an abort or run it out of order.
@@ -490,7 +491,7 @@ async function runLoop(
 					await startAsyncCall(message, call, message);
 			}
 		}
-		for (const result of (await failToolCalls(unstarted, emit, INTERRUPTED_RESPONSE_CALL)).messages) {
+		for (const result of (await failToolCalls(unstarted, emit, INTERRUPTED_CALL)).messages) {
 			currentContext.messages.push(result);
 			newMessages.push(result);
 			savedResults.push(result);
@@ -734,7 +735,7 @@ async function runLoop(
 								call.type === "toolCall" && !!call.responsesItem && !startedCalls.has(call.id),
 						),
 						emit,
-						INTERRUPTED_RESPONSE_CALL,
+						INTERRUPTED_CALL,
 					);
 					for (const result of receipts.messages) {
 						currentContext.messages.push(result);
@@ -1321,8 +1322,7 @@ async function prepareToolCall(
 const UNKNOWN_TOOL_OUTCOME =
 	"Previous tool execution was interrupted; its outcome is unknown. Do not assume the operation did not occur.";
 
-const INTERRUPTED_RESPONSE_CALL =
-	"the response was interrupted before it ran. Re-issue the call if it is still needed.";
+const INTERRUPTED_CALL = "it was interrupted before it started. Re-issue the call if it is still needed.";
 
 /** Only this call's execution state is current; sibling snapshots may predate their admission or detachment. */
 function createToolCallCheckpoint(message: AssistantMessage, toolCall: AgentToolCall): AssistantMessage {

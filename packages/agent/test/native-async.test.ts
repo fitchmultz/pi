@@ -935,47 +935,76 @@ describe("native async lifecycle", () => {
 		},
 	);
 
-	it("receipts a restored native call whose ordered predecessor never finished instead of starting it", async () => {
-		const work = vi.fn<AgentTool["execute"]>(async () => result);
-		const { agent, streams, inputs } = setup(work);
-		agent.state.tools = [
-			...agent.state.tools,
-			{
-				name: "change_dir",
-				label: "Change dir",
-				description: "Change dir",
+	it.each([
+		{ order: ["change_dir", "work"], finished: false, starts: false },
+		{ order: ["change_dir", "work"], finished: true, starts: true },
+		// Admitted mid-stream, before the sequential call streamed.
+		{ order: ["read", "work", "change_dir"], finished: false, starts: true },
+	])(
+		"starts a restored native call only where mid-stream admission would ($order, finished=$finished)",
+		async ({ order, finished, starts }) => {
+			const work = deferred<AgentToolResult>();
+			const execute = vi.fn<AgentTool["execute"]>(async () => work.promise);
+			const { agent, streams, inputs } = setup(execute);
+			const syncTool = (name: string, executionMode: "sequential" | "parallel"): AgentTool => ({
+				name,
+				label: name,
+				description: name,
 				parameters: Type.Object({}),
-				executionMode: "sequential",
+				executionMode,
 				execute: async () => result,
-			},
-		];
-		const changeDir: ToolCall = {
-			type: "toolCall",
-			id: "cd|fc_cd",
-			name: "change_dir",
-			arguments: {},
-			responsesItem: {
-				type: "function_call",
-				id: "fc_cd",
-				call_id: "cd",
-				name: "change_dir",
-				arguments: "{}",
-				status: "completed",
-			},
-		};
-		// The process stopped while change_dir ran, so neither call has a result.
-		agent.state.messages = [
-			{ role: "user", content: "go", timestamp: 1 },
-			{ ...assistant("first", [changeDir, call()]), stopReason: "toolUse" },
-		];
-		const run = agent.prompt("continue");
-		await answer(streams, 0);
-		expect(work).not.toHaveBeenCalled();
-		await run;
-		expect(inputs[0]).toContainEqual(
-			expect.objectContaining({ role: "toolResult", toolCallId: call().id, isError: true }),
-		);
-	});
+			});
+			agent.state.tools = [...agent.state.tools, syncTool("change_dir", "sequential"), syncTool("read", "parallel")];
+			const syncCall = (name: string): ToolCall => ({
+				type: "toolCall",
+				id: `${name}|fc_${name}`,
+				name,
+				arguments: {},
+				responsesItem: {
+					type: "function_call",
+					id: `fc_${name}`,
+					call_id: name,
+					name,
+					arguments: "{}",
+					status: "completed",
+				},
+			});
+			// The process stopped before the native call ran.
+			agent.state.messages = [
+				{ role: "user", content: "go", timestamp: 1 },
+				{
+					...assistant(
+						"first",
+						order.map((name) => (name === "work" ? call() : syncCall(name))),
+					),
+					stopReason: "toolUse",
+				},
+				...(finished
+					? [
+							{
+								role: "toolResult" as const,
+								toolCallId: syncCall("change_dir").id,
+								toolName: "change_dir",
+								content: [{ type: "text" as const, text: "changed" }],
+								isError: false,
+								timestamp: 2,
+							},
+						]
+					: []),
+			];
+			const run = agent.prompt("continue");
+			await answer(streams, 0);
+			if (starts) await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+			else expect(execute).not.toHaveBeenCalled();
+			work.resolve(result);
+			if (starts) await answer(streams, 1);
+			await run;
+			if (!starts)
+				expect(inputs[0]).toContainEqual(
+					expect.objectContaining({ role: "toolResult", toolCallId: call().id, isError: true }),
+				);
+		},
+	);
 
 	it.each([false, true])("honors explicit continuation while native work runs (end next turn=%s)", async (end) => {
 		const work = deferred<AgentToolResult>();
