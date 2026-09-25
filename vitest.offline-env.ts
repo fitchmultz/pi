@@ -57,11 +57,19 @@ const hiddenCredentials = [
 	"ZAI_CODING_CN_API_KEY",
 ];
 
-/** Hide ambient provider credentials unless PI_LIVE_PROVIDER_TESTS=1. */
+function liveProviderTests(): boolean {
+	return process.env.PI_LIVE_PROVIDER_TESTS === "1";
+}
+
+/** Empty home so saved logins are not visible. No-op when live provider tests are requested. */
 export function offlineTestEnv(): Record<string, string> {
-	if (process.env.PI_LIVE_PROVIDER_TESTS === "1") return {};
+	if (liveProviderTests()) return {};
 	const home = mkdtempSync(join(tmpdir(), "pi-vitest-home-"));
-	const env: Record<string, string> = { HOME: home, USERPROFILE: home };
-	for (const name of hiddenCredentials) env[name] = "";
-	return env;
+	return { HOME: home, USERPROFILE: home };
+}
+
+/** Remove ambient provider credentials. Empty strings still count as set for some SDKs. */
+export function hideAmbientProviderCredentials(): void {
+	if (liveProviderTests()) return;
+	for (const name of hiddenCredentials) delete process.env[name];
 }
