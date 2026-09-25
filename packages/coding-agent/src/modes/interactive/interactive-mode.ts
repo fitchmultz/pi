@@ -3950,13 +3950,16 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 
-			case "agent_settled":
-				if (event.pendingToolCalls?.length)
+			case "agent_settled": {
+				// Only started calls reattach; a never-started call of an interrupted response gets a not-executed result.
+				const reattaching = event.pendingToolCalls?.filter((call) => call.state !== "pending").length;
+				if (reattaching)
 					this.showStatus(
-						`Stopped locally; ${event.pendingToolCalls.length} external tool call(s) remain pending. Continue to reattach.`,
+						`Stopped locally; ${reattaching} external tool call(s) remain pending. Continue to reattach.`,
 					);
 				await this.checkShutdownRequested();
 				break;
+			}
 
 			case "context_window_started":
 				this.rebuildChatFromMessages();

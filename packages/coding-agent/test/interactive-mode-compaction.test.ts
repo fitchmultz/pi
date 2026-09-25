@@ -290,6 +290,31 @@ describe("InteractiveMode compaction events", () => {
 		expect(fakeThis.retryEscapeHandler).toBeUndefined();
 	});
 
+	test("counts only started native calls as reattaching when the agent settles", async () => {
+		const fakeThis = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			showStatus: vi.fn(),
+			checkShutdownRequested: vi.fn(async () => {}),
+		};
+		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+			this: typeof fakeThis,
+			event: { type: "agent_settled"; pendingToolCalls: { toolCallId: string; toolName: string; state: string }[] },
+		) => Promise<void>;
+
+		await handleEvent.call(fakeThis, {
+			type: "agent_settled",
+			pendingToolCalls: [
+				{ toolCallId: "deferred", toolName: "delegate", state: "pending" },
+				{ toolCallId: "detached", toolName: "delegate", state: "detached" },
+			],
+		});
+
+		expect(fakeThis.showStatus).toHaveBeenCalledWith(
+			"Stopped locally; 1 external tool call(s) remain pending. Continue to reattach.",
+		);
+	});
+
 	test("keeps a tool that is still running out of a failed response's retry cleanup", async () => {
 		const streamingComponent = { updateContent: vi.fn() };
 		const running = { updateResult: vi.fn() };
