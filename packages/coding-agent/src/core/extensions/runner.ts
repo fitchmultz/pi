@@ -5,6 +5,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
+	hasNonAdditiveToolChanges,
 	type ImageContent,
 	type Model,
 	type Provider,
@@ -297,7 +298,8 @@ function sameMessages(left: AgentMessage[], right: AgentMessage[]): boolean {
  * system message in place, so models with mid-conversation support keep their cached
  * prefix. A changed one gets the replayed prompt sections and tool declarations as one
  * leading system message, so pruning, windowing, or slicing from a compaction summary
- * cannot drop them.
+ * cannot drop them. Tool search results the handler kept still declare their tools in
+ * place when that replays the same tools, so loading a tool does not rewrite the head.
  */
 function restoreSystemMessages(
 	current: AgentMessage[],
@@ -305,8 +307,12 @@ function restoreSystemMessages(
 	returned: AgentMessage[],
 ): AgentMessage[] {
 	if (sameMessages(returned, visible)) return current;
-	const head = getCurrentSystemMessage(current);
-	return head ? [head, ...withoutToolSearchState(returned)] : returned;
+	const kept = new Set(returned);
+	const anchored =
+		!hasNonAdditiveToolChanges(current) &&
+		current.every((message) => message.role !== "toolResult" || !message.toolsAdded || kept.has(message));
+	const head = getCurrentSystemMessage(anchored ? current.filter((message) => message.role === "system") : current);
+	return head ? [head, ...(anchored ? returned : withoutToolSearchState(returned))] : returned;
 }
 
 export async function emitProjectTrustEvent(

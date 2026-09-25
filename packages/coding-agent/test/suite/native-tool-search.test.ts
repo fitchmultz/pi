@@ -7,6 +7,7 @@ import {
 	getCurrentTools,
 	type ToolReference,
 	type ToolResultMessage,
+	type TranscriptContext,
 	toolId,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -302,6 +303,50 @@ it.each([false, true])(
 		).toMatchObject({ message: { toolsAdded: [rightTool] } });
 	},
 );
+
+it("keeps the leading system message stable when a context hook changes a conversation with loaded search tools", async () => {
+	let api!: ExtensionAPI;
+	harness = await createHarness({
+		tools: [],
+		extensionFactories: [
+			(pi) => {
+				api = pi;
+				registerLookup(pi, right);
+				pi.registerToolSearch({
+					name: "discover",
+					label: "Discover",
+					description: "Find tools",
+					parameters: Type.Object({}),
+					async execute() {
+						pi.setActiveToolReferences([...pi.getActiveToolReferences(), right]);
+						return { content: [], details: {}, tools: [right] };
+					},
+				});
+				pi.on("context", (event) => ({
+					messages: [
+						...event.messages,
+						{ role: "custom", customType: "note", content: "Note", display: false, timestamp: 0 },
+					],
+				}));
+			},
+		],
+	});
+	api.setActiveTools(["discover"]);
+	const requests: TranscriptContext[] = [];
+	harness.setResponses([
+		(context) => {
+			requests.push(context);
+			return fauxAssistantMessage(fauxToolCall("discover", {}), { stopReason: "toolUse" });
+		},
+		(context) => {
+			requests.push(context);
+			return fauxAssistantMessage("Done");
+		},
+	]);
+	await harness.session.prompt("Find");
+	expect(requests[1].messages[0]).toEqual(requests[0].messages[0]);
+	expect(getCurrentTools(requests[1].messages).map((tool) => tool.description)).toContain("right");
+});
 
 it("reports denied search references without publishing a declaration", async () => {
 	harness = await createHarness({
