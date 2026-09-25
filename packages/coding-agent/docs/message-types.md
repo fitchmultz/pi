@@ -93,7 +93,7 @@ interface Usage {
 }
 ```
 
-When present, `reasoning` is already included in `output`; do not add it again. `cacheWrite1h` is the subset of `cacheWrite` written with one-hour retention.
+When present, `reasoning` is already included in `output`; do not add it again. `cacheWrite1h` is the subset of `cacheWrite` written with one-hour retention. See [Task cost measurement](task-cost.md) for offline whole-task accounting and the distinction between recorded estimates and actual billing.
 
 ## Base messages
 
@@ -193,12 +193,14 @@ interface ToolResultMessage<TDetails = any> {
 
 ### Provider request diagnostics
 
-Codex, OpenAI Responses, and Azure Responses persist `provider_request` diagnostics on successful and failed messages. Details contain allowlisted scalar transport, byte-count, socket/recovery, service-tier, and timing facts; they are not model input or ordinary transcript notices.
+Codex, OpenAI Responses, and Azure Responses persist `provider_request` diagnostics on successful and failed messages. Details contain allowlisted transport, byte-count, socket/recovery, service-tier, and timing facts; they are not model input or ordinary transcript notices.
 
 - `timingOrigin: "adapter_start"` starts inside the adapter after earlier runtime preparation. Offsets use a monotonic clock; `onPayloadMs` and `connectMs` are durations, while socket/application-event ages are ages. Payload-hook time includes `before_provider_request`, not all extension work.
 - `headersMs` marks fetch/SDK response availability before `onResponse`. Event times measure adapter consumption, including reasoning/tool deltas, rather than network arrival or provider-only latency. `finishedMs` precedes later hooks/persistence.
 - Counters cover that invocation. SSE counts fetch/SDK calls, not redirects. Recovery retains first-event times and latest socket/attempt facts, which may describe different attempts. Missing fields mean unobserved boundaries.
-- Codex `fullBodyBytes` is the post-hook full JSON body. `websocketSendBytes` counts the UTF-8 payload passed to send, including `response.create`, after delta selection; `sseSendBytes` counts the optionally compressed fetch body. Neither proves network delivery.
+- OpenAI/Codex `requestShape` measures serialized UTF-8 bytes for instructions, tools and input, with allowlisted input-role/type buckets (including reasoning), tool count, and the first 128 top-level tool-definition sizes by ordinal. It stores no prompt, schema or tool-name content. Value sizes include JSON quoting/escaping but exclude enclosing keys/separators; they are not billed token counts.
+- `requestShapeScope: "full_request"` measures Codex's post-hook JSON or the OpenAI SDK's serialized SSE body. `"websocket_logical_body"` reuses OpenAI's serialized continuation components before delta selection, excluding `stream`; stateful serializers may produce different later wire values. `fullBodyBytes` follows this scope. Azure does not yet report shape measurements.
+- Codex `websocketSendBytes` counts the UTF-8 payload passed to send, including `response.create`, after delta selection; `sseSendBytes` counts the optionally compressed fetch body. Neither proves network delivery or reduced provider-billed context.
 - `requestedServiceTier` is post-hook input; `returnedServiceTier` is the recognized raw terminal tier before pricing. `fast` and `priority` stay distinct; missing/null/unrecognized tiers are `unknown`. A request for priority does not prove delivery.
 - Close code/cleanliness and local timeouts are independent evidence, not error classifications. Pi captures synchronous closes without waiting for late ones or changing retry policy. See [WebSocket diagnostics](websocket-recovery.md).
 
