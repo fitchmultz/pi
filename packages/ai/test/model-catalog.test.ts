@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { getModels } from "../src/compat.ts";
 import { flattenModelCatalog } from "../src/model-catalog.ts";
 import type { Api, Model } from "../src/types.ts";
 
@@ -58,4 +59,12 @@ it.each([
 ] satisfies Model<Api>[])("does not add Astra capabilities to $provider/$id using $api", (source) => {
 	const catalog = flattenModelCatalog(source.provider, { [source.api]: { [source.id]: source } });
 	expect(catalog[source.id]).toBe(source);
+});
+
+it("generates Anthropic IDs for Cloudflare AI Gateway Claude models", () => {
+	const ids = getModels("cloudflare-ai-gateway")
+		.filter((model) => model.api === "anthropic-messages")
+		.map((model) => model.id);
+	expect(ids).toContain("claude-opus-5-5");
+	expect(ids.filter((id) => id.includes("."))).toEqual([]);
 });

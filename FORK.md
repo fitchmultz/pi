@@ -98,6 +98,10 @@ Astra's supported lifecycle capabilities are applied when loading built-in and
 remote catalogs, so older or upstream data cannot silently omit them. Explicit
 capability values and user model overrides retain precedence.
 
+Cloudflare AI Gateway Claude models use Anthropic's hyphenated IDs in generated
+and remote catalogs. models.dev and pi.dev list dotted names, which the gateway's
+`/anthropic` passthrough forwards unchanged and Anthropic rejects.
+
 Releases live under `~/.local/share/pi-fork/releases/<identity>`, where identity
 includes the commit, catalog digest, Node version, platform and architecture.
 Existing releases are never rebuilt or overwritten. Deployed delivery uses the
