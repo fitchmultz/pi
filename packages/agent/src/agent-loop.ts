@@ -496,13 +496,14 @@ async function runLoop(
 						calls.some(
 							(sibling) => findTool(currentContext.tools ?? [], sibling)?.executionMode === "sequential",
 						);
-					// An ordered sync call starts only after each earlier sibling finished: ran to a real result, or detached.
-					const unfinished = (sibling: AgentToolCall): boolean => {
-						const result = restoredResults.get(sibling.id);
-						return !sibling.executionDetached && (!result || !!result.executionSkipped);
-					};
-					if (ordered && calls.slice(0, calls.indexOf(call)).some(unfinished)) {
-						// An ordered earlier sibling never finished, so this call never started.
+					const earlier = calls.slice(0, calls.indexOf(call));
+					if (
+						// Not-executed receipts are written in call order, so an earlier one puts this call in an
+						// unattempted suffix. An ordered call also waits for every earlier sibling to finish with a
+						// result; detaching requires an abort, after which nothing later runs.
+						earlier.some((sibling) => restoredResults.get(sibling.id)?.executionSkipped) ||
+						(ordered && earlier.some((sibling) => !restoredResults.has(sibling.id)))
+					) {
 						unstarted.push(call);
 					} else {
 						// A completed response runs its synchronous calls at once and does not journal them, so one

@@ -1010,8 +1010,11 @@ describe("native async lifecycle", () => {
 		{ first: "change_dir", state: "running", second: "write", secondRan: false },
 		{ first: "read", state: "running", second: "write", secondRan: true },
 		{ first: "work", state: "started", second: "change_dir", secondRan: false },
-		{ first: "work", state: "detached", second: "change_dir", secondRan: true },
+		// Detaching requires an abort, after which no ordered call starts.
+		{ first: "work", state: "detached", second: "change_dir", secondRan: false },
 		{ first: "read", state: "skipped", second: "change_dir", secondRan: false },
+		// Abort receipts are written in call order, so even a parallel call after one never started.
+		{ first: "read", state: "skipped", second: "write", secondRan: false },
 	])(
 		"receipts a restored sync call as unknown only if it may have started ($first $state, $second)",
 		async ({ first, state, second, secondRan }) => {
