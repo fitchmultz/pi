@@ -237,12 +237,38 @@ Running `pi update` without a target updates Pi itself.
 | Task | Command |
 |---|---|
 | Update Pi | `pi update` |
+| Update an immutable fork installation to latest `fitchmultz/pi` main | `pi update --fork` |
 | Update all installed packages | `pi update --extensions` |
 | Update one installed package | `pi update <source>` |
 | Refresh model catalogs | `pi update --models` |
 | Update Pi and all installed packages | `pi update --all` |
 
-Add `--force` to reinstall Pi when the selected update includes Pi.
+Add `--force` to reinstall Pi when the selected update includes Pi (except `--fork`).
+
+`pi update --fork` fetches main once into a temporary checkout, prints the pinned
+commit, hydrates model data, and runs that commit's immutable installer. It builds
+and validates a new release before atomically selecting it; the previous runtime
+is retained at the package selector's `.previous` sibling. Settings, credentials,
+extensions, and sessions are unchanged. Build/download/validation failures do not
+select a candidate. Temporary source and dependency files are removed on normal
+success or failure. This executes trusted code from `fitchmultz/pi`, not an npm
+release, and requires network access to GitHub, npm, and model catalog sources.
+
+Initial support is **macOS/Linux arm64/x64 with an existing immutable fork package
+symlink in the active npm global prefix**. Node >=22.19 with adjacent npm, Git
+(supporting `git archive --mtime`), bash, tar, gzip, and tmux are required. The
+`<prefix>/bin/pi` symlink must point through that selector to `dist/bundle/cli.js`.
+Windows, Bun, ordinary npm package directories, standalone/managed installers,
+other package managers, and mismatched/non-writable prefixes fail explicitly;
+they are not migrated. No existing checkout is needed for subsequent updates.
+See [fork setup and rollback](https://github.com/fitchmultz/pi/blob/main/FORK.md#immutable-installation-and-activation)
+for initial setup on another machine.
+
+`--fork` cannot combine with positional targets, other update targets, or
+`--force`. Exit status is 0 on success/help, 1 on invalid options or failure.
+After success, fully relaunch `pi`, or use `pi restart` from a selector-following
+session and verify the loaded runtime. An explicitly pinned runtime stays pinned;
+updating does not restart running sessions automatically.
 
 ### Aliases and command options
 

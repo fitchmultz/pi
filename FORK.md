@@ -71,6 +71,61 @@ regenerate tracked inputs.
 
 ## Immutable installation and activation
 
+### Update an existing fork installation
+
+```sh
+pi update --fork
+```
+
+This fetches `fitchmultz/pi` main once into a temporary checkout, prints and pins
+its commit, installs frozen dependencies without lifecycle scripts, hydrates model
+data, and delegates build, validation, and selection to that commit's installer.
+It needs no existing source checkout. It runs trusted fork code and downloads
+from GitHub, npm, and model catalog sources. Running sessions, settings, credentials,
+and extensions are unchanged. Failures before selection leave the old runtime
+selected; normal success/failure removes the temporary checkout. Fully relaunch Pi
+or use a selector-following native restart afterward and verify the loaded identity.
+
+Initial support is macOS/Linux arm64/x64, Node >=22.19 with npm installed alongside
+Node, Git with `archive --mtime` support, bash, tar, gzip, and tmux. The command
+resolves `npm root -g` using that Node/npm installation; it never assumes a fixed
+npm prefix. The global package must already be an immutable fork **symlink** that
+resolves to the running Pi package, with `<prefix>/bin/pi` pointing through it to
+`dist/bundle/cli.js`. The selector must be writable; `.previous`, if present, must
+also be a symlink.
+Windows, Bun, ordinary npm directories, standalone/managed installers, other
+package managers, and mismatched prefixes are rejected rather than migrated.
+`--fork` cannot combine with other update targets, positional sources, or `--force`.
+
+For initial setup on another supported machine, use a separate, user-owned prefix
+rather than replacing an ordinary npm directory. The one-time setup still needs
+a checkout; subsequent `pi update --fork` calls do not:
+
+```sh
+work=$(mktemp -d)
+git clone --depth=1 --branch main https://github.com/fitchmultz/pi.git "$work/pi"
+cd "$work/pi"
+npm ci --ignore-scripts
+npm run hydrate:model-data
+unset npm_config_prefix
+export NPM_CONFIG_PREFIX="$HOME/.local/share/pi-fork/npm"
+selector="$NPM_CONFIG_PREFIX/lib/node_modules/@earendil-works/pi-coding-agent"
+node scripts/install-fork.mjs --ref "$(git rev-parse HEAD)" --selector "$selector"
+# Only after successful installation; ln refuses to overwrite an existing bin.
+mkdir -p "$NPM_CONFIG_PREFIX/bin"
+ln -s ../lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js "$NPM_CONFIG_PREFIX/bin/pi"
+export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
+pi --version
+```
+
+Keep the prefix and PATH exports in your shell startup configuration. Remove the
+temporary checkout after success. If installation fails, stop before creating the
+bin symlink. Keep the old installation and fork releases for rollback.
+For an existing custom prefix, use the same prefix environment that originally
+installed it. Do not point npm at another installation merely to bypass a failure.
+
+### Stage and select a reviewed commit
+
 Hydrate model data in the checkout, then stage the exact reviewed commit. If
 merging changes the commit ID, stage and validate the merged commit before
 activation.
@@ -138,7 +193,8 @@ also take effect only at a full launch. See
 [Managed Restarts](packages/coding-agent/docs/restart.md).
 
 To return to an earlier installer-validated release, use `--rollback <identity>`
-and an ordinary restart when following the selector. If an explicit runtime is
+with the same `--selector <path>` used for installation (required for a custom
+npm prefix), and an ordinary restart when following the selector. If an explicit runtime is
 pinned, use `--runtime <rolled-back-packageDir>` or fully relaunch Pi. Keep
 previous runtimes and extension files intact outside explicit pruning. Legacy
 releases without receipts remain untouched; their previous selector target is
