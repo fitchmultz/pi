@@ -405,6 +405,6 @@ export async function main(args = process.argv.slice(2)) {
 	}
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (import.meta.main) {
 	main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

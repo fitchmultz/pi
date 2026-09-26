@@ -16,6 +16,23 @@ import {
 const name = "@earendil-works/pi-coding-agent";
 const tools = resolveBuildTools();
 
+test("runs the installer CLI through a symlinked path", (t) => {
+	const f = fixture(t);
+	const entry = join(f.root, "install-fork.mjs");
+	symlinkSync(fileURLToPath(new URL("./install-fork.mjs", import.meta.url)), entry);
+	const output = execFileSync(tools.node, [entry, "--help"], { env: f.env, encoding: "utf8" });
+	assert.match(output, /Usage: node scripts\/install-fork\.mjs/);
+});
+
+test("importing the installer from stdin does not run the CLI", () => {
+	const entry = new URL("./install-fork.mjs", import.meta.url).href;
+	const output = execFileSync(tools.node, ["--input-type=module", "-"], {
+		input: `import ${JSON.stringify(entry)};`,
+		encoding: "utf8",
+	});
+	assert.equal(output, "");
+});
+
 function fixture(t) {
 	const root = mkdtempSync(join(tmpdir(), "pi-fork-selector-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
