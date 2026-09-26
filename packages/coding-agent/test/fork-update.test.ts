@@ -166,7 +166,7 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 		await handlePackageCommand(["update", "--fork"]);
 		expect(process.exitCode).toBe(1);
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("exited with code 23"));
-		expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("Selected fork commit"));
+		expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("Fork commit"));
 		expect(readlinkSync(selector)).toBe(oldPackage);
 		expect(existsSync(temporarySource!)).toBe(false);
 		expect(existsSync(`${selector}.lock`)).toBe(false);

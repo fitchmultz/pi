@@ -115,7 +115,7 @@ export async function runForkUpdate(): Promise<void> {
 			"--releases",
 			join(homedir(), ".local/share/pi-fork/releases"),
 		]);
-		console.log(`Selected fork commit ${commit}. Previous runtime: ${selector}.previous`);
+		console.log(`Fork commit ${commit} is active. Rollback selector (when available): ${selector}.previous`);
 		console.log(
 			"Running sessions are unchanged. Fully relaunch pi, or use pi restart from a selector-following session and verify the loaded runtime.",
 		);
