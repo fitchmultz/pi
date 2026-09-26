@@ -6,6 +6,10 @@
 
 - Added the `live_tool_result` extension event, which supplies model-only tool result content for native WebSocket continuations that bypass context hooks.
 
+### Changed
+
+- Changed the default Fireworks model to Kimi K3; Fireworks retired Kimi K2.6 from its catalog.
+
 ### Fixed
 
 - Fixed context usage and automatic rollover losing measured reasoning tokens when request transforms add messages or append content blocks.
