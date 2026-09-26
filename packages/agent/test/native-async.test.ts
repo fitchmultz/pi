@@ -1006,6 +1006,153 @@ describe("native async lifecycle", () => {
 		},
 	);
 
+	it.each([
+		{ first: "change_dir", state: "running", second: "write", secondRan: false },
+		{ first: "read", state: "running", second: "write", secondRan: true },
+		{ first: "work", state: "started", second: "change_dir", secondRan: false },
+		// Detaching requires an abort, after which no ordered call starts.
+		{ first: "work", state: "detached", second: "change_dir", secondRan: false },
+		{ first: "read", state: "skipped", second: "change_dir", secondRan: false },
+		// Abort receipts are written in call order, so even a parallel call after one never started.
+		{ first: "read", state: "skipped", second: "write", secondRan: false },
+	])(
+		"receipts a restored sync call as unknown only if it may have started ($first $state, $second)",
+		async ({ first, state, second, secondRan }) => {
+			const executions = vi.fn<AgentTool["execute"]>(async () => result);
+			const { agent, streams, inputs } = setup(async () => result);
+			const provider = agent.streamFunction;
+			agent.streamFunction = async (...args) => {
+				const response = await provider(...args);
+				finish(response, assistant(`answer-${streams.length}`));
+				return response;
+			};
+			const syncTool = (name: string, executionMode: "sequential" | "parallel"): AgentTool => ({
+				name,
+				label: name,
+				description: name,
+				parameters: Type.Object({}),
+				executionMode,
+				execute: executions,
+			});
+			agent.state.tools = [
+				...agent.state.tools,
+				syncTool("change_dir", "sequential"),
+				syncTool("read", "parallel"),
+				syncTool("write", "parallel"),
+			];
+			const syncCall = (name: string): ToolCall => ({
+				type: "toolCall",
+				id: `${name}|fc_${name}`,
+				name,
+				arguments: {},
+				responsesItem: {
+					type: "function_call",
+					id: `fc_${name}`,
+					call_id: name,
+					name,
+					arguments: "{}",
+					status: "completed",
+				},
+			});
+			const firstCall =
+				first === "work"
+					? { ...call(), executionStarted: true, executionDetached: state === "detached" }
+					: syncCall(first);
+			// The process stopped during the first call, or while receipting an abort after it.
+			agent.state.messages = [
+				{ role: "user", content: "go", timestamp: 1 },
+				{ ...assistant("first", [firstCall, syncCall(second)]), stopReason: "toolUse" },
+				...(state === "skipped"
+					? [
+							{
+								role: "toolResult" as const,
+								toolCallId: firstCall.id,
+								toolName: first,
+								content: [{ type: "text" as const, text: "not executed" }],
+								isError: true,
+								executionSkipped: true,
+								timestamp: 2,
+							},
+						]
+					: []),
+			];
+			await agent.prompt("continue");
+			expect(executions).not.toHaveBeenCalled();
+			if (state === "running")
+				expect(inputs[0].find((m) => m.role === "toolResult" && m.toolCallId === firstCall.id)).toMatchObject({
+					content: [{ type: "text", text: expect.stringContaining("outcome is unknown") }],
+				});
+			expect(inputs[0].find((m) => m.role === "toolResult" && m.toolCallId === syncCall(second).id)).toMatchObject({
+				content: [
+					{
+						type: "text",
+						text: expect.stringContaining(secondRan ? "outcome is unknown" : "interrupted before it started"),
+					},
+				],
+			});
+		},
+	);
+
+	it("receipts calls after an aborted one as never started instead of leaving them resultless", async () => {
+		let markStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const laterExecute = vi.fn<AgentTool["execute"]>(async () => result);
+		const { agent, streams } = setup(async () => result);
+		agent.toolExecution = "sequential";
+		agent.state.tools = [
+			{
+				name: "slow",
+				label: "Slow",
+				description: "Slow",
+				parameters: Type.Object({}),
+				execute: async (_id, _args, signal) => {
+					markStarted();
+					await new Promise<void>((_resolve, reject) => {
+						signal?.addEventListener("abort", () => reject(new Error("Tool cancelled")), { once: true });
+					});
+					return result;
+				},
+			},
+			{
+				name: "later",
+				label: "Later",
+				description: "Later",
+				parameters: Type.Object({}),
+				execute: laterExecute,
+			},
+		];
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		const first = assistant("first", [
+			{ type: "toolCall", id: "slow-1", name: "slow", arguments: {} },
+			{ type: "toolCall", id: "later-1", name: "later", arguments: {} },
+		]);
+		streams[0].push({ type: "start", partial: first });
+		streams[0].push({
+			type: "toolcall_end",
+			contentIndex: 0,
+			toolCall: first.content[0] as ToolCall,
+			partial: first,
+		});
+		streams[0].push({
+			type: "toolcall_end",
+			contentIndex: 1,
+			toolCall: first.content[1] as ToolCall,
+			partial: first,
+		});
+		finish(streams[0], first);
+		await started;
+		agent.abort();
+		await run;
+		expect(laterExecute).not.toHaveBeenCalled();
+		expect(agent.state.messages.find((m) => m.role === "toolResult" && m.toolCallId === "later-1")).toMatchObject({
+			isError: true,
+			content: [{ type: "text", text: expect.stringContaining("interrupted before it started") }],
+		});
+	});
+
 	it.each([false, true])("honors explicit continuation while native work runs (end next turn=%s)", async (end) => {
 		const work = deferred<AgentToolResult>();
 		const { agent, streams, inputs, events } = setup(async () => work.promise);

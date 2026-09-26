@@ -463,6 +463,7 @@ async function runLoop(
 	};
 	try {
 		const unstarted: AgentToolCall[] = [];
+		const interrupted: AgentToolCall[] = [];
 		for (const message of currentContext.messages.slice()) {
 			if (message.role !== "assistant") continue;
 			if (message.toolExecutionFailed) failedScopes.add(message);
@@ -489,9 +490,34 @@ async function runLoop(
 					failedScopes.add(message);
 				} else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
+				else if (message.stopReason === "toolUse") {
+					const ordered =
+						config.toolExecution === "sequential" ||
+						calls.some(
+							(sibling) => findTool(currentContext.tools ?? [], sibling)?.executionMode === "sequential",
+						);
+					const earlier = calls.slice(0, calls.indexOf(call));
+					if (
+						// Not-executed receipts are written in call order, so an earlier one puts this call in an
+						// unattempted suffix. An ordered call also waits for every earlier sibling to finish with a
+						// result; detaching requires an abort, after which nothing later runs.
+						earlier.some((sibling) => restoredResults.get(sibling.id)?.executionSkipped) ||
+						(ordered && earlier.some((sibling) => !restoredResults.has(sibling.id)))
+					) {
+						unstarted.push(call);
+					} else {
+						// A completed response runs its synchronous calls at once and does not journal them, so one
+						// without a result was cut off (for example, the process stopped) and may have partly run.
+						interrupted.push(call);
+					}
+					failedScopes.add(message);
+				}
 			}
 		}
-		for (const result of (await failToolCalls(unstarted, emit, INTERRUPTED_CALL)).messages) {
+		for (const result of [
+			...(await failToolCalls(interrupted, emit, UNKNOWN_TOOL_OUTCOME, false)).messages,
+			...(await failToolCalls(unstarted, emit, INTERRUPTED_CALL)).messages,
+		]) {
 			currentContext.messages.push(result);
 			newMessages.push(result);
 			savedResults.push(result);
@@ -976,12 +1002,14 @@ async function streamAssistantResponse(
 }
 
 /**
- * Close untouched calls with explicit error receipts so the model can re-issue them.
+ * Receipt calls that ended without a result: untouched ones as not executed so the model can re-issue
+ * them, or with the caller's outcome when the call may have partly run.
  */
 async function failToolCalls(
 	toolCalls: AgentToolCall[],
 	emit: AgentEventSink,
 	reason: string,
+	executionSkipped = true,
 ): Promise<ExecutedToolCallBatch> {
 	const messages: ToolResultMessage[] = [];
 	for (const toolCall of toolCalls) {
@@ -994,12 +1022,14 @@ async function failToolCalls(
 		});
 		const finalized: FinalizedToolCallOutcome = {
 			toolCall,
-			result: createErrorToolResult(`Tool call "${toolCall.name}" was not executed: ${reason}`),
+			result: createErrorToolResult(
+				executionSkipped ? `Tool call "${toolCall.name}" was not executed: ${reason}` : reason,
+			),
 			isError: true,
 		};
 		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
-		toolResultMessage.executionSkipped = true;
+		if (executionSkipped) toolResultMessage.executionSkipped = true;
 		await emitToolResultMessage(toolResultMessage, emit);
 		messages.push(toolResultMessage);
 	}
@@ -1043,7 +1073,7 @@ async function executeToolCallsSequential(
 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
 	const messages: ToolResultMessage[] = [];
 
-	for (const toolCall of toolCalls) {
+	for (const [index, toolCall] of toolCalls.entries()) {
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -1081,6 +1111,9 @@ async function executeToolCallsSequential(
 		}
 
 		if (signal?.aborted) {
+			// The remaining calls never started; without receipts a later run would mistake them for
+			// executions cut off mid-flight.
+			messages.push(...(await failToolCalls(toolCalls.slice(index + 1), emit, INTERRUPTED_CALL)).messages);
 			break;
 		}
 	}
@@ -1111,7 +1144,8 @@ async function executeToolCallsParallel(
 		}
 	};
 
-	for (const toolCall of toolCalls) {
+	let abortedSuffix: AgentToolCall[] = [];
+	for (const [index, toolCall] of toolCalls.entries()) {
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -1130,6 +1164,7 @@ async function executeToolCallsParallel(
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
 			if (signal?.aborted) {
+				abortedSuffix = toolCalls.slice(index + 1);
 				break;
 			}
 			continue;
@@ -1158,6 +1193,7 @@ async function executeToolCallsParallel(
 			return finalized;
 		});
 		if (signal?.aborted) {
+			abortedSuffix = toolCalls.slice(index + 1);
 			break;
 		}
 	}
@@ -1174,6 +1210,11 @@ async function executeToolCallsParallel(
 		const toolResultMessage = createToolResultMessage(finalized);
 		await emitToolResultMessage(toolResultMessage, emitCompletedEvent);
 		messages.push(toolResultMessage);
+	}
+	if (abortedSuffix.length > 0) {
+		// The remaining calls never started; without receipts a later run would mistake them for
+		// executions cut off mid-flight.
+		messages.push(...(await failToolCalls(abortedSuffix, emitCompletedEvent, INTERRUPTED_CALL)).messages);
 	}
 	if (errors.length > 0) throw errors[0];
 
