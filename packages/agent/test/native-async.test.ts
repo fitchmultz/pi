@@ -148,6 +148,46 @@ describe("native async lifecycle", () => {
 		).toHaveLength(1);
 	});
 
+	it("passes model-only content with results submitted to a live response", async () => {
+		const gate = deferred<void>();
+		const { agent, streams } = setup(async () => {
+			await gate.promise;
+			return result;
+		});
+		const submissions: { ids: string[]; content: unknown }[] = [];
+		const provider = agent.streamFunction;
+		agent.streamFunction = (model, context, options) => {
+			options?.onResponseControl?.({
+				waitingForSuccessor: false,
+				deliveredToolCallIds: new Set(),
+				retired: false,
+				retire() {},
+				steer: () => false,
+				submitToolResults(results, modelContent) {
+					submissions.push({
+						ids: results.map((saved) => saved.toolCallId),
+						content: results.map((saved) => modelContent?.(saved)),
+					});
+				},
+			});
+			return provider(model, context, options);
+		};
+		agent.toolResultModelContent = (saved) => [{ type: "text", text: `model copy of ${saved.toolCallId}` }];
+		const run = agent.prompt("go");
+		await vi.waitFor(() => expect(streams).toHaveLength(1));
+		await emitCall(streams[0], assistant("live"), call());
+		gate.resolve();
+		await vi.waitFor(() => expect(submissions.some((submission) => submission.ids.length > 0)).toBe(true));
+		expect(submissions.find((submission) => submission.ids.length > 0)).toEqual({
+			ids: ["call|fc_call"],
+			content: [[{ type: "text", text: "model copy of call|fc_call" }]],
+		});
+		finish(streams[0], assistant("live", [call()]));
+		await answer(streams, 1);
+		await run;
+		expect(agent.state.messages.find((message) => message.role === "toolResult")?.content).toEqual(result.content);
+	});
+
 	it("does not execute partial calls when a stream fails", async () => {
 		const execute = vi.fn<AgentTool["execute"]>(async () => result);
 		const { agent, streams } = setup(execute);

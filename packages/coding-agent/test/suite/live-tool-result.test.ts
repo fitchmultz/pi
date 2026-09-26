@@ -23,9 +23,18 @@ it("offers live_tool_result content for live continuations without changing the 
 				pi.on("live_tool_result", ({ message }, ctx) => {
 					savedBeforeHook = ctx.sessionManager
 						.getEntries()
-						.some((entry) => entry.type === "message" && entry.message === message);
+						.some(
+							(entry) =>
+								entry.type === "message" &&
+								entry.message.role === "toolResult" &&
+								entry.message.toolCallId === message.toolCallId,
+						);
 					return { content: [...message.content, { type: "text", text: "live note" }] };
 				});
+				pi.on("live_tool_result", ({ message }) => {
+					message.content.push({ type: "text", text: "in-place edit" });
+				});
+				pi.on("live_tool_result", () => ({ content: "not an array" }) as never);
 				pi.on("live_tool_result", ({ message }) => ({
 					content: [...message.content, { type: "text", text: "second note" }],
 				}));

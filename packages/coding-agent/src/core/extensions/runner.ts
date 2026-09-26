@@ -1253,12 +1253,22 @@ export class ExtensionRunner {
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "live_tool_result")) {
 			for (const handler of handlers) {
 				try {
+					// Handlers get copies: the saved message backs the session and terminal output.
 					const event: LiveToolResultEvent = {
 						type: "live_tool_result",
-						message: content ? { ...message, content } : message,
+						message: structuredClone({ ...message, content: content ?? message.content }),
 					};
 					const handlerResult = (await handler(event, ctx)) as LiveToolResultEventResult | undefined;
-					if (handlerResult?.content) content = handlerResult.content;
+					if (handlerResult?.content === undefined) continue;
+					if (!Array.isArray(handlerResult.content)) {
+						this.emitError({
+							extensionPath: ext.path,
+							event: "live_tool_result",
+							error: "live_tool_result handlers must return a content array",
+						});
+						continue;
+					}
+					content = structuredClone(handlerResult.content);
 				} catch (err) {
 					this.emitError({
 						extensionPath: ext.path,

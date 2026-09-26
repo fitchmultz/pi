@@ -166,7 +166,11 @@ export function withToolNamespaces(
 								}
 							}
 							register(declarations);
-							control.submitToolResults(results.map(mapResult), modelContent);
+							const originals = new Map(results.map((result) => [result.toolCallId, result]));
+							control.submitToolResults(
+								results.map(mapResult),
+								modelContent && ((mapped) => modelContent(originals.get(mapped.toolCallId) ?? mapped)),
+							);
 						},
 					},
 			);
