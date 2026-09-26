@@ -806,6 +806,16 @@ export interface ContextWithSystemEvent {
 	messages: AgentMessage[];
 }
 
+/**
+ * Fired after a finalized tool result is saved. A live native response continuation sends that
+ * result without running context hooks; returned `content` replaces it in that frame only. The
+ * saved result is unchanged, and ordinary requests still run `context` and `context_with_system`.
+ */
+export interface LiveToolResultEvent {
+	type: "live_tool_result";
+	message: ToolResultMessage;
+}
+
 /** Fired before a provider request is sent. Can replace the payload. */
 export interface BeforeProviderRequestEvent {
 	type: "before_provider_request";
@@ -1320,6 +1330,7 @@ export type ExtensionEvent =
 	| SessionEvent
 	| ContextEvent
 	| ContextWithSystemEvent
+	| LiveToolResultEvent
 	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
@@ -1401,6 +1412,11 @@ export interface ToolResultEventResult {
 export interface MessageEndEventResult {
 	/** Replace the finalized message. The replacement must keep the original message role. */
 	message?: AgentMessage;
+}
+
+export interface LiveToolResultEventResult {
+	/** Content sent in place of the saved content on a live continuation. Later handlers see it. */
+	content?: (TextContent | ImageContent)[];
 }
 
 export interface BeforeAgentStartEventResult {
@@ -1591,6 +1607,7 @@ export interface ExtensionAPI {
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): () => void;
 	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): () => void;
 	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent, MessageEndEventResult>): () => void;
+	on(event: "live_tool_result", handler: ExtensionHandler<LiveToolResultEvent, LiveToolResultEventResult>): () => void;
 	on(
 		event: "tool_execution_prepared",
 		handler: ExtensionHandler<Extract<AgentEvent, { type: "tool_execution_prepared" }>>,

@@ -10,6 +10,7 @@ import {
 	type Model,
 	type Provider,
 	type ProviderHeaders,
+	type ToolResultMessage,
 	type ToolSelection,
 	toolKey,
 	withoutToolSearchState,
@@ -65,6 +66,8 @@ import type {
 	InputEvent,
 	InputEventResult,
 	InputSource,
+	LiveToolResultEvent,
+	LiveToolResultEventResult,
 	LoadExtensionsResult,
 	MarkdownTransformer,
 	MessageEndEvent,
@@ -1241,6 +1244,33 @@ export class ExtensionRunner {
 		}
 
 		return modified ? currentMessage : undefined;
+	}
+
+	async emitLiveToolResult(message: ToolResultMessage): Promise<ToolResultMessage["content"] | undefined> {
+		const ctx = this.createContext();
+		let content: ToolResultMessage["content"] | undefined;
+
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "live_tool_result")) {
+			for (const handler of handlers) {
+				try {
+					const event: LiveToolResultEvent = {
+						type: "live_tool_result",
+						message: content ? { ...message, content } : message,
+					};
+					const handlerResult = (await handler(event, ctx)) as LiveToolResultEventResult | undefined;
+					if (handlerResult?.content) content = handlerResult.content;
+				} catch (err) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "live_tool_result",
+						error: err instanceof Error ? err.message : String(err),
+						stack: err instanceof Error ? err.stack : undefined,
+					});
+				}
+			}
+		}
+
+		return content;
 	}
 
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {

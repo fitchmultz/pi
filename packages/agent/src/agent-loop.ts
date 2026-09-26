@@ -323,7 +323,7 @@ async function runLoop(
 					readyBatches.push(batch);
 					recordNewContext(batch, scope);
 					if (pendingNewContext) retireResponse();
-					else activeControl?.submitToolResults(savedResults);
+					else activeControl?.submitToolResults(savedResults, config.toolResultModelContent);
 				},
 				(error: unknown) => {
 					asyncFailure = error;
@@ -652,7 +652,7 @@ async function runLoop(
 							activeControl = control;
 							config.onResponseControl?.(control);
 							if (pendingNewContext) retireResponse();
-							else control?.submitToolResults(savedResults);
+							else control?.submitToolResults(savedResults, config.toolResultModelContent);
 						},
 					},
 					signal,
@@ -672,7 +672,7 @@ async function runLoop(
 						const batch = await finishToolCalls(message, scope, steered);
 						if (batch) readyBatches.push(batch);
 						if (pendingNewContext) retireResponse();
-						else activeControl?.submitToolResults(savedResults);
+						else activeControl?.submitToolResults(savedResults, config.toolResultModelContent);
 					},
 				);
 				const message = streamed.message;

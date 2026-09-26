@@ -112,6 +112,8 @@ export type {
 	InputEventResult,
 	InputSource,
 	KeybindingsManager,
+	LiveToolResultEvent,
+	LiveToolResultEventResult,
 	LoadExtensionsResult,
 	LsToolCallEvent,
 	LsToolResultEvent,

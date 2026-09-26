@@ -462,7 +462,9 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 						});
 				} else if (body.type === "response.create" && body.previous_response_id) {
 					expect(body.previous_response_id).toBe("parent");
-					expect(body.input).toEqual([{ type: "function_call_output", call_id: "call1", output: "actual" }]);
+					expect(body.input).toEqual([
+						{ type: "function_call_output", call_id: "call1", output: "actual\nmodel-only note" },
+					]);
 					if (mode === "pending-multiple")
 						request.send({
 							type: "response.steer.pending",
@@ -521,9 +523,14 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 						isError: false,
 						timestamp: 3,
 					};
-					control!.submitToolResults([result, { ...result, toolCallId: "unsent|fc_2" }]);
+					// The model-only copy reaches the frame; continuation input keeps the saved result.
+					const modelContent = (saved: ToolResultMessage) => [
+						...saved.content,
+						{ type: "text" as const, text: "model-only note" },
+					];
+					control!.submitToolResults([result, { ...result, toolCallId: "unsent|fc_2" }], modelContent);
 					result.content = [{ type: "text", text: "edited after send" }];
-					control!.submitToolResults([result]);
+					control!.submitToolResults([result], modelContent);
 				}
 				await consume;
 				const message = await response.result();

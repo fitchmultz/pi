@@ -201,8 +201,14 @@ export interface ResponseControl {
 	readonly retired: boolean;
 	/** Retire the remote chain before starting a fresh local context. */
 	retire(): void;
-	/** Deliver saved results when accepted steering is waiting for client tools. Never executes tools. */
-	submitToolResults(results: ToolResultMessage[]): void;
+	/**
+	 * Deliver saved results when accepted steering is waiting for client tools. Never executes tools.
+	 * `modelContent` may replace a result's content in the sent frame only; continuation input keeps the saved result.
+	 */
+	submitToolResults(
+		results: ToolResultMessage[],
+		modelContent?: (result: ToolResultMessage) => ToolResultMessage["content"] | undefined,
+	): void;
 }
 
 export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
