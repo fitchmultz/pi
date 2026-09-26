@@ -1007,13 +1007,22 @@ describe("native async lifecycle", () => {
 	);
 
 	it.each([
-		{ first: "change_dir", second: "write", ordered: true },
-		{ first: "read", second: "write", ordered: false },
+		{ first: "change_dir", state: "running", second: "write", secondRan: false },
+		{ first: "read", state: "running", second: "write", secondRan: true },
+		{ first: "work", state: "started", second: "change_dir", secondRan: false },
+		{ first: "work", state: "detached", second: "change_dir", secondRan: true },
+		{ first: "read", state: "skipped", second: "change_dir", secondRan: false },
 	])(
-		"receipts a restored sync call as interrupted unless an ordered sibling never finished ($first, $second)",
-		async ({ first, second, ordered }) => {
+		"receipts a restored sync call as unknown only if it may have started ($first $state, $second)",
+		async ({ first, state, second, secondRan }) => {
 			const executions = vi.fn<AgentTool["execute"]>(async () => result);
 			const { agent, streams, inputs } = setup(async () => result);
+			const provider = agent.streamFunction;
+			agent.streamFunction = async (...args) => {
+				const response = await provider(...args);
+				finish(response, assistant(`answer-${streams.length}`));
+				return response;
+			};
 			const syncTool = (name: string, executionMode: "sequential" | "parallel"): AgentTool => ({
 				name,
 				label: name,
@@ -1042,23 +1051,39 @@ describe("native async lifecycle", () => {
 					status: "completed",
 				},
 			});
-			// The process stopped while the first call ran, so neither call has a result.
+			const firstCall =
+				first === "work"
+					? { ...call(), executionStarted: true, executionDetached: state === "detached" }
+					: syncCall(first);
+			// The process stopped during the first call, or while receipting an abort after it.
 			agent.state.messages = [
 				{ role: "user", content: "go", timestamp: 1 },
-				{ ...assistant("first", [syncCall(first), syncCall(second)]), stopReason: "toolUse" },
+				{ ...assistant("first", [firstCall, syncCall(second)]), stopReason: "toolUse" },
+				...(state === "skipped"
+					? [
+							{
+								role: "toolResult" as const,
+								toolCallId: firstCall.id,
+								toolName: first,
+								content: [{ type: "text" as const, text: "not executed" }],
+								isError: true,
+								executionSkipped: true,
+								timestamp: 2,
+							},
+						]
+					: []),
 			];
-			const run = agent.prompt("continue");
-			await answer(streams, 0);
-			await run;
+			await agent.prompt("continue");
 			expect(executions).not.toHaveBeenCalled();
-			expect(inputs[0].find((m) => m.role === "toolResult" && m.toolCallId === syncCall(first).id)).toMatchObject({
-				content: [{ type: "text", text: expect.stringContaining("outcome is unknown") }],
-			});
+			if (state === "running")
+				expect(inputs[0].find((m) => m.role === "toolResult" && m.toolCallId === firstCall.id)).toMatchObject({
+					content: [{ type: "text", text: expect.stringContaining("outcome is unknown") }],
+				});
 			expect(inputs[0].find((m) => m.role === "toolResult" && m.toolCallId === syncCall(second).id)).toMatchObject({
 				content: [
 					{
 						type: "text",
-						text: expect.stringContaining(ordered ? "interrupted before it started" : "outcome is unknown"),
+						text: expect.stringContaining(secondRan ? "outcome is unknown" : "interrupted before it started"),
 					},
 				],
 			});

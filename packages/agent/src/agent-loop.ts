@@ -491,7 +491,17 @@ async function runLoop(
 				} else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
 				else if (message.stopReason === "toolUse") {
-					if (waitsForEarlierSiblings(calls, call)) {
+					const ordered =
+						config.toolExecution === "sequential" ||
+						calls.some(
+							(sibling) => findTool(currentContext.tools ?? [], sibling)?.executionMode === "sequential",
+						);
+					// An ordered sync call starts only after each earlier sibling finished: ran to a real result, or detached.
+					const unfinished = (sibling: AgentToolCall): boolean => {
+						const result = restoredResults.get(sibling.id);
+						return !sibling.executionDetached && (!result || !!result.executionSkipped);
+					};
+					if (ordered && calls.slice(0, calls.indexOf(call)).some(unfinished)) {
 						// An ordered earlier sibling never finished, so this call never started.
 						unstarted.push(call);
 					} else {
