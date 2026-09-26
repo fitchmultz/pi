@@ -27,6 +27,7 @@ import { DefaultResourceLoader } from "./core/resource-loader.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./utils/child-process.ts";
+import { runForkUpdate } from "./utils/fork-update.ts";
 import { getPiUserAgent } from "./utils/pi-user-agent.ts";
 import { formatVersionCheckError, getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.ts";
 import {
@@ -36,7 +37,12 @@ import {
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
-type UpdateTarget = { type: "all" } | { type: "self" } | { type: "extensions"; source?: string } | { type: "models" };
+type UpdateTarget =
+	| { type: "all" }
+	| { type: "self" }
+	| { type: "fork" }
+	| { type: "extensions"; source?: string }
+	| { type: "models" };
 
 const DEFAULT_INSTALLER_API_BASE = "https://pi.dev/api/installer/releases";
 const MANAGED_RELEASE_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -232,7 +238,7 @@ function getPackageCommandUsage(command: PackageCommand): string {
 		case "remove":
 			return `${APP_NAME} remove <source> [-l] [--approve|--no-approve]`;
 		case "update":
-			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force]`;
+			return `${APP_NAME} update [source|self|pi] [--self|--fork|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force]`;
 		case "list":
 			return `${APP_NAME} list [--approve|--no-approve]`;
 	}
@@ -304,6 +310,7 @@ Update pi, installed packages, or model catalogs.
 
 Options:
   --self                  Update pi only (default when no target is given)
+  --fork                  Install pinned latest fitchmultz/pi main (macOS/Linux)
   --extensions            Update installed packages only
   --models                Refresh model catalogs only
   --all                   Update pi and installed packages
@@ -314,10 +321,19 @@ Options:
 
 Short forms:
   ${APP_NAME} update                Update pi only
+  ${APP_NAME} update --fork         Build, validate, and select latest fork main
   ${APP_NAME} update --all          Update pi and all extensions
   ${APP_NAME} update --models       Refresh model catalogs only
   ${APP_NAME} update <source>       Update one package
   ${APP_NAME} update pi             Update pi only (self works as alias to pi)
+
+--fork requires an existing immutable fork selector in the active npm global prefix,
+Node >=22.19 with adjacent npm, Git, bash, tar, gzip, tmux, and network access.
+Supports macOS/Linux arm64/x64, not Windows, ordinary npm directories, or other
+install methods. No existing checkout needed. Does not update extensions/settings
+or restart running sessions. Cannot combine with other targets or --force.
+Initial setup: https://github.com/fitchmultz/pi/blob/main/FORK.md
+Exit status: 0 on success/help, 1 on invalid options or failed update.
 `);
 			return;
 
@@ -357,6 +373,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	let conflictingOptions: string | undefined;
 	let source: string | undefined;
 	let selfFlag = false;
+	let forkFlag = false;
 	let extensionsFlag = false;
 	let modelsFlag = false;
 	let allFlag = false;
@@ -375,6 +392,12 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			} else {
 				invalidOption = invalidOption ?? arg;
 			}
+			continue;
+		}
+
+		if (arg === "--fork") {
+			if (command === "update") forkFlag = true;
+			else invalidOption = invalidOption ?? arg;
 			continue;
 		}
 
@@ -475,7 +498,12 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			conflictingOptions = conflictingOptions ?? "--all cannot be combined with a positional source";
 		}
 
-		if (modelsFlag) {
+		if (forkFlag) {
+			if (selfFlag || extensionsFlag || modelsFlag || allFlag || extensionFlagSource || source || force) {
+				conflictingOptions = conflictingOptions ?? "--fork cannot be combined with other update targets or --force";
+			}
+			updateTarget = { type: "fork" };
+		} else if (modelsFlag) {
 			if (selfFlag || extensionsFlag || allFlag || extensionFlagSource) {
 				conflictingOptions =
 					conflictingOptions ?? "--models cannot be combined with --self, --extensions, --all, or --extension";
@@ -871,6 +899,16 @@ export async function handlePackageCommand(
 		console.error(chalk.red(`Missing ${options.command} source.`));
 		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
 		process.exitCode = 1;
+		return true;
+	}
+
+	if (options.command === "update" && options.updateTarget?.type === "fork") {
+		try {
+			await runForkUpdate();
+		} catch (error: unknown) {
+			console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
+			process.exitCode = 1;
+		}
 		return true;
 	}
 

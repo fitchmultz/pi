@@ -253,7 +253,18 @@ describe("Anthropic raw SSE parsing", () => {
 		} as unknown as Anthropic;
 
 		await streamAnthropic(
-			getModel("openrouter", "anthropic/claude-3-haiku"),
+			{
+				id: "anthropic/claude-3-haiku",
+				name: "Claude 3 Haiku",
+				api: "anthropic-messages",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api",
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 0.25, output: 1.25, cacheRead: 0.03, cacheWrite: 0.3 },
+				contextWindow: 200000,
+				maxTokens: 4096,
+			},
 			normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
 			{ client, thinkingEnabled: false },
 		).result();
