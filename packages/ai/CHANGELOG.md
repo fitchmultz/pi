@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added an optional `modelContent` callback to `ResponseControl.submitToolResults()` that replaces a result's content in the sent continuation frame while `continuationInput` keeps the saved result.
+
 ## [0.87.1] - 2026-09-22
 
 ### Added

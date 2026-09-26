@@ -249,6 +249,8 @@ export class Agent {
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	/** Awaited after all turn_end subscribers, before the loop can drain queues or start another turn. */
 	public afterTurn?: (signal: AbortSignal) => Promise<void>;
+	/** Model-only content for saved tool results sent on a live response continuation. */
+	public toolResultModelContent?: AgentLoopConfig["toolResultModelContent"];
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
@@ -577,6 +579,7 @@ export class Agent {
 				return convertToLlm(messages);
 			},
 			transformContext: this.transformContext,
+			toolResultModelContent: this.toolResultModelContent,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				const preparation = this.steeringPreparation;

@@ -110,6 +110,10 @@ Shell guards must check both `bash` and `background_command` starts. Use `isTool
 
 `context` transforms conversation messages without prompt and tool system messages; Pi restores that state afterward. Use `context_with_system` only when a request-local transformation must own the complete transcript, and keep a system message at index zero.
 
+<a id="live_tool_result"></a>
+
+A native Responses WebSocket continuation can send a tool result without a new request, so context hooks do not run for it. `live_tool_result` fires once each finalized result is saved; return `{ content }` to replace that result's content in such a frame only. Handlers compose, and the saved result, terminal output, and ordinary requests are unchanged. An extension that decorates results in `context_with_system` should return the same decoration here.
+
 `turn_end` and `agent_before_settle` are actionable boundaries. Their handlers can chain proposed `custom`, `custom_message`, `context_edit`, or `compaction` entries and return `continue: true` for one next model request. Guard continuation conditions because an unconditional continuation can loop. Use the exported event declarations for the complete validation and ordering contract.
 
 <a id="cache_warming_decision"></a>

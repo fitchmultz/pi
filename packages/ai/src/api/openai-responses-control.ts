@@ -44,6 +44,7 @@ export function createResponsesControl(
 	let required: { parentId: string; inputs: ResponseSteerRequiredInput[]; sent?: ToolResultMessage[] } | undefined;
 	let closed = false;
 	let retired = false;
+	let modelContent: ((result: ToolResultMessage) => ToolResultMessage["content"] | undefined) | undefined;
 
 	const update = (submission: Submission, status: SteeringStatus, errorMessage?: string): void => {
 		submission.status = status;
@@ -68,9 +69,10 @@ export function createResponsesControl(
 			) {
 				throw new Error(`Unsupported steering continuation input: ${stub.type}`);
 			}
-			const result = results.get(stub.call_id);
-			if (!result) return;
-			submitted.push(structuredClone(result));
+			const saved = results.get(stub.call_id);
+			if (!saved) return;
+			submitted.push(structuredClone(saved));
+			const result = { ...saved, content: modelContent?.(saved) ?? saved.content };
 			if (stub.type === "tool_search_output") {
 				if (result.toolCallKind !== "toolSearch")
 					throw new Error(`Steering tool search result has no native search identity: ${stub.call_id}`);
@@ -157,7 +159,8 @@ export function createResponsesControl(
 			}
 			return true;
 		},
-		submitToolResults(saved) {
+		submitToolResults(saved, content) {
+			modelContent = content;
 			for (const result of saved) {
 				results.set(result.toolCallId.split("|")[0], result);
 				if (grammarToolInputProperties && result.toolsAdded) {

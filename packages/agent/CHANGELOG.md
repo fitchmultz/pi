@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added `AgentLoopConfig.toolResultModelContent` and `Agent.toolResultModelContent` for model-only tool result content on live response continuations.
+
 ## [0.87.1] - 2026-09-22
 
 ## [0.87.0] - 2026-09-21

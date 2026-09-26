@@ -155,7 +155,7 @@ export function withToolNamespaces(
 						deliveredToolCallIds: control.deliveredToolCallIds,
 						steer: (message) => control.steer(message),
 						retire: () => control.retire(),
-						submitToolResults: (results) => {
+						submitToolResults: (results, modelContent) => {
 							const declarations = results.flatMap((result) => result.toolsAdded ?? []);
 							for (const tool of declarations) {
 								if (tool.namespace === undefined) loadedBare.add(toolKey(tool));
@@ -166,7 +166,11 @@ export function withToolNamespaces(
 								}
 							}
 							register(declarations);
-							control.submitToolResults(results.map(mapResult));
+							const originals = new Map(results.map((result) => [result.toolCallId, result]));
+							control.submitToolResults(
+								results.map(mapResult),
+								modelContent && ((mapped) => modelContent(originals.get(mapped.toolCallId) ?? mapped)),
+							);
 						},
 					},
 			);

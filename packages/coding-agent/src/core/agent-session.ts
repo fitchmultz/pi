@@ -526,6 +526,8 @@ export class AgentSession {
 	private _pendingNewContext: NewContextRequest | undefined;
 	private _reportedUsagePrefix: ProviderRequestPrefix | null | undefined;
 	private _providerRequestPrefix: ProviderRequestPrefix | undefined;
+	/** live_tool_result replacements for this run's saved results, keyed by tool call ID. */
+	private readonly _liveToolResultContent = new Map<string, ToolResultMessage["content"]>();
 	private _toolPrefixKeys = new WeakMap<AgentTool, string>();
 	private _contextUsageCache?: {
 		inputs: unknown;
@@ -957,6 +959,8 @@ export class AgentSession {
 				thinkingLevel: previous?.thinkingLevel ?? this.agent.state.thinkingLevel,
 			};
 		};
+
+		this.agent.toolResultModelContent = (result) => this._liveToolResultContent.get(result.toolCallId);
 
 		const previousTransform = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
@@ -1543,7 +1547,10 @@ export class AgentSession {
 				? snapshotProviderConversation([event.message])[0]
 				: undefined;
 		if (requestEnded) this._skipNextProviderRequestPreflight = false;
-		if (event.type === "agent_end") this._providerRequestPrefix = undefined;
+		if (event.type === "agent_end") {
+			this._providerRequestPrefix = undefined;
+			this._liveToolResultContent.clear();
+		}
 		if (event.type === "message_start" && event.message.role === "assistant") {
 			if (this._providerRequestPrefix) {
 				const continuation = snapshotProviderConversation([...(event.continuationInput ?? [])]);
@@ -1638,6 +1645,16 @@ export class AgentSession {
 				}
 				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 			}
+		}
+
+		// The loop awaits this before it can submit the result on a live continuation.
+		if (
+			event.type === "message_end" &&
+			event.message.role === "toolResult" &&
+			this._extensionRunner.hasHandlers("live_tool_result")
+		) {
+			const content = await this._extensionRunner.emitLiveToolResult(event.message);
+			if (content) this._liveToolResultContent.set(event.message.toolCallId, content);
 		}
 
 		if (event.type === "message_end" && event.message.role === "assistant") {

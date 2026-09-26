@@ -186,6 +186,11 @@ it.each([false, true])(
 				for await (const event of response) events.push(structuredClone(event));
 			})();
 			const results: ToolResultMessage[] = [];
+			const seen: ToolResultMessage[] = [];
+			const modelContent = (saved: ToolResultMessage) => {
+				seen.push(saved);
+				return undefined;
+			};
 			for (const round of [1, 2]) {
 				await vi.waitFor(() =>
 					expect(
@@ -219,9 +224,14 @@ it.each([false, true])(
 					timestamp: round,
 				};
 				results.push(result);
-				control!.submitToolResults([result]);
-				control!.submitToolResults([result]);
+				control!.submitToolResults([result], modelContent);
+				control!.submitToolResults([result], modelContent);
 			}
+			expect(seen.length).toBeGreaterThan(0);
+			expect(
+				seen.every((saved) => results.includes(saved)),
+				"callbacks see the caller's results",
+			).toBe(true);
 			await consume;
 			const final = await response.result();
 			expect(fixture.errors).toEqual([]);

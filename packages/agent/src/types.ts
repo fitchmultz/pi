@@ -304,6 +304,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	subscribeSteering?: (listener: () => void) => () => void;
 
 	/**
+	 * Model-only content for a saved tool result delivered on a live response continuation.
+	 * Those frames bypass `transformContext`; ordinary requests use it instead. Return undefined to send the saved content.
+	 */
+	toolResultModelContent?: (result: ToolResultMessage) => ToolResultMessage["content"] | undefined;
+
+	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
 	 *
 	 * Called when the agent has no more tool calls and no steering messages.
