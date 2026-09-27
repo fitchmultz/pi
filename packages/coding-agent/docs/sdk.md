@@ -104,6 +104,8 @@ New sessions include this tool by default. Existing saved selections and explici
 
 ### Native asynchronous tools and steering
 
+Built-in GPT-6 Astra, Sol and Luna enable `compat.supportsAsyncTools`, `compat.supportsSteering`, and `compat.supportsReasoningEffortUpdates` on OpenAI and Cloudflare OpenAI Responses routes and OpenAI Codex Responses. Defaults survive remote catalog overlays; explicit `false` and user model overrides take precedence. Other model IDs and provider/API combinations are not enabled by this default.
+
 Set `async: true` on a `ToolDefinition` for capable Responses routes. Execution begins only after an authoritative completed async call, argument preparation, validation, and `tool_call` hooks. The journal records the original provider item and admitted arguments before side effects. `executionMode` still controls local sequential/parallel execution.
 
 `tool_execution_start` begins preflight; `tool_execution_prepared` provides admitted arguments. Final results preserve original call IDs and may arrive after later assistant messages. `elapsedMs` measures executor time, excluding validation and hooks; blocked calls omit it.

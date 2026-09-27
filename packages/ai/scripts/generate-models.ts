@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
-import { withAstraLifecycleDefaults } from "../src/model-catalog.ts";
+import { withOpenAIResponsesLifecycleDefaults } from "../src/model-catalog.ts";
 import { getEffortThinkingLevelMap, type ModelsDevReasoningOption } from "./models-dev-reasoning-options.ts";
 import {
 	getOpenRouterThinkingLevelMap,
@@ -3285,7 +3285,7 @@ async function generateModels() {
 		applyOpenAICompletionsTranscriptMetadata(model);
 		applyOpenAIResponsesTranscriptMetadata(model);
 		applyOpenAIExplicitPromptCacheMetadata(model);
-		model.compat = withAstraLifecycleDefaults(model).compat;
+		model.compat = withOpenAIResponsesLifecycleDefaults(model).compat;
 		applyPromptCacheMetadata(model);
 		applyImageInputMetadata(model);
 	}

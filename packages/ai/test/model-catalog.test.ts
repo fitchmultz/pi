@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { getModels } from "../src/compat.ts";
 import { flattenModelCatalog } from "../src/model-catalog.ts";
 import type { Api, Model } from "../src/types.ts";
@@ -17,46 +17,52 @@ const astra: Model<"openai-responses"> = {
 	compat: { supportsStrictMode: true },
 };
 
-it.each([
-	["openai", "openai-responses"],
-	["openai-codex", "openai-codex-responses"],
-	["cloudflare-ai-gateway", "openai-responses"],
-] as const)("restores Astra lifecycle capabilities from older %s catalog data", (provider, api) => {
-	const source = { ...astra, provider, api };
-	const catalog = flattenModelCatalog(provider, { [api]: { [source.id]: source } });
+describe.each(["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"])("%s lifecycle defaults", (id) => {
+	it.each([
+		["openai", "openai-responses"],
+		["openai-codex", "openai-codex-responses"],
+		["cloudflare-ai-gateway", "openai-responses"],
+	] as const)("restores lifecycle capabilities from older %s catalog data", (provider, api) => {
+		const source = { ...astra, id, provider, api };
+		const catalog = flattenModelCatalog(provider, { [api]: { [source.id]: source } });
 
-	expect(catalog[source.id].compat).toEqual({
-		supportsStrictMode: true,
-		supportsAsyncTools: true,
-		supportsSteering: true,
-		supportsReasoningEffortUpdates: true,
+		expect(catalog[source.id].compat).toEqual({
+			supportsStrictMode: true,
+			supportsAsyncTools: true,
+			supportsSteering: true,
+			supportsReasoningEffortUpdates: true,
+		});
+		expect(source.compat).toEqual({ supportsStrictMode: true });
 	});
-	expect(source.compat).toEqual({ supportsStrictMode: true });
+
+	it.each([
+		{ supportsSteering: false },
+		{ supportsAsyncTools: false, supportsSteering: false, supportsReasoningEffortUpdates: false },
+	])("preserves explicit capabilities and fills only omitted defaults: %j", (compat) => {
+		const source = { ...astra, id, compat };
+		const catalog = flattenModelCatalog("openai", { "openai-responses": { [source.id]: source } });
+		expect(catalog[source.id].compat).toEqual(
+			Object.assign(
+				{
+					supportsAsyncTools: true,
+					supportsSteering: true,
+					supportsReasoningEffortUpdates: true,
+				},
+				compat,
+			),
+		);
+	});
 });
 
 it.each([
-	{ supportsSteering: false },
-	{ supportsAsyncTools: false, supportsSteering: false, supportsReasoningEffortUpdates: false },
-])("preserves explicit Astra capabilities and fills only omitted defaults: %j", (compat) => {
-	const source = { ...astra, compat };
-	const catalog = flattenModelCatalog("openai", { "openai-responses": { [source.id]: source } });
-	expect(catalog[source.id].compat).toEqual(
-		Object.assign(
-			{
-				supportsAsyncTools: true,
-				supportsSteering: true,
-				supportsReasoningEffortUpdates: true,
-			},
-			compat,
-		),
-	);
-});
-
-it.each([
-	{ ...astra, id: "gpt-6-sol" },
+	{ ...astra, id: "gpt-6-future" },
+	{ ...astra, id: "gpt-6-sol-preview" },
+	{ ...astra, id: "gpt-5.6-sol" },
 	{ ...astra, provider: "custom-openai" },
 	{ ...astra, api: "openai-completions" },
-] satisfies Model<Api>[])("does not add Astra capabilities to $provider/$id using $api", (source) => {
+	{ ...astra, provider: "openai", api: "openai-codex-responses" },
+	{ ...astra, provider: "openai-codex", api: "openai-responses" },
+] satisfies Model<Api>[])("does not add lifecycle capabilities to $provider/$id using $api", (source) => {
 	const catalog = flattenModelCatalog(source.provider, { [source.api]: { [source.id]: source } });
 	expect(catalog[source.id]).toBe(source);
 });

@@ -157,9 +157,12 @@ static Linux TypeScript compiler into the disposable build. Restart sockets fall
 back to Termux's writable short temporary path when needed. The `pi update --fork`
 bootstrap preserves that same native shell/exec environment.
 
-Astra's supported lifecycle capabilities are applied when loading built-in and
-remote catalogs, so older or upstream data cannot silently omit them. Explicit
-capability values and user model overrides retain precedence.
+GPT-6 Astra, Sol and Luna default to native async tools, steering and positional
+reasoning-effort updates on OpenAI and Cloudflare OpenAI Responses routes and
+OpenAI Codex Responses. These exact-model defaults apply when loading built-in
+and remote catalogs, so older data cannot silently omit them. Explicit capability
+values (including `false`) and user model overrides retain precedence; no local
+capability configuration is required.
 
 Cloudflare AI Gateway Claude models use Anthropic's hyphenated IDs in generated
 and remote catalogs. models.dev and pi.dev list dotted names, which the gateway's
