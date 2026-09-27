@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
 	readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync,
@@ -10,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { installCodingAgentConsumer, packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import {
-	activateRelease, installRelease, isolatedEnvironment, main, pruneReleases, releaseIdentity, resolveBuildTools,
+	activateRelease, installRelease, isolatedEnvironment, main, prepareTermuxCompiler, pruneReleases, releaseIdentity, resolveBuildTools,
 } from "./install-fork.mjs";
 
 const name = "@earendil-works/pi-coding-agent";
@@ -291,7 +292,57 @@ test("isolates ambient Pi/npm config and resolves native Node/npm before HOME ch
 	assert.equal(f.env.PI_RESTART_SOCKET, undefined);
 	assert.equal(f.env.NODE_OPTIONS, undefined);
 	assert.equal(f.env.NPM_CONFIG_USERCONFIG, undefined);
+	assert.equal(f.env.TMPDIR, join(f.env.HOME, "tmp"));
+	assert.ok(existsSync(f.env.TMPDIR));
+	if (process.platform !== "android") {
+		assert.equal(f.env.LD_PRELOAD, undefined);
+		assert.equal(f.env.PREFIX, undefined);
+		assert.equal(f.env.npm_config_script_shell, undefined);
+	}
 	assert.equal(execFileSync(tools.node, [tools.npm, "--version"], { env: f.env, encoding: "utf8" }).trim(), tools.npmVersion);
 	assert.equal(execFileSync("node", ["-p", "process.execPath"], { env: f.env, encoding: "utf8" }).trim(), tools.node);
 	assert.notEqual(releaseIdentity(receipt()), releaseIdentity(receipt("a", "e")));
+});
+
+test("isolated npm scripts can invoke npm and package executables on Termux", { skip: process.platform === "win32" }, (t) => {
+	const f = fixture(t);
+	const bin = join(f.root, "node_modules/.bin");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "fixture-executable"), '#!/usr/bin/env node\nconsole.log("package executable");\n', { mode: 0o755 });
+	writeFileSync(join(f.root, "package.json"), JSON.stringify({
+		private: true,
+		scripts: { probe: "npm --version && fixture-executable" },
+	}));
+	const output = execFileSync(tools.node, [tools.npm, "run", "--silent", "probe"], {
+		cwd: f.root, env: f.env, encoding: "utf8",
+	});
+	assert.deepEqual(output.trim().split(/\r?\n/), [tools.npmVersion, "package executable"]);
+});
+
+test("Termux compiler installation preserves the source lock and uses its pinned artifact without scripts", { skip: process.platform === "win32" }, (t) => {
+	const f = fixture(t);
+	const name = `@typescript/native-preview-linux-${process.arch}`;
+	const directory = join(f.root, "compiler");
+	mkdirSync(join(directory, "lib"), { recursive: true });
+	writeFileSync(join(directory, "package.json"), JSON.stringify({
+		name, version: "1.2.3", os: ["linux"], cpu: [process.arch],
+		scripts: { postinstall: "node -e 'process.exit(27)'" },
+	}));
+	writeFileSync(join(directory, "lib/tsgo"), '#!/usr/bin/env node\nconsole.log("Version 1.2.3");\n', { mode: 0o755 });
+	const tarball = packReleasePackages([{ name, directory }], join(f.root, "tarballs"), { npm: tools.npm, env: f.env }).get(name);
+	const lock = JSON.stringify({
+		lockfileVersion: 3,
+		packages: {
+			[`node_modules/${name}`]: {
+				version: "1.2.3", resolved: `file:${tarball}`, optional: true, os: ["linux"], cpu: [process.arch],
+				integrity: `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`,
+			},
+		},
+	});
+	writeFileSync(join(f.root, "package-lock.json"), lock);
+	mkdirSync(join(f.root, "node_modules/.bin"), { recursive: true });
+	symlinkSync(join(f.root, "unusable-android-wrapper"), join(f.root, "node_modules/.bin/tsgo"));
+	prepareTermuxCompiler(f.root, tools, { ...f.env, npm_config_offline: "true" });
+	assert.equal(readFileSync(join(f.root, "package-lock.json"), "utf8"), lock);
+	assert.equal(execFileSync(join(f.root, "node_modules/.bin/tsgo"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
 });

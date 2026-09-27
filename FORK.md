@@ -149,6 +149,12 @@ real-terminal restart tests must pass before the release receives a validation
 receipt. It retains the archive, commit, tarballs and build identity. No
 hand-made workspace dependency links are used.
 
+The checkout installer also supports Termux on Android: it preserves the native
+shell/exec environment, isolates temporary files, and installs the lockfile-pinned
+static Linux TypeScript compiler into the disposable build. Restart sockets fall
+back to Termux's writable short temporary path when needed. This does not extend
+the platform support of `pi update --fork`.
+
 Astra's supported lifecycle capabilities are applied when loading built-in and
 remote catalogs, so older or upstream data cannot silently omit them. Explicit
 capability values and user model overrides retain precedence.

@@ -40,11 +40,12 @@ export function resolveBuildTools() {
 }
 
 export function isolatedEnvironment(home, tools) {
-	mkdirSync(home, { recursive: true });
+	mkdirSync(join(home, "tmp"), { recursive: true });
 	return {
 		PATH: tools.path,
 		HOME: home,
 		USERPROFILE: home,
+		TMPDIR: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"),
 		XDG_CACHE_HOME: join(home, "cache"),
 		XDG_DATA_HOME: join(home, "data"),
@@ -55,7 +56,35 @@ export function isolatedEnvironment(home, tools) {
 		JITI_FS_CACHE: "0",
 		npm_config_cache: join(home, "npm-cache"),
 		npm_config_userconfig: join(home, ".npmrc"),
+		...(process.platform === "android" ? {
+			PREFIX: process.env.PREFIX,
+			LD_PRELOAD: process.env.LD_PRELOAD,
+			npm_config_script_shell: join(dirname(tools.node), "bash"),
+		} : {}),
 	};
+}
+
+export function prepareTermuxCompiler(source, tools, env) {
+	// tsgo has no Android package; its pinned Linux binary is statically linked.
+	const name = `@typescript/native-preview-linux-${process.arch}`;
+	const key = `node_modules/${name}`;
+	const locked = JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8")).packages[key];
+	if (!locked?.version || !locked.integrity) throw new Error(`Missing locked compiler: ${name}`);
+	const directory = join(source, "node_modules/.termux-compiler");
+	mkdirSync(directory, { recursive: true });
+	const optionalDependencies = { [name]: locked.version };
+	writeFileSync(join(directory, "package.json"), JSON.stringify({ private: true, optionalDependencies }));
+	writeFileSync(join(directory, "package-lock.json"), JSON.stringify({
+		lockfileVersion: 3, requires: true,
+		packages: { "": { optionalDependencies }, [key]: locked },
+	}));
+	run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--os=linux", "--include=optional", "--no-audit", "--no-fund"], {
+		cwd: directory, env,
+	});
+	const binary = join(directory, key, "lib/tsgo");
+	const version = run(binary, ["--version"], { env, stdio: "pipe" });
+	if (version !== `Version ${locked.version}`) throw new Error(`Unexpected compiler version: ${version}`);
+	replaceSymlink(binary, join(source, "node_modules/.bin/tsgo"));
 }
 
 export function releaseIdentity(receipt) {
@@ -386,6 +415,7 @@ export async function main(args = process.argv.slice(2)) {
 			writeFileSync(join(directory, "source.commit"), `${commit}\n`);
 			run("tmux", ["-V"], { env }); // Missing tmux must fail, not silently skip the acceptance tests.
 			run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: source, env });
+			if (process.platform === "android") prepareTermuxCompiler(source, tools, env);
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
 			const packages = getPublicWorkspacePackages(join(source, "packages"));
 			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { npm: tools.npm, env });

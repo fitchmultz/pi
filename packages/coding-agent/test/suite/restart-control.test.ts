@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage, type SystemMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -135,7 +135,8 @@ describe("native restart control at session boundaries", () => {
 		// Fewer than 104 characters, but too many UTF-8 bytes for a Unix socket.
 		{ name: "multibyte", component: "é".repeat(40), keepTemporary: false },
 	])("starts, accepts restart and cleans up with a $name TMPDIR", async ({ component, keepTemporary }) => {
-		const root = mkdtempSync("/tmp/pi-socket-test-");
+		const shortTmp = process.platform === "android" ? resolve(dirname(process.execPath), "../tmp") : "/tmp";
+		const root = mkdtempSync(join(shortTmp, "pi-socket-test-"));
 		directories.push(root);
 		const temporary = join(root, component);
 		mkdirSync(temporary);
