@@ -131,6 +131,9 @@ function mergeHeaders(
 
 /** Configured pi-ai Models collection used by coding-agent and SDK consumers. */
 export class ModelRuntime implements Models {
+	/** Feature detection for extensions that also run on hosts without credential isolation. */
+	static readonly supportsIgnoreStoredCredentials = true;
+
 	private readonly models: MutableModels;
 	private readonly credentials: RuntimeCredentials;
 	private readonly defaultBuiltins: ReadonlyMap<string, Provider>;
@@ -220,7 +223,17 @@ export class ModelRuntime implements Models {
 		// a provider/store continuation releases its file lock. Keep native auth unchanged.
 		this.models = createModels({
 			credentials: {
-				read: (id, options) => this.checkpointActivity.run(() => credentials.read(id, options)),
+				read: (id, options) =>
+					this.checkpointActivity.run(async () => {
+						options?.signal?.throwIfAborted();
+						if (
+							this.extensionProviders.get(id)?.ignoreStoredCredentials === true &&
+							!credentials.hasRuntimeApiKey(id)
+						) {
+							return undefined;
+						}
+						return credentials.read(id, options);
+					}),
 				list: (options) => this.checkpointActivity.run(() => credentials.list(options)),
 				modify: (id, fn, options) => {
 					let callbackFailure: { error: unknown } | undefined;
@@ -695,7 +708,12 @@ export class ModelRuntime implements Models {
 	getProviderAuthStatus(providerId: string): AuthStatus {
 		if (this.snapshot.authErrors.has(providerId)) return { configured: false };
 		if (this.credentials.hasRuntimeApiKey(providerId)) return { configured: true, source: "runtime" };
-		if (this.snapshot.storedProviders.has(providerId)) return { configured: true, source: "stored" };
+		if (
+			this.snapshot.storedProviders.has(providerId) &&
+			this.extensionProviders.get(providerId)?.ignoreStoredCredentials !== true
+		) {
+			return { configured: true, source: "stored" };
+		}
 		const configured = configuredRequestAuthStatus(
 			this.config.getProvider(providerId),
 			this.extensionProviders.get(providerId),
