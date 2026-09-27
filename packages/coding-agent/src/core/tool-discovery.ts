@@ -132,7 +132,6 @@ export function createDiscoverToolsDefinition(options: {
 		promptSnippet:
 			"Discover optional capabilities before substituting a less suitable tool or declaring them unavailable",
 		parameters: discoveryParams,
-		executionMode: "sequential",
 		async execute(_id, params, signal) {
 			signal?.throwIfAborted();
 			const groups = options.getGroups();
