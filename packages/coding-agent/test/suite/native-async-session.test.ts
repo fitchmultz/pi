@@ -14,6 +14,7 @@ import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { convertResponsesMessages } from "../../../ai/src/api/openai-responses-shared.ts";
 import { transformMessages } from "../../../ai/src/api/transform-messages.ts";
+import type { ContextWindowHook } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness } from "./harness.ts";
 
@@ -103,59 +104,229 @@ it("finalizes synchronous window edits in registration order without rewriting h
 	}
 });
 
-it("validates a final-window edit batch before publishing any of it", async () => {
-	const directory = mkdtempSync(join(tmpdir(), "pi-native-window-hook-failure-"));
+it("persists window metadata before the first in-run replacement request without rewriting history", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "pi-native-window-metadata-"));
+	const manager = SessionManager.create(directory, directory);
+	let savedPrefix = "";
+	let metadataId = "";
 	const harness = await createHarness({
-		sessionManager: SessionManager.create(directory, directory),
+		sessionManager: manager,
+		settings: { compaction: { enabled: false }, retry: { enabled: false } },
+		tools: [
+			{
+				name: "reset",
+				label: "Reset",
+				description: "Start a fresh context",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [], details: undefined, newContext: { handoff: "continue" } }),
+			},
+		],
 		extensionFactories: [
 			(pi) => {
-				pi.registerContextWindowHook((event) => [
-					{
-						type: "context_edit",
-						targetId: event.contextEntries.find((entry) =>
-							entry.messages.some((message) => message.role === "toolResult"),
-						)!.sourceEntry.id,
-						replacement: { content: "accepted excerpt" },
-					},
-				]);
-				pi.registerContextWindowHook((event) => {
-					const targetId = event.contextEntries.find((entry) =>
-						entry.messages.some((message) => message.role === "toolResult"),
-					)!.sourceEntry.id;
-					return [targetId, "missing"].map((id) => ({
-						type: "context_edit",
-						targetId: id,
-						replacement: { content: "excerpt" },
-					}));
+				pi.registerContextWindowHook(() => {
+					savedPrefix = readFileSync(manager.getSessionFile()!, "utf8");
+					return [
+						{
+							type: "custom_message",
+							customType: "window-metadata",
+							content: "current metadata",
+							display: false,
+							details: { revision: 1 },
+						},
+					];
+				});
+				pi.registerContextWindowHook((event, ctx) => {
+					const metadata = event.contextEntries.find((entry) => entry.sourceEntry.type === "custom_message")!;
+					expect(metadata.messages).toMatchObject([{ role: "custom", content: "current metadata" }]);
+					metadataId = metadata.sourceEntry.id;
+					expect(ctx.sessionManager.getLeafId()).toBe(metadataId);
+					return [{ type: "context_edit", targetId: metadataId, replacement: { content: "final metadata" } }];
 				});
 			},
 		],
 	});
+	harness.setResponses([
+		fauxAssistantMessage([{ type: "toolCall", id: "reset", name: "reset", arguments: {} }], {
+			stopReason: "toolUse",
+		}),
+		(context) => {
+			expect(JSON.stringify(context.messages)).toContain("final metadata");
+			expect(JSON.stringify(context.messages)).not.toContain("old user input");
+			const reopened = SessionManager.open(manager.getSessionFile()!);
+			expect(reopened.getEntry(metadataId)).toMatchObject({
+				type: "custom_message",
+				content: "current metadata",
+				display: false,
+				details: { revision: 1 },
+			});
+			expect(JSON.stringify(reopened.buildSessionProjection().messages)).toContain("final metadata");
+			expect(readFileSync(manager.getSessionFile()!, "utf8").startsWith(savedPrefix)).toBe(true);
+			return fauxAssistantMessage("done");
+		},
+	]);
 	try {
-		harness.sessionManager.appendMessage(assistant());
-		harness.sessionManager.appendMessage({
-			role: "toolResult",
-			toolCallId: toolCall().id,
-			toolName: "work",
-			content: result.content,
-			isError: false,
-			timestamp: 1,
-		});
-		harness.session.refreshContext();
-		const original = harness.sessionManager.getBranch();
-		expect(() => harness.session.newContext()).toThrow();
-		expect(harness.sessionManager.getBranch()).toEqual(original);
-		expect(harness.eventsOfType("entry_appended")).toHaveLength(0);
-		expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionProjection().messages);
-		expect(harness.session.messages).toEqual(
-			SessionManager.open(harness.sessionManager.getSessionFile()!).buildSessionProjection().messages,
+		await harness.session.prompt("old user input");
+		expect(
+			harness.session.messages.filter((message) => message.role === "assistant").at(-1)?.errorMessage,
+		).toBeUndefined();
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
+		expect(harness.eventsOfType("entry_appended").map(({ entry }) => entry.type)).toEqual([
+			"custom_message",
+			"context_edit",
+		]);
+		expect(SessionManager.open(manager.getSessionFile()!).buildSessionProjection()).toEqual(
+			manager.buildSessionProjection(),
 		);
-		expect(harness.eventsOfType("context_window_started")).toHaveLength(0);
 	} finally {
 		harness.cleanup();
 		rmSync(directory, { recursive: true, force: true });
 	}
 });
+
+// PR #140: window metadata must not delay input queued by agent_end until a second replacement request.
+it.each(["agent_end", "overflow"] as const)(
+	"delivers queued follow-up in the first metadata-bearing window request after %s",
+	async (boundary) => {
+		let queued = false;
+		const requests: Message[][] = [];
+		const harness = await createHarness({
+			settings: { compaction: { enabled: boundary === "overflow" }, retry: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.registerContextWindowHook(() => [
+						{ type: "custom_message", customType: "metadata", content: "window metadata", display: false },
+					]);
+					pi.on("agent_end", (_event, ctx) => {
+						if (queued) return;
+						queued = true;
+						expect(ctx.isIdle()).toBe(false);
+						if (boundary === "agent_end") ctx.newContext({ handoff: "continue" });
+						pi.sendUserMessage("queued follow-up", { deliverAs: "followUp" });
+					});
+					pi.on("session_before_auto_compact", () => ({ newContext: { handoff: "recover overflow" } }));
+				},
+			],
+		});
+		harness.setResponses([
+			boundary === "overflow"
+				? fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: "prompt is too long: 300000 tokens > 128000 maximum",
+					})
+				: fauxAssistantMessage("finished old task"),
+			...[1, 2].map(() => (context: { messages: Message[] }) => {
+				requests.push(structuredClone(context.messages));
+				return fauxAssistantMessage("continued");
+			}),
+		]);
+		try {
+			await harness.session.prompt("old input");
+			expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
+			expect(JSON.stringify(requests[0])).toContain("window metadata");
+			expect(requests[0]).toContainEqual(
+				expect.objectContaining({
+					role: "user",
+					content: [{ type: "text", text: "queued follow-up" }],
+				}),
+			);
+			expect(JSON.stringify(requests[0])).not.toContain("old input");
+			expect(requests).toHaveLength(1);
+			expect(harness.session.agent.hasQueuedMessages()).toBe(false);
+		} finally {
+			harness.cleanup();
+		}
+	},
+);
+
+it.each(["invalid edit", "unsupported draft", "invalid message", "invalid block", "throw", "promise"] as const)(
+	"rejects %s before publishing any final-window drafts",
+	async (failure) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-native-window-hook-failure-"));
+		const harness = await createHarness({
+			sessionManager: SessionManager.create(directory, directory),
+			extensionFactories: [
+				(pi) => {
+					pi.registerContextWindowHook(() => [
+						{
+							type: "custom_message",
+							customType: "window-metadata",
+							content: "unpublished",
+							display: false,
+						},
+					]);
+					pi.registerContextWindowHook((event) => [
+						{
+							type: "context_edit",
+							targetId: event.contextEntries.find((entry) =>
+								entry.messages.some((message) => message.role === "toolResult"),
+							)!.sourceEntry.id,
+							replacement: { content: "accepted excerpt" },
+						},
+					]);
+					pi.registerContextWindowHook(((event) => {
+						if (failure === "throw") throw new Error("hook failed");
+						if (failure === "promise") return Promise.resolve([]);
+						if (failure === "unsupported draft") return [{ type: "custom", customType: "unsupported" }];
+						if (failure === "invalid message" || failure === "invalid block")
+							return [
+								{
+									type: "custom_message",
+									customType: "bad",
+									content: failure === "invalid message" ? 42 : [{ type: "toolCall" }],
+									display: false,
+								},
+							];
+						const targetId = event.contextEntries.find((entry) =>
+							entry.messages.some((message) => message.role === "toolResult"),
+						)!.sourceEntry.id;
+						return [targetId, "missing"].map((id) => ({
+							type: "context_edit",
+							targetId: id,
+							replacement: { content: "excerpt" },
+						}));
+					}) as ContextWindowHook);
+				},
+			],
+		});
+		try {
+			harness.sessionManager.appendMessage(assistant());
+			harness.sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: toolCall().id,
+				toolName: "work",
+				content: result.content,
+				isError: false,
+				timestamp: 1,
+			});
+			harness.session.refreshContext();
+			const original = harness.sessionManager.getBranch();
+			const saved = readFileSync(harness.sessionManager.getSessionFile()!, "utf8");
+			expect(() => harness.session.newContext()).toThrow(
+				failure === "invalid edit"
+					? "Entry missing not found"
+					: failure === "throw"
+						? "hook failed"
+						: failure === "promise"
+							? "must return synchronously"
+							: failure === "invalid message" || failure === "invalid block"
+								? "Invalid context window custom_message draft"
+								: "may only return context_edit or custom_message drafts",
+			);
+			expect(readFileSync(harness.sessionManager.getSessionFile()!, "utf8")).toBe(saved);
+			expect(harness.sessionManager.getBranch()).toEqual(original);
+			expect(harness.eventsOfType("entry_appended")).toHaveLength(0);
+			expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionProjection().messages);
+			expect(harness.session.messages).toEqual(
+				SessionManager.open(harness.sessionManager.getSessionFile()!).buildSessionProjection().messages,
+			);
+			expect(harness.eventsOfType("context_window_started")).toHaveLength(0);
+		} finally {
+			harness.cleanup();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	},
+);
 
 describe("native journal projection", () => {
 	it.each([false, true])(

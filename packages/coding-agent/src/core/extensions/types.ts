@@ -1059,11 +1059,11 @@ export interface ContextWindowHookEvent {
 	pendingMessages: AgentMessage[];
 }
 
-/** Synchronous content edits; originals remain recoverable from the session journal. */
+/** Synchronous durable messages and content edits; originals remain in the session journal. */
 export type ContextWindowHook = (
 	event: ContextWindowHookEvent,
 	ctx: ExtensionContext,
-) => ContextEditEntryDraft[] | undefined;
+) => (ContextEditEntryDraft | CustomMessageEntryDraft)[] | undefined;
 
 /** Fired when user executes a bash command via ! or !! prefix */
 export interface UserBashEvent {
@@ -1647,7 +1647,7 @@ export interface ExtensionAPI {
 	 */
 	registerBashCwdHook(hook: BashCwdHook): void;
 
-	/** Shape the final fresh window synchronously using validated context edits. Errors stop rollover. */
+	/** Shape the final fresh window with context edits or durable custom messages. Errors stop rollover. */
 	registerContextWindowHook(hook: ContextWindowHook): void;
 
 	// =========================================================================
