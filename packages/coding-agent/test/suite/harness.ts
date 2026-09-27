@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type {
+	Api,
 	FauxModelDefinition,
 	FauxProviderRegistration,
 	FauxResponseStep,
@@ -61,6 +62,9 @@ export function getAssistantTexts(harness: Harness): string[] {
 }
 
 export interface HarnessOptions {
+	/** Exercise native API eligibility using the scripted offline transport. */
+	api?: string;
+	compat?: Model<Api>["compat"];
 	models?: FauxModelDefinition[];
 	settings?: Partial<Settings>;
 	/** Replaces the in-memory manager built from `settings`, e.g. a file-backed one with project trust. */
@@ -104,8 +108,12 @@ function createTempDir(): string {
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const tempDir = createTempDir();
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
+		api: options.api,
 		models: options.models,
 	});
+	for (const model of fauxProvider.models) {
+		if (options.compat) (model as Model<Api>).compat = options.compat;
+	}
 	fauxProvider.setResponses([]);
 	const model = fauxProvider.getModel();
 	const toolMap = options.tools ? Object.fromEntries(options.tools.map((tool) => [tool.name, tool])) : undefined;
@@ -136,6 +144,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 				reasoning: registeredModel.reasoning,
 				input: registeredModel.input,
 				inputLimits: registeredModel.inputLimits,
+				compat: registeredModel.compat,
 				cost: registeredModel.cost,
 				contextWindow: registeredModel.contextWindow,
 				maxTokens: registeredModel.maxTokens,

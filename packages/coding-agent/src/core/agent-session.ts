@@ -175,11 +175,12 @@ import {
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
 import {
+	type AvailableDiscoveryGroup,
 	availableDiscoveryGroups,
 	createDiscoverToolsDefinition,
 	DISCOVER_TOOLS_NAME,
 	discoverySectionTools,
-	type ToolDiscoveryGroup,
+	supportsToolDiscovery,
 } from "./tool-discovery.ts";
 import type { BackgroundCommandToolDetails } from "./tools/background-command.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
@@ -602,7 +603,7 @@ export class AgentSession {
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
-	private _toolDiscoveryGroups: ToolDiscoveryGroup[] = [];
+	private _toolDiscoveryGroups: AvailableDiscoveryGroup[] = [];
 
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
 	/** Prompt options after before_agent_start mutations for the active run. */
@@ -2044,6 +2045,7 @@ export class AgentSession {
 			description: definition.description,
 			parameters: definition.parameters,
 			promptGuidelines: definition.promptGuidelines,
+			discovery: definition.discovery,
 			sourceInfo,
 		}));
 	}
@@ -3409,8 +3411,12 @@ export class AgentSession {
 		previousModel: Model<any> | undefined,
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
+		if (
+			supportsToolDiscovery(previousModel) !== supportsToolDiscovery(nextModel) &&
+			[...this._toolDefinitions.values()].some(({ definition }) => definition.discovery)
+		)
+			this._refreshToolRegistry();
 		if (modelsAreEqual(previousModel, nextModel)) return;
-		if (this.settingsManager.getToolDiscoverySettings().enabled) this._refreshToolRegistry();
 		await this._extensionRunner.emit({
 			type: "model_select",
 			model: nextModel,
@@ -4411,6 +4417,11 @@ export class AgentSession {
 		}
 
 		this.agent.state.model = refreshedModel;
+		if (
+			supportsToolDiscovery(currentModel) !== supportsToolDiscovery(refreshedModel) &&
+			[...this._toolDefinitions.values()].some(({ definition }) => definition.discovery)
+		)
+			this._refreshToolRegistry();
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -4600,22 +4611,17 @@ export class AgentSession {
 			});
 		}
 		const previousDiscoveryGroups = this._toolDiscoveryGroups;
-		const discoverySettings = this.settingsManager.getToolDiscoverySettings();
+		const groups = availableDiscoveryGroups(
+			[...definitionRegistry.values()]
+				.filter(({ sourceInfo }) => sourceInfo.source !== "builtin")
+				.map(({ definition }) => definition),
+		);
 		// Explicit host allowlists remain explicit. Excluding the loader must never strand capabilities.
 		const useDiscovery =
-			discoverySettings.enabled === true &&
 			this._allowedToolNames === undefined &&
 			isAllowedTool(DISCOVER_TOOLS_NAME) &&
-			!!this.model &&
-			(discoverySettings.providers?.includes(this.model.provider) ?? false);
-		this._toolDiscoveryGroups = useDiscovery
-			? availableDiscoveryGroups(
-					discoverySettings,
-					[...definitionRegistry.values()]
-						.filter(({ sourceInfo }) => sourceInfo.source !== "builtin")
-						.map(({ definition }) => toToolReference(definition)),
-				)
-			: [];
+			supportsToolDiscovery(this.model);
+		this._toolDiscoveryGroups = useDiscovery ? groups : [];
 		if (this._toolDiscoveryGroups.length) {
 			if (definitionRegistry.has(toolKey(DISCOVER_TOOLS_NAME)))
 				throw new Error(`Tool discovery conflicts with registered ${DISCOVER_TOOLS_NAME}`);
@@ -4696,7 +4702,7 @@ export class AgentSession {
 					previousRegistryNames.size > 0 &&
 					(previousActiveKeys.size === 0 ||
 						this._toolDiscoveryGroups.some((group) =>
-							(group.defaultTools ?? group.tools).some(
+							group.defaultTools.some(
 								(tool) => previousRegistryNames.has(toolKey(tool)) && !previousActiveKeys.has(toolKey(tool)),
 							),
 						));
@@ -4704,12 +4710,13 @@ export class AgentSession {
 					nextActiveToolNames.push(toToolReference(tool));
 			}
 		}
-		// A rollback or switch to an unevaluated provider restores the ordinary front doors,
+		// Removing metadata or switching to an unsupported model restores the ordinary front doors,
 		// not advanced tools that the integration itself normally keeps inactive.
 		if (previousActiveKeys.has(toolKey(DISCOVER_TOOLS_NAME))) {
 			for (const group of previousDiscoveryGroups) {
-				if (!this._toolDiscoveryGroups.some((current) => current.name === group.name))
-					nextActiveToolNames.push(...(group.defaultTools ?? group.tools));
+				for (const tool of group.defaultTools) {
+					if (!deferredKeys.has(toolKey(tool)) && isAllowedTool(tool)) nextActiveToolNames.push(tool);
+				}
 			}
 		}
 

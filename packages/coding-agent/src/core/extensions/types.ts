@@ -482,6 +482,20 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	isError: boolean;
 }
 
+/** Extension-owned capability description shared by its registered tools. */
+export interface ToolDiscoveryGroup {
+	name: string;
+	description: string;
+	/** Custom prompt sections rendered when any permitted group member is selected. */
+	sections?: readonly string[];
+}
+
+export interface ToolDiscovery {
+	group: ToolDiscoveryGroup;
+	/** Entry tools activate on discovery; advanced tools remain behind the extension's own loader. */
+	role: "entry" | "advanced";
+}
+
 /**
  * Tool definition for registerTool().
  */
@@ -494,6 +508,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	namespace?: string;
 	/** Set by registerToolSearch. */
 	toolSearch?: true;
+	/** Optional extension-owned discovery metadata; ordinary exposure on unsupported hosts/models. */
+	discovery?: ToolDiscovery;
 	/** Human-readable label for UI */
 	label: string;
 	/** Description for LLM */
@@ -2017,7 +2033,7 @@ export type GetActiveToolsHandler = () => string[];
 /** Tool info with name, description, parameter schema, prompt guidelines, and source metadata. */
 export type ToolInfo = Pick<
 	ToolDefinition,
-	"name" | "namespace" | "toolSearch" | "description" | "parameters" | "promptGuidelines"
+	"name" | "namespace" | "toolSearch" | "discovery" | "description" | "parameters" | "promptGuidelines"
 > & {
 	/** Registered public ID accepted by setActiveTools; namespaced IDs are opaque. */
 	id: string;

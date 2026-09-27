@@ -1,47 +1,47 @@
 import {
+	type Api,
 	fauxAssistantMessage,
 	fauxToolCall,
 	getCurrentSystemPrompt,
 	getCurrentTools,
+	type Model,
 	type ToolReference,
 	toolId,
 	toToolDeclaration,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
+import type { ExtensionAPI, ToolDefinition } from "../../src/core/extensions/types.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { buildSystemPrompt } from "../../src/core/system-prompt.ts";
-import { discoverySectionTools, validateToolDiscoverySettings } from "../../src/core/tool-discovery.ts";
+import { discoverySectionTools } from "../../src/core/tool-discovery.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const lookup: ToolReference = { namespace: "browser", name: "lookup" };
-const settings = {
-	enabled: true,
-	providers: ["faux"],
-	groups: [
-		{
-			name: "browser",
-			description: "Browse and verify web pages",
-			tools: [lookup, "advanced"],
-			defaultTools: [lookup],
-			sections: ["browser_manual"],
-		},
-		{ name: "desktop", description: "Inspect native applications", tools: ["desktop"] },
-	],
-};
+const browserGroup = {
+	name: "browser",
+	description: "Browse and verify web pages",
+	sections: ["browser_manual"],
+} as const;
+const desktopGroup = { name: "desktop", description: "Inspect native applications" } as const;
 const manual = `Browser safety: observe before mutation. Preserve user-owned sessions. ${"Full instructions. ".repeat(100)}`;
 const harnesses: Harness[] = [];
 afterEach(() => {
 	for (const harness of harnesses.splice(0)) harness.cleanup();
 });
 
-function registerTools(pi: ExtensionAPI, execute = () => {}) {
+function registerTools(pi: ExtensionAPI, execute = () => {}, discovery = true) {
 	for (const reference of [lookup, { name: "advanced" }, { name: "desktop" }]) {
 		pi.registerTool({
 			...reference,
+			discovery: discovery
+				? {
+						group: reference.name === "desktop" ? desktopGroup : browserGroup,
+						role: reference.name === "advanced" ? "advanced" : "entry",
+					}
+				: undefined,
 			label: reference.name,
 			description: `Full ${reference.name} schema and documentation`,
 			promptGuidelines: [`${reference.name}: do not bypass safeguards`],
@@ -53,7 +53,8 @@ function registerTools(pi: ExtensionAPI, execute = () => {}) {
 		});
 	}
 	pi.on("before_agent_start", (event) => {
-		event.systemPromptOptions.sections.browser_manual = manual;
+		if (event.systemPromptOptions.sectionTools.browser_manual || event.prompt.includes("browser"))
+			event.systemPromptOptions.sections.browser_manual = manual;
 		event.systemPromptOptions.sections.always_on_safety = "Always-on policy remains enabled";
 	});
 }
@@ -61,7 +62,8 @@ function registerTools(pi: ExtensionAPI, execute = () => {}) {
 async function setup(options: Parameters<typeof createHarness>[0] = {}) {
 	const harness = await createHarness({
 		tools: [],
-		settings: { toolDiscovery: settings },
+		api: "openai-responses",
+		compat: { supportsAdditionalTools: true, supportsMidConvoSystemMessages: true },
 		extensionFactories: [registerTools],
 		...options,
 	});
@@ -116,14 +118,18 @@ it("delivers complete schemas, guidelines, and scoped sections before the first 
 			expect(getCurrentSystemPrompt(context.messages)).toContain(manual);
 			expect(getCurrentSystemPrompt(context.messages)).toContain("lookup: do not bypass safeguards");
 			const tools = getCurrentTools(context.messages);
+			expect(tools.every((tool) => !("discovery" in tool))).toBe(true);
 			expect(tools.map((tool) => tool.description)).toEqual([
 				expect.stringContaining("Enable optional integrations"),
 				"Full lookup schema and documentation",
 			]);
 			expect(tools[1].parameters).toEqual(Type.Object({ key: Type.String() }));
-			return fauxAssistantMessage(fauxToolCall(tools[1].name, { key: "page" }, { id: "page-lookup" }), {
-				stopReason: "toolUse",
-			});
+			return fauxAssistantMessage(
+				{ ...fauxToolCall(tools[1].name, { key: "page" }, { id: "page-lookup" }), namespace: tools[1].namespace },
+				{
+					stopReason: "toolUse",
+				},
+			);
 		},
 		(context) => {
 			expect(
@@ -132,7 +138,7 @@ it("delivers complete schemas, guidelines, and scoped sections before the first 
 			return fauxAssistantMessage("Verified page");
 		},
 	]);
-	await harness.session.prompt("Verify this web page");
+	await harness.session.prompt("Find the evidence needed to resolve this question");
 	expect(
 		harness.session.messages
 			.filter((message) => message.role === "assistant" && message.stopReason === "error")
@@ -168,6 +174,7 @@ it("keeps exclusions binding, omits unavailable catalog groups, and never widens
 	const harness = await setup({ excludedToolNames: [lookup] });
 	const discovery = harness.session.getToolDefinition("discover_tools")!;
 	expect(discovery.description).not.toContain("browser: Browse");
+	expect(harness.session.getActiveToolNames()).toContain("advanced");
 	harness.setResponses([
 		fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), { stopReason: "toolUse" }),
 		fauxAssistantMessage("Unavailable"),
@@ -187,22 +194,55 @@ it.each([{ allowedToolNames: [lookup] }, { allowedToolNames: [] }, { excludedToo
 	},
 );
 
-it.each([false, true])(
-	"leaves the original behavior intact when disabled or on an unevaluated provider (%s)",
-	async (unevaluated) => {
-		const harness = await setup({
-			settings: { toolDiscovery: { ...settings, enabled: unevaluated, providers: ["other-provider"] } },
-		});
-		expect(harness.session.getActiveToolNames()).toEqual([toolId(lookup), "advanced", "desktop"]);
-		harness.setResponses([
-			(context) => {
-				expect(getCurrentSystemPrompt(context.messages)).toContain(manual);
-				return fauxAssistantMessage("Original behavior");
-			},
-		]);
-		await harness.session.prompt("Continue");
-	},
-);
+it.each<{ api: string; compat?: Model<Api>["compat"] }>([
+	{ api: "faux" },
+	{ api: "cursor-sdk", compat: { supportsAdditionalTools: true, supportsMidConvoSystemMessages: true } },
+	{ api: "openai-responses", compat: { supportsAdditionalTools: true } },
+	{ api: "openai-responses", compat: { supportsMidConvoSystemMessages: true } },
+	{ api: "anthropic-messages", compat: { supportsMidConvoToolChanges: true } },
+	{ api: "anthropic-messages", compat: { supportsMidConvoSystemMessages: true } },
+	{ api: "openai-completions", compat: { supportsMidConvoToolAdditions: true } },
+	{ api: "openai-completions", compat: { supportsMidConvoSystemMessages: true } },
+])("keeps ordinary exposure without both native capabilities: %j", async (options) => {
+	const harness = await setup({ ...options, compat: options.compat });
+	expect(harness.session.getActiveToolNames()).toEqual([toolId(lookup), "advanced", "desktop"]);
+	harness.setResponses([
+		(context) => {
+			expect(getCurrentSystemPrompt(context.messages)).toContain(manual);
+			return fauxAssistantMessage("Original behavior");
+		},
+	]);
+	await harness.session.prompt("Use browser");
+	expect(
+		harness.session.messages.filter((message) => message.role === "assistant" && message.stopReason === "error"),
+	).toEqual([]);
+});
+
+it.each<{ api: string; compat: Model<Api>["compat"] }>([
+	{ api: "openai-responses", compat: { supportsToolSearch: true, supportsMidConvoSystemMessages: true } },
+	{ api: "openai-codex-responses", compat: { supportsAdditionalTools: true, supportsMidConvoSystemMessages: true } },
+	{ api: "azure-openai-responses", compat: { supportsAdditionalTools: true, supportsMidConvoSystemMessages: true } },
+	{ api: "anthropic-messages", compat: { supportsMidConvoToolChanges: true, supportsMidConvoSystemMessages: true } },
+	{ api: "openai-completions", compat: { supportsMidConvoToolAdditions: true, supportsMidConvoSystemMessages: true } },
+])("discovers through capable native API contracts: %j", async (options) => {
+	const harness = await setup(options);
+	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools"]);
+	harness.setResponses([
+		fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), { stopReason: "toolUse" }),
+		(context) => {
+			expect(getCurrentSystemPrompt(context.messages)).toContain(manual);
+			expect(getCurrentTools(context.messages).map((tool) => tool.description)).toEqual([
+				expect.stringContaining("Enable optional integrations"),
+				"Full lookup schema and documentation",
+			]);
+			return fauxAssistantMessage("Loaded");
+		},
+	]);
+	await harness.session.prompt("Find evidence");
+	expect(
+		harness.session.messages.filter((message) => message.role === "assistant" && message.stopReason === "error"),
+	).toEqual([]);
+});
 
 it("does not reactivate deferred tools on registry refresh or reload, but keeps new unrelated tools", async () => {
 	let api!: ExtensionAPI;
@@ -226,6 +266,120 @@ it("does not reactivate deferred tools on registry refresh or reload, but keeps 
 	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools", "utility"]);
 	await harness.session.reload();
 	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools", "utility"]);
+});
+
+it("automatically catalogs late registrations and enables only actual entry tools without configuration", async () => {
+	let api!: ExtensionAPI;
+	const harness = await setup({
+		extensionFactories: [
+			(pi) => {
+				api = pi;
+				registerTools(pi);
+			},
+		],
+	});
+	const base = harness.session.getToolDefinition(lookup)!;
+	api.registerTool({ ...base, name: "new_entry" });
+	api.registerTool({ ...base, name: "new_advanced", discovery: { group: browserGroup, role: "advanced" } });
+	api.registerTool({
+		...base,
+		name: "new_service",
+		discovery: { group: { name: "new_service", description: "A newly installed service" }, role: "entry" },
+	});
+	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools"]);
+	expect(harness.session.getToolDefinition("discover_tools")!.description).toContain(
+		"new_service: A newly installed service",
+	);
+	harness.setResponses([
+		fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser", "new_service"] }), {
+			stopReason: "toolUse",
+		}),
+		fauxAssistantMessage("Ready"),
+	]);
+	await harness.session.prompt("Find evidence");
+	expect(harness.session.getActiveToolReferences()).toEqual([
+		{ name: "discover_tools" },
+		lookup,
+		{ namespace: "browser", name: "new_entry" },
+		{ namespace: "browser", name: "new_service" },
+	]);
+	expect(harness.session.getAllTools().find((tool) => tool.id === toolId(lookup))?.discovery).toEqual({
+		group: browserGroup,
+		role: "entry",
+	});
+});
+
+it("preserves exact namespaces when only one same-named member is excluded", async () => {
+	const otherLookup = { namespace: "other", name: "lookup" };
+	const harness = await setup({
+		excludedToolNames: [lookup],
+		extensionFactories: [
+			(pi) => {
+				registerTools(pi);
+				pi.registerTool({
+					...otherLookup,
+					label: "Other lookup",
+					description: "Other lookup",
+					parameters: Type.Object({}),
+					discovery: { group: browserGroup, role: "entry" },
+					async execute() {
+						return { content: [], details: {} };
+					},
+				});
+			},
+		],
+	});
+	harness.setResponses([
+		fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Ready"),
+	]);
+	await harness.session.prompt("Find evidence");
+	expect(harness.session.getActiveToolReferences()).toEqual([{ name: "discover_tools" }, otherLookup]);
+	expect(harness.session.getToolDefinition(lookup)).toBeUndefined();
+});
+
+it("derives metadata from final permitted definitions rather than shadowed or excluded registrations", async () => {
+	const harness = await setup({
+		excludedToolNames: ["excluded"],
+		extensionFactories: [
+			registerTools,
+			(pi) => {
+				for (const reference of [lookup, { name: "excluded" }])
+					pi.registerTool({
+						...reference,
+						label: "Unused",
+						description: "Unused",
+						parameters: Type.Object({}),
+						discovery: {
+							group: { ...browserGroup, description: "Must not replace the winning descriptor" },
+							role: "entry",
+						},
+						async execute() {
+							return { content: [], details: {} };
+						},
+					});
+			},
+		],
+	});
+	expect(harness.session.getToolDefinition("discover_tools")!.description).toContain(
+		"browser: Browse and verify web pages",
+	);
+	expect(harness.session.getToolDefinition("excluded")).toBeUndefined();
+	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools"]);
+});
+
+it("applies exact checkpoint selection after recovery hooks without widening it", async () => {
+	const harness = await setup({
+		extensionFactories: [
+			(pi) => {
+				registerTools(pi);
+				pi.on("session_start", () => pi.setActiveToolReferences([...pi.getActiveToolReferences(), lookup]));
+			},
+		],
+	});
+	harness.session.restoreCheckpointTools([]);
+	await harness.session.bindExtensions({});
+	expect(harness.session.getActiveToolNames()).toEqual([]);
 });
 
 it("persists activation through resume, reload, and a fresh context window without rediscovery", async () => {
@@ -294,14 +448,14 @@ it("keeps native MCP search independent of the ordinary integration loader", asy
 	]);
 });
 
-it("restores front-door tools when switching to an unevaluated provider without enabling advanced tools", async () => {
+it("restores front-door tools when switching to an unsupported API without enabling advanced tools", async () => {
 	const harness = await setup();
 	const runtime = harness.session.modelRuntime;
 	runtime.registerProvider("unevaluated", {
-		api: harness.getModel().api,
+		api: "cursor-sdk",
 		apiKey: "faux-key",
 		baseUrl: "http://unused",
-		models: [{ ...harness.getModel(), id: "other" }],
+		models: [{ ...harness.getModel(), api: "cursor-sdk", id: "other" }],
 	});
 	const unevaluatedModel = runtime.getModel("unevaluated", "other")!;
 	await harness.session.setModel(unevaluatedModel);
@@ -312,6 +466,31 @@ it("restores front-door tools when switching to an unevaluated provider without 
 	expect(harness.session.getActiveToolNames()).toEqual([toolId(lookup), "desktop"]);
 });
 
+it.each(["selection", "registration"] as const)(
+	"rechecks current capabilities when the same model changes via %s",
+	async (change) => {
+		let api!: ExtensionAPI;
+		const harness = await setup({
+			extensionFactories: [
+				(pi) => {
+					api = pi;
+					registerTools(pi);
+				},
+			],
+		});
+		const model = { ...harness.getModel(), compat: undefined };
+		if (change === "selection") await harness.session.setModel(model);
+		else
+			api.registerProvider(model.provider, {
+				api: model.api,
+				baseUrl: model.baseUrl,
+				apiKey: "faux-key",
+				models: [model],
+			});
+		expect(harness.session.getActiveToolNames()).toEqual([toolId(lookup), "desktop"]);
+	},
+);
+
 it.each([{ selected: [] }, { selected: ["read"] }, { selected: ["read", toolId(lookup)] }])(
 	"does not widen a deliberate tool selection on provider switch: %j",
 	async ({ selected }) => {
@@ -319,10 +498,10 @@ it.each([{ selected: [] }, { selected: ["read"] }, { selected: ["read", toolId(l
 		const runtime = harness.session.modelRuntime;
 		const originalModel = harness.getModel();
 		runtime.registerProvider("unevaluated", {
-			api: originalModel.api,
+			api: "cursor-sdk",
 			apiKey: "faux-key",
 			baseUrl: "http://unused",
-			models: [{ ...originalModel, id: "other" }],
+			models: [{ ...originalModel, api: "cursor-sdk", id: "other" }],
 		});
 		harness.session.setActiveToolsByName(selected);
 		for (let roundTrip = 0; roundTrip < 2; roundTrip++) {
@@ -334,17 +513,70 @@ it.each([{ selected: [] }, { selected: ["read"] }, { selected: ["read", toolId(l
 	},
 );
 
-it("can roll back via settings and reload without leaving capabilities hidden", async () => {
-	const harness = await setup();
-	// Settings overrides are intentionally cleared by reload; model a persisted setting change.
-	const manager = harness.settingsManager;
-	const storage = SettingsManager.inMemory({ toolDiscovery: { ...settings, enabled: false } });
-	manager.getToolDiscoverySettings = () => storage.getToolDiscoverySettings();
+it("restores ordinary exposure after partial live metadata removal and reload", async () => {
+	let api!: ExtensionAPI;
+	const harness = await setup({
+		extensionFactories: [
+			(pi) => {
+				api = pi;
+				registerTools(pi);
+			},
+		],
+	});
+	const entry = harness.session.getToolDefinition(lookup)!;
+	api.registerTool({ ...entry, name: "second_entry" });
+	api.registerTool({ ...entry, discovery: undefined });
+	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools", toolId(lookup)]);
+	harness.setResponses([
+		fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Ready"),
+	]);
+	await harness.session.prompt("Load the remaining browser entry");
+	expect(harness.session.getActiveToolNames()).toEqual([
+		"discover_tools",
+		toolId(lookup),
+		toolId({ namespace: "browser", name: "second_entry" }),
+	]);
+	api.registerTool({ ...entry, name: "second_entry", discovery: undefined });
+	registerTools(api, undefined, false);
 	await harness.session.reload();
 	expect(harness.session.getActiveToolNames()).toContain(toolId(lookup));
 	expect(harness.session.getActiveToolNames()).toContain("desktop");
 	expect(harness.session.getActiveToolNames()).not.toContain("discover_tools");
 });
+
+it.each(["empty", "loader removed", "excluded", "advanced", "moved"] as const)(
+	"keeps restrictions when entry metadata changes: %s",
+	async (restriction) => {
+		let api!: ExtensionAPI;
+		const harness = await setup({
+			excludedToolNames: restriction === "excluded" ? [lookup] : undefined,
+			extensionFactories: [
+				(pi) => {
+					api = pi;
+					registerTools(pi);
+				},
+			],
+		});
+		const entry = { ...harness.session.getToolDefinition("advanced")!, ...lookup };
+		if (restriction !== "moved")
+			api.registerTool({ ...entry, name: "second_entry", discovery: { group: browserGroup, role: "entry" } });
+		if (restriction === "empty") harness.session.setActiveToolsByName([]);
+		if (restriction === "loader removed") harness.session.setActiveToolsByName(["desktop"]);
+		const before = harness.session.getActiveToolNames();
+		api.registerTool({
+			...entry,
+			discovery:
+				restriction === "advanced"
+					? { group: browserGroup, role: "advanced" }
+					: restriction === "moved"
+						? { group: desktopGroup, role: "entry" }
+						: undefined,
+		});
+		expect(harness.session.getActiveToolNames()).toEqual(before);
+		if (restriction === "excluded") expect(harness.session.getToolDefinition(lookup)).toBeUndefined();
+	},
+);
 
 it("restores each branch's declared selection without inheriting discoveries from another branch", async () => {
 	const harness = await setup();
@@ -388,30 +620,45 @@ it("preserves recovery activation and pending prompt edits when navigating befor
 	expect(harness.session.systemPrompt).toContain(options.appendSystemPrompt);
 });
 
-it.each([false, true])("keeps deselected builtins off when resuming after rollback (removed=%s)", async (removed) => {
-	// PR #139: rollback restores extension exposure, not unselected shell/file tools.
-	const harness = await setup({ tools: undefined });
-	harness.session.setActiveToolsByName(["read", "discover_tools"]);
-	harness.setResponses([fauxAssistantMessage("Read-only work")]);
-	await harness.session.prompt("Use only the selected tools");
-	const { session } = await createAgentSession({
-		sessionManager: harness.sessionManager,
-		settingsManager: SettingsManager.inMemory(removed ? {} : { toolDiscovery: { ...settings, enabled: false } }),
-		modelRuntime: harness.session.modelRuntime,
-		resourceLoader: harness.session.resourceLoader,
-	});
-	try {
-		expect(session.getActiveToolNames()).toEqual(["read", toolId(lookup), "advanced", "desktop"]);
-	} finally {
-		session.dispose();
-	}
-});
+it.each([false, true])(
+	"keeps deselected builtins off when resuming on an unsupported API or without metadata (removed=%s)",
+	async (removed) => {
+		// PR #139: ordinary fallback restores extension exposure, not unselected shell/file tools.
+		let api!: ExtensionAPI;
+		const harness = await setup({
+			tools: undefined,
+			extensionFactories: [
+				(pi) => {
+					api = pi;
+					registerTools(pi);
+				},
+			],
+		});
+		harness.session.setActiveToolsByName(["read", "discover_tools"]);
+		harness.setResponses([fauxAssistantMessage("Read-only work")]);
+		await harness.session.prompt("Use only the selected tools");
+		if (removed) registerTools(api, undefined, false);
+		const { session } = await createAgentSession({
+			sessionManager: harness.sessionManager,
+			settingsManager: SettingsManager.inMemory(),
+			model: removed ? harness.getModel() : { ...harness.getModel(), api: "cursor-sdk" },
+			modelRuntime: harness.session.modelRuntime,
+			resourceLoader: harness.session.resourceLoader,
+		});
+		try {
+			expect(session.getActiveToolNames()).toEqual(["read", toolId(lookup), "advanced", "desktop"]);
+		} finally {
+			session.dispose();
+		}
+	},
+);
 
-it("restores capabilities when reopening a lean session with the setting removed", async () => {
+it("restores capabilities when reopening a lean session on an unsupported API", async () => {
 	const harness = await setup();
 	harness.setResponses([fauxAssistantMessage("Done")]);
 	await harness.session.prompt("No optional tools needed");
 	const { session } = await createAgentSession({
+		model: { ...harness.getModel(), api: "cursor-sdk" },
 		sessionManager: harness.sessionManager,
 		settingsManager: SettingsManager.inMemory(),
 		modelRuntime: harness.session.modelRuntime,
@@ -503,9 +750,12 @@ it("does not bypass an execution guard after discovery", async () => {
 			const tool = getCurrentTools(context.messages).find(
 				(tool) => tool.description === "Full lookup schema and documentation",
 			)!;
-			return fauxAssistantMessage(fauxToolCall(tool.name, { key: "page" }, { id: "guarded" }), {
-				stopReason: "toolUse",
-			});
+			return fauxAssistantMessage(
+				{ ...fauxToolCall(tool.name, { key: "page" }, { id: "guarded" }), namespace: tool.namespace },
+				{
+					stopReason: "toolUse",
+				},
+			);
 		},
 		fauxAssistantMessage("Approval required"),
 	]);
@@ -525,6 +775,7 @@ it("restores a pending native integration call across a fresh window and resume 
 				registerTools(pi);
 				pi.registerTool({
 					name: "desktop",
+					discovery: { group: desktopGroup, role: "entry" },
 					label: "Desktop",
 					description: "Recoverable desktop job",
 					parameters: Type.Object({ key: Type.String() }),
@@ -598,19 +849,6 @@ it("restores a pending native integration call across a fresh window and resume 
 it("never defers ordinary built-in coding tools", async () => {
 	const harness = await setup({
 		tools: undefined,
-		settings: {
-			toolDiscovery: {
-				...settings,
-				groups: [
-					...settings.groups,
-					{
-						name: "bad-coding-group",
-						description: "Not an integration",
-						tools: ["read", "bash", "background_command", "edit", "write"],
-					},
-				],
-			},
-		},
 	});
 	expect(harness.session.getActiveToolNames()).toEqual([
 		"read",
@@ -620,13 +858,18 @@ it("never defers ordinary built-in coding tools", async () => {
 		"write",
 		"discover_tools",
 	]);
-	expect(harness.session.getToolDefinition("discover_tools")!.description).not.toContain("bad-coding-group");
 });
 
 it("handles shared section ownership and prototype-like section names without dropping unrelated text", () => {
 	const sectionTools = discoverySectionTools([
-		{ name: "one", description: "One", tools: [lookup], sections: ["constructor", "shared"] },
-		{ name: "two", description: "Two", tools: ["desktop"], sections: ["shared"] },
+		{ name: "one", description: "One", tools: [lookup], defaultTools: [lookup], sections: ["constructor", "shared"] },
+		{
+			name: "two",
+			description: "Two",
+			tools: [{ name: "desktop" }],
+			defaultTools: [{ name: "desktop" }],
+			sections: ["shared"],
+		},
 	]);
 	const options = {
 		cwd: "/test",
@@ -641,23 +884,55 @@ it("handles shared section ownership and prototype-like section names without dr
 	expect(buildSystemPrompt({ ...options, sectionTools, selectedTools: [lookup] })).toContain("Constructor guidance");
 });
 
-describe("configuration validation", () => {
-	it("requires an explicit provider rollout and rejects ambiguous or unsafe groups", () => {
-		expect(() => validateToolDiscoverySettings({ ...settings, providers: [] })).toThrow("provider IDs");
+describe("registration metadata validation", () => {
+	it.each([
+		{ group: { ...browserGroup, name: "Bad Group" }, role: "entry" },
+		{ group: browserGroup, role: "invalid" },
+		{ group: { ...browserGroup, description: "" }, role: "entry" },
+		{ group: { ...browserGroup, sections: ["bad section"] }, role: "entry" },
+		{ group: { ...browserGroup, sections: ["project_context"] }, role: "entry" },
+		{ group: { ...browserGroup, description: "Conflicting description" }, role: "entry" },
+		{ group: { ...browserGroup, sections: ["different_section"] }, role: "entry" },
+	])("rejects invalid or conflicting metadata without changing the permitted registry: %j", async (discovery) => {
+		let api!: ExtensionAPI;
+		const harness = await setup({
+			extensionFactories: [
+				(pi) => {
+					api = pi;
+					registerTools(pi);
+				},
+			],
+		});
+		const before = harness.session.getAllTools();
 		expect(() =>
-			validateToolDiscoverySettings({ ...settings, groups: [settings.groups[0], settings.groups[0]] }),
-		).toThrow("Duplicate");
-		expect(() =>
-			validateToolDiscoverySettings({ ...settings, groups: [{ ...settings.groups[0], defaultTools: ["missing"] }] }),
-		).toThrow("not a member");
-		expect(() =>
-			validateToolDiscoverySettings({
-				...settings,
-				groups: [{ ...settings.groups[0], sections: ["project_context"] }],
+			api.registerTool({
+				...harness.session.getToolDefinition(lookup)!,
+				name: "invalid",
+				// Untyped extension inputs still require runtime validation.
+				discovery: discovery as ToolDefinition["discovery"],
 			}),
-		).toThrow("core prompt");
+		).toThrow(/Invalid discovery|core prompt|Conflicting/);
+		expect(harness.session.getAllTools()).toEqual(before);
+		expect(harness.session.getActiveToolNames()).toEqual(["discover_tools"]);
+	});
+
+	it("rejects a self-deferred loader", async () => {
+		let api!: ExtensionAPI;
+		const harness = await setup({
+			extensionFactories: [
+				(pi) => {
+					api = pi;
+					registerTools(pi);
+				},
+			],
+		});
 		expect(() =>
-			validateToolDiscoverySettings({ ...settings, groups: [{ ...settings.groups[0], tools: ["discover_tools"] }] }),
+			api.registerTool({
+				...harness.session.getToolDefinition(lookup)!,
+				name: "discover_tools",
+				namespace: undefined,
+			}),
 		).toThrow("defer itself");
+		expect(harness.session.getActiveToolNames()).toEqual(["discover_tools"]);
 	});
 });
