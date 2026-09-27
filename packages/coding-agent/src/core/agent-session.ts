@@ -2267,20 +2267,19 @@ export class AgentSession {
 	/** Restore the active tool loadout declared by the session transcript, if it declares one. */
 	private _restoreToolsFromTranscript(): void {
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
-		if (!current) {
-			// A branch before its first request has no saved activation to inherit.
-			if (this._toolDiscoveryGroups.length) {
-				const deferred = new Set(this._toolDiscoveryGroups.flatMap((group) => group.tools.map(toolKey)));
-				this._setActiveTools(this.getActiveToolReferences().filter((tool) => !deferred.has(toolKey(tool))));
-			}
-			return;
-		}
+		// Without a declaration there is no saved selection to restore. Preserve native
+		// behavior, including lifecycle-hook activations and pending prompt edits.
+		if (!current) return;
 		const rollback =
 			(current.toolsAdded ?? []).some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME)) &&
 			!this._toolRegistry.has(toolKey(DISCOVER_TOOLS_NAME));
 		const toolNames = [
 			...(current.toolsAdded ?? []).map(toToolReference),
-			...(rollback ? this.getActiveToolReferences() : []),
+			...(rollback
+				? this.getActiveToolReferences().filter(
+						(tool) => this._toolDefinitions.get(toolKey(tool))?.sourceInfo.source !== "builtin",
+					)
+				: []),
 		].filter(
 			(tool, index, tools) =>
 				this._toolRegistry.has(this._toolSelectionKey(tool)) &&

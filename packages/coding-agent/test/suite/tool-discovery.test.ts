@@ -346,9 +346,11 @@ it("can roll back via settings and reload without leaving capabilities hidden", 
 	expect(harness.session.getActiveToolNames()).not.toContain("discover_tools");
 });
 
-it("restores the selected branch and does not inherit discoveries when navigating before the first request", async () => {
+it("restores each branch's declared selection without inheriting discoveries from another branch", async () => {
 	const harness = await setup();
-	const root = harness.sessionManager.appendCustomEntry("root-anchor", {});
+	harness.setResponses([fauxAssistantMessage("No integrations needed")]);
+	await harness.session.prompt("Start lean");
+	const root = harness.sessionManager.getLeafId()!;
 	harness.setResponses([
 		fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), { stopReason: "toolUse" }),
 		fauxAssistantMessage("Ready"),
@@ -359,6 +361,50 @@ it("restores the selected branch and does not inherit discoveries when navigatin
 	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools"]);
 	await harness.session.navigateTree(leaf);
 	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools", toolId(lookup)]);
+});
+
+it("preserves recovery activation and pending prompt edits when navigating before the first declaration", async () => {
+	// PR #139: an undeclared target must not reset native selection or prompt state.
+	const harness = await setup({
+		extensionFactories: [
+			(pi) => {
+				registerTools(pi);
+				pi.on("session_start", () => pi.setActiveToolReferences([...pi.getActiveToolReferences(), lookup]));
+			},
+		],
+	});
+	await harness.session.bindExtensions({});
+	const root = harness.sessionManager.appendCustomEntry("root-anchor", {});
+	harness.setResponses([fauxAssistantMessage("Recovery tool remains available")]);
+	await harness.session.prompt("Continue");
+	const leaf = harness.sessionManager.getLeafId()!;
+	const options = harness.session.extensionRunner.createCommandContext().getSystemPromptOptions();
+	options.appendSystemPrompt = "Pending local guidance must survive navigation";
+	await harness.session.navigateTree(root);
+	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools", toolId(lookup)]);
+	expect(harness.session.systemPrompt).toContain(options.appendSystemPrompt);
+	await harness.session.navigateTree(leaf);
+	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools", toolId(lookup)]);
+	expect(harness.session.systemPrompt).toContain(options.appendSystemPrompt);
+});
+
+it.each([false, true])("keeps deselected builtins off when resuming after rollback (removed=%s)", async (removed) => {
+	// PR #139: rollback restores extension exposure, not unselected shell/file tools.
+	const harness = await setup({ tools: undefined });
+	harness.session.setActiveToolsByName(["read", "discover_tools"]);
+	harness.setResponses([fauxAssistantMessage("Read-only work")]);
+	await harness.session.prompt("Use only the selected tools");
+	const { session } = await createAgentSession({
+		sessionManager: harness.sessionManager,
+		settingsManager: SettingsManager.inMemory(removed ? {} : { toolDiscovery: { ...settings, enabled: false } }),
+		modelRuntime: harness.session.modelRuntime,
+		resourceLoader: harness.session.resourceLoader,
+	});
+	try {
+		expect(session.getActiveToolNames()).toEqual(["read", toolId(lookup), "advanced", "desktop"]);
+	} finally {
+		session.dispose();
+	}
 });
 
 it("restores capabilities when reopening a lean session with the setting removed", async () => {
