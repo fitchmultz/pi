@@ -2209,13 +2209,30 @@ export class AgentSession {
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions(this._baseSystemPromptOptions);
 		this._hasPreparedPrompt = true;
 		const current = getCurrentSystemMessage(messages);
+		const deferredToolEntries = this._toolDiscoveryGroups.flatMap((group) => group.defaultTools);
+		const discoveryChanged = !isDeepStrictEqual(current?.deferredToolEntries, deferredToolEntries);
 		const desired = buildSystemPromptSections(options);
 		// Saved full-prompt replacements must not become a permanent opaque prefix.
 		if (current && (current.sections === undefined || contentText(current.content).length > 0)) {
-			return { role: "system", content: "", sections: desired, replace: true, timestamp: Date.now() };
+			return {
+				role: "system",
+				content: "",
+				sections: desired,
+				deferredToolEntries,
+				replace: true,
+				timestamp: Date.now(),
+			};
 		}
 		const sections = diffSystemPromptSections(current?.sections ?? {}, desired);
-		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
+		return sections || discoveryChanged
+			? {
+					role: "system",
+					content: "",
+					sections,
+					...(discoveryChanged ? { deferredToolEntries } : {}),
+					timestamp: Date.now(),
+				}
+			: undefined;
 	}
 
 	/**
@@ -2255,15 +2272,19 @@ export class AgentSession {
 		// Without a declaration there is no saved selection to restore. Preserve native
 		// behavior, including lifecycle-hook activations and pending prompt edits.
 		if (!current) return;
-		const rollback =
-			(current.toolsAdded ?? []).some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME)) &&
-			!this._toolRegistry.has(toolKey(DISCOVER_TOOLS_NAME));
+		const loaderSelected = (current.toolsAdded ?? []).some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME));
+		const deferredKeys = new Set(this._toolDiscoveryGroups.flatMap((group) => group.tools.map(toolKey)));
+		// Unannotated history cannot distinguish retired entries from deliberately omitted ordinary tools.
+		// Preserve its legacy fallback only when the loader itself is no longer available.
+		const retiredEntries = current.deferredToolEntries
+			? current.deferredToolEntries.filter((tool) => !deferredKeys.has(toolKey(tool)))
+			: !this._toolRegistry.has(toolKey(DISCOVER_TOOLS_NAME))
+				? this.getActiveToolReferences()
+				: [];
 		const toolNames = [
 			...(current.toolsAdded ?? []).map(toToolReference),
-			...(rollback
-				? this.getActiveToolReferences().filter(
-						(tool) => this._toolDefinitions.get(toolKey(tool))?.sourceInfo.source !== "builtin",
-					)
+			...(loaderSelected
+				? retiredEntries.filter((tool) => this._toolDefinitions.get(toolKey(tool))?.sourceInfo.source !== "builtin")
 				: []),
 		].filter(
 			(tool, index, tools) =>

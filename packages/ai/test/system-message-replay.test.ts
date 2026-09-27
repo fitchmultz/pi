@@ -25,6 +25,7 @@ const transcript = normalizeContext({
 			content: "base",
 			sections: { a: "<a>1</a>", b: "<b>1</b>" },
 			toolsAdded: [tool("first")],
+			deferredToolEntries: [{ namespace: "integration", name: "first_entry" }],
 			timestamp: 10,
 		},
 		{ role: "user", content: "hello", timestamp: 11 },
@@ -36,6 +37,7 @@ const transcript = normalizeContext({
 			sections: { a: "<a>2</a>", b: null, c: "<c>1</c>" },
 			toolsRemoved: [{ name: "first" }],
 			toolsAdded: [tool("second")],
+			deferredToolEntries: [{ namespace: "integration", name: "second_entry" }],
 			timestamp: 14,
 		},
 	],
@@ -49,6 +51,7 @@ describe("system message replay", () => {
 			content: "base\n\nalso do this",
 			sections: { a: "<a>2</a>", c: "<c>1</c>" },
 			toolsAdded: [tool("second")],
+			deferredToolEntries: [{ namespace: "integration", name: "second_entry" }],
 			timestamp: 10,
 		});
 		expect(getCurrentSystemPrompt(transcript.messages)).toBe("base\n\nalso do this\n\n<a>2</a>\n\n<c>1</c>");
@@ -81,6 +84,18 @@ describe("system message replay", () => {
 		expect(resolveTranscript(transcript, true)).toBe(transcript);
 		const leading = { messages: [replacement, patch] } as TranscriptContext;
 		expect(resolveTranscript(leading, true)).toBe(leading);
+	});
+
+	test("an empty host entry snapshot clears prior membership while ordinary patches preserve it", () => {
+		const cleared: Message[] = [
+			...transcript.messages,
+			{ role: "system", content: "", deferredToolEntries: [], timestamp: 15 },
+			{ role: "system", content: "later guidance", timestamp: 16 },
+		];
+		expect(getCurrentSystemMessage(cleared)?.deferredToolEntries).toEqual([]);
+		expect(getCurrentSystemMessage(transcript.messages.slice(0, 4))?.deferredToolEntries).toEqual([
+			{ namespace: "integration", name: "first_entry" },
+		]);
 	});
 
 	test("replay of a transcript without system messages is empty", () => {

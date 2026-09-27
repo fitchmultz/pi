@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type Api,
 	fauxAssistantMessage,
@@ -11,6 +14,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { readSessionCheckpoint, writeSessionCheckpoint } from "../../src/core/checkpoint.ts";
 import type { ExtensionAPI, ToolDefinition } from "../../src/core/extensions/types.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -28,8 +32,10 @@ const browserGroup = {
 const desktopGroup = { name: "desktop", description: "Inspect native applications" } as const;
 const manual = `Browser safety: observe before mutation. Preserve user-owned sessions. ${"Full instructions. ".repeat(100)}`;
 const harnesses: Harness[] = [];
+const sessionDirs: string[] = [];
 afterEach(() => {
 	for (const harness of harnesses.splice(0)) harness.cleanup();
+	for (const directory of sessionDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 function registerTools(pi: ExtensionAPI, execute = () => {}, discovery = true) {
@@ -578,6 +584,191 @@ it.each(["empty", "loader removed", "excluded", "advanced", "moved"] as const)(
 	},
 );
 
+it.each([
+	"resume",
+	"compaction",
+	"fresh window",
+	"branch",
+	"checkpoint",
+	"empty",
+	"loader removed",
+	"excluded",
+	"advanced",
+	"moved",
+	"no loader",
+] as const)("restores only known retired entries on cold resume: %s", async (mode) => {
+	// PR #142: cold restoration must distinguish former entries from tools never selected.
+	const directory = mkdtempSync(join(tmpdir(), "pi-discovery-resume-"));
+	sessionDirs.push(directory);
+	const manager = SessionManager.create(directory, directory);
+	const ordinary = { namespace: "ordinary", name: "lookup" };
+	const extension = (retired: boolean) => (pi: ExtensionAPI) => {
+		for (const reference of [lookup, { name: "desktop" }, { name: "advanced" }, ordinary]) {
+			const isRetired = retired && (reference === lookup || mode === "no loader");
+			pi.registerTool({
+				...reference,
+				label: reference.name,
+				description: reference.name,
+				parameters: Type.Object({}),
+				discovery:
+					reference === ordinary || (isRetired && mode !== "advanced" && mode !== "moved")
+						? undefined
+						: {
+								group:
+									reference === lookup && mode !== "advanced" && !(isRetired && mode === "moved")
+										? browserGroup
+										: desktopGroup,
+								role:
+									reference.name === "advanced" || (isRetired && mode === "advanced") ? "advanced" : "entry",
+							},
+				async execute() {
+					return { content: [], details: {} };
+				},
+			});
+		}
+	};
+	const original = await setup({ tools: undefined, sessionManager: manager, extensionFactories: [extension(false)] });
+	// Ordinary and built-in tools are deliberately omitted before their first declaration.
+	original.session.setActiveToolsByName(["discover_tools"]);
+	original.setResponses([fauxAssistantMessage("Lean")]);
+	await original.session.prompt("Start lean");
+	const leanLeaf = manager.getLeafId()!;
+	const selected = mode === "empty" ? [] : mode === "loader removed" ? ["desktop"] : ["discover_tools"];
+	if (mode === "empty" || mode === "loader removed" || mode === "branch") {
+		original.session.setActiveToolsByName(mode === "branch" ? [] : selected);
+		original.setResponses([fauxAssistantMessage("Selection saved")]);
+		await original.session.prompt("Keep this selection");
+		if (mode === "branch") {
+			await original.session.navigateTree(leanLeaf);
+			original.setResponses([fauxAssistantMessage("Lean branch")]);
+			await original.session.prompt("Continue the lean branch");
+		}
+	}
+	if (mode === "compaction") manager.appendCompaction("Lean summary", null, 100);
+	if (mode === "fresh window") manager.appendContextWindow("Continue lean", 100);
+	const checkpointPath = join(directory, "checkpoint.json");
+	if (mode === "checkpoint") {
+		original.session.setActiveToolsByName([]);
+		const hold = await original.session.acquireCheckpoint({ quiesce: () => () => {} });
+		try {
+			writeSessionCheckpoint(checkpointPath, hold.checkpoint);
+		} finally {
+			hold.release();
+		}
+	}
+	original.session.dispose();
+
+	const resumed = await setup({
+		tools: undefined,
+		sessionManager: SessionManager.open(manager.getSessionFile()!),
+		extensionFactories: [extension(true)],
+		excludedToolNames: mode === "excluded" ? [lookup] : undefined,
+	});
+	const restored = ["excluded", "advanced", "moved", "empty", "loader removed"].includes(mode)
+		? selected
+		: mode === "no loader"
+			? [toolId(lookup), "desktop"]
+			: ["discover_tools", toolId(lookup)];
+	expect(resumed.session.getActiveToolNames()).toEqual(restored);
+	expect(resumed.session.getActiveToolNames()).not.toContain(toolId(ordinary));
+	expect(resumed.session.getActiveToolNames()).not.toContain("read");
+	if (mode === "excluded") expect(resumed.session.getToolDefinition(lookup)).toBeUndefined();
+	if (mode === "checkpoint") {
+		const { session } = await createAgentSession({
+			checkpoint: readSessionCheckpoint(checkpointPath),
+			modelRuntime: original.session.modelRuntime,
+			resourceLoader: resumed.session.resourceLoader,
+			settingsManager: original.settingsManager,
+		});
+		try {
+			expect(session.getActiveToolNames()).toEqual([]);
+			await session.navigateTree(manager.getEntry(leanLeaf)!.parentId!);
+			expect(session.getActiveToolNames()).toEqual(restored);
+		} finally {
+			session.dispose();
+		}
+	}
+	resumed.setResponses([
+		(context) => {
+			expect(JSON.stringify(context)).not.toContain("deferredToolEntries");
+			expect(getCurrentTools(context.messages).map(toolId)).toEqual(restored);
+			return fauxAssistantMessage("Restored");
+		},
+	]);
+	await resumed.session.prompt("Continue");
+	expect(resumed.session.getLastAssistantText()).toBe("Restored");
+});
+
+it.each([false, true])("preserves the unannotated historical fallback (loader missing=%s)", async (missingLoader) => {
+	const manager = SessionManager.inMemory();
+	manager.appendMessage({
+		role: "system",
+		content: "Historical prompt",
+		toolsAdded: [{ name: "discover_tools", description: "Legacy loader", parameters: Type.Object({}) }],
+		timestamp: 0,
+	});
+	const harness = await setup({
+		sessionManager: manager,
+		extensionFactories: [
+			(pi) => {
+				registerTools(pi, undefined, false);
+				if (missingLoader) return;
+				pi.registerTool({
+					name: "surviving_entry",
+					label: "Surviving entry",
+					description: "Surviving entry",
+					parameters: Type.Object({}),
+					discovery: { group: desktopGroup, role: "entry" },
+					async execute() {
+						return { content: [], details: {} };
+					},
+				});
+			},
+		],
+	});
+	expect(harness.session.getActiveToolNames()).toEqual(
+		missingLoader ? [toolId(lookup), "advanced", "desktop"] : ["discover_tools"],
+	);
+});
+
+it("snapshots entry reclassification without changing visible declarations and replays the selected branch", async () => {
+	let api!: ExtensionAPI;
+	const harness = await setup({
+		extensionFactories: [
+			(pi) => {
+				api = pi;
+				registerTools(pi);
+			},
+		],
+	});
+	const entry = harness.session.getToolDefinition(lookup)!;
+	api.registerTool({ ...entry, name: "second_entry" });
+	harness.setResponses([fauxAssistantMessage("Entry snapshot"), fauxAssistantMessage("Advanced snapshot")]);
+	await harness.session.prompt("Start lean");
+	const entryLeaf = harness.sessionManager.getLeafId()!;
+	const declarations = getCurrentTools(harness.session.messages);
+	api.registerTool({ ...entry, discovery: { group: browserGroup, role: "advanced" } });
+	await harness.session.prompt("Stay lean");
+	const advancedLeaf = harness.sessionManager.getLeafId()!;
+	expect(getCurrentTools(harness.session.messages)).toEqual(declarations);
+	api.registerTool({ ...entry, discovery: undefined });
+	const { session } = await createAgentSession({
+		sessionManager: harness.sessionManager,
+		settingsManager: harness.settingsManager,
+		modelRuntime: harness.session.modelRuntime,
+		resourceLoader: harness.session.resourceLoader,
+	});
+	try {
+		expect(session.getActiveToolNames()).toEqual(["discover_tools"]);
+		await session.navigateTree(entryLeaf);
+		expect(session.getActiveToolNames()).toEqual(["discover_tools", toolId(lookup)]);
+		await session.navigateTree(advancedLeaf);
+		expect(session.getActiveToolNames()).toEqual(["discover_tools"]);
+	} finally {
+		session.dispose();
+	}
+});
+
 it("restores each branch's declared selection without inheriting discoveries from another branch", async () => {
 	const harness = await setup();
 	harness.setResponses([fauxAssistantMessage("No integrations needed")]);
@@ -646,7 +837,7 @@ it.each([false, true])(
 			resourceLoader: harness.session.resourceLoader,
 		});
 		try {
-			expect(session.getActiveToolNames()).toEqual(["read", toolId(lookup), "advanced", "desktop"]);
+			expect(session.getActiveToolNames()).toEqual(["read", toolId(lookup), "desktop"]);
 		} finally {
 			session.dispose();
 		}

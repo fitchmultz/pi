@@ -71,7 +71,11 @@ Activation is additive and idempotent; there is no per-turn unloading or separat
 
 Switching to an unsupported model restores group entry tools, not advanced tools, only while the discovery loader remains selected. Deliberate empty selections and selections that removed the loader are not widened. Returning to a supported model does not unload tools already made available; the loader returns only if it cannot expose previously deselected entry tools. Start a fresh session for a clean lean baseline.
 
-Removing an extension's discovery metadata restores ordinary exposure. Resuming a formerly lean session without an eligible loader restores extension exposure without reactivating deselected built-ins. `/reload` refreshes resources and reinitializes cached factories; changed extension/runtime code requires a process restart. Use normal package installations, not external staging paths.
+Removing an extension's discovery metadata restores ordinary exposure. Native system declaration snapshots retain host-only, source-derived entry identities alongside the selected tools; they are not sent to providers. On resume, if the saved loader is selected, only recorded former entries that are permitted and no longer deferred return to ordinary exposure. Ordinary tools deliberately omitted even before their first declaration stay omitted, as do advanced or moved tools still deferred by current registrations. Snapshot updates follow the same branch, compaction, and fresh-window history as tool declarations; checkpoint restoration still applies its exact saved selection.
+
+Historical declarations without this annotation cannot distinguish former entries from ordinary tools deliberately omitted. If a loader survives, Pi preserves their exact selection rather than guessing membership; a retired entry may therefore require explicit activation or a fresh session. If no eligible loader remains, unannotated history retains the older broad extension-exposure fallback, without reactivating deselected built-ins. Annotated snapshots use the narrower recorded-entry restoration in both cases.
+
+`/reload` refreshes resources and reinitializes cached factories; changed extension/runtime code requires a process restart. Use normal package installations, not external staging paths.
 
 ## Verification
 
