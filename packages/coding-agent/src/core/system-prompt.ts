@@ -23,6 +23,8 @@ export interface BuildSystemPromptOptions {
 	appendSystemPrompt?: string;
 	/** Additional XML-wrapped prompt sections keyed by tag name. */
 	sections?: Record<string, string>;
+	/** Optional tool owners for custom sections. Render when any listed tool is active. */
+	sectionTools?: Record<string, ToolSelection[]>;
 	/** Working directory. */
 	cwd: string;
 	/** Pre-loaded context files. */
@@ -38,6 +40,7 @@ export type NormalizedBuildSystemPromptOptions = BuildSystemPromptOptions & {
 	promptGuidelines: string[];
 	appendSystemPrompt: string;
 	sections: Record<string, string>;
+	sectionTools: Record<string, ToolSelection[]>;
 	contextFiles: Array<{ path: string; content: string }>;
 	skills: Skill[];
 };
@@ -65,6 +68,12 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 		promptGuidelines: [...(input.promptGuidelines ?? [])],
 		appendSystemPrompt: input.appendSystemPrompt ?? "",
 		sections: { ...(input.sections ?? {}) },
+		sectionTools: Object.fromEntries(
+			Object.entries(input.sectionTools ?? {}).map(([name, tools]) => [
+				name,
+				tools.map((tool) => (typeof tool === "string" ? tool : { ...tool })),
+			]),
+		),
 		cwd: input.cwd,
 		contextFiles: (input.contextFiles ?? []).map((file) => ({ ...file })),
 		skills: (input.skills ?? []).map((skill) => ({ ...skill })),
@@ -135,6 +144,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		promptGuidelines,
 		appendSystemPrompt,
 		sections: customSections,
+		sectionTools,
 		cwd,
 		contextFiles,
 		skills,
@@ -182,8 +192,10 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		if (skillsPrompt) promptSections.skills = skillsPrompt;
 	}
 	promptSections.cwd = process.platform === "win32" ? cwd.replace(/\\/g, "/") : cwd;
+	const activeTools = new Set(selectedTools.map(toolKey));
 	for (const [name, content] of Object.entries(customSections)) {
-		if (content) promptSections[name] = content;
+		const owners = Object.hasOwn(sectionTools, name) ? sectionTools[name] : undefined;
+		if (content && (!owners || owners.some((tool) => activeTools.has(toolKey(tool))))) promptSections[name] = content;
 	}
 
 	const sections: SystemPromptSections = { preamble: promptSections.preamble };

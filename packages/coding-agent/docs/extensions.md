@@ -167,6 +167,8 @@ Register tools first, then select them using `pi.setActiveTools(ids)`. `getAllTo
 
 For exact identities, use `getActiveToolReferences()` and `setActiveToolReferences([{ name, namespace? }])`. Bare names select only unnamespaced tools. Both selection paths obey allowlists and exclusions. Events preserve namespace and leaf name separately; built-in type guards match only unnamespaced tools.
 
+Custom sections can also be tool-scoped: set `event.systemPromptOptions.sectionTools.browser = ["browser_tool"]` alongside `sections.browser`. Pi retains the complete text but renders it only when an owning tool is active, including activation between tool-loop requests. Keep execution guards and recovery hooks active independently. See [Experimental Tool Discovery](tool-discovery.md).
+
 ### Tool discovery
 
 `pi.registerToolSearch(definition)` uses ordinary tool validation, hooks, cancellation, and rendering. Its callback owns registration and search policy: activate matches before returning normal content/details plus `tools: ToolReference[]`. Pi resolves references against the active permitted registry and persists declaration snapshots. Unknown, inactive, or denied references fail without publishing declarations; returned objects cannot override schemas.
