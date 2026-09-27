@@ -1,4 +1,4 @@
-import { setKeybindings } from "@earendil-works/pi-tui";
+import { Container, setKeybindings } from "@earendil-works/pi-tui";
 import type { ResponsesClientEvent } from "openai/resources/responses/responses.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
@@ -12,10 +12,12 @@ import {
 } from "../../../ai/test/responses-websocket-server.ts";
 import { TuiMainScreen } from "../../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
+import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
+import { ChatContainer } from "../../src/modes/interactive/components/activity.ts";
 import { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
-import { getEditorTheme, initTheme } from "../../src/modes/interactive/theme/theme.ts";
+import { getEditorTheme, getMarkdownTheme, initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { createHarness, getUserTexts } from "./harness.ts";
 
 const token = `x.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "local" } })).toString("base64url")}.x`;
@@ -80,7 +82,10 @@ it.each(["unsent", "unsent-normal", "accepted", "unacknowledged", "failed", "unk
 			await prepare?.(message);
 		};
 		initTheme("dark");
-		const ui = new TuiMainScreen(new VirtualTerminal(80, 24));
+		const terminal = new VirtualTerminal(80, 24);
+		const ui = new TuiMainScreen(terminal);
+		const pending = new Container();
+		ui.addChild(pending);
 		const keys = new KeybindingsManager();
 		setKeybindings(keys);
 		const editor = new CustomEditor(ui, getEditorTheme(), keys);
@@ -88,9 +93,24 @@ it.each(["unsent", "unsent-normal", "accepted", "unacknowledged", "failed", "unk
 			runtimeHost: { session },
 			editor,
 			compactionQueuedMessages: [],
-			updatePendingMessagesDisplay: vi.fn(),
+			isInitialized: true,
+			ui,
+			pendingMessagesContainer: pending,
+			liveSteeringMessages: new Set(),
+			chatContainer: new ChatContainer(),
+			footer: { invalidate: vi.fn() },
+			pendingTools: new Map(),
+			completedToolCalls: new Set(),
+			entriesRenderedByBoundaryCompaction: new Set(),
+			workingVisible: false,
+			clearStatusIndicator: vi.fn(),
+			getMarkdownThemeWithSettings: getMarkdownTheme,
+			getMarkdownTransformers: () => [],
+			maybeSuggestBugReport: vi.fn(),
 			showStatus: vi.fn(),
-		}) as { handleDequeue(): void };
+		}) as { handleDequeue(): void; handleEvent(event: AgentSessionEvent): Promise<void> };
+		const unsubscribe = session.subscribe((event) => view.handleEvent(event));
+		ui.start();
 		editor.onAction("app.message.dequeue", () => view.handleDequeue());
 		const run = session.prompt("original");
 		try {
@@ -98,6 +118,14 @@ it.each(["unsent", "unsent-normal", "accepted", "unacknowledged", "failed", "unk
 			await session.steer("OLD");
 			if (!unsent) await vi.waitFor(() => expect(steers).toBe(1));
 			expect(session.getSteeringMessages()).toEqual(unsent ? ["OLD"] : []);
+			for (const width of [80, 32]) {
+				terminal.resize(width, 24);
+				ui.requestRender(true);
+				await terminal.waitForRender();
+				const screen = terminal.getViewport().join("\n");
+				expect(screen.match(/Steering: OLD/g)).toHaveLength(1);
+				expect(screen.includes("to edit")).toBe(unsent);
+			}
 			expect(session.pendingMessageCount).toBe(unsent ? 1 : 0);
 			expect(session.getCheckpointQueues().steering).toHaveLength(unsent ? 1 : 0);
 			await vi.waitFor(() => expect(h.eventsOfType("queue_update").at(-1)?.steering).toEqual(unsent ? ["OLD"] : []));
@@ -106,6 +134,14 @@ it.each(["unsent", "unsent-normal", "accepted", "unacknowledged", "failed", "unk
 			);
 			editor.handleInput("\u001b[1;3A");
 			expect(editor.getText()).toBe(unsent ? "OLD" : "");
+			editor.setText("");
+			await session.followUp("LATER");
+			await terminal.waitForRender();
+			const mixed = terminal.getViewport().join("\n");
+			expect(mixed).toContain("Follow-up: LATER");
+			expect(mixed.includes("Steering: OLD")).toBe(!unsent);
+			editor.handleInput("\u001b[1;3A");
+			expect(editor.getText()).toBe("LATER");
 			editor.setText("");
 			editor.handleInput("NEW");
 			await session.prompt(editor.getText(), { streamingBehavior: "steer" });
@@ -165,10 +201,14 @@ it.each(["unsent", "unsent-normal", "accepted", "unacknowledged", "failed", "unk
 					).toHaveLength(unsent && text === "OLD" ? 0 : 1);
 			}
 			expect(session.clearQueue()).toEqual({ steering: [], followUp: [] });
+			await terminal.waitForRender();
+			expect(terminal.getViewport().join("\n")).not.toContain("Steering:");
 		} finally {
 			release();
 			await session.abort();
 			await run;
+			unsubscribe();
+			ui.stop();
 			h.cleanup();
 			await fixture.close();
 		}

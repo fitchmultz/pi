@@ -15,6 +15,7 @@ function createView(harness: Harness) {
 	return Object.assign(Object.create(InteractiveMode.prototype), {
 		runtimeHost: { session: harness.session },
 		isInitialized: true,
+		liveSteeringMessages: new Set(),
 		chatContainer: new Container(),
 		pendingTools: new Map(),
 		completedToolCalls: new Set(),

@@ -465,6 +465,8 @@ export class InteractiveMode {
 	private transcriptOrder: "oldest-first" | "newest-first" = "oldest-first";
 	private tuiModeBeforeNewestFirst: TuiMode | undefined;
 	private pendingMessagesContainer: Container;
+	// Presentation only: live input has left the recallable queue, but is not yet applied.
+	private liveSteeringMessages = new Set<Extract<AgentMessage, { role: "user" }>>();
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
@@ -2208,6 +2210,7 @@ export class InteractiveMode {
 		this.loadedResourcesContainer.clear();
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
+		this.liveSteeringMessages.clear();
 		this.compactionQueuedMessages = [];
 		this.failedAttemptComponents = [];
 		this.failedAttemptMessage = undefined;
@@ -3677,6 +3680,16 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 
+			case "steering":
+				if (event.status === "queued" || event.status === "accepted" || event.status === "pending") {
+					this.liveSteeringMessages.add(event.message);
+				} else {
+					this.liveSteeringMessages.delete(event.message);
+				}
+				this.updatePendingMessagesDisplay();
+				this.ui.requestRender();
+				break;
+
 			case "queue_update":
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
@@ -3932,6 +3945,8 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
+				this.liveSteeringMessages.clear();
+				this.updatePendingMessagesDisplay();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -5156,6 +5171,15 @@ export class InteractiveMode {
 			(child) => child instanceof BashExecutionComponent,
 		);
 		this.pendingMessagesContainer.clear();
+		if (this.liveSteeringMessages.size > 0) {
+			this.pendingMessagesContainer.addChild(new Spacer(1));
+			for (const message of this.liveSteeringMessages) {
+				this.pendingMessagesContainer.addChild(
+					new TruncatedText(theme.fg("dim", `Steering: ${this.getUserMessageText(message)}`), 1, 0),
+				);
+			}
+			this.pendingMessagesContainer.addChild(new TruncatedText(theme.fg("dim", "↳ sent; cannot edit"), 1, 0));
+		}
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));

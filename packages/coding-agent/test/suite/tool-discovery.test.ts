@@ -7,13 +7,15 @@ import {
 	fauxToolCall,
 	getCurrentSystemPrompt,
 	getCurrentTools,
+	type Message,
 	type Model,
+	type ToolCall,
 	type ToolReference,
 	toolId,
 	toToolDeclaration,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readSessionCheckpoint, writeSessionCheckpoint } from "../../src/core/checkpoint.ts";
 import type { ExtensionAPI, ToolDefinition } from "../../src/core/extensions/types.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
@@ -118,9 +120,23 @@ it("delivers complete schemas, guidelines, and scoped sections before the first 
 		],
 	});
 	harness.setResponses([
-		fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(
+			[
+				fauxToolCall("discover_tools", { enable: ["browser"] }),
+				{
+					...fauxToolCall(lookup.name, { key: "too early" }, { id: "premature-lookup" }),
+					namespace: lookup.namespace,
+				},
+			],
+			{ stopReason: "toolUse" },
+		),
 		(context) => {
 			expect(calls).toBe(0);
+			expect(
+				context.messages.find(
+					(message) => message.role === "toolResult" && message.toolCallId === "premature-lookup",
+				),
+			).toMatchObject({ isError: true });
 			expect(getCurrentSystemPrompt(context.messages)).toContain(manual);
 			expect(getCurrentSystemPrompt(context.messages)).toContain("lookup: do not bypass safeguards");
 			const tools = getCurrentTools(context.messages);
@@ -164,9 +180,13 @@ it("validates all requested groups before activation and allows idempotent multi
 		}),
 		() => {
 			expect(harness.session.getActiveToolNames()).toEqual(["discover_tools"]);
-			return fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser", "desktop"] }), {
-				stopReason: "toolUse",
-			});
+			return fauxAssistantMessage(
+				[
+					fauxToolCall("discover_tools", { enable: ["browser"] }),
+					fauxToolCall("discover_tools", { enable: ["desktop"] }),
+				],
+				{ stopReason: "toolUse" },
+			);
 		},
 		fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), { stopReason: "toolUse" }),
 		fauxAssistantMessage("Done"),
@@ -174,6 +194,107 @@ it("validates all requested groups before activation and allows idempotent multi
 	await harness.session.prompt("Use both integrations");
 	expect(harness.session.getActiveToolNames()).toEqual(["discover_tools", toolId(lookup), "desktop"]);
 	expect(harness.session.messages.find((message) => message.role === "toolResult")).toMatchObject({ isError: true });
+});
+
+it("does not strand independent reads and discovery behind native delegates when progress steers the parent", async () => {
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const launched: string[] = [];
+	const read: string[] = [];
+	let nextInput: Message[] | undefined;
+	const delegates: ToolCall[] = ["one", "two"].map((id) => ({
+		...fauxToolCall("delegate", {}, { id: `${id}|fc_${id}` }),
+		async: true,
+		responsesItem: {
+			type: "function_call",
+			id: `fc_${id}`,
+			call_id: id,
+			name: "delegate",
+			arguments: "{}",
+			async: true,
+			status: "completed",
+		},
+	}));
+	const reads = ["baseline", "ledger", "runtime", "skill"].map((id) => fauxToolCall("read", {}, { id }));
+	const discovery = fauxToolCall("discover_tools", { enable: ["browser"] }, { id: "discover" });
+	const harness = await setup({
+		compat: {
+			supportsAdditionalTools: true,
+			supportsMidConvoSystemMessages: true,
+			supportsAsyncTools: true,
+		},
+		tools: [
+			{
+				name: "delegate",
+				label: "Delegate",
+				description: "Native asynchronous research",
+				parameters: Type.Object({}),
+				async: true,
+				async execute(id) {
+					launched.push(id);
+					await gate;
+					return { content: [{ type: "text", text: "Research finished" }], details: {} };
+				},
+			},
+			{
+				name: "read",
+				label: "Read",
+				description: "Independent local read",
+				parameters: Type.Object({}),
+				async execute(id) {
+					read.push(id);
+					return { content: [{ type: "text", text: id }], details: {} };
+				},
+			},
+		],
+	});
+	harness.session.subscribe((event) => {
+		if (
+			event.type === "message_end" &&
+			event.message.role === "assistant" &&
+			event.message.responseId === "research"
+		) {
+			harness.session.agent.steer({
+				role: "custom",
+				customType: "intercom_message",
+				content: "Research progress: useful finding; continue the independent work.",
+				display: true,
+				timestamp: Date.now(),
+			});
+		}
+	});
+	harness.setResponses([
+		fauxAssistantMessage([...delegates, ...reads, discovery], { responseId: "research", stopReason: "toolUse" }),
+		(context) => {
+			nextInput = context.messages;
+			return fauxAssistantMessage("Independent work received; researchers are still running.");
+		},
+		fauxAssistantMessage("Research complete"),
+	]);
+	const run = harness.session.prompt("Delegate research, read the evidence, and enable browser.");
+	try {
+		await vi.waitFor(() => expect(nextInput).toBeDefined());
+		expect(launched).toEqual(delegates.map((call) => call.id));
+		expect(read).toEqual(reads.map((call) => call.id));
+		expect(harness.session.getPendingToolCalls()).toHaveLength(2);
+		expect(nextInput!.filter((message) => message.role === "toolResult")).toMatchObject(
+			[...reads, discovery].map((call) => ({ toolCallId: call.id, isError: false })),
+		);
+		expect(JSON.stringify(nextInput)).toContain("Research progress: useful finding");
+		expect(getCurrentTools(nextInput!).map(toolId)).toContain(toolId(lookup));
+		expect(getCurrentSystemPrompt(nextInput!)).toContain(manual);
+	} finally {
+		release();
+		await run;
+	}
+	expect(launched).toHaveLength(2);
+	expect(harness.session.getPendingToolCalls()).toEqual([]);
+	expect(harness.faux.state.callCount).toBe(3);
+	expect(
+		harness.session.messages.filter((message) => message.role === "toolResult" && message.toolName === "delegate"),
+	).toMatchObject(delegates.map((call) => ({ toolCallId: call.id, isError: false })));
 });
 
 it("keeps exclusions binding, omits unavailable catalog groups, and never widens namespace identities", async () => {
