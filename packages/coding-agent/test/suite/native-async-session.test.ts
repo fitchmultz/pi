@@ -184,6 +184,61 @@ it("persists window metadata before the first in-run replacement request without
 	}
 });
 
+// PR #140: window metadata must not delay input queued by agent_end until a second replacement request.
+it.each(["agent_end", "overflow"] as const)(
+	"delivers queued follow-up in the first metadata-bearing window request after %s",
+	async (boundary) => {
+		let queued = false;
+		const requests: Message[][] = [];
+		const harness = await createHarness({
+			settings: { compaction: { enabled: boundary === "overflow" }, retry: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.registerContextWindowHook(() => [
+						{ type: "custom_message", customType: "metadata", content: "window metadata", display: false },
+					]);
+					pi.on("agent_end", (_event, ctx) => {
+						if (queued) return;
+						queued = true;
+						expect(ctx.isIdle()).toBe(false);
+						if (boundary === "agent_end") ctx.newContext({ handoff: "continue" });
+						pi.sendUserMessage("queued follow-up", { deliverAs: "followUp" });
+					});
+					pi.on("session_before_auto_compact", () => ({ newContext: { handoff: "recover overflow" } }));
+				},
+			],
+		});
+		harness.setResponses([
+			boundary === "overflow"
+				? fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: "prompt is too long: 300000 tokens > 128000 maximum",
+					})
+				: fauxAssistantMessage("finished old task"),
+			...[1, 2].map(() => (context: { messages: Message[] }) => {
+				requests.push(structuredClone(context.messages));
+				return fauxAssistantMessage("continued");
+			}),
+		]);
+		try {
+			await harness.session.prompt("old input");
+			expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
+			expect(JSON.stringify(requests[0])).toContain("window metadata");
+			expect(requests[0]).toContainEqual(
+				expect.objectContaining({
+					role: "user",
+					content: [{ type: "text", text: "queued follow-up" }],
+				}),
+			);
+			expect(JSON.stringify(requests[0])).not.toContain("old input");
+			expect(requests).toHaveLength(1);
+			expect(harness.session.agent.hasQueuedMessages()).toBe(false);
+		} finally {
+			harness.cleanup();
+		}
+	},
+);
+
 it.each(["invalid edit", "unsupported draft", "invalid message", "invalid block", "throw", "promise"] as const)(
 	"rejects %s before publishing any final-window drafts",
 	async (failure) => {

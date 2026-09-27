@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
 	Agent,
 	type AgentEvent,
+	type AgentMessage,
 	type AgentTool,
 	type AgentToolUpdateCallback,
 	type StreamFn,
@@ -1332,27 +1333,62 @@ describe("Agent", () => {
 		expect(agent.peekQueuedMessages()).toEqual([followUp]);
 	});
 
-	it.each([
-		{
-			name: "user",
-			messages: [createUserMessage("existing user")],
-		},
-		{
-			name: "toolResult",
-			messages: [
-				createUserMessage("existing user"),
-				createAssistantToolUseMessage([{ type: "toolCall", id: "call-1", name: "noop", arguments: {} }]),
-				{
-					role: "toolResult" as const,
-					toolCallId: "call-1",
-					toolName: "noop",
-					content: [{ type: "text" as const, text: "done" }],
-					isError: false,
-					timestamp: 1,
-				},
-			],
-		},
-	])("defers follow-up input on the first continuation request from a $name tail", async ({ messages }) => {
+	it.each(
+		[
+			{
+				name: "user",
+				messages: [createUserMessage("existing user")],
+			},
+			{
+				name: "toolResult",
+				messages: [
+					createUserMessage("existing user"),
+					createAssistantToolUseMessage([{ type: "toolCall", id: "call-1", name: "noop", arguments: {} }]),
+					{
+						role: "toolResult" as const,
+						toolCallId: "call-1",
+						toolName: "noop",
+						content: [{ type: "text" as const, text: "done" }],
+						isError: false,
+						timestamp: 1,
+					},
+				],
+			},
+			{
+				name: "ordinary custom",
+				messages: [
+					createAssistantMessage("previous answer"),
+					{ role: "custom" as const, customType: "note", content: "new note", display: false, timestamp: 1 },
+				],
+			},
+		].flatMap(({ name, messages }): { name: string; messages: AgentMessage[] }[] => [
+			{ name, messages },
+			...(name === "ordinary custom"
+				? []
+				: [
+						{
+							name: `window ${name} with metadata`,
+							messages: [
+								{
+									role: "custom" as const,
+									customType: "context-window",
+									content: "fresh",
+									display: true,
+									timestamp: 0,
+								},
+								...messages,
+								{
+									role: "custom" as const,
+									customType: "metadata",
+									content: "note",
+									display: false,
+									timestamp: 2,
+								},
+							],
+						},
+					]),
+		]),
+	)("defers follow-up input on the first continuation request from a $name tail", async ({ messages }) => {
 		const requests: string[][] = [];
 		const agent = new Agent({
 			initialState: { messages },

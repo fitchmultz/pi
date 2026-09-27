@@ -450,7 +450,7 @@ export class Agent {
 		await this.runPromptMessages(messages);
 	}
 
-	/** Continue from the current transcript. The last message must be a user or tool-result message. */
+	/** Continue the transcript, consuming queued input first after an assistant or fresh-window boundary. */
 	async continue(): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
@@ -461,10 +461,18 @@ export class Agent {
 			throw new Error("No messages to continue from");
 		}
 
-		if (
-			lastMessage.role === "assistant" ||
-			(lastMessage.role === "custom" && "customType" in lastMessage && lastMessage.customType === "context-window")
-		) {
+		// Window hooks may append custom metadata after the marker. Do not look past
+		// actual conversation or tool receipts: those still need their own continuation.
+		let freshWindow = false;
+		for (let index = this._state.messages.length - 1; index >= 0; index--) {
+			const message = this._state.messages[index];
+			if (message.role !== "custom") break;
+			if ("customType" in message && message.customType === "context-window") {
+				freshWindow = true;
+				break;
+			}
+		}
+		if (lastMessage.role === "assistant" || freshWindow) {
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
 				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
