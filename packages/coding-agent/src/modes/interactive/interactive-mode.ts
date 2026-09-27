@@ -3911,10 +3911,6 @@ export class InteractiveMode {
 				break;
 			}
 
-			case "steering":
-				this.showStatus(`Steering ${event.status}${event.errorMessage ? `: ${event.errorMessage}` : ""}`);
-				break;
-
 			case "tool_execution_update": {
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {

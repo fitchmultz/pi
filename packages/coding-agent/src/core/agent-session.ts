@@ -496,10 +496,8 @@ export class AgentSession {
 	private readonly _idleWaiters = new Set<() => void>();
 	private readonly _deferredSettlement = new AsyncLocalStorage<{ barriers: number }>();
 
-	/** Tracks pending steering messages for UI display. Removed when delivered. */
-	private _steeringMessages: string[] = [];
-	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
-	private _followUpMessages: string[] = [];
+	/** Presentation fingerprint only; recallability always comes from Agent's queues. */
+	private _lastQueueUpdate = JSON.stringify({ steering: [], followUp: [] });
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
@@ -1440,12 +1438,13 @@ export class AgentSession {
 		this._emit(event);
 	}
 
-	private _emitQueueUpdate(): void {
-		this._emit({
-			type: "queue_update",
-			steering: [...this._steeringMessages],
-			followUp: [...this._followUpMessages],
-		});
+	private _emitQueueUpdate(onlyIfChanged = false): void {
+		const queues = { steering: this.getSteeringMessages(), followUp: this.getFollowUpMessages() };
+		const fingerprint = JSON.stringify(queues);
+		if (onlyIfChanged && fingerprint === this._lastQueueUpdate) return;
+		// Update before notifying synchronous listeners, which may themselves modify queues.
+		this._lastQueueUpdate = fingerprint;
+		this._emit({ type: "queue_update", ...queues });
 	}
 
 	private async _emitSessionCompactFailed(event: Omit<SessionCompactFailedEvent, "type">): Promise<void> {
@@ -1512,6 +1511,8 @@ export class AgentSession {
 			return;
 		}
 		if (event.type === "steering") {
+			// Native control now owns sent input; it is no longer recallable from the queue.
+			this._emitQueueUpdate(true);
 			// Status is independent of input delivery. An accepted send is not application.
 			this.sessionManager.appendCustomEntry("response-steering", {
 				message: event.message,
@@ -1578,26 +1579,8 @@ export class AgentSession {
 
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._overflowRecoveryAttempted = false;
-			// An "all" drain owns the entire batch before its first message starts. Reflect
-			// native ownership before yielding so clearQueue cannot restore already-drained text.
-			// Matching the current message by text would also remove undrained duplicates.
-			const queues = this.agent.getQueuedMessages();
-			const steering = queues.steering
-				.filter((message) => message.role === "user")
-				.map((message) => contentText(message.content, ""));
-			const followUp = queues.followUp
-				.filter((message) => message.role === "user")
-				.map((message) => contentText(message.content, ""));
-			if (
-				steering.length !== this._steeringMessages.length ||
-				followUp.length !== this._followUpMessages.length ||
-				steering.some((text, index) => text !== this._steeringMessages[index]) ||
-				followUp.some((text, index) => text !== this._followUpMessages[index])
-			) {
-				this._steeringMessages = steering;
-				this._followUpMessages = followUp;
-				this._emitQueueUpdate();
-			}
+			// Reflect the native drain, including its entire batch in "all" mode.
+			this._emitQueueUpdate(true);
 			// The loop owns this await after draining the native queue. Awaiting image work in
 			// _queueSteer/_queueFollowUp instead could enqueue after the run has already settled.
 			// Finish accepted delivery even on abort; request preflight prevents further dispatch.
@@ -2830,42 +2813,36 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
-		const queuedTexts = this._steeringMessages;
-		queuedTexts.push(text);
-		try {
-			this._emitQueueUpdate();
-		} catch (error) {
-			queuedTexts.pop();
-			throw error;
-		}
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
-		this.agent.steer({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
+		const message: UserMessage = { role: "user", content, timestamp: Date.now() };
+		this.agent.steer(message);
+		try {
+			this._emitQueueUpdate();
+		} catch (error) {
+			this.agent.takeQueuedMessages((queued) => queued === message);
+			throw error;
+		}
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
-		const queuedTexts = this._followUpMessages;
-		queuedTexts.push(text);
-		try {
-			this._emitQueueUpdate();
-		} catch (error) {
-			queuedTexts.pop();
-			throw error;
-		}
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
-		this.agent.followUp({ role: "user", content, timestamp: Date.now() });
+		const message: UserMessage = { role: "user", content, timestamp: Date.now() };
+		this.agent.followUp(message);
+		try {
+			this._emitQueueUpdate();
+		} catch (error) {
+			this.agent.takeQueuedMessages((queued) => queued === message);
+			throw error;
+		}
 	}
 
 	/**
@@ -3031,10 +3008,8 @@ export class AgentSession {
 	clearQueue(): { steering: string[]; followUp: string[] } {
 		this._assertNotCheckpointHeld();
 		this._preserveUndeliveredCustomMessages();
-		const steering = [...this._steeringMessages];
-		const followUp = [...this._followUpMessages];
-		this._steeringMessages = [];
-		this._followUpMessages = [];
+		const steering = [...this.getSteeringMessages()];
+		const followUp = [...this.getFollowUpMessages()];
 		this.agent.clearAllQueues();
 		this._emitQueueUpdate();
 		if (!this.isStreaming) {
@@ -3061,7 +3036,7 @@ export class AgentSession {
 
 	/** Number of pending user texts shown in the steering/follow-up UI. */
 	get pendingMessageCount(): number {
-		return this._steeringMessages.length + this._followUpMessages.length;
+		return this.getSteeringMessages().length + this.getFollowUpMessages().length;
 	}
 
 	/** Pending non-user steering/follow-up messages, retained in the native agent queues. */
@@ -3072,12 +3047,18 @@ export class AgentSession {
 
 	/** Get pending steering messages (read-only) */
 	getSteeringMessages(): readonly string[] {
-		return this._steeringMessages;
+		return this.agent
+			.getQueuedMessages()
+			.steering.filter((message) => message.role === "user")
+			.map((message) => contentText(message.content, ""));
 	}
 
 	/** Get pending follow-up messages (read-only) */
 	getFollowUpMessages(): readonly string[] {
-		return this._followUpMessages;
+		return this.agent
+			.getQueuedMessages()
+			.followUp.filter((message) => message.role === "user")
+			.map((message) => contentText(message.content, ""));
 	}
 
 	private async _flushCheckpointSettings(): Promise<void> {
@@ -3374,12 +3355,6 @@ export class AgentSession {
 		this.agent.followUpMode = queues.followUpMode;
 		for (const message of queues.steering) this.agent.steer(message);
 		for (const message of queues.followUp) this.agent.followUp(message);
-		this._steeringMessages = queues.steering
-			.filter((message) => message.role === "user")
-			.map((message) => contentText(message.content, ""));
-		this._followUpMessages = queues.followUp
-			.filter((message) => message.role === "user")
-			.map((message) => contentText(message.content, ""));
 		this._pendingNextTurnMessages = queues.nextTurn;
 		const messages = [...queues.steering, ...queues.followUp];
 		for (const index of queues.persistOnCancel) {
@@ -5057,10 +5032,14 @@ export class AgentSession {
 					{
 						customType: BACKGROUND_COMMAND_NOTICE,
 						content: `Background commands finished:\n${completed
-							.map(
-								(job) =>
-									`${JSON.stringify(summarizeBackgroundCommand(job), null, 2)}\nOutput tail:\n${backgroundCommandOutputTail(job)}`,
-							)
+							.map((job) => {
+								const { id, status, exitCode, commandPreview, logFile, error } =
+									summarizeBackgroundCommand(job);
+								const summary = JSON.stringify({ id, status, exitCode, commandPreview, logFile, error });
+								return status === "succeeded"
+									? summary
+									: `${summary}\nOutput tail:\n${backgroundCommandOutputTail(job, { maxLines: 20, maxBytes: 2048 })}`;
+							})
 							.join("\n\n")}`,
 						display: true,
 						details: { jobIds: completedIds },

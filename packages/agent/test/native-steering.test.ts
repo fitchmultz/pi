@@ -21,6 +21,7 @@ it.each<{
 	terminal?: "completed" | "incomplete";
 	tool?: boolean;
 	unacknowledged?: boolean;
+	rejected?: boolean;
 	successor?: boolean;
 	close?: "abnormal" | "invalid-json";
 	error?: string;
@@ -28,6 +29,7 @@ it.each<{
 }>([
 	{ boundary: "completed parent", terminal: "completed", tool: true, steers: 3 },
 	{ boundary: "steered parent without tools", terminal: "incomplete" },
+	{ boundary: "rejected successor", terminal: "incomplete", tool: true, rejected: true },
 	{ boundary: "unacknowledged steer", terminal: "completed", tool: true, unacknowledged: true },
 	{ boundary: "unfinished parent", error: "WebSocket closed 1000" },
 	{ boundary: "started successor", terminal: "completed", successor: true, error: "WebSocket closed 1000" },
@@ -88,6 +90,17 @@ it.each<{
 						usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
 					},
 				});
+			if (scenario.rejected) {
+				request.send({
+					type: "response.steer.failed",
+					steer: { id: "steer_1", previous_response_id: "parent", input: body.input },
+					error: {
+						code: "successor_creation_failed",
+						message: "prompt_cache_options is not supported on this model",
+					},
+				});
+				return;
+			}
 			if (scenario.successor)
 				request.send({ type: "response.created", response: { id: "successor", status: "in_progress" } });
 			if (scenario.close === "invalid-json") request.socket!.send("{");
@@ -166,10 +179,14 @@ it.each<{
 		expect(statuses).toEqual([
 			...input.map(() => "queued"),
 			...(scenario.unacknowledged ? [] : input.map(() => "accepted")),
-			...input.map(() => (scenario.successor ? "applied" : "unknown")),
+			...input.map(() => (scenario.successor ? "applied" : scenario.rejected ? "failed" : "unknown")),
 		]);
 		const creates = fixture.requests.filter((request) => request.body.type === "response.create");
-		expect(creates.map((request) => request.connection)).toEqual(scenario.successor ? [1] : [1, 2]);
+		expect(creates.map((request) => request.connection)).toEqual(
+			scenario.successor ? [1] : scenario.rejected ? [1, 1] : [1, 2],
+		);
+		if (scenario.rejected)
+			for (const request of fixture.requests) expect(request.body).not.toHaveProperty("prompt_cache_options");
 		expect(fixture.requests).toHaveLength(input.length + creates.length);
 		for (const text of input)
 			expect(

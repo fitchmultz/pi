@@ -119,20 +119,23 @@ export function listBackgroundCommands(root: string): BackgroundCommandJob[] {
 		: [];
 }
 
-export function backgroundCommandOutputTail(job: BackgroundCommandJob): string {
+export function backgroundCommandOutputTail(
+	job: BackgroundCommandJob,
+	{ maxLines = 100, maxBytes = 16_384 } = {},
+): string {
 	if (job.status === "unknown" && !existsSync(job.logFile)) return "";
 	let fd: number | undefined;
 	try {
 		fd = openSync(job.logFile, "r");
 		const size = fstatSync(fd).size;
-		const bytes = Buffer.alloc(Math.min(size, 16_384));
+		const bytes = Buffer.alloc(Math.min(size, maxBytes));
 		const read = readSync(fd, bytes, 0, bytes.length, size - bytes.length);
 		let start = 0;
 		if (size > bytes.length) while (start < read && (bytes[start] & 0xc0) === 0x80) start++;
 		const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(start, read), {
 			stream: !backgroundCommandFinished(job),
 		});
-		return truncateTail(stripVTControlCharacters(text), { maxLines: 100, maxBytes: 16_384 }).content;
+		return truncateTail(stripVTControlCharacters(text), { maxLines, maxBytes }).content;
 	} catch (error) {
 		return `Output unavailable: ${String(error).slice(0, 512)}. Inspect logFile for this job.`;
 	} finally {
