@@ -17,9 +17,12 @@ import { handlePackageCommand } from "../src/package-manager-cli.ts";
 import * as childProcess from "../src/utils/child-process.ts";
 import { runForkUpdate } from "../src/utils/fork-update.ts";
 
-describe.skipIf(process.platform === "win32")("fork update bootstrap", () => {
+const platforms = ["darwin", "linux", "android"];
+describe.skipIf(process.platform === "win32").each(platforms)("fork update bootstrap on %s", (platform) => {
+	const originalPlatform = process.platform;
 	let root: string;
 	let selector: string;
+	let bin: string;
 	let oldPackage: string;
 	let source: string;
 	let expectedCommit: string;
@@ -29,17 +32,23 @@ describe.skipIf(process.platform === "win32")("fork update bootstrap", () => {
 	let originalExitCode: typeof process.exitCode;
 
 	beforeEach(() => {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
 		originalExitCode = process.exitCode;
 		process.exitCode = undefined;
 		root = mkdtempSync(join(tmpdir(), "pi-fork-bootstrap-test-"));
-		const globalRoot = join(root, "custom prefix/lib/node_modules");
+		const globalRoot = join(
+			root,
+			platform === "android"
+				? "real-home/.local/share/npm-global/lib/node_modules"
+				: "custom prefix/lib/node_modules",
+		);
 		selector = join(globalRoot, PACKAGE_NAME);
 		oldPackage = join(root, "old-package");
 		mkdirSync(dirname(selector), { recursive: true });
 		mkdirSync(oldPackage);
 		symlinkSync(oldPackage, selector);
-		const bin = join(root, "custom prefix/bin/pi");
-		mkdirSync(dirname(bin));
+		bin = join(root, platform === "android" ? "real-home/.local/bin/pi" : "custom prefix/bin/pi");
+		mkdirSync(dirname(bin), { recursive: true });
 		symlinkSync(join(selector, "dist/bundle/cli.js"), bin);
 		vi.stubEnv("PI_PACKAGE_DIR", oldPackage);
 		vi.stubEnv("HOME", join(root, "real-home"));
@@ -132,6 +141,7 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 	});
 
 	afterEach(() => {
+		Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		vi.restoreAllMocks();
 		vi.unstubAllEnvs();
 		process.exitCode = originalExitCode;
@@ -155,10 +165,16 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 		expect(observed.env.PI_RESTART_SOCKET).toBeUndefined();
 		expect(observed.env.PI_PACKAGE_DIR).toBeUndefined();
 		expect(observed.env.HOME).not.toBe(process.env.HOME);
+		expect(observed.env.TMPDIR).toBe(join(observed.env.HOME, "tmp"));
+		expect(observed.env.PREFIX).toBe(platform === "android" ? process.env.PREFIX : undefined);
+		expect(observed.env.LD_PRELOAD).toBe(platform === "android" ? process.env.LD_PRELOAD : undefined);
+		expect(observed.env.npm_config_script_shell).toBe(
+			platform === "android" ? join(dirname(process.execPath), "bash") : undefined,
+		);
 		expect(fetched).toBe(1);
 		expect(existsSync(temporarySource!)).toBe(false);
 		expect(existsSync(`${selector}.lock`)).toBe(false);
-		expect(existsSync(process.env.HOME!)).toBe(false);
+		expect(existsSync(join(process.env.HOME!, ".pi"))).toBe(false);
 	});
 
 	it("reports installer failure without success, leaves the selector and cleans up", async () => {
@@ -197,7 +213,6 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 			} else if (layout === "other-runtime") {
 				vi.stubEnv("PI_PACKAGE_DIR", root);
 			} else if (layout === "bin-bypass") {
-				const bin = join(root, "custom prefix/bin/pi");
 				rmSync(bin);
 				symlinkSync(join(oldPackage, "dist/bundle/cli.js"), bin);
 			} else writeFileSync(`${selector}.previous`, "unrelated");

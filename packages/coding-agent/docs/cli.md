@@ -254,10 +254,12 @@ select a candidate. Temporary source and dependency files are removed on normal
 success or failure. This executes trusted code from `fitchmultz/pi`, not an npm
 release, and requires network access to GitHub, npm, and model catalog sources.
 
-Initial support is **macOS/Linux arm64/x64 with an existing immutable fork package
-symlink in the active npm global prefix**. Node >=22.19 with adjacent npm, Git
-(supporting `git archive --mtime`), bash, tar, gzip, and tmux are required. The
-`<prefix>/bin/pi` symlink must point through that selector to `dist/bundle/cli.js`.
+Supported platforms are **macOS/Linux/Termux arm64/x64 with an existing immutable
+fork package symlink**. macOS/Linux use the active npm global prefix and its
+`<prefix>/bin/pi`. Termux uses `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent`
+and `~/.local/bin/pi`, without changing npm's system prefix. The executable symlink
+must point through the package selector to `dist/bundle/cli.js`. Node >=22.19 with
+adjacent npm, Git (supporting `git archive --mtime`), bash, tar, gzip, and tmux are required.
 Windows, Bun, ordinary npm package directories, standalone/managed installers,
 other package managers, and mismatched/non-writable prefixes fail explicitly;
 they are not migrated. No existing checkout is needed for subsequent updates.

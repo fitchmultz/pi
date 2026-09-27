@@ -7,8 +7,9 @@ import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./child-pro
 
 /** Bootstrap a pinned fork checkout; the fork installer owns validation and atomic selection. */
 export async function runForkUpdate(): Promise<void> {
-	if (!["darwin", "linux"].includes(process.platform) || !["arm64", "x64"].includes(process.arch)) {
-		throw new Error("pi update --fork supports macOS and Linux on arm64/x64 only; Windows is not supported.");
+	const termux = process.platform === "android";
+	if (!["darwin", "linux", "android"].includes(process.platform) || !["arm64", "x64"].includes(process.arch)) {
+		throw new Error("pi update --fork supports macOS, Linux and Termux on arm64/x64 only; Windows is not supported.");
 	}
 	const [major, minor] = process.versions.node.split(".").map(Number);
 	if (isBunRuntime || major < 22 || (major === 22 && minor < 19)) {
@@ -28,12 +29,14 @@ export async function runForkUpdate(): Promise<void> {
 		}
 		return result.stdout.trim();
 	};
-	const globalRoot = capture(node, [npm, "root", "-g"]);
+	const globalRoot = termux
+		? join(homedir(), ".local/share/npm-global/lib/node_modules")
+		: capture(node, [npm, "root", "-g"]);
 	if (!isAbsolute(globalRoot) || !globalRoot.endsWith("/lib/node_modules")) {
 		throw new Error(`Unsupported npm global layout: ${globalRoot}`);
 	}
 	const selector = join(globalRoot, PACKAGE_NAME);
-	const bin = resolve(globalRoot, "../../bin/pi");
+	const bin = termux ? join(homedir(), ".local/bin/pi") : resolve(globalRoot, "../../bin/pi");
 	try {
 		if (!lstatSync(selector).isSymbolicLink()) {
 			throw new Error(
@@ -41,10 +44,10 @@ export async function runForkUpdate(): Promise<void> {
 			);
 		}
 		if (realpathSync(selector) !== realpathSync(getPackageDir())) {
-			throw new Error("npm root -g does not select this running Pi installation");
+			throw new Error("the package selector does not select this running Pi installation");
 		}
 		if (resolve(dirname(bin), readlinkSync(bin)) !== join(selector, "dist/bundle/cli.js")) {
-			throw new Error("the npm bin/pi symlink must point through the package selector to dist/bundle/cli.js");
+			throw new Error(`${bin} must point through the package selector to dist/bundle/cli.js`);
 		}
 		accessSync(dirname(selector), constants.W_OK);
 		try {
@@ -74,13 +77,14 @@ export async function runForkUpdate(): Promise<void> {
 		temporary = mkdtempSync(join(tmpdir(), "pi-fork-update-"));
 		const home = join(temporary, "home");
 		const source = join(temporary, "source");
-		mkdirSync(home);
+		mkdirSync(join(home, "tmp"), { recursive: true });
 		mkdirSync(source);
 		// Do not expose real settings, credentials, Git hooks/config, or npm lifecycle hooks to the build.
 		const env: NodeJS.ProcessEnv = {
 			PATH: `${dirname(node)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
 			HOME: home,
 			USERPROFILE: home,
+			TMPDIR: join(home, "tmp"),
 			XDG_CONFIG_HOME: join(home, "config"),
 			XDG_CACHE_HOME: join(home, "cache"),
 			XDG_DATA_HOME: join(home, "data"),
@@ -92,6 +96,13 @@ export async function runForkUpdate(): Promise<void> {
 			GIT_TERMINAL_PROMPT: "0",
 			npm_config_cache: join(home, "npm-cache"),
 			npm_config_userconfig: join(home, ".npmrc"),
+			...(termux
+				? {
+						PREFIX: process.env.PREFIX,
+						LD_PRELOAD: process.env.LD_PRELOAD,
+						npm_config_script_shell: join(dirname(node), "bash"),
+					}
+				: {}),
 		};
 		const run = async (command: string, args: string[]): Promise<void> => {
 			console.log(`$ ${[command, ...args].join(" ")}`);

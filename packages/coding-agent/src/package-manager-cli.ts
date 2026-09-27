@@ -310,7 +310,7 @@ Update pi, installed packages, or model catalogs.
 
 Options:
   --self                  Update pi only (default when no target is given)
-  --fork                  Install pinned latest fitchmultz/pi main (macOS/Linux)
+  --fork                  Install pinned latest fitchmultz/pi main (macOS/Linux/Termux)
   --extensions            Update installed packages only
   --models                Refresh model catalogs only
   --all                   Update pi and installed packages
@@ -327,9 +327,10 @@ Short forms:
   ${APP_NAME} update <source>       Update one package
   ${APP_NAME} update pi             Update pi only (self works as alias to pi)
 
---fork requires an existing immutable fork selector in the active npm global prefix,
-Node >=22.19 with adjacent npm, Git, bash, tar, gzip, tmux, and network access.
-Supports macOS/Linux arm64/x64, not Windows, ordinary npm directories, or other
+--fork requires an existing immutable fork selector in the active npm global prefix
+(or Termux's ~/.local/share/npm-global with ~/.local/bin/pi), Node >=22.19 with
+adjacent npm, Git, bash, tar, gzip, tmux, and network access.
+Supports macOS/Linux/Termux arm64/x64, not Windows, ordinary npm directories, or other
 install methods. No existing checkout needed. Does not update extensions/settings
 or restart running sessions. Cannot combine with other targets or --force.
 Initial setup: https://github.com/fitchmultz/pi/blob/main/FORK.md

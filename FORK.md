@@ -86,19 +86,21 @@ and extensions are unchanged. Failures before selection leave the old runtime
 selected; normal success/failure removes the temporary checkout. Fully relaunch Pi
 or use a selector-following native restart afterward and verify the loaded identity.
 
-Initial support is macOS/Linux arm64/x64, Node >=22.19 with npm installed alongside
-Node, Git with `archive --mtime` support, bash, tar, gzip, and tmux. The command
-resolves `npm root -g` using that Node/npm installation; it never assumes a fixed
-npm prefix. The global package must already be an immutable fork **symlink** that
-resolves to the running Pi package, with `<prefix>/bin/pi` pointing through it to
-`dist/bundle/cli.js`. The selector must be writable; `.previous`, if present, must
-also be a symlink.
+Supported platforms are macOS/Linux/Termux arm64/x64, with Node >=22.19 and npm
+installed alongside Node, Git with `archive --mtime` support, bash, tar, gzip, and
+tmux. On macOS/Linux the command resolves `npm root -g` using that Node/npm
+installation; it never assumes a fixed npm prefix. Termux instead uses the private
+`~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` selector
+and `~/.local/bin/pi`, leaving npm's system prefix unchanged. The package must
+already be an immutable fork **symlink** resolving to the running Pi package, with
+the executable symlink pointing through it to `dist/bundle/cli.js`. The selector
+must be writable; `.previous`, if present, must also be a symlink.
 Windows, Bun, ordinary npm directories, standalone/managed installers, other
 package managers, and mismatched prefixes are rejected rather than migrated.
 `--fork` cannot combine with other update targets, positional sources, or `--force`.
 
 For initial setup on another supported machine, use a separate, user-owned prefix
-rather than replacing an ordinary npm directory. The one-time setup still needs
+rather than replacing an ordinary npm directory. The one-time setup below is for macOS/Linux and still needs
 a checkout; subsequent `pi update --fork` calls do not:
 
 ```sh
@@ -152,8 +154,8 @@ hand-made workspace dependency links are used.
 The checkout installer also supports Termux on Android: it preserves the native
 shell/exec environment, isolates temporary files, and installs the lockfile-pinned
 static Linux TypeScript compiler into the disposable build. Restart sockets fall
-back to Termux's writable short temporary path when needed. This does not extend
-the platform support of `pi update --fork`.
+back to Termux's writable short temporary path when needed. The `pi update --fork`
+bootstrap preserves that same native shell/exec environment.
 
 Astra's supported lifecycle capabilities are applied when loading built-in and
 remote catalogs, so older or upstream data cannot silently omit them. Explicit
