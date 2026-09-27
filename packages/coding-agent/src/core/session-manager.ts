@@ -77,6 +77,8 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	checkpoint?: boolean;
 	/** Original result entry IDs present in this successful assistant response's request input. */
 	consumedToolResultIds?: string[];
+	/** Native receipts after the request frontier, excluded from its input, preceding its first snapshot. */
+	concurrentToolResultIds?: string[];
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -520,6 +522,7 @@ function coalesceAssistantCheckpoints(path: SessionEntry[]): SessionEntry[] {
 					previous.type === "message" && previous.message.role === "assistant"
 						? {
 								...(entry.checkpoint ? previous : entry),
+								concurrentToolResultIds: previous.concurrentToolResultIds,
 								message: mergeAssistantCheckpoint(previous.message, entry.message),
 							}
 						: entry;
@@ -539,15 +542,20 @@ function coalesceAssistantCheckpoints(path: SessionEntry[]): SessionEntry[] {
  * window, the latest compaction is represented by its summary, its kept entries,
  * and everything appended afterward.
  */
-export function buildContextEntries(
+function buildModelContextEntries(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
+	retainedByBoundary = new Map<string, Set<string>>(),
 ): SessionEntry[] {
 	const fullPath = buildSessionPath(entries, leafId, byId);
 	// Late execution checkpoints update the original response, not the window
 	// in which they were saved. Coalesce before cutting away older conversation.
-	const coalescedPath = coalesceAssistantCheckpoints(fullPath);
+	const coalescedPath = orderConcurrentToolResults(
+		coalesceAssistantCheckpoints(fullPath),
+		fullPath,
+		retainedByBoundary,
+	);
 	let contextWindowIndex = -1;
 	for (let i = coalescedPath.length - 1; i >= 0; i--) {
 		if (coalescedPath[i].type === "context_window") {
@@ -619,6 +627,74 @@ export function buildContextEntries(
 	return contextEntries;
 }
 
+/** Move only explicitly related earlier receipts; later responses can defer the same receipt again. */
+function orderConcurrentToolResults(
+	path: SessionEntry[],
+	fullPath: SessionEntry[],
+	retainedByBoundary: Map<string, Set<string>>,
+): SessionEntry[] {
+	const positions = new Map(path.map((entry, index) => [entry.id, index]));
+	const after = new Map<string, number>();
+	let boundary = -1;
+	let retainedAtBoundary: Set<string> | undefined;
+	for (const [index, entry] of path.entries()) {
+		if (entry.type === "compaction" || entry.type === "context_window") {
+			boundary = index;
+			retainedAtBoundary = undefined;
+		}
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		for (const id of entry.concurrentToolResultIds ?? []) {
+			const position = positions.get(id);
+			if (position === undefined || position >= index) continue;
+			if (position < boundary) {
+				// Resolve the strictly earlier branch at the cut, before this response can
+				// move anything. Reuse retention semantics, including prior causal cuts.
+				if (!retainedAtBoundary) {
+					const boundaryId = path[boundary].id;
+					retainedAtBoundary = retainedByBoundary.get(boundaryId);
+					if (!retainedAtBoundary) {
+						retainedAtBoundary = new Set(
+							buildModelContextEntries(fullPath, boundaryId, undefined, retainedByBoundary).map(
+								(entry) => entry.id,
+							),
+						);
+						// Invocation-local: each exact cut is resolved once, never cached across edits or branches.
+						retainedByBoundary.set(boundaryId, retainedAtBoundary);
+					}
+				}
+				if (!retainedAtBoundary.has(id)) continue;
+			}
+			const receipt = path[position];
+			if (receipt.type === "message" && receipt.message.role === "toolResult") after.set(id, index);
+		}
+	}
+	const deferred = new Map<number, SessionEntry[]>();
+	for (const entry of path) {
+		const index = after.get(entry.id);
+		if (index === undefined) continue;
+		const receipts = deferred.get(index) ?? [];
+		receipts.push(entry);
+		deferred.set(index, receipts);
+	}
+	return path.flatMap((entry, index) => [...(after.has(entry.id) ? [] : [entry]), ...(deferred.get(index) ?? [])]);
+}
+
+/** Present the causally retained set in arrival order, with its active boundary first. */
+export function buildContextEntries(
+	entries: SessionEntry[],
+	leafId?: string | null,
+	byId?: Map<string, SessionEntry>,
+): SessionEntry[] {
+	const selected = buildModelContextEntries(entries, leafId, byId);
+	const positions = new Map(
+		coalesceAssistantCheckpoints(buildSessionPath(entries, leafId, byId)).map((entry, index) => [entry.id, index]),
+	);
+	const boundary =
+		selected[0]?.type === "compaction" || selected[0]?.type === "context_window" ? selected.shift() : undefined;
+	selected.sort((a, b) => positions.get(a.id)! - positions.get(b.id)!);
+	return boundary ? [boundary, ...selected] : selected;
+}
+
 /**
  * Build the session context from entries using tree traversal.
  * If leafId is provided, walks from that entry to root.
@@ -675,7 +751,7 @@ export function buildSessionProjection(
 ): SessionProjection {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const contextEntries = buildContextEntries(entries, leafId, byId);
+	const contextEntries = buildModelContextEntries(entries, leafId, byId);
 	const allResults = new Map(
 		path.flatMap((entry) =>
 			entry.type === "message" && entry.message.role === "toolResult"
@@ -1510,6 +1586,7 @@ export class SessionManager {
 		message: Message | CustomMessage | BashExecutionMessage,
 		checkpoint = false,
 		consumedToolResultIds?: string[],
+		concurrentToolResultIds?: string[],
 	): string {
 		const entry: SessionMessageEntry = {
 			type: "message",
@@ -1519,6 +1596,7 @@ export class SessionManager {
 			message,
 			...(checkpoint ? { checkpoint: true } : {}),
 			...(consumedToolResultIds?.length ? { consumedToolResultIds: [...consumedToolResultIds] } : {}),
+			...(concurrentToolResultIds?.length ? { concurrentToolResultIds: [...concurrentToolResultIds] } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;

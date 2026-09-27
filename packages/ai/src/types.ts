@@ -731,6 +731,8 @@ export type AssistantMessageEvent =
 	| {
 			type: "start";
 			partial: AssistantMessage;
+			/** Initial logical payload's result call IDs after onPayload, before delta extraction. [] is known empty; absent is unknown. */
+			inputToolCallIds?: readonly string[];
 			/** Inputs added to the preceding response by a native continuation. Absent on the first response. */
 			continuationInput?: readonly (UserMessage | ToolResultMessage)[];
 	  }

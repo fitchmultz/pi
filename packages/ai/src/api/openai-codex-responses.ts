@@ -64,6 +64,7 @@ import {
 	createResponsesSuccessor,
 	getInitialResponsesEffort,
 	getNativeToolSearch,
+	getResponsesInputToolCallIds,
 	processResponsesStream,
 	resolveResponsesEffort,
 	resolveResponsesTranscript,
@@ -329,6 +330,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 			} finally {
 				details.onPayloadMs = performance.now() - hookStartedAt;
 			}
+			const inputToolCallIds = getResponsesInputToolCallIds(body);
 			details.requestedServiceTier = diagnosticServiceTier(body.service_tier);
 			const websocketRequestId = codexSessionId || uuidv7();
 			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
@@ -378,7 +380,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 								websocketStarted = true;
 								if (!startEmitted) {
 									startEmitted = true;
-									stream.push({ type: "start", partial: output });
+									stream.push({ type: "start", partial: output, inputToolCallIds });
 								}
 							},
 							() => {
@@ -575,7 +577,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 
 			if (!startEmitted) {
 				startEmitted = true;
-				stream.push({ type: "start", partial: output });
+				stream.push({ type: "start", partial: output, inputToolCallIds });
 			}
 			await processStream(
 				response,

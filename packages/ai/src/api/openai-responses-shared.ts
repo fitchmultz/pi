@@ -95,6 +95,30 @@ function parseTextSignature(
 
 type ToolResultOutputContent = Array<ResponseInputText | ResponseInputImage>;
 
+/** Snapshot logical input, not the connection's extracted delta. */
+export function getResponsesInputToolCallIds(body: {
+	input?: unknown;
+	previous_response_id?: unknown;
+	conversation?: unknown;
+}): string[] | undefined {
+	// ponytail: opaque server history cannot prove membership; expand only with authoritative resolved input.
+	if (body.previous_response_id != null || body.conversation != null) return undefined;
+	if (typeof body.input === "string") return [];
+	if (!Array.isArray(body.input)) return undefined;
+	const ids: string[] = [];
+	const input: unknown[] = body.input;
+	for (const item of input) {
+		if (!item || typeof item !== "object") return undefined;
+		const type = "type" in item ? item.type : undefined;
+		if (type === "compaction" || type === "item_reference" || (type == null && !("role" in item))) return undefined;
+		if (type === "function_call_output" || type === "custom_tool_call_output" || type === "tool_search_output") {
+			if (!("call_id" in item) || typeof item.call_id !== "string") return undefined;
+			ids.push(item.call_id);
+		}
+	}
+	return ids;
+}
+
 export function convertToolResultOutput<TApi extends Api>(
 	model: Model<TApi>,
 	content: readonly (TextContent | ImageContent)[],

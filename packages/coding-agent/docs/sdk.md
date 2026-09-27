@@ -116,6 +116,8 @@ Live steering reports `queued`, `accepted`, `pending`, `applied`, `failed`, or `
 
 Automatic successors have separate assistant lifecycles and usage. `message_start.continuationInput` snapshots the user inputs and submitted results added to the preceding response: absent on the first response, empty for a known empty delta. They already have message events; do not append them twice. `message_checkpoint` is an execution snapshot of the same response, not another billable response. See [JSON events](json.md) and [session persistence](session-format.md#sessionmessageentry).
 
+Initial native `message_start.inputToolCallIds` reports post-`onPayload` logical result membership, before transport delta extraction: `[]` is known empty and absence is unknown. Custom native streams must provide this snapshot to prove initial consumption; unknown histories conservatively retain receipts. Successful successors still prove their explicit incremental inputs. Session projection places explicitly identified concurrent receipts after the response that excluded them, while journal, events, and UI retain arrival order. This preserves eligible delta requests; it does not guarantee provider cache hits.
+
 Routes with `compat.supportsReasoningEffortUpdates` retain initial effort, persist `providerThinkingLevel`, and insert coalesced positional updates. Omitted Astra effort is recorded as `medium`. Automatic provider compaction, truncation, and nonstandard reasoning modes do not use this path; explicit opaque compaction items are replayed unchanged.
 
 ### Fresh context windows
