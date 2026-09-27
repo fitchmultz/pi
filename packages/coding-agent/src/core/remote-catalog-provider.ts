@@ -3,7 +3,7 @@ import {
 	type Model,
 	type ModelsStoreEntry,
 	type Provider,
-	withAstraLifecycleDefaults,
+	withOpenAIResponsesLifecycleDefaults,
 } from "@earendil-works/pi-ai";
 import { VERSION } from "../config.ts";
 import { fetchWithRetry } from "../utils/management-http.ts";
@@ -67,7 +67,7 @@ export function withRemoteCatalog(
 		...provider,
 		getModels: () =>
 			mergeModels(provider.getModels(), dynamicModels.map(withCloudflareAnthropicModelId)).map(
-				withAstraLifecycleDefaults,
+				withOpenAIResponsesLifecycleDefaults,
 			),
 		refreshModels: async (context) => {
 			const stored = context.stored;

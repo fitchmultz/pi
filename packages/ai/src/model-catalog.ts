@@ -19,10 +19,10 @@ export type ModelCatalog<TGroups extends ModelGroups, TProvider extends Provider
 	};
 };
 
-/** Older and upstream catalogs can omit the fork's supported Astra lifecycle capabilities. */
-export function withAstraLifecycleDefaults(model: Model<Api>): Model<Api> {
+/** Older and upstream catalogs can omit the fork's supported GPT-6 lifecycle capabilities. */
+export function withOpenAIResponsesLifecycleDefaults(model: Model<Api>): Model<Api> {
 	if (
-		model.id !== "gpt-6-astra" ||
+		(model.id !== "gpt-6-astra" && model.id !== "gpt-6-sol" && model.id !== "gpt-6-luna") ||
 		!(
 			((model.provider === "openai" || model.provider === "cloudflare-ai-gateway") &&
 				model.api === "openai-responses") ||
@@ -47,6 +47,6 @@ export function flattenModelCatalog<const TProvider extends ProviderId, const TG
 	groups: TGroups,
 ): ModelCatalog<TGroups, TProvider> {
 	const catalog = Object.assign({}, ...Object.values(groups)) as Record<string, Model<Api>>;
-	for (const [id, model] of Object.entries(catalog)) catalog[id] = withAstraLifecycleDefaults(model);
+	for (const [id, model] of Object.entries(catalog)) catalog[id] = withOpenAIResponsesLifecycleDefaults(model);
 	return catalog as ModelCatalog<TGroups, TProvider>;
 }

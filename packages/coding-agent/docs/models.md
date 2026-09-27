@@ -65,6 +65,8 @@ The dummy key makes the model available to Pi; Ollama ignores it. For an authent
 
 Opening `/model` reloads the file. A `models` entry adds or replaces a model with the same ID on that provider. Use `modelOverrides` to change metadata for a built-in, custom, or extension-provided model without replacing the provider's model list. Custom entries and extension replacements are composed first, then matching overrides apply; model-definition header keys take precedence. Unknown override IDs are ignored.
 
+GPT-6 Astra, Sol and Luna include native async-tool, steering and positional reasoning-effort defaults on OpenAI and Cloudflare OpenAI Responses routes and OpenAI Codex Responses. You do not need `models.json` capability blocks for these models. Explicit `compat` opt-outs and `modelOverrides` still win over bundled and remote catalogs. Context limits and thinking preferences remain independently configurable; Sol and Luna retain their `off` → `none` mapping.
+
 ### Describe model input and caching
 
 Use `inputLimits.images.resize` to control how Pi encodes new image attachments, `read` results, and tool-result images before storing them in conversation history:

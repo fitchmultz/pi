@@ -1,10 +1,12 @@
 import type { ResponsesClientEvent } from "openai/resources/responses/responses.js";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { stream as codexStream } from "../src/api/openai-codex-responses.ts";
 import { stream as responsesStream } from "../src/api/openai-responses.ts";
 import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
+import { getModel } from "../src/compat.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type {
 	AssistantMessage,
@@ -411,9 +413,18 @@ it.each(["error", "aborted"] as const)(
 );
 
 describe.each([false, true])("native steering (Codex=%s)", (codex) => {
-	it.each(["completed", "steered", "pending", "pending-multiple", "rejected", "disconnect"] as const)(
-		"handles %s parent and preserves per-response usage",
-		async (mode) => {
+	it.each([
+		["completed", "gpt-6-astra"],
+		["steered", "gpt-6-astra"],
+		["pending", "gpt-6-astra"],
+		["pending-multiple", "gpt-6-astra"],
+		["rejected", "gpt-6-astra"],
+		["disconnect", "gpt-6-astra"],
+		["completed", "gpt-6-sol"],
+		["completed", "gpt-6-luna"],
+	] as const)(
+		"handles %s parent for catalog %s with async tools, positional effort and per-response usage",
+		async (mode, modelId) => {
 			const pending = mode === "pending" || mode === "pending-multiple";
 			vi.stubGlobal("WebSocket", WebSocket);
 			let parent: LocalResponsesRequest | undefined;
@@ -481,11 +492,21 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 				}
 			});
 			try {
+				const model = codex ? getModel("openai-codex", modelId) : getModel("openai", modelId);
+				const history = normalizeContext({
+					messages: [
+						...context.messages,
+						{ ...saved("low", "earlier"), api: model.api, provider: model.provider, model: model.id },
+						{ role: "user", content: "next", timestamp: 2 },
+					],
+					tools: [{ name: "work", description: "Work", parameters: Type.Object({}), async: true }],
+				});
 				const options = {
 					apiKey: codex ? token : "local",
-					sessionId: `native-${codex}-${mode}`,
+					sessionId: `native-${codex}-${mode}-${modelId}`,
 					transport: "websocket" as const,
 					timeoutMs: 1500,
+					reasoningEffort: "high" as const,
 					onResponseControl(value: ResponseControl | undefined) {
 						control = value;
 					},
@@ -493,19 +514,25 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 				const response = codex
 					? codexStream(
 							{
-								...nativeModel,
+								...model,
 								baseUrl: fixture.baseUrl,
 								api: "openai-codex-responses",
 								provider: "openai-codex",
 							},
-							context,
+							history,
 							options,
 						)
-					: responsesStream({ ...nativeModel, baseUrl: fixture.baseUrl }, context, options);
+					: responsesStream({ ...model, api: "openai-responses", baseUrl: fixture.baseUrl }, history, options);
 				const consume = (async () => {
 					for await (const event of response) events.push(structuredClone(event));
 				})();
 				await vi.waitFor(() => expect(control).toBeDefined());
+				expect.soft(parent?.body.tools).toMatchObject([{ name: "work", async: true }]);
+				expect.soft(parent?.body.reasoning).toMatchObject({ effort: "low" });
+				expect.soft(parent?.body.input).toContainEqual({
+					type: "configuration_update",
+					reasoning: { effort: "high" },
+				});
 				const steeringInput = { role: "user" as const, content: "new input", timestamp: 2 };
 				expect(control!.steer(steeringInput)).toBe(true);
 				steeringInput.content = "edited after send";
