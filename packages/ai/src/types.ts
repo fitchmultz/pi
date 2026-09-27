@@ -541,6 +541,11 @@ export interface SystemMessage {
 	/** Tools that stop being available at this point. */
 	toolsRemoved?: ToolReference[];
 	/**
+	 * Host-only snapshot of source-owned deferred entry identities, never provider instructions or schemas.
+	 * Omitted patches preserve the prior snapshot; an array (including empty) replaces it.
+	 */
+	deferredToolEntries?: ToolReference[];
+	/**
 	 * Discard every earlier system message before applying this one, so its `content`,
 	 * `sections`, and `toolsAdded` are the complete prompt and tool state from here on.
 	 */

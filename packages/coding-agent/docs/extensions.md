@@ -165,13 +165,15 @@ See [`hello.ts`](../examples/extensions/hello.ts), [`todo.ts`](../examples/exten
 
 ### Activate tools dynamically
 
-Register tools first, then select them using `pi.setActiveTools(ids)`. `getAllTools()` supplies each public `id`, leaf `name`, optional `namespace` and `toolSearch`, description, schema, guidelines, and source. Unnamespaced IDs equal their name; namespaced IDs are opaque. The setter replaces the whole selection, including clearing it with `[]`; unknown IDs are ignored and registration collisions reject.
+Register tools first, then select them using `pi.setActiveTools(ids)`. `getAllTools()` supplies each public `id`, leaf `name`, optional `namespace`, `toolSearch`, and `discovery` metadata, description, schema, guidelines, and source. Unnamespaced IDs equal their name; namespaced IDs are opaque. The setter replaces the whole selection, including clearing it with `[]`; unknown IDs are ignored and registration collisions reject.
 
 For exact identities, use `getActiveToolReferences()` and `setActiveToolReferences([{ name, namespace? }])`. Bare names select only unnamespaced tools. Both selection paths obey allowlists and exclusions. Events preserve namespace and leaf name separately; built-in type guards match only unnamespaced tools.
 
-Custom sections can also be tool-scoped: set `event.systemPromptOptions.sectionTools.browser = ["browser_tool"]` alongside `sections.browser`. Pi retains the complete text but renders it only when an owning tool is active, including activation between tool-loop requests. Keep execution guards and recovery hooks active independently. See [Experimental Tool Discovery](tool-discovery.md).
+Custom sections can also be tool-scoped: set `event.systemPromptOptions.sectionTools.browser = ["browser_tool"]` alongside `sections.browser`. Pi retains the complete text but renders it only when an owning tool is active, including activation between tool-loop requests. Keep execution guards and recovery hooks active independently. For automatic grouping, attach extension-owned `discovery: { group, role }` metadata at tool registration sites; Pi supplies the section ownership map before `before_agent_start`. Generate complete scoped text even for generic prompts while tools are inactive. See [Extension-owned Tool Discovery](tool-discovery.md).
 
 ### Tool discovery
+
+Extension-owned `ToolDefinition.discovery` metadata feeds Pi's ordinary `discover_tools` catalog on capable models, with no settings inventory. Entry tools activate on discovery; advanced tools remain behind the extension's own loader. Unsupported APIs retain ordinary exposure. This mechanism is separate from the native search callback below.
 
 `pi.registerToolSearch(definition)` uses ordinary tool validation, hooks, cancellation, and rendering. Its callback owns registration and search policy: activate matches before returning normal content/details plus `tools: ToolReference[]`. Pi resolves references against the active permitted registry and persists declaration snapshots. Unknown, inactive, or denied references fail without publishing declarations; returned objects cannot override schemas.
 

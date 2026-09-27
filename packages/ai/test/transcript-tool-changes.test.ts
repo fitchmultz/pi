@@ -11,15 +11,28 @@ function tool(name: string): Tool {
 
 async function capturePayload<T>(model: Model<Api>, context: Context): Promise<T> {
 	let captured: T | undefined;
-	const stream = streamSimple(model, context, {
-		apiKey: "test-key",
-		onPayload: (payload) => {
-			captured = payload as T;
-			throw new PayloadCaptured();
+	const stream = streamSimple(
+		model,
+		{
+			...context,
+			messages: context.messages.map((message) =>
+				message.role === "system"
+					? { ...message, deferredToolEntries: [{ namespace: "host_only", name: "undeclared_entry" }] }
+					: message,
+			),
 		},
-	});
+		{
+			apiKey: "test-key",
+			onPayload: (payload) => {
+				captured = payload as T;
+				throw new PayloadCaptured();
+			},
+		},
+	);
 	await stream.result();
 	if (!captured) throw new Error("Expected payload capture");
+	expect(JSON.stringify(captured)).not.toContain("deferredToolEntries");
+	expect(JSON.stringify(captured)).not.toContain("undeclared_entry");
 	return captured;
 }
 

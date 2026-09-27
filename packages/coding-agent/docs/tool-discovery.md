@@ -1,64 +1,84 @@
-# Experimental tool discovery
+# Extension-owned tool discovery
 
-Tool discovery reduces unused integration declarations without disabling extensions or shortening their instructions. It is opt-in and limited to explicitly selected providers. The model keeps ordinary coding tools and sees one small `discover_tools` catalog for the configured groups.
+Tool discovery reduces unused integration declarations without disabling extensions or shortening their instructions. Extensions attach capability metadata to their actual tool definitions. Pi derives the catalog from the final permitted registrations; users do not maintain tool lists or provider lists, and no configuration is required.
 
-For example, a dependency audit need not receive browser schemas. A browser task calls `discover_tools({ enable: ["browser"] })`; Pi activates the group's normal entry tools and includes their complete schemas, guidelines, and associated prompt sections on the next request. Discovery executes no browser action. Actual calls still use normal validation, tool hooks, approvals, cancellation, and rendering.
+For example, a dependency audit need not receive browser schemas. A task needing the browser calls `discover_tools({ enable: ["browser"] })`; Pi activates the group's entry tools and includes their complete schemas, guidelines, and associated prompt sections on the next request. Discovery executes no integration action. Actual calls retain normal validation, tool hooks, approvals, cancellation, and rendering.
 
-## Configuration
+## Extension contract
 
-Add a `toolDiscovery` object to [settings](settings.md#tools):
+Share a descriptor beside the extension's registrations and attach it with the optional `ToolDefinition.discovery` field:
 
-```json
-{
-  "toolDiscovery": {
-    "enabled": true,
-    "providers": ["openai-codex"],
-    "groups": [
-      {
-        "name": "browser",
-        "description": "Browse, search, interact with web pages, and verify browser UI",
-        "tools": ["agent_browser", "agent_browser_code", "agent_browser_tools", "agent_browser_qa"],
-        "defaultTools": ["agent_browser", "agent_browser_code", "agent_browser_tools"],
-        "sections": ["agent_browser"]
-      }
-    ]
-  }
-}
+```typescript
+const group = {
+  name: "browser",
+  description: "Browse and verify web pages",
+  sections: ["browser_manual"],
+} as const;
+
+pi.registerTool({
+  ...browserTool,
+  ...{ discovery: { group, role: "entry" as const } },
+});
+pi.registerTool({
+  ...advancedBrowserTool,
+  ...{ discovery: { group, role: "advanced" as const } },
+});
 ```
 
-This is an illustrative group, not a complete inventory for every browser extension release. Inspect the installed extension's tools when creating a profile. A conservative profile for the integrations used in this fork is provided in [tool-discovery.example.json](tool-discovery.example.json).
+`ToolDiscoveryGroup` and `ToolDiscovery` are exported for fork-native authors. The spread form also remains authorable against official Pi types without a new registration method; hosts that do not implement the metadata retain their ordinary exposure.
 
-- `enabled`: defaults to `false`.
-- `providers`: exact provider IDs evaluated for this rollout; required when enabled. Other providers retain ordinary tool exposure. Do not include Cursor: its current MCP bridge snapshots the catalog for an SDK run and does not implement this activation boundary.
-- `groups`: at most 32 explicit capability groups. Keep each description short and recognizable by task, not just package name.
-- `tools`: exact tool names, or `{ "namespace": "...", "name": "..." }` references. These tools start inactive. Built-in tools cannot be deferred through this setting.
-- `defaultTools`: the group's normal entry tools to activate; defaults to `tools`. Leave advanced tools behind the integration's existing loader instead of loading every schema at once.
-- `sections`: custom prompt-section names owned by the group. Their complete text renders when any group member is active. Shared sections remain visible if any owner is active. Core rules, project instructions, skills, and other core sections cannot be deferred this way.
+- `group.name`: a lowercase identifier matching `[a-z][a-z0-9_-]*`.
+- `group.description`: a recognizable capability description, 1–240 characters.
+- `group.sections`: optional custom prompt-section names. Every tool using a group name must agree on its description and section set. Duplicate or invalid section names and core prompt sections are rejected.
+- `role: "entry"`: activates when the model enables the group.
+- `role: "advanced"`: belongs to the group but remains behind the extension's own activation workflow.
 
-Groups are filtered through the permitted registry. Missing/excluded tools are not made available by discovery. Explicit CLI/SDK tool allowlists retain their existing semantics and bypass automatic deferral. Excluding `discover_tools` also disables deferral, rather than stranding tools behind an excluded loader. Extensions may explicitly activate tools for automatic recovery or commands; discovery does not fight that selection.
+Tools without metadata retain ordinary exposure. Built-ins are never deferred. Keep always-needed recovery/control tools ordinary, or explicitly activate permitted tools when recovery requires them. Metadata is host-only: it is not added to provider tool schemas. `getAllTools()` exposes it for host-side inspection.
 
-## Lifecycle and rollback
+Pi collects exact namespace/name identities from the final permitted registry. New registrations automatically join their declared group; removed, replaced, or excluded definitions cannot leave stale catalog members. A group with no permitted entry tool is omitted and its remaining tools keep ordinary exposure rather than becoming unreachable. Shared sections render when any owning group member is active.
 
-Activation is additive and idempotent; there is no per-turn unloading. Pi's existing declaration history owns activation across resume, tree navigation, compaction, and fresh context windows. Navigating to a branch with saved declarations restores its selection. A target before the first declaration retains the current selection and pending prompt edits, including lifecycle-hook activations, just as ordinary Pi does. Reload does not implicitly enable undiscovered groups. Unlisted new tools retain their original startup behavior.
+## Host eligibility and restrictions
 
-Switching to an unevaluated provider restores the groups' normal entry tools, not their advanced tools, only while the discovery loader remains selected. Deliberate empty selections and selections that removed the loader are not widened by that restoration. Returning to an evaluated provider does not unload tools already made available in that session. It re-adds the discovery catalog only if doing so cannot expose previously deselected entry tools; repeated provider switches preserve restricted selections. Start a fresh session for a clean lean baseline.
+Deferral requires a known native API and the current model's explicit support for both tool additions and mid-conversation system messages:
 
-To roll back, set `toolDiscovery.enabled` to `false` and run `/reload`, or restart. This restores ordinary extension exposure without reactivating built-in tools deselected in the transcript. Keep the previous runtime and extension checkouts when trying a staged build. `/reload` alone does not load changed extension or runtime code.
+| Native API | Required tool capability |
+|---|---|
+| OpenAI Responses, Codex Responses, Azure Responses | `supportsAdditionalTools` or `supportsToolSearch` |
+| Anthropic Messages | `supportsMidConvoToolChanges` |
+| OpenAI Completions | `supportsMidConvoToolAdditions` |
 
-## Instruction contract
+All also require `supportsMidConvoSystemMessages`. Unknown/custom APIs, including `cursor-sdk`, retain ordinary exposure even if their models copy these flags. This policy uses existing native model metadata, not a user-maintained provider catalog.
 
-Tool `promptGuidelines` and `promptSnippet` are already active-only. For dynamic custom sections, `BuildSystemPromptOptions.sectionTools` associates section names with tool references. The source section text remains in the run's prompt options even while omitted from model input, so activation can deliver it before the first tool call in the same run. Only custom sections are affected. Forced full-prompt replacements remain opaque and unchanged.
+Explicit CLI/SDK tool allowlists bypass automatic deferral. Excluding `discover_tools` also disables deferral, rather than stranding capabilities behind an excluded loader. Tool exclusions remain binding. Extension lifecycle and recovery hooks continue to run. The ordinary integration loader is independent of MCP's native `tool_search` callback.
 
-An integration whose hook declines to generate its instructions while inactive needs adjustment before deferral. Do not defer a background-control tool solely because the current user prompt does not mention it. Model discovery is not an adequate replacement for automatic recovery behavior.
+## Full instructions before first use
 
-## Quality gate
+Pi populates `event.systemPromptOptions.sectionTools` before `before_agent_start`. An extension must generate its complete section text when its ownership key is present, even for a generic prompt and while its tools are inactive:
 
-The example keeps editing replacements, working-directory support, questions, naming, subagent controls, intercom, goals, Posthorse recovery, and MCP's existing native discovery available. It defers only browser, native macOS, Oracle submission/authentication, and Z.ai lookups. Oracle read/cancel stay available for existing jobs. No provider, skill, project context, execution safeguard, or background handler is disabled.
+```typescript
+pi.on("before_agent_start", (event) => {
+  if (event.systemPromptOptions.sectionTools.browser_manual || needsBrowser(event.prompt)) {
+    event.systemPromptOptions.sections.browser_manual = fullBrowserInstructions;
+  }
+});
+```
 
-Before promoting a profile:
+Pi retains that hidden source text in the run's prompt options and reveals it after discovery, before the first integration call in the same run. Do not rely only on user-prompt keywords or current tool activity to generate it. Tool `promptGuidelines` and `promptSnippet` are already active-only. Unrelated instructions remain visible. Forced full-prompt replacements are opaque and unchanged.
 
-1. Verify initial schemas and instructions, then discovery followed immediately by execution.
-2. Verify restrictions, guards, late registration, reload/resume, tree navigation, and recovery.
-3. Compare representative task outcomes with the same model, thinking level, context, and skills. Scripted/faux-provider tests verify plumbing, not the model's ability to choose the right integration.
-4. Measure first-request input, request count, cumulative input, and cache usage separately. First-use discovery costs a model round and some providers rebuild their cached prefix when tools change.
-5. Keep an integration eager if discovery causes missed capabilities or worse outcomes. Do not claim zero quality regression from token counts alone.
+## Selection and lifecycle
+
+Activation is additive and idempotent; there is no per-turn unloading or separate selection journal. Pi's existing declaration history owns activation across resume, tree navigation, compaction, and fresh context windows. Navigating to a branch with saved declarations restores its selection. A target before the first declaration retains current selection and pending prompt edits, including lifecycle-hook activations. Checkpoint restoration applies its exact selection after startup hooks. Reload does not implicitly enable undiscovered groups.
+
+Switching to an unsupported model restores group entry tools, not advanced tools, only while the discovery loader remains selected. Deliberate empty selections and selections that removed the loader are not widened. Returning to a supported model does not unload tools already made available; the loader returns only if it cannot expose previously deselected entry tools. Start a fresh session for a clean lean baseline.
+
+Removing an extension's discovery metadata restores ordinary exposure. Native system declaration snapshots retain host-only, source-derived entry identities alongside the selected tools; they are not sent to providers. On resume, if the saved loader is selected, only recorded former entries that are permitted and no longer deferred return to ordinary exposure. Ordinary tools deliberately omitted even before their first declaration stay omitted, as do advanced or moved tools still deferred by current registrations. Snapshot updates follow the same branch, compaction, and fresh-window history as tool declarations; checkpoint restoration still applies its exact saved selection.
+
+Historical declarations without this annotation cannot distinguish former entries from ordinary tools deliberately omitted. If a loader survives, Pi preserves their exact selection rather than guessing membership; a retired entry may therefore require explicit activation or a fresh session. If no eligible loader remains, unannotated history retains the older broad extension-exposure fallback, without reactivating deselected built-ins. Annotated snapshots use the narrower recorded-entry restoration in both cases.
+
+`/reload` refreshes resources and reinitializes cached factories; changed extension/runtime code requires a process restart. Use normal package installations, not external staging paths.
+
+## Verification
+
+Before shipping metadata, verify initial exposure, generic-prompt discovery followed immediately by execution, complete instructions, restrictions, guards, late registration, reload/resume, branching, checkpoints, and pending-job recovery. Scripted offline tests establish these runtime contracts, not a model's ability to choose the right integration.
+
+Measure first-request input, request count, cumulative input, and cache usage separately. First-use discovery costs a model round; cache support does not guarantee a cache hit. Compare representative task outcomes with the same model, thinking level, context, and skills. Do not claim zero quality regression from token counts alone.

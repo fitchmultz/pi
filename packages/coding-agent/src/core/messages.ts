@@ -204,7 +204,11 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						],
 						timestamp: m.timestamp,
 					};
-				case "system":
+				case "system": {
+					if (m.deferredToolEntries === undefined) return m;
+					const { deferredToolEntries: _deferredToolEntries, ...message } = m;
+					return message;
+				}
 				case "user":
 				case "assistant":
 				case "toolResult":

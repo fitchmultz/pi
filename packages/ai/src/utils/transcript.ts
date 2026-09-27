@@ -122,13 +122,16 @@ export function getCurrentTools(messages: TranscriptMessages): Tool[] {
 export function getCurrentSystemMessage(messages: TranscriptMessages): SystemMessage | undefined {
 	const content: string[] = [];
 	const sections = new Map<string, string>();
+	let deferredToolEntries: ToolReference[] | undefined;
 	let timestamp: number | undefined;
 	for (const message of messages) {
 		if (!isSystemMessage(message)) continue;
 		if (message.replace) {
 			content.length = 0;
 			sections.clear();
+			deferredToolEntries = undefined;
 		}
+		if (message.deferredToolEntries !== undefined) deferredToolEntries = message.deferredToolEntries;
 		timestamp ??= message.timestamp;
 		const text = contentText(message.content);
 		if (text.length > 0) content.push(text);
@@ -144,6 +147,7 @@ export function getCurrentSystemMessage(messages: TranscriptMessages): SystemMes
 		content: content.join("\n\n"),
 		...(sections.size > 0 ? { sections: Object.fromEntries(sections) } : {}),
 		...(tools.length > 0 ? { toolsAdded: tools } : {}),
+		...(deferredToolEntries === undefined ? {} : { deferredToolEntries }),
 		timestamp: timestamp ?? 0,
 	};
 }

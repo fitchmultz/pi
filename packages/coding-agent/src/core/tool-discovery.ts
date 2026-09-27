@@ -1,41 +1,39 @@
-import { type ToolReference, type ToolSelection, toolId, toolKey, toToolReference } from "@earendil-works/pi-ai";
-import { type Static, Type } from "typebox";
+import { isDeepStrictEqual } from "node:util";
+import {
+	type AnthropicMessagesCompat,
+	type Api,
+	type Model,
+	type OpenAICompletionsCompat,
+	type OpenAIResponsesCompat,
+	type ToolReference,
+	type ToolSelection,
+	toolId,
+	toolKey,
+	toToolReference,
+} from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
-import type { ToolDefinition } from "./extensions/types.ts";
+import type { ToolDefinition, ToolDiscoveryGroup } from "./extensions/types.ts";
 
-const referenceSchema = Type.Union([
-	Type.String({ minLength: 1 }),
-	Type.Object(
-		{ name: Type.String({ minLength: 1 }), namespace: Type.Optional(Type.String({ minLength: 1 })) },
-		{ additionalProperties: false },
-	),
-]);
-const settingsSchema = Type.Object(
+const discoverySchema = Type.Object(
 	{
-		enabled: Type.Optional(Type.Boolean()),
-		providers: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-		groups: Type.Optional(
-			Type.Array(
-				Type.Object(
-					{
-						name: Type.String({ pattern: "^[a-z][a-z0-9_-]*$" }),
-						description: Type.String({ minLength: 1, maxLength: 240 }),
-						tools: Type.Array(referenceSchema, { minItems: 1 }),
-						defaultTools: Type.Optional(Type.Array(referenceSchema, { minItems: 1 })),
-						sections: Type.Optional(Type.Array(Type.String({ pattern: "^[a-z][a-z0-9_-]*$" }))),
-					},
-					{ additionalProperties: false },
-				),
-				{ maxItems: 32 },
-			),
+		group: Type.Object(
+			{
+				name: Type.String({ pattern: "^[a-z][a-z0-9_-]*$" }),
+				description: Type.String({ minLength: 1, maxLength: 240 }),
+				sections: Type.Optional(Type.Array(Type.String({ pattern: "^[a-z][a-z0-9_-]*$" }), { uniqueItems: true })),
+			},
+			{ additionalProperties: false },
 		),
+		role: Type.Union([Type.Literal("entry"), Type.Literal("advanced")]),
 	},
 	{ additionalProperties: false },
 );
 
-/** An explicit, opt-in catalog. Unlisted tools and extension lifecycle hooks are unchanged. */
-export type ToolDiscoverySettings = Static<typeof settingsSchema>;
-export type ToolDiscoveryGroup = NonNullable<ToolDiscoverySettings["groups"]>[number];
+export interface AvailableDiscoveryGroup extends ToolDiscoveryGroup {
+	tools: ToolReference[];
+	defaultTools: ToolReference[];
+}
 export const DISCOVER_TOOLS_NAME = "discover_tools";
 const reservedSections = new Set([
 	"preamble",
@@ -48,50 +46,62 @@ const reservedSections = new Set([
 	"cwd",
 ]);
 
-export function validateToolDiscoverySettings(value: unknown): ToolDiscoverySettings {
-	if (value === undefined) return {};
-	if (!Check(settingsSchema, value)) throw new Error("Invalid toolDiscovery settings. See docs/tool-discovery.md.");
-	if (value.enabled && !value.providers?.length)
-		throw new Error("toolDiscovery.providers must list the provider IDs evaluated for discovery");
-	const names = new Set<string>();
-	const tools = new Set<string>();
-	for (const group of value.groups ?? []) {
-		if (names.has(group.name)) throw new Error(`Duplicate tool discovery group: ${group.name}`);
-		names.add(group.name);
-		const members = new Set(group.tools.map(toolKey));
-		for (const tool of group.tools) {
-			const key = toolKey(tool);
-			if (tools.has(key))
-				throw new Error(`Tool belongs to multiple discovery groups: ${toolId(toToolReference(tool))}`);
-			if (key === toolKey(DISCOVER_TOOLS_NAME)) throw new Error("The discovery tool cannot defer itself");
-			tools.add(key);
+/** Only native transports with both tail-loaded tools and prompt additions can defer integrations. */
+export function supportsToolDiscovery(model: Model<Api> | undefined): boolean {
+	if (!model) return false;
+	switch (model.api) {
+		case "openai-responses":
+		case "openai-codex-responses":
+		case "azure-openai-responses": {
+			const compat = model.compat as OpenAIResponsesCompat | undefined;
+			return (
+				compat?.supportsMidConvoSystemMessages === true &&
+				(compat.supportsAdditionalTools === true || compat.supportsToolSearch === true)
+			);
 		}
-		for (const tool of group.defaultTools ?? []) {
-			if (!members.has(toolKey(tool)))
-				throw new Error(`Default tool is not a member of ${group.name}: ${toolId(toToolReference(tool))}`);
+		case "anthropic-messages": {
+			const compat = model.compat as AnthropicMessagesCompat | undefined;
+			return compat?.supportsMidConvoSystemMessages === true && compat.supportsMidConvoToolChanges === true;
 		}
-		for (const section of group.sections ?? []) {
-			if (reservedSections.has(section)) throw new Error(`Cannot defer core prompt section: ${section}`);
+		case "openai-completions": {
+			const compat = model.compat as OpenAICompletionsCompat | undefined;
+			return compat?.supportsMidConvoSystemMessages === true && compat.supportsMidConvoToolAdditions === true;
 		}
+		default:
+			return false;
 	}
-	return structuredClone(value);
 }
 
-/** Filter the catalog through the actual permitted registry, never through a guessed tool name. */
-export function availableDiscoveryGroups(
-	settings: ToolDiscoverySettings,
-	available: readonly ToolReference[],
-): ToolDiscoveryGroup[] {
-	const keys = new Set(available.map(toolKey));
-	return (settings.groups ?? []).flatMap((group) => {
-		const tools = group.tools.filter((tool) => keys.has(toolKey(tool)));
-		const defaultTools = (group.defaultTools ?? group.tools).filter((tool) => keys.has(toolKey(tool)));
-		return tools.length && defaultTools.length ? [{ ...group, tools, defaultTools }] : [];
-	});
+/** Derive membership from final permitted definitions, never from a separate tool inventory. */
+export function availableDiscoveryGroups(definitions: readonly ToolDefinition[]): AvailableDiscoveryGroup[] {
+	const groups = new Map<string, AvailableDiscoveryGroup>();
+	for (const definition of definitions) {
+		const discovery = definition.discovery;
+		if (discovery === undefined) continue;
+		if (!Check(discoverySchema, discovery)) throw new Error(`Invalid discovery metadata for ${toolId(definition)}`);
+		if (toolKey(definition) === toolKey(DISCOVER_TOOLS_NAME))
+			throw new Error("The discovery tool cannot defer itself");
+		const descriptor = discovery.group;
+		const sections = [...(descriptor.sections ?? [])].sort();
+		for (const section of sections) {
+			if (reservedSections.has(section)) throw new Error(`Cannot defer core prompt section: ${section}`);
+		}
+		let group = groups.get(descriptor.name);
+		if (group && (group.description !== descriptor.description || !isDeepStrictEqual(group.sections, sections)))
+			throw new Error(`Conflicting tool discovery group: ${descriptor.name}`);
+		if (!group) {
+			group = { ...descriptor, sections, tools: [], defaultTools: [] };
+			groups.set(group.name, group);
+		}
+		group.tools.push(toToolReference(definition));
+		if (discovery.role === "entry") group.defaultTools.push(toToolReference(definition));
+	}
+	// An excluded/missing entry must not strand the remaining tools behind an unusable group.
+	return [...groups.values()].filter((group) => group.defaultTools.length > 0);
 }
 
 /** Shared sections stay visible when any owning tool is active. Original text is never summarized. */
-export function discoverySectionTools(groups: readonly ToolDiscoveryGroup[]): Record<string, ToolSelection[]> {
+export function discoverySectionTools(groups: readonly AvailableDiscoveryGroup[]): Record<string, ToolSelection[]> {
 	const sections = new Map<string, ToolSelection[]>();
 	for (const group of groups) {
 		for (const section of group.sections ?? []) {
@@ -107,8 +117,8 @@ const discoveryParams = Type.Object(
 );
 
 export function createDiscoverToolsDefinition(options: {
-	groups: readonly ToolDiscoveryGroup[];
-	getGroups: () => readonly ToolDiscoveryGroup[];
+	groups: readonly AvailableDiscoveryGroup[];
+	getGroups: () => readonly AvailableDiscoveryGroup[];
 	getActive: () => ToolReference[];
 	setActive: (tools: ToolReference[]) => void;
 }): ToolDefinition<typeof discoveryParams> {
@@ -138,7 +148,7 @@ export function createDiscoverToolsDefinition(options: {
 			if (selected.length) {
 				options.setActive([
 					...options.getActive(),
-					...selected.flatMap((group) => (group.defaultTools ?? group.tools).map(toToolReference)),
+					...selected.flatMap((group) => group.defaultTools.map(toToolReference)),
 				]);
 			}
 			const active = new Set(options.getActive().map(toolKey));

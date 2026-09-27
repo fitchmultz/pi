@@ -194,6 +194,8 @@ export type {
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolDefinition,
+	ToolDiscovery,
+	ToolDiscoveryGroup,
 	ToolExecutionEndEvent,
 	ToolExecutionMode,
 	ToolExecutionStartEvent,

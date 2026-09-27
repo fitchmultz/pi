@@ -187,6 +187,8 @@ export type {
 	ToolCallEventResult,
 	// Tools
 	ToolDefinition,
+	ToolDiscovery,
+	ToolDiscoveryGroup,
 	// Events - Tool Execution
 	ToolExecutionEndEvent,
 	// Tool execution mode
