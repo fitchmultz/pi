@@ -174,6 +174,13 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
+import {
+	availableDiscoveryGroups,
+	createDiscoverToolsDefinition,
+	DISCOVER_TOOLS_NAME,
+	discoverySectionTools,
+	type ToolDiscoveryGroup,
+} from "./tool-discovery.ts";
 import type { BackgroundCommandToolDetails } from "./tools/background-command.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
@@ -597,6 +604,7 @@ export class AgentSession {
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
+	private _toolDiscoveryGroups: ToolDiscoveryGroup[] = [];
 
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
 	/** Prompt options after before_agent_start mutations for the active run. */
@@ -1247,6 +1255,7 @@ export class AgentSession {
 				selectedTools: this.getActiveToolReferences(),
 				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
 				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
+				sectionTools: { ...runOptions.sectionTools, ...this._baseSystemPromptOptions.sectionTools },
 			});
 			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
 			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
@@ -2187,6 +2196,7 @@ export class AgentSession {
 			selectedTools: validToolNames,
 			toolSnippets,
 			toolGuidelines: Object.fromEntries(this._toolPromptGuidelines),
+			sectionTools: discoverySectionTools(this._toolDiscoveryGroups),
 		});
 	}
 
@@ -2257,10 +2267,42 @@ export class AgentSession {
 	/** Restore the active tool loadout declared by the session transcript, if it declares one. */
 	private _restoreToolsFromTranscript(): void {
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
+		// Without a declaration there is no saved selection to restore. Preserve native
+		// behavior, including lifecycle-hook activations and pending prompt edits.
 		if (!current) return;
-		const toolNames = (current.toolsAdded ?? [])
-			.map(toToolReference)
-			.filter((tool) => this._toolRegistry.has(this._toolSelectionKey(tool)));
+		const rollback =
+			(current.toolsAdded ?? []).some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME)) &&
+			!this._toolRegistry.has(toolKey(DISCOVER_TOOLS_NAME));
+		const toolNames = [
+			...(current.toolsAdded ?? []).map(toToolReference),
+			...(rollback
+				? this.getActiveToolReferences().filter(
+						(tool) => this._toolDefinitions.get(toolKey(tool))?.sourceInfo.source !== "builtin",
+					)
+				: []),
+		].filter(
+			(tool, index, tools) =>
+				this._toolRegistry.has(this._toolSelectionKey(tool)) &&
+				tools.findIndex((other) => toolKey(other) === toolKey(tool)) === index,
+		);
+		// Older selections have never declared the loader. Keep it available for newly
+		// installed deferred integrations, but respect empty selections and a deliberate
+		// removal recorded after discovery was already available in this branch.
+		if (
+			toolNames.length &&
+			this._toolRegistry.has(toolKey(DISCOVER_TOOLS_NAME)) &&
+			!toolNames.some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME)) &&
+			!this.sessionManager
+				.getBranch()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						(entry.message.role === "system" || entry.message.role === "toolResult") &&
+						entry.message.toolsAdded?.some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME)),
+				)
+		) {
+			toolNames.push({ name: DISCOVER_TOOLS_NAME });
+		}
 		this.agent.state.tools = toolNames.flatMap((name) => {
 			const registered = this._toolRegistry.get(toolKey(name));
 			return registered ? [registered] : [];
@@ -3393,6 +3435,7 @@ export class AgentSession {
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
 		if (modelsAreEqual(previousModel, nextModel)) return;
+		if (this.settingsManager.getToolDiscoverySettings().enabled) this._refreshToolRegistry();
 		await this._extensionRunner.emit({
 			type: "model_select",
 			model: nextModel,
@@ -4547,6 +4590,7 @@ export class AgentSession {
 	}): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolReferences();
+		const previousActiveKeys = new Set(previousActiveToolNames.map(toolKey));
 		const allowedToolNames = this._allowedToolNames ? new Set(this._allowedToolNames.map(toolKey)) : undefined;
 		const excludedToolNames = this._excludedToolNames ? new Set(this._excludedToolNames.map(toolKey)) : undefined;
 		const isAllowedTool = (tool: ToolSelection): boolean =>
@@ -4580,6 +4624,40 @@ export class AgentSession {
 				sourceInfo: tool.sourceInfo,
 			});
 		}
+		const previousDiscoveryGroups = this._toolDiscoveryGroups;
+		const discoverySettings = this.settingsManager.getToolDiscoverySettings();
+		// Explicit host allowlists remain explicit. Excluding the loader must never strand capabilities.
+		const useDiscovery =
+			discoverySettings.enabled === true &&
+			this._allowedToolNames === undefined &&
+			isAllowedTool(DISCOVER_TOOLS_NAME) &&
+			!!this.model &&
+			(discoverySettings.providers?.includes(this.model.provider) ?? false);
+		this._toolDiscoveryGroups = useDiscovery
+			? availableDiscoveryGroups(
+					discoverySettings,
+					[...definitionRegistry.values()]
+						.filter(({ sourceInfo }) => sourceInfo.source !== "builtin")
+						.map(({ definition }) => toToolReference(definition)),
+				)
+			: [];
+		if (this._toolDiscoveryGroups.length) {
+			if (definitionRegistry.has(toolKey(DISCOVER_TOOLS_NAME)))
+				throw new Error(`Tool discovery conflicts with registered ${DISCOVER_TOOLS_NAME}`);
+			const definition = createDiscoverToolsDefinition({
+				groups: this._toolDiscoveryGroups,
+				getGroups: () => this._toolDiscoveryGroups,
+				getActive: () => this.getActiveToolReferences(),
+				setActive: (tools) => this.setActiveToolReferences(tools),
+			});
+			const tool = {
+				definition,
+				sourceInfo: createSyntheticSourceInfo(`<builtin:${DISCOVER_TOOLS_NAME}>`, { source: "builtin" }),
+			};
+			definitionRegistry.set(toolKey(definition), tool);
+			allCustomTools.push(tool);
+		}
+		const deferredKeys = new Set(this._toolDiscoveryGroups.flatMap((group) => group.tools.map(toolKey)));
 		const publicIds = new Map<string, string>();
 		for (const [key, { definition }] of definitionRegistry) {
 			const id = toolId(definition);
@@ -4631,10 +4709,32 @@ export class AgentSession {
 		).filter((name) => isAllowedTool(name));
 
 		if (options?.includeAllExtensionTools) {
-			for (const tool of wrappedExtensionTools) nextActiveToolNames.push(toToolReference(tool));
+			for (const tool of wrappedExtensionTools) {
+				if (!deferredKeys.has(toolKey(tool))) nextActiveToolNames.push(toToolReference(tool));
+			}
 		} else if (!options?.activeToolNames) {
 			for (const [key, tool] of this._toolRegistry) {
-				if (!previousRegistryNames.has(key)) nextActiveToolNames.push(toToolReference(tool));
+				// A reappearing loader must not make previously deselected entry tools reachable.
+				// Genuinely new integrations still follow normal late-registration behavior.
+				const wouldWidenSelection =
+					key === toolKey(DISCOVER_TOOLS_NAME) &&
+					previousRegistryNames.size > 0 &&
+					(previousActiveKeys.size === 0 ||
+						this._toolDiscoveryGroups.some((group) =>
+							(group.defaultTools ?? group.tools).some(
+								(tool) => previousRegistryNames.has(toolKey(tool)) && !previousActiveKeys.has(toolKey(tool)),
+							),
+						));
+				if (!previousRegistryNames.has(key) && !deferredKeys.has(key) && !wouldWidenSelection)
+					nextActiveToolNames.push(toToolReference(tool));
+			}
+		}
+		// A rollback or switch to an unevaluated provider restores the ordinary front doors,
+		// not advanced tools that the integration itself normally keeps inactive.
+		if (previousActiveKeys.has(toolKey(DISCOVER_TOOLS_NAME))) {
+			for (const group of previousDiscoveryGroups) {
+				if (!this._toolDiscoveryGroups.some((current) => current.name === group.name))
+					nextActiveToolNames.push(...(group.defaultTools ?? group.tools));
 			}
 		}
 

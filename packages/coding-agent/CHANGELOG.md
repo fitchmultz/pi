@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `live_tool_result` extension event, which supplies model-only tool result content for native WebSocket continuations that bypass context hooks.
+- Added experimental provider-scoped `toolDiscovery` settings and an ordinary `discover_tools` loader for optional integrations, plus tool-owned custom prompt sections that deliver full guidance when activated. See [Tool Discovery](docs/tool-discovery.md).
 
 ### Changed
 

@@ -38,6 +38,7 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `defaultTools` | `string[]` | `read`, `bash`, `background_command`, `edit`, `write` | Built-in tools enabled at startup. An empty array disables all built-in tools but not extension or SDK tools. |
+| `toolDiscovery` | object | Disabled | Experimental provider-scoped integration catalog; defer configured tool groups and their instructions until needed. See [Tool Discovery](tool-discovery.md). |
 
 Available built-in tools are `read`, `bash`, `background_command`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. CLI tool options override this setting for one invocation. See [Command Line](cli.md#tools).
 

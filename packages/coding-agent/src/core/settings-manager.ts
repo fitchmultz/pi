@@ -21,6 +21,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import { type ToolDiscoverySettings, validateToolDiscoverySettings } from "./tool-discovery.ts";
 
 export interface CompactionModelOverride {
 	reserveTokens?: number;
@@ -155,6 +156,7 @@ export interface Settings {
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	defaultTools?: string[]; // Initial built-in tool selection
+	toolDiscovery?: ToolDiscoverySettings; // Experimental opt-in deferred integration catalog
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
@@ -1392,6 +1394,10 @@ export class SettingsManager {
 	getDefaultTools(): string[] | undefined {
 		const tools = this.settings.defaultTools;
 		return tools ? [...tools] : undefined;
+	}
+
+	getToolDiscoverySettings(): ToolDiscoverySettings {
+		return validateToolDiscoverySettings(this.settings.toolDiscovery);
 	}
 
 	setEnabledModels(patterns: string[] | undefined): void {
