@@ -140,7 +140,7 @@ describe("session-owned background completion", () => {
 					"toolResult",
 					"toolResult",
 				]);
-				expect(getMessageText(context.messages[notice])).toContain('"exitCode": 7');
+				expect(getMessageText(context.messages[notice])).toContain('"exitCode":7');
 				expect(getMessageText(context.messages[notice])).toContain("Output tail:\nbackground result\n");
 				return fauxAssistantMessage("Completion consumed");
 			},
@@ -152,6 +152,56 @@ describe("session-owned background completion", () => {
 		await delay(1100);
 		expect(notices(h.session)).toHaveLength(1);
 		expect(h.faux.state.callCount).toBe(3);
+	});
+
+	it.each([
+		{ name: "success", exitCode: 0, output: "full successful output\n".repeat(200) },
+		{ name: "failure lines", exitCode: 7, output: "diagnostic line\n".repeat(200) },
+		{ name: "failure bytes", exitCode: 7, output: `${"😀".repeat(5000)}\n` },
+	])("keeps automatic $name completion compact and raw output intact", async ({ exitCode, output }) => {
+		const h = await harness();
+		const release = join(h.tempDir, "release");
+		const source = join(h.tempDir, "output");
+		writeFileSync(source, output);
+		const command = `while [ ! -f ${quote(release)} ]; do sleep 0.02; done; cat ${quote(source)}; exit ${exitCode}`;
+		let job: BackgroundCommandJob;
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+				stopReason: "toolUse",
+			}),
+			async (context) => {
+				job = jobFrom(context.messages);
+				await finish(h, job, release);
+				return fauxAssistantMessage(fauxToolCall("bash", { command: "printf foreground" }), {
+					stopReason: "toolUse",
+				});
+			},
+			(context) => {
+				const text = getMessageText(context.messages.at(-1));
+				expect(text).toMatch(/^Background commands finished:\n/);
+				const [summary, excerpt] = text.slice("Background commands finished:\n".length).split("\nOutput tail:\n");
+				if (exitCode === 0) expect(excerpt).toBeUndefined();
+				else {
+					expect(excerpt.length).toBeGreaterThan(0);
+					expect(Buffer.byteLength(excerpt)).toBeLessThanOrEqual(2048);
+					expect(excerpt.trimEnd().split("\n").length).toBeLessThanOrEqual(20);
+					expect(excerpt).not.toContain("\uFFFD");
+					expect(output.trimEnd().endsWith(excerpt.trimEnd())).toBe(true);
+				}
+				expect(JSON.parse(summary)).toEqual({
+					id: job.id,
+					status: exitCode === 0 ? "succeeded" : "failed",
+					exitCode,
+					commandPreview: command.slice(0, 160),
+					logFile: job.logFile,
+				});
+				expect(readFileSync(job.logFile, "utf8")).toBe(output);
+				return fauxAssistantMessage("Completion consumed");
+			},
+		]);
+		await h.session.prompt("Run a verbose job");
+		expect(notices(h.session)).toHaveLength(1);
+		expect(notices(h.session)[0]).toMatchObject({ details: { jobIds: [job!.id] } });
 	});
 
 	it.each(["missing", "unreadable"])(
@@ -291,7 +341,14 @@ describe("session-owned background completion", () => {
 			},
 			(context) => {
 				expect(notices(h.session)).toHaveLength(2);
-				expect(JSON.stringify(context.messages.at(-1))).toContain("second completion");
+				const second = listBackgroundCommands(backgroundCommandDirectory(h.sessionManager)).find(
+					(job) => job.command === secondCommand,
+				)!;
+				expect(JSON.parse(getMessageText(context.messages.at(-1)).split("\n")[1])).toMatchObject({
+					id: second.id,
+					status: "succeeded",
+					logFile: second.logFile,
+				});
 				return fauxAssistantMessage("Both consumed");
 			},
 		]);

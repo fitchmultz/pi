@@ -64,7 +64,7 @@ export function createBackgroundCommandToolDefinition(
 		name: "background_command",
 		label: "Background command",
 		description:
-			"Start a detached shell command, inspect status/output, or cancel it. Jobs and raw logs survive Pi exit/restart. Completion with up to 16KB/100 lines of output is delivered after the foreground tool batch or when this session is idle or resumed.",
+			"Start a detached shell command, inspect status/output, or cancel it. Jobs and raw logs survive Pi exit/restart. Automatic completion reports status and logFile, with no output on success and up to 2KB/20 lines otherwise. Delivered after the foreground tool batch or when this session is idle or resumed. Explicit status includes up to 16KB/100 lines; read logFile for full output.",
 		promptSnippet: "Run long commands without blocking; receive completion automatically, including after restart",
 		promptGuidelines: [
 			"Use background_command for long tests, builds, and watches such as gh pr checks --watch. Do not add & or poll repeatedly; read logFile for full output.",
