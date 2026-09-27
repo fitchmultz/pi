@@ -15,6 +15,7 @@
 ### Fixed
 
 - Fixed context usage and automatic rollover losing measured reasoning tokens when request transforms add messages or append content blocks.
+- Fixed empty runtime API keys falling back to stored credentials; they are now rejected before changing the active override.
 
 ## [0.87.1] - 2026-09-22
 

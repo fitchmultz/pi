@@ -71,6 +71,7 @@ describe("provider credential isolation", () => {
 	it("preserves request/CLI keys and restores stored auth when disabled or unregistered", async () => {
 		runtime.registerProvider("openai-codex", { apiKey: "router-key", ignoreStoredCredentials: true });
 		await runtime.setRuntimeApiKey("openai-codex", "cli-key");
+		await expect(runtime.setRuntimeApiKey("openai-codex", "")).rejects.toThrow("must not be empty");
 		expect((await runtime.getAuth("openai-codex"))?.auth.apiKey).toBe("cli-key");
 		expect(runtime.getProviderAuthStatus("openai-codex")).toEqual({ configured: true, source: "runtime" });
 		expect((await runtime.getAuth("openai-codex", { apiKey: "request-key" }))?.auth.apiKey).toBe("request-key");
@@ -85,6 +86,29 @@ describe("provider credential isolation", () => {
 		expect((await runtime.getAuth("openai-codex"))?.auth.apiKey).toBe("router-key");
 		runtime.unregisterProvider("openai-codex");
 		await expect(runtime.getAuth("openai-codex")).rejects.toThrow("OAuth refresh failed");
+		expect(await credentials.read("openai-codex")).toEqual(storedOAuth);
+	});
+
+	it("allows ambient account auth only while the registration opts out of stored credentials", async () => {
+		const resolve = vi.fn(async () => ({ auth: { apiKey: "slot-key" }, source: "rotation slot" }));
+		runtime.registerProvider("openai-codex", {
+			ignoreStoredCredentials: true,
+			ambientAuth: {
+				check: async () => ({ type: "oauth", source: "rotation slot" }),
+				resolve,
+			},
+		});
+		await runtime.refresh({ allowNetwork: false });
+		expect((await runtime.getAuth("openai-codex"))?.auth.apiKey).toBe("slot-key");
+		expect(runtime.getProviderAuthStatus("openai-codex")).toEqual({
+			configured: true,
+			source: "environment",
+			label: "rotation slot",
+		});
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+		runtime.registerProvider("openai-codex", { ignoreStoredCredentials: false });
+		await expect(runtime.getAuth("openai-codex")).rejects.toThrow("OAuth refresh failed");
+		expect(resolve).toHaveBeenCalledTimes(1);
 		expect(await credentials.read("openai-codex")).toEqual(storedOAuth);
 	});
 

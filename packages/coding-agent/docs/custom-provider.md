@@ -79,7 +79,7 @@ pi.registerProvider("openai-codex", {
 });
 ```
 
-This skips only that provider's persisted credential during request resolution, availability checks and catalog refresh. An expired or revoked standalone login cannot block the router. Explicit request and CLI/runtime keys retain priority. `/login` and `/logout` remain deliberate persistent operations; this option never deletes, migrates or refreshes the ignored credential. Other providers and independent runtimes are unaffected.
+This skips only that provider's persisted credential during request resolution, availability checks and catalog refresh. An expired or revoked standalone login cannot block the router. Explicit request and CLI/runtime keys retain priority; empty runtime keys are rejected rather than falling back to storage. `/login` and `/logout` remain deliberate persistent operations; this option never deletes, migrates or refreshes the ignored credential. Other providers and independent runtimes are unaffected.
 
 The policy belongs to the registration: set it to `false` or unregister the provider to restore stored authentication. Extensions must unregister their own override during `session_shutdown` if disabling/removing them on reload should restore native behavior; resource reload does not automatically remove provider registrations.
 
