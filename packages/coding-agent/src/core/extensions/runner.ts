@@ -49,6 +49,7 @@ import type {
 	ContextUsage,
 	ContextWindowHookEvent,
 	ContextWithSystemEvent,
+	CustomMessageEntryDraft,
 	EntryRenderer,
 	Extension,
 	ExtensionActions,
@@ -1053,7 +1054,7 @@ export class ExtensionRunner {
 
 	runContextWindowHooks(
 		buildEvent: () => ContextWindowHookEvent,
-		apply: (drafts: ContextEditEntryDraft[]) => void,
+		apply: (drafts: (ContextEditEntryDraft | CustomMessageEntryDraft)[]) => void,
 		sessionManager: SessionManager,
 	): void {
 		const ctx = this.createContext(sessionManager);
@@ -1067,9 +1068,38 @@ export class ExtensionRunner {
 				}
 				if (
 					!Array.isArray(result) ||
-					result.some((draft) => !draft || typeof draft !== "object" || draft.type !== "context_edit")
+					result.some(
+						(draft) =>
+							!draft ||
+							typeof draft !== "object" ||
+							(draft.type !== "context_edit" && draft.type !== "custom_message"),
+					)
 				) {
-					throw new Error("Context window hooks may only return context_edit drafts");
+					throw new Error("Context window hooks may only return context_edit or custom_message drafts");
+				}
+				for (const draft of result) {
+					if (
+						draft.type === "custom_message" &&
+						(typeof draft.customType !== "string" ||
+							typeof draft.display !== "boolean" ||
+							(typeof draft.content !== "string" &&
+								(!Array.isArray(draft.content) ||
+									draft.content.some(
+										(block: unknown) =>
+											!block ||
+											typeof block !== "object" ||
+											!("type" in block) ||
+											(block.type === "text"
+												? !("text" in block) || typeof block.text !== "string"
+												: block.type !== "image" ||
+													!("data" in block) ||
+													typeof block.data !== "string" ||
+													!("mimeType" in block) ||
+													typeof block.mimeType !== "string"),
+									))))
+					) {
+						throw new Error("Invalid context window custom_message draft");
+					}
 				}
 				apply(result);
 			}
