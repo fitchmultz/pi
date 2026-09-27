@@ -83,6 +83,10 @@ Assistant entries with `checkpoint: true` record completed native items before a
 
 Optional `consumedToolResultIds` on a completed assistant entry names original tool-result entries included in that successful response's captured request or native continuation input. This branch-local proof survives reload, compaction, and forks. Journal ordering alone is not proof: a result can finish while an earlier request is streaming. Older entries without this metadata leave consumption unknown, so fresh windows conservatively retain those native receipts.
 
+Optional `concurrentToolResultIds` on an assistant entry names original native result entries arriving after its request's captured branch frontier, excluded from the finalized native input, and preceding its first real persisted snapshot. It is host-only ordering provenance, not consumption proof. Only nonempty relations are written. Coalescing preserves the first snapshot's relation alongside final entry identity/usage and admitted execution state. Later response relations can move the same receipt farther forward. Missing/off-branch references do nothing; unannotated histories keep their existing order. Ordering never moves receipts across an intervening compaction/window cut before retention selection. Only receipts surviving that cut may subsequently move after a related response; preparation-discarded receipts are not annotated. Failed, aborted, or pending responses never grant successful consumption proof.
+
+For native requests, input membership comes after payload hooks, not from pre-payload message transforms. Encrypted provider compaction summaries and opaque references leave initial membership unknown. Unknown initial membership supplies no consumption proof; explicitly known successor inputs can still supply their own successful proof. Existing saved proof remains valid.
+
 A forced `before_agent_start` prompt affects provider requests for that run only; the transcript and context checkpoints retain structured state. Older full-prompt records with `replace: true` clear preceding prompt/tools during replay. The next run writes a structured replacement baseline rather than accumulating opaque prompt text.
 
 ```json
@@ -142,7 +146,7 @@ Created when context is compacted. Stores a summary of earlier messages and a co
 {"type":"compaction","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:10:00.000Z","summary":"User discussed X, Y, Z...","firstKeptEntryId":"c3d4e5f6","tokensBefore":50000,"systemMessage":{"role":"system","content":"You are a coding assistant.","toolsAdded":[],"timestamp":1733235000000}}
 ```
 
-`firstKeptEntryId` is required. It identifies the first entry retained from before the compaction entry. When rebuilding context, Pi replaces older summarized entries with the compaction summary and keeps the range beginning at this entry. A retain-none compaction stores its own ID in this field, so no preceding entries are retained.
+`firstKeptEntryId` is required. It identifies the first entry retained from before the compaction entry. When rebuilding context, Pi replaces older summarized entries with the compaction summary and keeps the range beginning at this entry in causal model order. A retain-none compaction stores its own ID in this field, so no preceding entries are retained.
 
 Optional fields:
 - `systemMessage`: The replayed prompt sections and tool declarations at the compaction boundary; it becomes the leading system message of the compacted context, and system messages among the kept entries are dropped in its favor. It is absent on older session entries.
@@ -237,15 +241,17 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 
 `buildContextEntries()` walks from the current leaf to the root, producing the active entry list while honoring compaction:
 
-1. Collects the full selected branch and coalesces execution snapshots by response identity, retaining final content/usage and latest admitted-call state at the original response position
+1. Collects the full selected branch and coalesces execution snapshots by response identity, retaining final content/usage and latest admitted-call state at the original response position. Explicit `concurrentToolResultIds` then place those receipts after their response in model order, before retention cuts
 2. Selects the path starting at the latest `ContextWindowEntry`, when present, and inserts its explicitly retained tool-result entries after the marker; late checkpoints from older responses do not reintroduce their conversation
 3. Applies the latest remaining `CompactionEntry`:
    - Includes the compaction entry first
    - Includes non-system entries from `firstKeptEntryId` up to, but not including, the compaction entry
    - Includes entries after the compaction entry
-4. Preserves non-message entries in the selected range for rendering
+4. Presents this retained set in arrival order for rendering, with the active boundary first; non-message entries remain available
 
-`buildSessionProjection()` then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. The raw selected entries are not modified.
+`buildSessionProjection()` uses the same retained set in causal model order, with `.entries` and `.messages` agreeing. For raw `[receipt, response]` with an explicit concurrent relation, model order is `[response, receipt]`; a compaction retaining that receipt does not revive the summarized response. Raw APIs, journal bytes, event timing, UI, and exports retain arrival order. This repairs delta eligibility, not provider cache-hit guarantees.
+
+Projection then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. The raw selected entries are not modified.
 
 Across compaction and context-window boundaries, projection also carries native asynchronous call items from the selected branch when they remain unresolved or have a retained result. Carried calls keep their original reasoning signatures but clear the separate thinking text, which another model would otherwise replay as old assistant prose. They preserve their original source entry, provider item, namespace, call ID, and admitted execution arguments/state. Context edits still apply: omitting a call also omits its dependent output. Results on other branches do not resolve calls on the selected branch. Reopening the journal uses the same projection.
 

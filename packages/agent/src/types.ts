@@ -534,6 +534,8 @@ export type AgentEvent =
 	| {
 			type: "message_start";
 			message: AgentMessage;
+			/** Initial native payload's result call IDs; [] is known empty, absent is unknown. */
+			inputToolCallIds?: readonly string[];
 			/** Provider-captured input delta for an automatic successor. */
 			continuationInput?: readonly (UserMessage | ToolResultMessage)[];
 	  }

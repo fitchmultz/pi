@@ -41,6 +41,7 @@ import {
 	createResponsesSuccessor,
 	getInitialResponsesEffort,
 	getNativeToolSearch,
+	getResponsesInputToolCallIds,
 	processResponsesStream,
 	resolveResponsesEffort,
 	resolveResponsesTranscript,
@@ -205,6 +206,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 			} finally {
 				details.onPayloadMs = performance.now() - hookStartedAt;
 			}
+			const inputToolCallIds = getResponsesInputToolCallIds(params);
 			details.requestedServiceTier = diagnosticServiceTier(params.service_tier);
 			details.requestReadyMs = performance.now() - diagnostics.startedAt;
 			let liveControl: ResponseControl | undefined;
@@ -265,7 +267,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 									grammarToolInputProperties,
 									() => {
 										started = true;
-										stream.push({ type: "start", partial: output });
+										stream.push({ type: "start", partial: output, inputToolCallIds });
 									},
 									diagnostics,
 									stream,
@@ -351,7 +353,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 				);
 				details.headersMs = performance.now() - diagnostics.startedAt;
 				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-				stream.push({ type: "start", partial: output });
+				stream.push({ type: "start", partial: output, inputToolCallIds });
 				await processResponsesStream(openaiStream, output, stream, model, streamOptions);
 			}
 

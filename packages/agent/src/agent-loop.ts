@@ -934,6 +934,7 @@ async function streamAssistantResponse(
 					await emit({
 						type: "message_start",
 						message: { ...partialMessage },
+						...(event.inputToolCallIds === undefined ? {} : { inputToolCallIds: event.inputToolCallIds }),
 						...(event.continuationInput === undefined ? {} : { continuationInput: event.continuationInput }),
 					});
 					break;

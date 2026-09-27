@@ -329,6 +329,120 @@ it.each(["invalid edit", "unsupported draft", "invalid message", "invalid block"
 );
 
 describe("native journal projection", () => {
+	it.each(["compaction", "window"] as const)("never lets saved relations bypass a %s cut", (boundary) => {
+		for (const retained of [false, true]) {
+			const manager = SessionManager.inMemory();
+			manager.appendMessage(assistant());
+			const receiptId = manager.appendMessage({
+				role: "toolResult",
+				toolCallId: toolCall().id,
+				toolName: "work",
+				content: result.content,
+				isError: false,
+				timestamp: 1,
+			});
+			if (boundary === "compaction") manager.appendCompaction("cut", retained ? receiptId : null, 100);
+			else manager.appendContextWindow("cut", 100, retained ? [receiptId] : []);
+			const responseId = manager.appendMessage(
+				fauxAssistantMessage("after boundary", { responseId: "B" }),
+				false,
+				undefined,
+				[receiptId],
+			);
+			const projection = manager.buildSessionProjection();
+			expect(projection.messages.some((message) => message.role === "toolResult")).toBe(retained);
+			if (retained) {
+				const ids = projection.entries.map((entry) => entry.sourceEntry.id);
+				expect(ids.indexOf(responseId)).toBeLessThan(ids.indexOf(receiptId));
+				expect(
+					manager
+						.buildContextEntries()
+						.map((entry) => entry.id)
+						.indexOf(receiptId),
+				).toBeLessThan(
+					manager
+						.buildContextEntries()
+						.map((entry) => entry.id)
+						.indexOf(responseId),
+				);
+				manager.appendCompaction("summarize B, keep only its later receipt", receiptId, 100);
+				expect(JSON.stringify(manager.buildSessionProjection().messages)).not.toContain("after boundary");
+				expect(manager.buildSessionProjection().messages.some((message) => message.role === "toolResult")).toBe(
+					true,
+				);
+			}
+		}
+	});
+
+	it.each([false, true])("selects causal retained sets without rewriting arrival history (known=%s)", (known) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-native-causal-"));
+		try {
+			const manager = SessionManager.create(directory, directory);
+			const callId = manager.appendMessage(assistant({ ...toolCall(), executionStarted: true }));
+			const receiptId = manager.appendMessage({
+				role: "toolResult",
+				toolCallId: toolCall().id,
+				toolName: "work",
+				content: result.content,
+				isError: false,
+				timestamp: 1,
+			});
+			const b = fauxAssistantMessage("B prose", { responseId: "B" });
+			const relation = known ? [receiptId] : undefined;
+			manager.appendMessage({ ...b, stopReason: "pending" }, true, undefined, relation);
+			const bId = manager.appendMessage(b);
+			const cId = manager.appendMessage(
+				fauxAssistantMessage("C prose", { responseId: "C" }),
+				false,
+				undefined,
+				relation,
+			);
+			// An older response's late execution snapshot must not acquire a newer relation.
+			manager.appendMessage({ ...b, stopReason: "pending" }, true, undefined, ["missing"]);
+			const leafId = manager.getLeafId()!;
+			const saved = readFileSync(manager.getSessionFile()!, "utf8");
+			expect(manager.buildContextEntries().map((entry) => entry.id)).toEqual([callId, receiptId, bId, cId]);
+			expect(manager.buildSessionProjection().entries.map((entry) => entry.sourceEntry.id)).toEqual(
+				known ? [callId, bId, cId, receiptId] : [callId, receiptId, bId, cId],
+			);
+			expect(manager.buildSessionProjection().messages).toEqual(
+				manager.buildSessionProjection().entries.flatMap((entry) => entry.messages),
+			);
+
+			const summaryId = manager.appendCompaction("summarized earlier model context", receiptId, 100);
+			const projection = manager.buildSessionProjection();
+			expect(projection.entries.map((entry) => entry.sourceEntry.id)).toEqual(
+				known ? [summaryId, callId, receiptId] : [summaryId, callId, receiptId, bId, cId],
+			);
+			expect(JSON.stringify(projection.messages).includes("B prose")).toBe(!known);
+			expect(JSON.stringify(projection.messages).includes("C prose")).toBe(!known);
+			expect(readFileSync(manager.getSessionFile()!, "utf8").startsWith(saved)).toBe(true);
+			const reopened = SessionManager.open(manager.getSessionFile()!);
+			expect(reopened.buildSessionProjection()).toEqual(projection);
+			const forkFile = reopened.createBranchedSession(reopened.getLeafId()!)!;
+			expect(SessionManager.open(forkFile).buildSessionProjection()).toEqual(projection);
+
+			manager.branch(leafId);
+			manager.appendContextEdit(receiptId, { content: "edited receipt" });
+			const windowId = manager.appendContextWindow("fresh", 100, [receiptId]);
+			expect(
+				manager.buildSessionProjection().messages.filter((message) => message.role === "toolResult"),
+			).toMatchObject([{ content: [{ type: "text", text: "edited receipt" }] }]);
+			manager.appendContextEdit(receiptId, null);
+			expect(manager.buildSessionProjection().messages.some((message) => message.role === "toolResult")).toBe(false);
+			manager.branch(windowId);
+			manager.appendContextEdit(callId, null);
+			expect(manager.buildSessionProjection().messages.some((message) => message.role === "toolResult")).toBe(false);
+			manager.branch(callId);
+			manager.appendMessage(fauxAssistantMessage("sibling", { responseId: "sibling" }), false, undefined, [
+				receiptId,
+			]);
+			expect(manager.buildSessionProjection().messages.some((message) => message.role === "toolResult")).toBe(false);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it.each([false, true])(
 		"keeps only the raw tail after a coalesced compaction anchor (straddling=%s)",
 		(straddling) => {
@@ -919,7 +1033,13 @@ it.each(["stop", "error"] as const)(
 			message.usage = { ...message.usage, input: 100, totalTokens: 100 };
 			const stream = createAssistantMessageEventStream();
 			void (async () => {
-				stream.push({ type: "start", partial: message });
+				stream.push({
+					type: "start",
+					partial: message,
+					inputToolCallIds: context.messages.flatMap((input) =>
+						input.role === "toolResult" ? [input.toolCallId.split("|")[0]] : [],
+					),
+				});
 				if (first) {
 					stream.push({ type: "toolcall_end", partial: message, toolCall: toolCall(), contentIndex: 1 });
 					await executing;
@@ -1055,7 +1175,13 @@ it("uses the last successful prefix after a failed response without dropping a n
 		message.usage = { ...message.usage, input: 100, totalTokens: 100 };
 		const stream = createAssistantMessageEventStream();
 		void (async () => {
-			stream.push({ type: "start", partial: message });
+			stream.push({
+				type: "start",
+				partial: message,
+				inputToolCallIds: context.messages.flatMap((input) =>
+					input.role === "toolResult" ? [input.toolCallId.split("|")[0]] : [],
+				),
+			});
 			if (request === 1)
 				stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: lateCall, partial: message });
 			if (request === 2) {
@@ -1091,8 +1217,17 @@ it("uses the last successful prefix after a failed response without dropping a n
 	}
 });
 
-it.each(["reopen", "compact", "navigation", "fork", "continuation", "failed continuation"] as const)(
-	"remembers consumed receipts after %s without discarding filtered or late receipts",
+it.each([
+	"reopen",
+	"compact",
+	"navigation",
+	"fork",
+	"continuation",
+	"failed continuation",
+	"unknown continuation",
+	"unknown failed continuation",
+] as const)(
+	"remembers successful consumed receipts after %s without discarding filtered, concurrent, or unknown receipts",
 	async (boundary) => {
 		const directory = mkdtempSync(join(tmpdir(), "pi-native-consumed-"));
 		const manager = SessionManager.create(directory, directory);
@@ -1181,10 +1316,14 @@ it.each(["reopen", "compact", "navigation", "fork", "continuation", "failed cont
 			};
 			const stream = createAssistantMessageEventStream();
 			void (async () => {
-				stream.push({ type: "start", partial: response });
+				stream.push({
+					type: "start",
+					partial: response,
+					inputToolCallIds: boundary.startsWith("unknown") ? undefined : ["consumed"],
+				});
 				release();
 				await receiptPersisted;
-				if (boundary === "continuation" || boundary === "failed continuation") {
+				if (boundary.includes("continuation")) {
 					stream.push({ type: "response_end", message: response });
 					const successor = { ...response, responseId: "successor" };
 					const receipt = manager
@@ -1194,7 +1333,7 @@ it.each(["reopen", "compact", "navigation", "fork", "continuation", "failed cont
 					if (receipt?.type !== "message" || receipt.message.role !== "toolResult")
 						throw new Error("late receipt was not persisted");
 					stream.push({ type: "start", partial: successor, continuationInput: [receipt.message] });
-					if (boundary === "failed continuation") {
+					if (boundary.includes("failed")) {
 						successor.stopReason = "error";
 						successor.errorMessage = "successor failed";
 						stream.push({ type: "error", reason: "error", error: successor });
@@ -1226,7 +1365,11 @@ it.each(["reopen", "compact", "navigation", "fork", "continuation", "failed cont
 			session.newContext();
 			expect(
 				session.messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
-			).toEqual(boundary === "continuation" ? [filtered.id] : [filtered.id, late.id]);
+			).toEqual([
+				...(boundary.startsWith("unknown") ? [consumed.id] : []),
+				filtered.id,
+				...(boundary.includes("continuation") && !boundary.includes("failed") ? [] : [late.id]),
+			]);
 		} finally {
 			release();
 			restored?.cleanup();

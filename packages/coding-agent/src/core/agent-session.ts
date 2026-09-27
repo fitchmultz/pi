@@ -396,6 +396,10 @@ interface ProviderRequestPrefix {
 	conversationPreserved: boolean;
 	/** Only results actually sent can be retired at a context boundary. */
 	toolResultIds: ReadonlySet<string>;
+	/** Raw branch frontier captured beside canonical input, before request preparation can await. */
+	frontier: string | null;
+	/** Native post-payload membership. Undefined is unknown, not an empty set. */
+	inputToolCallIds?: ReadonlySet<string>;
 	systemTokens: number;
 	response?: AssistantMessage;
 	responseSnapshot?: unknown;
@@ -937,8 +941,10 @@ export class AgentSession {
 
 	private _installAgentRequestProjection(): void {
 		const previousPrepareRequest = this.agent.prepareRequest;
+		let frontier: string | null = null;
 		this.agent.prepareRequest = async (request, signal) => {
 			this._shutdownAbortController.signal.throwIfAborted();
+			frontier = this.sessionManager.getLeafId();
 			const canonicalContext = this._restorePendingProviderMessages({
 				...request.context,
 				messages: this.sessionManager.buildSessionProjection().messages,
@@ -991,6 +997,7 @@ export class AgentSession {
 						canonicalConversation,
 						conversationPreserved: providerConversationCovers(canonicalConversation, sentConversation),
 						toolResultIds: providerToolResultIds(sentConversation),
+						frontier,
 						systemTokens: this._projectEstimatedMessages(transformed).reduce(
 							(sum, message) => sum + (message.role === "system" ? estimateTokens(message) : 0),
 							0,
@@ -1283,7 +1290,61 @@ export class AgentSession {
 		return context;
 	}
 
-	private _persistMessage(message: AgentMessage, consumedToolResultIds?: string[]): void {
+	private _concurrentToolResultIds(
+		message: AgentMessage,
+		prefix: ProviderRequestPrefix | undefined,
+	): string[] | undefined {
+		if (
+			message.role !== "assistant" ||
+			!message.responseId ||
+			!message.content.length ||
+			!prefix?.inputToolCallIds ||
+			message.provider !== prefix.provider ||
+			message.api !== prefix.api ||
+			message.model !== prefix.model
+		)
+			return undefined;
+		const branch = this.sessionManager.getBranch();
+		// The first real snapshot already anchors older responses, including late execution checkpoints.
+		if (branch.some((entry) => entry.type === "message" && isSameResponse(entry.message, message))) return undefined;
+		const frontier = prefix.frontier === null ? -1 : branch.findIndex((entry) => entry.id === prefix.frontier);
+		if (prefix.frontier !== null && frontier < 0) return undefined;
+		// Preparation can summarize or omit receipts after the captured frontier.
+		// Ordering provenance must not bring those discarded contributions back.
+		const retained = new Set(
+			this.sessionManager
+				.buildSessionProjection()
+				.entries.flatMap((entry) =>
+					entry.messages.some((message) => message.role === "toolResult") ? [entry.sourceEntry.id] : [],
+				),
+		);
+		const nativeCalls = new Set(
+			branch.flatMap((entry) =>
+				entry.type === "message" && entry.message.role === "assistant"
+					? (entry.message.content ?? []).flatMap((call) =>
+							call.type === "toolCall" && call.async && call.responsesItem?.async ? [call.id] : [],
+						)
+					: [],
+			),
+		);
+		return branch
+			.slice(frontier + 1)
+			.flatMap((entry) =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				retained.has(entry.id) &&
+				nativeCalls.has(entry.message.toolCallId) &&
+				!prefix.inputToolCallIds!.has(entry.message.toolCallId.split("|")[0])
+					? [entry.id]
+					: [],
+			);
+	}
+
+	private _persistMessage(
+		message: AgentMessage,
+		consumedToolResultIds?: string[],
+		prefix?: ProviderRequestPrefix,
+	): void {
 		let entryId: string | undefined;
 		if (message.role === "custom") {
 			entryId = this.sessionManager.appendCustomMessageEntry(
@@ -1304,6 +1365,7 @@ export class AgentSession {
 					: message,
 				false,
 				consumedToolResultIds,
+				this._concurrentToolResultIds(message, prefix),
 			);
 		}
 		if (entryId) this._entryIdsByMessage.set(message, entryId);
@@ -1506,7 +1568,12 @@ export class AgentSession {
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		if (event.type === "message_checkpoint") {
 			this._flushPendingProviderMessages();
-			const entryId = this.sessionManager.appendMessage(structuredClone(event.message), true);
+			const entryId = this.sessionManager.appendMessage(
+				structuredClone(event.message),
+				true,
+				undefined,
+				this._concurrentToolResultIds(event.message, this._providerRequestPrefix),
+			);
 			this._entryIdsByMessage.set(event.message, entryId);
 			this._emit(event);
 			return;
@@ -1565,12 +1632,36 @@ export class AgentSession {
 		if (event.type === "message_start" && event.message.role === "assistant") {
 			if (this._providerRequestPrefix) {
 				const continuation = snapshotProviderConversation([...(event.continuationInput ?? [])]);
+				const native = event.message.api === "openai-responses" || event.message.api === "openai-codex-responses";
+				const initialIds = event.inputToolCallIds === undefined ? undefined : new Set(event.inputToolCallIds);
+				const initialResults = native
+					? this.sessionManager
+							.getBranch()
+							.flatMap((entry) =>
+								entry.type === "message" &&
+								entry.message.role === "toolResult" &&
+								initialIds?.has(entry.message.toolCallId.split("|")[0])
+									? [entry.message.toolCallId]
+									: [],
+							)
+					: this._providerRequestPrefix.toolResultIds;
 				this._providerRequestPrefix = {
 					...this._providerRequestPrefix,
 					response: undefined,
+					inputToolCallIds:
+						event.continuationInput === undefined
+							? initialIds
+							: this._providerRequestPrefix.inputToolCallIds === undefined
+								? undefined
+								: new Set([
+										...this._providerRequestPrefix.inputToolCallIds,
+										...[...providerToolResultIds(continuation)].map((id) => id.split("|")[0]),
+									]),
 					canonicalConversation: [...this._providerRequestPrefix.canonicalConversation, ...continuation],
 					toolResultIds: new Set([
-						...this._providerRequestPrefix.toolResultIds,
+						...(event.continuationInput === undefined
+							? initialResults
+							: this._providerRequestPrefix.toolResultIds),
 						...providerToolResultIds(continuation),
 					]),
 				};
@@ -1634,7 +1725,7 @@ export class AgentSession {
 					this._pendingProviderMessages.push(event.message);
 					if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
 				} else {
-					this._persistMessage(event.message, consumedToolResultIds);
+					this._persistMessage(event.message, consumedToolResultIds, requestPrefix);
 				}
 				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 			}
