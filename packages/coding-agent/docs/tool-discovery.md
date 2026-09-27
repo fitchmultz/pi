@@ -41,7 +41,7 @@ Groups are filtered through the permitted registry. Missing/excluded tools are n
 
 Activation is additive and idempotent. Tools stay available in the selected session branch; there is no per-turn unloading. Pi's existing declaration history owns activation across resume, tree navigation, compaction, and fresh context windows. Reload does not implicitly enable undiscovered groups. Unlisted new tools retain their original startup behavior.
 
-Switching to an unevaluated provider restores the groups' normal entry tools, not their advanced tools. Returning to an evaluated provider does not unload tools already made available in that session. Start a fresh session for a clean lean baseline.
+Switching to an unevaluated provider restores the groups' normal entry tools, not their advanced tools, only while the discovery loader remains selected. Deliberate empty selections and selections that removed the loader are not widened by that restoration. Returning to an evaluated provider does not unload tools already made available in that session. It re-adds the discovery catalog only if doing so cannot expose previously deselected entry tools; repeated provider switches preserve restricted selections. Start a fresh session for a clean lean baseline.
 
 To roll back, set `toolDiscovery.enabled` to `false` and run `/reload`, or restart. This restores ordinary extension exposure. Keep the previous runtime and extension checkouts when trying a staged build. `/reload` alone does not load changed extension or runtime code.
 

@@ -4591,6 +4591,7 @@ export class AgentSession {
 	}): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolReferences();
+		const previousActiveKeys = new Set(previousActiveToolNames.map(toolKey));
 		const allowedToolNames = this._allowedToolNames ? new Set(this._allowedToolNames.map(toolKey)) : undefined;
 		const excludedToolNames = this._excludedToolNames ? new Set(this._excludedToolNames.map(toolKey)) : undefined;
 		const isAllowedTool = (tool: ToolSelection): boolean =>
@@ -4714,15 +4715,28 @@ export class AgentSession {
 			}
 		} else if (!options?.activeToolNames) {
 			for (const [key, tool] of this._toolRegistry) {
-				if (!previousRegistryNames.has(key) && !deferredKeys.has(key))
+				// A reappearing loader must not make previously deselected entry tools reachable.
+				// Genuinely new integrations still follow normal late-registration behavior.
+				const wouldWidenSelection =
+					key === toolKey(DISCOVER_TOOLS_NAME) &&
+					previousRegistryNames.size > 0 &&
+					(previousActiveKeys.size === 0 ||
+						this._toolDiscoveryGroups.some((group) =>
+							(group.defaultTools ?? group.tools).some(
+								(tool) => previousRegistryNames.has(toolKey(tool)) && !previousActiveKeys.has(toolKey(tool)),
+							),
+						));
+				if (!previousRegistryNames.has(key) && !deferredKeys.has(key) && !wouldWidenSelection)
 					nextActiveToolNames.push(toToolReference(tool));
 			}
 		}
 		// A rollback or switch to an unevaluated provider restores the ordinary front doors,
 		// not advanced tools that the integration itself normally keeps inactive.
-		for (const group of previousDiscoveryGroups) {
-			if (!this._toolDiscoveryGroups.some((current) => current.name === group.name))
-				nextActiveToolNames.push(...(group.defaultTools ?? group.tools));
+		if (previousActiveKeys.has(toolKey(DISCOVER_TOOLS_NAME))) {
+			for (const group of previousDiscoveryGroups) {
+				if (!this._toolDiscoveryGroups.some((current) => current.name === group.name))
+					nextActiveToolNames.push(...(group.defaultTools ?? group.tools));
+			}
 		}
 
 		this.setActiveToolReferences(nextActiveToolNames.map(toToolReference));

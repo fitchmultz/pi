@@ -303,9 +303,36 @@ it("restores front-door tools when switching to an unevaluated provider without 
 		baseUrl: "http://unused",
 		models: [{ ...harness.getModel(), id: "other" }],
 	});
-	await harness.session.setModel(runtime.getModel("unevaluated", "other")!);
+	const unevaluatedModel = runtime.getModel("unevaluated", "other")!;
+	await harness.session.setModel(unevaluatedModel);
+	expect(harness.session.getActiveToolNames()).toEqual([toolId(lookup), "desktop"]);
+	await harness.session.setModel(harness.getModel());
+	expect(harness.session.getActiveToolNames()).toEqual([toolId(lookup), "desktop", "discover_tools"]);
+	await harness.session.setModel(unevaluatedModel);
 	expect(harness.session.getActiveToolNames()).toEqual([toolId(lookup), "desktop"]);
 });
+
+it.each([{ selected: [] }, { selected: ["read"] }, { selected: ["read", toolId(lookup)] }])(
+	"does not widen a deliberate tool selection on provider switch: %j",
+	async ({ selected }) => {
+		const harness = await setup({ tools: undefined });
+		const runtime = harness.session.modelRuntime;
+		const originalModel = harness.getModel();
+		runtime.registerProvider("unevaluated", {
+			api: originalModel.api,
+			apiKey: "faux-key",
+			baseUrl: "http://unused",
+			models: [{ ...originalModel, id: "other" }],
+		});
+		harness.session.setActiveToolsByName(selected);
+		for (let roundTrip = 0; roundTrip < 2; roundTrip++) {
+			await harness.session.setModel(runtime.getModel("unevaluated", "other")!);
+			expect(harness.session.getActiveToolNames()).toEqual(selected);
+			await harness.session.setModel(originalModel);
+			expect(harness.session.getActiveToolNames()).toEqual(selected);
+		}
+	},
+);
 
 it("can roll back via settings and reload without leaving capabilities hidden", async () => {
 	const harness = await setup();
