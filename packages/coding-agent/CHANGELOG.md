@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added opt-in provider credential isolation so account-routing extensions can bypass stored credentials without deleting or refreshing them, while preserving explicit request/CLI keys and native login/logout.
 - Added the `live_tool_result` extension event, which supplies model-only tool result content for native WebSocket continuations that bypass context hooks.
 - Added experimental provider-scoped `toolDiscovery` settings and an ordinary `discover_tools` loader for optional integrations, plus tool-owned custom prompt sections that deliver full guidance when activated. See [Tool Discovery](docs/tool-discovery.md).
 
@@ -14,6 +15,7 @@
 ### Fixed
 
 - Fixed context usage and automatic rollover losing measured reasoning tokens when request transforms add messages or append content blocks.
+- Fixed empty runtime API keys falling back to stored credentials; they are now rejected before changing the active override.
 
 ## [0.87.1] - 2026-09-22
 

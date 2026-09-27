@@ -1890,6 +1890,13 @@ export interface ProviderConfig {
 	/** API key literal, env interpolation ($ENV_VAR or ${ENV_VAR}), or leading !command. Required when defining models (unless oauth provided). */
 	apiKey?: string;
 	/**
+	 * Ignore this provider's stored credentials during requests, availability checks and catalog refresh.
+	 * Explicit runtime/request keys still win. Login/logout still deliberately update stored credentials.
+	 * Scoped to this registration; false or unregister restores stored auth. Defaults to false.
+	 * Feature-detect with ModelRuntime.supportsIgnoreStoredCredentials on older/official hosts.
+	 */
+	ignoreStoredCredentials?: boolean;
+	/**
 	 * Override ambient auth without replacing native login, catalogs, or transports.
 	 * Called only without a stored/runtime credential or configured apiKey; receives no credential.
 	 * Both callbacks must honor signal. check reports the actual auth type (including OAuth).

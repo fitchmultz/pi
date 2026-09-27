@@ -68,6 +68,23 @@ A throwing `check` is distinct from unconfigured authentication. Aggregate avail
 
 `ambientAuth` is extension-only, not a `models.json` field. Standalone `pi update --models` does not discover session extensions.
 
+## Isolate a routing provider from stored credentials
+
+An account router may replace a built-in provider's requests while leaving its ordinary login available to other Pi processes. Register `ignoreStoredCredentials: true` alongside the router's configured `apiKey` or `ambientAuth`:
+
+```ts
+pi.registerProvider("openai-codex", {
+  ignoreStoredCredentials: true,
+  ambientAuth: accountRouterAuth,
+});
+```
+
+This skips only that provider's persisted credential during request resolution, availability checks and catalog refresh. An expired or revoked standalone login cannot block the router. Explicit request and CLI/runtime keys retain priority; empty runtime keys are rejected rather than falling back to storage. `/login` and `/logout` remain deliberate persistent operations; this option never deletes, migrates or refreshes the ignored credential. Other providers and independent runtimes are unaffected.
+
+The policy belongs to the registration: set it to `false` or unregister the provider to restore stored authentication. Extensions must unregister their own override during `session_shutdown` if disabling/removing them on reload should restore native behavior; resource reload does not automatically remove provider registrations.
+
+This is a fork extension capability, not a `models.json` field. Detect it with `ModelRuntime.supportsIgnoreStoredCredentials === true` from `@earendil-works/pi-coding-agent`; version strings cannot distinguish the fork from official Pi. On hosts without it, use a distinct routing provider ID rather than deleting credentials or pretending OAuth refresh succeeded.
+
 ## Supply and refresh models
 
 Every model needs an ID, display name, input capabilities, context window, output limit, reasoning support, and cost metadata. Choose the API implementation at the provider level unless one model requires an override.

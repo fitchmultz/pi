@@ -47,6 +47,8 @@ export interface ProviderConfigInput {
 	name?: string;
 	baseUrl?: string;
 	apiKey?: string;
+	/** Ignore this provider's stored credentials for resolution, not explicit runtime/request keys or login/logout. */
+	ignoreStoredCredentials?: boolean;
 	ambientAuth?: {
 		check: NonNullable<ApiKeyAuth["check"]>;
 		resolve: ApiKeyAuth["resolve"];
