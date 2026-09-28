@@ -607,6 +607,20 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 		},
 	);
 	const currentTools = getCurrentTools(normalizedContext.messages);
+	const windowId = getInitialSystemMessage(context.messages)?.contextWindowId ?? null;
+	let strictToolsFallback = context.messages.some(
+		(message) =>
+			message.role === "assistant" &&
+			message.api === model.api &&
+			message.provider === model.provider &&
+			message.model === model.id &&
+			message.diagnostics?.some(
+				(entry) =>
+					entry.type === "anthropic_strict_tool_fallback" &&
+					entry.details?.windowId === windowId &&
+					entry.details?.baseUrl === model.baseUrl,
+			),
+	);
 
 	(async () => {
 		const providerThinkingLevel = model.compat?.supportsMidConvoEffort ? (options?.effort ?? "high") : undefined;
@@ -666,6 +680,34 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				isOAuth = created.isOAuthToken;
 			}
 			let params = buildParams(model, normalizedContext, isOAuth, toolProtocol, options);
+			const declarations = normalizedContext.messages.flatMap((message) =>
+				message.role === "system" || message.role === "toolResult" ? (message.toolsAdded ?? []) : [],
+			);
+			const preferredNames = new Set(
+				declarations
+					.filter(
+						(tool) =>
+							tool.constrainedSampling &&
+							tool.constrainedSampling.type === "json_schema" &&
+							tool.constrainedSampling.strict === "prefer",
+					)
+					.map((tool) => (isOAuth ? toClaudeCodeName(tool.name) : tool.name)),
+			);
+			for (const tool of declarations) {
+				if (
+					tool.constrainedSampling &&
+					tool.constrainedSampling.type === "json_schema" &&
+					tool.constrainedSampling.strict === "require"
+				)
+					preferredNames.delete(isOAuth ? toClaudeCodeName(tool.name) : tool.name);
+			}
+			// Match entire declarations so a payload hook's added/replaced tools retain its strictness.
+			const preferredStrictDefinitions = new Set(
+				getToolDefinitions(params)
+					.filter((tool) => tool.strict && preferredNames.has(tool.name))
+					.map((tool) => JSON.stringify(tool)),
+			);
+			if (strictToolsFallback) relaxPreferredStrictTools(params, preferredStrictDefinitions);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
@@ -696,20 +738,49 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					},
 				});
 			}
-			const requestOptions = {
-				headers: { "anthropic-beta": params.betas?.join(",") ?? null },
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: 0,
-			};
-			const response = await retryProviderRequest(
-				() => client.beta.messages.create(params, requestOptions).asResponse(),
-				{
-					maxRetries: options?.maxRetries,
-					maxRetryDelayMs: options?.maxRetryDelayMs,
-					signal: options?.signal,
-				},
-			);
+			const request = () =>
+				retryProviderRequest(
+					() =>
+						client.beta.messages
+							.create(params, {
+								headers: { "anthropic-beta": params.betas?.join(",") ?? null },
+								...(options?.signal ? { signal: options.signal } : {}),
+								...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+								maxRetries: 0,
+							})
+							.asResponse(),
+					{
+						maxRetries: options?.maxRetries,
+						maxRetryDelayMs: options?.maxRetryDelayMs,
+						signal: options?.signal,
+					},
+				);
+			let response: Response;
+			try {
+				response = await request();
+			} catch (error) {
+				if (
+					strictToolsFallback ||
+					options?.signal?.aborted ||
+					!(error instanceof Anthropic.BadRequestError) ||
+					error.type !== "invalid_request_error" ||
+					!/compiled grammar is too large|schema is too complex for compilation/i.test(error.message)
+				)
+					throw error;
+				const retryParams = structuredClone(params);
+				if (!relaxPreferredStrictTools(retryParams, preferredStrictDefinitions)) throw error;
+				const replacement = await options?.onPayload?.(retryParams, model);
+				params = { ...((replacement ?? retryParams) as MessageCreateParamsStreaming), stream: true };
+				response = await request();
+				strictToolsFallback = true;
+			}
+			if (strictToolsFallback) {
+				appendAssistantMessageDiagnostic(output, {
+					type: "anthropic_strict_tool_fallback",
+					timestamp: Date.now(),
+					details: { windowId, baseUrl: model.baseUrl },
+				});
+			}
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -947,6 +1018,30 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 
 	return stream;
 };
+
+function getToolDefinitions(params: MessageCreateParamsStreaming): BetaTool[] {
+	const definitions = [...(params.tools ?? [])];
+	for (const message of params.messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			if (block.type === "tool_addition" && block.tool.type === "tool_definition") {
+				definitions.push(block.tool.definition);
+			}
+		}
+	}
+	return definitions.filter((tool): tool is BetaTool => "input_schema" in tool);
+}
+
+function relaxPreferredStrictTools(params: MessageCreateParamsStreaming, preferred: ReadonlySet<string>): boolean {
+	let changed = false;
+	for (const tool of getToolDefinitions(params)) {
+		if (tool.strict && preferred.has(JSON.stringify(tool))) {
+			delete tool.strict;
+			changed = true;
+		}
+	}
+	return changed;
+}
 
 /**
  * Map ThinkingLevel to Anthropic effort levels for adaptive thinking.
