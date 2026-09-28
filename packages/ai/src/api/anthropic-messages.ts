@@ -679,7 +679,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			let params = buildParams(model, normalizedContext, isOAuth, toolProtocol, options);
+			const originalParams = buildParams(model, normalizedContext, isOAuth, toolProtocol, options);
 			const declarations = normalizedContext.messages.flatMap((message) =>
 				message.role === "system" || message.role === "toolResult" ? (message.toolsAdded ?? []) : [],
 			);
@@ -701,13 +701,9 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				)
 					preferredNames.delete(isOAuth ? toClaudeCodeName(tool.name) : tool.name);
 			}
-			// Match entire declarations so a payload hook's added/replaced tools retain its strictness.
-			const preferredStrictDefinitions = new Set(
-				getToolDefinitions(params)
-					.filter((tool) => tool.strict && preferredNames.has(tool.name))
-					.map((tool) => JSON.stringify(tool)),
-			);
-			if (strictToolsFallback) relaxPreferredStrictTools(params, preferredStrictDefinitions);
+			// Each attempt starts before hooks, so additive transformations run exactly once.
+			let params = structuredClone(originalParams);
+			if (strictToolsFallback) relaxPreferredStrictTools(params, preferredNames);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
@@ -767,8 +763,8 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					!/compiled grammar is too large|schema is too complex for compilation/i.test(error.message)
 				)
 					throw error;
-				const retryParams = structuredClone(params);
-				if (!relaxPreferredStrictTools(retryParams, preferredStrictDefinitions)) throw error;
+				const retryParams = structuredClone(originalParams);
+				if (!relaxPreferredStrictTools(retryParams, preferredNames)) throw error;
 				const replacement = await options?.onPayload?.(retryParams, model);
 				params = { ...((replacement ?? retryParams) as MessageCreateParamsStreaming), stream: true };
 				response = await request();
@@ -1035,7 +1031,7 @@ function getToolDefinitions(params: MessageCreateParamsStreaming): BetaTool[] {
 function relaxPreferredStrictTools(params: MessageCreateParamsStreaming, preferred: ReadonlySet<string>): boolean {
 	let changed = false;
 	for (const tool of getToolDefinitions(params)) {
-		if (tool.strict && preferred.has(JSON.stringify(tool))) {
+		if (tool.strict && preferred.has(tool.name)) {
 			delete tool.strict;
 			changed = true;
 		}

@@ -205,7 +205,6 @@ it("stops after one unsuccessful schema recovery", async () => {
 
 it("preserves replaced and added hook-owned declarations when recovering other tools", async () => {
 	const requests: RequestBody[] = [];
-	let hookCalls = 0;
 	const result = await streamAnthropic(
 		model,
 		normalizeContext({
@@ -215,11 +214,14 @@ it("preserves replaced and added hook-owned declarations when recovering other t
 		{
 			apiKey: "test-key",
 			onPayload: (payload) => {
-				if (++hookCalls > 1) return;
 				const body = structuredClone(payload) as RequestBody;
-				body.tools[0].input_schema = { type: "object", properties: { replacement: { type: "boolean" } } };
+				body.tools[0] = {
+					name: "tool_0",
+					strict: true,
+					input_schema: { type: "object", properties: { replacement: { type: "boolean" } } },
+				};
 				body.tools.push({ name: "hook_tool", strict: true, input_schema: { type: "object", properties: {} } });
-				body.metadata = { user_id: "preserve-first-hook-result" };
+				body.metadata = { user_id: "from-hook" };
 				return body;
 			},
 			fetch: async (_url, init) => {
