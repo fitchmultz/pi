@@ -12,11 +12,13 @@
 ### Changed
 
 - Changed the default Fireworks model to Kimi K3; Fireworks retired Kimi K2.6 from its catalog.
+- Changed cache miss notices and `/session` to list the changes observed between requests (model, service tier, tool definitions, instructions, older async results admitted, new connection, full resend, idle gap) plus provider-supplied reasons, and to report an actual drop in cached reads separately from tokens not read from cache. Dollar amounts are labeled estimates. See [settings](docs/settings.md).
 
 ### Fixed
 
 - Fixed context usage and automatic rollover losing measured reasoning tokens when request transforms add messages or append content blocks.
 - Fixed empty runtime API keys falling back to stored credentials; they are now rejected before changing the active override.
+- Fixed cache miss notices comparing a response with an abandoned branch after `/tree` navigation; live and redrawn notices now follow the active branch.
 
 ## [0.87.1] - 2026-09-22
 
