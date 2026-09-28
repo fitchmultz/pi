@@ -13,6 +13,7 @@
 - Fixed OpenAI Codex WebSocket continuations keeping a mutable request/response baseline, so later in-memory edits could change delta eligibility or content.
 - Fixed OpenAI Codex requests not echoing a server-issued `x-codex-turn-state` within the same turn; it is latched per turn and account and never sent on steering frames.
 - Fixed steering being admitted after a response's terminal event had arrived but was not yet processed; late input now continues in the next request on the same connection.
+- Fixed OpenAI Responses steering successors carrying no request diagnostics while overwriting the committed response's record; each response now keeps its own record.
 
 ## [0.87.1] - 2026-09-22
 

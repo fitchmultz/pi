@@ -4,7 +4,11 @@ import { stream as streamAzure } from "../src/api/azure-openai-responses.ts";
 import { stream as streamCodex } from "../src/api/openai-codex-responses.ts";
 import { stream as streamOpenAI } from "../src/api/openai-responses.ts";
 import { createResponsesDiagnostics } from "../src/api/openai-responses-diagnostics.ts";
-import { convertResponsesMessages, processResponsesStream, type ResponsesEvent } from "../src/api/openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	processResponsesStream,
+	type ResponsesEvent,
+} from "../src/api/openai-responses-shared.ts";
 import type { AssistantMessage, Model, StreamOptions } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
@@ -56,7 +60,7 @@ describe("Responses request diagnostics", () => {
 		).toEqual(cacheDiagnostics);
 	});
 
-	it("records each steering successor on its own copy of the request diagnostics", async () => {
+	it("freezes the committed response record when a steering successor continues the request", async () => {
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -103,7 +107,8 @@ describe("Responses request diagnostics", () => {
 		});
 		expect(successor).toHaveLength(1);
 		expect(successor[0].timestamp).toBe(committed[0].timestamp);
-		expect(successor[0].details).toMatchObject({ socketReused: true, websocketRequestMode: "delta" });
+		expect(successor[0].details).toBe(diagnostics.details);
+		expect(successor[0].details).toMatchObject({ socketReused: false, websocketRequestMode: "delta" });
 		expect(successor[0].details).not.toHaveProperty("prompt_cache_diagnostics");
 	});
 

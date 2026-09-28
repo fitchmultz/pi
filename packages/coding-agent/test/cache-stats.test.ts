@@ -14,7 +14,9 @@ function detectCacheMiss(
 	prices: ModelPriceSource,
 	consumed?: string[],
 ) {
-	return detectLiveCacheMiss(SessionManager.inMemory(undefined, undefined, entries), message, prices, consumed);
+	// Live detection follows the active branch, so link the fixture entries into one.
+	const branch = entries.map((entry, index) => ({ ...entry, parentId: index ? entries[index - 1].id : null }));
+	return detectLiveCacheMiss(SessionManager.inMemory(undefined, undefined, branch), message, prices, consumed);
 }
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
@@ -51,14 +53,16 @@ function assistant(options: {
 	} as AssistantMessage;
 }
 
+let nextEntryId = 0;
+
 function entry(message: AssistantMessage): SessionMessageEntry {
-	return { type: "message", id: "x", parentId: null, timestamp: "", message };
+	return { type: "message", id: `entry-${nextEntryId++}`, parentId: null, timestamp: "", message };
 }
 
 function usageEntry(kind: string, timestamp: number): SessionEntry {
 	return {
 		type: "usage",
-		id: `usage-${kind}`,
+		id: `usage-${nextEntryId++}`,
 		parentId: null,
 		timestamp: new Date(timestamp).toISOString(),
 		kind,
@@ -334,7 +338,7 @@ describe("incremental live cache comparisons", () => {
 	it("reads only appended entries after initial hydration and matches replay", () => {
 		const manager = SessionManager.inMemory();
 		manager.appendMessage(turn2);
-		const reads = vi.spyOn(manager, "getEntries");
+		const reads = vi.spyOn(manager, "getBranch");
 		for (let index = 0; index < 20; index++) {
 			const message = assistant({ input: 30_000, cacheRead: 70_000, timestamp: 120_000 + index });
 			const miss = detectLiveCacheMiss(manager, message, models);
@@ -352,16 +356,16 @@ describe("incremental live cache comparisons", () => {
 		expect(detectLiveCacheMiss(manager, message, models)).toBeUndefined();
 	});
 
-	it("replays a changed journal when navigation hides new entries from the active leaf", () => {
+	it("compares with the active branch after navigation that appends nothing", () => {
 		const manager = SessionManager.inMemory();
 		const anchor = manager.appendMessage(turn2);
-		detectLiveCacheMiss(manager, fullMiss, models);
 		manager.appendMessage({ ...fullMiss, model: "other-branch" });
+		detectLiveCacheMiss(manager, { ...fullMiss }, models);
 		manager.branch(anchor);
 		const live = detectLiveCacheMiss(manager, fullMiss, models);
-		expect(live).toMatchObject({ missedTokens: 110_000, observedChanges: ["model changed"] });
+		expect(live).toMatchObject({ missedTokens: 105_000, observedChanges: ["unclassified"] });
 		manager.appendMessage(fullMiss);
-		expect(collectCacheMisses(manager.getEntries(), models).get(fullMiss)).toEqual(live);
+		expect(collectCacheMisses(manager.getBranch(), models).get(fullMiss)).toEqual(live);
 	});
 
 	it.each([false, true])("retains checkpoint-only call provenance across a window boundary=%s", (boundary) => {
@@ -448,6 +452,12 @@ describe("observed cache changes", () => {
 			detectCacheMiss([entry(withDiagnostics(turn2, before))], withDiagnostics(fullMiss, after), models)
 				?.observedChanges,
 		).toEqual([label]);
+	});
+
+	it("does not attribute a steering successor's miss to its request's new connection", () => {
+		const committed = withDiagnostics(turn2, { socketReused: false });
+		const successor = { ...fullMiss, diagnostics: committed.diagnostics };
+		expect(detectCacheMiss([entry(committed)], successor, models)?.observedChanges).toEqual(["unclassified"]);
 	});
 
 	it("keeps the warning deficit independent of an actual cached-read decline", () => {

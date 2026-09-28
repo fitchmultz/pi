@@ -4302,7 +4302,7 @@ export class InteractiveMode {
 		// Cache misses are not persisted, unlike successful cache-warming usage.
 		// Re-derive them and inject them after the assistant messages that paid for them.
 		const cacheMisses = this.settingsManager.getShowCacheMissNotices()
-			? collectCacheMisses(this.sessionManager.getEntries(), this.session.modelRuntime)
+			? collectCacheMisses(this.sessionManager.getBranch(), this.session.modelRuntime)
 			: new Map<AssistantMessage, CacheMiss>();
 
 		if (options.updateFooter) {

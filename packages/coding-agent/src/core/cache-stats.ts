@@ -44,6 +44,7 @@ interface PreviousRequest {
 	reportedCache: boolean;
 	requestIndex: number;
 	responseId?: string;
+	requestStart?: number;
 	details: JsonObject;
 }
 
@@ -185,7 +186,9 @@ function detectMiss(
 		before.instructionsBytes !== after.instructionsBytes
 	)
 		observedChanges.push("instructions changed");
-	if (details.socketReused === false) observedChanges.push("new connection");
+	// A steering successor continues the previous response's request and connection.
+	if (details.socketReused === false && requestStart(message) !== prev.requestStart)
+		observedChanges.push("new connection");
 	if (details.websocketRequestMode === "full" && prev.details.websocketRequestMode === "delta")
 		observedChanges.push("full resend");
 	const idleMs = Math.max(0, requestStart(message) - prev.endedAt);
@@ -346,6 +349,7 @@ class CacheMissTracker {
 				reportedCache: (this.prev?.reportedCache ?? false) || usage.cacheRead + usage.cacheWrite > 0,
 				requestIndex: this.requestIndex,
 				responseId: message.responseId,
+				requestStart: requestStart(message),
 				details,
 			};
 		}
@@ -398,8 +402,9 @@ interface LiveCacheState {
 	tracker: CacheMissTracker;
 	sessionId: string;
 	revision: number;
+	leafId: string | null;
 	lastEntry: SessionEntry | undefined;
-	lastComparison?: { message: AssistantMessage; miss: CacheMiss | undefined; revision: number };
+	lastComparison?: { message: AssistantMessage; miss: CacheMiss | undefined };
 }
 const liveCacheStates = new WeakMap<SessionManager, LiveCacheState>();
 
@@ -412,6 +417,8 @@ export function detectCacheMiss(
 ): CacheMiss | undefined {
 	let state = liveCacheStates.get(manager);
 	const revision = manager.getEntriesRevision();
+	// Navigation moves the leaf without changing the entry revision.
+	const leafId = manager.getLeafId();
 	const sessionId = manager.getSessionId();
 	if (
 		!state ||
@@ -422,38 +429,40 @@ export function detectCacheMiss(
 			tracker: new CacheMissTracker((id) => manager.getEntry(id)),
 			sessionId,
 			revision: -1,
+			leafId: null,
 			lastEntry: undefined,
 		};
 		liveCacheStates.set(manager, state);
 	}
-	if (state.revision !== revision) {
+	if (state.revision !== revision || state.leafId !== leafId) {
 		const pending: SessionEntry[] = [];
-		let id = manager.getLeafId();
+		let id = leafId;
 		while (id && id !== state.lastEntry?.id) {
 			const entry = manager.getEntry(id);
 			if (!entry) break;
 			pending.push(entry);
 			id = entry.parentId;
 		}
-		// Initial hydration or a branch/reload needs replay; normal appends only visit the new suffix.
+		// Initial hydration, navigation, or a reload replays the active branch; appends only visit the new suffix.
 		if (
 			state.revision === -1 ||
 			id !== (state.lastEntry?.id ?? null) ||
 			pending.length !== revision - state.revision
 		) {
 			state.tracker = new CacheMissTracker((id) => manager.getEntry(id));
-			const entries = manager.getEntries();
-			for (const entry of entries) state.tracker.observe(entry, models);
-			state.lastEntry = entries.at(-1);
+			const branch = manager.getBranch();
+			for (const entry of branch) state.tracker.observe(entry, models);
+			state.lastEntry = branch.at(-1);
 		} else {
 			for (const entry of pending.reverse()) state.tracker.observe(entry, models);
 			state.lastEntry = pending.at(-1) ?? state.lastEntry;
 		}
 		state.revision = revision;
+		state.leafId = leafId;
+		state.lastComparison = undefined;
 	}
-	if (state.lastComparison?.message === message && state.lastComparison.revision === revision)
-		return state.lastComparison.miss;
+	if (state.lastComparison?.message === message) return state.lastComparison.miss;
 	const miss = state.tracker.detect(message, models, consumedToolResultIds);
-	state.lastComparison = { message, miss, revision };
+	state.lastComparison = { message, miss };
 	return miss;
 }
