@@ -15,6 +15,7 @@ import type {
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
+	Tool,
 	TranscriptContext,
 	Usage,
 } from "../types.ts";
@@ -40,8 +41,8 @@ import {
 	convertResponsesTools,
 	createResponsesSuccessor,
 	getInitialResponsesEffort,
-	getNativeToolSearch,
 	getResponsesInputToolCallIds,
+	getTranscriptNativeToolSearch,
 	processResponsesStream,
 	resolveResponsesEffort,
 	resolveResponsesTranscript,
@@ -97,6 +98,10 @@ function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCo
 		supportsStrictMode: model.compat?.supportsStrictMode ?? false,
 		supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
 		supportsAdditionalTools: model.compat?.supportsAdditionalTools ?? false,
+		supportsAllowedTools:
+			model.compat?.supportsAllowedTools ??
+			(model.provider === "openai" &&
+				(model.baseUrl === "https://api.openai.com" || model.baseUrl.startsWith("https://api.openai.com/"))),
 		supportsToolSearch: model.compat?.supportsToolSearch ?? false,
 		supportsExplicitPromptCacheMode: model.compat?.supportsExplicitPromptCacheMode ?? false,
 		supportsMaxOutputTokens: model.compat?.supportsMaxOutputTokens ?? true,
@@ -136,10 +141,11 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 /**
  * Generate function for OpenAI Responses API
  */
-const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
+const streamRaw = (
 	model: Model<"openai-responses">,
 	context: TranscriptContext,
 	options?: OpenAIResponsesOptions,
+	availableTools?: Tool[],
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 	const normalizedContext = resolveResponsesTranscript(
@@ -193,7 +199,14 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 				},
 				cacheSessionId,
 			);
-			let params = buildParams(model, normalizedContext, options, compat, grammarToolInputProperties);
+			let params = buildParams(
+				model,
+				normalizedContext,
+				options,
+				compat,
+				grammarToolInputProperties,
+				availableTools,
+			);
 			if (compat.supportsReasoningEffortUpdates)
 				output.providerThinkingLevel = resolveResponsesEffort(model, options?.reasoningEffort);
 			details.prepareMs = performance.now() - diagnostics.startedAt;
@@ -220,7 +233,7 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 				onResponseEnd: (message: AssistantMessage) => {
 					output = createResponsesSuccessor(message);
 				},
-				toolSearchTool: getNativeToolSearch(getCurrentTools(normalizedContext.messages), compat.supportsToolSearch),
+				toolSearchTool: getTranscriptNativeToolSearch(normalizedContext, compat.supportsToolSearch),
 				diagnostics,
 				serviceTier: options?.serviceTier,
 				grammarToolInputProperties,
@@ -392,17 +405,33 @@ const streamRaw: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 	return stream;
 };
 
-export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (model, context, options) =>
-	withToolNamespaces(
+export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (model, context, options) => {
+	const declared = getDeclaredTools(context.messages);
+	const current = getCurrentTools(context.messages);
+	// ponytail: namespace/search restriction syntax is not verified; those routes use
+	// the appended notice plus executor policy until a documented selector is available.
+	const availableTools =
+		getCompat(model).supportsAllowedTools &&
+		current.length < declared.length &&
+		declared.every((tool) => tool.namespace === undefined && !tool.toolSearch)
+			? current
+			: undefined;
+	return withToolNamespaces(
 		model,
 		context,
 		(mapped, mapControl) =>
-			streamRaw(model, mapped, {
-				...options,
-				onResponseControl: (control) => options?.onResponseControl?.(control ? mapControl(control) : undefined),
-			}),
+			streamRaw(
+				model,
+				mapped,
+				{
+					...options,
+					onResponseControl: (control) => options?.onResponseControl?.(control ? mapControl(control) : undefined),
+				},
+				availableTools,
+			),
 		options?.signal,
 	);
+};
 
 export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOptions> = (
 	model: Model<"openai-responses">,
@@ -477,6 +506,7 @@ function buildParams(
 		getDeclaredTools(context.messages),
 		compat.supportsOpenAIGrammarTools,
 	),
+	availableTools?: Tool[],
 ) {
 	const transcriptTools = resolveTranscriptTools(
 		context.messages,
@@ -484,7 +514,7 @@ function buildParams(
 	);
 	const effort = resolveResponsesEffort(model, options?.reasoningEffort);
 	const positional = supportsPositionalResponsesEffort(model, options?.samplingParams);
-	const toolSearchTool = getNativeToolSearch(getCurrentTools(context.messages), compat.supportsToolSearch);
+	const toolSearchTool = getTranscriptNativeToolSearch(context, compat.supportsToolSearch);
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
 		reasoningEffort: positional ? effort : undefined,
 		grammarToolInputProperties,
@@ -553,6 +583,24 @@ function buildParams(
 	// Last so custom keys override the named request fields.
 	if (options?.samplingParams) {
 		Object.assign(params, options.samplingParams);
+	}
+
+	if (
+		availableTools &&
+		(params.tool_choice === undefined || params.tool_choice === "auto" || params.tool_choice === "required")
+	) {
+		params.tool_choice =
+			availableTools.length === 0
+				? "none"
+				: {
+						type: "allowed_tools",
+						mode: params.tool_choice === "required" ? "required" : "auto",
+						tools: convertResponsesTools(availableTools, {
+							supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
+						}).flatMap((tool) =>
+							tool.type === "function" || tool.type === "custom" ? [{ type: tool.type, name: tool.name }] : [],
+						),
+					};
 	}
 
 	if (model.id === "gpt-6-astra") {

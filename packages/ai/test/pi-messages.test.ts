@@ -95,6 +95,19 @@ const usage = {
 };
 
 describe("pi-messages", () => {
+	it("keeps the context-window binding host-only without changing transcript content", async () => {
+		const { baseUrl, requests } = await startServer({ events: [{ type: "done", reason: "stop", usage }] });
+		const system = { role: "system" as const, content: "Base", contextWindowId: "host-only-window", timestamp: 0 };
+		await stream(createModel(baseUrl), normalizeContext({ messages: [system, ...context.messages] }), {
+			apiKey: "test-key",
+		}).result();
+		expect(requests[0].body).toMatchObject({
+			context: { messages: [{ role: "system", content: "Base", timestamp: 0 }, ...context.messages] },
+		});
+		expect(JSON.stringify(requests[0].body)).not.toContain("host-only-window");
+		expect(system.contextWindowId).toBe("host-only-window");
+	});
+
 	it("streams text and tool calls and resolves the terminal message", async () => {
 		const { baseUrl, requests } = await startServer({
 			events: [

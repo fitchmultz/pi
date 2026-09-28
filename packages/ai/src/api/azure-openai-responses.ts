@@ -17,7 +17,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getCurrentTools, getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
@@ -28,7 +28,7 @@ import {
 import {
 	convertResponsesMessages,
 	convertResponsesTools,
-	getNativeToolSearch,
+	getTranscriptNativeToolSearch,
 	processResponsesStream,
 	resolveResponsesTranscript,
 } from "./openai-responses-shared.ts";
@@ -175,10 +175,7 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 			await processResponsesStream(openaiStream, output, stream, model, {
 				diagnostics,
 				grammarToolInputProperties,
-				toolSearchTool: getNativeToolSearch(
-					getCurrentTools(normalizedContext.messages),
-					model.compat?.supportsToolSearch,
-				),
+				toolSearchTool: getTranscriptNativeToolSearch(normalizedContext, model.compat?.supportsToolSearch),
 			});
 
 			if (options?.signal?.aborted) {
@@ -360,7 +357,7 @@ function buildParams(
 		supportsAdditionalTools,
 		supportsToolSearch,
 		toolOptions: {
-			toolSearchTool: getNativeToolSearch(getCurrentTools(context.messages), supportsToolSearch),
+			toolSearchTool: getTranscriptNativeToolSearch(context, supportsToolSearch),
 			supportsStrictMode: model.compat?.supportsStrictMode ?? true,
 			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
 		},
@@ -384,7 +381,7 @@ function buildParams(
 
 	if (transcriptTools.requestTools.length > 0) {
 		params.tools = convertResponsesTools(transcriptTools.requestTools, {
-			toolSearchTool: getNativeToolSearch(getCurrentTools(context.messages), supportsToolSearch),
+			toolSearchTool: getTranscriptNativeToolSearch(context, supportsToolSearch),
 			supportsStrictMode: model.compat?.supportsStrictMode ?? true,
 			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
 		});

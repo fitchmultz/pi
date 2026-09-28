@@ -376,7 +376,14 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 
 			let payload: unknown = {
 				model: model.id,
-				context,
+				context: {
+					...context,
+					messages: context.messages.map((message) => {
+						if (message.role !== "system" || message.contextWindowId === undefined) return message;
+						const { contextWindowId: _contextWindowId, ...wireMessage } = message;
+						return wireMessage;
+					}),
+				},
 				options: {
 					temperature: options?.temperature,
 					maxTokens: options?.maxTokens,

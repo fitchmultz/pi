@@ -202,12 +202,27 @@ export function getNativeToolSearch(tools: readonly Tool[], supported: boolean |
 	return searches.length === 1 ? searches[0] : undefined;
 }
 
+/** The first search declaration group binds the nameless wire identity until the tool baseline is rebuilt. */
+export function getTranscriptNativeToolSearch(
+	context: TranscriptContext,
+	supported: boolean | undefined,
+): Tool | undefined {
+	if (!supported) return undefined;
+	for (const message of context.messages) {
+		if (message.role !== "system" && message.role !== "toolResult") continue;
+		const searches = message.toolsAdded?.filter((tool) => tool.toolSearch) ?? [];
+		if (searches.length > 0) return getNativeToolSearch(searches, true);
+	}
+	return undefined;
+}
+
 /** Tool-search additions can remain in place even when later instruction text must be folded. */
 export function resolveResponsesTranscript(
 	context: TranscriptContext,
 	supportsMidConvoSystemMessages: boolean | undefined,
 	supportsToolSearch: boolean | undefined,
 ): TranscriptContext {
+	if (supportsMidConvoSystemMessages) context = resolveTranscript(context, true, "all");
 	const nonAdditive = hasNonAdditiveToolChanges(context.messages);
 	if (
 		nonAdditive &&

@@ -492,7 +492,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	if (entry.type === "context_window") {
 		const handoff = entry.handoff ? `\n\nHandoff from the previous window:\n${entry.handoff}` : "";
 		return [
-			...(entry.systemMessage ? [entry.systemMessage] : []),
+			...(entry.systemMessage ? [{ ...entry.systemMessage, contextWindowId: entry.id }] : []),
 			createCustomMessage(
 				"context-window",
 				`Context window ${entry.id} starts here. Earlier conversation is not available in this window.${handoff}`,
@@ -504,7 +504,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	}
 	if (entry.type === "compaction") {
 		const summary = createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
-		return entry.systemMessage ? [entry.systemMessage, summary] : [summary];
+		return entry.systemMessage ? [{ ...entry.systemMessage, contextWindowId: entry.id }, summary] : [summary];
 	}
 	return [];
 }

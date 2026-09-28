@@ -42,29 +42,64 @@ const mistralModel = { ...model("mistral-conversations"), compat: { supportsMidC
 const options = { apiKey: "offline-placeholder", maxRetries: 0 };
 
 describe("native provider input admission", () => {
+	it("counts Anthropic inline declarations even when the request has no top-level tools", async () => {
+		const fetch = vi.fn<typeof globalThis.fetch>();
+		const result = await streamAnthropic(
+			{
+				...model("anthropic-messages"),
+				provider: "anthropic",
+				baseUrl: "https://api.anthropic.com",
+				compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true },
+			},
+			normalizeContext({
+				messages: [
+					{ role: "system", content: "Base", timestamp: 0 },
+					{ role: "user", content: "Load tool", timestamp: 1 },
+					{ role: "system", content: "", toolsAdded: [hugeTool], timestamp: 2 },
+				],
+			}),
+			{ ...options, fetch },
+		).result();
+		expect(fetch).not.toHaveBeenCalled();
+		expect(result.errorMessage).toMatch(/Estimated provider input .* exceeds .*context window/);
+	});
+
 	it.each([
 		{
 			name: "Responses",
-			run: (fetch: typeof globalThis.fetch) =>
-				streamResponses(responsesModel, removedToolContext, { ...options, fetch, transport: "sse" }),
+			run: (fetch: typeof globalThis.fetch, supportsMidConvoSystemMessages: boolean) =>
+				streamResponses({ ...responsesModel, compat: { supportsMidConvoSystemMessages } }, removedToolContext, {
+					...options,
+					fetch,
+					transport: "sse",
+				}),
 		},
 		{
 			name: "Completions",
-			run: (fetch: typeof globalThis.fetch) =>
-				streamCompletions(completionsModel, removedToolContext, { ...options, fetch }),
+			run: (fetch: typeof globalThis.fetch, supportsMidConvoSystemMessages: boolean) =>
+				streamCompletions({ ...completionsModel, compat: { supportsMidConvoSystemMessages } }, removedToolContext, {
+					...options,
+					fetch,
+				}),
 		},
 		{
 			name: "Mistral",
-			run: (fetch: typeof globalThis.fetch) =>
-				streamMistral(mistralModel, removedToolContext, { ...options, fetch }),
+			run: (fetch: typeof globalThis.fetch, supportsMidConvoSystemMessages: boolean) =>
+				streamMistral({ ...mistralModel, compat: { supportsMidConvoSystemMessages } }, removedToolContext, {
+					...options,
+					fetch,
+				}),
 		},
-	])("$name admits removed schemas when the native request sends only current tools", async ({ run }) => {
+	])("$name counts retained wire schemas but not schemas discarded by a collapsed request", async ({ run }) => {
 		const bodies: string[] = [];
 		const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
 			bodies.push(String(init?.body));
 			return new Response("", { headers: { "content-type": "text/event-stream" } });
 		});
-		await run(fetch).result();
+		const retained = await run(fetch, true).result();
+		expect(fetch).not.toHaveBeenCalled();
+		expect(retained.errorMessage).toMatch(/Estimated provider input .* exceeds .*context window/);
+		await run(fetch, false).result();
 		expect(fetch).toHaveBeenCalledOnce();
 		expect(bodies[0]).toContain("Keep working instructions");
 		expect(bodies[0]).toContain("Small tool");
@@ -72,7 +107,7 @@ describe("native provider input admission", () => {
 	});
 
 	it.each([false, true])(
-		"Anthropic counts removed deferred declarations only when native tool changes send them (%s)",
+		"Anthropic counts removed declarations whether withdrawal is native or executor-enforced (%s)",
 		async (supportsMidConvoToolChanges) => {
 			const fetch = vi.fn<typeof globalThis.fetch>(
 				async () => new Response("", { headers: { "content-type": "text/event-stream" } }),
@@ -85,12 +120,8 @@ describe("native provider input admission", () => {
 				removedToolContext,
 				{ ...options, fetch },
 			).result();
-			if (supportsMidConvoToolChanges) {
-				expect(fetch).not.toHaveBeenCalled();
-				expect(result.errorMessage).toMatch(/Estimated provider input .* exceeds .*context window/);
-			} else {
-				expect(fetch).toHaveBeenCalledOnce();
-			}
+			expect(fetch).not.toHaveBeenCalled();
+			expect(result.errorMessage).toMatch(/Estimated provider input .* exceeds .*context window/);
 		},
 	);
 

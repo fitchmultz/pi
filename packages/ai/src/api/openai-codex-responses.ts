@@ -35,7 +35,6 @@ import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getSystemMessageText } from "../utils/text.ts";
 import {
-	getCurrentTools,
 	getDeclaredTools,
 	getInitialSystemMessage,
 	normalizeContext,
@@ -63,8 +62,8 @@ import {
 	convertResponsesTools,
 	createResponsesSuccessor,
 	getInitialResponsesEffort,
-	getNativeToolSearch,
 	getResponsesInputToolCallIds,
+	getTranscriptNativeToolSearch,
 	processResponsesStream,
 	resolveResponsesEffort,
 	resolveResponsesTranscript,
@@ -311,10 +310,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 				getDeclaredTools(normalizedContext.messages),
 				model.compat?.supportsOpenAIGrammarTools ?? false,
 			);
-			const toolSearchTool = getNativeToolSearch(
-				getCurrentTools(normalizedContext.messages),
-				model.compat?.supportsToolSearch,
-			);
+			const toolSearchTool = getTranscriptNativeToolSearch(normalizedContext, model.compat?.supportsToolSearch);
 			const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
 			const codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
 			let body = buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties);
@@ -675,7 +671,7 @@ function buildRequestBody(
 	const transcriptTools = resolveTranscriptTools(context.messages, supportsAdditionalTools || supportsToolSearch);
 	const effort = resolveResponsesEffort(model, options?.reasoningEffort);
 	const positional = supportsPositionalResponsesEffort(model);
-	const toolSearchTool = getNativeToolSearch(getCurrentTools(context.messages), supportsToolSearch);
+	const toolSearchTool = getTranscriptNativeToolSearch(context, supportsToolSearch);
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		reasoningEffort: positional ? effort : undefined,
 		includeSystemPrompt: false,

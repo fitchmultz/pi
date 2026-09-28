@@ -50,6 +50,99 @@ function response(content: AssistantMessage["content"]) {
 	return stream;
 }
 
+describe.each(["sequential", "parallel"] as const)("%s tool revocation", (toolExecution) => {
+	it.each(["schema", "executor", "both"] as const)(
+		"rejects in-place %s mutation during preparation",
+		async (mutation) => {
+			let executions = 0;
+			const tool: AgentTool = {
+				name: "mutable",
+				label: "Mutable",
+				description: "Original",
+				parameters: Type.Object({}),
+				async execute() {
+					executions++;
+					return { content: [], details: {} };
+				},
+			};
+			let requests = 0;
+			const agent = new Agent({
+				initialState: { model, tools: [tool] },
+				toolExecution,
+				beforeToolCall: async () => {
+					if (mutation !== "executor") {
+						Object.assign(tool.parameters, {
+							properties: { requiredValue: { type: "string" } },
+							required: ["requiredValue"],
+						});
+					}
+					if (mutation !== "schema")
+						tool.execute = async () => {
+							executions++;
+							return { content: [], details: {} };
+						};
+					return undefined;
+				},
+				streamFn: () =>
+					response(
+						requests++ === 0 ? [{ type: "toolCall", id: "mutable-call", name: tool.name, arguments: {} }] : [],
+					),
+			});
+			await agent.prompt("Use the tool");
+			expect(executions).toBe(0);
+			expect(agent.state.messages.find((message) => message.role === "toolResult")).toMatchObject({
+				isError: true,
+				content: [{ type: "text", text: expect.stringContaining("changed before execution") }],
+			});
+		},
+	);
+
+	it.each(["generation", "beforeToolCall", "prepared-event"] as const)(
+		"rejects a formerly advertised tool revoked during %s",
+		async (boundary) => {
+			let executions = 0;
+			const tool: AgentTool = {
+				name: "revoked",
+				label: "Revoked",
+				description: "Initially permitted",
+				parameters: Type.Object({}),
+				async execute() {
+					executions++;
+					return { content: [], details: {} };
+				},
+			};
+			let requests = 0;
+			const agent = new Agent({
+				initialState: { model, tools: [tool] },
+				toolExecution,
+				beforeToolCall: async () => {
+					if (boundary === "beforeToolCall") agent.state.tools = [];
+					return undefined;
+				},
+				streamFn: (_model, context) => {
+					if (requests++ > 0) {
+						expect(getCurrentTools(context.messages)).toEqual([]);
+						return response([]);
+					}
+					expect(getCurrentTools(context.messages).map((tool) => tool.name)).toEqual(["revoked"]);
+					if (boundary === "generation") agent.state.tools = [];
+					return response([{ type: "toolCall", id: "revoked-call", name: tool.name, arguments: {} }]);
+				},
+			});
+			agent.subscribe((event) => {
+				if (boundary === "prepared-event" && event.type === "tool_execution_prepared") agent.state.tools = [];
+			});
+			await agent.prompt("Use the tool");
+			expect(executions).toBe(0);
+			expect(agent.state.messages.find((message) => message.role === "toolResult")).toMatchObject({
+				toolCallId: "revoked-call",
+				isError: true,
+				content: [{ type: "text", text: expect.stringMatching(/not found|no longer available/) }],
+			});
+		},
+	);
+});
+
 for (const kind of [undefined, "toolSearch"] as const) {
 	it(`continues from ${kind ?? "ordinary"} discovery with only core-resolved declarations`, async () => {
 		let called = 0;

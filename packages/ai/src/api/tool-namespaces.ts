@@ -13,7 +13,7 @@ import type {
 } from "../types.ts";
 import { shortHash } from "../utils/hash.ts";
 import { toolKey, toToolReference } from "../utils/tool-identity.ts";
-import { normalizeContext } from "../utils/transcript.ts";
+import { normalizeContext, resolveTranscript } from "../utils/transcript.ts";
 import { lazyStream } from "./lazy.ts";
 
 // Models, provider factories, and direct adapters can wrap the same request.
@@ -32,11 +32,15 @@ export function withToolNamespaces(
 	if (namespaceMapping in context) return run(context, (control) => control);
 	const native = ["openai-responses", "openai-codex-responses", "azure-openai-responses"].includes(model.api);
 	const compat = native ? (model.compat as OpenAIResponsesCompat | undefined) : undefined;
+	// Retained declarations must be selected before deriving aliases from later tool loads.
+	const declarationContext = compat?.supportsMidConvoSystemMessages
+		? resolveTranscript(context, true, "all")
+		: context;
 	const references: ToolReference[] = [];
 	const loadedBare = new Set<string>();
 	const declaredNamespaces = new Set<string>();
 	let hasSearchState = false;
-	for (const [index, message] of context.messages.entries()) {
+	for (const [index, message] of declarationContext.messages.entries()) {
 		const declarations = message.role === "system" || message.role === "toolResult" ? (message.toolsAdded ?? []) : [];
 		references.push(...declarations);
 		for (const tool of declarations) {

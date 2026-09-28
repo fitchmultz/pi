@@ -5,6 +5,7 @@
 
 import {
 	type AssistantMessage,
+	declarationsEqual,
 	EventStream,
 	findTool,
 	getCurrentTools,
@@ -16,6 +17,7 @@ import {
 	type Tool,
 	type ToolResultMessage,
 	type ToolStateChanges,
+	toolId,
 	toolKey,
 	toToolDeclaration,
 	type UserMessage,
@@ -1092,7 +1094,14 @@ async function executeToolCallsSequential(
 				isError: preparation.isError,
 			};
 		} else {
-			const executed = await executePreparedToolCall(preparation, assistantMessage, signal, emit);
+			const executed = await executePreparedToolCall(
+				preparation,
+				assistantMessage,
+				currentContext,
+				config,
+				signal,
+				emit,
+			);
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -1181,7 +1190,14 @@ async function executeToolCallsParallel(
 				await emitToolExecutionEnd(finalized, emitCompletedEvent);
 				return finalized;
 			}
-			const executed = await executePreparedToolCall(preparation, assistantMessage, signal, emit);
+			const executed = await executePreparedToolCall(
+				preparation,
+				assistantMessage,
+				currentContext,
+				config,
+				signal,
+				emit,
+			);
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -1290,8 +1306,8 @@ async function prepareToolCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
-	const tool = findTool(currentContext.tools ?? [], toolCall);
-	if (!tool || (toolCall.kind === "toolSearch" && !tool.toolSearch)) {
+	const available = findTool(config.getTools?.() ?? currentContext.tools ?? [], toolCall);
+	if (!available || (toolCall.kind === "toolSearch" && !available.toolSearch)) {
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(
@@ -1302,6 +1318,8 @@ async function prepareToolCall(
 	}
 
 	try {
+		// Hooks may mutate the live object in place: snapshot functions and clone the schema.
+		const tool = { ...available, ...toToolDeclaration(available) };
 		if (toolCall.executionStarted) {
 			if (!tool.resume)
 				return { kind: "immediate", result: createErrorToolResult(UNKNOWN_TOOL_OUTCOME), isError: true };
@@ -1388,6 +1406,8 @@ function createToolCallCheckpoint(message: AssistantMessage, toolCall: AgentTool
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	assistantMessage: AssistantMessage,
+	currentContext: AgentContext,
+	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallOutcome> {
@@ -1417,6 +1437,20 @@ async function executePreparedToolCall(
 	let acceptingUpdates = true;
 
 	try {
+		// Preparation hooks, queued siblings, and checkpoint sinks can revoke or replace
+		// a tool. Recheck after those awaits, immediately before invoking its executor.
+		const live = findTool(config.getTools?.() ?? currentContext.tools ?? [], prepared.toolCall);
+		if (
+			!live ||
+			live.execute !== prepared.tool.execute ||
+			live.resume !== prepared.tool.resume ||
+			live.prepareArguments !== prepared.tool.prepareArguments ||
+			!declarationsEqual(live, prepared.tool)
+		) {
+			throw new Error(
+				`Tool ${toolId(prepared.toolCall)} is no longer available or changed before execution. Re-issue the call if it is still permitted.`,
+			);
+		}
 		const execute = resume ? prepared.tool.resume : prepared.tool.execute;
 		const result = await execute?.(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
 			if (!acceptingUpdates) return;

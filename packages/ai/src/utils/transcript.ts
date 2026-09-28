@@ -10,7 +10,7 @@ import type {
 	TranscriptContext,
 } from "../types.ts";
 import { contentText, getSystemMessageText } from "./text.ts";
-import { toolKey } from "./tool-identity.ts";
+import { toolId, toolKey } from "./tool-identity.ts";
 
 export type { TranscriptContext } from "../types.ts";
 
@@ -199,11 +199,120 @@ export function collapseSystemMessages(context: TranscriptContext): TranscriptCo
 export function resolveTranscript(
 	context: TranscriptContext,
 	supportsMidConvoSystemMessages: boolean | undefined,
+	retainTools?: "all" | "descriptions",
 ): TranscriptContext {
 	const lateReplacement = context.messages.some(
 		(message, index) => index > 0 && isSystemMessage(message) && message.replace === true,
 	);
-	return supportsMidConvoSystemMessages && !lateReplacement ? context : collapseSystemMessages(context);
+	if (!supportsMidConvoSystemMessages || lateReplacement) return collapseSystemMessages(context);
+	return retainTools ? retainToolDeclarations(context, retainTools === "all") : context;
+}
+
+/**
+ * Keep wire declarations stable when the executor owns availability. Instruction-capable
+ * transports can announce removals and description updates in place; contract changes
+ * still rebuild. This projection never changes the host's active tools or saved transcript.
+ */
+function retainToolDeclarations(context: TranscriptContext, retainRemovals: boolean): TranscriptContext {
+	const declared = new Map<string, Tool>();
+	let lastSchemaChange = -1;
+	for (const [index, message] of context.messages.entries()) {
+		if (!isToolStateMessage(message)) continue;
+		for (const tool of message.toolsAdded ?? []) {
+			const previous = declared.get(toolKey(tool));
+			if (previous && !declarationsEqual({ ...previous, description: tool.description }, tool))
+				lastSchemaChange = index;
+			declared.set(toolKey(tool), tool);
+		}
+	}
+	if (lastSchemaChange >= 0) {
+		// A real contract change establishes a new wire baseline once. Later removals
+		// and additions must not keep rebuilding just because that old change exists.
+		const history = context.messages.slice(0, lastSchemaChange + 1);
+		const searchCalls = new Set(
+			history.flatMap((message) =>
+				message.role === "assistant"
+					? message.content.flatMap((block) =>
+							block.type === "toolCall" && block.kind === "toolSearch" ? [block.id] : [],
+						)
+					: [],
+			),
+		);
+		const prefix = withoutToolSearchState(history).map((message) =>
+			message.role === "system" ? { ...message, toolsAdded: undefined, toolsRemoved: undefined } : message,
+		);
+		const initial = getInitialSystemMessage(prefix);
+		const head: SystemMessage = {
+			...(initial ?? { role: "system", content: "", timestamp: 0 }),
+			toolsAdded: getCurrentTools(history),
+		};
+		context = normalizeContext({
+			messages: [
+				head,
+				...prefix.slice(initial ? 1 : 0),
+				...context.messages
+					.slice(lastSchemaChange + 1)
+					.map((message) =>
+						message.role === "toolResult" && searchCalls.has(message.toolCallId)
+							? { ...message, toolCallKind: undefined }
+							: message,
+					),
+			],
+		});
+	}
+	declared.clear();
+	const descriptions = new Map<string, string>();
+	const active = new Set<string>();
+	const messages = context.messages.flatMap((message): Message[] => {
+		if (!isToolStateMessage(message)) return [message];
+		const notices: string[] = [];
+		const additions = new Set((message.toolsAdded ?? []).map(toolKey));
+		const toolsRemoved =
+			message.role === "system"
+				? message.toolsRemoved?.filter((tool) => {
+						const key = toolKey(tool);
+						if (additions.has(key)) return false;
+						active.delete(key);
+						if (!retainRemovals) return true;
+						notices.push(
+							`Tool ${toolId(tool)} is no longer available. Do not call it; the executor will reject calls to it.`,
+						);
+						return false;
+					})
+				: undefined;
+		const toolsAdded = message.toolsAdded?.flatMap((tool): Tool[] => {
+			const key = toolKey(tool);
+			const previous = declared.get(key);
+			const wasActive = active.has(key);
+			const previousDescription = descriptions.get(key);
+			descriptions.set(key, tool.description);
+			active.add(key);
+			if (!previous) {
+				declared.set(key, tool);
+				return [tool];
+			}
+			if (previousDescription !== tool.description)
+				notices.push(`Updated description for tool ${toolId(tool)}:\n${tool.description}`);
+			if (!wasActive && retainRemovals) notices.push(`Tool ${toolId(tool)} is available again.`);
+			return message.role === "toolResult" || (!retainRemovals && !wasActive) ? [previous] : [];
+		});
+		if (message.role === "system")
+			return [
+				{
+					...message,
+					content: [contentText(message.content), ...notices].filter(Boolean).join("\n\n"),
+					toolsAdded,
+					toolsRemoved,
+				},
+			];
+		return [
+			{ ...message, toolsAdded },
+			...(notices.length
+				? [{ role: "system" as const, content: notices.join("\n\n"), timestamp: message.timestamp }]
+				: []),
+		];
+	});
+	return { messages } as TranscriptContext;
 }
 
 /** Strip executable and display-only fields from a tool before transcript comparison or persistence. */
@@ -258,12 +367,14 @@ export function getToolStateChanges(previous: readonly Tool[], current: readonly
 	};
 }
 
-/** Every definition referenced by transcript tool state, in first-declaration order. */
-export function getDeclaredTools(messages: TranscriptMessages): Tool[] {
+/** Definitions in first-declaration order; inline transports retain the original version at the top level. */
+export function getDeclaredTools(messages: TranscriptMessages, version: "first" | "latest" = "latest"): Tool[] {
 	const definitions = new Map<string, Tool>();
 	for (const message of messages) {
 		if (!isToolStateMessage(message)) continue;
-		for (const tool of message.toolsAdded ?? []) definitions.set(toolKey(tool), tool);
+		for (const tool of message.toolsAdded ?? []) {
+			if (version === "latest" || !definitions.has(toolKey(tool))) definitions.set(toolKey(tool), tool);
+		}
 	}
 	return [...definitions.values()];
 }
