@@ -56,6 +56,9 @@ export type ResponsesDiagnostics = {
 		closeCode?: number;
 		closeWasClean?: boolean;
 		closeMs?: number;
+		closeReason?: string;
+		closeInitiator?: "local" | "remote" | "unknown";
+		sinceParentTerminalMs?: number;
 		localTimeout?: "websocket_connect" | "websocket_idle" | "sse_headers" | "sdk_request";
 		localTimeoutMs?: number;
 	};

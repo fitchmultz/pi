@@ -13,6 +13,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types.ts";
+import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { convertResponsesToolSearchOutput, convertToolResultOutput } from "./openai-responses-shared.ts";
 
@@ -37,6 +38,7 @@ export function createResponsesControl(
 	const results = new Map<string, ToolResultMessage>();
 	const continuations = new Set<string>();
 	const deliveredToolCallIds = new Set<string>();
+	const receivedTerminals = new Set<string>();
 	let activeResponseId: string | undefined;
 	let lastResponseId: string | undefined;
 	let terminal = false;
@@ -46,7 +48,12 @@ export function createResponsesControl(
 	let retired = false;
 	let modelContent: ((result: ToolResultMessage) => ToolResultMessage["content"] | undefined) | undefined;
 
-	const update = (submission: Submission, status: SteeringStatus, errorMessage?: string): void => {
+	const update = (
+		submission: Submission,
+		status: SteeringStatus,
+		errorMessage?: string,
+		diagnostic?: AssistantMessageDiagnostic,
+	): void => {
 		submission.status = status;
 		emit({
 			type: "steering",
@@ -55,6 +62,7 @@ export function createResponsesControl(
 			steeringId: submission.id,
 			responseId: submission.parentId,
 			...(errorMessage ? { errorMessage } : {}),
+			...(diagnostic ? { diagnostic } : {}),
 		});
 	};
 	const continueWithResults = (): void => {
@@ -122,7 +130,13 @@ export function createResponsesControl(
 			);
 		},
 		steer(message) {
-			if (!activeResponseId || closed || model.compat?.supportsSteering !== true) return false;
+			if (
+				!activeResponseId ||
+				receivedTerminals.has(activeResponseId) ||
+				closed ||
+				model.compat?.supportsSteering !== true
+			)
+				return false;
 			const submission: Submission = {
 				message,
 				input: structuredClone(message),
@@ -184,6 +198,15 @@ export function createResponsesControl(
 		},
 		get finished(): boolean {
 			return terminal && !this.waiting;
+		},
+		get reusable(): boolean {
+			return (
+				this.finished && !retired && submissions.every(({ status }) => status === "applied" || status === "failed")
+			);
+		},
+		/** Stop admitting input on receipt, even while earlier output is being consumed. */
+		observeTerminal(responseId: string): void {
+			receivedTerminals.add(responseId);
 		},
 		handle(event: ResponsesServerEvent): (UserMessage | ToolResultMessage)[] | undefined {
 			if (event.type === "response.created") {
@@ -247,11 +270,19 @@ export function createResponsesControl(
 					successorExpected = false;
 			}
 		},
-		close(): void {
+		close(diagnostic?: AssistantMessageDiagnostic): void {
 			closed = true;
 			for (const submission of submissions) {
 				if (submission.status === "queued" || submission.status === "accepted" || submission.status === "pending")
-					update(submission, "unknown", "Connection ended before steering application was observed");
+					update(
+						submission,
+						"unknown",
+						"Connection ended before steering application was observed",
+						diagnostic && {
+							...diagnostic,
+							details: { ...diagnostic.details, pendingSteerStatus: submission.status },
+						},
+					);
 			}
 		},
 	};

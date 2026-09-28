@@ -150,7 +150,10 @@ describe("cache warming", () => {
 		const signal = new AbortController().signal;
 		const transformHeaders = async () => ({});
 
-		warmer.start(request(adaptiveModel, { reasoning: "high", signal, sessionId: "s", transformHeaders }), current);
+		warmer.start(
+			request(adaptiveModel, { reasoning: "high", signal, sessionId: "s", transformHeaders, turnScope: {} }),
+			current,
+		);
 		await vi.advanceTimersByTimeAsync(270_000);
 
 		expect(calls[0]).toMatchObject({
@@ -158,6 +161,7 @@ describe("cache warming", () => {
 			options: { reasoning: "high", sessionId: "s", transformHeaders, maxTokens: 1, maxRetries: 0 },
 		});
 		expect(calls[0].options?.signal).not.toBe(signal);
+		expect(calls[0].options?.turnScope).toBeUndefined();
 		expect(events[0]).toMatchObject({
 			type: "cache_warming_decision",
 			continuationProbability: 1,
