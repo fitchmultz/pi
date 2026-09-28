@@ -40,6 +40,7 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
+import { toolKey } from "../utils/tool-identity.ts";
 import {
 	collapseSystemMessages,
 	declarationsEqual,
@@ -1640,12 +1641,22 @@ function countUnionParameters(schema: unknown): number {
  */
 function selectStrictTools(tools: readonly Tool[], supportsStrictTools: boolean): Set<Tool> {
 	const selected = new Set<Tool>();
+	const declared = new Map<string, Tool>();
+	let count = 0;
 	let unions = 0;
 	for (const tool of tools) {
-		if (selected.has(tool) || resolveJsonSchemaStrictSampling(tool, supportsStrictTools) !== true) continue;
+		const previous = declared.get(toolKey(tool));
+		// An identical re-declaration reaches the wire at most once, so it shares the first decision.
+		if (previous && declarationsEqual(previous, tool)) {
+			if (selected.has(previous)) selected.add(tool);
+			continue;
+		}
+		declared.set(toolKey(tool), tool);
+		if (resolveJsonSchemaStrictSampling(tool, supportsStrictTools) !== true) continue;
 		const cost = countUnionParameters(getJsonSchemaToolParameters(tool, true));
-		if (selected.size < MAX_STRICT_TOOLS && unions + cost <= MAX_STRICT_UNION_PARAMETERS) {
+		if (count < MAX_STRICT_TOOLS && unions + cost <= MAX_STRICT_UNION_PARAMETERS) {
 			selected.add(tool);
+			count++;
 			unions += cost;
 		} else if (
 			tool.constrainedSampling &&
