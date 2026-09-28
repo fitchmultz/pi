@@ -6,6 +6,7 @@ import {
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { SessionManager } from "../../../src/core/session-manager.ts";
 import type { ExtensionFactory } from "../../../src/index.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -176,7 +177,7 @@ describe("context_with_system handlers", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
-	it("runs after context handlers on the restored transcript and sends its output verbatim", async () => {
+	it("runs after context handlers and preserves the native checkpoint tools", async () => {
 		const seen: AgentMessage[][] = [];
 		const harness = await createHarness({
 			extensionFactories: [
@@ -210,11 +211,17 @@ describe("context_with_system handlers", () => {
 		expect(input?.[0]?.role).toBe("system");
 		expect(input?.[1]?.role).toBe("compactionSummary");
 		expect(harness.session.getActiveToolNames()).toContain("bash");
-		expect(toolNames(getRequest())).toEqual(harness.session.getActiveToolNames().filter((name) => name !== "bash"));
+		expect(toolNames(getRequest())).toEqual(harness.session.getActiveToolNames());
 	});
 
-	it("reports a handler that drops the leading system message but honors its output", async () => {
+	it.each([false, true])("reports a dropped head and restores only opted-in windows (legacy=%s)", async (legacy) => {
+		const sessionManager = SessionManager.inMemory();
+		if (legacy) {
+			sessionManager.appendMessage({ role: "system", content: "", sections: { preamble: "OLD" }, timestamp: 1 });
+			sessionManager.appendMessage(fauxAssistantMessage("bound legacy response"));
+		}
 		const harness = await createHarness({
+			sessionManager,
 			extensionFactories: [
 				(pi) => {
 					pi.on("context_with_system", async (event) => ({
@@ -224,6 +231,7 @@ describe("context_with_system handlers", () => {
 			],
 		});
 		harnesses.push(harness);
+		harness.session.refreshContext();
 		const errors: string[] = [];
 		harness.session.extensionRunner.onError((error) => {
 			errors.push(`${error.event}: ${error.error}`);
@@ -232,9 +240,15 @@ describe("context_with_system handlers", () => {
 
 		await harness.session.prompt("hello");
 
-		expect(getRequest().messages.map((message) => message.role)).toEqual(["user"]);
+		expect(getRequest().messages.map((message) => message.role)).toEqual(
+			legacy ? ["assistant", "user"] : ["system", "user"],
+		);
 		expect(errors).toEqual([
-			expect.stringMatching(/^context_with_system: Handler removed the leading system message/),
+			expect.stringMatching(
+				legacy
+					? /^context_with_system: Handler removed the leading system message/
+					: /^context_with_system: Restored the native initial declaration/,
+			),
 		]);
 	});
 });

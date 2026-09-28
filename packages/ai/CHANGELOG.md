@@ -5,6 +5,7 @@
 ### Added
 
 - Added an optional `modelContent` callback to `ResponseControl.submitToolResults()` that replaces a result's content in the sent continuation frame while `continuationInput` keeps the saved result.
+- Added `SystemMessage.nativeHead`, a host-owned marker that identifies the initial system/tool declaration regardless of its position; it is never sent to providers.
 
 ## [0.87.1] - 2026-09-22
 

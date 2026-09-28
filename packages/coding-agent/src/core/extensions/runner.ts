@@ -2,6 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
@@ -1419,7 +1420,7 @@ export class ExtensionRunner {
 	/**
 	 * Run the request-time transforms in two phases. `context` handlers see the conversation
 	 * only and Pi restores the prompt and tool state after each; `context_with_system`
-	 * handlers then see the full transcript and their output is used as returned.
+	 * handlers then see the full transcript. New-session native heads retain their position and tools.
 	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
 		const ctx = this.createContext();
@@ -1454,6 +1455,13 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "context_with_system")) {
 			for (const handler of handlers) {
+				const head = currentMessages[0];
+				const nativeHead = head?.role === "system" && head.nativeHead ? structuredClone(head) : undefined;
+				const otherSystemMessages = nativeHead
+					? currentMessages
+							.slice(1)
+							.filter((message) => message.role === "system" && message.timestamp === nativeHead.timestamp)
+					: [];
 				try {
 					const hadLeadingSystemMessage = currentMessages[0]?.role === "system";
 					const event: ContextWithSystemEvent = { type: "context_with_system", messages: currentMessages };
@@ -1461,7 +1469,7 @@ export class ExtensionRunner {
 					currentMessages = handlerResult?.messages ?? currentMessages;
 					// Providers read the prompt and initial tools from the leading system message.
 					// Losing it is never intended; report it but honor the handler's output.
-					if (hadLeadingSystemMessage && currentMessages[0]?.role !== "system") {
+					if (!nativeHead && hadLeadingSystemMessage && currentMessages[0]?.role !== "system") {
 						this.emitError({
 							extensionPath: ext.path,
 							event: "context_with_system",
@@ -1477,6 +1485,43 @@ export class ExtensionRunner {
 						error: message,
 						stack,
 					});
+				} finally {
+					if (nativeHead) {
+						let index = currentMessages.findIndex(
+							(message) => message === head || (message.role === "system" && message.nativeHead),
+						);
+						// Reconstructed heads can omit the marker. Match their retained timestamp,
+						// excluding existing policy messages that happen to share that timestamp.
+						if (index < 0)
+							index = currentMessages.findIndex(
+								(message) =>
+									message.role === "system" &&
+									message.timestamp === nativeHead.timestamp &&
+									!otherSystemMessages.some((other) => other === message || isDeepStrictEqual(other, message)),
+							);
+						const edited = currentMessages[index];
+						const restored = nativeHead;
+						if (edited?.role === "system") {
+							restored.content = edited.content;
+							if (edited.sections === undefined) delete restored.sections;
+							else restored.sections = edited.sections;
+						}
+						const remaining = currentMessages.filter(
+							(message, position) => position !== index && !(message.role === "system" && message.nativeHead),
+						);
+						if (
+							index !== 0 ||
+							!isDeepStrictEqual(edited, restored) ||
+							remaining.length !== currentMessages.length - 1
+						) {
+							this.emitError({
+								extensionPath: ext.path,
+								event: "context_with_system",
+								error: "Restored the native initial declaration at index 0. Keep its nativeHead marker and initial tools; append policy and tool changes after it.",
+							});
+						}
+						currentMessages = [restored, ...remaining];
+					}
 				}
 			}
 		}

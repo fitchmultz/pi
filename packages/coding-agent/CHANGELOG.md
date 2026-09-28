@@ -11,11 +11,13 @@
 ### Changed
 
 - Changed the default Fireworks model to Kimi K3; Fireworks retired Kimi K2.6 from its catalog.
+- Changed `context_with_system` handling for new context windows: Pi restores its marked native system/tool declaration at index 0 with its initial tools after each handler and reports a warning when a handler removes, displaces, or reconstructs it; handlers may still edit its content and sections. See [Extensions](docs/extensions.md).
 
 ### Fixed
 
 - Fixed context usage and automatic rollover losing measured reasoning tokens when request transforms add messages or append content blocks.
 - Fixed empty runtime API keys falling back to stored credentials; they are now rejected before changing the active override.
+- Fixed startup extension messages (such as Ponytail's mode receipt) displacing the native system/tool declaration, which disabled deferred tool additions: on Anthropic, lazily activated tools such as `intercom` rewrote the top-level tool list, reset the prompt cache and dropped earlier thinking; on OpenAI Codex, instructions and tools moved into input. Existing sessions adopt the fix at their next context window or compaction.
 
 ## [0.87.1] - 2026-09-22
 
