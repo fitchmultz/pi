@@ -11,6 +11,7 @@
 ### Changed
 
 - Changed the default Fireworks model to Kimi K3; Fireworks retired Kimi K2.6 from its catalog.
+- Changed cache miss notices and `/session` to list the changes observed between requests (model, service tier, tool definitions, instructions, older async results admitted, new connection, full resend, idle gap) plus provider-supplied reasons, and to report an actual drop in cached reads separately from tokens not read from cache. Dollar amounts are labeled estimates. See [settings](docs/settings.md).
 
 ### Fixed
 

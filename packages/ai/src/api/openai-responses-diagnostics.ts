@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "../types.ts";
+import type { AssistantMessage, JsonValue } from "../types.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import type { WebSocketSocketDiagnostics } from "../utils/websocket-diagnostics.ts";
 
@@ -10,6 +10,7 @@ export type ResponsesDiagnostics = {
 		transport?: "websocket" | "sse";
 		requestedServiceTier: ReturnType<typeof diagnosticServiceTier>;
 		returnedServiceTier: ReturnType<typeof diagnosticServiceTier>;
+		prompt_cache_diagnostics?: JsonValue;
 		prepareMs?: number;
 		onPayloadMs?: number;
 		requestReadyMs?: number;
@@ -205,8 +206,22 @@ export function recordResponsesEvent(
 		event.type === "response.failed"
 	) {
 		details.terminalEventMs = elapsed;
-		const response = event.response as { service_tier?: unknown } | undefined;
+		const response = event.response as
+			| {
+					service_tier?: unknown;
+					prompt_cache_diagnostics?: JsonValue;
+					usage?: {
+						prompt_cache_diagnostics?: JsonValue;
+						input_tokens_details?: { prompt_cache_diagnostics?: JsonValue };
+					};
+			  }
+			| undefined;
 		details.returnedServiceTier = diagnosticServiceTier(response?.service_tier);
+		const cacheDiagnostics =
+			response?.prompt_cache_diagnostics ??
+			response?.usage?.prompt_cache_diagnostics ??
+			response?.usage?.input_tokens_details?.prompt_cache_diagnostics;
+		if (cacheDiagnostics !== undefined) details.prompt_cache_diagnostics = cacheDiagnostics;
 	}
 }
 

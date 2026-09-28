@@ -37,6 +37,23 @@ function request(provider: (typeof providers)[number], options: StreamOptions & 
 afterEach(() => vi.restoreAllMocks());
 
 describe("Responses request diagnostics", () => {
+	it.each(providers)("retains provider-supplied cache reasons for %s", async (provider) => {
+		const cacheDiagnostics = { type: "cache_miss", reason: "input_changed" };
+		const result = await request(provider, {
+			apiKey,
+			transport: "sse",
+			fetch: async () =>
+				new Response(
+					`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", prompt_cache_diagnostics: cacheDiagnostics } })}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(
+			result.diagnostics?.find((entry) => entry.type === "provider_request")?.details?.prompt_cache_diagnostics,
+		).toEqual(cacheDiagnostics);
+	});
+
 	it.each(["openai", "openai-codex"] as const)("measures in-place payload hook changes for %s", async (provider) => {
 		const result = await request(provider, {
 			apiKey,

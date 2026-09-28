@@ -76,13 +76,7 @@ import {
 	SessionReplacementPersistenceError,
 } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
-import {
-	CACHE_TTL_MS,
-	type CacheMiss,
-	collectCacheMisses,
-	computeCacheWaste,
-	detectCacheMiss,
-} from "../../core/cache-stats.ts";
+import { type CacheMiss, collectCacheMisses, computeCacheWaste, detectCacheMiss } from "../../core/cache-stats.ts";
 import { formatCacheWarmingStatus, formatCacheWarmingUsage } from "../../core/cache-warmer.ts";
 import { CheckpointActivity, type SessionCheckpoint, type ShutdownCheckpoint } from "../../core/checkpoint.ts";
 import { findExtensionStackMatches, recordCrash, takeUnnotifiedCrash } from "../../core/crash-log.ts";
@@ -3867,7 +3861,7 @@ export class InteractiveMode {
 						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
 						this.maybeShowThinkingDropNotice(this.streamingMessage);
-						this.maybeShowCacheMissNotice(this.streamingMessage);
+						this.maybeShowCacheMissNotice(this.streamingMessage, event.consumedToolResultIds);
 					}
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
@@ -4505,29 +4499,27 @@ export class InteractiveMode {
 
 	/**
 	 * Show a transcript notice when a completed assistant message paid for a
-	 * significant cache miss. Only states observable facts: the miss itself,
-	 * a model switch, or an idle gap past the cache TTL.
+	 * significant cache miss. Observations are not assertions about its cause.
 	 */
-	private maybeShowCacheMissNotice(message: AssistantMessage): void {
+	private maybeShowCacheMissNotice(message: AssistantMessage, consumedToolResultIds?: string[]): void {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
 
 		// Entries don't contain `message` yet: message_end fires before persistence.
-		const miss = detectCacheMiss(this.sessionManager.getEntries(), message, this.session.modelRuntime);
+		const miss = detectCacheMiss(this.sessionManager, message, this.session.modelRuntime, consumedToolResultIds);
 		if (miss) this.addCacheMissNotice(miss);
 	}
 
 	private addCacheMissNotice(miss: CacheMiss): void {
 		if (miss.missedTokens < 20_000 && miss.missedCost < 0.1) return;
 
-		const cost = miss.missedCost >= 0.01 ? ` (~$${miss.missedCost.toFixed(2)})` : "";
-		const reBilled = `${formatTokens(miss.missedTokens)} tokens re-billed${cost}`;
-		let label = "Cache miss";
-		if (miss.modelChanged) {
-			label = "Cache miss after model switch";
-		} else if (miss.idleMs >= CACHE_TTL_MS) {
-			label = `Cache miss after ${Math.round(miss.idleMs / 60_000)}m idle`;
-		}
-		const text = theme.fg("warning", `${label}: ${reBilled}`);
+		const cost = miss.missedCost >= 0.01 ? ` (estimated extra $${miss.missedCost.toFixed(2)})` : "";
+		const decline =
+			miss.cacheReadDecline > 0 ? `; cached reads fell by ${formatTokens(miss.cacheReadDecline)} tokens` : "";
+		const provider = miss.providerReasons.length ? `; provider: ${miss.providerReasons.join(", ")}` : "";
+		const text = theme.fg(
+			"warning",
+			`Cache miss: ${formatTokens(miss.missedTokens)} tokens not read from cache${cost}${decline}. Observed: ${miss.observedChanges.join(", ")}${provider}`,
+		);
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addActivity(new Text(text, 1, 0));
 	}
@@ -7114,11 +7106,15 @@ export class InteractiveMode {
 			}
 			if (cacheWaste.missedTokens > 0) {
 				const missLabel = cacheWaste.missCount === 1 ? "1 miss" : `${cacheWaste.missCount} misses`;
-				const detail = `${cacheWaste.missedTokens.toLocaleString()} tokens, ${missLabel}`;
+				const detail = `${cacheWaste.missedTokens.toLocaleString()} tokens not read from cache, ${missLabel}`;
 				info +=
 					cacheWaste.missedCost >= 0.0001
-						? `\n${theme.fg("dim", "Cache Re-billed:")} $${cacheWaste.missedCost.toFixed(3)} ${theme.fg("dim", `(${detail})`)}`
-						: `\n${theme.fg("dim", "Cache Re-billed:")} ${detail}`;
+						? `\n${theme.fg("dim", "Cache misses:")} estimated extra $${cacheWaste.missedCost.toFixed(3)} ${theme.fg("dim", `(${detail})`)}`
+						: `\n${theme.fg("dim", "Cache misses:")} ${detail}`;
+				info += `\n${theme.fg("dim", "Observed (counts may overlap):")} ${[...cacheWaste.observedChanges].map(([label, count]) => `${label} (${count})`).join(", ")}`;
+				if (cacheWaste.providerReasons.size) {
+					info += `\n${theme.fg("dim", "Provider:")} ${[...cacheWaste.providerReasons].map(([reason, count]) => `${reason} (${count})`).join(", ")}`;
+				}
 			}
 		}
 

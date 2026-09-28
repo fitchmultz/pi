@@ -1,12 +1,21 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import type { AssistantMessage, JsonObject } from "@earendil-works/pi-ai";
+import { describe, expect, it, vi } from "vitest";
 import {
 	collectCacheMisses,
 	computeCacheWaste,
-	detectCacheMiss,
+	detectCacheMiss as detectLiveCacheMiss,
 	type ModelPriceSource,
 } from "../src/core/cache-stats.ts";
-import type { SessionEntry } from "../src/core/session-manager.ts";
+import { type SessionEntry, SessionManager, type SessionMessageEntry } from "../src/core/session-manager.ts";
+
+function detectCacheMiss(
+	entries: SessionEntry[],
+	message: AssistantMessage,
+	prices: ModelPriceSource,
+	consumed?: string[],
+) {
+	return detectLiveCacheMiss(SessionManager.inMemory(undefined, undefined, entries), message, prices, consumed);
+}
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 
@@ -42,8 +51,8 @@ function assistant(options: {
 	} as AssistantMessage;
 }
 
-function entry(message: AssistantMessage): SessionEntry {
-	return { type: "message", id: "x", parentId: null, timestamp: "", message } as SessionEntry;
+function entry(message: AssistantMessage): SessionMessageEntry {
+	return { type: "message", id: "x", parentId: null, timestamp: "", message };
 }
 
 function usageEntry(kind: string, timestamp: number): SessionEntry {
@@ -180,5 +189,313 @@ describe("detectCacheMiss", () => {
 
 	it("returns undefined for the first turn of a session", () => {
 		expect(detectCacheMiss([], turn1, models)).toBeUndefined();
+	});
+});
+
+function withDiagnostics(message: AssistantMessage, details: JsonObject): AssistantMessage {
+	return { ...message, diagnostics: [{ type: "provider_request", timestamp: message.timestamp, details }] };
+}
+
+const fullMiss = assistant({ input: 110_000, timestamp: 120_000 });
+
+describe("incremental live cache comparisons", () => {
+	it("reads only appended entries after initial hydration and matches replay", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage(turn2);
+		const reads = vi.spyOn(manager, "getEntries");
+		for (let index = 0; index < 20; index++) {
+			const message = assistant({ input: 30_000, cacheRead: 70_000, timestamp: 120_000 + index });
+			const miss = detectLiveCacheMiss(manager, message, models);
+			expect(miss?.missedTokens).toBe(30_000);
+			expect(detectLiveCacheMiss(manager, message, models)).toEqual(miss);
+			manager.appendMessage(message);
+		}
+		expect(reads).toHaveBeenCalledTimes(1);
+		const message = assistant({ input: 100_000, model: "switched", timestamp: 120_100 });
+		const live = detectLiveCacheMiss(manager, message, models);
+		manager.appendMessage(message);
+		expect(collectCacheMisses(manager.getEntries(), models).get(message)).toEqual(live);
+		expect(live?.observedChanges).toEqual(["model changed"]);
+		manager.newSession();
+		expect(detectLiveCacheMiss(manager, message, models)).toBeUndefined();
+	});
+
+	it("replays a changed journal when navigation hides new entries from the active leaf", () => {
+		const manager = SessionManager.inMemory();
+		const anchor = manager.appendMessage(turn2);
+		detectLiveCacheMiss(manager, fullMiss, models);
+		manager.appendMessage({ ...fullMiss, model: "other-branch" });
+		manager.branch(anchor);
+		const live = detectLiveCacheMiss(manager, fullMiss, models);
+		expect(live).toMatchObject({ missedTokens: 110_000, observedChanges: ["model changed"] });
+		manager.appendMessage(fullMiss);
+		expect(collectCacheMisses(manager.getEntries(), models).get(fullMiss)).toEqual(live);
+	});
+
+	it.each([false, true])("retains checkpoint-only call provenance across a window boundary=%s", (boundary) => {
+		const manager = SessionManager.inMemory();
+		const checkpoint = assistant({ cacheRead: 100_000 });
+		checkpoint.responseId = "checkpoint-only";
+		checkpoint.content = [{ type: "toolCall", id: "old", name: "work", arguments: {}, async: true }];
+		manager.appendMessage(checkpoint, true);
+		if (boundary) manager.appendContextWindow("next", 100_000);
+		manager.appendMessage({ ...turn2, responseId: "previous" });
+		detectLiveCacheMiss(manager, fullMiss, models);
+		const resultId = manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "old",
+			toolName: "work",
+			content: [],
+			isError: false,
+			timestamp: 1,
+		});
+		const live = detectLiveCacheMiss(manager, fullMiss, models, [resultId]);
+		expect(live?.observedChanges).toEqual(["older async result admitted"]);
+		manager.appendMessage(fullMiss, false, [resultId]);
+		expect(collectCacheMisses(manager.getEntries(), models).get(fullMiss)).toEqual(live);
+	});
+
+	it("does not treat a checkpoint of the previous response as an older call", () => {
+		const manager = SessionManager.inMemory();
+		const previous = {
+			...turn2,
+			responseId: "same-response",
+			content: [{ type: "toolCall" as const, id: "recent", name: "work", arguments: {}, async: true }],
+		};
+		manager.appendMessage(previous, true);
+		manager.appendMessage(previous);
+		const resultId = manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "recent",
+			toolName: "work",
+			content: [],
+			isError: false,
+			timestamp: 1,
+		});
+		expect(detectLiveCacheMiss(manager, fullMiss, models, [resultId])?.observedChanges).toEqual(["unclassified"]);
+	});
+
+	it.each([0, 40_000])("ingests an aborted response with %s prompt tokens even when no live warning ran", (tokens) => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage(turn2);
+		detectLiveCacheMiss(manager, fullMiss, models);
+		const aborted = assistant({ input: tokens, model: "aborted-model", timestamp: 90_000 });
+		aborted.stopReason = "aborted";
+		manager.appendMessage(aborted);
+		const next = assistant({ input: 100_000, timestamp: 120_000 });
+		const live = detectLiveCacheMiss(manager, next, models);
+		expect(live?.missedTokens).toBe(tokens || 100_000);
+		expect(live?.observedChanges).toEqual([tokens ? "model changed" : "unclassified"]);
+		manager.appendMessage(next);
+		expect(collectCacheMisses(manager.getEntries(), models).get(next)).toEqual(live);
+	});
+});
+
+describe("observed cache changes", () => {
+	it.each<[string, JsonObject, JsonObject]>([
+		["service tier changed", { requestedServiceTier: "priority" }, { requestedServiceTier: "default" }],
+		["service tier changed", { returnedServiceTier: "priority" }, { returnedServiceTier: "default" }],
+		["tool definitions changed", { requestShape: { toolsBytes: 100 } }, { requestShape: { toolsBytes: 101 } }],
+		[
+			"tool definitions changed",
+			{ requestShape: { toolsBytes: 100, toolDefinitionBytes: [40, 60] } },
+			{ requestShape: { toolsBytes: 100, toolDefinitionBytes: [60, 40] } },
+		],
+		[
+			"instructions changed",
+			{ requestShape: { instructionsBytes: 100 } },
+			{ requestShape: { instructionsBytes: 101 } },
+		],
+		["new connection", {}, { socketReused: false }],
+		["full resend", { websocketRequestMode: "delta" }, { websocketRequestMode: "full" }],
+		["unclassified", { websocketRequestMode: "full" }, { websocketRequestMode: "full" }],
+		["unclassified", {}, { requestedServiceTier: "default", requestShape: { instructionsBytes: 100 } }],
+		["unclassified", { requestedServiceTier: "unknown" }, { requestedServiceTier: "default" }],
+	])("reports %s only from comparable evidence (%j → %j)", (label, before, after) => {
+		expect(
+			detectCacheMiss([entry(withDiagnostics(turn2, before))], withDiagnostics(fullMiss, after), models)
+				?.observedChanges,
+		).toEqual([label]);
+	});
+
+	it("keeps the warning deficit independent of an actual cached-read decline", () => {
+		const previous = assistant({ input: 30_000, cacheRead: 70_000 });
+		const current = assistant({ input: 40_000, cacheRead: 70_000 });
+		expect(detectCacheMiss([entry(previous)], current, models)).toMatchObject({
+			missedTokens: 30_000,
+			cacheReadDecline: 0,
+			observedChanges: ["unclassified"],
+		});
+		expect(detectCacheMiss([entry(turn2)], fullMiss, models)).toMatchObject({
+			missedTokens: 105_000,
+			cacheReadDecline: 100_000,
+		});
+	});
+
+	it("measures idle from the previous completion, respects known lifetimes, and resets after warming", () => {
+		const previous = { ...entry(turn2), timestamp: new Date(300_000).toISOString() };
+		const next = assistant({ input: 110_000, timestamp: 660_000 });
+		expect(detectCacheMiss([previous], next, models)?.observedChanges).toEqual(["idle 6m"]);
+		const longerLifetime: ModelPriceSource = {
+			getModel: () => ({ cost: { cacheRead: 0.3 }, promptCache: { short: 600, long: 600 } }),
+		};
+		expect(detectCacheMiss([previous], next, longerLifetime)?.observedChanges).toEqual(["unclassified"]);
+		expect(detectCacheMiss([previous, usageEntry("cache_warm", 600_000)], next, models)?.observedChanges).toEqual([
+			"unclassified",
+		]);
+		const longResponse = { ...previous, timestamp: new Date(600_000).toISOString() };
+		expect(detectCacheMiss([longResponse], next, models)?.observedChanges).toEqual(["unclassified"]);
+		const measured = { ...longResponse, message: withDiagnostics(turn2, { terminalEventMs: 240_000 }) };
+		expect(detectCacheMiss([measured], next, models)?.observedChanges).toEqual(["idle 6m"]);
+	});
+
+	it.each([false, true])(
+		"requires a newly admitted older native async result (carried=%s), not just a completed result",
+		(carried) => {
+			const issued = assistant({ cacheRead: 100_000 });
+			issued.content = [{ type: "toolCall", id: "async-call", name: "work", arguments: {}, async: true }];
+			const result: SessionEntry = {
+				type: "message",
+				id: "result",
+				parentId: null,
+				timestamp: "",
+				message: {
+					role: "toolResult",
+					toolCallId: "async-call",
+					toolName: "work",
+					content: [],
+					isError: false,
+					timestamp: 1,
+				},
+			};
+			const entries: SessionEntry[] = [entry(issued)];
+			if (carried)
+				entries.push({
+					type: "context_window",
+					id: "window",
+					parentId: null,
+					timestamp: "",
+					handoff: "next",
+					tokensBefore: 100_000,
+				});
+			entries.push(entry(turn2), result);
+			expect(detectCacheMiss(entries, fullMiss, models)?.observedChanges).toEqual(["unclassified"]);
+			const live = detectCacheMiss(entries, fullMiss, models, ["result"]);
+			expect(live?.observedChanges).toEqual(["older async result admitted"]);
+			const persisted: SessionEntry = { ...entry(fullMiss), consumedToolResultIds: ["result"] };
+			expect(collectCacheMisses([...entries, persisted], models).get(fullMiss)).toEqual(live);
+			const alreadyConsumed: SessionEntry = { ...entry(turn2), consumedToolResultIds: ["result"] };
+			expect(
+				detectCacheMiss([entry(issued), result, alreadyConsumed], fullMiss, models, ["result"])?.observedChanges,
+			).toEqual(["unclassified"]);
+			expect(detectCacheMiss([entry(issued), result], fullMiss, models, ["result"])?.observedChanges).toEqual([
+				"unclassified",
+			]);
+		},
+	);
+
+	it("does not classify synchronous tools as older async results", () => {
+		const issued = assistant({ cacheRead: 100_000 });
+		issued.content = [{ type: "toolCall", id: "sync", name: "work", arguments: {} }];
+		const result: SessionEntry = {
+			type: "message",
+			id: "result",
+			parentId: null,
+			timestamp: "",
+			message: {
+				role: "toolResult",
+				toolCallId: "sync",
+				toolName: "work",
+				content: [],
+				isError: false,
+				timestamp: 1,
+			},
+		};
+		expect(
+			detectCacheMiss([entry(issued), entry(turn2), result], fullMiss, models, ["result"])?.observedChanges,
+		).toEqual(["unclassified"]);
+	});
+
+	it("escapes provider control characters instead of sending them to the terminal", () => {
+		const current = {
+			...fullMiss,
+			diagnostics: [
+				{
+					type: "anthropic_input_transformations",
+					timestamp: 1,
+					details: { transformations: [{ type: "thinking_dropped", reason: "bad\u001b[2J\nreason" }] },
+				},
+			],
+		};
+		expect(detectCacheMiss([entry(turn2)], current, models)?.providerReasons).toEqual([
+			"dropped 1 thinking block (bad\\u001b[2J\\u000areason)",
+		]);
+	});
+
+	it.each<[JsonObject, string[]]>([
+		[{ type: "unavailable" }, []],
+		[{ type: "unavailable", reason: "input_changed" }, []],
+		[{ type: "cache_miss", reason: "tools_changed" }, ["tools changed"]],
+		[{ type: "cache_miss", reason: "future_reason" }, ["future_reason"]],
+		[{ type: "cache_hit" }, ["cache hit"]],
+		[{ type: "comparison_response_not_found" }, ["comparison response not found"]],
+		[{ type: "cache_miss", reason: { unexpected: true } }, ["cache miss"]],
+	])("formats provider diagnostic %j without dumping JSON", (diagnostics, expected) => {
+		const current = withDiagnostics(fullMiss, { prompt_cache_diagnostics: diagnostics });
+		expect(detectCacheMiss([entry(turn2)], current, models)?.providerReasons).toEqual(expected);
+	});
+
+	it("groups transformations by both type and reason across diagnostic entries", () => {
+		const current = {
+			...fullMiss,
+			diagnostics: [
+				{
+					type: "anthropic_input_transformations",
+					timestamp: 1,
+					details: {
+						transformations: [
+							{ type: "thinking_dropped", reason: "prefix_binding_mismatch" },
+							{ type: "thinking_dropped", reason: "model_binding_mismatch" },
+							{ type: "future_transformation", reason: "future_reason" },
+						],
+					},
+				},
+				{
+					type: "anthropic_input_transformations",
+					timestamp: 2,
+					details: { transformations: [{ type: "thinking_dropped", reason: "prefix_binding_mismatch" }] },
+				},
+			],
+		};
+		expect(detectCacheMiss([entry(turn2)], current, models)?.providerReasons).toEqual([
+			"dropped 2 thinking blocks (prefix binding mismatch)",
+			"dropped 1 thinking block (model binding mismatch)",
+			"future_transformation (1) (future_reason)",
+		]);
+	});
+
+	it("preserves provider reasons and all concurrent observations in session totals", () => {
+		const previous = withDiagnostics(turn2, { requestedServiceTier: "priority", websocketRequestMode: "delta" });
+		const current = withDiagnostics(fullMiss, {
+			requestedServiceTier: "default",
+			websocketRequestMode: "full",
+			socketReused: false,
+			prompt_cache_diagnostics: { type: "cache_miss", reason: "input_changed" },
+		});
+		current.diagnostics!.push({
+			type: "anthropic_input_transformations",
+			timestamp: 1,
+			details: { transformations: [{ type: "thinking_dropped", reason: "prefix_binding_mismatch" }] },
+		});
+		const miss = detectCacheMiss([entry(previous)], current, models);
+		expect(miss?.observedChanges).toEqual(["service tier changed", "new connection", "full resend"]);
+		expect(miss?.providerReasons).toEqual(["input changed", "dropped 1 thinking block (prefix binding mismatch)"]);
+		const totals = computeCacheWaste([entry(previous), entry(current)], models);
+		expect([...totals.observedChanges]).toEqual([
+			["service tier changed", 1],
+			["new connection", 1],
+			["full resend", 1],
+		]);
+		expect([...totals.providerReasons.keys()]).toEqual(miss?.providerReasons);
 	});
 });

@@ -5,6 +5,7 @@
 ### Added
 
 - Added an optional `modelContent` callback to `ResponseControl.submitToolResults()` that replaces a result's content in the sent continuation frame while `continuationInput` keeps the saved result.
+- Added capture of OpenAI Responses `prompt_cache_diagnostics` into provider request diagnostics when the provider returns it.
 
 ## [0.87.1] - 2026-09-22
 
