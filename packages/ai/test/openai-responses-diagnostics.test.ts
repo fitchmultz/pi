@@ -3,8 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { stream as streamAzure } from "../src/api/azure-openai-responses.ts";
 import { stream as streamCodex } from "../src/api/openai-codex-responses.ts";
 import { stream as streamOpenAI } from "../src/api/openai-responses.ts";
-import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts";
-import type { Model, StreamOptions } from "../src/types.ts";
+import { createResponsesDiagnostics } from "../src/api/openai-responses-diagnostics.ts";
+import {
+	convertResponsesMessages,
+	processResponsesStream,
+	type ResponsesEvent,
+} from "../src/api/openai-responses-shared.ts";
+import type { AssistantMessage, Model, StreamOptions } from "../src/types.ts";
+import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 import { createResponsesServer, replyWithOutput } from "./responses-websocket-server.ts";
 
@@ -37,6 +43,75 @@ function request(provider: (typeof providers)[number], options: StreamOptions & 
 afterEach(() => vi.restoreAllMocks());
 
 describe("Responses request diagnostics", () => {
+	it.each(providers)("retains provider-supplied cache reasons for %s", async (provider) => {
+		const cacheDiagnostics = { type: "cache_miss", reason: "input_changed" };
+		const result = await request(provider, {
+			apiKey,
+			transport: "sse",
+			fetch: async () =>
+				new Response(
+					`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", prompt_cache_diagnostics: cacheDiagnostics } })}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(
+			result.diagnostics?.find((entry) => entry.type === "provider_request")?.details?.prompt_cache_diagnostics,
+		).toEqual(cacheDiagnostics);
+	});
+
+	it("freezes the committed response record when a steering successor continues the request", async () => {
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "pending",
+			timestamp: 1,
+		};
+		const diagnostics = createResponsesDiagnostics(output);
+		Object.assign(diagnostics.details, { socketReused: false, websocketRequestMode: "delta" });
+		const cacheDiagnostics = { type: "cache_miss", reason: "input_changed" };
+		async function* events() {
+			yield { type: "response.created", response: { id: "resp_A" } } as ResponsesEvent;
+			yield {
+				type: "response.completed",
+				response: { id: "resp_A", status: "completed", prompt_cache_diagnostics: cacheDiagnostics },
+			} as unknown as ResponsesEvent;
+			yield { type: "response.created", response: { id: "resp_B" } } as ResponsesEvent;
+			yield { type: "response.completed", response: { id: "resp_B", status: "completed" } } as ResponsesEvent;
+		}
+		const messages: AssistantMessage[] = [];
+		await processResponsesStream(events(), output, new AssistantMessageEventStream(), model, {
+			diagnostics,
+			continuesResponse: () => true,
+			onResponseEnd: (message) => messages.push(message),
+		});
+		const [committed, successor] = messages.map(
+			(message) => message.diagnostics?.filter((entry) => entry.type === "provider_request") ?? [],
+		);
+		expect(committed).toHaveLength(1);
+		expect(committed[0].details).toMatchObject({
+			socketReused: false,
+			lastEventType: "response.completed",
+			prompt_cache_diagnostics: cacheDiagnostics,
+		});
+		expect(successor).toHaveLength(1);
+		expect(successor[0].timestamp).toBe(committed[0].timestamp);
+		expect(successor[0].details).toBe(diagnostics.details);
+		expect(successor[0].details).toMatchObject({ socketReused: false, websocketRequestMode: "delta" });
+		expect(successor[0].details).not.toHaveProperty("prompt_cache_diagnostics");
+	});
+
 	it.each(["openai", "openai-codex"] as const)("measures in-place payload hook changes for %s", async (provider) => {
 		const result = await request(provider, {
 			apiKey,

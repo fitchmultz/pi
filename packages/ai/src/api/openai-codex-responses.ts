@@ -4,6 +4,7 @@ import type {
 	ResponseCreateParamsStreaming,
 	ResponseInput,
 	ResponseStreamEvent,
+	ResponsesClientEvent,
 	ResponsesServerEvent,
 } from "openai/resources/responses/responses.js";
 
@@ -306,6 +307,26 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 			}
 
 			const accountId = extractAccountId(apiKey);
+			let turnState: WebSocketTurnState | undefined;
+			if (options?.turnScope) {
+				const authDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(apiKey)));
+				const owner = JSON.stringify([
+					resolveCodexUrl(model.baseUrl),
+					model.provider,
+					accountId,
+					Array.from(authDigest),
+				]);
+				turnState = websocketTurnStates.get(options.turnScope);
+				if (!turnState || turnState.owner !== owner) {
+					// Invalidate overlapping old-owner streams as well as later requests.
+					if (turnState) {
+						turnState.token = undefined;
+						turnState.invalidated = true;
+					}
+					turnState = { owner };
+					websocketTurnStates.set(options.turnScope, turnState);
+				}
+			}
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				getDeclaredTools(normalizedContext.messages),
 				model.compat?.supportsOpenAIGrammarTools ?? false,
@@ -389,6 +410,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 							grammarToolInputProperties,
 							toolSearchTool,
 							diagnostics,
+							turnState,
 							options,
 							(message) => {
 								output = message;
@@ -1038,6 +1060,29 @@ const websocketDebugStats = new Map<string, OpenAICodexWebSocketDebugStats>();
 const websocketSseFallbackSessions = new Set<string>();
 // Two consecutive drops get one HTTP request, not a permanent transport downgrade.
 const websocketConsecutiveFailures = new Map<string, number>();
+const websocketLocalCloses = new WeakMap<object, string>();
+
+// A turn outlives a socket, but never its caller-owned scope or authentication owner.
+interface WebSocketTurnState {
+	owner: string;
+	token?: string;
+	invalidated?: boolean;
+}
+const websocketTurnStates = new WeakMap<object, WebSocketTurnState>();
+
+function observeTurnState(event: Record<string, unknown>, state: WebSocketTurnState | undefined): void {
+	if (!state || state.invalidated || state.token !== undefined || event.type !== "response.metadata") return;
+	if (!event.headers || typeof event.headers !== "object" || Array.isArray(event.headers)) return;
+	for (const [name, header] of Object.entries(event.headers)) {
+		if (name.toLowerCase() !== "x-codex-turn-state") continue;
+		let value: unknown = header;
+		while (Array.isArray(value)) value = value[0];
+		if (typeof value === "string") {
+			state.token = value;
+			return;
+		}
+	}
+}
 
 function getOrCreateWebSocketDebugStats(sessionId: string): OpenAICodexWebSocketDebugStats {
 	let stats = websocketDebugStats.get(sessionId);
@@ -1191,6 +1236,7 @@ function isWebSocketSessionExpired(entry: CachedWebSocketConnection): boolean {
 
 function closeWebSocketSilently(socket: WebSocketLike, code = 1000, reason = "done"): void {
 	try {
+		if (!websocketLocalCloses.has(socket)) websocketLocalCloses.set(socket, reason);
 		recordWebSocketLocalClose(socket, reason);
 		socket.close(code, reason);
 	} catch {}
@@ -1479,6 +1525,7 @@ async function* parseWebSocket(
 	idleTimeoutMs?: number,
 	control?: ReturnType<typeof createResponsesControl>,
 	onControl?: OpenAICodexResponsesOptions["onResponseControl"],
+	turnState?: WebSocketTurnState,
 ): AsyncGenerator<Record<string, unknown>> {
 	const queue: Record<string, unknown>[] = [];
 	let pending: (() => void) | null = null;
@@ -1501,6 +1548,15 @@ async function* parseWebSocket(
 				text = await decodeWebSocketData((event as { data?: unknown }).data);
 				if (!text) return;
 				const parsed = JSON.parse(text) as Record<string, unknown>;
+				if (
+					parsed.type === "response.completed" ||
+					parsed.type === "response.done" ||
+					parsed.type === "response.incomplete" ||
+					parsed.type === "response.failed"
+				) {
+					const response = parsed.response as { id?: unknown } | undefined;
+					if (typeof response?.id === "string") control?.observeTerminal(response.id);
+				}
 
 				queue.push(parsed);
 				wake();
@@ -1523,6 +1579,18 @@ async function* parseWebSocket(
 
 	const onClose: WebSocketListener = (event) => {
 		recordWebSocketClose(diagnostics, event);
+		const localReason = websocketLocalCloses.get(socket);
+		const reason = (event as { reason?: unknown } | undefined)?.reason;
+		// Remote close text is untrusted and can contain credentials or payload fragments.
+		diagnostics.details.closeReason = localReason ?? (reason === "" ? "" : "redacted");
+		diagnostics.details.closeInitiator = localReason
+			? "local"
+			: diagnostics.details.closeCode === undefined || diagnostics.details.closeCode === 1006
+				? "unknown"
+				: "remote";
+		if (diagnostics.details.terminalEventMs !== undefined)
+			diagnostics.details.sinceParentTerminalMs =
+				performance.now() - diagnostics.startedAt - diagnostics.details.terminalEventMs;
 		// A clean successor gap leaves the parent complete; unresolved steering can continue on a fresh request.
 		if (
 			sawCompletion &&
@@ -1560,6 +1628,7 @@ async function* parseWebSocket(
 			}
 			if (queue.length > 0) {
 				const event = queue.shift()!;
+				observeTurnState(event, turnState);
 				const terminal =
 					event.type === "response.completed" ||
 					event.type === "response.done" ||
@@ -1689,6 +1758,8 @@ async function* observeWebSocketOutput(
 			!started &&
 			(startOnCreated || event.type !== "response.created") &&
 			event.type !== "response.in_progress" &&
+			(event.type as string) !== "response.metadata" &&
+			(event.type as string) !== "codex.response.metadata" &&
 			(event.type as string) !== "codex.rate_limits"
 		) {
 			started = true;
@@ -1714,6 +1785,7 @@ async function processWebSocketStream(
 	grammarToolInputProperties: Map<string, string>,
 	toolSearchTool: ToolReference | undefined,
 	diagnostics: ResponsesDiagnostics,
+	turnState: WebSocketTurnState | undefined,
 	options?: OpenAICodexResponsesOptions,
 	onAssistantMessage?: (message: AssistantMessage) => void,
 ): Promise<void> {
@@ -1722,6 +1794,9 @@ async function processWebSocketStream(
 	delete details.closeCode;
 	delete details.closeWasClean;
 	delete details.closeMs;
+	delete details.closeReason;
+	delete details.closeInitiator;
+	delete details.sinceParentTerminalMs;
 	delete details.localTimeout;
 	delete details.localTimeoutMs;
 	delete details.connectMs;
@@ -1741,6 +1816,7 @@ async function processWebSocketStream(
 	details.lastAttemptStartMs = performance.now() - diagnostics.startedAt;
 	details.websocketConnectTimeoutMs = websocketConnectTimeoutMs ?? DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 	if (idleTimeoutMs !== undefined) details.websocketIdleTimeoutMs = idleTimeoutMs;
+	const fullBody = structuredClone(body);
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1757,7 +1833,6 @@ async function processWebSocketStream(
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
-	const fullBody = body;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
@@ -1777,16 +1852,28 @@ async function processWebSocketStream(
 			stats.lastPreviousResponseId = undefined;
 		}
 	}
+	const serialize = (event: ResponsesClientEvent | (RequestBody & { type: "response.create" })): string =>
+		JSON.stringify(
+			event.type === "response.create" && turnState?.token !== undefined
+				? {
+						...event,
+						client_metadata: {
+							...("client_metadata" in event ? (event.client_metadata as Record<string, unknown>) : {}),
+							"x-codex-turn-state": turnState.token,
+						},
+					}
+				: event,
+		);
 	const control = createResponsesControl(
 		model,
 		body as ResponseCreateParamsStreaming,
-		(event) => socket.send(JSON.stringify(event)),
+		(event) => socket.send(serialize(event)),
 		(event) => stream.push(event),
 		() => closeWebSocketSilently(socket, 1000, "context_replaced"),
 		grammarToolInputProperties,
 	);
 	try {
-		const requestJson = JSON.stringify({ type: "response.create", ...requestBody });
+		const requestJson = serialize({ type: "response.create", ...requestBody });
 		details.websocketSendBytes = utf8ByteLength(requestJson);
 		details.websocketRequestMode = requestBody === fullBody ? "full" : "delta";
 		details.websocketSendMs = performance.now() - diagnostics.startedAt;
@@ -1794,7 +1881,15 @@ async function processWebSocketStream(
 		await processResponsesStream(
 			observeWebSocketOutput(
 				mapCodexEvents(
-					parseWebSocket(socket, diagnostics, options?.signal, idleTimeoutMs, control, options?.onResponseControl),
+					parseWebSocket(
+						socket,
+						diagnostics,
+						options?.signal,
+						idleTimeoutMs,
+						control,
+						options?.onResponseControl,
+						turnState,
+					),
 					diagnostics,
 					true,
 				),
@@ -1825,7 +1920,7 @@ async function processWebSocketStream(
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			},
 		);
-		if (options?.signal?.aborted || control.control.retired) {
+		if (options?.signal?.aborted || !control.reusable) {
 			keepConnection = false;
 		} else if (!control.used && useCachedContext && entry && output.responseId) {
 			const responseItems = convertResponsesMessages(
@@ -1848,7 +1943,7 @@ async function processWebSocketStream(
 			entry.continuation = {
 				lastRequestBody: fullBody,
 				lastResponseId: output.responseId,
-				lastResponseItems: responseItems,
+				lastResponseItems: structuredClone(responseItems),
 			};
 		} else if (entry) {
 			// Control successors are not represented by fullBody; the previous baseline is no longer valid.
@@ -1862,10 +1957,26 @@ async function processWebSocketStream(
 		keepConnection = false;
 		throw error;
 	} finally {
-		control.close();
-		options?.onResponseControl?.(undefined);
+		if (!keepConnection && details.closeInitiator === undefined) {
+			const reason = options?.signal?.aborted
+				? "aborted"
+				: control.control.retired
+					? "context_replaced"
+					: "stream_error";
+			closeWebSocketSilently(socket, 1000, reason);
+			details.closeInitiator = "local";
+			details.closeReason = websocketLocalCloses.get(socket);
+		}
+		if (control.used && !control.reusable && details.terminalEventMs !== undefined)
+			details.sinceParentTerminalMs ??= performance.now() - diagnostics.startedAt - details.terminalEventMs;
 		const socketDetails = snapshotWebSocketSocket(socket);
 		if (socketDetails) details.socket = socketDetails;
+		control.close({
+			type: "provider_transport_close",
+			timestamp: Date.now(),
+			details: structuredClone(details),
+		});
+		options?.onResponseControl?.(undefined);
 		release({ keep: keepConnection });
 	}
 }

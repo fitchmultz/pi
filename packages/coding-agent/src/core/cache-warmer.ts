@@ -36,7 +36,10 @@ export function getCacheWarmingDelayMs(ttlMs: number): number | undefined {
  * `promptCache` tier for the retention the request used. Undefined when the
  * model has no lifetime for that tier or caching is off.
  */
-export function getPromptCacheTtlMs(model: Model<Api>, options: SimpleStreamOptions | undefined): number | undefined {
+export function getPromptCacheTtlMs(
+	model: Pick<Model<Api>, "promptCache">,
+	options: SimpleStreamOptions | undefined,
+): number | undefined {
 	const retention =
 		options?.cacheRetention ??
 		(getProviderEnvValue("PI_CACHE_RETENTION", options?.env) === "long" ? "long" : "short");
@@ -332,6 +335,8 @@ export class CacheWarmer {
 			const message = await this.models
 				.streamSimple(run.model, run.context, {
 					...run.options,
+					// A background refresh is not part of the agent turn; never share its routing state.
+					turnScope: undefined,
 					maxTokens: 1,
 					maxRetries: 0,
 					signal: run.controller.signal,

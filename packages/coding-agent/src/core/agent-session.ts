@@ -219,7 +219,8 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
-	| Exclude<AgentEvent, { type: "agent_end" }>
+	| Exclude<AgentEvent, { type: "agent_end" | "message_end" }>
+	| (Extract<AgentEvent, { type: "message_end" }> & { consumedToolResultIds?: string[] })
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
@@ -1588,6 +1589,7 @@ export class AgentSession {
 				steeringId: event.steeringId,
 				responseId: event.responseId,
 				errorMessage: event.errorMessage,
+				...(event.diagnostic ? { diagnostic: event.diagnostic } : {}),
 			});
 			await this._extensionRunner.emit(event);
 			this._emit(event);
@@ -1713,7 +1715,9 @@ export class AgentSession {
 							willRetry: this._willRetryAfterAgentEnd(event),
 							...(this.getPendingToolCalls().length ? { pendingToolCalls: this.getPendingToolCalls() } : {}),
 						}
-					: event,
+					: event.type === "message_end"
+						? { ...event, consumedToolResultIds }
+						: event,
 			);
 		} finally {
 			// A throwing subscriber must not skip persistence of the completed message.
