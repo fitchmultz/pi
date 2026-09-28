@@ -40,6 +40,7 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
+import { toolKey } from "../utils/tool-identity.ts";
 import {
 	collapseSystemMessages,
 	declarationsEqual,
@@ -1166,6 +1167,15 @@ function buildParams(
 			? []
 			: getDeclaredTools(context.messages, "first")
 		: getCurrentTools(context.messages);
+	// Inline definitions also carry redefinitions, so every declaration may reach the wire.
+	const strictTools = selectStrictTools(
+		inlineToolDefinitions && nativeToolChanges
+			? context.messages.flatMap((message) =>
+					message.role === "system" || message.role === "toolResult" ? (message.toolsAdded ?? []) : [],
+				)
+			: requestTools,
+		compat.supportsStrictTools,
+	);
 	assertContextFits(model, transformedMessages, inlineToolDefinitions && nativeToolChanges ? undefined : requestTools);
 	const converted = convertMessages(
 		conversationMessages,
@@ -1178,7 +1188,7 @@ function buildParams(
 			? {
 					initialTools,
 					supportsEagerToolInputStreaming: compat.supportsEagerToolInputStreaming,
-					supportsStrictTools: compat.supportsStrictTools,
+					strictTools,
 				}
 			: undefined,
 	);
@@ -1246,16 +1256,14 @@ function buildParams(
 				initialTools,
 				isOAuthToken,
 				compat.supportsEagerToolInputStreaming,
-				compat.supportsStrictTools,
+				strictTools,
 				toolCacheControl,
 			),
 			DEFERRED_TOOL_PLACEHOLDER,
-			...convertTools(
-				laterTools,
-				isOAuthToken,
-				compat.supportsEagerToolInputStreaming,
-				compat.supportsStrictTools,
-			).map((tool) => ({ ...tool, defer_loading: true })),
+			...convertTools(laterTools, isOAuthToken, compat.supportsEagerToolInputStreaming, strictTools).map((tool) => ({
+				...tool,
+				defer_loading: true,
+			})),
 		];
 	} else {
 		if (requestTools.length > 0) {
@@ -1263,7 +1271,7 @@ function buildParams(
 				requestTools,
 				isOAuthToken,
 				compat.supportsEagerToolInputStreaming,
-				compat.supportsStrictTools,
+				strictTools,
 				toolCacheControl,
 			);
 		}
@@ -1355,7 +1363,7 @@ function convertMessages(
 	inlineTools?: {
 		initialTools: Tool[];
 		supportsEagerToolInputStreaming: boolean;
-		supportsStrictTools: boolean;
+		strictTools: ReadonlySet<Tool>;
 	},
 ): ConvertedAnthropicMessages {
 	const params: MessageParam[] = [];
@@ -1409,7 +1417,7 @@ function convertMessages(
 											[tool],
 											isOAuthToken,
 											inlineTools.supportsEagerToolInputStreaming,
-											inlineTools.supportsStrictTools,
+											inlineTools.strictTools,
 										)[0],
 									}
 								: { type: "tool_reference", name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name },
@@ -1604,17 +1612,76 @@ function shouldUseFineGrainedToolStreamingBeta(
 	return getCurrentTools(context.messages).length > 0 && !getAnthropicCompat(model).supportsEagerToolInputStreaming;
 }
 
+// Anthropic's request-wide limits across all strict schemas. Strict conversion requires every
+// property, so the separate optional-parameter limit cannot bind.
+const MAX_STRICT_TOOLS = 20;
+const MAX_STRICT_UNION_PARAMETERS = 16;
+
+/** Parameters Anthropic counts as unions (`anyOf` or type arrays), at any depth. */
+function countUnionParameters(schema: unknown): number {
+	if (typeof schema !== "object" || schema === null) return 0;
+	const { properties, items, anyOf } = schema as {
+		properties?: Record<string, unknown>;
+		items?: unknown;
+		anyOf?: unknown;
+	};
+	let count = 0;
+	for (const child of [...Object.values(properties ?? {}), ...(items === undefined ? [] : [items])]) {
+		const { anyOf: union, type } = (child ?? {}) as { anyOf?: unknown; type?: unknown };
+		if (Array.isArray(union) || Array.isArray(type)) count++;
+		count += countUnionParameters(child);
+	}
+	for (const variant of Array.isArray(anyOf) ? anyOf : []) count += countUnionParameters(variant);
+	return count;
+}
+
+/**
+ * Admit strict tools in declaration order while the request stays within Anthropic's limits.
+ * Earlier tools keep their mode as later ones are appended, so the cached prefix stays stable.
+ */
+function selectStrictTools(tools: readonly Tool[], supportsStrictTools: boolean): Set<Tool> {
+	const selected = new Set<Tool>();
+	const declared = new Map<string, Tool>();
+	let count = 0;
+	let unions = 0;
+	for (const tool of tools) {
+		const previous = declared.get(toolKey(tool));
+		// An identical re-declaration reaches the wire at most once, so it shares the first decision.
+		if (previous && declarationsEqual(previous, tool)) {
+			if (selected.has(previous)) selected.add(tool);
+			continue;
+		}
+		declared.set(toolKey(tool), tool);
+		if (resolveJsonSchemaStrictSampling(tool, supportsStrictTools) !== true) continue;
+		const cost = countUnionParameters(getJsonSchemaToolParameters(tool, true));
+		if (count < MAX_STRICT_TOOLS && unions + cost <= MAX_STRICT_UNION_PARAMETERS) {
+			selected.add(tool);
+			count++;
+			unions += cost;
+		} else if (
+			tool.constrainedSampling &&
+			tool.constrainedSampling.type === "json_schema" &&
+			tool.constrainedSampling.strict === "require"
+		) {
+			throw new Error(
+				`Tool "${tool.name}" requires JSON-schema constrained sampling, but the request exceeds Anthropic's strict tool limits.`,
+			);
+		}
+	}
+	return selected;
+}
+
 function convertTools(
 	tools: Tool[],
 	isOAuthToken: boolean,
 	supportsEagerToolInputStreaming: boolean,
-	supportsStrictTools: boolean,
+	strictTools: ReadonlySet<Tool>,
 	cacheControl?: CacheControlEphemeral,
 ): BetaTool[] {
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
-		const strict = resolveJsonSchemaStrictSampling(tool, supportsStrictTools);
+		const strict = strictTools.has(tool);
 		const parameters = getJsonSchemaToolParameters(tool, strict);
 		const schema = parameters as { properties?: unknown; required?: string[] };
 		const legacyInputSchema = {

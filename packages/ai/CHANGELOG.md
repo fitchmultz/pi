@@ -22,6 +22,7 @@
 - Fixed OpenAI Responses steering successors carrying no request diagnostics while overwriting the committed response's record; each response now keeps its own record.
 - Fixed mid-session tool removals and description changes rebuilding the whole declared tool list. Withdrawn and redescribed declarations are retained with a positional notice, additions stay positional, and only genuine schema changes rebuild on routes without inline redefinition. Public OpenAI Responses receives `allowed_tools` for withdrawn ordinary tools.
 - Fixed replacing a native Responses tool-search callback turning the initial `tool_search` declaration into an ordinary function.
+- Fixed Anthropic requests failing with "Schemas contains too many parameters with union types" when many tools prefer strict sampling. Strict mode is admitted in declaration order within Anthropic's per-request limits (20 strict tools, 16 union-typed parameters), and the remaining tools are sent non-strict.
 
 ## [0.87.1] - 2026-09-22
 

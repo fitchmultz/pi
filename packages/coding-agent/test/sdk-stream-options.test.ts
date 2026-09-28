@@ -5,10 +5,12 @@ import {
 	type Api,
 	type AssistantMessage,
 	createAssistantMessageEventStream,
+	getCurrentTools,
 	type Model,
 	normalizeContext,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
@@ -162,6 +164,55 @@ describe("createAgentSession stream options", () => {
 			},
 		};
 	}
+
+	it("gives extension-owned provider streams unique names for same-named namespaced tools", async () => {
+		const model = createModel("anthropic-messages");
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "test-api-key" }));
+		const modelRegistry = await createModelRegistry(authStorage, join(agentDir, "models.json"));
+		let wireNames: string[] = [];
+		modelRegistry.registerProvider(model.provider, {
+			api: model.api,
+			streamSimple: (_model, context) => {
+				wireNames = getCurrentTools(context.messages).map((tool) => tool.name);
+				const message: AssistantMessage = {
+					...createDoneMessage(model.api),
+					content: [{ type: "toolCall", id: "call", name: wireNames[1] ?? "", arguments: {} }],
+					stopReason: "toolUse",
+				};
+				const stream = createAssistantMessageEventStream();
+				stream.push({ type: "start", partial: { ...message, content: [] } });
+				stream.push({ type: "done", reason: "toolUse", message });
+				return stream;
+			},
+		});
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model,
+			modelRuntime: getModelRuntime(modelRegistry),
+			settingsManager: SettingsManager.inMemory({}),
+			sessionManager: SessionManager.inMemory(cwd),
+		});
+		const tools = ["left", "right"].map((namespace) => ({
+			namespace,
+			name: "lookup",
+			description: namespace,
+			parameters: Type.Object({}),
+		}));
+
+		try {
+			const stream = await session.agent.streamFunction(model, normalizeContext({ tools, messages: [] }), {});
+			const message = await stream.result();
+			expect(new Set(wireNames).size).toBe(2);
+			expect(message.content).toEqual([
+				expect.objectContaining({ type: "toolCall", namespace: "right", name: "lookup" }),
+			]);
+		} finally {
+			session.dispose();
+			modelRegistry.unregisterProvider(model.provider);
+		}
+	});
 
 	it("schedules cache warming after a completed session request", async () => {
 		const fixture = await createCacheWarmingSession();
