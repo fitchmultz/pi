@@ -1508,13 +1508,17 @@ export class ExtensionRunner {
 							message.deferredToolEntries,
 							message.replace,
 						];
-						if (index < 0)
-							index = currentMessages.findIndex(
-								(message) =>
-									message.role === "system" &&
-									!isOtherSystemMessage(message) &&
-									isDeepStrictEqual(declarations(message), declarations(nativeHead)),
+						if (index < 0) {
+							const matches = currentMessages.flatMap((message, position) =>
+								message.role === "system" &&
+								!isOtherSystemMessage(message) &&
+								isDeepStrictEqual(declarations(message), declarations(nativeHead))
+									? [position]
+									: [],
 							);
+							// Tool-less heads share empty declarations with ordinary policy; never guess.
+							if (matches.length === 1) index = matches[0];
+						}
 						const edited = currentMessages[index];
 						const restored = nativeHead;
 						if (edited?.role === "system") {

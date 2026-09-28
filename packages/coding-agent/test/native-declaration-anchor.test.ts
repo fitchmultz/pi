@@ -118,6 +118,50 @@ test.each(["prepend", "throw", "reconstruct", "restamp", "prepend-restamp", "dup
 	},
 );
 
+test("keeps new policy separate when a restamped tool-less head is ambiguous", async () => {
+	const requests: TranscriptContext[] = [];
+	const errors: string[] = [];
+	const harness = await createHarness({
+		initialActiveToolNames: [],
+		extensionFactories: [
+			(pi) =>
+				pi.on("context_with_system", (event) => {
+					const head = event.messages[0];
+					if (head.role !== "system" || !head.nativeHead) throw new Error("Missing native head before hook");
+					const { nativeHead: _nativeHead, ...rebuilt } = head;
+					// A tool-less head's declarations can equal an ordinary policy's.
+					const { deferredToolEntries } = head;
+					return {
+						messages: [
+							{ role: "system", content: "POLICY", deferredToolEntries, timestamp: 0 },
+							{ ...rebuilt, content: "EDITED BASE", timestamp: rebuilt.timestamp + 1 },
+							...event.messages.slice(1),
+						],
+					};
+				}),
+		],
+	});
+	try {
+		await harness.session.bindExtensions({ onError: (error) => errors.push(error.error) });
+		harness.setResponses([
+			(context) => {
+				requests.push(structuredClone(context));
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await harness.session.prompt("one");
+		const [head, ...rest] = requests[0].messages;
+		expect(head).toMatchObject({ role: "system" });
+		expect(getCurrentTools(requests[0].messages)).toEqual([]);
+		// Without a unique match the saved head wins; the policy is never consumed as the head.
+		expect(["POLICY", "EDITED BASE"]).not.toContain(head.role === "system" ? head.content : undefined);
+		expect(rest).toContainEqual(expect.objectContaining({ role: "system", content: "POLICY" }));
+		expect(errors.some((error) => error.includes("Restored the native initial declaration"))).toBe(true);
+	} finally {
+		harness.cleanup();
+	}
+});
+
 test("forking an earlier branch retains its native declaration and startup policy", async () => {
 	const requests: TranscriptContext[] = [];
 	const harness = await createHarness({ extensionFactories: [startup] });
