@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AgentLoopConfig.toolResultModelContent` and `Agent.toolResultModelContent` for model-only tool result content on live response continuations.
+- Added a per-run `turnScope` to agent-loop provider calls so providers can keep turn-scoped routing state across the run's requests.
 
 ## [0.87.1] - 2026-09-22
 

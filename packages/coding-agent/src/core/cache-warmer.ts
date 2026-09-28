@@ -332,6 +332,8 @@ export class CacheWarmer {
 			const message = await this.models
 				.streamSimple(run.model, run.context, {
 					...run.options,
+					// A background refresh is not part of the agent turn; never share its routing state.
+					turnScope: undefined,
 					maxTokens: 1,
 					maxRetries: 0,
 					signal: run.controller.signal,
