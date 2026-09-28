@@ -815,7 +815,9 @@ export interface ContextEvent {
 /**
  * Fired before each LLM call, after every `context` handler has run and Pi has restored
  * the prompt and tool state. `messages` is the full transcript including system messages,
- * and the result is sent as returned: the handler owns the prompt and tool declarations.
+ * and handlers may edit its content and sections. A marked `nativeHead` declaration
+ * keeps its position at index zero, identity, and initial tool state; Pi restores these
+ * fields and reports a warning if changed. Unmarked legacy windows retain the old behavior.
  */
 export interface ContextWithSystemEvent {
 	type: "context_with_system";

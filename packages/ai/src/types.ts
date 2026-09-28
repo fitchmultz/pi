@@ -535,6 +535,8 @@ export interface SystemMessage {
 	role: "system";
 	/** Host-only identity of the current compaction/fresh-window checkpoint; never serialized to providers. */
 	contextWindowId?: string;
+	/** Host-owned initial declaration anchor. Only new, unbound context windows opt in; never sent to providers. */
+	nativeHead?: true;
 	/** Instruction text. On the leading message this is the base prompt; later, additional instructions. */
 	content: string | TextContent[];
 	/**

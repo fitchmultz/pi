@@ -146,6 +146,7 @@ export function getCurrentSystemMessage(messages: TranscriptMessages): SystemMes
 	return {
 		role: "system",
 		content: content.join("\n\n"),
+		...(getInitialSystemMessage(messages)?.nativeHead ? { nativeHead: true as const } : {}),
 		...(sections.size > 0 ? { sections: Object.fromEntries(sections) } : {}),
 		...(tools.length > 0 ? { toolsAdded: tools } : {}),
 		...(deferredToolEntries === undefined ? {} : { deferredToolEntries }),

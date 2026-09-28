@@ -110,6 +110,12 @@ Shell guards must check both `bash` and `background_command` starts. Use `isTool
 
 `context` transforms conversation messages without prompt and tool system messages; Pi restores that state afterward. Use `context_with_system` only when a request-local transformation must own the complete transcript, and keep a system message at index zero.
 
+New sessions mark their native initial system/tool declaration with host-only `nativeHead: true`. Pi projects this declaration before startup custom messages without changing journal order or timestamps. After each `context_with_system` handler, Pi keeps that marked declaration at index zero and preserves its marker, timestamp, and initial tool state. Removing, displacing, or changing those fields produces a warning and restoration. Content and section edits remain supported; keep them stable across requests. Append extension policy and later tool activations after the head rather than replacing it.
+
+Already-bound unmarked sessions keep their existing layout for the current window: restarting or resuming does not rewrite their cached prefix. Their next native `context_window` or compaction checkpoint adopts the anchor while the prefix is being rebuilt anyway. This prevents future displacement; it does not repair signatures or cache misses from earlier requests. Anthropic's initial-tools guard and deferred-tool protocol are unchanged: later schemas may be appended with `defer_loading`, while active top-level tools and their cache marker stay fixed.
+
+The offline cross-repository regression loads Ponytail's actual extension through the native loader. From `packages/coding-agent`, run `PONYTAIL_EXTENSION_PATH=/path/to/ponytail/pi-extension/index.js node ../../node_modules/vitest/dist/cli.js --run test/native-declaration-anchor.test.ts`. Without that path, the core hook-recovery cases still run and the cross-repository cases are skipped.
+
 <a id="live_tool_result"></a>
 
 A native Responses WebSocket continuation can send a tool result without a new request, so context hooks do not run for it. `live_tool_result` fires once each finalized result is saved; return `{ content }` to replace that result's content in such a frame only. Handlers compose, and the saved result, terminal output, and ordinary requests are unchanged. An extension that decorates results in `context_with_system` should return the same decoration here.

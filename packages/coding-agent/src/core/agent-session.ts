@@ -982,6 +982,9 @@ export class AgentSession {
 			// inspection cache without replacing request-only edits from prepareRequest.
 			this._flushPendingProviderMessages();
 			this._refreshFinalizedContext();
+			const headIndex = messages.findIndex((message) => message.role === "system" && message.nativeHead);
+			if (headIndex > 0)
+				messages = [messages[headIndex], ...messages.slice(0, headIndex), ...messages.slice(headIndex + 1)];
 			const model = this.model;
 			const systemPrompt = getCurrentSystemPrompt(messages);
 			const canonicalConversation = snapshotProviderConversation(messages);
@@ -2319,10 +2322,25 @@ export class AgentSession {
 			};
 		}
 		const sections = diffSystemPromptSections(current?.sections ?? {}, desired);
+		// Never retrofit a declaration into a prefix that has already been bound by a response.
+		const lastBinding =
+			!current &&
+			this.sessionManager
+				.getBranch()
+				.reverse()
+				.find(
+					(entry) =>
+						entry.type === "compaction" ||
+						entry.type === "context_window" ||
+						(entry.type === "message" && (entry.message.role === "system" || entry.message.role === "assistant")),
+				);
+		const nativeHead =
+			!current && (!lastBinding || lastBinding.type === "compaction" || lastBinding.type === "context_window");
 		return sections || discoveryChanged
 			? {
 					role: "system",
 					content: "",
+					...(nativeHead ? { nativeHead: true as const } : {}),
 					sections,
 					...(discoveryChanged ? { deferredToolEntries } : {}),
 					timestamp: Date.now(),

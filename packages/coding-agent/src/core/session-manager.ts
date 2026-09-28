@@ -872,6 +872,12 @@ export function buildSessionProjection(
 			return { ...message, content, toolExecutionFailed };
 		});
 	}
+	// Keep journal arrival order; only new declarations opt into leading model context.
+	// Unmarked legacy prefixes must replay as they were originally bound.
+	const headIndex = projectedEntries.findIndex((entry) =>
+		entry.messages.some((message) => message.role === "system" && message.nativeHead),
+	);
+	if (headIndex > 0) projectedEntries.unshift(...projectedEntries.splice(headIndex, 1));
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),
@@ -1645,7 +1651,9 @@ export class SessionManager {
 			handoff,
 			tokensBefore,
 			...(retainedToolResultIds?.length ? { retainedToolResultIds: [...retainedToolResultIds] } : {}),
-			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
+			...(systemMessage
+				? { systemMessage: { ...systemMessage, nativeHead: true, timestamp: new Date(timestamp).getTime() } }
+				: {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1762,7 +1770,9 @@ export class SessionManager {
 			details,
 			usage,
 			fromHook,
-			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
+			...(systemMessage
+				? { systemMessage: { ...systemMessage, nativeHead: true, timestamp: new Date(timestamp).getTime() } }
+				: {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
