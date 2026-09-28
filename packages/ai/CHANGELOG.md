@@ -6,6 +6,7 @@
 
 - Added an optional `modelContent` callback to `ResponseControl.submitToolResults()` that replaces a result's content in the sent continuation frame while `continuationInput` keeps the saved result.
 - Added `StreamOptions.turnScope` so callers can scope server-issued routing state, such as OpenAI Codex `x-codex-turn-state`, to one logical turn.
+- Added `SystemMessage.nativeHead`, a host-owned marker that identifies the initial system/tool declaration regardless of its position; it is never sent to providers.
 - Added capture of OpenAI Responses `prompt_cache_diagnostics` into provider request diagnostics when the provider returns it.
 
 ### Fixed
