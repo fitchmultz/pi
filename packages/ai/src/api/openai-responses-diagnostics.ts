@@ -179,6 +179,27 @@ export function createResponsesDiagnostics(output: AssistantMessage): ResponsesD
 	return diagnostics;
 }
 
+/**
+ * A steering successor is a new response on the same request and connection. Freeze the
+ * committed response's record and continue recording on the successor's own copy.
+ */
+export function continueResponsesDiagnostics(
+	diagnostics: ResponsesDiagnostics,
+	committed: AssistantMessage,
+	successor: AssistantMessage,
+): void {
+	const record = committed.diagnostics?.find((diagnostic) => diagnostic.details === diagnostics.details);
+	diagnostics.details = { ...diagnostics.details, socketReused: true };
+	delete diagnostics.details.prompt_cache_diagnostics;
+	delete diagnostics.details.terminalEventMs;
+	appendAssistantMessageDiagnostic(successor, {
+		type: "provider_request",
+		// Timings stay relative to the request start.
+		timestamp: record?.timestamp ?? Date.now(),
+		details: diagnostics.details,
+	});
+}
+
 /** Observe parsed application events, not socket packets, control frames, or backend timing. */
 export function recordResponsesEvent(
 	diagnostics: ResponsesDiagnostics,
