@@ -124,7 +124,7 @@ test("keeps new policy separate when a restamped tool-less head is ambiguous", a
 	const harness = await createHarness({
 		initialActiveToolNames: [],
 		extensionFactories: [
-			(pi) =>
+			(pi) => {
 				pi.on("context_with_system", (event) => {
 					const head = event.messages[0];
 					if (head.role !== "system" || !head.nativeHead) throw new Error("Missing native head before hook");
@@ -138,7 +138,8 @@ test("keeps new policy separate when a restamped tool-less head is ambiguous", a
 							...event.messages.slice(1),
 						],
 					};
-				}),
+				});
+			},
 		],
 	});
 	try {
