@@ -276,6 +276,8 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 		context,
 		model.compat?.supportsMidConvoSystemMessages,
 		model.compat?.supportsToolSearch,
+		model.contextWindow,
+		model.compat?.supportsAdditionalTools,
 	);
 
 	(async () => {

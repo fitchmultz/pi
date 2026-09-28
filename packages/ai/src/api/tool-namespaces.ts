@@ -34,7 +34,10 @@ export function withToolNamespaces(
 	const compat = native ? (model.compat as OpenAIResponsesCompat | undefined) : undefined;
 	// Retained declarations must be selected before deriving aliases from later tool loads.
 	const declarationContext = compat?.supportsMidConvoSystemMessages
-		? resolveTranscript(context, true, "all")
+		? resolveTranscript(context, true, "all", {
+				contextWindow: model.contextWindow,
+				tools: compat.supportsToolSearch || compat.supportsAdditionalTools ? "inline" : "current",
+			})
 		: context;
 	const references: ToolReference[] = [];
 	const loadedBare = new Set<string>();

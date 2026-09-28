@@ -152,6 +152,8 @@ const streamRaw = (
 		context,
 		getCompat(model).supportsMidConvoSystemMessages,
 		getCompat(model).supportsToolSearch,
+		model.contextWindow,
+		getCompat(model).supportsAdditionalTools,
 	);
 
 	// Start async processing

@@ -595,6 +595,14 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 		context,
 		compat.supportsMidConvoSystemMessages,
 		inlineToolDefinitions ? undefined : toolProtocol === MID_CONVERSATION_TOOL_CHANGES_BETA ? "descriptions" : "all",
+		{
+			contextWindow: model.contextWindow,
+			tools: inlineToolDefinitions
+				? "inline"
+				: toolProtocol === MID_CONVERSATION_TOOL_CHANGES_BETA
+					? "declared"
+					: "current",
+		},
 	);
 	const currentTools = getCurrentTools(normalizedContext.messages);
 

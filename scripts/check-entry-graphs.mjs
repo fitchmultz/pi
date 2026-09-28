@@ -33,7 +33,8 @@ const WORKSPACE = {
  */
 const BUDGETS = {
 	"packages/ai": {
-		"./utils/*": { maxFiles: 3, forbid: ["providers/", "api/", "index.ts"] },
+		// Transcript projection shares the physical-input estimator used by provider admission.
+		"./utils/*": { maxFiles: 4, forbid: ["providers/", "api/", "index.ts"] },
 	},
 	"packages/agent": {
 		"./harness/runtime/reducer": { maxFiles: 1 },

@@ -9,6 +9,7 @@ import type {
 	ToolResultMessage,
 	TranscriptContext,
 } from "../types.ts";
+import { estimateProviderInputTokens } from "./estimate.ts";
 import { contentText, getSystemMessageText } from "./text.ts";
 import { toolId, toolKey } from "./tool-identity.ts";
 
@@ -200,12 +201,67 @@ export function resolveTranscript(
 	context: TranscriptContext,
 	supportsMidConvoSystemMessages: boolean | undefined,
 	retainTools?: "all" | "descriptions",
+	inputBudget?: { contextWindow: number; tools: "inline" | "current" | "declared" },
 ): TranscriptContext {
 	const lateReplacement = context.messages.some(
 		(message, index) => index > 0 && isSystemMessage(message) && message.replace === true,
 	);
 	if (!supportsMidConvoSystemMessages || lateReplacement) return collapseSystemMessages(context);
-	return retainTools ? retainToolDeclarations(context, retainTools === "all") : context;
+	const retained = retainTools ? retainToolDeclarations(context, retainTools === "all") : context;
+	if (inputBudget && inputBudget.contextWindow > 0) {
+		const tools =
+			inputBudget.tools === "inline"
+				? undefined
+				: inputBudget.tools === "declared"
+					? getDeclaredTools(retained.messages, "first")
+					: getCurrentTools(retained.messages);
+		if (estimateProviderInputTokens(retained, tools) > inputBudget.contextWindow) {
+			const rebuilt = rebaselineToolDeclarations(context, context.messages.length - 1);
+			if (
+				estimateProviderInputTokens(
+					rebuilt,
+					inputBudget.tools === "inline" ? undefined : getCurrentTools(rebuilt.messages),
+				) <= inputBudget.contextWindow
+			)
+				return rebuilt;
+		}
+	}
+	return retained;
+}
+
+/** Establish a current-tool baseline while preserving positional instruction history. */
+function rebaselineToolDeclarations(context: TranscriptContext, index: number): TranscriptContext {
+	const history = context.messages.slice(0, index + 1);
+	const searchCalls = new Set(
+		history.flatMap((message) =>
+			message.role === "assistant"
+				? message.content.flatMap((block) =>
+						block.type === "toolCall" && block.kind === "toolSearch" ? [block.id] : [],
+					)
+				: [],
+		),
+	);
+	const prefix = withoutToolSearchState(history).map((message) =>
+		message.role === "system" ? { ...message, toolsAdded: undefined, toolsRemoved: undefined } : message,
+	);
+	const initial = getInitialSystemMessage(prefix);
+	const head: SystemMessage = {
+		...(initial ?? { role: "system", content: "", timestamp: 0 }),
+		toolsAdded: getCurrentTools(history),
+	};
+	return normalizeContext({
+		messages: [
+			head,
+			...prefix.slice(initial ? 1 : 0),
+			...context.messages
+				.slice(index + 1)
+				.map((message) =>
+					message.role === "toolResult" && searchCalls.has(message.toolCallId)
+						? { ...message, toolCallKind: undefined }
+						: message,
+				),
+		],
+	});
 }
 
 /**
@@ -225,41 +281,7 @@ function retainToolDeclarations(context: TranscriptContext, retainRemovals: bool
 			declared.set(toolKey(tool), tool);
 		}
 	}
-	if (lastSchemaChange >= 0) {
-		// A real contract change establishes a new wire baseline once. Later removals
-		// and additions must not keep rebuilding just because that old change exists.
-		const history = context.messages.slice(0, lastSchemaChange + 1);
-		const searchCalls = new Set(
-			history.flatMap((message) =>
-				message.role === "assistant"
-					? message.content.flatMap((block) =>
-							block.type === "toolCall" && block.kind === "toolSearch" ? [block.id] : [],
-						)
-					: [],
-			),
-		);
-		const prefix = withoutToolSearchState(history).map((message) =>
-			message.role === "system" ? { ...message, toolsAdded: undefined, toolsRemoved: undefined } : message,
-		);
-		const initial = getInitialSystemMessage(prefix);
-		const head: SystemMessage = {
-			...(initial ?? { role: "system", content: "", timestamp: 0 }),
-			toolsAdded: getCurrentTools(history),
-		};
-		context = normalizeContext({
-			messages: [
-				head,
-				...prefix.slice(initial ? 1 : 0),
-				...context.messages
-					.slice(lastSchemaChange + 1)
-					.map((message) =>
-						message.role === "toolResult" && searchCalls.has(message.toolCallId)
-							? { ...message, toolCallKind: undefined }
-							: message,
-					),
-			],
-		});
-	}
+	if (lastSchemaChange >= 0) context = rebaselineToolDeclarations(context, lastSchemaChange);
 	declared.clear();
 	const descriptions = new Map<string, string>();
 	const active = new Set<string>();

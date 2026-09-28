@@ -225,8 +225,14 @@ export function resolveResponsesTranscript(
 	context: TranscriptContext,
 	supportsMidConvoSystemMessages: boolean | undefined,
 	supportsToolSearch: boolean | undefined,
+	contextWindow?: number,
+	supportsAdditionalTools?: boolean,
 ): TranscriptContext {
-	if (supportsMidConvoSystemMessages) context = resolveTranscript(context, true, "all");
+	if (supportsMidConvoSystemMessages)
+		context = resolveTranscript(context, true, "all", {
+			contextWindow: contextWindow ?? 0,
+			tools: supportsToolSearch || supportsAdditionalTools ? "inline" : "current",
+		});
 	const nonAdditive = hasNonAdditiveToolChanges(context.messages);
 	if (
 		nonAdditive &&
@@ -319,6 +325,8 @@ export function convertResponsesMessages<TApi extends Api>(
 		context,
 		options?.supportsMidConvoSystemMessages,
 		options?.supportsToolSearch,
+		model.contextWindow,
+		options?.supportsAdditionalTools,
 	);
 	const messages: ResponseInput = [];
 
