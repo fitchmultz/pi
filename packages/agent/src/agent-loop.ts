@@ -242,6 +242,7 @@ async function runLoop(
 	streamFunction: StreamFn,
 ): Promise<void> {
 	let currentContext = initialContext;
+	const turnScope = {};
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	let explicitContinuation = false;
@@ -660,7 +661,7 @@ async function runLoop(
 					(model, context, options) => {
 						for (const message of context.messages)
 							if (message.role === "toolResult") deliveredResults.add(message.toolCallId);
-						return streamFunction(model, context, options);
+						return streamFunction(model, context, { ...options, turnScope });
 					},
 					async (message, call, scope, partial) => {
 						const calls = partial.content.filter((block): block is AgentToolCall => block.type === "toolCall");

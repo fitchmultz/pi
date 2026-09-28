@@ -7,6 +7,7 @@
 - Added opt-in provider credential isolation so account-routing extensions can bypass stored credentials without deleting or refreshing them, while preserving explicit request/CLI keys and native login/logout.
 - Added the `live_tool_result` extension event, which supplies model-only tool result content for native WebSocket continuations that bypass context hooks.
 - Added experimental provider-scoped `toolDiscovery` settings and an ordinary `discover_tools` loader for optional integrations, plus tool-owned custom prompt sections that deliver full guidance when activated. See [Tool Discovery](docs/tool-discovery.md).
+- Added transport close diagnostics (close code, redacted reason, initiator, timing, pending steering state) to persisted `response-steering` entries when a steering outcome is unknown. See [WebSocket recovery](docs/websocket-recovery.md).
 
 ### Changed
 

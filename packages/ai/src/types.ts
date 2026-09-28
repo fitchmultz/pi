@@ -246,6 +246,12 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 */
 	sessionId?: string;
 	/**
+	 * In-memory identity for one logical turn, shared across provider calls and reconnects.
+	 * Use a fresh object for each prompt/continue run. Omit to disable turn-scoped routing state.
+	 * Never serialized; independent of session-level connection caching.
+	 */
+	turnScope?: object;
+	/**
 	 * WebSocket connect timeout in milliseconds for providers that support
 	 * WebSocket transports. This covers the connection/open handshake only;
 	 * stream idleness after connection uses timeoutMs.
@@ -745,6 +751,8 @@ export type AssistantMessageEvent =
 			steeringId?: string;
 			responseId?: string;
 			errorMessage?: string;
+			/** Durable transport snapshot when an unresolved submission loses its connection. */
+			diagnostic?: AssistantMessageDiagnostic;
 	  }
 	| { type: "text_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
