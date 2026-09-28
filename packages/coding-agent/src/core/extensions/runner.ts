@@ -11,6 +11,7 @@ import {
 	type Model,
 	type Provider,
 	type ProviderHeaders,
+	type SystemMessage,
 	type ToolResultMessage,
 	type ToolSelection,
 	toolKey,
@@ -1499,9 +1500,21 @@ export class ExtensionRunner {
 									message.timestamp === nativeHead.timestamp &&
 									!isOtherSystemMessage(message),
 							);
-						// A rebuilt head can also get a fresh timestamp; it still occupies index 0.
-						if (index < 0 && currentMessages[0]?.role === "system" && !isOtherSystemMessage(currentMessages[0]))
-							index = 0;
+						// A rebuilt head can also get a fresh timestamp. Its host-owned declarations
+						// still identify it; position alone cannot tell it from a new policy message.
+						const declarations = (message: SystemMessage) => [
+							message.toolsAdded,
+							message.toolsRemoved,
+							message.deferredToolEntries,
+							message.replace,
+						];
+						if (index < 0)
+							index = currentMessages.findIndex(
+								(message) =>
+									message.role === "system" &&
+									!isOtherSystemMessage(message) &&
+									isDeepStrictEqual(declarations(message), declarations(nativeHead)),
+							);
 						const edited = currentMessages[index];
 						const restored = nativeHead;
 						if (edited?.role === "system") {

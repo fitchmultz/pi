@@ -29,7 +29,7 @@ const startup: ExtensionFactory = (pi) => {
 };
 
 // Owns startup ordering and hostile-hook recovery, not just a serializer-shaped fixture.
-test.each(["prepend", "throw", "reconstruct", "restamp", "duplicate", "remove"])(
+test.each(["prepend", "throw", "reconstruct", "restamp", "prepend-restamp", "duplicate", "remove"])(
 	"anchors startup declarations after a %s hook",
 	async (action) => {
 		const requests: TranscriptContext[] = [];
@@ -46,17 +46,26 @@ test.each(["prepend", "throw", "reconstruct", "restamp", "duplicate", "remove"])
 								messages: [{ role: "system", content: "OTHER POLICY", timestamp: 0 }, ...event.messages],
 							};
 						if (action === "remove") return { messages: structuredClone(event.messages.slice(1)) };
-						if (action !== "duplicate") {
+						// Rebuilt heads with fresh timestamps are identified by their intact declarations.
+						if (action !== "duplicate" && !action.endsWith("restamp")) {
 							head.toolsAdded = [];
 							head.toolsRemoved = [{ name: "read" }];
 						}
 						head.content = "EDITED BASE";
 						head.sections = { ...head.sections, extension: "EDITED CONTENT" };
 						if (action === "throw") throw new Error("Hook failed after mutation");
-						if (action === "reconstruct" || action === "restamp") {
+						if (action === "reconstruct" || action.endsWith("restamp")) {
 							const { nativeHead: _nativeHead, ...reconstructed } = head;
-							if (action === "restamp") reconstructed.timestamp++;
-							return { messages: [reconstructed, ...event.messages.slice(1)] };
+							if (action === "reconstruct") return { messages: [reconstructed, ...event.messages.slice(1)] };
+							reconstructed.timestamp++;
+							const policy = { role: "system" as const, content: "OTHER POLICY", timestamp: 0 };
+							return {
+								messages: [
+									...(action === "prepend-restamp" ? [policy] : []),
+									reconstructed,
+									...event.messages.slice(1),
+								],
+							};
 						}
 						if (action === "duplicate")
 							return {
@@ -93,7 +102,7 @@ test.each(["prepend", "throw", "reconstruct", "restamp", "duplicate", "remove"])
 			if (action !== "prepend" && action !== "remove")
 				expect(head).toMatchObject({ content: "EDITED BASE", sections: { extension: "EDITED CONTENT" } });
 			expect(requests[0].messages.filter((message) => message.role === "system")).toHaveLength(
-				action === "prepend" ? 3 : 2,
+				action.startsWith("prepend") ? 3 : 2,
 			);
 			expect(getCurrentTools(requests[0].messages).map((tool) => tool.name)).toEqual(
 				harness.session.getActiveToolNames(),
