@@ -19,6 +19,7 @@
 - Fixed context usage and automatic rollover losing measured reasoning tokens when request transforms add messages or append content blocks.
 - Fixed empty runtime API keys falling back to stored credentials; they are now rejected before changing the active override.
 - Fixed cache miss notices comparing a response with an abandoned branch after `/tree` navigation; live and redrawn notices now follow the active branch.
+- Fixed tool loadout changes during a session (reload, extension tool activation or removal) resetting the provider prompt cache when the provider supports append-only tool changes. Withdrawn tools are denied immediately, even while a response is generating.
 
 ## [0.87.1] - 2026-09-22
 

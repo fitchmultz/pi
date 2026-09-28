@@ -7,6 +7,11 @@
 - Added an optional `modelContent` callback to `ResponseControl.submitToolResults()` that replaces a result's content in the sent continuation frame while `continuationInput` keeps the saved result.
 - Added `StreamOptions.turnScope` so callers can scope server-issued routing state, such as OpenAI Codex `x-codex-turn-state`, to one logical turn.
 - Added capture of OpenAI Responses `prompt_cache_diagnostics` into provider request diagnostics when the provider returns it.
+- Added append-only Anthropic tool changes: new context windows use inline tool definitions (`inline-tools-2026-09-15`), so changed definitions, removals, and additions no longer rebuild the cached prompt prefix. The protocol is bound per context window; conflicting configured beta headers are ignored with a warning diagnostic.
+
+### Changed
+
+- Updated `@anthropic-ai/sdk` to 0.128.0.
 
 ### Fixed
 
@@ -14,6 +19,8 @@
 - Fixed OpenAI Codex requests not echoing a server-issued `x-codex-turn-state` within the same turn; it is latched per turn and account and never sent on steering frames.
 - Fixed steering being admitted after a response's terminal event had arrived but was not yet processed; late input now continues in the next request on the same connection.
 - Fixed OpenAI Responses steering successors carrying no request diagnostics while overwriting the committed response's record; each response now keeps its own record.
+- Fixed mid-session tool removals and description changes rebuilding the whole declared tool list. Withdrawn and redescribed declarations are retained with a positional notice, additions stay positional, and only genuine schema changes rebuild on routes without inline redefinition. Public OpenAI Responses receives `allowed_tools` for withdrawn ordinary tools.
+- Fixed replacing a native Responses tool-search callback turning the initial `tool_search` declaration into an ordinary function.
 
 ## [0.87.1] - 2026-09-22
 
