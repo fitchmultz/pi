@@ -1458,10 +1458,10 @@ export class ExtensionRunner {
 				const head = currentMessages[0];
 				const nativeHead = head?.role === "system" && head.nativeHead ? structuredClone(head) : undefined;
 				const otherSystemMessages = nativeHead
-					? currentMessages
-							.slice(1)
-							.filter((message) => message.role === "system" && message.timestamp === nativeHead.timestamp)
+					? currentMessages.slice(1).filter((message) => message.role === "system")
 					: [];
+				const isOtherSystemMessage = (message: AgentMessage) =>
+					otherSystemMessages.some((other) => other === message || isDeepStrictEqual(other, message));
 				try {
 					const hadLeadingSystemMessage = currentMessages[0]?.role === "system";
 					const event: ContextWithSystemEvent = { type: "context_with_system", messages: currentMessages };
@@ -1497,8 +1497,11 @@ export class ExtensionRunner {
 								(message) =>
 									message.role === "system" &&
 									message.timestamp === nativeHead.timestamp &&
-									!otherSystemMessages.some((other) => other === message || isDeepStrictEqual(other, message)),
+									!isOtherSystemMessage(message),
 							);
+						// A rebuilt head can also get a fresh timestamp; it still occupies index 0.
+						if (index < 0 && currentMessages[0]?.role === "system" && !isOtherSystemMessage(currentMessages[0]))
+							index = 0;
 						const edited = currentMessages[index];
 						const restored = nativeHead;
 						if (edited?.role === "system") {

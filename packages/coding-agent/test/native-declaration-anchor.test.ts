@@ -29,7 +29,7 @@ const startup: ExtensionFactory = (pi) => {
 };
 
 // Owns startup ordering and hostile-hook recovery, not just a serializer-shaped fixture.
-test.each(["prepend", "throw", "reconstruct", "duplicate", "remove"])(
+test.each(["prepend", "throw", "reconstruct", "restamp", "duplicate", "remove"])(
 	"anchors startup declarations after a %s hook",
 	async (action) => {
 		const requests: TranscriptContext[] = [];
@@ -53,8 +53,9 @@ test.each(["prepend", "throw", "reconstruct", "duplicate", "remove"])(
 						head.content = "EDITED BASE";
 						head.sections = { ...head.sections, extension: "EDITED CONTENT" };
 						if (action === "throw") throw new Error("Hook failed after mutation");
-						if (action === "reconstruct") {
+						if (action === "reconstruct" || action === "restamp") {
 							const { nativeHead: _nativeHead, ...reconstructed } = head;
+							if (action === "restamp") reconstructed.timestamp++;
 							return { messages: [reconstructed, ...event.messages.slice(1)] };
 						}
 						if (action === "duplicate")
