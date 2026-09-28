@@ -37,6 +37,7 @@ import {
 	type SimpleStreamOptions,
 	type StreamOptions,
 } from "@earendil-works/pi-ai";
+import { withToolNamespaces } from "@earendil-works/pi-ai/api/tool-namespaces";
 import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";
 import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
@@ -773,10 +774,16 @@ export class ModelRuntime implements Models {
 					model,
 					options as (StreamOptions & ModelsRequestTransforms) | undefined,
 				);
-				return prepared.provider.stream(
-					prepared.model as Model<TApi>,
+				// Extension-owned provider streams bypass pi-ai's provider wrapper.
+				return withToolNamespaces(
+					prepared.model,
 					transcript,
-					prepared.options as ApiStreamOptions<TApi>,
+					(mapped, mapControl) =>
+						prepared.provider.stream(prepared.model as Model<TApi>, mapped, {
+							...prepared.options,
+							onResponseControl: (control) => options?.onResponseControl?.(mapControl(control)),
+						} as ApiStreamOptions<TApi>),
+					options?.signal,
 				);
 			},
 			options?.signal,
@@ -797,7 +804,16 @@ export class ModelRuntime implements Models {
 			model,
 			async () => {
 				const prepared = await this.prepareRequest(model, options);
-				return prepared.provider.streamSimple(prepared.model, transcript, prepared.options as SimpleStreamOptions);
+				return withToolNamespaces(
+					prepared.model,
+					transcript,
+					(mapped, mapControl) =>
+						prepared.provider.streamSimple(prepared.model, mapped, {
+							...prepared.options,
+							onResponseControl: (control) => options?.onResponseControl?.(mapControl(control)),
+						} as SimpleStreamOptions),
+					options?.signal,
+				);
 			},
 			options?.signal,
 		);
