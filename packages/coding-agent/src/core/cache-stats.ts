@@ -44,7 +44,6 @@ interface PreviousRequest {
 	reportedCache: boolean;
 	requestIndex: number;
 	responseId?: string;
-	consumed: Set<string>;
 	details: JsonObject;
 }
 
@@ -210,8 +209,13 @@ class CacheMissTracker {
 	private prev: PreviousRequest | undefined;
 	private requestIndex = 0;
 	private window = 0;
-	private calls = new Map<string, { requestIndex: number; window: number; responseId?: string }>();
+	private calls = new Map<string, { requestIndex: number; window: number; responseId?: string; resultId?: string }>();
 	private results = new Map<string, string>();
+	private getEntry: (id: string) => SessionEntry | undefined;
+
+	constructor(getEntry: (id: string) => SessionEntry | undefined) {
+		this.getEntry = getEntry;
+	}
 
 	detect(
 		message: AssistantMessage,
@@ -223,17 +227,41 @@ class CacheMissTracker {
 			return (
 				call &&
 				this.prev &&
-				!this.prev.consumed.has(id) &&
 				(call.window < this.window ||
 					(call.requestIndex < this.prev.requestIndex &&
 						(!call.responseId || call.responseId !== this.prev.responseId)))
 			);
 		});
-		return detectMiss(this.prev, message, models, olderAsyncAdmitted);
+		const miss = detectMiss(this.prev, message, models, olderAsyncAdmitted);
+		for (const id of consumedToolResultIds) {
+			const callId = this.results.get(id);
+			if (callId) this.calls.delete(callId);
+			this.results.delete(id);
+		}
+		return miss;
 	}
 
 	observe(entry: SessionEntry, models: ModelPriceSource): CacheMiss | undefined {
 		if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "context_window") {
+			const retained = new Set(entry.type === "context_window" ? entry.retainedToolResultIds : []);
+			if (entry.type === "compaction" && entry.firstKeptEntryId !== entry.id) {
+				// Resolve the kept range from the journal only at a replay boundary.
+				let id = entry.parentId;
+				while (id) {
+					if (this.results.has(id)) retained.add(id);
+					if (id === entry.firstKeptEntryId) break;
+					id = this.getEntry(id)?.parentId ?? null;
+				}
+				if (id !== entry.firstKeptEntryId) retained.clear();
+			}
+			for (const [id, call] of this.calls) {
+				// Unresolved native calls are carried by the session projection. Completed
+				// receipts survive only when the boundary explicitly retains their context.
+				if (call.resultId && !retained.has(call.resultId)) {
+					this.results.delete(call.resultId);
+					this.calls.delete(id);
+				}
+			}
 			this.prev = undefined;
 			this.window++;
 			return;
@@ -250,23 +278,49 @@ class CacheMissTracker {
 					reportedCache: true,
 					requestIndex: this.prev?.requestIndex ?? this.requestIndex,
 					responseId: this.prev?.responseId,
-					consumed: this.prev?.consumed ?? new Set(),
 					details: this.prev?.details ?? {},
 				};
 			}
 		}
 		if (entry.type !== "message") return;
-		if (entry.message.role === "toolResult") this.results.set(entry.id, entry.message.toolCallId);
+		if (entry.message.role === "toolResult") {
+			const call = this.calls.get(entry.message.toolCallId);
+			if (call) {
+				if (call.resultId) this.results.delete(call.resultId);
+				call.resultId = entry.id;
+				this.results.set(entry.id, entry.message.toolCallId);
+			}
+		}
 		if (entry.message.role !== "assistant") return;
 		const message = entry.message;
 		// Checkpoints can be the only surviving record of a carried native call.
 		for (const block of message.content) {
-			if (block.type === "toolCall" && block.async && !this.calls.has(block.id))
-				this.calls.set(block.id, {
-					requestIndex: this.requestIndex,
-					window: this.window,
-					responseId: message.responseId,
-				});
+			if (block.type !== "toolCall" || !block.async || this.calls.has(block.id)) continue;
+			if (entry.checkpoint) {
+				// Late execution checkpoints can repeat already retired calls. Consult
+				// their ancestry instead of retaining an ever-growing set of retired IDs.
+				let id = entry.parentId;
+				let completed = false;
+				while (id) {
+					const ancestor = this.getEntry(id);
+					if (!ancestor) break;
+					if (
+						ancestor.type === "message" &&
+						ancestor.message.role === "toolResult" &&
+						ancestor.message.toolCallId === block.id
+					) {
+						completed = true;
+						break;
+					}
+					id = ancestor.parentId;
+				}
+				if (completed) continue;
+			}
+			this.calls.set(block.id, {
+				requestIndex: this.requestIndex,
+				window: this.window,
+				responseId: message.responseId,
+			});
 		}
 		if (entry.checkpoint) {
 			this.requestIndex++;
@@ -292,7 +346,6 @@ class CacheMissTracker {
 				reportedCache: (this.prev?.reportedCache ?? false) || usage.cacheRead + usage.cacheWrite > 0,
 				requestIndex: this.requestIndex,
 				responseId: message.responseId,
-				consumed: new Set(entry.consumedToolResultIds ?? []),
 				details,
 			};
 		}
@@ -305,7 +358,8 @@ function scan(
 	entries: SessionEntry[],
 	models: ModelPriceSource,
 ): { totals: CacheWasteTotals; misses: Map<AssistantMessage, CacheMiss> } {
-	const tracker = new CacheMissTracker();
+	const byId = new Map(entries.map((entry) => [entry.id, entry]));
+	const tracker = new CacheMissTracker((id) => byId.get(id));
 	const totals: CacheWasteTotals = {
 		missedTokens: 0,
 		missedCost: 0,
@@ -345,6 +399,7 @@ interface LiveCacheState {
 	sessionId: string;
 	revision: number;
 	lastEntry: SessionEntry | undefined;
+	lastComparison?: { message: AssistantMessage; miss: CacheMiss | undefined; revision: number };
 }
 const liveCacheStates = new WeakMap<SessionManager, LiveCacheState>();
 
@@ -363,7 +418,12 @@ export function detectCacheMiss(
 		state.sessionId !== sessionId ||
 		(state.lastEntry && manager.getEntry(state.lastEntry.id) !== state.lastEntry)
 	) {
-		state = { tracker: new CacheMissTracker(), sessionId, revision: -1, lastEntry: undefined };
+		state = {
+			tracker: new CacheMissTracker((id) => manager.getEntry(id)),
+			sessionId,
+			revision: -1,
+			lastEntry: undefined,
+		};
 		liveCacheStates.set(manager, state);
 	}
 	if (state.revision !== revision) {
@@ -381,7 +441,7 @@ export function detectCacheMiss(
 			id !== (state.lastEntry?.id ?? null) ||
 			pending.length !== revision - state.revision
 		) {
-			state.tracker = new CacheMissTracker();
+			state.tracker = new CacheMissTracker((id) => manager.getEntry(id));
 			const entries = manager.getEntries();
 			for (const entry of entries) state.tracker.observe(entry, models);
 			state.lastEntry = entries.at(-1);
@@ -391,5 +451,9 @@ export function detectCacheMiss(
 		}
 		state.revision = revision;
 	}
-	return state.tracker.detect(message, models, consumedToolResultIds);
+	if (state.lastComparison?.message === message && state.lastComparison.revision === revision)
+		return state.lastComparison.miss;
+	const miss = state.tracker.detect(message, models, consumedToolResultIds);
+	state.lastComparison = { message, miss, revision };
+	return miss;
 }

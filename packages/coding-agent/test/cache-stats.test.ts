@@ -199,6 +199,138 @@ function withDiagnostics(message: AssistantMessage, details: JsonObject): Assist
 const fullMiss = assistant({ input: 110_000, timestamp: 120_000 });
 
 describe("incremental live cache comparisons", () => {
+	it.each(["context_window", "compaction"] as const)(
+		"bounds async provenance across repeated %s boundaries",
+		(boundary) => {
+			const manager = SessionManager.inMemory();
+			const issued = assistant({ cacheRead: 100_000 });
+			issued.content = [{ type: "toolCall", id: "tracked-0", name: "work", arguments: {}, async: true }];
+			manager.appendMessage(issued);
+			manager.appendMessage(turn2);
+			const resultId = manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "tracked-0",
+				toolName: "work",
+				content: [],
+				isError: false,
+				timestamp: 1,
+			});
+			const syncId = manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "sync",
+				toolName: "work",
+				content: [],
+				isError: false,
+				timestamp: 1,
+			});
+			// Observe actual retained collections without adding a production inspection API.
+			const maps: Map<unknown, unknown>[] = [];
+			let storedSync = false;
+			const originalSet = Map.prototype.set;
+			const set = vi.spyOn(Map.prototype, "set").mockImplementation(function (
+				this: Map<unknown, unknown>,
+				key: unknown,
+				value: unknown,
+			) {
+				if (key === "tracked-0" || (key === resultId && value === "tracked-0")) maps.push(this);
+				if (key === syncId && value === "sync") storedSync = true;
+				return originalSet.call(this, key, value);
+			});
+			try {
+				detectLiveCacheMiss(manager, { ...fullMiss }, models);
+			} finally {
+				set.mockRestore();
+			}
+			expect(storedSync).toBe(false);
+			expect(maps).toHaveLength(2);
+			expect(maps.map((map) => map.size)).toEqual([1, 1]);
+			const admitted = { ...fullMiss };
+			expect(detectLiveCacheMiss(manager, admitted, models, [resultId])?.observedChanges).toEqual([
+				"older async result admitted",
+			]);
+			expect(maps.map((map) => map.size)).toEqual([0, 0]);
+			expect(detectLiveCacheMiss(manager, admitted, models, [resultId])?.observedChanges).toEqual([
+				"older async result admitted",
+			]);
+			manager.appendMessage(admitted, false, [resultId]);
+			for (let index = 1; index <= 20; index++) {
+				const message = {
+					...issued,
+					content: [
+						{ type: "toolCall" as const, id: `tracked-${index}`, name: "work", arguments: {}, async: true },
+					],
+				};
+				manager.appendMessage(message);
+				const id = manager.appendMessage({
+					role: "toolResult",
+					toolCallId: `tracked-${index}`,
+					toolName: "work",
+					content: [],
+					isError: false,
+					timestamp: 1,
+				});
+				manager.appendMessage({
+					role: "toolResult",
+					toolCallId: `sync-${index}`,
+					toolName: "work",
+					content: [],
+					isError: false,
+					timestamp: 1,
+				});
+				const consumed = index % 2 ? [id] : [];
+				const response = { ...fullMiss };
+				detectLiveCacheMiss(manager, response, models, consumed);
+				manager.appendMessage(response, false, consumed);
+				if (boundary === "context_window") manager.appendContextWindow("next", 100_000);
+				else manager.appendCompaction("summary", index % 3 === 0 ? null : manager.getLeafId(), 100_000);
+				// A delayed execution checkpoint must not resurrect a retired completed call.
+				manager.appendMessage(message, true);
+				detectLiveCacheMiss(manager, { ...fullMiss }, models);
+				expect(maps.map((map) => map.size)).toEqual([0, 0]);
+			}
+		},
+	);
+
+	it.each(["context_window", "compaction"] as const)(
+		"retains pending calls and explicitly carried receipts across %s",
+		(boundary) => {
+			const manager = SessionManager.inMemory();
+			const issued = assistant({ cacheRead: 100_000 });
+			issued.content = ["pending", "carried", "discarded"].map((id) => ({
+				type: "toolCall",
+				id,
+				name: "work",
+				arguments: {},
+				async: true,
+			}));
+			manager.appendMessage(issued);
+			const receipt = (id: string) =>
+				manager.appendMessage({
+					role: "toolResult",
+					toolCallId: id,
+					toolName: "work",
+					content: [],
+					isError: false,
+					timestamp: 1,
+				});
+			const discardedId = receipt("discarded");
+			const carriedId = receipt("carried");
+			detectLiveCacheMiss(manager, { ...fullMiss }, models);
+			if (boundary === "context_window") manager.appendContextWindow("next", 100_000, [carriedId]);
+			else manager.appendCompaction("summary", carriedId, 100_000);
+			manager.appendMessage(turn2);
+			const pendingId = receipt("pending");
+			expect(detectLiveCacheMiss(manager, { ...fullMiss }, models, [discardedId])?.observedChanges).toEqual([
+				"unclassified",
+			]);
+			const message = { ...fullMiss };
+			const miss = detectLiveCacheMiss(manager, message, models, [pendingId, carriedId]);
+			expect(miss?.observedChanges).toEqual(["older async result admitted"]);
+			manager.appendMessage(message, false, [pendingId, carriedId]);
+			expect(collectCacheMisses(manager.getEntries(), models).get(message)).toEqual(miss);
+		},
+	);
+
 	it("reads only appended entries after initial hydration and matches replay", () => {
 		const manager = SessionManager.inMemory();
 		manager.appendMessage(turn2);
