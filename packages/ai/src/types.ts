@@ -533,6 +533,8 @@ export interface DeferredHandle {
  */
 export interface SystemMessage {
 	role: "system";
+	/** Host-only identity of the current compaction/fresh-window checkpoint; never serialized to providers. */
+	contextWindowId?: string;
 	/** Host-owned initial declaration anchor. Only new, unbound context windows opt in; never sent to providers. */
 	nativeHead?: true;
 	/** Instruction text. On the leading message this is the base prompt; later, additional instructions. */
@@ -871,6 +873,8 @@ export interface OpenAIResponsesCompat {
 	supportsOpenAIGrammarTools?: boolean;
 	/** Whether the model supports message-anchored `additional_tools` input items. Default: false. */
 	supportsAdditionalTools?: boolean;
+	/** Whether public Responses accepts `tool_choice: allowed_tools`. Defaults to true on api.openai.com, false elsewhere; not used by Codex or Azure adapters. */
+	supportsAllowedTools?: boolean;
 	/** Whether the model supports client-executed tool search for transcript-anchored additions. Default: false. */
 	supportsToolSearch?: boolean;
 	/** Whether the model accepts `prompt_cache_options` (OpenAI GPT-5.6+ prompt caching). Older OpenAI models reject the parameter. Default: false. */

@@ -312,6 +312,7 @@ describe("Anthropic raw SSE parsing", () => {
 		const delta = JSON.parse(events[4].data) as Record<string, unknown>;
 		delta.input_transformations = [
 			{ type: "thinking_dropped", path: "messages.3.content.0", reason: "model_binding_mismatch" },
+			{ type: "thinking_mismatch_allowed", path: "messages.4.content.0", reason: "prefix_binding_mismatch" },
 		];
 		events[4].data = JSON.stringify(delta);
 
@@ -321,7 +322,7 @@ describe("Anthropic raw SSE parsing", () => {
 			{ client: createFakeAnthropicClient(createSseResponse(events)) },
 		).result();
 
-		expect(result.diagnostics).toEqual([
+		expect(result.diagnostics?.filter((entry) => entry.type === "anthropic_input_transformations")).toEqual([
 			{
 				type: "anthropic_input_transformations",
 				timestamp: expect.any(Number),
@@ -331,6 +332,11 @@ describe("Anthropic raw SSE parsing", () => {
 							type: "thinking_dropped",
 							path: "messages.3.content.0",
 							reason: "model_binding_mismatch",
+						},
+						{
+							type: "thinking_mismatch_allowed",
+							path: "messages.4.content.0",
+							reason: "prefix_binding_mismatch",
 						},
 					],
 				},

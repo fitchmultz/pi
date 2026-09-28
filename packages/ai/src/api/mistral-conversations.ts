@@ -128,7 +128,11 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 	options?: MistralOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages, "all", {
+		contextWindow: model.contextWindow,
+		transform: (messages) => transformMessages(messages, model, createMistralToolCallIdNormalizer()),
+		tools: "current",
+	});
 
 	(async () => {
 		const output = createOutput(model);

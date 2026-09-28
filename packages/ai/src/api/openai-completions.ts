@@ -304,7 +304,11 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 	options?: OpenAICompletionsOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, getCompat(model).supportsMidConvoSystemMessages);
+	const normalizedContext = resolveTranscript(context, getCompat(model).supportsMidConvoSystemMessages, "all", {
+		contextWindow: model.contextWindow,
+		transform: (messages) => transformMessages(messages, model),
+		tools: getCompat(model).supportsMidConvoToolAdditions ? "inline" : "current",
+	});
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -1192,7 +1196,11 @@ export function convertMessages(
 	compat: ResolvedOpenAICompletionsCompat,
 	options?: ConvertCompletionsMessagesOptions,
 ): ChatCompletionMessageParam[] {
-	const normalizedContext = resolveTranscript(context, compat.supportsMidConvoSystemMessages);
+	const normalizedContext = resolveTranscript(context, compat.supportsMidConvoSystemMessages, "all", {
+		contextWindow: model.contextWindow,
+		transform: (messages) => transformMessages(messages, model),
+		tools: compat.supportsMidConvoToolAdditions ? "inline" : "current",
+	});
 	const params: ChatCompletionMessageParam[] = [];
 
 	const normalizeToolCallId = (id: string): string => {

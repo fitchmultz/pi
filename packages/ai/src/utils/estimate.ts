@@ -71,6 +71,18 @@ export function estimateMessageTokens(message: Message, includeTools = true): nu
 	return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
+/** Estimate physical input without reusing earlier response usage. */
+export function estimateProviderInputTokens(
+	context: TranscriptContext | readonly Message[],
+	tools?: readonly Tool[],
+): number {
+	const messages = "messages" in context ? context.messages : context;
+	return messages.reduce(
+		(sum, message) => sum + estimateMessageTokens(message, tools === undefined),
+		tools === undefined ? 0 : estimateToolsTokens(tools),
+	);
+}
+
 /** Admit physical input after native prompt/tool projection, without reusing earlier response usage. */
 export function assertContextFits(
 	model: { contextWindow: number },
@@ -79,11 +91,7 @@ export function assertContextFits(
 	tools?: readonly Tool[],
 ): void {
 	if (!(model.contextWindow > 0)) return;
-	const messages = "messages" in context ? context.messages : context;
-	const inputTokens = messages.reduce(
-		(sum, message) => sum + estimateMessageTokens(message, tools === undefined),
-		tools === undefined ? 0 : estimateToolsTokens(tools),
-	);
+	const inputTokens = estimateProviderInputTokens(context, tools);
 	if (inputTokens > model.contextWindow)
 		throw new Error(
 			`Estimated provider input (${inputTokens} tokens) exceeds the context window of this model (${model.contextWindow} tokens). Reduce input or use a larger-context model.`,

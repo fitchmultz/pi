@@ -21,6 +21,7 @@
 - Fixed empty runtime API keys falling back to stored credentials; they are now rejected before changing the active override.
 - Fixed startup extension messages (such as Ponytail's mode receipt) displacing the native system/tool declaration, which disabled deferred tool additions: on Anthropic, lazily activated tools such as `intercom` rewrote the top-level tool list, reset the prompt cache and dropped earlier thinking; on OpenAI Codex, instructions and tools moved into input. Existing sessions adopt the fix at their next context window or compaction.
 - Fixed cache miss notices comparing a response with an abandoned branch after `/tree` navigation; live and redrawn notices now follow the active branch.
+- Fixed tool loadout changes during a session (reload, extension tool activation or removal) resetting the provider prompt cache when the provider supports append-only tool changes. Withdrawn tools are denied immediately, even while a response is generating.
 
 ## [0.87.1] - 2026-09-22
 
