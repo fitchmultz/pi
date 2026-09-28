@@ -1591,6 +1591,7 @@ export class AgentSession {
 				steeringId: event.steeringId,
 				responseId: event.responseId,
 				errorMessage: event.errorMessage,
+				...(event.diagnostic ? { diagnostic: event.diagnostic } : {}),
 			});
 			await this._extensionRunner.emit(event);
 			this._emit(event);
