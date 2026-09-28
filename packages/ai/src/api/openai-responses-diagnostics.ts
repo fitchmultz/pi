@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "../types.ts";
+import type { AssistantMessage, JsonValue } from "../types.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import type { WebSocketSocketDiagnostics } from "../utils/websocket-diagnostics.ts";
 
@@ -10,6 +10,7 @@ export type ResponsesDiagnostics = {
 		transport?: "websocket" | "sse";
 		requestedServiceTier: ReturnType<typeof diagnosticServiceTier>;
 		returnedServiceTier: ReturnType<typeof diagnosticServiceTier>;
+		prompt_cache_diagnostics?: JsonValue;
 		prepareMs?: number;
 		onPayloadMs?: number;
 		requestReadyMs?: number;
@@ -178,6 +179,26 @@ export function createResponsesDiagnostics(output: AssistantMessage): ResponsesD
 	return diagnostics;
 }
 
+/**
+ * A steering successor is a new response on the same request. Freeze the committed response's
+ * record and continue the live request record on the successor.
+ */
+export function continueResponsesDiagnostics(
+	diagnostics: ResponsesDiagnostics,
+	committed: AssistantMessage,
+	successor: AssistantMessage,
+): void {
+	const record = committed.diagnostics?.find((diagnostic) => diagnostic.details === diagnostics.details);
+	if (record) record.details = structuredClone(diagnostics.details);
+	// The successor reports its own cache result, if the provider sends one.
+	delete diagnostics.details.prompt_cache_diagnostics;
+	appendAssistantMessageDiagnostic(successor, {
+		type: "provider_request",
+		timestamp: record?.timestamp ?? Date.now(),
+		details: diagnostics.details,
+	});
+}
+
 /** Observe parsed application events, not socket packets, control frames, or backend timing. */
 export function recordResponsesEvent(
 	diagnostics: ResponsesDiagnostics,
@@ -208,8 +229,22 @@ export function recordResponsesEvent(
 		event.type === "response.failed"
 	) {
 		details.terminalEventMs = elapsed;
-		const response = event.response as { service_tier?: unknown } | undefined;
+		const response = event.response as
+			| {
+					service_tier?: unknown;
+					prompt_cache_diagnostics?: JsonValue;
+					usage?: {
+						prompt_cache_diagnostics?: JsonValue;
+						input_tokens_details?: { prompt_cache_diagnostics?: JsonValue };
+					};
+			  }
+			| undefined;
 		details.returnedServiceTier = diagnosticServiceTier(response?.service_tier);
+		const cacheDiagnostics =
+			response?.prompt_cache_diagnostics ??
+			response?.usage?.prompt_cache_diagnostics ??
+			response?.usage?.input_tokens_details?.prompt_cache_diagnostics;
+		if (cacheDiagnostics !== undefined) details.prompt_cache_diagnostics = cacheDiagnostics;
 	}
 }
 

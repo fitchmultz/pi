@@ -60,7 +60,11 @@ import {
 	resolveGrammarConstrainedSampling,
 	resolveJsonSchemaStrictSampling,
 } from "./constrained-sampling.ts";
-import { type ResponsesDiagnostics, recordResponsesEvent } from "./openai-responses-diagnostics.ts";
+import {
+	continueResponsesDiagnostics,
+	type ResponsesDiagnostics,
+	recordResponsesEvent,
+} from "./openai-responses-diagnostics.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
@@ -956,17 +960,19 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 
 	for await (const event of openaiStream) {
+		if (event.type === "response.created" && sawTerminalResponseEvent) {
+			const committed = output;
+			output = createResponsesSuccessor(output);
+			if (options?.diagnostics) continueResponsesDiagnostics(options.diagnostics, committed, output);
+			output.responseId = event.response.id;
+			outputSlots.clear();
+			reasoningBlocksById.clear();
+			sawTerminalResponseEvent = false;
+			options?.onResponseStart?.(output);
+			stream.push({ type: "start", partial: output, continuationInput: event.continuationInput });
+		}
 		if (options?.diagnostics) recordResponsesEvent(options.diagnostics, event);
 		if (event.type === "response.created") {
-			if (sawTerminalResponseEvent) {
-				output = createResponsesSuccessor(output);
-				output.responseId = event.response.id;
-				outputSlots.clear();
-				reasoningBlocksById.clear();
-				sawTerminalResponseEvent = false;
-				options?.onResponseStart?.(output);
-				stream.push({ type: "start", partial: output, continuationInput: event.continuationInput });
-			}
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
 			createSlot(event.output_index, event.item);
