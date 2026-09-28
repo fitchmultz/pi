@@ -12,6 +12,7 @@
 ### Changed
 
 - Changed the default Fireworks model to Kimi K3; Fireworks retired Kimi K2.6 from its catalog.
+- Changed the default OpenCode Go model to Kimi K3; OpenCode Go retired Kimi K2.6 from its catalog.
 - Changed `context_with_system` handling for new context windows: Pi restores its marked native system/tool declaration at index 0 with its initial tools after each handler and reports a warning when a handler removes, displaces, or reconstructs it; handlers may still edit its content and sections. See [Extensions](docs/extensions.md).
 - Changed cache miss notices and `/session` to list the changes observed between requests (model, service tier, tool definitions, instructions, older async results admitted, new connection, full resend, idle gap) plus provider-supplied reasons, and to report an actual drop in cached reads separately from tokens not read from cache. Dollar amounts are labeled estimates. See [settings](docs/settings.md).
 
