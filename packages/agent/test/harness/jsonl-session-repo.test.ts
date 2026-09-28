@@ -1,10 +1,16 @@
-import { describe, expect, it } from "vitest";
-import { BACKGROUND_CONTEXT, type Context } from "../../src/harness/context.ts";
+import { promises as nativeFs } from "node:fs";
+import * as fs from "node:fs/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BACKGROUND_CONTEXT, type Context, withAbortSignal } from "../../src/harness/context.ts";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { JSONL_STORAGE_VERSION, JsonlSessionRepo } from "../../src/harness/session/jsonl/index.ts";
-import { sessionName, setValue } from "../../src/harness/session/values.ts";
+import { sessionName, setValue, value } from "../../src/harness/session/values.ts";
 import { getOrThrow } from "../../src/harness/types.ts";
 import { createTempDir } from "./session-test-utils.ts";
+
+vi.mock("node:fs/promises", { spy: true });
+
+afterEach(() => vi.restoreAllMocks());
 
 const NOW = 1_700_000_000_000;
 
@@ -29,6 +35,33 @@ class AtomicPublicationNodeExecutionEnv extends NodeExecutionEnv {
 }
 
 describe("JsonlSessionRepo cwd-scoped lifecycle", () => {
+	it("retains a successful append despite late cancellation and reopens after another write", async () => {
+		const fileSystem = new NodeExecutionEnv({ cwd: createTempDir() });
+		const repo = new JsonlSessionRepo({ fileSystem, sessionsRoot: "sessions", now: () => NOW });
+		const session = await repo.create({ id: "late-abort", cwd: "/workspace" }, BACKGROUND_CONTEXT);
+		const address = value<string>("test", "payload");
+		await session.setName("before", BACKGROUND_CONTEXT);
+		const controller = new AbortController();
+		vi.mocked(fs.appendFile).mockImplementationOnce(async (...args) => {
+			await nativeFs.appendFile(...args);
+			controller.abort();
+		});
+
+		await session.setValue(address, "retained", withAbortSignal(controller.signal, BACKGROUND_CONTEXT));
+		expect(controller.signal.aborted).toBe(true);
+		expect(await session.getValue(address, BACKGROUND_CONTEXT)).toMatchObject({ value: "retained", seq: 2 });
+		await session.setName("after", BACKGROUND_CONTEXT);
+		await session.close(BACKGROUND_CONTEXT);
+
+		const lines = (await nativeFs.readFile(session.metadata.path, "utf8")).trimEnd().split("\n");
+		expect(lines.slice(1).map((line) => JSON.parse(line).seq)).toEqual([1, 2, 3]);
+		const reopened = await repo.open(session.metadata, BACKGROUND_CONTEXT);
+		expect(await reopened.getValue(address, BACKGROUND_CONTEXT)).toMatchObject({ value: "retained", seq: 2 });
+		expect(await reopened.getName(BACKGROUND_CONTEXT)).toBe("after");
+		await reopened.close(BACKGROUND_CONTEXT);
+		await repo.close(BACKGROUND_CONTEXT);
+	});
+
 	it("persists metadata and filters discovery by cwd", async () => {
 		const fileSystem = new NodeExecutionEnv({ cwd: createTempDir() });
 		const repo = new JsonlSessionRepo({ fileSystem, sessionsRoot: "sessions", now: () => NOW });

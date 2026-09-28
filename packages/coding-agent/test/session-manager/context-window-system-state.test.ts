@@ -30,6 +30,7 @@ it("retains current prompt and tools across a persisted context window without r
 	const messages = reopened.buildSessionContext().messages;
 
 	expect(messages.map((message) => message.role)).toEqual(["system", "custom", "user"]);
+	expect(messages[0]).toMatchObject({ nativeHead: true });
 	expect(getCurrentSystemPrompt(messages)).toBe("Runtime guidance\n\nUpdated rules");
 	expect(getCurrentTools(messages).map((tool) => tool.name)).toEqual(["chosen"]);
 	expect(messages[1]).toMatchObject({

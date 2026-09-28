@@ -1,10 +1,12 @@
 import type { ResponsesClientEvent } from "openai/resources/responses/responses.js";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { stream as codexStream } from "../src/api/openai-codex-responses.ts";
 import { stream as responsesStream } from "../src/api/openai-responses.ts";
 import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
+import { getModel } from "../src/compat.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type {
 	AssistantMessage,
@@ -411,9 +413,18 @@ it.each(["error", "aborted"] as const)(
 );
 
 describe.each([false, true])("native steering (Codex=%s)", (codex) => {
-	it.each(["completed", "steered", "pending", "pending-multiple", "rejected", "disconnect"] as const)(
-		"handles %s parent and preserves per-response usage",
-		async (mode) => {
+	it.each([
+		["completed", "gpt-6-astra"],
+		["steered", "gpt-6-astra"],
+		["pending", "gpt-6-astra"],
+		["pending-multiple", "gpt-6-astra"],
+		["rejected", "gpt-6-astra"],
+		["disconnect", "gpt-6-astra"],
+		["completed", "gpt-6-sol"],
+		["completed", "gpt-6-luna"],
+	] as const)(
+		"handles %s parent for catalog %s with async tools, positional effort and per-response usage",
+		async (mode, modelId) => {
 			const pending = mode === "pending" || mode === "pending-multiple";
 			vi.stubGlobal("WebSocket", WebSocket);
 			let parent: LocalResponsesRequest | undefined;
@@ -462,7 +473,9 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 						});
 				} else if (body.type === "response.create" && body.previous_response_id) {
 					expect(body.previous_response_id).toBe("parent");
-					expect(body.input).toEqual([{ type: "function_call_output", call_id: "call1", output: "actual" }]);
+					expect(body.input).toEqual([
+						{ type: "function_call_output", call_id: "call1", output: "actual\nmodel-only note" },
+					]);
 					if (mode === "pending-multiple")
 						request.send({
 							type: "response.steer.pending",
@@ -479,11 +492,21 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 				}
 			});
 			try {
+				const model = codex ? getModel("openai-codex", modelId) : getModel("openai", modelId);
+				const history = normalizeContext({
+					messages: [
+						...context.messages,
+						{ ...saved("low", "earlier"), api: model.api, provider: model.provider, model: model.id },
+						{ role: "user", content: "next", timestamp: 2 },
+					],
+					tools: [{ name: "work", description: "Work", parameters: Type.Object({}), async: true }],
+				});
 				const options = {
 					apiKey: codex ? token : "local",
-					sessionId: `native-${codex}-${mode}`,
+					sessionId: `native-${codex}-${mode}-${modelId}`,
 					transport: "websocket" as const,
 					timeoutMs: 1500,
+					reasoningEffort: "high" as const,
 					onResponseControl(value: ResponseControl | undefined) {
 						control = value;
 					},
@@ -491,19 +514,25 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 				const response = codex
 					? codexStream(
 							{
-								...nativeModel,
+								...model,
 								baseUrl: fixture.baseUrl,
 								api: "openai-codex-responses",
 								provider: "openai-codex",
 							},
-							context,
+							history,
 							options,
 						)
-					: responsesStream({ ...nativeModel, baseUrl: fixture.baseUrl }, context, options);
+					: responsesStream({ ...model, api: "openai-responses", baseUrl: fixture.baseUrl }, history, options);
 				const consume = (async () => {
 					for await (const event of response) events.push(structuredClone(event));
 				})();
 				await vi.waitFor(() => expect(control).toBeDefined());
+				expect.soft(parent?.body.tools).toMatchObject([{ name: "work", async: true }]);
+				expect.soft(parent?.body.reasoning).toMatchObject({ effort: "low" });
+				expect.soft(parent?.body.input).toContainEqual({
+					type: "configuration_update",
+					reasoning: { effort: "high" },
+				});
 				const steeringInput = { role: "user" as const, content: "new input", timestamp: 2 };
 				expect(control!.steer(steeringInput)).toBe(true);
 				steeringInput.content = "edited after send";
@@ -521,9 +550,14 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 						isError: false,
 						timestamp: 3,
 					};
-					control!.submitToolResults([result, { ...result, toolCallId: "unsent|fc_2" }]);
+					// The model-only copy reaches the frame; continuation input keeps the saved result.
+					const modelContent = (saved: ToolResultMessage) => [
+						...saved.content,
+						{ type: "text" as const, text: "model-only note" },
+					];
+					control!.submitToolResults([result, { ...result, toolCallId: "unsent|fc_2" }], modelContent);
 					result.content = [{ type: "text", text: "edited after send" }];
-					control!.submitToolResults([result]);
+					control!.submitToolResults([result], modelContent);
 				}
 				await consume;
 				const message = await response.result();
@@ -533,7 +567,7 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 					message: { endTurn: false },
 				});
 				expect(events.find((event) => event.type === "start")).not.toHaveProperty("continuationInput");
-				if (mode === "rejected") {
+				if (mode === "rejected" || (codex && mode === "disconnect")) {
 					expect(message).toMatchObject({
 						stopReason: "stop",
 						rawStopReason: "incomplete.steered",
@@ -576,9 +610,13 @@ describe.each([false, true])("native steering (Codex=%s)", (codex) => {
 									: ["queued", "accepted", "applied"],
 				);
 				expect(message.responseId).toBe(
-					mode === "disconnect" ? undefined : mode === "rejected" ? "parent" : "successor",
+					mode === "disconnect" && !codex
+						? undefined
+						: mode === "rejected" || mode === "disconnect"
+							? "parent"
+							: "successor",
 				);
-				expect(message.usage.totalTokens).toBe(mode === "disconnect" ? 0 : 110);
+				expect(message.usage.totalTokens).toBe(mode === "disconnect" && !codex ? 0 : 110);
 				expect(fixture.requests).toHaveLength(mode === "pending-multiple" ? 4 : pending ? 3 : 2);
 			} finally {
 				await fixture.close();

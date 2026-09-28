@@ -201,8 +201,14 @@ export interface ResponseControl {
 	readonly retired: boolean;
 	/** Retire the remote chain before starting a fresh local context. */
 	retire(): void;
-	/** Deliver saved results when accepted steering is waiting for client tools. Never executes tools. */
-	submitToolResults(results: ToolResultMessage[]): void;
+	/**
+	 * Deliver saved results when accepted steering is waiting for client tools. Never executes tools.
+	 * `modelContent` may replace a result's content in the sent frame only; continuation input keeps the saved result.
+	 */
+	submitToolResults(
+		results: ToolResultMessage[],
+		modelContent?: (result: ToolResultMessage) => ToolResultMessage["content"] | undefined,
+	): void;
 }
 
 export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
@@ -239,6 +245,12 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 * session-aware features. Ignored by providers that don't support it.
 	 */
 	sessionId?: string;
+	/**
+	 * In-memory identity for one logical turn, shared across provider calls and reconnects.
+	 * Use a fresh object for each prompt/continue run. Omit to disable turn-scoped routing state.
+	 * Never serialized; independent of session-level connection caching.
+	 */
+	turnScope?: object;
 	/**
 	 * WebSocket connect timeout in milliseconds for providers that support
 	 * WebSocket transports. This covers the connection/open handshake only;
@@ -521,6 +533,10 @@ export interface DeferredHandle {
  */
 export interface SystemMessage {
 	role: "system";
+	/** Host-only identity of the current compaction/fresh-window checkpoint; never serialized to providers. */
+	contextWindowId?: string;
+	/** Host-owned initial declaration anchor. Only new, unbound context windows opt in; never sent to providers. */
+	nativeHead?: true;
 	/** Instruction text. On the leading message this is the base prompt; later, additional instructions. */
 	content: string | TextContent[];
 	/**
@@ -534,6 +550,11 @@ export interface SystemMessage {
 	toolsAdded?: Tool[];
 	/** Tools that stop being available at this point. */
 	toolsRemoved?: ToolReference[];
+	/**
+	 * Host-only snapshot of source-owned deferred entry identities, never provider instructions or schemas.
+	 * Omitted patches preserve the prior snapshot; an array (including empty) replaces it.
+	 */
+	deferredToolEntries?: ToolReference[];
 	/**
 	 * Discard every earlier system message before applying this one, so its `content`,
 	 * `sections`, and `toolsAdded` are the complete prompt and tool state from here on.
@@ -577,6 +598,8 @@ export interface AssistantMessage {
 	deferred?: DeferredHandle;
 	errorMessage?: string;
 	rawStopReason?: string;
+	/** Projection-derived foreground tool failure in this response; preserves its reset veto when receipts are omitted. */
+	toolExecutionFailed?: boolean;
 	/**
 	 * Provider indication of whether the model explicitly ended its turn.
 	 * Preserved for debugging and does not currently affect agent control flow.
@@ -601,6 +624,8 @@ export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails>
 			usage?: Usage;
 			/** Actual executor time, excluding validation, preflight and result hooks. Absent when never executed. */
 			elapsedMs?: number;
+			/** Foreground scheduling skipped this call (for example, truncated arguments), rather than native work failing. */
+			executionSkipped?: boolean;
 			isError: boolean;
 			timestamp: number; // Unix timestamp in milliseconds
 		}
@@ -716,6 +741,8 @@ export type AssistantMessageEvent =
 	| {
 			type: "start";
 			partial: AssistantMessage;
+			/** Initial logical payload's result call IDs after onPayload, before delta extraction. [] is known empty; absent is unknown. */
+			inputToolCallIds?: readonly string[];
 			/** Inputs added to the preceding response by a native continuation. Absent on the first response. */
 			continuationInput?: readonly (UserMessage | ToolResultMessage)[];
 	  }
@@ -728,6 +755,8 @@ export type AssistantMessageEvent =
 			steeringId?: string;
 			responseId?: string;
 			errorMessage?: string;
+			/** Durable transport snapshot when an unresolved submission loses its connection. */
+			diagnostic?: AssistantMessageDiagnostic;
 	  }
 	| { type: "text_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
@@ -844,6 +873,8 @@ export interface OpenAIResponsesCompat {
 	supportsOpenAIGrammarTools?: boolean;
 	/** Whether the model supports message-anchored `additional_tools` input items. Default: false. */
 	supportsAdditionalTools?: boolean;
+	/** Whether public Responses accepts `tool_choice: allowed_tools`. Defaults to true on api.openai.com, false elsewhere; not used by Codex or Azure adapters. */
+	supportsAllowedTools?: boolean;
 	/** Whether the model supports client-executed tool search for transcript-anchored additions. Default: false. */
 	supportsToolSearch?: boolean;
 	/** Whether the model accepts `prompt_cache_options` (OpenAI GPT-5.6+ prompt caching). Older OpenAI models reject the parameter. Default: false. */

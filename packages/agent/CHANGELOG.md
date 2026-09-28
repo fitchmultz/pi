@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added `AgentLoopConfig.toolResultModelContent` and `Agent.toolResultModelContent` for model-only tool result content on live response continuations.
+- Added a per-run `turnScope` to agent-loop provider calls so providers can keep turn-scoped routing state across the run's requests.
+
+### Fixed
+
+- Fixed the agent loop executing tools that were withdrawn while a response was generating or during tool hooks. Admission now checks the live tool set immediately before execution and rejects in-place schema or executor changes made by hooks.
+
 ## [0.87.1] - 2026-09-22
 
 ## [0.87.0] - 2026-09-21

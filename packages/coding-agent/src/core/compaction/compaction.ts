@@ -38,6 +38,7 @@ import type {
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
 import {
+	buildContextEntries,
 	buildSessionProjection,
 	type CompactionEntry,
 	type ProjectedSessionEntry,
@@ -671,7 +672,10 @@ export function prepareCompaction(
 	}
 
 	const projection = buildSessionProjection(pathEntries);
-	const projectedEntries = projection.entries;
+	// Carried async calls retain old source IDs, but cannot reopen the raw history
+	// before the previous kept boundary. They still count in the full token estimate.
+	const retainedIds = new Set(buildContextEntries(pathEntries).map((entry) => entry.id));
+	const projectedEntries = projection.entries.filter((entry) => retainedIds.has(entry.sourceEntry.id));
 	const sourceEntries = projectedEntries.map((entry) => entry.sourceEntry);
 	// The newest compaction is projected first. Older compaction entries can still
 	// occur in its retained raw range, but their projected contribution is empty.

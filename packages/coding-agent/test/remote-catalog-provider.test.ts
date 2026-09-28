@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	createModels,
 	createProvider,
@@ -9,6 +12,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VERSION } from "../src/config.ts";
+import { ModelConfig } from "../src/core/model-config.ts";
+import { composeModelProvider } from "../src/core/provider-composer.ts";
 import { withRemoteCatalog } from "../src/core/remote-catalog-provider.ts";
 
 const neverAbortedSignal = new AbortController().signal;
@@ -72,6 +77,143 @@ async function refreshProvider(
 afterEach(() => vi.restoreAllMocks());
 
 describe("remote catalog provider", () => {
+	describe.each(["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"])("%s lifecycle defaults", (modelId) => {
+		it.each([
+			["openai", "openai-responses"],
+			["openai-codex", "openai-codex-responses"],
+			["cloudflare-ai-gateway", "openai-responses"],
+		] as const)(
+			"retains capabilities and parsed opt-outs through cached and refreshed %s catalogs",
+			async (id, api) => {
+				const astra = { ...model(modelId), provider: id, api, compat: { supportsStrictMode: true } };
+				const provider = withRemoteCatalog(
+					createProvider({
+						id,
+						auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
+						models: [astra],
+						api: {
+							stream: () => {
+								throw new Error("not used");
+							},
+							streamSimple: () => {
+								throw new Error("not used");
+							},
+						},
+					}),
+					"https://pi.dev",
+					1,
+				);
+				const store = new InMemoryModelsStore();
+				const directory = await mkdtemp(join(tmpdir(), "lifecycle-overrides-"));
+				let config: ModelConfig;
+				const preferences = {
+					contextWindow: 500000,
+					thinkingLevelMap: { minimal: null, high: "max" },
+					compat: { supportsAsyncTools: false, supportsSteering: false, supportsReasoningEffortUpdates: false },
+				};
+				try {
+					const path = join(directory, "models.json");
+					await writeFile(
+						path,
+						JSON.stringify({ providers: { [id]: { modelOverrides: { [modelId]: preferences } } } }),
+					);
+					config = await ModelConfig.load(path);
+				} finally {
+					await rm(directory, { recursive: true, force: true });
+				}
+				expect(config.getError()).toBeUndefined();
+				const configured = composeModelProvider(id, provider, config, undefined);
+				await store.write(id, { models: [{ ...astra, contextWindow: 2000 }], lastModified: 2 });
+				await refreshProvider(provider, store, { allowNetwork: false });
+				expect(configured.getModels()[0]).toMatchObject(preferences);
+				expect(provider.getModels()[0]).toMatchObject({
+					contextWindow: 2000,
+					compat: {
+						supportsStrictMode: true,
+						supportsAsyncTools: true,
+						supportsSteering: true,
+						supportsReasoningEffortUpdates: true,
+					},
+				});
+
+				vi.spyOn(globalThis, "fetch").mockResolvedValue(
+					new Response(
+						JSON.stringify({
+							astra: { ...astra, contextWindow: 3000, compat: { supportsStrictMode: false } },
+						}),
+						{ headers: { "last-modified": new Date(3000).toUTCString() } },
+					),
+				);
+				await refreshProvider(provider, store, { force: true });
+				expect(configured.getModels()[0]).toMatchObject(preferences);
+				expect(provider.getModels()[0]).toMatchObject({
+					contextWindow: 3000,
+					compat: {
+						supportsStrictMode: false,
+						supportsAsyncTools: true,
+						supportsSteering: true,
+						supportsReasoningEffortUpdates: true,
+					},
+				});
+
+				await store.write(id, {
+					models: [
+						{
+							...astra,
+							compat: {
+								supportsAsyncTools: false,
+								supportsSteering: false,
+								supportsReasoningEffortUpdates: false,
+							},
+						},
+					],
+					lastModified: 4,
+				});
+				await refreshProvider(provider, store, { allowNetwork: false });
+				expect(provider.getModels()[0].compat).toEqual({
+					supportsAsyncTools: false,
+					supportsSteering: false,
+					supportsReasoningEffortUpdates: false,
+				});
+			},
+		);
+	});
+
+	it("merges dotted Cloudflare AI Gateway Claude IDs into their Anthropic IDs", async () => {
+		const opus = {
+			...model("claude-opus-5-5"),
+			provider: "cloudflare-ai-gateway",
+			api: "anthropic-messages" as const,
+			compat: { sendSessionAffinityHeaders: true },
+		};
+		const provider = withRemoteCatalog(
+			createProvider({
+				id: "cloudflare-ai-gateway",
+				auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
+				models: [opus],
+				api: {
+					stream: () => {
+						throw new Error("not used");
+					},
+					streamSimple: () => {
+						throw new Error("not used");
+					},
+				},
+			}),
+			"https://pi.dev",
+			1,
+		);
+		const store = new InMemoryModelsStore();
+		await store.write(provider.id, {
+			models: [{ ...opus, id: "claude-opus-5.5", contextWindow: 2000 }],
+			lastModified: 2,
+		});
+		await refreshProvider(provider, store, { allowNetwork: false });
+		expect(provider.getModels().map(({ id, contextWindow }) => ({ id, contextWindow }))).toEqual([
+			{ id: "claude-opus-5-5", contextWindow: 2000 },
+		]);
+	});
+
 	it("parses keyed catalogs, sends version headers, observes the refresh TTL, and supports forced refreshes", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			async () =>

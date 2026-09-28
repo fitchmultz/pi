@@ -1,4 +1,10 @@
-import type { Api, Model, ModelsStoreEntry, Provider } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	type Model,
+	type ModelsStoreEntry,
+	type Provider,
+	withOpenAIResponsesLifecycleDefaults,
+} from "@earendil-works/pi-ai";
 import { VERSION } from "../config.ts";
 import { fetchWithRetry } from "../utils/management-http.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
@@ -15,6 +21,13 @@ function mergeModels(baseline: readonly Model<Api>[], dynamic: readonly Model<Ap
 		else merged.push(model);
 	}
 	return merged;
+}
+
+// pi.dev serves models.dev's dotted gateway Claude IDs; Cloudflare's /anthropic passthrough needs Anthropic's.
+function withCloudflareAnthropicModelId(model: Model<Api>): Model<Api> {
+	return model.provider === "cloudflare-ai-gateway" && model.api === "anthropic-messages"
+		? { ...model, id: model.id.replaceAll(".", "-") }
+		: model;
 }
 
 function parseCatalog(providerId: string, value: unknown): Model<Api>[] {
@@ -52,7 +65,10 @@ export function withRemoteCatalog(
 
 	return {
 		...provider,
-		getModels: () => mergeModels(provider.getModels(), dynamicModels),
+		getModels: () =>
+			mergeModels(provider.getModels(), dynamicModels.map(withCloudflareAnthropicModelId)).map(
+				withOpenAIResponsesLifecycleDefaults,
+			),
 		refreshModels: async (context) => {
 			const stored = context.stored;
 			const restored = remoteModels(stored, localGeneratedAt).filter((model) => model.provider === provider.id);

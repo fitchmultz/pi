@@ -75,6 +75,10 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	message: AgentMessage;
 	/** Non-billable completed-item snapshot saved before an early tool effect. */
 	checkpoint?: boolean;
+	/** Original result entry IDs present in this successful assistant response's request input. */
+	consumedToolResultIds?: string[];
+	/** Native receipts after the request frontier, excluded from its input, preceding its first snapshot. */
+	concurrentToolResultIds?: string[];
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -92,6 +96,8 @@ export interface ContextWindowEntry extends SessionEntryBase {
 	type: "context_window";
 	/** Optional continuation state supplied by the previous window. */
 	handoff?: string;
+	/** Original result entry IDs not yet consumed by a completed provider response. */
+	retainedToolResultIds?: string[];
 	/** Active context size immediately before the window transition, when known. */
 	tokensBefore: number | null;
 	/** Prompt and tool state retained while earlier conversation is dropped. */
@@ -486,7 +492,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	if (entry.type === "context_window") {
 		const handoff = entry.handoff ? `\n\nHandoff from the previous window:\n${entry.handoff}` : "";
 		return [
-			...(entry.systemMessage ? [entry.systemMessage] : []),
+			...(entry.systemMessage ? [{ ...entry.systemMessage, contextWindowId: entry.id }] : []),
 			createCustomMessage(
 				"context-window",
 				`Context window ${entry.id} starts here. Earlier conversation is not available in this window.${handoff}`,
@@ -498,7 +504,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	}
 	if (entry.type === "compaction") {
 		const summary = createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
-		return entry.systemMessage ? [entry.systemMessage, summary] : [summary];
+		return entry.systemMessage ? [{ ...entry.systemMessage, contextWindowId: entry.id }, summary] : [summary];
 	}
 	return [];
 }
@@ -516,6 +522,7 @@ function coalesceAssistantCheckpoints(path: SessionEntry[]): SessionEntry[] {
 					previous.type === "message" && previous.message.role === "assistant"
 						? {
 								...(entry.checkpoint ? previous : entry),
+								concurrentToolResultIds: previous.concurrentToolResultIds,
 								message: mergeAssistantCheckpoint(previous.message, entry.message),
 							}
 						: entry;
@@ -535,21 +542,43 @@ function coalesceAssistantCheckpoints(path: SessionEntry[]): SessionEntry[] {
  * window, the latest compaction is represented by its summary, its kept entries,
  * and everything appended afterward.
  */
-export function buildContextEntries(
+function buildModelContextEntries(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
+	retainedByBoundary = new Map<string, Set<string>>(),
 ): SessionEntry[] {
 	const fullPath = buildSessionPath(entries, leafId, byId);
+	// Late execution checkpoints update the original response, not the window
+	// in which they were saved. Coalesce before cutting away older conversation.
+	const coalescedPath = orderConcurrentToolResults(
+		coalesceAssistantCheckpoints(fullPath),
+		fullPath,
+		retainedByBoundary,
+	);
 	let contextWindowIndex = -1;
-	for (let i = fullPath.length - 1; i >= 0; i--) {
-		if (fullPath[i].type === "context_window") {
+	for (let i = coalescedPath.length - 1; i >= 0; i--) {
+		if (coalescedPath[i].type === "context_window") {
 			contextWindowIndex = i;
 			break;
 		}
 	}
-	const windowPath = contextWindowIndex === -1 ? fullPath : fullPath.slice(contextWindowIndex);
-	const path = coalesceAssistantCheckpoints(windowPath);
+	const path = contextWindowIndex === -1 ? coalescedPath : coalescedPath.slice(contextWindowIndex);
+	const window = path[0];
+	if (window?.type === "context_window" && window.retainedToolResultIds?.length) {
+		const retainedIds = new Set(window.retainedToolResultIds);
+		// Retain the original receipts before applying compaction, so a later summary
+		// can keep or drop them like ordinary results without reopening old prose.
+		path.splice(
+			1,
+			0,
+			...coalescedPath
+				.slice(0, contextWindowIndex)
+				.filter(
+					(entry) => entry.type === "message" && entry.message.role === "toolResult" && retainedIds.has(entry.id),
+				),
+		);
+	}
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -568,29 +597,102 @@ export function buildContextEntries(
 	}
 
 	const contextEntries: SessionEntry[] = [compaction];
-	let foundFirstKept = false;
-	const firstKept = windowPath.find((entry) => entry.id === compaction.firstKeptEntryId);
+	const firstKept = fullPath.find((entry) => entry.id === compaction.firstKeptEntryId);
 	const firstKeptResponseId =
 		firstKept?.type === "message" && firstKept.message.role === "assistant"
 			? firstKept.message.responseId
 			: undefined;
-	for (let i = 0; i < compactionIdx; i++) {
-		const entry = path[i];
-		if (
+	let firstKeptIndex = path.findIndex(
+		(entry) =>
 			entry.id === compaction.firstKeptEntryId ||
 			(firstKeptResponseId &&
 				entry.type === "message" &&
 				entry.message.role === "assistant" &&
-				entry.message.responseId === firstKeptResponseId)
-		) {
-			foundFirstKept = true;
-		}
-		if (foundFirstKept && !(entry.type === "message" && entry.message.role === "system")) {
+				entry.message.responseId === firstKeptResponseId),
+	);
+	let rawKeptIds: Set<string> | undefined;
+	if (firstKeptIndex < 0 && firstKept) {
+		// A saved checkpoint anchor may have coalesced into a response before this window.
+		// Other final responses can move before that anchor too; select each entry by its raw position.
+		rawKeptIds = new Set(fullPath.slice(fullPath.indexOf(firstKept)).map((entry) => entry.id));
+		firstKeptIndex = 0;
+	}
+	for (let i = firstKeptIndex; i >= 0 && i < compactionIdx; i++) {
+		const entry = path[i];
+		if ((!rawKeptIds || rawKeptIds.has(entry.id)) && !(entry.type === "message" && entry.message.role === "system")) {
 			contextEntries.push(entry);
 		}
 	}
 	contextEntries.push(...path.slice(compactionIdx + 1));
 	return contextEntries;
+}
+
+/** Move only explicitly related earlier receipts; later responses can defer the same receipt again. */
+function orderConcurrentToolResults(
+	path: SessionEntry[],
+	fullPath: SessionEntry[],
+	retainedByBoundary: Map<string, Set<string>>,
+): SessionEntry[] {
+	const positions = new Map(path.map((entry, index) => [entry.id, index]));
+	const after = new Map<string, number>();
+	let boundary = -1;
+	let retainedAtBoundary: Set<string> | undefined;
+	for (const [index, entry] of path.entries()) {
+		if (entry.type === "compaction" || entry.type === "context_window") {
+			boundary = index;
+			retainedAtBoundary = undefined;
+		}
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		for (const id of entry.concurrentToolResultIds ?? []) {
+			const position = positions.get(id);
+			if (position === undefined || position >= index) continue;
+			if (position < boundary) {
+				// Resolve the strictly earlier branch at the cut, before this response can
+				// move anything. Reuse retention semantics, including prior causal cuts.
+				if (!retainedAtBoundary) {
+					const boundaryId = path[boundary].id;
+					retainedAtBoundary = retainedByBoundary.get(boundaryId);
+					if (!retainedAtBoundary) {
+						retainedAtBoundary = new Set(
+							buildModelContextEntries(fullPath, boundaryId, undefined, retainedByBoundary).map(
+								(entry) => entry.id,
+							),
+						);
+						// Invocation-local: each exact cut is resolved once, never cached across edits or branches.
+						retainedByBoundary.set(boundaryId, retainedAtBoundary);
+					}
+				}
+				if (!retainedAtBoundary.has(id)) continue;
+			}
+			const receipt = path[position];
+			if (receipt.type === "message" && receipt.message.role === "toolResult") after.set(id, index);
+		}
+	}
+	const deferred = new Map<number, SessionEntry[]>();
+	for (const entry of path) {
+		const index = after.get(entry.id);
+		if (index === undefined) continue;
+		const receipts = deferred.get(index) ?? [];
+		receipts.push(entry);
+		deferred.set(index, receipts);
+	}
+	return path.flatMap((entry, index) => [...(after.has(entry.id) ? [] : [entry]), ...(deferred.get(index) ?? [])]);
+}
+
+/** Present the causally retained set in arrival order, with its active boundary first. */
+export function buildContextEntries(
+	entries: SessionEntry[],
+	leafId?: string | null,
+	byId?: Map<string, SessionEntry>,
+): SessionEntry[] {
+	const selected = buildModelContextEntries(entries, leafId, byId);
+	const positions = new Map(
+		coalesceAssistantCheckpoints(buildSessionPath(entries, leafId, byId)).map((entry, index) => [entry.id, index]),
+	);
+	const boundary =
+		selected[0]?.type === "compaction" || selected[0]?.type === "context_window" ? selected.shift() : undefined;
+	selected.sort((a, b) => positions.get(a.id)! - positions.get(b.id)!);
+	return boundary ? [boundary, ...selected] : selected;
 }
 
 /**
@@ -621,6 +723,26 @@ function projectContextEntry(entry: SessionEntry, edit: ContextEditEntry | undef
 	});
 }
 
+/** Keep each surviving output with its reasoning group, which may also cover other outputs. */
+function filterAssistantOutputs(
+	content: AssistantMessage["content"],
+	keep: (block: AssistantMessage["content"][number]) => boolean,
+): AssistantMessage["content"] {
+	const filtered: AssistantMessage["content"] = [];
+	const reasoning: AssistantMessage["content"] = [];
+	let removed = false;
+	for (const [index, block] of content.entries()) {
+		if (block.type === "thinking") {
+			if (content[index - 1]?.type !== "thinking") reasoning.length = 0;
+			reasoning.push(block);
+		} else if (keep(block)) {
+			filtered.push(...reasoning, block);
+			reasoning.length = 0;
+		} else removed = true;
+	}
+	return removed ? filtered : content;
+}
+
 /** Build provenance-preserving, compaction-aware model context. */
 export function buildSessionProjection(
 	entries: SessionEntry[],
@@ -629,7 +751,14 @@ export function buildSessionProjection(
 ): SessionProjection {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const contextEntries = buildContextEntries(entries, leafId, byId);
+	const contextEntries = buildModelContextEntries(entries, leafId, byId);
+	const allResults = new Map(
+		path.flatMap((entry) =>
+			entry.type === "message" && entry.message.role === "toolResult"
+				? [[entry.message.toolCallId, entry.message] as const]
+				: [],
+		),
+	);
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of path) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
@@ -650,17 +779,10 @@ export function buildSessionProjection(
 						),
 		}),
 	);
-	// Async result dependencies span turns. Carry only their original call items across
-	// compaction; a fresh context-window boundary deliberately excludes older operations.
-	if (contextEntries[0]?.type === "compaction") {
-		let windowIndex = -1;
-		for (let index = path.length - 1; index >= 0; index--) {
-			if (path[index].type === "context_window") {
-				windowIndex = index;
-				break;
-			}
-		}
-		const windowEntries = coalesceAssistantCheckpoints(path.slice(Math.max(0, windowIndex)));
+	// Async work outlives conversation. Carry only unresolved call items and the
+	// originals needed by retained results across compactions and fresh windows.
+	if (contextEntries[0]?.type === "compaction" || contextEntries[0]?.type === "context_window") {
+		const branchEntries = coalesceAssistantCheckpoints(path);
 		const retained = projectedEntries.flatMap((entry) => entry.messages);
 		const retainedCalls = new Set(
 			retained.flatMap((message) =>
@@ -672,28 +794,27 @@ export function buildSessionProjection(
 		const retainedResults = new Set(
 			retained.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
 		);
-		const allResults = new Set(
-			windowEntries.flatMap((entry) =>
-				entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
-			),
-		);
-		const carried = windowEntries.flatMap((sourceEntry): ProjectedSessionEntry[] => {
+		const carried = branchEntries.flatMap((sourceEntry): ProjectedSessionEntry[] => {
 			if (sourceEntry.type !== "message" || sourceEntry.message.role !== "assistant") return [];
 			const message = projectContextEntry(sourceEntry, edits.get(sourceEntry.id))[0];
 			if (message?.role !== "assistant") return [];
-			const calls = message.content.filter(
+			// Keep replay signatures without text that another model would convert back to old prose.
+			const content = filterAssistantOutputs(
+				message.content,
 				(call) =>
 					call.type === "toolCall" &&
-					call.async &&
+					!!call.async &&
 					!retainedCalls.has(call.id) &&
 					(retainedResults.has(call.id) || !allResults.has(call.id)),
-			);
-			return calls.length > 0 ? [{ sourceEntry, messages: [{ ...message, content: calls }] }] : [];
+			).map((block) => (block.type === "thinking" ? { ...block, thinking: "" } : block));
+			return content.some((block) => block.type === "toolCall")
+				? [{ sourceEntry, messages: [{ ...message, content }] }]
+				: [];
 		});
 		projectedEntries.splice(1, 0, ...carried);
 		// An explicit call omission also omits its dependent output; never resurrect the removed call.
 		const omittedCalls = new Set<string>();
-		for (const source of windowEntries) {
+		for (const source of branchEntries) {
 			if (source.type !== "message" || source.message.role !== "assistant" || !edits.has(source.id)) continue;
 			const visible = projectContextEntry(source, edits.get(source.id))[0];
 			const visibleIds = new Set(
@@ -719,6 +840,44 @@ export function buildSessionProjection(
 			if (retainedIds.has(entry.sourceEntry.id)) entry.messages = withoutToolSearchState(entry.messages);
 		}
 	}
+	const retainedResults = new Set(
+		projectedEntries.flatMap((entry) =>
+			entry.messages.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
+		),
+	);
+	for (const entry of projectedEntries) {
+		const source = entry.sourceEntry;
+		const toolExecutionFailed =
+			(source.type === "message" &&
+				source.message.role === "assistant" &&
+				source.message.content?.some((call) => {
+					if (call.type !== "toolCall") return false;
+					const result = allResults.get(call.id);
+					return result?.isError && (result.executionSkipped || !(call.async && call.responsesItem?.async));
+				})) ||
+			undefined;
+		entry.messages = entry.messages.map((message) => {
+			if (message.role !== "assistant") return message;
+			const content = filterAssistantOutputs(
+				message.content,
+				(block) =>
+					!(
+						block.type === "toolCall" &&
+						(block.executionStarted || (block.async && block.responsesItem)) &&
+						allResults.has(block.id) &&
+						!retainedResults.has(block.id)
+					),
+			);
+			if (content === message.content && message.toolExecutionFailed === toolExecutionFailed) return message;
+			return { ...message, content, toolExecutionFailed };
+		});
+	}
+	// Keep journal arrival order; only new declarations opt into leading model context.
+	// Unmarked legacy prefixes must replay as they were originally bound.
+	const headIndex = projectedEntries.findIndex((entry) =>
+		entry.messages.some((message) => message.role === "system" && message.nativeHead),
+	);
+	if (headIndex > 0) projectedEntries.unshift(...projectedEntries.splice(headIndex, 1));
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),
@@ -1153,7 +1312,7 @@ export class SessionManager {
 	private persist: boolean;
 	private flushed: boolean = false;
 	/** A failed write may have left missing entries or a partial JSONL record. */
-	private needsRewrite = false;
+	private needsRewrite: "w" | "wx" | undefined;
 	private failedAppendIndex: number | undefined;
 	private fileEntries: FileEntry[] = [];
 	private entriesRevision = 0;
@@ -1171,7 +1330,7 @@ export class SessionManager {
 		preloadedFileEntries?: FileEntry[],
 	) {
 		this.cwd = resolvePath(cwd);
-		this.sessionDir = normalizePath(sessionDir);
+		this.sessionDir = sessionDir ? resolvePath(sessionDir) : "";
 		this.persist = persist;
 		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
 			mkdirSync(this.sessionDir, { recursive: true });
@@ -1291,7 +1450,7 @@ export class SessionManager {
 
 	private _rewriteFile(flag: "w" | "wx" = "w"): void {
 		if (!this.persist || !this.sessionFile) return;
-		if (flag === "w") this.needsRewrite = true;
+		if (flag === "w") this.needsRewrite = flag;
 		let destination = this.sessionFile;
 		let mode: number | undefined;
 		if (flag === "w" && existsSync(destination)) {
@@ -1303,7 +1462,7 @@ export class SessionManager {
 		}
 		const temporary = flag === "w" ? `${destination}.${randomUUID()}.tmp` : undefined;
 		const fd = openSync(temporary ?? destination, "wx", mode);
-		this.needsRewrite = true;
+		this.needsRewrite = flag;
 		// Only a successful exclusive creation authorizes repairing an initial file.
 		// Keep open outside cleanup so a collision never removes someone else's file.
 		if (!temporary) this.flushed = true;
@@ -1319,7 +1478,7 @@ export class SessionManager {
 			// Never truncate prior journal bytes when a repair write or close fails.
 			if (temporary) renameSync(temporary, destination);
 			this.flushed = true;
-			this.needsRewrite = false;
+			this.needsRewrite = undefined;
 		} finally {
 			if (temporary) rmSync(temporary, { force: true });
 		}
@@ -1337,6 +1496,12 @@ export class SessionManager {
 	 * new journals wait for an assistant response, usage entry, or custom entry.
 	 */
 	flush(): void {
+		// An initial save may have exposed a valid journal that another writer resumed.
+		// Recover its missing entries through the append path instead of replacing it.
+		if (this.needsRewrite === "wx" && this.sessionFile && loadEntriesFromFile(this.sessionFile).length > 0) {
+			this.needsRewrite = undefined;
+			this.failedAppendIndex = 1;
+		}
 		if (this.needsRewrite || (!this.flushed && this._hasPersistableEntries())) {
 			this._rewriteFile(this.flushed ? "w" : "wx");
 		}
@@ -1423,7 +1588,12 @@ export class SessionManager {
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(message: Message | CustomMessage | BashExecutionMessage, checkpoint = false): string {
+	appendMessage(
+		message: Message | CustomMessage | BashExecutionMessage,
+		checkpoint = false,
+		consumedToolResultIds?: string[],
+		concurrentToolResultIds?: string[],
+	): string {
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
@@ -1431,6 +1601,8 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			message,
 			...(checkpoint ? { checkpoint: true } : {}),
+			...(consumedToolResultIds?.length ? { consumedToolResultIds: [...consumedToolResultIds] } : {}),
+			...(concurrentToolResultIds?.length ? { concurrentToolResultIds: [...concurrentToolResultIds] } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1464,7 +1636,11 @@ export class SessionManager {
 	}
 
 	/** Append a fresh context-window boundary as child of current leaf, then advance leaf. Returns entry id. */
-	appendContextWindow(handoff: string | undefined, tokensBefore: number | null): string {
+	appendContextWindow(
+		handoff: string | undefined,
+		tokensBefore: number | null,
+		retainedToolResultIds?: string[],
+	): string {
 		const timestamp = new Date().toISOString();
 		const systemMessage = getCurrentSystemMessage(this.buildSessionContext().messages);
 		const entry: ContextWindowEntry = {
@@ -1474,10 +1650,33 @@ export class SessionManager {
 			timestamp,
 			handoff,
 			tokensBefore,
-			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
+			...(retainedToolResultIds?.length ? { retainedToolResultIds: [...retainedToolResultIds] } : {}),
+			...(systemMessage
+				? { systemMessage: { ...systemMessage, nativeHead: true, timestamp: new Date(timestamp).getTime() } }
+				: {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
+	}
+
+	/** Publish a validated prospective window without regenerating its marker or draft IDs. */
+	appendPreparedContextWindow(preview: SessionManager, windowId: string): void {
+		const branch = preview.getBranch();
+		const index = branch.findIndex((entry) => entry.id === windowId && entry.type === "context_window");
+		if (preview.persist || preview.sessionId !== this.sessionId || index < 0)
+			throw new Error("Invalid context window preview");
+		const entries = branch.slice(index);
+		let parentId = this.leafId;
+		for (const [offset, entry] of entries.entries()) {
+			if (
+				entry.parentId !== parentId ||
+				this.byId.has(entry.id) ||
+				(offset > 0 && entry.type !== "context_edit" && entry.type !== "custom_message")
+			)
+				throw new Error("Context window preview no longer extends the active branch");
+			parentId = entry.id;
+		}
+		for (const entry of entries) this._appendEntry(entry);
 	}
 
 	/** Append model-attributed usage that does not participate in LLM context. Returns the appended entry. */
@@ -1571,7 +1770,9 @@ export class SessionManager {
 			details,
 			usage,
 			fromHook,
-			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
+			...(systemMessage
+				? { systemMessage: { ...systemMessage, nativeHead: true, timestamp: new Date(timestamp).getTime() } }
+				: {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -2077,9 +2278,13 @@ export class SessionManager {
 		return new SessionManager(cwd, dir, undefined, true);
 	}
 
-	/** Create an in-memory session (no file persistence), optionally from entries held outside the filesystem. */
-	static inMemory(cwd: string = process.cwd(), options?: NewSessionOptions, entries?: FileEntry[]): SessionManager {
-		return new SessionManager(cwd, "", undefined, false, options, entries);
+	/** No journal persistence. sessionDir optionally locates durable artifacts such as background jobs. */
+	static inMemory(
+		cwd: string = process.cwd(),
+		options?: NewSessionOptions & { sessionDir?: string },
+		entries?: FileEntry[],
+	): SessionManager {
+		return new SessionManager(cwd, options?.sessionDir ?? "", undefined, false, options, entries);
 	}
 
 	/**

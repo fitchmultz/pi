@@ -35,6 +35,7 @@ import type {
 	Usage,
 	UserMessage,
 } from "../types.ts";
+import { assertContextFits } from "../utils/estimate.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
@@ -59,7 +60,11 @@ import {
 	resolveGrammarConstrainedSampling,
 	resolveJsonSchemaStrictSampling,
 } from "./constrained-sampling.ts";
-import { type ResponsesDiagnostics, recordResponsesEvent } from "./openai-responses-diagnostics.ts";
+import {
+	continueResponsesDiagnostics,
+	type ResponsesDiagnostics,
+	recordResponsesEvent,
+} from "./openai-responses-diagnostics.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
@@ -93,6 +98,30 @@ function parseTextSignature(
 }
 
 type ToolResultOutputContent = Array<ResponseInputText | ResponseInputImage>;
+
+/** Snapshot logical input, not the connection's extracted delta. */
+export function getResponsesInputToolCallIds(body: {
+	input?: unknown;
+	previous_response_id?: unknown;
+	conversation?: unknown;
+}): string[] | undefined {
+	// ponytail: opaque server history cannot prove membership; expand only with authoritative resolved input.
+	if (body.previous_response_id != null || body.conversation != null) return undefined;
+	if (typeof body.input === "string") return [];
+	if (!Array.isArray(body.input)) return undefined;
+	const ids: string[] = [];
+	const input: unknown[] = body.input;
+	for (const item of input) {
+		if (!item || typeof item !== "object") return undefined;
+		const type = "type" in item ? item.type : undefined;
+		if (type === "compaction" || type === "item_reference" || (type == null && !("role" in item))) return undefined;
+		if (type === "function_call_output" || type === "custom_tool_call_output" || type === "tool_search_output") {
+			if (!("call_id" in item) || typeof item.call_id !== "string") return undefined;
+			ids.push(item.call_id);
+		}
+	}
+	return ids;
+}
 
 export function convertToolResultOutput<TApi extends Api>(
 	model: Model<TApi>,
@@ -177,12 +206,34 @@ export function getNativeToolSearch(tools: readonly Tool[], supported: boolean |
 	return searches.length === 1 ? searches[0] : undefined;
 }
 
+/** The first search declaration group binds the nameless wire identity until the tool baseline is rebuilt. */
+export function getTranscriptNativeToolSearch(
+	context: TranscriptContext,
+	supported: boolean | undefined,
+): Tool | undefined {
+	if (!supported) return undefined;
+	for (const message of context.messages) {
+		if (message.role !== "system" && message.role !== "toolResult") continue;
+		const searches = message.toolsAdded?.filter((tool) => tool.toolSearch) ?? [];
+		if (searches.length > 0) return getNativeToolSearch(searches, true);
+	}
+	return undefined;
+}
+
 /** Tool-search additions can remain in place even when later instruction text must be folded. */
 export function resolveResponsesTranscript(
 	context: TranscriptContext,
 	supportsMidConvoSystemMessages: boolean | undefined,
 	supportsToolSearch: boolean | undefined,
+	model?: Model<Api>,
+	supportsAdditionalTools?: boolean,
 ): TranscriptContext {
+	if (supportsMidConvoSystemMessages)
+		context = resolveTranscript(context, true, "all", {
+			contextWindow: model?.contextWindow ?? 0,
+			transform: (messages) => (model ? transformMessages(messages, model) : messages),
+			tools: supportsToolSearch || supportsAdditionalTools ? "inline" : "current",
+		});
 	const nonAdditive = hasNonAdditiveToolChanges(context.messages);
 	if (
 		nonAdditive &&
@@ -275,6 +326,8 @@ export function convertResponsesMessages<TApi extends Api>(
 		context,
 		options?.supportsMidConvoSystemMessages,
 		options?.supportsToolSearch,
+		model,
+		options?.supportsAdditionalTools,
 	);
 	const messages: ResponseInput = [];
 
@@ -322,6 +375,11 @@ export function convertResponsesMessages<TApi extends Api>(
 	const transcriptTools = resolveTranscriptTools(
 		normalizedContext.messages,
 		(options?.supportsAdditionalTools ?? false) || (options?.supportsToolSearch ?? false),
+	);
+	assertContextFits(
+		model,
+		transformedMessages,
+		transcriptTools.anchorsAdditions ? undefined : transcriptTools.requestTools,
 	);
 	const appendSystemToolAdditions = (message: Pick<SystemMessage, "toolsAdded">, seed: string): void => {
 		const tools = transcriptTools.anchorsAdditions ? (message.toolsAdded ?? []) : [];
@@ -926,17 +984,19 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 
 	for await (const event of openaiStream) {
+		if (event.type === "response.created" && sawTerminalResponseEvent) {
+			const committed = output;
+			output = createResponsesSuccessor(output);
+			if (options?.diagnostics) continueResponsesDiagnostics(options.diagnostics, committed, output);
+			output.responseId = event.response.id;
+			outputSlots.clear();
+			reasoningBlocksById.clear();
+			sawTerminalResponseEvent = false;
+			options?.onResponseStart?.(output);
+			stream.push({ type: "start", partial: output, continuationInput: event.continuationInput });
+		}
 		if (options?.diagnostics) recordResponsesEvent(options.diagnostics, event);
 		if (event.type === "response.created") {
-			if (sawTerminalResponseEvent) {
-				output = createResponsesSuccessor(output);
-				output.responseId = event.response.id;
-				outputSlots.clear();
-				reasoningBlocksById.clear();
-				sawTerminalResponseEvent = false;
-				options?.onResponseStart?.(output);
-				stream.push({ type: "start", partial: output, continuationInput: event.continuationInput });
-			}
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
 			createSlot(event.output_index, event.item);

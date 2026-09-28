@@ -1,4 +1,11 @@
 export {
+	type BackgroundCommandToolDetails,
+	type BackgroundCommandToolInput,
+	type BackgroundCommandToolOptions,
+	createBackgroundCommandTool,
+	createBackgroundCommandToolDefinition,
+} from "./background-command.ts";
+export {
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
@@ -81,6 +88,11 @@ export {
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "../extensions/types.ts";
+import {
+	type BackgroundCommandToolOptions,
+	createBackgroundCommandTool,
+	createBackgroundCommandToolDefinition,
+} from "./background-command.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
@@ -92,10 +104,20 @@ import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } fro
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "read" | "bash" | "powershell" | "edit" | "write" | "grep" | "find" | "ls";
+export type ToolName =
+	| "read"
+	| "bash"
+	| "background_command"
+	| "powershell"
+	| "edit"
+	| "write"
+	| "grep"
+	| "find"
+	| "ls";
 export const allToolNames: Set<ToolName> = new Set([
 	"read",
 	"bash",
+	"background_command",
 	"powershell",
 	"edit",
 	"write",
@@ -107,6 +129,7 @@ export const allToolNames: Set<ToolName> = new Set([
 export interface ToolsOptions {
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;
+	background_command?: BackgroundCommandToolOptions;
 	powershell?: PowerShellToolOptions;
 	write?: WriteToolOptions;
 	edit?: EditToolOptions;
@@ -121,6 +144,8 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createReadToolDefinition(cwd, options?.read);
 		case "bash":
 			return createBashToolDefinition(cwd, options?.bash);
+		case "background_command":
+			return createBackgroundCommandToolDefinition(cwd, options?.background_command);
 		case "powershell":
 			return createPowerShellToolDefinition(cwd, options?.powershell);
 		case "edit":
@@ -144,6 +169,8 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createReadTool(cwd, options?.read);
 		case "bash":
 			return createBashTool(cwd, options?.bash);
+		case "background_command":
+			return createBackgroundCommandTool(cwd, options?.background_command);
 		case "powershell":
 			return createPowerShellTool(cwd, options?.powershell);
 		case "edit":
@@ -165,6 +192,7 @@ export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions)
 	return [
 		createReadToolDefinition(cwd, options?.read),
 		createBashToolDefinition(cwd, options?.bash),
+		createBackgroundCommandToolDefinition(cwd, options?.background_command),
 		createEditToolDefinition(cwd, options?.edit),
 		createWriteToolDefinition(cwd, options?.write),
 	];
@@ -183,6 +211,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 	return {
 		read: createReadToolDefinition(cwd, options?.read),
 		bash: createBashToolDefinition(cwd, options?.bash),
+		background_command: createBackgroundCommandToolDefinition(cwd, options?.background_command),
 		powershell: createPowerShellToolDefinition(cwd, options?.powershell),
 		edit: createEditToolDefinition(cwd, options?.edit),
 		write: createWriteToolDefinition(cwd, options?.write),
@@ -196,6 +225,7 @@ export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 	return [
 		createReadTool(cwd, options?.read),
 		createBashTool(cwd, options?.bash),
+		createBackgroundCommandTool(cwd, options?.background_command),
 		createEditTool(cwd, options?.edit),
 		createWriteTool(cwd, options?.write),
 	];
@@ -214,6 +244,7 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 	return {
 		read: createReadTool(cwd, options?.read),
 		bash: createBashTool(cwd, options?.bash),
+		background_command: createBackgroundCommandTool(cwd, options?.background_command),
 		powershell: createPowerShellTool(cwd, options?.powershell),
 		edit: createEditTool(cwd, options?.edit),
 		write: createWriteTool(cwd, options?.write),

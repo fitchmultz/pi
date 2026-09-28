@@ -131,18 +131,21 @@ See [Settings](settings.md#tools) for configuring the default tool selection.
 - `-nt`, `--no-tools`<br>
   Starts with all built-in, extension, and custom tools disabled.
 
-Default enabled tools are `read`, `bash`, `edit`, and `write`, unless `defaultTools` changes them.
+Default enabled tools for new sessions are `read`, `bash`, `background_command`, `edit`, and `write`, unless `defaultTools` changes them.
 
 | Built-in | Purpose |
 |---|---|
 | `read` | Read text files and images, or [select JSON before truncation](sdk.md#json-selection-with-read) |
 | `bash` | Run shell commands |
+| `background_command` | Start, inspect, or cancel [durable background shell commands](sdk.md#background-commands) |
 | `powershell` | Run PowerShell commands on Windows |
 | `edit` | Apply exact text replacements to an existing file |
 | `write` | Create or overwrite a file |
 | `grep` | Search file contents |
 | `find` | Find paths using glob patterns |
 | `ls` | List directory contents |
+
+Resumed sessions retain their saved tool selection. To enable a new built-in explicitly, pass `--session <file> --tools <complete desired tool list>`; the allowlist replaces the whole selection.
 
 <a id="resource-options"></a>
 
@@ -234,12 +237,40 @@ Running `pi update` without a target updates Pi itself.
 | Task | Command |
 |---|---|
 | Update Pi | `pi update` |
+| Update an immutable fork installation to latest `fitchmultz/pi` main | `pi update --fork` |
 | Update all installed packages | `pi update --extensions` |
 | Update one installed package | `pi update <source>` |
 | Refresh model catalogs | `pi update --models` |
 | Update Pi and all installed packages | `pi update --all` |
 
-Add `--force` to reinstall Pi when the selected update includes Pi.
+Add `--force` to reinstall Pi when the selected update includes Pi (except `--fork`).
+
+`pi update --fork` fetches main once into a temporary checkout, prints the pinned
+commit, hydrates model data, and runs that commit's immutable installer. It builds
+and validates a new release before atomically selecting it; the previous runtime
+is retained at the package selector's `.previous` sibling. Settings, credentials,
+extensions, and sessions are unchanged. Build/download/validation failures do not
+select a candidate. Temporary source and dependency files are removed on normal
+success or failure. This executes trusted code from `fitchmultz/pi`, not an npm
+release, and requires network access to GitHub, npm, and model catalog sources.
+
+Supported platforms are **macOS/Linux/Termux arm64/x64 with an existing immutable
+fork package symlink**. macOS/Linux use the active npm global prefix and its
+`<prefix>/bin/pi`. Termux uses `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent`
+and `~/.local/bin/pi`, without changing npm's system prefix. The executable symlink
+must point through the package selector to `dist/bundle/cli.js`. Node >=22.19 with
+adjacent npm, Git (supporting `git archive --mtime`), bash, tar, gzip, and tmux are required.
+Windows, Bun, ordinary npm package directories, standalone/managed installers,
+other package managers, and mismatched/non-writable prefixes fail explicitly;
+they are not migrated. No existing checkout is needed for subsequent updates.
+See [fork setup and rollback](https://github.com/fitchmultz/pi/blob/main/FORK.md#immutable-installation-and-activation)
+for initial setup on another machine.
+
+`--fork` cannot combine with positional targets, other update targets, or
+`--force`. Exit status is 0 on success/help, 1 on invalid options or failure.
+After success, fully relaunch `pi`, or use `pi restart` from a selector-following
+session and verify the loaded runtime. An explicitly pinned runtime stays pinned;
+updating does not restart running sessions automatically.
 
 ### Aliases and command options
 

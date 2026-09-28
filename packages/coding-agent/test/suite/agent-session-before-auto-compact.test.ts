@@ -1,14 +1,35 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type Usage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type Model, type Usage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExtensionAPI } from "../../src/core/extensions/index.ts";
+import { streamSimple as streamOpenAIResponses } from "../../../ai/src/api/openai-responses.ts";
+import type {
+	ExtensionAPI,
+	SessionBeforeAutoCompactEvent,
+	SessionBeforeCompactEvent,
+} from "../../src/core/extensions/index.ts";
 import { createHarness, getMessageText, getUserTexts, type Harness } from "./harness.ts";
 
 const OVERFLOW = "prompt is too long: 300000 tokens > 128000 maximum";
 
 function overflowResponse() {
 	return fauxAssistantMessage("", { stopReason: "error", errorMessage: OVERFLOW });
+}
+
+function nativeSlowCall() {
+	const call = { ...fauxToolCall("slow", {}), async: true };
+	return {
+		...call,
+		responsesItem: {
+			type: "function_call" as const,
+			id: "fc_slow",
+			call_id: call.id,
+			name: call.name,
+			arguments: "{}",
+			async: true,
+			status: "completed" as const,
+		},
+	};
 }
 
 function usage(totalTokens: number): Usage {
@@ -90,39 +111,44 @@ describe("session_before_auto_compact", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
-	it("rolls over a single oversized first owner turn without summarization auth", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
-		const harness = await createHarness({ extensionFactories: [claimRollover(seen)] });
-		harnesses.push(harness);
-		forbidSummarizationAuth(harness);
-		let entriesAtCompactionEnd: string[] = [];
-		harness.session.subscribe((event) => {
-			if (event.type === "compaction_end" && event.contextWindowStarted) {
-				entriesAtCompactionEnd = entryTypes(harness);
-			}
-		});
-		let retryTexts: string[] = [];
-		harness.setResponses([
-			overflowResponse(),
-			(context) => {
-				retryTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
-				return fauxAssistantMessage("continued in a fresh window");
-			},
-		]);
+	it.each(["local", "provider"] as const)(
+		"rolls over a %s-refused first owner turn without summarization auth",
+		async (refusal) => {
+			const seen: Array<{ reason: string; willRetry: boolean }> = [];
+			const harness = await createHarness({ extensionFactories: [claimRollover(seen)] });
+			harnesses.push(harness);
+			forbidSummarizationAuth(harness);
+			let entriesAtCompactionEnd: string[] = [];
+			harness.session.subscribe((event) => {
+				if (event.type === "compaction_end" && event.contextWindowStarted) {
+					entriesAtCompactionEnd = entryTypes(harness);
+				}
+			});
+			let retryTexts: string[] = [];
+			harness.setResponses([
+				...(refusal === "provider" ? [overflowResponse()] : []),
+				(context) => {
+					retryTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
+					return fauxAssistantMessage("continued in a fresh window");
+				},
+			]);
 
-		await harness.session.prompt("x".repeat(600_000));
+			await harness.session.prompt("x".repeat(refusal === "local" ? 600_000 : 400_000));
 
-		expect(seen).toEqual([{ reason: "overflow", willRetry: true }]);
-		expect(entriesAtCompactionEnd).toContain("context_window");
-		expect(countType(harness, "context_window")).toBe(1);
-		expect(countType(harness, "compaction")).toBe(0);
-		expect(retryTexts).toEqual([expect.stringContaining("handoff after overflow")]);
-		expect(harness.session.messages.filter((message) => message.role !== "system").map((m) => m.role)).toEqual([
-			"custom",
-			"assistant",
-		]);
-		expect(harness.getPendingResponseCount()).toBe(0);
-	});
+			expect(harness.faux.state.callCount).toBe(refusal === "local" ? 1 : 2);
+
+			expect(seen).toEqual([{ reason: "overflow", willRetry: true }]);
+			expect(entriesAtCompactionEnd).toContain("context_window");
+			expect(countType(harness, "context_window")).toBe(1);
+			expect(countType(harness, "compaction")).toBe(0);
+			expect(retryTexts).toEqual([expect.stringContaining("handoff after overflow")]);
+			expect(harness.session.messages.filter((message) => message.role !== "system").map((m) => m.role)).toEqual([
+				"custom",
+				"assistant",
+			]);
+			expect(harness.getPendingResponseCount()).toBe(0);
+		},
+	);
 
 	it("keeps the first-request overflow exemption across repeated preparation", async () => {
 		const seen: Array<{ reason: string; willRetry: boolean }> = [];
@@ -189,6 +215,69 @@ describe("session_before_auto_compact", () => {
 		expect(entryTypes(harness)).toEqual(["message", "message", "message", "context_window", "message"]);
 	});
 
+	it.each(["request preflight", "settlement threshold", "settlement overflow"] as const)(
+		"rolls over decorated opaque context at %s",
+		async (boundary) => {
+			const seen: Array<{ reason: string; willRetry: boolean }> = [];
+			let responses = 0;
+			const measured =
+				boundary === "request preflight" ? 430_000 : boundary === "settlement threshold" ? 447_778 : 510_000;
+			const harness = await createHarness({
+				tools: [],
+				models: [{ id: "faux-1", contextWindow: 500_000, maxTokens: 1000 }],
+				settings: { compaction: { enabled: true, reserveTokens: 64_000 } },
+				extensionFactories: [
+					claimRollover(seen),
+					(pi) => {
+						pi.on("context", (event) => ({
+							messages: [
+								{ role: "user", content: "Recovered todo: finish the task", timestamp: 0 },
+								...event.messages,
+							],
+						}));
+						pi.on("message_end", (event) => {
+							if (event.message.role === "assistant" && responses++ === 0) event.message.usage = usage(measured);
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				fauxAssistantMessage([
+					{ type: "thinking", thinking: "", thinkingSignature: "opaque-test" },
+					{ type: "text", text: "completed answer" },
+				]),
+			]);
+			await harness.session.prompt("original request");
+			if (boundary === "request preflight") {
+				expect(seen).toEqual([]);
+				expect(harness.session.getContextUsage()).toMatchObject({ tokens: measured, source: "reported" });
+				const next = `next request ${"n".repeat(28_000)}`;
+				harness.setResponses([
+					(context) => {
+						expect(seen).toEqual([{ reason: "threshold", willRetry: false }]);
+						const texts = context.messages.map(getMessageText);
+						expect(texts).toContain(next);
+						expect(texts).not.toContain("original request");
+						return fauxAssistantMessage("next answer");
+					},
+				]);
+				await harness.session.prompt(next);
+			}
+			expect(seen).toEqual([
+				{ reason: boundary === "settlement overflow" ? "overflow" : "threshold", willRetry: false },
+			]);
+			expect(countType(harness, "context_window")).toBe(1);
+			expect(countType(harness, "compaction")).toBe(0);
+			expect(harness.faux.state.callCount).toBe(boundary === "request preflight" ? 2 : 1);
+			expect(
+				harness.sessionManager
+					.getBranch()
+					.some((entry) => entry.type === "message" && getMessageText(entry.message) === "completed answer"),
+			).toBe(true);
+		},
+	);
+
 	it("applies session_before_compact newContext before a mid-run provider request", async () => {
 		const bigTool: AgentTool = {
 			name: "dump",
@@ -233,6 +322,202 @@ describe("session_before_auto_compact", () => {
 			"message",
 		]);
 	});
+
+	it.each([
+		{ hook: "session_before_auto_compact", completion: "afterHook" },
+		{ hook: "session_before_compact", completion: "afterHook" },
+		{ hook: "session_before_auto_compact", completion: "duringHook" },
+		{ hook: "session_before_compact", completion: "duringHook" },
+		{ hook: "session_before_auto_compact", completion: "duringMessageEnd" },
+		{ hook: "session_before_compact", completion: "duringMessageEnd" },
+	] as const)(
+		"starts the claimed $hook window while native work completes (completion=$completion)",
+		async ({ hook, completion }) => {
+			let release!: () => void;
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			let messageEndStarted!: () => void;
+			const messageEndStart = new Promise<void>((resolve) => {
+				messageEndStarted = resolve;
+			});
+			let releaseMessageEnd!: () => void;
+			const messageEndGate = new Promise<void>((resolve) => {
+				releaseMessageEnd = resolve;
+			});
+			const owner = "NEW_OWNER_DECISION: work only on the revised request";
+			const receipt = "LATE_RECEIPT";
+			const call = nativeSlowCall();
+			const execute = vi.fn(async () => {
+				await gate;
+				return { content: [{ type: "text" as const, text: receipt }], details: {} };
+			});
+			const handoffs: string[] = [];
+			let pendingAtFirstHook: number | undefined;
+			let runningAtFirstHook: number | undefined;
+			const harness = await createHarness({
+				models: [{ id: "small", contextWindow: 100_000, maxTokens: 1000 }],
+				settings: {
+					compaction: { reserveTokens: 16_384, keepRecentTokens: 1 },
+					retry: { enabled: false },
+				},
+				tools: [
+					{
+						name: "slow",
+						label: "Slow",
+						description: "Return a delayed receipt",
+						parameters: Type.Object({}),
+						async: true,
+						execute,
+					},
+					{
+						name: "dump",
+						label: "Dump",
+						description: "Cross the context threshold",
+						parameters: Type.Object({}),
+						execute: async () => {
+							await harness.session.steer(owner);
+							if (completion === "duringMessageEnd") {
+								release();
+								await messageEndStart;
+							}
+							return { content: [{ type: "text", text: "x".repeat(340_000) }], details: {} };
+						},
+					},
+				],
+				extensionFactories: [
+					(pi) => {
+						pi.registerContextWindowHook((event) =>
+							event.contextEntries.flatMap((entry) =>
+								entry.messages.some(
+									(message) => message.role === "toolResult" && message.toolCallId === call.id,
+								)
+									? [
+											{
+												type: "context_edit" as const,
+												targetId: entry.sourceEntry.id,
+												replacement: { content: `${receipt} shaped at final cut` },
+											},
+										]
+									: [],
+							),
+						);
+						pi.on("message_end", async (event) => {
+							if (
+								completion === "duringMessageEnd" &&
+								event.message.role === "toolResult" &&
+								event.message.toolName === "slow"
+							) {
+								messageEndStarted();
+								await messageEndGate;
+							}
+						});
+						const claim = async (event: SessionBeforeAutoCompactEvent | SessionBeforeCompactEvent) => {
+							const handoff = event.branchEntries
+								.flatMap((entry) =>
+									entry.type === "message" ? [getMessageText(entry.message).slice(0, 100)] : [],
+								)
+								.join("\n");
+							handoffs.push(handoff);
+							if (handoffs.length === 1) {
+								pendingAtFirstHook = harness.session.getPendingToolCalls().length;
+								runningAtFirstHook = harness.session.agent.state.pendingToolCalls.size;
+								if (completion !== "afterHook") {
+									release();
+									releaseMessageEnd();
+									await vi.waitFor(() =>
+										expect(
+											harness.sessionManager
+												.getBranch()
+												.some(
+													(entry) => entry.type === "message" && getMessageText(entry.message) === receipt,
+												),
+										).toBe(true),
+									);
+								}
+							}
+							return { newContext: { handoff } };
+						};
+						if (hook === "session_before_auto_compact") pi.on("session_before_auto_compact", claim);
+						else pi.on("session_before_compact", claim);
+					},
+				],
+			});
+			harnesses.push(harness);
+			const stream = harness.session.agent.streamFunction;
+			harness.session.agent.state.model = {
+				...harness.getModel(),
+				api: "openai-responses",
+				compat: { supportsAsyncTools: true },
+			} as Model<"openai-responses">;
+			harness.session.agent.streamFunction = (_model, context, options) =>
+				stream(harness.getModel(), context, options);
+			const observations: Array<{ windows: number; pending: number; text: string }> = [];
+			harness.setResponses([
+				fauxAssistantMessage([call, fauxToolCall("dump", {})], {
+					responseId: "pending",
+					stopReason: "toolUse",
+				}),
+				(context) => {
+					observations.push({
+						windows: countType(harness, "context_window"),
+						pending: harness.session.getPendingToolCalls().length,
+						text: context.messages.map(getMessageText).join("\n"),
+					});
+					release();
+					return fauxAssistantMessage("Waiting for receipt");
+				},
+				(context) => {
+					observations.push({
+						windows: countType(harness, "context_window"),
+						pending: harness.session.getPendingToolCalls().length,
+						text: context.messages.map(getMessageText).join("\n"),
+					});
+					return fauxAssistantMessage("Done");
+				},
+			]);
+
+			try {
+				await harness.session.prompt("Run both tools and check their receipts");
+				if (completion !== "afterHook") await harness.session.prompt("Check the receipt in the fresh window");
+			} finally {
+				release();
+				releaseMessageEnd();
+			}
+
+			expect(observations).toHaveLength(2);
+			if (completion === "duringMessageEnd") {
+				expect(pendingAtFirstHook).toBe(0);
+				expect(runningAtFirstHook).toBe(0);
+			}
+			expect(observations[0]).toMatchObject({
+				windows: 1,
+				pending: completion === "afterHook" ? 1 : 0,
+				text: expect.stringContaining(owner),
+			});
+			expect(observations[1]).toMatchObject({ windows: 1, pending: 0, text: expect.stringContaining(owner) });
+			if (completion === "afterHook") expect(observations[0].text).not.toContain(receipt);
+			else expect(observations[0].text).toContain(`${receipt} shaped at final cut`);
+			expect(observations[1].text).toContain(receipt);
+			expect(execute).toHaveBeenCalledOnce();
+			expect(
+				harness.sessionManager
+					.getBranch()
+					.filter(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "toolResult" &&
+							entry.message.toolCallId === call.id,
+					),
+			).toMatchObject([
+				{ message: { toolCallId: call.id, content: [{ type: "text", text: receipt }], isError: false } },
+			]);
+			expect(handoffs).toHaveLength(1);
+			expect(handoffs[0]).not.toContain(owner);
+			expect(handoffs[0]).not.toContain(receipt);
+			expect(harness.eventsOfType("compaction_end")).toMatchObject([{ contextWindowStarted: true }]);
+		},
+	);
 
 	it("estimates a replacement tool set before the next provider request", async () => {
 		let hookCalls = 0;
@@ -684,11 +969,11 @@ describe("session_before_auto_compact", () => {
 			],
 		});
 		harnesses.push(harness);
-		vi.spyOn(harness.sessionManager, "appendContextWindow").mockImplementation(() => {
+		vi.spyOn(harness.sessionManager, "_persist").mockImplementation(() => {
 			throw new Error("disk full");
 		});
 
-		await expect(runAutoCompaction(harness)("threshold", false)).resolves.toBe(false);
+		await expect(runAutoCompaction(harness)("threshold", false)).rejects.toThrow("disk full");
 
 		expect(harness.eventsOfType("compaction_end")).toEqual([
 			expect.objectContaining({ errorMessage: "Auto-compaction failed: disk full" }),
@@ -696,13 +981,196 @@ describe("session_before_auto_compact", () => {
 		expect(failures).toEqual(["Auto-compaction failed: disk full"]);
 	});
 
+	it.each(["promise", "invalid draft", "exception"] as const)(
+		"stops provider dispatch when final-window shaping returns %s",
+		async (failure) => {
+			const harness = await createHarness({
+				models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
+				settings: { compaction: { reserveTokens: 5000 }, retry: { enabled: false } },
+				extensionFactories: [
+					claimRollover(),
+					(pi) => {
+						pi.registerContextWindowHook(() => {
+							if (failure === "exception") throw new Error("receipt capacity exhausted");
+							// Exercise runtime validation for extensions loaded without typechecking.
+							return (failure === "promise" ? Promise.resolve([]) : [{ type: "custom" }]) as never;
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("must not dispatch")]);
+			await harness.session.prompt("p".repeat(36_000));
+			await expect(harness.session.prompt("q".repeat(28_000))).rejects.toThrow();
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+			expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionProjection().messages);
+			expect(harness.eventsOfType("context_window_started")).toHaveLength(0);
+			expect(countType(harness, "context_window")).toBe(0);
+			expect(countType(harness, "context_edit")).toBe(0);
+			expect(harness.eventsOfType("compaction_end").length).toBeGreaterThan(0);
+			for (const event of harness.eventsOfType("compaction_end")) {
+				expect(event.errorMessage).toContain("Auto-compaction failed:");
+			}
+			harness.session.setAutoCompactionEnabled(false);
+			harness.setResponses([
+				(context) => {
+					const text = context.messages.map(getMessageText).join("\n");
+					expect(text).toContain("q".repeat(28_000));
+					expect(text).toContain("p".repeat(36_000));
+					expect(text).not.toContain("Context window");
+					return fauxAssistantMessage("continued in the unchanged window");
+				},
+			]);
+			await harness.session.prompt("continue");
+			expect(harness.faux.state.callCount).toBe(2);
+		},
+	);
+
+	it.each(["forced prompt", "context", "tools", "conversion"] as const)(
+		"refuses physical overflow after the final %s transformation with compaction disabled",
+		async (source) => {
+			const oversized = "x".repeat(200_000);
+			const harness = await createHarness({
+				models: [{ id: "small", contextWindow: 40_000, maxTokens: 1000 }],
+				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						if (source === "forced prompt") pi.on("before_agent_start", () => ({ systemPrompt: oversized }));
+						if (source === "context")
+							pi.on("context", (event) => ({
+								messages: [{ role: "user", content: oversized, timestamp: 1 }, ...event.messages],
+							}));
+						if (source === "tools")
+							pi.on("context_with_system", (event) => ({
+								messages: [
+									{
+										role: "system",
+										content: "",
+										toolsAdded: [
+											{
+												name: "large",
+												description: oversized,
+												parameters: Type.Object({}),
+											},
+										],
+										timestamp: 1,
+									},
+									...event.messages.filter((message) => message.role !== "system"),
+								],
+							}));
+					},
+				],
+			});
+			harnesses.push(harness);
+			if (source === "conversion") {
+				const convert = harness.session.agent.convertToLlm;
+				harness.session.agent.convertToLlm = async (messages) => [
+					{ role: "user", content: oversized, timestamp: 1 },
+					...(await convert(messages)),
+				];
+			}
+			// Prior low usage must not hide a request-only addition to its earlier prefix.
+			harness.sessionManager.appendMessage({
+				role: "user",
+				content: "earlier input",
+				timestamp: 1,
+			});
+			harness.sessionManager.appendMessage({
+				...fauxAssistantMessage("earlier successful answer", {
+					timestamp: Date.now() + 60_000,
+				}),
+				usage: usage(100),
+			});
+			harness.session.refreshContext();
+			harness.setResponses([fauxAssistantMessage("must not dispatch")]);
+			await harness.session.prompt("Initially fitting input");
+			expect(harness.faux.state.callCount).toBe(0);
+			expect(harness.session.state.errorMessage).toMatch(/Estimated provider input .* exceeds .*context window/);
+			expect(countType(harness, "context_window")).toBe(0);
+		},
+	);
+
+	it.each([false, true])(
+		"admits section/tool replacements using native transcript capabilities (mid-conversation=%s)",
+		async (supportsMidConvoSystemMessages) => {
+			const harness = await createHarness({
+				models: [{ id: "small", contextWindow: 40_000, maxTokens: 1000 }],
+				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("context_with_system", (event) => ({
+							messages: [
+								{
+									role: "system",
+									content: "",
+									sections: {
+										policy: `OLD_LARGE_SECTION ${"x".repeat(200_000)}`,
+									},
+									toolsAdded: [
+										{
+											name: "old",
+											description: "OLD_LARGE_TOOL",
+											parameters: Type.Object({}),
+										},
+									],
+									timestamp: 1,
+								},
+								...event.messages.filter((message) => message.role !== "system"),
+								{
+									role: "system",
+									content: "",
+									sections: { policy: "CURRENT_SMALL_SECTION" },
+									toolsRemoved: [{ name: "old" }],
+									timestamp: 2,
+								},
+							],
+						}));
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.session.agent.state.model = {
+				...harness.getModel(),
+				api: "openai-responses",
+				baseUrl: "https://offline.invalid/v1",
+				compat: { supportsMidConvoSystemMessages },
+			} as Model<"openai-responses">;
+			const payloads: string[] = [];
+			harness.session.agent.streamFunction = (model, context, options) =>
+				streamOpenAIResponses(model as Model<"openai-responses">, context, {
+					...options,
+					apiKey: "offline-placeholder",
+					transport: "sse",
+					maxRetries: 0,
+					fetch: async (_url, init) => {
+						payloads.push(String(init?.body));
+						return new Response(
+							`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })}\n\n`,
+							{ headers: { "content-type": "text/event-stream" } },
+						);
+					},
+				});
+			await harness.session.prompt("Fitting current instructions");
+			expect(payloads).toHaveLength(supportsMidConvoSystemMessages ? 0 : 1);
+			if (supportsMidConvoSystemMessages) {
+				expect(harness.session.state.errorMessage).toMatch(/Estimated provider input .* exceeds .*context window/);
+			} else {
+				expect(payloads[0]).toContain("CURRENT_SMALL_SECTION");
+				expect(payloads[0]).not.toContain("OLD_LARGE");
+				expect(harness.session.state.errorMessage).toBeUndefined();
+			}
+		},
+	);
+
 	it("retries an overflow exactly once", async () => {
 		const seen: Array<{ reason: string; willRetry: boolean }> = [];
 		const harness = await createHarness({ extensionFactories: [claimRollover(seen)] });
 		harnesses.push(harness);
 		harness.setResponses([overflowResponse(), overflowResponse(), fauxAssistantMessage("must remain unused")]);
 
-		await harness.session.prompt("x".repeat(600_000));
+		// The local estimate fits; a stricter provider token count still takes the overflow path.
+		await harness.session.prompt("x".repeat(400_000));
 
 		expect(seen).toHaveLength(1);
 		expect(countType(harness, "context_window")).toBe(1);
@@ -750,6 +1218,30 @@ describe("session_before_auto_compact", () => {
 		expect(beforeCompactCalls).toBe(1);
 		expect(countType(harness, "compaction")).toBe(1);
 		expect(countType(harness, "context_window")).toBe(0);
+	});
+
+	it("keeps default automatic summary compaction available with an unresolved native tool call", async () => {
+		const harness = await createHarness({ settings: { compaction: { keepRecentTokens: 100 } } });
+		harnesses.push(harness);
+		const call = nativeSlowCall();
+		harness.sessionManager.appendMessage({ role: "user", content: "old request ".repeat(1000), timestamp: 1 });
+		harness.sessionManager.appendMessage(
+			fauxAssistantMessage(call, { responseId: "pending", stopReason: "toolUse" }),
+		);
+		harness.sessionManager.appendMessage({ role: "user", content: "recent request ".repeat(100), timestamp: 2 });
+		harness.sessionManager.appendMessage(fauxAssistantMessage("recent response"));
+		harness.session.refreshContext();
+		harness.setResponses([fauxAssistantMessage("summary with pending work")]);
+
+		await runAutoCompaction(harness)("threshold", false);
+
+		expect(harness.eventsOfType("compaction_end")).toMatchObject([
+			{ result: { summary: expect.stringContaining("summary with pending work") }, aborted: false },
+		]);
+		expect(countType(harness, "compaction")).toBe(1);
+		expect(countType(harness, "context_window")).toBe(0);
+		expect(harness.session.getPendingToolCalls()).toMatchObject([{ toolCallId: call.id }]);
+		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
 	it("does not fire for manual compaction", async () => {

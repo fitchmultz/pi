@@ -87,6 +87,10 @@ Use `/share` to upload the session and get a viewer link. With Radius authentica
 
 Regular mode uses the terminal's normal scrollback. Fullscreen mode keeps the editor and status area fixed while the transcript scrolls within the terminal window. Choose a mode through `/settings` or `--tui-mode`.
 
+Use `/topview` to toggle the inverted layout, or `/topview on` and `/topview off` to choose explicitly. The footer becomes a header, with the message editor and its surrounding widgets and status areas above the newest-first conversation. The dock, conversation blocks, and expanded Activity items reverse order; text lines within each component stay in their original order. Native Markdown and controls are preserved. New activity stays at the top of the transcript until you scroll away.
+
+Top view temporarily uses fullscreen. Turning it off restores the normal editor/footer placement and the previous terminal mode. The TUI mode setting shows that restore mode; choosing fullscreen there saves that preference. Use `/topview off` before choosing regular mode in settings. The choice lasts for the current Pi process, including reloads and session switches, and does not change saved history or model context. New Pi processes start oldest-first.
+
 Terminal support for mouse input, keyboard shortcuts, and inline images varies. See [Terminal Setup](terminal-setup.md) for platform-specific configuration and [Keybindings](keybindings.md) for every configurable shortcut. Run `/hotkeys` to inspect the shortcuts active in your current session.
 
 ## Collect diagnostic information

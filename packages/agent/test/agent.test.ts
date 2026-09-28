@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
 	Agent,
 	type AgentEvent,
+	type AgentMessage,
 	type AgentTool,
 	type AgentToolUpdateCallback,
 	type StreamFn,
@@ -631,9 +632,11 @@ describe("Agent", () => {
 		const releaseSlow = createDeferred();
 		const listenerFailed = createDeferred();
 		const events: string[] = [];
+		const executions: string[] = [];
 		const tool: AgentTool = {
 			...createTool("work"),
 			async execute(id) {
+				executions.push(id);
 				if (id === "slow") {
 					slowStarted.resolve();
 					await releaseSlow.promise;
@@ -641,7 +644,7 @@ describe("Agent", () => {
 				} else {
 					await slowStarted.promise;
 				}
-				return { content: [], details: {}, terminate: true };
+				return { content: [{ type: "text", text: `Completed ${id}` }], details: { id }, terminate: true };
 			},
 		};
 		const agent = new Agent({
@@ -659,10 +662,11 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
-		agent.subscribe((event) => {
+		agent.subscribe(async (event) => {
 			events.push(event.type);
 			if (event.type === "tool_execution_end" && event.toolCallId === "fast") {
 				listenerFailed.resolve();
+				await Promise.resolve();
 				throw new Error("completion listener failed");
 			}
 		});
@@ -688,6 +692,21 @@ describe("Agent", () => {
 		expect(events.indexOf("slow effect")).toBeLessThan(events.indexOf("agent_end"));
 		expect(agent.state.isStreaming).toBe(false);
 		expect(agent.state.errorMessage).toBe("completion listener failed");
+		expect(executions).toEqual(["fast", "slow"]);
+		expect(agent.state.messages.filter((message) => message.role === "toolResult")).toMatchObject([
+			{
+				toolCallId: "fast",
+				content: [{ type: "text", text: "Completed fast" }],
+				details: { id: "fast" },
+				isError: false,
+			},
+			{
+				toolCallId: "slow",
+				content: [{ type: "text", text: "Completed slow" }],
+				details: { id: "slow" },
+				isError: false,
+			},
+		]);
 	});
 
 	it("should update state with mutators", () => {
@@ -1314,27 +1333,62 @@ describe("Agent", () => {
 		expect(agent.peekQueuedMessages()).toEqual([followUp]);
 	});
 
-	it.each([
-		{
-			name: "user",
-			messages: [createUserMessage("existing user")],
-		},
-		{
-			name: "toolResult",
-			messages: [
-				createUserMessage("existing user"),
-				createAssistantToolUseMessage([{ type: "toolCall", id: "call-1", name: "noop", arguments: {} }]),
-				{
-					role: "toolResult" as const,
-					toolCallId: "call-1",
-					toolName: "noop",
-					content: [{ type: "text" as const, text: "done" }],
-					isError: false,
-					timestamp: 1,
-				},
-			],
-		},
-	])("defers follow-up input on the first continuation request from a $name tail", async ({ messages }) => {
+	it.each(
+		[
+			{
+				name: "user",
+				messages: [createUserMessage("existing user")],
+			},
+			{
+				name: "toolResult",
+				messages: [
+					createUserMessage("existing user"),
+					createAssistantToolUseMessage([{ type: "toolCall", id: "call-1", name: "noop", arguments: {} }]),
+					{
+						role: "toolResult" as const,
+						toolCallId: "call-1",
+						toolName: "noop",
+						content: [{ type: "text" as const, text: "done" }],
+						isError: false,
+						timestamp: 1,
+					},
+				],
+			},
+			{
+				name: "ordinary custom",
+				messages: [
+					createAssistantMessage("previous answer"),
+					{ role: "custom" as const, customType: "note", content: "new note", display: false, timestamp: 1 },
+				],
+			},
+		].flatMap(({ name, messages }): { name: string; messages: AgentMessage[] }[] => [
+			{ name, messages },
+			...(name === "ordinary custom"
+				? []
+				: [
+						{
+							name: `window ${name} with metadata`,
+							messages: [
+								{
+									role: "custom" as const,
+									customType: "context-window",
+									content: "fresh",
+									display: true,
+									timestamp: 0,
+								},
+								...messages,
+								{
+									role: "custom" as const,
+									customType: "metadata",
+									content: "note",
+									display: false,
+									timestamp: 2,
+								},
+							],
+						},
+					]),
+		]),
+	)("defers follow-up input on the first continuation request from a $name tail", async ({ messages }) => {
 		const requests: string[][] = [];
 		const agent = new Agent({
 			initialState: { messages },

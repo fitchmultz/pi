@@ -36,6 +36,8 @@ export type {
 	AutocompleteProviderFactory,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	BackgroundCommandToolCallEvent,
+	BackgroundCommandToolResultEvent,
 	BashCwdHook,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
@@ -60,6 +62,8 @@ export type {
 	// Event Results
 	ContextEventResult,
 	ContextUsage,
+	ContextWindowHook,
+	ContextWindowHookEvent,
 	ContextWithSystemEvent,
 	CustomEntryDraft,
 	CustomMessageEntryDraft,
@@ -108,6 +112,8 @@ export type {
 	InputEventResult,
 	InputSource,
 	KeybindingsManager,
+	LiveToolResultEvent,
+	LiveToolResultEventResult,
 	LoadExtensionsResult,
 	LsToolCallEvent,
 	LsToolResultEvent,
@@ -181,6 +187,8 @@ export type {
 	ToolCallEventResult,
 	// Tools
 	ToolDefinition,
+	ToolDiscovery,
+	ToolDiscoveryGroup,
 	// Events - Tool Execution
 	ToolExecutionEndEvent,
 	// Tool execution mode
@@ -211,6 +219,7 @@ export type {
 // Type guards
 export {
 	defineTool,
+	isBackgroundCommandToolResult,
 	isBashToolResult,
 	isEditToolResult,
 	isFindToolResult,

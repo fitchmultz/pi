@@ -93,7 +93,7 @@ interface Usage {
 }
 ```
 
-When present, `reasoning` is already included in `output`; do not add it again. `cacheWrite1h` is the subset of `cacheWrite` written with one-hour retention.
+When present, `reasoning` is already included in `output`; do not add it again. `cacheWrite1h` is the subset of `cacheWrite` written with one-hour retention. See [Task cost measurement](task-cost.md) for offline whole-task accounting and the distinction between recorded estimates and actual billing.
 
 ## Base messages
 
@@ -141,12 +141,15 @@ interface AssistantMessage {
   deferred?: DeferredHandle;
   errorMessage?: string;
   rawStopReason?: string;
+  toolExecutionFailed?: boolean;
   endTurn?: boolean;
   timestamp: number;
 }
 ```
 
 `responseModel` records a concrete provider response model when it differs from the requested model. `responseId`, `providerThinkingLevel`, `diagnostics`, and `rawStopReason` preserve provider or runtime details.
+
+`toolExecutionFailed` is local execution bookkeeping derived by session projection from the original response's foreground failure receipts on the active branch. It preserves that response's fresh-window veto when those receipts leave model context. It is not provider input.
 
 `"pending"` appears during streaming and in durable assistant snapshots marked `checkpoint: true`. Completed responses use ordinary message entries with terminal stop reasons. Checkpoints are not additional billable responses; see [session snapshots](session-format.md#sessionmessageentry).
 
@@ -175,6 +178,7 @@ interface ToolResultMessage<TDetails = any> {
   toolCallKind?: "toolSearch";
   toolsAdded?: Tool[];
   elapsedMs?: number;
+  executionSkipped?: boolean;
   content: (TextContent | ImageContent)[];
   details?: TDetails;
   usage?: Usage;
@@ -185,14 +189,18 @@ interface ToolResultMessage<TDetails = any> {
 
 `details` is tool-specific. Optional `usage` reports nested model work and contributes to full-session statistics, separately from the main model call. `elapsedMs` measures executor time only; blocked calls omit it. `toolsAdded` holds core-resolved discovery declarations, including `[]` for an empty native search result.
 
+`executionSkipped: true` identifies a foreground scheduling failure, such as truncated arguments or interrupted ordered execution. Its error vetoes a sibling fresh-window request after restore just as it does live. Native background failures, including preflight blocks, do not acquire that veto. Older results without the field retain their existing classification.
+
 ### Provider request diagnostics
 
-Codex, OpenAI Responses, and Azure Responses persist `provider_request` diagnostics on successful and failed messages. Details contain allowlisted scalar transport, byte-count, socket/recovery, service-tier, and timing facts; they are not model input or ordinary transcript notices.
+Codex, OpenAI Responses, and Azure Responses persist `provider_request` diagnostics on successful and failed messages. Details contain allowlisted transport, byte-count, socket/recovery, service-tier, and timing facts; they are not model input or ordinary transcript notices.
 
 - `timingOrigin: "adapter_start"` starts inside the adapter after earlier runtime preparation. Offsets use a monotonic clock; `onPayloadMs` and `connectMs` are durations, while socket/application-event ages are ages. Payload-hook time includes `before_provider_request`, not all extension work.
 - `headersMs` marks fetch/SDK response availability before `onResponse`. Event times measure adapter consumption, including reasoning/tool deltas, rather than network arrival or provider-only latency. `finishedMs` precedes later hooks/persistence.
 - Counters cover that invocation. SSE counts fetch/SDK calls, not redirects. Recovery retains first-event times and latest socket/attempt facts, which may describe different attempts. Missing fields mean unobserved boundaries.
-- Codex `fullBodyBytes` is the post-hook full JSON body. `websocketSendBytes` counts the UTF-8 payload passed to send, including `response.create`, after delta selection; `sseSendBytes` counts the optionally compressed fetch body. Neither proves network delivery.
+- OpenAI/Codex `requestShape` measures serialized UTF-8 bytes for instructions, tools and input, with allowlisted input-role/type buckets (including reasoning), tool count, and the first 128 top-level tool-definition sizes by ordinal. It stores no prompt, schema or tool-name content. Value sizes include JSON quoting/escaping but exclude enclosing keys/separators; they are not billed token counts.
+- `requestShapeScope: "full_request"` measures Codex's post-hook JSON or the OpenAI SDK's serialized SSE body. `"websocket_logical_body"` reuses OpenAI's serialized continuation components before delta selection, excluding `stream`; stateful serializers may produce different later wire values. `fullBodyBytes` follows this scope. Azure does not yet report shape measurements.
+- Codex `websocketSendBytes` counts the UTF-8 payload passed to send, including `response.create`, after delta selection; `sseSendBytes` counts the optionally compressed fetch body. Neither proves network delivery or reduced provider-billed context.
 - `requestedServiceTier` is post-hook input; `returnedServiceTier` is the recognized raw terminal tier before pricing. `fast` and `priority` stay distinct; missing/null/unrecognized tiers are `unknown`. A request for priority does not prove delivery.
 - Close code/cleanliness and local timeouts are independent evidence, not error classifications. Pi captures synchronous closes without waiting for late ones or changing retry policy. See [WebSocket diagnostics](websocket-recovery.md).
 

@@ -1,4 +1,5 @@
 import {
+	collapseSystemMessages,
 	createInitialSystemMessage,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
@@ -13,6 +14,8 @@ import {
 	type Transport,
 	toToolDeclaration,
 } from "@earendil-works/pi-ai";
+import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages";
+import { assertContextFits } from "@earendil-works/pi-ai/utils/estimate";
 import { getPendingToolCalls, runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
@@ -219,6 +222,8 @@ export class Agent {
 	/** Shared invocation boundary for agent turns and host-owned requests such as summaries. */
 	public readonly streamResponse: StreamFn = (model, context, options) => {
 		this.requestAdmissionSignal?.throwIfAborted();
+		// Provider-independent floor for custom streams; native adapters also admit their resolved input.
+		assertContextFits(model, transformMessages(collapseSystemMessages(context).messages, model));
 		const streamFunction = this.streamFunction;
 		return streamFunction(model, context, options);
 	};
@@ -244,6 +249,8 @@ export class Agent {
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	/** Awaited after all turn_end subscribers, before the loop can drain queues or start another turn. */
 	public afterTurn?: (signal: AbortSignal) => Promise<void>;
+	/** Model-only content for saved tool results sent on a live response continuation. */
+	public toolResultModelContent?: AgentLoopConfig["toolResultModelContent"];
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
@@ -443,7 +450,7 @@ export class Agent {
 		await this.runPromptMessages(messages);
 	}
 
-	/** Continue from the current transcript. The last message must be a user or tool-result message. */
+	/** Continue the transcript, consuming queued input first after an assistant or fresh-window boundary. */
 	async continue(): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
@@ -454,10 +461,18 @@ export class Agent {
 			throw new Error("No messages to continue from");
 		}
 
-		if (
-			lastMessage.role === "assistant" ||
-			(lastMessage.role === "custom" && "customType" in lastMessage && lastMessage.customType === "context-window")
-		) {
+		// Window hooks may append custom metadata after the marker. Do not look past
+		// actual conversation or tool receipts: those still need their own continuation.
+		let freshWindow = false;
+		for (let index = this._state.messages.length - 1; index >= 0; index--) {
+			const message = this._state.messages[index];
+			if (message.role !== "custom") break;
+			if ("customType" in message && message.customType === "context-window") {
+				freshWindow = true;
+				break;
+			}
+		}
+		if (lastMessage.role === "assistant" || freshWindow) {
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
 				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
@@ -531,7 +546,9 @@ export class Agent {
 	}
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
-		let steeringPollsToSkip = options.skipInitialSteeringPoll ? (this.prepareRequest ? 2 : 1) : 0;
+		// continue() started this run with one steering message; a poll before its request would add another.
+		let skipSteeringPolls = options.skipInitialSteeringPoll === true;
+		const convertToLlm = this.convertToLlm;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
@@ -543,6 +560,7 @@ export class Agent {
 			},
 			subscribeSteering: (listener) => {
 				this.steeringListeners.add(listener);
+				if (this.steeringQueue.hasItems()) listener();
 				return () => this.steeringListeners.delete(listener);
 			},
 			transport: this.transport,
@@ -563,8 +581,13 @@ export class Agent {
 							return await this.prepareNextTurn?.(this.signal);
 						}
 					: undefined,
-			convertToLlm: this.convertToLlm,
+			convertToLlm: (messages) => {
+				// Runs once per request, as the request is built.
+				skipSteeringPolls = false;
+				return convertToLlm(messages);
+			},
 			transformContext: this.transformContext,
+			toolResultModelContent: this.toolResultModelContent,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				const preparation = this.steeringPreparation;
@@ -573,10 +596,7 @@ export class Agent {
 				} finally {
 					if (this.steeringPreparation === preparation) this.steeringPreparation = undefined;
 				}
-				if (steeringPollsToSkip > 0) {
-					steeringPollsToSkip--;
-					return [];
-				}
+				if (skipSteeringPolls) return [];
 				return this.steeringQueue.drain();
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),

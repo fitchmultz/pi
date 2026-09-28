@@ -1,18 +1,38 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
-	readdirSync, rmSync, symlinkSync, writeFileSync,
+	readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { installCodingAgentConsumer, packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
-import { activateRelease, installRelease, isolatedEnvironment, main, releaseIdentity, resolveBuildTools } from "./install-fork.mjs";
+import {
+	activateRelease, installRelease, isolatedEnvironment, main, prepareTermuxCompiler, pruneReleases, releaseIdentity, resolveBuildTools,
+} from "./install-fork.mjs";
 
 const name = "@earendil-works/pi-coding-agent";
 const tools = resolveBuildTools();
+
+test("runs the installer CLI through a symlinked path", (t) => {
+	const f = fixture(t);
+	const entry = join(f.root, "install-fork.mjs");
+	symlinkSync(fileURLToPath(new URL("./install-fork.mjs", import.meta.url)), entry);
+	const output = execFileSync(tools.node, [entry, "--help"], { env: f.env, encoding: "utf8" });
+	assert.match(output, /Usage: node scripts\/install-fork\.mjs/);
+});
+
+test("importing the installer from stdin does not run the CLI", () => {
+	const entry = new URL("./install-fork.mjs", import.meta.url).href;
+	const output = execFileSync(tools.node, ["--input-type=module", "-"], {
+		input: `import ${JSON.stringify(entry)};`,
+		encoding: "utf8",
+	});
+	assert.equal(output, "");
+});
 
 function fixture(t) {
 	const root = mkdtempSync(join(tmpdir(), "pi-fork-selector-test-"));
@@ -70,11 +90,22 @@ export class ModelRuntime { static create() {} }
 	return packages;
 }
 
-function installFixture(f, options) {
+function installFixture(f, options = {}) {
 	const pkgs = packages(f, options);
 	return (directory) => {
+		const lockDirectory = join(f.root, "install-lock");
+		const manifest = { private: true, dependencies: { [name]: "1.0.0" } };
+		const lock = { lockfileVersion: 3, requires: true, packages: { "": manifest } };
+		for (const pkg of pkgs) {
+			const { version, dependencies, bin } = JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"));
+			lock.packages[`node_modules/${pkg.name}`] = { version, dependencies, bin };
+		}
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(join(lockDirectory, "package.json"), JSON.stringify(manifest));
+		writeFileSync(join(lockDirectory, "package-lock.json"), JSON.stringify(lock));
 		const tarballs = packReleasePackages(pkgs, join(directory, "tarballs"), { npm: tools.npm, env: f.env });
-		installCodingAgentConsumer(directory, tarballs, tools.npm, { env: f.env });
+		if (options.brokenTarball) writeFileSync(tarballs.get(name), "not an npm tarball");
+		installCodingAgentConsumer(directory, tarballs, tools.npm, { env: f.env, lockDirectory });
 		smokeTestCodingAgentConsumer(directory, tools.node, { path: tools.path });
 	};
 }
@@ -164,11 +195,7 @@ test("a real child build failure cannot select or leave a reusable success recei
 
 test("a real npm install failure leaves the selector unchanged", async (t) => {
 	const f = fixture(t);
-	await assert.rejects(installRelease({ ...f, receipt: receipt() }, (directory) => {
-		const tarball = join(directory, "broken.tgz");
-		writeFileSync(tarball, "not an npm tarball");
-		installCodingAgentConsumer(directory, new Map([[name, tarball]]), tools.npm, { env: f.env });
-	}), /Command failed/);
+	await assert.rejects(installRelease({ ...f, receipt: receipt() }, installFixture(f, { brokenTarball: true })), /Command failed/);
 	assertPreserved(f);
 	assert.deepEqual(readdirSync(f.releases), []);
 });
@@ -214,13 +241,108 @@ test("native selection replaces the link inode and leaves no temporary selectors
 	assert.deepEqual(readdirSync(dirname(f.selector)).sort(), ["pi-coding-agent", "pi-coding-agent.previous"]);
 });
 
+function validatedRelease(f, commit, validatedAt) {
+	const directory = join(f.releases, releaseIdentity(receipt(commit)));
+	const pkg = join(directory, "node_modules", name);
+	mkdirSync(join(pkg, "dist/bundle"), { recursive: true });
+	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name }));
+	writeFileSync(join(pkg, "dist/bundle/cli-worker.js"), "");
+	writeFileSync(join(directory, "fork-release.json"), JSON.stringify({ ...receipt(commit), validated: true }));
+	utimesSync(join(directory, "fork-release.json"), validatedAt, validatedAt);
+	return { identity: basename(directory), directory };
+}
+
+test("prunes old validated releases except selected, previous and visibly running ones", (t) => {
+	const f = fixture(t);
+	const [previous, selected, running, old, newer, newest] = ["1", "2", "3", "4", "5", "6"]
+		.map((commit, index) => validatedRelease(f, commit, 1_000 + index));
+	activateRelease(f.releases, previous.identity, f.selector);
+	activateRelease(f.releases, selected.identity, f.selector);
+	const legacy = join(f.releases, "legacy-release");
+	const installing = join(f.releases, releaseIdentity(receipt("7")));
+	for (const directory of [legacy, installing]) mkdirSync(directory, { recursive: true });
+
+	const result = pruneReleases({ releases: f.releases, selector: f.selector, keep: 2 },
+		() => `p1\nn${running.directory}/node_modules/native.node\n`);
+
+	assert.deepEqual(result, { kept: 5, removed: [old.identity] });
+	assert.equal(existsSync(old.directory), false);
+	for (const directory of [previous, selected, running, newer, newest].map((release) => release.directory).concat(legacy, installing)) {
+		assert.ok(existsSync(directory), directory);
+	}
+	assert.equal(readlinkSync(f.selector), join(selected.directory, "node_modules", name));
+});
+
+test("prune is a separate operation and requires an explicit keep count", async (t) => {
+	const f = fixture(t);
+	const paths = ["--releases", f.releases, "--selector", f.selector];
+	await assert.rejects(main(["--prune", ...paths]), /Use --prune with --keep/);
+	await assert.rejects(main(["--keep", "1", ...paths]), /Use --prune with --keep/);
+	for (const keep of ["-1", "two", "1.5"]) {
+		await assert.rejects(main(["--prune", "--keep", keep, ...paths]), /non-negative integer/);
+	}
+	await assert.rejects(main(["--prune", "--keep", "1", "--stage", ...paths]), /cannot combine/);
+	await assert.rejects(main(["--prune", "--keep", "1", "--rollback", "x", ...paths]), /cannot combine/);
+	assertPreserved(f);
+});
+
 test("isolates ambient Pi/npm config and resolves native Node/npm before HOME changes", (t) => {
 	const f = fixture(t);
 	assert.equal(f.env.PI_CACHE_RETENTION, undefined);
 	assert.equal(f.env.PI_RESTART_SOCKET, undefined);
 	assert.equal(f.env.NODE_OPTIONS, undefined);
 	assert.equal(f.env.NPM_CONFIG_USERCONFIG, undefined);
+	assert.equal(f.env.TMPDIR, join(f.env.HOME, "tmp"));
+	assert.ok(existsSync(f.env.TMPDIR));
+	if (process.platform !== "android") {
+		assert.equal(f.env.LD_PRELOAD, undefined);
+		assert.equal(f.env.PREFIX, undefined);
+		assert.equal(f.env.npm_config_script_shell, undefined);
+	}
 	assert.equal(execFileSync(tools.node, [tools.npm, "--version"], { env: f.env, encoding: "utf8" }).trim(), tools.npmVersion);
 	assert.equal(execFileSync("node", ["-p", "process.execPath"], { env: f.env, encoding: "utf8" }).trim(), tools.node);
 	assert.notEqual(releaseIdentity(receipt()), releaseIdentity(receipt("a", "e")));
+});
+
+test("isolated npm scripts can invoke npm and package executables on Termux", { skip: process.platform === "win32" }, (t) => {
+	const f = fixture(t);
+	const bin = join(f.root, "node_modules/.bin");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "fixture-executable"), '#!/usr/bin/env node\nconsole.log("package executable");\n', { mode: 0o755 });
+	writeFileSync(join(f.root, "package.json"), JSON.stringify({
+		private: true,
+		scripts: { probe: "npm --version && fixture-executable" },
+	}));
+	const output = execFileSync(tools.node, [tools.npm, "run", "--silent", "probe"], {
+		cwd: f.root, env: f.env, encoding: "utf8",
+	});
+	assert.deepEqual(output.trim().split(/\r?\n/), [tools.npmVersion, "package executable"]);
+});
+
+test("Termux compiler installation preserves the source lock and uses its pinned artifact without scripts", { skip: process.platform === "win32" }, (t) => {
+	const f = fixture(t);
+	const name = `@typescript/native-preview-linux-${process.arch}`;
+	const directory = join(f.root, "compiler");
+	mkdirSync(join(directory, "lib"), { recursive: true });
+	writeFileSync(join(directory, "package.json"), JSON.stringify({
+		name, version: "1.2.3", os: ["linux"], cpu: [process.arch],
+		scripts: { postinstall: "node -e 'process.exit(27)'" },
+	}));
+	writeFileSync(join(directory, "lib/tsgo"), '#!/usr/bin/env node\nconsole.log("Version 1.2.3");\n', { mode: 0o755 });
+	const tarball = packReleasePackages([{ name, directory }], join(f.root, "tarballs"), { npm: tools.npm, env: f.env }).get(name);
+	const lock = JSON.stringify({
+		lockfileVersion: 3,
+		packages: {
+			[`node_modules/${name}`]: {
+				version: "1.2.3", resolved: `file:${tarball}`, optional: true, os: ["linux"], cpu: [process.arch],
+				integrity: `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`,
+			},
+		},
+	});
+	writeFileSync(join(f.root, "package-lock.json"), lock);
+	mkdirSync(join(f.root, "node_modules/.bin"), { recursive: true });
+	symlinkSync(join(f.root, "unusable-android-wrapper"), join(f.root, "node_modules/.bin/tsgo"));
+	prepareTermuxCompiler(f.root, tools, { ...f.env, npm_config_offline: "true" });
+	assert.equal(readFileSync(join(f.root, "package-lock.json"), "utf8"), lock);
+	assert.equal(execFileSync(join(f.root, "node_modules/.bin/tsgo"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
 });

@@ -2,13 +2,17 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
+	hasNonAdditiveToolChanges,
 	type ImageContent,
 	type Model,
 	type Provider,
 	type ProviderHeaders,
+	type SystemMessage,
+	type ToolResultMessage,
 	type ToolSelection,
 	toolKey,
 	withoutToolSearchState,
@@ -20,6 +24,7 @@ import { CheckpointActivity } from "../checkpoint.ts";
 import type { CompactionSettings } from "../compaction/index.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
+import { isMessagePreserved } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
 import type { SessionManager } from "../session-manager.ts";
@@ -40,10 +45,13 @@ import type {
 	CacheWarmingDecisionEvent,
 	CacheWarmingDecisionEventResult,
 	CompactOptions,
+	ContextEditEntryDraft,
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
+	ContextWindowHookEvent,
 	ContextWithSystemEvent,
+	CustomMessageEntryDraft,
 	EntryRenderer,
 	Extension,
 	ExtensionActions,
@@ -61,6 +69,8 @@ import type {
 	InputEvent,
 	InputEventResult,
 	InputSource,
+	LiveToolResultEvent,
+	LiveToolResultEventResult,
 	LoadExtensionsResult,
 	MarkdownTransformer,
 	MessageEndEvent,
@@ -290,12 +300,9 @@ function sameMessages(left: AgentMessage[], right: AgentMessage[]): boolean {
 }
 
 /**
- * Re-attach the prompt and tool state after a `context` handler. Handlers only see the
- * conversation; the system messages belong to Pi. An unchanged conversation keeps every
- * system message in place, so models with mid-conversation support keep their cached
- * prefix. A changed one gets the replayed prompt sections and tool declarations as one
- * leading system message, so pruning, windowing, or slicing from a compaction summary
- * cannot drop them.
+ * Restore Pi-owned system state after a conversation-only `context` handler. Additive
+ * transforms keep every system and search anchor. Other transforms fold system messages,
+ * keeping surviving search declarations in place only when tool history still replays safely.
  */
 function restoreSystemMessages(
 	current: AgentMessage[],
@@ -303,8 +310,31 @@ function restoreSystemMessages(
 	returned: AgentMessage[],
 ): AgentMessage[] {
 	if (sameMessages(returned, visible)) return current;
-	const head = getCurrentSystemMessage(current);
-	return head ? [head, ...withoutToolSearchState(returned)] : returned;
+	const restored: AgentMessage[] = [];
+	let index = 0;
+	for (const message of current) {
+		if (message.role === "system") {
+			restored.push(message);
+			continue;
+		}
+		while (index < returned.length && !isMessagePreserved(message, returned[index])) {
+			restored.push(returned[index++]);
+		}
+		if (index === returned.length) {
+			const anchored =
+				!hasNonAdditiveToolChanges(current) &&
+				!current.some((message, index) => index > 0 && message.role === "system" && message.replace) &&
+				current.every(
+					(message) => message.role !== "toolResult" || !message.toolsAdded || returned.includes(message),
+				);
+			const head = getCurrentSystemMessage(
+				anchored ? current.filter((message) => message.role === "system") : current,
+			);
+			return head ? [head, ...(anchored ? returned : withoutToolSearchState(returned))] : returned;
+		}
+		restored.push(returned[index++]);
+	}
+	return [...restored, ...returned.slice(index)];
 }
 
 export async function emitProjectTrustEvent(
@@ -877,7 +907,7 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
-	createContext(): ExtensionContext {
+	createContext(sessionManager = this.sessionManager): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
 		const getScopedModels = this.getScopedModels;
@@ -900,7 +930,7 @@ export class ExtensionRunner {
 			},
 			get sessionManager() {
 				runner.assertActive();
-				return runner.sessionManager;
+				return sessionManager;
 			},
 			get modelRegistry() {
 				runner.assertActive();
@@ -1022,6 +1052,60 @@ export class ExtensionRunner {
 			return this.reloadHandler();
 		};
 		return context;
+	}
+
+	runContextWindowHooks(
+		buildEvent: () => ContextWindowHookEvent,
+		apply: (drafts: (ContextEditEntryDraft | CustomMessageEntryDraft)[]) => void,
+		sessionManager: SessionManager,
+	): void {
+		const ctx = this.createContext(sessionManager);
+		for (const extension of this.extensions) {
+			for (const hook of extension.contextWindowHooks ?? []) {
+				const result: unknown = hook(buildEvent(), ctx);
+				if (result === undefined) continue;
+				if (result instanceof Promise) {
+					void result.catch(() => {});
+					throw new Error("Context window hooks must return synchronously");
+				}
+				if (
+					!Array.isArray(result) ||
+					result.some(
+						(draft) =>
+							!draft ||
+							typeof draft !== "object" ||
+							(draft.type !== "context_edit" && draft.type !== "custom_message"),
+					)
+				) {
+					throw new Error("Context window hooks may only return context_edit or custom_message drafts");
+				}
+				for (const draft of result) {
+					if (
+						draft.type === "custom_message" &&
+						(typeof draft.customType !== "string" ||
+							typeof draft.display !== "boolean" ||
+							(typeof draft.content !== "string" &&
+								(!Array.isArray(draft.content) ||
+									draft.content.some(
+										(block: unknown) =>
+											!block ||
+											typeof block !== "object" ||
+											!("type" in block) ||
+											(block.type === "text"
+												? !("text" in block) || typeof block.text !== "string"
+												: block.type !== "image" ||
+													!("data" in block) ||
+													typeof block.data !== "string" ||
+													!("mimeType" in block) ||
+													typeof block.mimeType !== "string"),
+									))))
+					) {
+						throw new Error("Invalid context window custom_message draft");
+					}
+				}
+				apply(result);
+			}
+		}
 	}
 
 	emitBoundary(
@@ -1194,6 +1278,43 @@ export class ExtensionRunner {
 		return modified ? currentMessage : undefined;
 	}
 
+	async emitLiveToolResult(message: ToolResultMessage): Promise<ToolResultMessage["content"] | undefined> {
+		const ctx = this.createContext();
+		let content: ToolResultMessage["content"] | undefined;
+
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "live_tool_result")) {
+			for (const handler of handlers) {
+				try {
+					// Handlers get copies: the saved message backs the session and terminal output.
+					const event: LiveToolResultEvent = {
+						type: "live_tool_result",
+						message: structuredClone({ ...message, content: content ?? message.content }),
+					};
+					const handlerResult = (await handler(event, ctx)) as LiveToolResultEventResult | undefined;
+					if (handlerResult?.content === undefined) continue;
+					if (!Array.isArray(handlerResult.content)) {
+						this.emitError({
+							extensionPath: ext.path,
+							event: "live_tool_result",
+							error: "live_tool_result handlers must return a content array",
+						});
+						continue;
+					}
+					content = structuredClone(handlerResult.content);
+				} catch (err) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "live_tool_result",
+						error: err instanceof Error ? err.message : String(err),
+						stack: err instanceof Error ? err.stack : undefined,
+					});
+				}
+			}
+		}
+
+		return content;
+	}
+
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
 		const ctx = this.createContext();
 		const currentEvent: ToolResultEvent = { ...event };
@@ -1300,7 +1421,7 @@ export class ExtensionRunner {
 	/**
 	 * Run the request-time transforms in two phases. `context` handlers see the conversation
 	 * only and Pi restores the prompt and tool state after each; `context_with_system`
-	 * handlers then see the full transcript and their output is used as returned.
+	 * handlers then see the full transcript. New-session native heads retain their position and tools.
 	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
 		const ctx = this.createContext();
@@ -1335,6 +1456,13 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "context_with_system")) {
 			for (const handler of handlers) {
+				const head = currentMessages[0];
+				const nativeHead = head?.role === "system" && head.nativeHead ? structuredClone(head) : undefined;
+				const otherSystemMessages = nativeHead
+					? currentMessages.slice(1).filter((message) => message.role === "system")
+					: [];
+				const isOtherSystemMessage = (message: AgentMessage) =>
+					otherSystemMessages.some((other) => other === message || isDeepStrictEqual(other, message));
 				try {
 					const hadLeadingSystemMessage = currentMessages[0]?.role === "system";
 					const event: ContextWithSystemEvent = { type: "context_with_system", messages: currentMessages };
@@ -1342,7 +1470,7 @@ export class ExtensionRunner {
 					currentMessages = handlerResult?.messages ?? currentMessages;
 					// Providers read the prompt and initial tools from the leading system message.
 					// Losing it is never intended; report it but honor the handler's output.
-					if (hadLeadingSystemMessage && currentMessages[0]?.role !== "system") {
+					if (!nativeHead && hadLeadingSystemMessage && currentMessages[0]?.role !== "system") {
 						this.emitError({
 							extensionPath: ext.path,
 							event: "context_with_system",
@@ -1358,6 +1486,62 @@ export class ExtensionRunner {
 						error: message,
 						stack,
 					});
+				} finally {
+					if (nativeHead) {
+						let index = currentMessages.findIndex(
+							(message) => message === head || (message.role === "system" && message.nativeHead),
+						);
+						// Reconstructed heads can omit the marker. Match their retained timestamp,
+						// excluding existing policy messages that happen to share that timestamp.
+						if (index < 0)
+							index = currentMessages.findIndex(
+								(message) =>
+									message.role === "system" &&
+									message.timestamp === nativeHead.timestamp &&
+									!isOtherSystemMessage(message),
+							);
+						// A rebuilt head can also get a fresh timestamp. Its host-owned declarations
+						// still identify it; position alone cannot tell it from a new policy message.
+						const declarations = (message: SystemMessage) => [
+							message.toolsAdded,
+							message.toolsRemoved,
+							message.deferredToolEntries,
+							message.replace,
+						];
+						if (index < 0) {
+							const matches = currentMessages.flatMap((message, position) =>
+								message.role === "system" &&
+								!isOtherSystemMessage(message) &&
+								isDeepStrictEqual(declarations(message), declarations(nativeHead))
+									? [position]
+									: [],
+							);
+							// Tool-less heads share empty declarations with ordinary policy; never guess.
+							if (matches.length === 1) index = matches[0];
+						}
+						const edited = currentMessages[index];
+						const restored = nativeHead;
+						if (edited?.role === "system") {
+							restored.content = edited.content;
+							if (edited.sections === undefined) delete restored.sections;
+							else restored.sections = edited.sections;
+						}
+						const remaining = currentMessages.filter(
+							(message, position) => position !== index && !(message.role === "system" && message.nativeHead),
+						);
+						if (
+							index !== 0 ||
+							!isDeepStrictEqual(edited, restored) ||
+							remaining.length !== currentMessages.length - 1
+						) {
+							this.emitError({
+								extensionPath: ext.path,
+								event: "context_with_system",
+								error: "Restored the native initial declaration at index 0. Keep its nativeHead marker and initial tools; append policy and tool changes after it.",
+							});
+						}
+						currentMessages = [restored, ...remaining];
+					}
 				}
 			}
 		}

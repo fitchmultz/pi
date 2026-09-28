@@ -104,9 +104,21 @@ Events cover resource discovery, sessions, agent and message lifecycle, provider
 
 `message_end` can replace a finalized message while preserving its role. `tool_call` can mutate input or block execution. `tool_result` handlers compose, with each handler seeing prior changes.
 
+Shell guards must check both `bash` and `background_command` starts. Use `isToolCallEventType()` to match native, unnamespaced tools. A Bash override or `user_bash` handler does not intercept background jobs: detached workers cannot serialize a custom execution backend. The sandbox and SSH examples explicitly block unsupported starts while active, leaving status and cancellation available. Tool exclusions are literal: exclude both IDs to disable both shell paths.
+
 <a id="context_with_system"></a>
 
 `context` transforms conversation messages without prompt and tool system messages; Pi restores that state afterward. Use `context_with_system` only when a request-local transformation must own the complete transcript, and keep a system message at index zero.
+
+New sessions mark their native initial system/tool declaration with host-only `nativeHead: true`. Pi projects this declaration before startup custom messages without changing journal order or timestamps. After each `context_with_system` handler, Pi keeps that marked declaration at index zero and preserves its marker, timestamp, and initial tool state. Removing, displacing, or changing those fields produces a warning and restoration. Content and section edits remain supported; keep them stable across requests. Append extension policy and later tool activations after the head rather than replacing it.
+
+Already-bound unmarked sessions keep their existing layout for the current window: restarting or resuming does not rewrite their cached prefix. Their next native `context_window` or compaction checkpoint adopts the anchor while the prefix is being rebuilt anyway. This prevents future displacement; it does not repair signatures or cache misses from earlier requests. Anthropic's initial-tools guard and deferred-tool protocol are unchanged: later schemas may be appended with `defer_loading`, while active top-level tools and their cache marker stay fixed.
+
+The offline cross-repository regression loads Ponytail's actual extension through the native loader. From `packages/coding-agent`, run `PONYTAIL_EXTENSION_PATH=/path/to/ponytail/pi-extension/index.js node ../../node_modules/vitest/dist/cli.js --run test/native-declaration-anchor.test.ts`. Without that path, the core hook-recovery cases still run and the cross-repository cases are skipped.
+
+<a id="live_tool_result"></a>
+
+A native Responses WebSocket continuation can send a tool result without a new request, so context hooks do not run for it. `live_tool_result` fires once each finalized result is saved; return `{ content }` to replace that result's content in such a frame only. Handlers compose, and the saved result, terminal output, and ordinary requests are unchanged. An extension that decorates results in `context_with_system` should return the same decoration here.
 
 `turn_end` and `agent_before_settle` are actionable boundaries. Their handlers can chain proposed `custom`, `custom_message`, `context_edit`, or `compaction` entries and return `continue: true` for one next model request. Guard continuation conditions because an unconditional continuation can loop. Use the exported event declarations for the complete validation and ordering contract.
 
@@ -122,7 +134,13 @@ A `user_bash` handler that returns `undefined` passes the command to the next ha
 
 ### Context boundaries and persistence
 
-`session_before_auto_compact` runs before automatic threshold/overflow summary preparation and authentication. `event.pendingMessages` contains provider-bound inputs not yet in `branchEntries`; `reason`, `willRetry`, and `signal` describe the trigger. Return `{ newContext: { handoff } }` to start a native `context_window` instead of a summary. The last handler result wins; one extension should own this policy. Manual `/compact` does not fire this hook. See [Compaction](compaction.md).
+`session_before_auto_compact` runs before automatic threshold/overflow summary preparation and authentication. `event.pendingMessages` contains provider-bound inputs not yet in `branchEntries`; `event.retainedToolResultIds` identifies native receipts a fresh window would retain at this point, excluding receipts with consumption proof. Pi recomputes that selection after awaited handlers to include late results. `reason`, `willRetry`, and `signal` describe the trigger. Return `{ newContext: { handoff } }` to start a native `context_window` instead of a summary. The last handler result wins; one extension should own this policy. Manual `/compact` does not fire this hook. See [Compaction](compaction.md).
+
+`pi.registerContextWindowHook((event, ctx) => drafts)` synchronously prepares every fresh window after its prospective marker and final retained tool receipts are selected. `event.contextEntries` contains the projected messages and their journal provenance; `event.pendingMessages` contains provider-bound inputs not yet journaled. Return `(ContextEditEntryDraft | CustomMessageEntryDraft)[]` or `undefined`. Each hook sees preceding hooks' edits and messages. Use projected content for excerpts and `sourceEntry.id` as the edit target; original entries remain in history. Custom messages are appended after the window marker and persisted before the first replacement-window provider request, including a fresh window requested within a running tool loop. `display: false` hides a message from the UI, not from model context.
+
+Hooks share an in-memory preview: both `event.contextEntries` and `ctx.sessionManager` reads include preceding hooks' drafts. Pi validates all hooks before publishing the marker and drafts, preserving their preview IDs and references. Promises, invalid drafts, and thrown errors stop preparation without publishing any part of the window. Only `context_edit` and `custom_message` drafts are supported, not state-only `custom` entries or compactions. On success, canonical state and `context_window_started` reflect the committed cut. Journal I/O errors can still leave accepted entries; canonical state reflects those entries. Hooks cannot request another window or continuation. This synchronous boundary also sees receipts completed during an awaited automatic-compaction handler.
+
+Older forks expose `registerContextWindowHook` but accept only context edits. Method presence alone does not prove custom-message support: deploy extensions using these drafts with a qualified core release that supports them.
 
 `session_checkpoint` is the optional awaited persistence barrier for [working-session checkpoints](checkpoint.md). Use its signal and invalidation callback to keep owned background work quiescent while a receipt is held. It does not run shutdown just to save.
 
@@ -153,11 +171,15 @@ See [`hello.ts`](../examples/extensions/hello.ts), [`todo.ts`](../examples/exten
 
 ### Activate tools dynamically
 
-Register tools first, then select them using `pi.setActiveTools(ids)`. `getAllTools()` supplies each public `id`, leaf `name`, optional `namespace` and `toolSearch`, description, schema, guidelines, and source. Unnamespaced IDs equal their name; namespaced IDs are opaque. The setter replaces the whole selection, including clearing it with `[]`; unknown IDs are ignored and registration collisions reject.
+Register tools first, then select them using `pi.setActiveTools(ids)`. `getAllTools()` supplies each public `id`, leaf `name`, optional `namespace`, `toolSearch`, and `discovery` metadata, description, schema, guidelines, and source. Unnamespaced IDs equal their name; namespaced IDs are opaque. The setter replaces the whole selection, including clearing it with `[]`; unknown IDs are ignored and registration collisions reject.
 
 For exact identities, use `getActiveToolReferences()` and `setActiveToolReferences([{ name, namespace? }])`. Bare names select only unnamespaced tools. Both selection paths obey allowlists and exclusions. Events preserve namespace and leaf name separately; built-in type guards match only unnamespaced tools.
 
+Custom sections can also be tool-scoped: set `event.systemPromptOptions.sectionTools.browser = ["browser_tool"]` alongside `sections.browser`. Pi retains the complete text but renders it only when an owning tool is active, including activation between tool-loop requests. Keep execution guards and recovery hooks active independently. For automatic grouping, attach extension-owned `discovery: { group, role }` metadata at tool registration sites; Pi supplies the section ownership map before `before_agent_start`. Generate complete scoped text even for generic prompts while tools are inactive. See [Extension-owned Tool Discovery](tool-discovery.md).
+
 ### Tool discovery
+
+Extension-owned `ToolDefinition.discovery` metadata feeds Pi's ordinary `discover_tools` catalog on capable models, with no settings inventory. Entry tools activate on discovery; advanced tools remain behind the extension's own loader. Unsupported APIs retain ordinary exposure. This mechanism is separate from the native search callback below.
 
 `pi.registerToolSearch(definition)` uses ordinary tool validation, hooks, cancellation, and rendering. Its callback owns registration and search policy: activate matches before returning normal content/details plus `tools: ToolReference[]`. Pi resolves references against the active permitted registry and persists declaration snapshots. Unknown, inactive, or denied references fail without publishing declarations; returned objects cannot override schemas.
 

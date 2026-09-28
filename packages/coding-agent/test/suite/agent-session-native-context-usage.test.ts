@@ -31,13 +31,15 @@ afterEach(() => {
 });
 
 it.each([
-	{ api: "openai-responses", omitInput: false },
-	{ api: "openai-codex-responses", omitInput: false },
-	{ api: "openai-responses", omitInput: true },
-	{ api: "openai-codex-responses", omitInput: true },
+	{ api: "openai-responses", omitInput: false, decorateInput: false },
+	{ api: "openai-codex-responses", omitInput: false, decorateInput: false },
+	{ api: "openai-responses", omitInput: true, decorateInput: false },
+	{ api: "openai-codex-responses", omitInput: true, decorateInput: false },
+	{ api: "openai-responses", omitInput: false, decorateInput: true },
+	{ api: "openai-codex-responses", omitInput: false, decorateInput: true },
 ] as const)(
-	"retains the measured $api successor without restoring hook-omitted input ($omitInput)",
-	async ({ api, omitInput }) => {
+	"retains the measured $api successor without restoring hook-omitted input (omit=$omitInput, decorate=$decorateInput)",
+	async ({ api, omitInput, decorateInput }) => {
 		vi.stubGlobal("WebSocket", WebSocket);
 		let parent: LocalResponsesRequest | undefined;
 		const fixture = await createResponsesServer((request) => {
@@ -85,7 +87,14 @@ it.each([
 						contexts();
 						return omitInput
 							? { messages: event.messages.filter((message) => message.role !== "user") }
-							: undefined;
+							: decorateInput
+								? {
+										messages: [
+											{ role: "user", content: "Session name: native-context", timestamp: 0 },
+											...event.messages,
+										],
+									}
+								: undefined;
 					});
 				},
 			],
@@ -129,6 +138,10 @@ it.each([
 			expect(starts).toHaveBeenCalledOnce();
 			expect(contexts).toHaveBeenCalledOnce();
 			expect(fixture.requests.map((request) => request.body.type)).toEqual(["response.create", "response.steer"]);
+			if (decorateInput) {
+				expect(JSON.stringify(fixture.requests[0].body)).toContain("Session name: native-context");
+				expect(JSON.stringify(session.messages)).not.toContain("Session name: native-context");
+			}
 			expect(
 				session.messages
 					.filter((message) => message.role === "assistant")

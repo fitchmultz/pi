@@ -15,7 +15,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
 	Agent,
@@ -69,13 +69,23 @@ import {
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
 import { Clone } from "typebox/value";
-import { APP_NAME } from "../config.ts";
+import { APP_NAME, ENV_SESSION_DIR, getAgentDir } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { processImage } from "../utils/image-process.ts";
+import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import {
+	BACKGROUND_COMMAND_NOTICE,
+	BACKGROUND_COMMAND_RUN_STATE,
+	backgroundCommandDirectory,
+	backgroundCommandFinished,
+	backgroundCommandOutputTail,
+	listBackgroundCommands,
+	summarizeBackgroundCommand,
+} from "./background-command.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { generateBugReportSummary } from "./bug-report.ts";
 import type { CacheWarmer, CacheWarmingStatus } from "./cache-warmer.ts";
@@ -139,7 +149,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
+import { type BashExecutionMessage, type CustomMessage, convertToLlm, isMessagePreserved } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -164,6 +174,15 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
+import {
+	type AvailableDiscoveryGroup,
+	availableDiscoveryGroups,
+	createDiscoverToolsDefinition,
+	DISCOVER_TOOLS_NAME,
+	discoverySectionTools,
+	supportsToolDiscovery,
+} from "./tool-discovery.ts";
+import type { BackgroundCommandToolDetails } from "./tools/background-command.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -200,7 +219,8 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
-	| Exclude<AgentEvent, { type: "agent_end" }>
+	| Exclude<AgentEvent, { type: "agent_end" | "message_end" }>
+	| (Extract<AgentEvent, { type: "message_end" }> & { consumedToolResultIds?: string[] })
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
@@ -265,6 +285,8 @@ export interface AgentSessionConfig {
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	cwd: string;
+	/** App-data root for artifacts when the session has no journal directory. */
+	agentDir?: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	/** Resource loader for extensions, skills, prompts, themes, context files, and system prompt */
@@ -275,8 +297,10 @@ export interface AgentSessionConfig {
 	modelRuntime: ModelRuntime;
 	/** Keeps the prompt cache entry of the last session request warm. */
 	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
-	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
+	/** Initial active built-in tool names. Default: [read, bash, background_command, edit, write] */
 	initialActiveToolNames?: ToolSelection[];
+	/** Hosts with startup input bind their input queue before enabling background notifications. */
+	deferBackgroundCommandNotifications?: boolean;
 	/** Suppress default built-ins, retaining extension tools and explicit selection. */
 	noBuiltinTools?: boolean;
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
@@ -368,8 +392,15 @@ interface ProviderRequestPrefix {
 	/** Structured prompt at dispatch; idle usage stays valid when a request-only force ends. */
 	transcriptSystemPrompt: string;
 	toolKeys: readonly string[];
-	/** Dispatch-time conversation and prefix estimate; opaque content is covered by response usage. */
-	conversation: unknown[];
+	/** Immutable pre-transform input; measured usage applies only while this baseline is unchanged. */
+	canonicalConversation: unknown[];
+	conversationPreserved: boolean;
+	/** Only results actually sent can be retired at a context boundary. */
+	toolResultIds: ReadonlySet<string>;
+	/** Raw branch frontier captured beside canonical input, before request preparation can await. */
+	frontier: string | null;
+	/** Native post-payload membership. Undefined is unknown, not an empty set. */
+	inputToolCallIds?: ReadonlySet<string>;
 	systemTokens: number;
 	response?: AssistantMessage;
 	responseSnapshot?: unknown;
@@ -402,7 +433,12 @@ function withoutUndefined(value: unknown): unknown {
 function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
 	return convertToLlm(messages.filter((message) => message.role !== "system")).map((message) => {
 		if (message.role !== "assistant") return withoutUndefined({ ...message, timestamp: 0 });
-		const { usage: _usage, diagnostics: _diagnostics, ...response } = message;
+		const {
+			usage: _usage,
+			diagnostics: _diagnostics,
+			toolExecutionFailed: _toolExecutionFailed,
+			...response
+		} = message;
 		return withoutUndefined({
 			...response,
 			timestamp: 0,
@@ -418,6 +454,31 @@ function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
 			}),
 		});
 	});
+}
+
+/** Request decorations may insert messages or append blocks, but must retain the original input in order. */
+function providerConversationCovers(canonical: readonly unknown[], sent: readonly unknown[]): boolean {
+	let index = 0;
+	for (const message of sent) {
+		if (index === canonical.length) break;
+		if (isMessagePreserved(canonical[index], message)) index++;
+	}
+	return index === canonical.length;
+}
+
+function providerToolResultIds(conversation: readonly unknown[]): Set<string> {
+	return new Set(
+		conversation.flatMap((message) =>
+			message &&
+			typeof message === "object" &&
+			"role" in message &&
+			message.role === "toolResult" &&
+			"toolCallId" in message &&
+			typeof message.toolCallId === "string"
+				? [message.toolCallId]
+				: [],
+		),
+	);
 }
 
 // ============================================================================
@@ -441,10 +502,8 @@ export class AgentSession {
 	private readonly _idleWaiters = new Set<() => void>();
 	private readonly _deferredSettlement = new AsyncLocalStorage<{ barriers: number }>();
 
-	/** Tracks pending steering messages for UI display. Removed when delivered. */
-	private _steeringMessages: string[] = [];
-	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
-	private _followUpMessages: string[] = [];
+	/** Presentation fingerprint only; recallability always comes from Agent's queues. */
+	private _lastQueueUpdate = JSON.stringify({ steering: [], followUp: [] });
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
@@ -478,6 +537,8 @@ export class AgentSession {
 	private _pendingNewContext: NewContextRequest | undefined;
 	private _reportedUsagePrefix: ProviderRequestPrefix | null | undefined;
 	private _providerRequestPrefix: ProviderRequestPrefix | undefined;
+	/** live_tool_result replacements for this run's saved results, keyed by tool call ID. */
+	private readonly _liveToolResultContent = new Map<string, ToolResultMessage["content"]>();
 	private _toolPrefixKeys = new WeakMap<AgentTool, string>();
 	private _contextUsageCache?: {
 		inputs: unknown;
@@ -492,10 +553,18 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	/** A failed response whose retry was already decided during its run, so post-run handling must not retry it again. */
+	private _inRunRetryMessage: AssistantMessage | undefined;
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
 	private _pendingBashMessages: BashExecutionMessage[] = [];
+	private _backgroundTimer?: NodeJS.Timeout;
+	private _backgroundWakeSuppressed = false;
+	private _backgroundNotificationsReady: boolean;
+	private readonly _backgroundCommandSessionDir: string;
+	private _backgroundCheckpointPaused = false;
+	private readonly _backgroundPending = new Set<string>();
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
@@ -522,7 +591,7 @@ export class AgentSession {
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
-	private _extensionMode: ExtensionMode = "print";
+	private _extensionMode?: ExtensionMode;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
 	private _extensionGetQueuedInputCount?: () => number;
 	private _extensionAbortHandler?: () => void;
@@ -539,6 +608,7 @@ export class AgentSession {
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
+	private _toolDiscoveryGroups: AvailableDiscoveryGroup[] = [];
 
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
 	/** Prompt options after before_agent_start mutations for the active run. */
@@ -552,7 +622,17 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.agent.requestAdmissionSignal = this._shutdownAbortController.signal;
 		this.sessionManager = config.sessionManager;
+		this._backgroundNotificationsReady = !config.deferBackgroundCommandNotifications;
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type === "custom" && entry.customType === BACKGROUND_COMMAND_RUN_STATE)
+				this._backgroundWakeSuppressed = entry.data === true;
+		}
 		this.settingsManager = config.settingsManager;
+		this._backgroundCommandSessionDir = resolvePath(
+			process.env[ENV_SESSION_DIR] ||
+				this.settingsManager.getSessionDir() ||
+				join(config.agentDir ?? getAgentDir(), "sessions"),
+		);
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
@@ -601,6 +681,7 @@ export class AgentSession {
 				: this._baseSystemPromptOptions.selectedTools,
 		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
+		this._startBackgroundCommandMonitor();
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -745,6 +826,40 @@ export class AgentSession {
 		};
 	}
 
+	private _getRetainedToolResultIds(): string[] {
+		const projection = this.sessionManager.buildSessionProjection();
+		const nativeCallIds = new Set(
+			projection.messages.flatMap((message) =>
+				message.role === "assistant"
+					? message.content.flatMap((block) =>
+							block.type === "toolCall" && block.async && block.responsesItem ? [block.id] : [],
+						)
+					: [],
+			),
+		);
+		// A prepared or failed request must not hide earlier proof of consumed input.
+		const prefix = [this._providerRequestPrefix, this._reportedUsagePrefix].find(
+			(candidate) => candidate?.response && ["stop", "length", "toolUse"].includes(candidate.response.stopReason),
+		);
+		const consumedResultIds = prefix?.toolResultIds;
+		const consumedEntryIds = new Set(
+			this.sessionManager
+				.getBranch()
+				.flatMap((entry) => (entry.type === "message" ? (entry.consumedToolResultIds ?? []) : [])),
+		);
+		return projection.entries.flatMap((entry) =>
+			!consumedEntryIds.has(entry.sourceEntry.id) &&
+			entry.messages.some(
+				(message) =>
+					message.role === "toolResult" &&
+					nativeCallIds.has(message.toolCallId) &&
+					!consumedResultIds?.has(message.toolCallId),
+			)
+				? [entry.sourceEntry.id]
+				: [],
+		);
+	}
+
 	private _consumeNewContext(request?: NewContextRequest): AgentContext | undefined {
 		const next = request ?? this._pendingNewContext;
 		this._pendingNewContext = undefined;
@@ -756,24 +871,42 @@ export class AgentSession {
 		)
 			return undefined;
 
-		if (this.agent.state.pendingToolCalls.size > 0 || this.getPendingToolCalls().length > 0) {
-			this._pendingNewContext = next;
-			return undefined;
-		}
 		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
 		const usage = this.getContextUsage();
-		this.sessionManager.appendContextWindow(handoff, usage?.tokens ?? null);
-		this._reportedUsagePrefix = null;
-		this._refreshFinalizedContext();
-		const messages = this.agent.state.messages;
-
-		const marker = messages.find((message) => message.role === "custom" && message.customType === "context-window")!;
-		this._emit({ type: "message_start", message: marker });
-		this._emit({ type: "message_end", message: marker });
-		this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
+		const preview = this._createBoundaryPreviewManager([]);
+		const windowId = preview.appendContextWindow(handoff, usage?.tokens ?? null, this._getRetainedToolResultIds());
+		this._extensionRunner.runContextWindowHooks(
+			() => ({
+				contextEntries: preview.buildSessionProjection().entries,
+				pendingMessages: this._pendingProviderMessages.slice(),
+			}),
+			(drafts) => this._applyBoundaryDrafts(preview, drafts),
+			preview,
+		);
+		const prepared = preview.getBranch();
+		const edits = prepared.slice(prepared.findIndex((entry) => entry.id === windowId) + 1);
+		try {
+			this.sessionManager.appendPreparedContextWindow(preview, windowId);
+		} finally {
+			// Publication can still fail at journal I/O; reflect only entries actually accepted.
+			if (this.sessionManager.getEntry(windowId)) {
+				this._reportedUsagePrefix = null;
+				this._refreshFinalizedContext();
+				this._restorePendingProviderMessages(this.agent.state);
+				for (const entry of edits) {
+					if (this.sessionManager.getEntry(entry.id)) this._emit({ type: "entry_appended", entry });
+				}
+				const marker = this.agent.state.messages.find(
+					(message) => message.role === "custom" && message.customType === "context-window",
+				)!;
+				this._emit({ type: "message_start", message: marker });
+				this._emit({ type: "message_end", message: marker });
+				this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
+			}
+		}
 
 		return {
-			messages: messages.slice(),
+			messages: this.agent.state.messages.slice(),
 			tools: this.agent.state.tools.slice(),
 		};
 	}
@@ -809,8 +942,10 @@ export class AgentSession {
 
 	private _installAgentRequestProjection(): void {
 		const previousPrepareRequest = this.agent.prepareRequest;
+		let frontier: string | null = null;
 		this.agent.prepareRequest = async (request, signal) => {
 			this._shutdownAbortController.signal.throwIfAborted();
+			frontier = this.sessionManager.getLeafId();
 			const canonicalContext = this._restorePendingProviderMessages({
 				...request.context,
 				messages: this.sessionManager.buildSessionProjection().messages,
@@ -839,15 +974,22 @@ export class AgentSession {
 			};
 		};
 
+		this.agent.toolResultModelContent = (result) => this._liveToolResultContent.get(result.toolCallId);
+
 		const previousTransform = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
 			// Final input/tool declarations can now be persisted exactly once. Refresh the
 			// inspection cache without replacing request-only edits from prepareRequest.
 			this._flushPendingProviderMessages();
 			this._refreshFinalizedContext();
+			const headIndex = messages.findIndex((message) => message.role === "system" && message.nativeHead);
+			if (headIndex > 0)
+				messages = [messages[headIndex], ...messages.slice(0, headIndex), ...messages.slice(headIndex + 1)];
 			const model = this.model;
 			const systemPrompt = getCurrentSystemPrompt(messages);
+			const canonicalConversation = snapshotProviderConversation(messages);
 			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
+			const sentConversation = snapshotProviderConversation(transformed);
 			this._providerRequestPrefix = model
 				? {
 						provider: model.provider,
@@ -856,7 +998,10 @@ export class AgentSession {
 						systemPrompt: getCurrentSystemPrompt(transformed),
 						transcriptSystemPrompt: systemPrompt,
 						toolKeys: this.agent.state.tools.map((tool) => this._captureToolPrefix(tool)),
-						conversation: snapshotProviderConversation(transformed),
+						canonicalConversation,
+						conversationPreserved: providerConversationCovers(canonicalConversation, sentConversation),
+						toolResultIds: providerToolResultIds(sentConversation),
+						frontier,
 						systemTokens: this._projectEstimatedMessages(transformed).reduce(
 							(sum, message) => sum + (message.role === "system" ? estimateTokens(message) : 0),
 							0,
@@ -913,8 +1058,20 @@ export class AgentSession {
 			this._boundaryDispatchedMessages.add(turn.message);
 			const extensionContinue = await this._dispatchTurnEndBoundary(turn.message, turn.toolResults);
 			const previousDecision = await previousFinishTurn?.(turn, signal);
+			if (turn.message.stopReason !== "error" && turn.message.stopReason !== "aborted")
+				await this._inspectBackgroundCommands(true);
 			if (this._shutdownAbortController.signal.aborted) return { action: "end" };
 			if (previousDecision?.action === "end") return previousDecision;
+			// Running native work keeps the run open, so a failed response retries here. Omitting the attempt could hide a
+			// native call that starts after the omission, and replay already drops the attempt's unfinished output.
+			if (
+				turn.message.stopReason === "error" &&
+				this.agent.state.pendingToolCalls.size > 0 &&
+				this._isRetryableError(turn.message)
+			) {
+				this._inRunRetryMessage = turn.message;
+				if (await this._prepareRetry(turn.message, false)) return { action: "continue" };
+			}
 			if (extensionContinue || previousDecision?.action === "continue") return { action: "continue" };
 			return undefined;
 		};
@@ -1010,6 +1167,7 @@ export class AgentSession {
 		const model = this.model;
 		if (
 			!prefix?.response ||
+			!prefix.conversationPreserved ||
 			!model ||
 			prefix.provider !== model.provider ||
 			prefix.api !== model.api ||
@@ -1024,7 +1182,10 @@ export class AgentSession {
 				snapshotProviderConversation([context.messages[lastUsageIndex]])[0],
 				prefix.responseSnapshot,
 			) &&
-			isDeepStrictEqual(snapshotProviderConversation(context.messages.slice(0, lastUsageIndex)), prefix.conversation)
+			isDeepStrictEqual(
+				snapshotProviderConversation(context.messages.slice(0, lastUsageIndex)),
+				prefix.canonicalConversation,
+			)
 		);
 	}
 
@@ -1059,7 +1220,9 @@ export class AgentSession {
 			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
 			if (entry.type === "context_window") return { hasPostCompactionUsage: true, useReportedUsage: false };
 			if (isContextUsageInvalidatingEntry(entry)) invalidated = true;
-			if (model && entry.type === "message" && entry.message.role === "assistant") {
+			// Execution checkpoints can arrive after a window boundary. Only the original
+			// final response anchors measured usage; keep walking to it or the boundary.
+			if (model && entry.type === "message" && !entry.checkpoint && entry.message.role === "assistant") {
 				const message = entry.message;
 				const entryId = entry.id;
 				if (
@@ -1102,6 +1265,7 @@ export class AgentSession {
 				selectedTools: this.getActiveToolReferences(),
 				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
 				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
+				sectionTools: { ...runOptions.sectionTools, ...this._baseSystemPromptOptions.sectionTools },
 			});
 			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
 			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
@@ -1130,7 +1294,61 @@ export class AgentSession {
 		return context;
 	}
 
-	private _persistMessage(message: AgentMessage): void {
+	private _concurrentToolResultIds(
+		message: AgentMessage,
+		prefix: ProviderRequestPrefix | undefined,
+	): string[] | undefined {
+		if (
+			message.role !== "assistant" ||
+			!message.responseId ||
+			!message.content.length ||
+			!prefix?.inputToolCallIds ||
+			message.provider !== prefix.provider ||
+			message.api !== prefix.api ||
+			message.model !== prefix.model
+		)
+			return undefined;
+		const branch = this.sessionManager.getBranch();
+		// The first real snapshot already anchors older responses, including late execution checkpoints.
+		if (branch.some((entry) => entry.type === "message" && isSameResponse(entry.message, message))) return undefined;
+		const frontier = prefix.frontier === null ? -1 : branch.findIndex((entry) => entry.id === prefix.frontier);
+		if (prefix.frontier !== null && frontier < 0) return undefined;
+		// Preparation can summarize or omit receipts after the captured frontier.
+		// Ordering provenance must not bring those discarded contributions back.
+		const retained = new Set(
+			this.sessionManager
+				.buildSessionProjection()
+				.entries.flatMap((entry) =>
+					entry.messages.some((message) => message.role === "toolResult") ? [entry.sourceEntry.id] : [],
+				),
+		);
+		const nativeCalls = new Set(
+			branch.flatMap((entry) =>
+				entry.type === "message" && entry.message.role === "assistant"
+					? (entry.message.content ?? []).flatMap((call) =>
+							call.type === "toolCall" && call.async && call.responsesItem?.async ? [call.id] : [],
+						)
+					: [],
+			),
+		);
+		return branch
+			.slice(frontier + 1)
+			.flatMap((entry) =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				retained.has(entry.id) &&
+				nativeCalls.has(entry.message.toolCallId) &&
+				!prefix.inputToolCallIds!.has(entry.message.toolCallId.split("|")[0])
+					? [entry.id]
+					: [],
+			);
+	}
+
+	private _persistMessage(
+		message: AgentMessage,
+		consumedToolResultIds?: string[],
+		prefix?: ProviderRequestPrefix,
+	): void {
 		let entryId: string | undefined;
 		if (message.role === "custom") {
 			entryId = this.sessionManager.appendCustomMessageEntry(
@@ -1149,6 +1367,9 @@ export class AgentSession {
 				message.role === "assistant" && message.content.some((block) => block.type === "toolCall" && block.async)
 					? structuredClone(message)
 					: message,
+				false,
+				consumedToolResultIds,
+				this._concurrentToolResultIds(message, prefix),
 			);
 		}
 		if (entryId) this._entryIdsByMessage.set(message, entryId);
@@ -1284,12 +1505,13 @@ export class AgentSession {
 		this._emit(event);
 	}
 
-	private _emitQueueUpdate(): void {
-		this._emit({
-			type: "queue_update",
-			steering: [...this._steeringMessages],
-			followUp: [...this._followUpMessages],
-		});
+	private _emitQueueUpdate(onlyIfChanged = false): void {
+		const queues = { steering: this.getSteeringMessages(), followUp: this.getFollowUpMessages() };
+		const fingerprint = JSON.stringify(queues);
+		if (onlyIfChanged && fingerprint === this._lastQueueUpdate) return;
+		// Update before notifying synchronous listeners, which may themselves modify queues.
+		this._lastQueueUpdate = fingerprint;
+		this._emit({ type: "queue_update", ...queues });
 	}
 
 	private async _emitSessionCompactFailed(event: Omit<SessionCompactFailedEvent, "type">): Promise<void> {
@@ -1350,12 +1572,19 @@ export class AgentSession {
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		if (event.type === "message_checkpoint") {
 			this._flushPendingProviderMessages();
-			const entryId = this.sessionManager.appendMessage(structuredClone(event.message), true);
+			const entryId = this.sessionManager.appendMessage(
+				structuredClone(event.message),
+				true,
+				undefined,
+				this._concurrentToolResultIds(event.message, this._providerRequestPrefix),
+			);
 			this._entryIdsByMessage.set(event.message, entryId);
 			this._emit(event);
 			return;
 		}
 		if (event.type === "steering") {
+			// Native control now owns sent input; it is no longer recallable from the queue.
+			this._emitQueueUpdate(true);
 			// Status is independent of input delivery. An accepted send is not application.
 			this.sessionManager.appendCustomEntry("response-steering", {
 				message: event.message,
@@ -1363,6 +1592,7 @@ export class AgentSession {
 				steeringId: event.steeringId,
 				responseId: event.responseId,
 				errorMessage: event.errorMessage,
+				...(event.diagnostic ? { diagnostic: event.diagnostic } : {}),
 			});
 			await this._extensionRunner.emit(event);
 			this._emit(event);
@@ -1375,20 +1605,70 @@ export class AgentSession {
 		}
 		const requestEnded = event.type === "message_end" && event.message.role === "assistant";
 		const requestPrefix = requestEnded ? this._providerRequestPrefix : undefined;
+		// Capture proof before message_end handlers can change context. Journal order cannot
+		// distinguish a result in this request from one completed while it was streaming.
+		const consumedCallIds =
+			requestPrefix &&
+			event.type === "message_end" &&
+			event.message.role === "assistant" &&
+			["stop", "length", "toolUse"].includes(event.message.stopReason)
+				? requestPrefix.toolResultIds
+				: undefined;
+		const consumedToolResultIds = consumedCallIds?.size
+			? this.sessionManager
+					.getBranch()
+					.flatMap((entry) =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						consumedCallIds.has(entry.message.toolCallId)
+							? [entry.id]
+							: [],
+					)
+			: undefined;
 		const responseSnapshot =
 			event.type === "message_end" && event.message.role === "assistant"
 				? snapshotProviderConversation([event.message])[0]
 				: undefined;
 		if (requestEnded) this._skipNextProviderRequestPreflight = false;
-		if (event.type === "agent_end") this._providerRequestPrefix = undefined;
+		if (event.type === "agent_end") {
+			this._providerRequestPrefix = undefined;
+			this._liveToolResultContent.clear();
+		}
 		if (event.type === "message_start" && event.message.role === "assistant") {
-			if (this._providerRequestPrefix && event.continuationInput !== undefined) {
+			if (this._providerRequestPrefix) {
+				const continuation = snapshotProviderConversation([...(event.continuationInput ?? [])]);
+				const native = event.message.api === "openai-responses" || event.message.api === "openai-codex-responses";
+				const initialIds = event.inputToolCallIds === undefined ? undefined : new Set(event.inputToolCallIds);
+				const initialResults = native
+					? this.sessionManager
+							.getBranch()
+							.flatMap((entry) =>
+								entry.type === "message" &&
+								entry.message.role === "toolResult" &&
+								initialIds?.has(entry.message.toolCallId.split("|")[0])
+									? [entry.message.toolCallId]
+									: [],
+							)
+					: this._providerRequestPrefix.toolResultIds;
 				this._providerRequestPrefix = {
 					...this._providerRequestPrefix,
-					conversation: [
-						...this._providerRequestPrefix.conversation,
-						...snapshotProviderConversation([...event.continuationInput]),
-					],
+					response: undefined,
+					inputToolCallIds:
+						event.continuationInput === undefined
+							? initialIds
+							: this._providerRequestPrefix.inputToolCallIds === undefined
+								? undefined
+								: new Set([
+										...this._providerRequestPrefix.inputToolCallIds,
+										...[...providerToolResultIds(continuation)].map((id) => id.split("|")[0]),
+									]),
+					canonicalConversation: [...this._providerRequestPrefix.canonicalConversation, ...continuation],
+					toolResultIds: new Set([
+						...(event.continuationInput === undefined
+							? initialResults
+							: this._providerRequestPrefix.toolResultIds),
+						...providerToolResultIds(continuation),
+					]),
 				};
 			}
 			this._flushPendingProviderMessages();
@@ -1396,26 +1676,8 @@ export class AgentSession {
 
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._overflowRecoveryAttempted = false;
-			// An "all" drain owns the entire batch before its first message starts. Reflect
-			// native ownership before yielding so clearQueue cannot restore already-drained text.
-			// Matching the current message by text would also remove undrained duplicates.
-			const queues = this.agent.getQueuedMessages();
-			const steering = queues.steering
-				.filter((message) => message.role === "user")
-				.map((message) => contentText(message.content, ""));
-			const followUp = queues.followUp
-				.filter((message) => message.role === "user")
-				.map((message) => contentText(message.content, ""));
-			if (
-				steering.length !== this._steeringMessages.length ||
-				followUp.length !== this._followUpMessages.length ||
-				steering.some((text, index) => text !== this._steeringMessages[index]) ||
-				followUp.some((text, index) => text !== this._followUpMessages[index])
-			) {
-				this._steeringMessages = steering;
-				this._followUpMessages = followUp;
-				this._emitQueueUpdate();
-			}
+			// Reflect the native drain, including its entire batch in "all" mode.
+			this._emitQueueUpdate(true);
 			// The loop owns this await after draining the native queue. Awaiting image work in
 			// _queueSteer/_queueFollowUp instead could enqueue after the run has already settled.
 			// Finish accepted delivery even on abort; request preflight prevents further dispatch.
@@ -1443,7 +1705,8 @@ export class AgentSession {
 			}
 			this._providerRequestPrefix = {
 				...requestPrefix,
-				conversation: [...requestPrefix.conversation, responseSnapshot],
+				response: message,
+				canonicalConversation: [...requestPrefix.canonicalConversation, responseSnapshot],
 			};
 		}
 
@@ -1455,7 +1718,9 @@ export class AgentSession {
 							willRetry: this._willRetryAfterAgentEnd(event),
 							...(this.getPendingToolCalls().length ? { pendingToolCalls: this.getPendingToolCalls() } : {}),
 						}
-					: event,
+					: event.type === "message_end"
+						? { ...event, consumedToolResultIds }
+						: event,
 			);
 		} finally {
 			// A throwing subscriber must not skip persistence of the completed message.
@@ -1467,10 +1732,20 @@ export class AgentSession {
 					this._pendingProviderMessages.push(event.message);
 					if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
 				} else {
-					this._persistMessage(event.message);
+					this._persistMessage(event.message, consumedToolResultIds, requestPrefix);
 				}
 				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 			}
+		}
+
+		// The loop awaits this before it can submit the result on a live continuation.
+		if (
+			event.type === "message_end" &&
+			event.message.role === "toolResult" &&
+			this._extensionRunner.hasHandlers("live_tool_result")
+		) {
+			const content = await this._extensionRunner.emitLiveToolResult(event.message);
+			if (content) this._liveToolResultContent.set(event.message.toolCallId, content);
 		}
 
 		if (event.type === "message_end" && event.message.role === "assistant") {
@@ -1513,7 +1788,11 @@ export class AgentSession {
 		for (let i = event.messages.length - 1; i >= 0; i--) {
 			const message = event.messages[i];
 			if (message.role === "assistant") {
-				return this._isRetryableError(message as AssistantMessage);
+				// A late native checkpoint can replace this entry, so identify the response by its end event.
+				return (
+					this._lastAssistantMessage !== this._inRunRetryMessage &&
+					this._isRetryableError(message as AssistantMessage)
+				);
 			}
 		}
 		return false;
@@ -1729,6 +2008,8 @@ export class AgentSession {
 
 	/** Close admission before host cleanup yields. Active responses are aborted only at final disposal. */
 	beginShutdown(): void {
+		clearInterval(this._backgroundTimer);
+		this._extensionUIContext?.setStatus("background-command", undefined);
 		this._cacheWarmer?.cancel();
 		this._checkpointRequest?.cancel();
 		this._shutdownAbortController.abort();
@@ -1740,6 +2021,8 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		clearInterval(this._backgroundTimer);
+		this._extensionUIContext?.setStatus("background-command", undefined);
 		this._checkpointRequest?.cancel();
 		this._shutdownAbortController.abort();
 		try {
@@ -1860,6 +2143,7 @@ export class AgentSession {
 			description: definition.description,
 			parameters: definition.parameters,
 			promptGuidelines: definition.promptGuidelines,
+			discovery: definition.discovery,
 			sourceInfo,
 		}));
 	}
@@ -1995,6 +2279,7 @@ export class AgentSession {
 			selectedTools: validToolNames,
 			toolSnippets,
 			toolGuidelines: Object.fromEntries(this._toolPromptGuidelines),
+			sectionTools: discoverySectionTools(this._toolDiscoveryGroups),
 		});
 	}
 
@@ -2022,13 +2307,45 @@ export class AgentSession {
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions(this._baseSystemPromptOptions);
 		this._hasPreparedPrompt = true;
 		const current = getCurrentSystemMessage(messages);
+		const deferredToolEntries = this._toolDiscoveryGroups.flatMap((group) => group.defaultTools);
+		const discoveryChanged = !isDeepStrictEqual(current?.deferredToolEntries, deferredToolEntries);
 		const desired = buildSystemPromptSections(options);
 		// Saved full-prompt replacements must not become a permanent opaque prefix.
 		if (current && (current.sections === undefined || contentText(current.content).length > 0)) {
-			return { role: "system", content: "", sections: desired, replace: true, timestamp: Date.now() };
+			return {
+				role: "system",
+				content: "",
+				sections: desired,
+				deferredToolEntries,
+				replace: true,
+				timestamp: Date.now(),
+			};
 		}
 		const sections = diffSystemPromptSections(current?.sections ?? {}, desired);
-		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
+		// Never retrofit a declaration into a prefix that has already been bound by a response.
+		const lastBinding =
+			!current &&
+			this.sessionManager
+				.getBranch()
+				.reverse()
+				.find(
+					(entry) =>
+						entry.type === "compaction" ||
+						entry.type === "context_window" ||
+						(entry.type === "message" && (entry.message.role === "system" || entry.message.role === "assistant")),
+				);
+		const nativeHead =
+			!current && (!lastBinding || lastBinding.type === "compaction" || lastBinding.type === "context_window");
+		return sections || discoveryChanged
+			? {
+					role: "system",
+					content: "",
+					...(nativeHead ? { nativeHead: true as const } : {}),
+					sections,
+					...(discoveryChanged ? { deferredToolEntries } : {}),
+					timestamp: Date.now(),
+				}
+			: undefined;
 	}
 
 	/**
@@ -2065,10 +2382,46 @@ export class AgentSession {
 	/** Restore the active tool loadout declared by the session transcript, if it declares one. */
 	private _restoreToolsFromTranscript(): void {
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
+		// Without a declaration there is no saved selection to restore. Preserve native
+		// behavior, including lifecycle-hook activations and pending prompt edits.
 		if (!current) return;
-		const toolNames = (current.toolsAdded ?? [])
-			.map(toToolReference)
-			.filter((tool) => this._toolRegistry.has(this._toolSelectionKey(tool)));
+		const loaderSelected = (current.toolsAdded ?? []).some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME));
+		const deferredKeys = new Set(this._toolDiscoveryGroups.flatMap((group) => group.tools.map(toolKey)));
+		// Unannotated history cannot distinguish retired entries from deliberately omitted ordinary tools.
+		// Preserve its legacy fallback only when the loader itself is no longer available.
+		const retiredEntries = current.deferredToolEntries
+			? current.deferredToolEntries.filter((tool) => !deferredKeys.has(toolKey(tool)))
+			: !this._toolRegistry.has(toolKey(DISCOVER_TOOLS_NAME))
+				? this.getActiveToolReferences()
+				: [];
+		const toolNames = [
+			...(current.toolsAdded ?? []).map(toToolReference),
+			...(loaderSelected
+				? retiredEntries.filter((tool) => this._toolDefinitions.get(toolKey(tool))?.sourceInfo.source !== "builtin")
+				: []),
+		].filter(
+			(tool, index, tools) =>
+				this._toolRegistry.has(this._toolSelectionKey(tool)) &&
+				tools.findIndex((other) => toolKey(other) === toolKey(tool)) === index,
+		);
+		// Older selections have never declared the loader. Keep it available for newly
+		// installed deferred integrations, but respect empty selections and a deliberate
+		// removal recorded after discovery was already available in this branch.
+		if (
+			toolNames.length &&
+			this._toolRegistry.has(toolKey(DISCOVER_TOOLS_NAME)) &&
+			!toolNames.some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME)) &&
+			!this.sessionManager
+				.getBranch()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						(entry.message.role === "system" || entry.message.role === "toolResult") &&
+						entry.message.toolsAdded?.some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME)),
+				)
+		) {
+			toolNames.push({ name: DISCOVER_TOOLS_NAME });
+		}
 		this.agent.state.tools = toolNames.flatMap((name) => {
 			const registered = this._toolRegistry.get(toolKey(name));
 			return registered ? [registered] : [];
@@ -2094,6 +2447,11 @@ export class AgentSession {
 		if (this._isAgentRunActive || this.agent.state.isStreaming) {
 			throw new Error("Agent is already processing.");
 		}
+		if (this.isCompacting) {
+			throw new Error(
+				"Cannot submit a prompt while compaction or tree navigation is in progress. Wait for it to finish and retry.",
+			);
+		}
 		this._agentRunAbortRequested = false;
 		this._isAgentRunActive = true;
 		const controller = new AbortController();
@@ -2104,6 +2462,8 @@ export class AgentSession {
 			const accept = await prepare(controller.signal);
 			controller.signal.throwIfAborted();
 			const messages = accept();
+			this._backgroundCheckpointPaused = false;
+			this._setBackgroundWakeSuppressed(false);
 			this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
 			started = true;
 			let run = this.agent.prompt(messages);
@@ -2128,23 +2488,27 @@ export class AgentSession {
 			if (!started) controller.signal.throwIfAborted();
 			throw error;
 		} finally {
-			if (controller.signal.aborted) this._pendingNewContext = undefined;
-			this._skipNextProviderRequestPreflight = false;
-			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
-			this._runSystemPromptOptions = undefined;
-			if (!started) this._baseSystemPromptBaseline = previousBaseSystemPromptBaseline;
-			// No further retry or continuation can deliver these messages. Recover both queued
-			// and drained-but-undelivered customs without starting another turn.
-			this._preserveUndeliveredCustomMessages(true);
-			this._flushPendingProviderMessages();
-			this._flushPendingBashMessages();
-			this._flushPendingCustomMessages();
-			this._promptAbortController = undefined;
-			if (started) {
-				await this._emitAgentSettled();
-			} else {
-				this._isAgentRunActive = false;
-				this._resolveIdleWaitIfIdle();
+			try {
+				if (controller.signal.aborted || this._agentRunAbortRequested) this._setBackgroundWakeSuppressed(true);
+				if (controller.signal.aborted) this._pendingNewContext = undefined;
+				this._skipNextProviderRequestPreflight = false;
+				if (this._agentRunAbortRequested) await this._finishCancelledRetry();
+				this._runSystemPromptOptions = undefined;
+				if (!started) this._baseSystemPromptBaseline = previousBaseSystemPromptBaseline;
+				// No further retry or continuation can deliver these messages. Recover both queued
+				// and drained-but-undelivered customs without starting another turn.
+				this._preserveUndeliveredCustomMessages(true);
+				this._flushPendingProviderMessages();
+				this._flushPendingBashMessages();
+				this._flushPendingCustomMessages();
+			} finally {
+				this._promptAbortController = undefined;
+				if (started) {
+					await this._emitAgentSettled();
+				} else {
+					this._isAgentRunActive = false;
+					this._resolveIdleWaitIfIdle();
+				}
 			}
 		}
 	}
@@ -2194,7 +2558,11 @@ export class AgentSession {
 			return message.stopReason !== "stop" || this.agent.hasQueuedMessages();
 		}
 
-		if (this._isRetryableError(message) && (await this._prepareRetry(message))) {
+		if (
+			message !== this._inRunRetryMessage &&
+			this._isRetryableError(message) &&
+			(await this._prepareRetry(message))
+		) {
 			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
 			return !this._agentRunAbortRequested;
 		}
@@ -2581,42 +2949,36 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
-		const queuedTexts = this._steeringMessages;
-		queuedTexts.push(text);
-		try {
-			this._emitQueueUpdate();
-		} catch (error) {
-			queuedTexts.pop();
-			throw error;
-		}
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
-		this.agent.steer({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
+		const message: UserMessage = { role: "user", content, timestamp: Date.now() };
+		this.agent.steer(message);
+		try {
+			this._emitQueueUpdate();
+		} catch (error) {
+			this.agent.takeQueuedMessages((queued) => queued === message);
+			throw error;
+		}
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
-		const queuedTexts = this._followUpMessages;
-		queuedTexts.push(text);
-		try {
-			this._emitQueueUpdate();
-		} catch (error) {
-			queuedTexts.pop();
-			throw error;
-		}
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
-		this.agent.followUp({ role: "user", content, timestamp: Date.now() });
+		const message: UserMessage = { role: "user", content, timestamp: Date.now() };
+		this.agent.followUp(message);
+		try {
+			this._emitQueueUpdate();
+		} catch (error) {
+			this.agent.takeQueuedMessages((queued) => queued === message);
+			throw error;
+		}
 	}
 
 	/**
@@ -2728,12 +3090,9 @@ export class AgentSession {
 	 * Called once the current turn's tool results are in agent state and session history.
 	 */
 	private _flushPendingCustomMessages(): void {
-		if (this._pendingCustomMessages.length === 0) return;
-
-		const pending = this._pendingCustomMessages;
-		this._pendingCustomMessages = [];
-		for (const appMessage of pending) {
-			this._appendCustomMessage(appMessage);
+		while (this._pendingCustomMessages.length > 0) {
+			// SessionManager owns the attempted entry even if persistence fails.
+			this._appendCustomMessage(this._pendingCustomMessages.shift()!);
 		}
 	}
 
@@ -2785,10 +3144,8 @@ export class AgentSession {
 	clearQueue(): { steering: string[]; followUp: string[] } {
 		this._assertNotCheckpointHeld();
 		this._preserveUndeliveredCustomMessages();
-		const steering = [...this._steeringMessages];
-		const followUp = [...this._followUpMessages];
-		this._steeringMessages = [];
-		this._followUpMessages = [];
+		const steering = [...this.getSteeringMessages()];
+		const followUp = [...this.getFollowUpMessages()];
 		this.agent.clearAllQueues();
 		this._emitQueueUpdate();
 		if (!this.isStreaming) {
@@ -2815,7 +3172,7 @@ export class AgentSession {
 
 	/** Number of pending user texts shown in the steering/follow-up UI. */
 	get pendingMessageCount(): number {
-		return this._steeringMessages.length + this._followUpMessages.length;
+		return this.getSteeringMessages().length + this.getFollowUpMessages().length;
 	}
 
 	/** Pending non-user steering/follow-up messages, retained in the native agent queues. */
@@ -2826,12 +3183,18 @@ export class AgentSession {
 
 	/** Get pending steering messages (read-only) */
 	getSteeringMessages(): readonly string[] {
-		return this._steeringMessages;
+		return this.agent
+			.getQueuedMessages()
+			.steering.filter((message) => message.role === "user")
+			.map((message) => contentText(message.content, ""));
 	}
 
 	/** Get pending follow-up messages (read-only) */
 	getFollowUpMessages(): readonly string[] {
-		return this._followUpMessages;
+		return this.agent
+			.getQueuedMessages()
+			.followUp.filter((message) => message.role === "user")
+			.map((message) => contentText(message.content, ""));
 	}
 
 	private async _flushCheckpointSettings(): Promise<void> {
@@ -3123,16 +3486,11 @@ export class AgentSession {
 			throw new Error("Checkpoint queues require a fresh idle session");
 		const queues = structuredClone(saved);
 		this._checkpointRestored = true;
+		this._backgroundCheckpointPaused = true;
 		this.agent.steeringMode = queues.steeringMode;
 		this.agent.followUpMode = queues.followUpMode;
 		for (const message of queues.steering) this.agent.steer(message);
 		for (const message of queues.followUp) this.agent.followUp(message);
-		this._steeringMessages = queues.steering
-			.filter((message) => message.role === "user")
-			.map((message) => contentText(message.content, ""));
-		this._followUpMessages = queues.followUp
-			.filter((message) => message.role === "user")
-			.map((message) => contentText(message.content, ""));
 		this._pendingNextTurnMessages = queues.nextTurn;
 		const messages = [...queues.steering, ...queues.followUp];
 		for (const index of queues.persistOnCancel) {
@@ -3154,6 +3512,7 @@ export class AgentSession {
 		this._promptAbortController?.abort();
 		if (this._isAgentRunActive) {
 			this._agentRunAbortRequested = true;
+			this._setBackgroundWakeSuppressed(true);
 		}
 		this.abortRetry();
 		this.abortCompaction();
@@ -3186,6 +3545,11 @@ export class AgentSession {
 		previousModel: Model<any> | undefined,
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
+		if (
+			supportsToolDiscovery(previousModel) !== supportsToolDiscovery(nextModel) &&
+			[...this._toolDefinitions.values()].some(({ definition }) => definition.discovery)
+		)
+			this._refreshToolRegistry();
 		if (modelsAreEqual(previousModel, nextModel)) return;
 		await this._extensionRunner.emit({
 			type: "model_select",
@@ -3836,6 +4200,7 @@ export class AgentSession {
 		let fromExtension = false;
 		let signal: AbortSignal | undefined;
 		let cancelledByExtension = false;
+		let claimedWindow = false;
 
 		try {
 			if (!model) {
@@ -3862,6 +4227,7 @@ export class AgentSession {
 				const claim = await this._extensionRunner.emit({
 					type: "session_before_auto_compact",
 					branchEntries: pathEntries,
+					retainedToolResultIds: this._getRetainedToolResultIds(),
 					pendingMessages: this._pendingProviderMessages.slice(),
 					reason,
 					willRetry,
@@ -3869,6 +4235,7 @@ export class AgentSession {
 				});
 				signal.throwIfAborted();
 				if (claim?.newContext) {
+					claimedWindow = true;
 					const contextWindowStarted = !!this._consumeNewContext(claim.newContext);
 					this._emit({
 						type: "compaction_end",
@@ -3912,6 +4279,7 @@ export class AgentSession {
 				signal.throwIfAborted();
 
 				if (extensionResult?.newContext) {
+					claimedWindow = true;
 					const contextWindowStarted = !!this._consumeNewContext(extensionResult.newContext);
 					this._emit({
 						type: "compaction_end",
@@ -4037,6 +4405,7 @@ export class AgentSession {
 					fromExtension,
 				});
 			}
+			if (claimedWindow) throw error;
 			return false;
 		} finally {
 			if (signal?.aborted) this._pendingNewContext = undefined;
@@ -4093,6 +4462,7 @@ export class AgentSession {
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
 		this._finishCheckpointToolRestore();
+		this._backgroundNotificationsReady = true;
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -4181,6 +4551,11 @@ export class AgentSession {
 		}
 
 		this.agent.state.model = refreshedModel;
+		if (
+			supportsToolDiscovery(currentModel) !== supportsToolDiscovery(refreshedModel) &&
+			[...this._toolDefinitions.values()].some(({ definition }) => definition.discovery)
+		)
+			this._refreshToolRegistry();
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -4335,6 +4710,7 @@ export class AgentSession {
 	}): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolReferences();
+		const previousActiveKeys = new Set(previousActiveToolNames.map(toolKey));
 		const allowedToolNames = this._allowedToolNames ? new Set(this._allowedToolNames.map(toolKey)) : undefined;
 		const excludedToolNames = this._excludedToolNames ? new Set(this._excludedToolNames.map(toolKey)) : undefined;
 		const isAllowedTool = (tool: ToolSelection): boolean =>
@@ -4368,6 +4744,35 @@ export class AgentSession {
 				sourceInfo: tool.sourceInfo,
 			});
 		}
+		const previousDiscoveryGroups = this._toolDiscoveryGroups;
+		const groups = availableDiscoveryGroups(
+			[...definitionRegistry.values()]
+				.filter(({ sourceInfo }) => sourceInfo.source !== "builtin")
+				.map(({ definition }) => definition),
+		);
+		// Explicit host allowlists remain explicit. Excluding the loader must never strand capabilities.
+		const useDiscovery =
+			this._allowedToolNames === undefined &&
+			isAllowedTool(DISCOVER_TOOLS_NAME) &&
+			supportsToolDiscovery(this.model);
+		this._toolDiscoveryGroups = useDiscovery ? groups : [];
+		if (this._toolDiscoveryGroups.length) {
+			if (definitionRegistry.has(toolKey(DISCOVER_TOOLS_NAME)))
+				throw new Error(`Tool discovery conflicts with registered ${DISCOVER_TOOLS_NAME}`);
+			const definition = createDiscoverToolsDefinition({
+				groups: this._toolDiscoveryGroups,
+				getGroups: () => this._toolDiscoveryGroups,
+				getActive: () => this.getActiveToolReferences(),
+				setActive: (tools) => this.setActiveToolReferences(tools),
+			});
+			const tool = {
+				definition,
+				sourceInfo: createSyntheticSourceInfo(`<builtin:${DISCOVER_TOOLS_NAME}>`, { source: "builtin" }),
+			};
+			definitionRegistry.set(toolKey(definition), tool);
+			allCustomTools.push(tool);
+		}
+		const deferredKeys = new Set(this._toolDiscoveryGroups.flatMap((group) => group.tools.map(toolKey)));
 		const publicIds = new Map<string, string>();
 		for (const [key, { definition }] of definitionRegistry) {
 			const id = toolId(definition);
@@ -4419,10 +4824,33 @@ export class AgentSession {
 		).filter((name) => isAllowedTool(name));
 
 		if (options?.includeAllExtensionTools) {
-			for (const tool of wrappedExtensionTools) nextActiveToolNames.push(toToolReference(tool));
+			for (const tool of wrappedExtensionTools) {
+				if (!deferredKeys.has(toolKey(tool))) nextActiveToolNames.push(toToolReference(tool));
+			}
 		} else if (!options?.activeToolNames) {
 			for (const [key, tool] of this._toolRegistry) {
-				if (!previousRegistryNames.has(key)) nextActiveToolNames.push(toToolReference(tool));
+				// A reappearing loader must not make previously deselected entry tools reachable.
+				// Genuinely new integrations still follow normal late-registration behavior.
+				const wouldWidenSelection =
+					key === toolKey(DISCOVER_TOOLS_NAME) &&
+					previousRegistryNames.size > 0 &&
+					(previousActiveKeys.size === 0 ||
+						this._toolDiscoveryGroups.some((group) =>
+							group.defaultTools.some(
+								(tool) => previousRegistryNames.has(toolKey(tool)) && !previousActiveKeys.has(toolKey(tool)),
+							),
+						));
+				if (!previousRegistryNames.has(key) && !deferredKeys.has(key) && !wouldWidenSelection)
+					nextActiveToolNames.push(toToolReference(tool));
+			}
+		}
+		// Removing metadata or switching to an unsupported model restores the ordinary front doors,
+		// not advanced tools that the integration itself normally keeps inactive.
+		if (previousActiveKeys.has(toolKey(DISCOVER_TOOLS_NAME))) {
+			for (const group of previousDiscoveryGroups) {
+				for (const tool of group.defaultTools) {
+					if (!deferredKeys.has(toolKey(tool)) && isAllowedTool(tool)) nextActiveToolNames.push(tool);
+				}
 			}
 		}
 
@@ -4450,6 +4878,15 @@ export class AgentSession {
 						commandPrefix: shellCommandPrefix,
 						shellPath,
 						spawnHook: (context) => ({ ...context, cwd: this._extensionRunner.resolveBashCwd(context.cwd) }),
+					},
+					background_command: {
+						sessionManager: this.sessionManager,
+						sessionDir: this._backgroundCommandSessionDir,
+						isOneShot: () => this._extensionMode === "print" || this._extensionMode === "json",
+						commandPrefix: shellCommandPrefix,
+						shellPath,
+						spawnHook: (context) => ({ ...context, cwd: this._extensionRunner.resolveBashCwd(context.cwd) }),
+						onStart: () => this._startBackgroundCommandMonitor(),
 					},
 				});
 
@@ -4485,7 +4922,7 @@ export class AgentSession {
 			? []
 			: this._baseToolsOverride
 				? Object.keys(this._baseToolsOverride)
-				: ["read", "bash", "edit", "write"];
+				: ["read", "bash", "background_command", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -4496,6 +4933,7 @@ export class AgentSession {
 	/** Refresh resources and reinitialize extensions. Extension code updates require a process restart. */
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
 		this._checkpointRequest?.cancel();
+		this._backgroundNotificationsReady = false;
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
@@ -4521,6 +4959,7 @@ export class AgentSession {
 			await this.extendResourcesFromExtensions("reload");
 		}
 		this._extensionUIContext?.notify(`Restart ${APP_NAME} to apply extension code changes.`, "warning");
+		this._backgroundNotificationsReady = true;
 	}
 
 	// =========================================================================
@@ -4584,7 +5023,7 @@ export class AgentSession {
 	 * Prepare a retryable error for continuation with exponential backoff.
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
-	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
+	private async _prepareRetry(message: AssistantMessage, omit = true): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) {
 			return false;
@@ -4612,7 +5051,7 @@ export class AgentSession {
 			});
 
 			// Keep raw history while durably omitting the selected attempt from future requests.
-			this._omitRecoveryAttempt(message);
+			if (omit) this._omitRecoveryAttempt(message);
 
 			await sleep(delayMs, this._retryAbortController.signal);
 			this._retryAbortController.signal.throwIfAborted();
@@ -4631,6 +5070,7 @@ export class AgentSession {
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
+		if (this._retryAbortController) this._setBackgroundWakeSuppressed(true);
 		this._retryAbortController?.abort();
 	}
 
@@ -4655,6 +5095,114 @@ export class AgentSession {
 	// =========================================================================
 	// Bash Execution
 	// =========================================================================
+
+	private _setBackgroundWakeSuppressed(value: boolean): void {
+		if (value === this._backgroundWakeSuppressed) return;
+		this._backgroundWakeSuppressed = value;
+		this.sessionManager.appendCustomEntry(BACKGROUND_COMMAND_RUN_STATE, value);
+	}
+
+	private _startBackgroundCommandMonitor(): void {
+		if (this._backgroundTimer || this._shutdownAbortController.signal.aborted) return;
+		this._backgroundTimer = setInterval(() => void this._inspectBackgroundCommands(), 1000).unref();
+	}
+
+	private async _inspectBackgroundCommands(atTurnEnd = false): Promise<void> {
+		if (
+			!this._backgroundNotificationsReady ||
+			this._backgroundCheckpointPaused ||
+			this.isCheckpointHeld ||
+			this._shutdownAbortController.signal.aborted
+		)
+			return;
+		let completedIds: string[] = [];
+		try {
+			const jobs = listBackgroundCommands(
+				backgroundCommandDirectory(this.sessionManager, this._backgroundCommandSessionDir),
+			);
+			const running = jobs.filter((job) => !backgroundCommandFinished(job)).length;
+			this._extensionUIContext?.setStatus(
+				"background-command",
+				running ? `background: ${running} running` : undefined,
+			);
+			if (
+				(!atTurnEnd && (!this.isIdle || this._settling > 0)) ||
+				this.isBashRunning ||
+				this.isCompacting ||
+				this.isRetrying ||
+				this._activeCommands > 0 ||
+				this.pendingInputCount > 0 ||
+				this.hasPendingMessages ||
+				(atTurnEnd && (this._agentRunAbortRequested || this._promptAbortController?.signal.aborted))
+			)
+				return;
+			const seen = new Set<string>();
+			for (const entry of this.sessionManager.getEntries()) {
+				if (entry.type === "custom_message" && entry.customType === BACKGROUND_COMMAND_NOTICE) {
+					const details = entry.details as { jobIds?: string[] } | undefined;
+					for (const id of details?.jobIds ?? []) seen.add(id);
+				} else if (
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolName === "background_command" &&
+					!entry.message.namespace &&
+					!entry.message.isError
+				) {
+					const details = entry.message.details as BackgroundCommandToolDetails | undefined;
+					if (details)
+						for (const job of "jobs" in details ? details.jobs : [details]) {
+							if (job.id && backgroundCommandFinished(job)) seen.add(job.id);
+						}
+				}
+			}
+			for (const id of seen) this._backgroundPending.delete(id);
+			if (jobs.every((job) => backgroundCommandFinished(job) && seen.has(job.id))) {
+				clearInterval(this._backgroundTimer);
+				this._backgroundTimer = undefined;
+				return;
+			}
+			const completed = jobs
+				.filter(
+					(job) => backgroundCommandFinished(job) && !seen.has(job.id) && !this._backgroundPending.has(job.id),
+				)
+				.slice(0, 20);
+			completedIds = completed.map((job) => job.id);
+			if (completed.length) {
+				for (const id of completedIds) this._backgroundPending.add(id);
+				await this.sendCustomMessage(
+					{
+						customType: BACKGROUND_COMMAND_NOTICE,
+						content: `Background commands finished:\n${completed
+							.map((job) => {
+								const { id, status, exitCode, commandPreview, logFile, error } =
+									summarizeBackgroundCommand(job);
+								const summary = JSON.stringify({ id, status, exitCode, commandPreview, logFile, error });
+								return status === "succeeded"
+									? summary
+									: `${summary}\nOutput tail:\n${backgroundCommandOutputTail(job, { maxLines: 20, maxBytes: 2048 })}`;
+							})
+							.join("\n\n")}`,
+						display: true,
+						details: { jobIds: completedIds },
+					},
+					{
+						triggerTurn: !this._backgroundWakeSuppressed && !!this.model,
+						deliverAs: "steer",
+						persistOnCancel: true,
+					},
+				);
+			}
+		} catch (error) {
+			for (const id of completedIds) this._backgroundPending.delete(id);
+			clearInterval(this._backgroundTimer);
+			this._backgroundTimer = undefined;
+			this._extensionRunner.emitError({
+				extensionPath: "<background-command>",
+				event: "completion",
+				error: `Background command monitoring failed: ${String(error)}. Results remain in ${backgroundCommandDirectory(this.sessionManager, this._backgroundCommandSessionDir)}.`,
+			});
+		}
+	}
 
 	/**
 	 * Execute a user bash command, including user_bash interception.
@@ -4768,10 +5316,10 @@ export class AgentSession {
 	private _flushPendingBashMessages(): void {
 		if (this._pendingBashMessages.length === 0) return;
 
-		for (const bashMessage of this._pendingBashMessages) {
-			this.sessionManager.appendMessage(bashMessage);
+		while (this._pendingBashMessages.length > 0) {
+			// SessionManager owns the attempted entry even if persistence fails.
+			this.sessionManager.appendMessage(this._pendingBashMessages.shift()!);
 		}
-		this._pendingBashMessages = [];
 		this._refreshFinalizedContext();
 	}
 

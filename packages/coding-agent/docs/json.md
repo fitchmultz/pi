@@ -63,7 +63,7 @@ A turn contains one assistant response and its currently available tool results.
 
 | Event | Fields | Meaning |
 |---|---|---|
-| `message_start` | `message`, optional `continuationInput` | A message started. |
+| `message_start` | `message`, optional `inputToolCallIds`, `continuationInput` | A message started. |
 | `message_checkpoint` | `message` | Durable execution snapshot of the same assistant response. |
 | `message_update` | `usage`, `assistantMessageEvent` | An assistant message emitted a content-block update. |
 | `message_end` | `message` | A message completed. This is the authoritative final message. |
@@ -71,6 +71,8 @@ A turn contains one assistant response and its currently available tool results.
 Update an existing assistant row by `responseId` for `message_checkpoint`; it is not another completed response or billable usage record. Raw journal snapshots use `checkpoint: true`.
 
 Each automatic successor has its own message lifecycle and usage. `message_start.continuationInput` is a send-time snapshot of user inputs and submitted tool results added to the preceding response. It is absent on the first response; an empty array is a known empty delta. These inputs already have message events and must not be appended again.
+
+For the initial Responses or Codex response, `message_start.inputToolCallIds` snapshots result call IDs in the logical native payload **after** `onPayload` and **before** cached-delta extraction. These are provider call IDs, without Pi's `|item_id` suffix. `[]` means known empty; absence means unknown (including encrypted compaction summaries, opaque item references or caller-supplied continuation history). Unknown input does not prove consumption or permit causal reordering. An explicit successor `continuationInput` still proves its incremental inputs independently of an unknown initial baseline. Neither field changes event timing or asks consumers to append input again.
 
 ### Reconstruct streaming messages
 

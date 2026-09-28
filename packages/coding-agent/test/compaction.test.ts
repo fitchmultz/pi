@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Usage } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, Usage, UserMessage } from "@earendil-works/pi-ai/compat";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { readFileSync } from "fs";
@@ -11,6 +11,7 @@ import {
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
@@ -53,7 +54,7 @@ function createMockUsage(input: number, output: number, cacheRead = 0, cacheWrit
 	};
 }
 
-function createUserMessage(text: string): AgentMessage {
+function createUserMessage(text: string): UserMessage {
 	return { role: "user", content: text, timestamp: Date.now() };
 }
 
@@ -682,6 +683,77 @@ describe("prepareCompaction", () => {
 });
 
 describe("prepareCompaction with previous compaction", () => {
+	it("never uses carried async calls as the retained boundary on repeated compaction", () => {
+		const session = SessionManager.inMemory();
+		session.appendMessage(createUserMessage("Review in the background while inspecting files"));
+		const pendingCalls: AssistantMessage[] = [];
+		for (let i = 0; i < 8; i++) {
+			const call: AssistantMessage = {
+				...createAssistantMessage("", createMockUsage(0, 0)),
+				content: [
+					{
+						type: "toolCall",
+						id: `background-${i}`,
+						name: "review",
+						arguments: { task: "Review contracts. ".repeat(700) },
+						async: true,
+					},
+				],
+			};
+			pendingCalls.push(call);
+			session.appendMessage(call);
+		}
+		for (let i = 0; i < 16; i++) {
+			session.appendMessage({
+				...createAssistantMessage("", createMockUsage(0, 0)),
+				content: [{ type: "toolCall", id: `read-${i}`, name: "read", arguments: { path: `${i}.ts` } }],
+			});
+			session.appendMessage({
+				role: "toolResult",
+				toolCallId: `read-${i}`,
+				toolName: "read",
+				content: [{ type: "text", text: `Already inspected file ${i}\n${"x".repeat(40_000)}` }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+		}
+		session.appendMessage(createAssistantMessage("Inspected files", createMockUsage(0, 0)));
+		const first = prepareCompaction(session.getBranch(), DEFAULT_COMPACTION_SETTINGS)!;
+		expect(first).toBeDefined();
+		session.appendCompaction("File inspection summarized", first.firstKeptEntryId, first.tokensBefore);
+		const afterFirst = session.buildSessionContext().messages;
+		expect(
+			afterFirst.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
+		).toEqual(["read-15"]);
+		expect(afterFirst).toEqual(expect.arrayContaining(pendingCalls));
+
+		session.appendMessage(createUserMessage("Compact again"));
+		// The retained raw tail still fits, even though the carried calls exceed the budget.
+		expect(prepareCompaction(session.getBranch(), DEFAULT_COMPACTION_SETTINGS)?.firstKeptEntryId).toBeUndefined();
+
+		const recentId = session.appendMessage(createUserMessage("New work ".repeat(10_000)));
+		const projection = session.buildSessionProjection();
+		const second = prepareCompaction(session.getBranch(), DEFAULT_COMPACTION_SETTINGS)!;
+		expect(second).toBeDefined();
+		expect(second.firstKeptEntryId).toBe(recentId);
+		expect(second.tokensBefore).toBe(projection.messages.reduce((sum, message) => sum + estimateTokens(message), 0));
+		session.appendCompaction("Updated file inspection summary", second.firstKeptEntryId, second.tokensBefore);
+
+		const afterSecond = session.buildSessionContext().messages;
+		expect(afterSecond).toEqual(expect.arrayContaining(pendingCalls));
+		expect(afterSecond.some((message) => message.role === "toolResult")).toBe(false);
+		const reloadedEntries = parseSessionEntries(
+			session
+				.getBranch()
+				.map((entry) => JSON.stringify(entry))
+				.join("\n"),
+		);
+		const reloaded = buildSessionContext(
+			reloadedEntries.filter((entry): entry is SessionEntry => entry.type !== "session"),
+		);
+		expect(reloaded.messages).toEqual(afterSecond);
+	});
+
 	it("preserves previous history when splitting the first retained turn again", async () => {
 		const previousSummary = "Never deploy without approval.";
 		const entries = [

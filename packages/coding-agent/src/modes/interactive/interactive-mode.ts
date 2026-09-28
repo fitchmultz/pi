@@ -76,13 +76,7 @@ import {
 	SessionReplacementPersistenceError,
 } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
-import {
-	CACHE_TTL_MS,
-	type CacheMiss,
-	collectCacheMisses,
-	computeCacheWaste,
-	detectCacheMiss,
-} from "../../core/cache-stats.ts";
+import { type CacheMiss, collectCacheMisses, computeCacheWaste, detectCacheMiss } from "../../core/cache-stats.ts";
 import { formatCacheWarmingStatus, formatCacheWarmingUsage } from "../../core/cache-warmer.ts";
 import { CheckpointActivity, type SessionCheckpoint, type ShutdownCheckpoint } from "../../core/checkpoint.ts";
 import { findExtensionStackMatches, recordCrash, takeUnnotifiedCrash } from "../../core/crash-log.ts";
@@ -138,7 +132,7 @@ import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { reportBug } from "./bug-report.ts";
-import { createChatViewport } from "./chat-viewport.ts";
+import { type ChatViewport, createChatViewport } from "./chat-viewport.ts";
 import { ChatContainer } from "./components/activity.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
@@ -207,6 +201,31 @@ export { createInteractiveTui, createInteractiveTuiReference } from "./tui-rende
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
 	setExpanded(expanded: boolean): void;
+}
+
+/** Keep the native skill card and its trailing prompt together when transcript blocks are reordered. */
+class SkillMessageGroup extends Container implements Expandable {
+	private readonly skill: SkillInvocationMessageComponent;
+	private readonly prompt: UserMessageComponent | undefined;
+
+	constructor(skill: SkillInvocationMessageComponent, prompt?: UserMessageComponent) {
+		super();
+		this.skill = skill;
+		this.prompt = prompt;
+		this.addChild(skill);
+		if (prompt) {
+			this.addChild(new Spacer(1));
+			this.addChild(prompt);
+		}
+	}
+
+	setExpanded(expanded: boolean): void {
+		this.skill.setExpanded(expanded);
+	}
+
+	setOutputPad(padding: number): void {
+		this.prompt?.setOutputPad(padding);
+	}
 }
 
 interface WorkingStatusEditor extends EditorComponent {
@@ -436,9 +455,12 @@ export class InteractiveMode {
 	private loadedResourcesContainer: Container;
 	private chatContainer: ChatContainer;
 	private documentContainer: Container;
-	private transcriptScrollView: TuiLayouts.ScrollView | undefined;
-	private fullscreenLayoutRoot: Component | undefined;
+	private chatViewport: ChatViewport | undefined;
+	private transcriptOrder: "oldest-first" | "newest-first" = "oldest-first";
+	private tuiModeBeforeNewestFirst: TuiMode | undefined;
 	private pendingMessagesContainer: Container;
+	// Presentation only: live input has left the recallable queue, but is not yet applied.
+	private liveSteeringMessages = new Set<Extract<AgentMessage, { role: "user" }>>();
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
@@ -843,38 +865,65 @@ export class InteractiveMode {
 		if (this.chatContainer.children.length > 0) {
 			this.chatContainer.addChild(new Spacer(1));
 		}
-		this.chatContainer.addChild(new DynamicBorder());
+		const panel = new Container();
+		panel.addChild(new DynamicBorder());
 		if (this.settingsManager.getCollapseChangelog()) {
 			const versionMatch = this.changelogMarkdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
 			const latestVersion = versionMatch ? versionMatch[1] : this.version;
 			const condensedText = `Updated to v${latestVersion}. Use ${theme.bold("/changelog")} to view full changelog.`;
-			this.chatContainer.addChild(new Text(condensedText, 1, 0));
+			panel.addChild(new Text(condensedText, 1, 0));
 		} else {
-			this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(
-				new Markdown(this.changelogMarkdown.trim(), 1, 0, this.getMarkdownThemeWithSettings()),
-			);
-			this.chatContainer.addChild(new Spacer(1));
+			panel.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+			panel.addChild(new Spacer(1));
+			panel.addChild(new Markdown(this.changelogMarkdown.trim(), 1, 0, this.getMarkdownThemeWithSettings()));
+			panel.addChild(new Spacer(1));
 		}
-		this.chatContainer.addChild(new DynamicBorder());
+		panel.addChild(new DynamicBorder());
+		this.chatContainer.addChild(panel);
 	}
 
 	private mountInteractiveTui(tui: TuiMainScreen | TuiAltScreen, components: readonly Component[]): void {
 		for (const component of components) tui.addChild(component);
 		if (TuiLayouts.isViewportTUI(tui)) {
-			if (!this.fullscreenLayoutRoot) throw new Error("Fullscreen layout is not initialized");
-			tui.setLayoutRoot(this.fullscreenLayoutRoot);
+			if (!this.chatViewport) throw new Error("Fullscreen layout is not initialized");
+			tui.setLayoutRoot(this.chatViewport.root);
 		}
 	}
 
 	private stopInteractiveTui(fullscreenExitOutput: FullscreenExitOutput): void {
 		if (this.renderer.mode === "fullscreen" && fullscreenExitOutput === "transcript") {
 			while (this.renderer.hasOverlayEntries) this.renderer.hideOverlay();
+			this.updateTranscriptOrderPresentation("oldest-first");
 			this.switchTuiMode("regular", false, false);
 			this.renderer.renderNow();
 		}
 		this.ui.stop({ preserveScreen: this.renderer.mode === "fullscreen" });
+	}
+
+	private updateTranscriptOrderPresentation(order: "oldest-first" | "newest-first"): void {
+		this.transcriptOrder = order;
+		this.renderWidgets();
+		this.chatContainer.setTranscriptOrder(order);
+		this.documentContainer.children =
+			order === "newest-first"
+				? [this.chatContainer, this.headerContainer, this.loadedResourcesContainer]
+				: [this.headerContainer, this.loadedResourcesContainer, this.chatContainer];
+		this.chatViewport?.setInverted(order === "newest-first");
+		this.chatViewport?.transcript.setFollow(order === "newest-first" ? "start" : "end");
+		if (this.renderer instanceof TuiAltScreen) this.renderer.resetTranscriptNavigation();
+	}
+
+	private setTranscriptOrder(order: "oldest-first" | "newest-first"): void {
+		if (order === this.transcriptOrder) return;
+		const previousMode = this.renderer.mode;
+		const targetMode = order === "newest-first" ? "fullscreen" : (this.tuiModeBeforeNewestFirst ?? previousMode);
+		if (!this.switchTuiMode(targetMode)) {
+			throw new Error("Close active overlays before changing transcript order");
+		}
+		this.tuiModeBeforeNewestFirst = order === "newest-first" ? previousMode : undefined;
+		this.updateTranscriptOrderPresentation(order);
+		this.ui.invalidate();
+		this.ui.requestRender(true);
 	}
 
 	private switchTuiMode(mode: TuiMode, restoreProgress = true, startRenderer = true): boolean {
@@ -955,7 +1004,7 @@ export class InteractiveMode {
 
 		// Keep one component tree and remount it when changing renderers.
 		this.renderWidgets(); // Initialize with default spacer
-		const viewport = createChatViewport({
+		this.chatViewport = createChatViewport({
 			document: this.documentContainer,
 			pendingMessages: this.pendingMessagesContainer,
 			status: this.statusContainer,
@@ -967,8 +1016,6 @@ export class InteractiveMode {
 			scrollbarTrackStyle: (text) => theme.fg("scrollbarTrack", text),
 			scrollbarThumbStyle: (text) => theme.fg("scrollbarThumb", text),
 		});
-		this.transcriptScrollView = viewport.transcript;
-		this.fullscreenLayoutRoot = viewport.root;
 		this.mountInteractiveTui(this.renderer, [
 			this.documentContainer,
 			this.pendingMessagesContainer,
@@ -2023,7 +2070,7 @@ export class InteractiveMode {
 	}
 
 	private applyFullscreenScrollbarSetting(): void {
-		this.transcriptScrollView?.setScrollbar(this.settingsManager.getFullscreenScrollbar());
+		this.chatViewport?.transcript.setScrollbar(this.settingsManager.getFullscreenScrollbar());
 	}
 
 	private applyRuntimeSettings(): void {
@@ -2157,6 +2204,7 @@ export class InteractiveMode {
 		this.loadedResourcesContainer.clear();
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
+		this.liveSteeringMessages.clear();
 		this.compactionQueuedMessages = [];
 		this.failedAttemptComponents = [];
 		this.failedAttemptMessage = undefined;
@@ -2444,7 +2492,8 @@ export class InteractiveMode {
 	 */
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
+		const addSpacer = this.transcriptOrder !== "newest-first";
+		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, addSpacer, addSpacer);
 		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
 		this.ui.requestRender();
 	}
@@ -3205,7 +3254,8 @@ export class InteractiveMode {
 	showExtensionError(extensionPath: string, error: string, stack?: string): void {
 		const errorMsg = `Extension "${extensionPath}" error: ${error}`;
 		const errorText = new Text(theme.fg("error", errorMsg), 1, 0);
-		this.chatContainer.addChild(errorText);
+		const panel = new Container();
+		panel.addChild(errorText);
 		if (stack) {
 			// Show stack trace in dim color, indented
 			const stackLines = stack
@@ -3214,9 +3264,10 @@ export class InteractiveMode {
 				.map((line) => theme.fg("dim", `  ${line.trim()}`))
 				.join("\n");
 			if (stackLines) {
-				this.chatContainer.addChild(new Text(stackLines, 1, 0));
+				panel.addChild(new Text(stackLines, 1, 0));
 			}
 		}
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 
@@ -3360,6 +3411,21 @@ export class InteractiveMode {
 			if (!text) return;
 
 			// Handle commands
+			if (/^\/topview(?:\s|$)/.test(text)) {
+				const action = text.slice("/topview".length).trim();
+				this.editor.setText("");
+				if (action !== "" && action !== "on" && action !== "off") {
+					this.showWarning("Usage: /topview [on|off]");
+					return;
+				}
+				const enabled = action === "on" || (action === "" && this.transcriptOrder === "oldest-first");
+				try {
+					this.setTranscriptOrder(enabled ? "newest-first" : "oldest-first");
+				} catch (error) {
+					this.showWarning(error instanceof Error ? error.message : String(error));
+				}
+				return;
+			}
 			if (/^\/compact-view(?:\s|$)/.test(text)) {
 				const action = text.slice("/compact-view".length).trim() || "toggle";
 				this.editor.setText("");
@@ -3586,15 +3652,15 @@ export class InteractiveMode {
 			case "agent_start":
 				this.pendingTools.clear();
 				this.completedToolCalls.clear();
+				break;
+
+			case "turn_start":
 				// Restore main escape handler if retry handler is still active
-				// (retry success event fires later, but we need main handler now)
+				// (retry success event fires later, and a retry within the same run starts no new agent run)
 				if (this.retryEscapeHandler) {
 					this.defaultEditor.onEscape = this.retryEscapeHandler;
 					this.retryEscapeHandler = undefined;
 				}
-				break;
-
-			case "turn_start":
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3605,6 +3671,16 @@ export class InteractiveMode {
 				} else {
 					this.clearStatusIndicator();
 				}
+				this.ui.requestRender();
+				break;
+
+			case "steering":
+				if (event.status === "queued" || event.status === "accepted" || event.status === "pending") {
+					this.liveSteeringMessages.add(event.message);
+				} else {
+					this.liveSteeringMessages.delete(event.message);
+				}
+				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				break;
 
@@ -3759,7 +3835,13 @@ export class InteractiveMode {
 							(block) => block.type === "toolCall" && block.executionStarted,
 						)
 							? []
-							: [this.streamingComponent, ...this.pendingTools.values()];
+							: [
+									this.streamingComponent,
+									// A tool still running from an earlier response keeps updating after a retry.
+									...[...this.pendingTools].flatMap(([id, component]) =>
+										this.session.state.pendingToolCalls.has(id) ? [] : [component],
+									),
+								];
 						this.failedAttemptMessage = this.streamingMessage;
 					}
 
@@ -3779,7 +3861,7 @@ export class InteractiveMode {
 						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
 						this.maybeShowThinkingDropNotice(this.streamingMessage);
-						this.maybeShowCacheMissNotice(this.streamingMessage);
+						this.maybeShowCacheMissNotice(this.streamingMessage, event.consumedToolResultIds);
 					}
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
@@ -3836,10 +3918,6 @@ export class InteractiveMode {
 				break;
 			}
 
-			case "steering":
-				this.showStatus(`Steering ${event.status}${event.errorMessage ? `: ${event.errorMessage}` : ""}`);
-				break;
-
 			case "tool_execution_update": {
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
@@ -3861,6 +3939,8 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
+				this.liveSteeringMessages.clear();
+				this.updatePendingMessagesDisplay();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -3875,13 +3955,16 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 
-			case "agent_settled":
-				if (event.pendingToolCalls?.length)
+			case "agent_settled": {
+				// Only started calls reattach; a never-started call of an interrupted response gets a not-executed result.
+				const reattaching = event.pendingToolCalls?.filter((call) => call.state !== "pending").length;
+				if (reattaching)
 					this.showStatus(
-						`Stopped locally; ${event.pendingToolCalls.length} external tool call(s) remain pending. Continue to reattach.`,
+						`Stopped locally; ${reattaching} external tool call(s) remain pending. Continue to reattach.`,
 					);
 				await this.checkShutdownRequested();
 				break;
+			}
 
 			case "context_window_started":
 				this.rebuildChatFromMessages();
@@ -4163,18 +4246,15 @@ export class InteractiveMode {
 							this.getMarkdownThemeWithSettings(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
-						// Render user message separately if present
-						if (skillBlock.userMessage) {
-							this.chatContainer.addChild(new Spacer(1));
-							const userComponent = new UserMessageComponent(
-								skillBlock.userMessage,
-								this.getMarkdownThemeWithSettings(),
-								this.outputPad,
-								this.getMarkdownTransformers(),
-							);
-							this.chatContainer.addChild(userComponent);
-						}
+						const userComponent = skillBlock.userMessage
+							? new UserMessageComponent(
+									skillBlock.userMessage,
+									this.getMarkdownThemeWithSettings(),
+									this.outputPad,
+									this.getMarkdownTransformers(),
+								)
+							: undefined;
+						this.chatContainer.addChild(new SkillMessageGroup(component, userComponent));
 					} else {
 						const userComponent = new UserMessageComponent(
 							textContent,
@@ -4222,7 +4302,7 @@ export class InteractiveMode {
 		// Cache misses are not persisted, unlike successful cache-warming usage.
 		// Re-derive them and inject them after the assistant messages that paid for them.
 		const cacheMisses = this.settingsManager.getShowCacheMissNotices()
-			? collectCacheMisses(this.sessionManager.getEntries(), this.session.modelRuntime)
+			? collectCacheMisses(this.sessionManager.getBranch(), this.session.modelRuntime)
 			: new Map<AssistantMessage, CacheMiss>();
 
 		if (options.updateFooter) {
@@ -4419,29 +4499,27 @@ export class InteractiveMode {
 
 	/**
 	 * Show a transcript notice when a completed assistant message paid for a
-	 * significant cache miss. Only states observable facts: the miss itself,
-	 * a model switch, or an idle gap past the cache TTL.
+	 * significant cache miss. Observations are not assertions about its cause.
 	 */
-	private maybeShowCacheMissNotice(message: AssistantMessage): void {
+	private maybeShowCacheMissNotice(message: AssistantMessage, consumedToolResultIds?: string[]): void {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
 
 		// Entries don't contain `message` yet: message_end fires before persistence.
-		const miss = detectCacheMiss(this.sessionManager.getEntries(), message, this.session.modelRuntime);
+		const miss = detectCacheMiss(this.sessionManager, message, this.session.modelRuntime, consumedToolResultIds);
 		if (miss) this.addCacheMissNotice(miss);
 	}
 
 	private addCacheMissNotice(miss: CacheMiss): void {
 		if (miss.missedTokens < 20_000 && miss.missedCost < 0.1) return;
 
-		const cost = miss.missedCost >= 0.01 ? ` (~$${miss.missedCost.toFixed(2)})` : "";
-		const reBilled = `${formatTokens(miss.missedTokens)} tokens re-billed${cost}`;
-		let label = "Cache miss";
-		if (miss.modelChanged) {
-			label = "Cache miss after model switch";
-		} else if (miss.idleMs >= CACHE_TTL_MS) {
-			label = `Cache miss after ${Math.round(miss.idleMs / 60_000)}m idle`;
-		}
-		const text = theme.fg("warning", `${label}: ${reBilled}`);
+		const cost = miss.missedCost >= 0.01 ? ` (estimated extra $${miss.missedCost.toFixed(2)})` : "";
+		const decline =
+			miss.cacheReadDecline > 0 ? `; cached reads fell by ${formatTokens(miss.cacheReadDecline)} tokens` : "";
+		const provider = miss.providerReasons.length ? `; provider: ${miss.providerReasons.join(", ")}` : "";
+		const text = theme.fg(
+			"warning",
+			`Cache miss: ${formatTokens(miss.missedTokens)} tokens not read from cache${cost}${decline}. Observed: ${miss.observedChanges.join(", ")}${provider}`,
+		);
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addActivity(new Text(text, 1, 0));
 	}
@@ -5006,21 +5084,21 @@ export class InteractiveMode {
 		const note = release.note?.trim();
 
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
-		this.chatContainer.addChild(
-			new Text(`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`, 1, 0),
-		);
+		const panel = new Container();
+		panel.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		panel.addChild(new Text(`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`, 1, 0));
 		if (note) {
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(
+			panel.addChild(new Spacer(1));
+			panel.addChild(
 				new Markdown(note, 1, 0, this.getMarkdownThemeWithSettings(), {
 					color: (text) => theme.fg("muted", text),
 				}),
 			);
-			this.chatContainer.addChild(new Spacer(1));
+			panel.addChild(new Spacer(1));
 		}
-		this.chatContainer.addChild(new Text(changelogLine, 1, 0));
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		panel.addChild(new Text(changelogLine, 1, 0));
+		panel.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 
@@ -5030,15 +5108,17 @@ export class InteractiveMode {
 		const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
 
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
-		this.chatContainer.addChild(
+		const panel = new Container();
+		panel.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		panel.addChild(
 			new Text(
 				`${theme.bold(theme.fg("warning", "Package Updates Available"))}\n${updateInstruction}\n${theme.fg("muted", "Packages:")}\n${packageLines}`,
 				1,
 				0,
 			),
 		);
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		panel.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 
@@ -5083,6 +5163,15 @@ export class InteractiveMode {
 			(child) => child instanceof BashExecutionComponent,
 		);
 		this.pendingMessagesContainer.clear();
+		if (this.liveSteeringMessages.size > 0) {
+			this.pendingMessagesContainer.addChild(new Spacer(1));
+			for (const message of this.liveSteeringMessages) {
+				this.pendingMessagesContainer.addChild(
+					new TruncatedText(theme.fg("dim", `Steering: ${this.getUserMessageText(message)}`), 1, 0),
+				);
+			}
+			this.pendingMessagesContainer.addChild(new TruncatedText(theme.fg("dim", "↳ sent; cannot edit"), 1, 0));
+		}
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));
@@ -5282,7 +5371,7 @@ export class InteractiveMode {
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
-					tuiMode: this.ui.mode,
+					tuiMode: this.tuiModeBeforeNewestFirst ?? this.ui.mode,
 					fullscreenExitOutput: this.settingsManager.getFullscreenExitOutput(),
 					fullscreenScrollbar: this.settingsManager.getFullscreenScrollbar(),
 					fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
@@ -5416,7 +5505,8 @@ export class InteractiveMode {
 								if (
 									child instanceof AssistantMessageComponent ||
 									child instanceof CustomMessageComponent ||
-									child instanceof UserMessageComponent
+									child instanceof UserMessageComponent ||
+									child instanceof SkillMessageGroup
 								) {
 									child.setOutputPad(padding);
 								}
@@ -5447,12 +5537,18 @@ export class InteractiveMode {
 						this.settingsManager.setShowTerminalProgress(enabled);
 					},
 					onTuiModeChange: (mode) => {
+						if (mode === "regular" && this.transcriptOrder === "newest-first") {
+							selector?.getSettingsList().updateValue("tui-mode", this.ui.mode);
+							this.showStatus("Use /topview off before leaving fullscreen mode");
+							return;
+						}
 						if (!this.switchTuiMode(mode)) {
 							selector?.getSettingsList().updateValue("tui-mode", this.ui.mode);
 							this.showStatus("Close active overlays before changing TUI mode");
 							return;
 						}
 						this.settingsManager.setTuiMode(mode);
+						if (this.transcriptOrder === "newest-first") this.tuiModeBeforeNewestFirst = mode;
 						if (!this.activeStatusIndicator) this.statusContainer.clear();
 						this.showStatus(`TUI mode: ${mode}`);
 					},
@@ -7010,11 +7106,15 @@ export class InteractiveMode {
 			}
 			if (cacheWaste.missedTokens > 0) {
 				const missLabel = cacheWaste.missCount === 1 ? "1 miss" : `${cacheWaste.missCount} misses`;
-				const detail = `${cacheWaste.missedTokens.toLocaleString()} tokens, ${missLabel}`;
+				const detail = `${cacheWaste.missedTokens.toLocaleString()} tokens not read from cache, ${missLabel}`;
 				info +=
 					cacheWaste.missedCost >= 0.0001
-						? `\n${theme.fg("dim", "Cache Re-billed:")} $${cacheWaste.missedCost.toFixed(3)} ${theme.fg("dim", `(${detail})`)}`
-						: `\n${theme.fg("dim", "Cache Re-billed:")} ${detail}`;
+						? `\n${theme.fg("dim", "Cache misses:")} estimated extra $${cacheWaste.missedCost.toFixed(3)} ${theme.fg("dim", `(${detail})`)}`
+						: `\n${theme.fg("dim", "Cache misses:")} ${detail}`;
+				info += `\n${theme.fg("dim", "Observed (counts may overlap):")} ${[...cacheWaste.observedChanges].map(([label, count]) => `${label} (${count})`).join(", ")}`;
+				if (cacheWaste.providerReasons.size) {
+					info += `\n${theme.fg("dim", "Provider:")} ${[...cacheWaste.providerReasons].map(([reason, count]) => `${reason} (${count})`).join(", ")}`;
+				}
 			}
 		}
 
@@ -7036,11 +7136,13 @@ export class InteractiveMode {
 				: "No changelog entries found.";
 
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(changelogMarkdown, 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new DynamicBorder());
+		const panel = new Container();
+		panel.addChild(new DynamicBorder());
+		panel.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+		panel.addChild(new Spacer(1));
+		panel.addChild(new Markdown(changelogMarkdown, 1, 1, this.getMarkdownThemeWithSettings()));
+		panel.addChild(new DynamicBorder());
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 
@@ -7167,11 +7269,13 @@ export class InteractiveMode {
 		}
 
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(hotkeys.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new DynamicBorder());
+		const panel = new Container();
+		panel.addChild(new DynamicBorder());
+		panel.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
+		panel.addChild(new Spacer(1));
+		panel.addChild(new Markdown(hotkeys.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
+		panel.addChild(new DynamicBorder());
+		this.chatContainer.addChild(panel);
 		this.ui.requestRender();
 	}
 

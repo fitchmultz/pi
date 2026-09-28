@@ -401,7 +401,7 @@ export async function createSessionManager(
 	}
 
 	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
-		return SessionManager.inMemory(cwd, parsed.sessionId !== undefined ? { id: parsed.sessionId } : undefined);
+		return SessionManager.inMemory(cwd, { id: parsed.sessionId, sessionDir });
 	}
 
 	if (parsed.fork) {
@@ -935,6 +935,7 @@ export async function main(args: string[], options?: MainOptions) {
 			services,
 			sessionManager,
 			sessionStartEvent,
+			deferBackgroundCommandNotifications: true,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,

@@ -71,6 +71,63 @@ regenerate tracked inputs.
 
 ## Immutable installation and activation
 
+### Update an existing fork installation
+
+```sh
+pi update --fork
+```
+
+This fetches `fitchmultz/pi` main once into a temporary checkout, prints and pins
+its commit, installs frozen dependencies without lifecycle scripts, hydrates model
+data, and delegates build, validation, and selection to that commit's installer.
+It needs no existing source checkout. It runs trusted fork code and downloads
+from GitHub, npm, and model catalog sources. Running sessions, settings, credentials,
+and extensions are unchanged. Failures before selection leave the old runtime
+selected; normal success/failure removes the temporary checkout. Fully relaunch Pi
+or use a selector-following native restart afterward and verify the loaded identity.
+
+Supported platforms are macOS/Linux/Termux arm64/x64, with Node >=22.19 and npm
+installed alongside Node, Git with `archive --mtime` support, bash, tar, gzip, and
+tmux. On macOS/Linux the command resolves `npm root -g` using that Node/npm
+installation; it never assumes a fixed npm prefix. Termux instead uses the private
+`~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` selector
+and `~/.local/bin/pi`, leaving npm's system prefix unchanged. The package must
+already be an immutable fork **symlink** resolving to the running Pi package, with
+the executable symlink pointing through it to `dist/bundle/cli.js`. The selector
+must be writable; `.previous`, if present, must also be a symlink.
+Windows, Bun, ordinary npm directories, standalone/managed installers, other
+package managers, and mismatched prefixes are rejected rather than migrated.
+`--fork` cannot combine with other update targets, positional sources, or `--force`.
+
+For initial setup on another supported machine, use a separate, user-owned prefix
+rather than replacing an ordinary npm directory. The one-time setup below is for macOS/Linux and still needs
+a checkout; subsequent `pi update --fork` calls do not:
+
+```sh
+work=$(mktemp -d)
+git clone --depth=1 --branch main https://github.com/fitchmultz/pi.git "$work/pi"
+cd "$work/pi"
+npm ci --ignore-scripts
+npm run hydrate:model-data
+unset npm_config_prefix
+export NPM_CONFIG_PREFIX="$HOME/.local/share/pi-fork/npm"
+selector="$NPM_CONFIG_PREFIX/lib/node_modules/@earendil-works/pi-coding-agent"
+node scripts/install-fork.mjs --ref "$(git rev-parse HEAD)" --selector "$selector"
+# Only after successful installation; ln refuses to overwrite an existing bin.
+mkdir -p "$NPM_CONFIG_PREFIX/bin"
+ln -s ../lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js "$NPM_CONFIG_PREFIX/bin/pi"
+export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
+pi --version
+```
+
+Keep the prefix and PATH exports in your shell startup configuration. Remove the
+temporary checkout after success. If installation fails, stop before creating the
+bin symlink. Keep the old installation and fork releases for rollback.
+For an existing custom prefix, use the same prefix environment that originally
+installed it. Do not point npm at another installation merely to bypass a failure.
+
+### Stage and select a reviewed commit
+
 Hydrate model data in the checkout, then stage the exact reviewed commit. If
 merging changes the commit ID, stage and validate the merged commit before
 activation.
@@ -88,10 +145,28 @@ optional `--source-archive` reuses a separately frozen archive with an adjacent
 `source.commit`, checking its source tree against the selected commit. The
 installer validates model data, builds in a temporary source directory, packs
 native workspace tarballs and installs a production npm consumer into a new
-release. Installed SDK, CLI, extension imports, native checkpoint restore and
+release using the frozen production dependency lock and those local tarballs.
+Installed SDK, CLI, extension imports, native checkpoint restore and
 real-terminal restart tests must pass before the release receives a validation
 receipt. It retains the archive, commit, tarballs and build identity. No
 hand-made workspace dependency links are used.
+
+The checkout installer also supports Termux on Android: it preserves the native
+shell/exec environment, isolates temporary files, and installs the lockfile-pinned
+static Linux TypeScript compiler into the disposable build. Restart sockets fall
+back to Termux's writable short temporary path when needed. The `pi update --fork`
+bootstrap preserves that same native shell/exec environment.
+
+GPT-6 Astra, Sol and Luna default to native async tools, steering and positional
+reasoning-effort updates on OpenAI and Cloudflare OpenAI Responses routes and
+OpenAI Codex Responses. These exact-model defaults apply when loading built-in
+and remote catalogs, so older data cannot silently omit them. Explicit capability
+values (including `false`) and user model overrides retain precedence; no local
+capability configuration is required.
+
+Cloudflare AI Gateway Claude models use Anthropic's hyphenated IDs in generated
+and remote catalogs. models.dev and pi.dev list dotted names, which the gateway's
+`/anthropic` passthrough forwards unchanged and Anthropic rejects.
 
 Releases live under `~/.local/share/pi-fork/releases/<identity>`, where identity
 includes the commit, catalog digest, Node version, platform and architecture.
@@ -129,11 +204,20 @@ also take effect only at a full launch. See
 [Managed Restarts](packages/coding-agent/docs/restart.md).
 
 To return to an earlier installer-validated release, use `--rollback <identity>`
-and an ordinary restart when following the selector. If an explicit runtime is
+with the same `--selector <path>` used for installation (required for a custom
+npm prefix), and an ordinary restart when following the selector. If an explicit runtime is
 pinned, use `--runtime <rolled-back-packageDir>` or fully relaunch Pi. Keep
-previous runtimes and extension files intact. Legacy releases without receipts
-remain untouched; their previous selector target is preserved for manual
-selection and native startup rollback.
+previous runtimes and extension files intact outside explicit pruning. Legacy
+releases without receipts remain untouched; their previous selector target is
+preserved for manual selection and native startup rollback.
+
+To reclaim space, `npm run install:fork -- --prune --keep <count>` deletes
+validated releases older than the newest `<count>`. It keeps the selected and
+`.previous` releases, releases a running process visibly uses (open files,
+native modules, working directory or command path), and directories without a
+receipt, including legacy releases and installations in progress. A session
+that loaded only JavaScript through the selector is not visible, so keep enough
+releases for running sessions or restart them before pruning.
 
 ## Fork patch intent
 
@@ -147,11 +231,12 @@ intent; Git history remains the detailed change record.
 | Native checkpoint and managed restart, including tool selection and pending UI input | `checkpoint*`, `restart-*`, `interactive-shutdown-admission` tests; checkpoint/restart docs | Upstream round-trips the same session state and passes bundled lifecycle tests. |
 | Normalize newly delivered queued images like idle prompts | `agent-session-queued-images`, queue/admission/checkpoint suites | Upstream normalizes once at an awaited delivery boundary without queue races. |
 | Structured JSON read extraction | `read-json.test.ts` | Upstream supports the same JSON path/field extraction before output limits. |
-| Provider startup refresh and ambient account authentication | `provider-startup-refresh`, `ambient-auth`, `model-runtime-auth-options`, availability tests | Upstream preserves refresh, credential selection and failure isolation contracts. |
+| Provider startup refresh, ambient account authentication and opt-in stored-credential isolation | `provider-startup-refresh`, `ambient-auth`, `provider-credential-isolation`, `model-runtime-auth-options`, availability tests | Upstream preserves refresh, credential selection and failure isolation contracts. |
 | Native async tools, steering and automatic Responses successors | `native-async*`, `native-steering`, `astra-native-protocol` and native session/context usage tests | Upstream preserves original-call durability, successor input snapshots and measured context through the same lifecycle. |
 | Exact tool namespaces and client-side discovery | Tool identity/search/namespace, retained projection and native renderer/export tests | Upstream keeps registered, wire and displayed identities consistent across discovery, execution and replay. |
 | Atomic local file publication and durable external usage | Publication, `extension-record-usage`, persistence and checkpoint billing tests | Upstream provides the same publication and journal accounting guarantees. |
 | Safe fork delivery with frozen inputs and immutable installation | Sync/installer script tests, local platform qualification and installed runtime smoke | Upstream tooling supports this fork's separate review, delivery and activation workflow. |
+| Provider tests stay offline unless explicitly requested | `PI_LIVE_PROVIDER_TESTS=1` | Upstream test runner hides ambient provider credentials by default. |
 
 Experimental Pico/micro remain opt-in; ordinary AgentSession extensions use the
 normal host. Install stock Pi separately if needed and verify before selecting it.

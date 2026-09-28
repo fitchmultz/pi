@@ -10,7 +10,7 @@ import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createAllToolDefinitions, createAllTools } from "../src/core/tools/index.ts";
 import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 
-const strictToolNames = ["read", "bash", "powershell", "edit", "write"] as const;
+const strictToolNames = ["read", "bash", "background_command", "powershell", "edit", "write"] as const;
 
 describe("strict built-in tools", () => {
 	afterEach(() => vi.unstubAllEnvs());

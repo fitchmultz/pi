@@ -18,6 +18,8 @@ This reference lists user-configurable settings, their types, defaults, and purp
 | `showCacheMissNotices` | boolean | `false` | Show notices for significant cache misses, successful cache warming, compaction usage, and provider recovery. |
 | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"streaming"` | Keep eligible provider prompt caches warm during active runs or, with `"idle"`, between runs. Global setting only. |
 
+Cache miss notices report tokens not read from cache relative to the smaller of the previous and current prompts, separately from any actual decline in cached reads. Dollar amounts are estimated extra cost, not a billing adjustment. Notices and `/session` list observed changes, not proven causes: model changes, older async results admitted, service tier changes, tool definition or instruction size changes, new connections, full resends after delta requests, and idle gaps beyond the known cache lifetime (five minutes when unknown). Provider-supplied reasons are shown as plain text when available; unavailable diagnostics are omitted, and dropped thinking blocks are grouped by reason with a count. Otherwise unexplained misses are `unclassified`. Multiple observations can apply to one miss. Equal-size instruction or tool edits cannot be detected from byte counts alone. Idle detection uses the configured model and retention lifetime; journals do not retain per-request lifetime overrides.
+
 Cache warming runs only when the model declares a cache lifetime and Pi estimates at least $0.05 in avoided cache-miss cost. Refresh usage counts toward session totals but does not enter model context. `/session` shows the next decision; extensions can override it with `cache_warming_decision`. See [Prompt Cache Lifetimes](models.md#prompt-cache-lifetimes).
 
 See [Choose a Model](models.md) for model selection and thinking controls.
@@ -37,9 +39,11 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `defaultTools` | `string[]` | `read`, `bash`, `edit`, `write` | Built-in tools enabled at startup. An empty array disables all built-in tools but not extension or SDK tools. |
+| `defaultTools` | `string[]` | `read`, `bash`, `background_command`, `edit`, `write` | Built-in tools enabled at startup. An empty array disables all built-in tools but not extension or SDK tools. |
 
-Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. CLI tool options override this setting for one invocation. See [Command Line](cli.md#tools).
+Optional integrations use [extension-owned tool discovery](tool-discovery.md) automatically on capable models. No user-maintained tool inventory is required.
+
+Available built-in tools are `read`, `bash`, `background_command`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. CLI tool options override this setting for one invocation. See [Command Line](cli.md#tools).
 
 ## Sessions and context
 

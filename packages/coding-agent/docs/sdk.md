@@ -86,7 +86,25 @@ SDK hosts can supply `getQueuedInputCount` through `bindExtensions()` for their 
 
 `sendCustomMessage(message, { deliverAs: "steer", persistOnCancel: true })` opts undelivered streamed customs into once-only persistence before settlement, without requesting another turn. `clearQueue()` preserves opted-in messages, deferring append until a safe boundary while streaming, and returns queued user texts only. The default remains false; `nextTurn` asides survive queue clearing and reload.
 
+### Background commands
+
+The built-in `background_command` tool starts long shell commands without blocking a tool batch. For example, `{ action: "start", command: "gh pr checks --watch --fail-fast" }` returns a job ID and `logFile`. Automatic completion includes the job ID, status, exit code when available, command preview, and `logFile`. Successful jobs omit output; failed, timed-out, cancelled, or unknown outcomes include the error when available and a readable tail bounded to 2KB/20 lines. Raw logs are unchanged. Use `read` for the complete log, or explicit `status` with a job `id` for up to 16KB/100 lines. Without an `id`, `status` lists up to 20 jobs with `offset` and optional `activeOnly`. `cancel` requires an `id` and stops the native shell process tree; a pending cancellation is reported explicitly.
+
+Jobs use the session's effective shell path, command prefix, environment, and native Bash cwd hooks. An optional `cwd` resolves relative to that selected directory. Each detached worker writes its job record, atomic state, and raw output beneath `<sessionDir>/background-commands/<sessionId>/<jobId>/`. Workers survive session disposal and Pi exit. Resume discovers existing work without replaying commands; a vanished or inaccessible worker reports an unknown outcome. Unreadable job records appear as bounded diagnostics without suppressing healthy jobs. In-memory sessions also retain job files, but have no saved conversation to resume automatically. Without a session directory, jobs use `PI_CODING_AGENT_SESSION_DIR`, the `sessionDir` setting, or `<agentDir>/sessions/` (in that order), still partitioned by the actual session ID. `--no-session --session-dir <path>` and `SessionManager.inMemory(cwd, { sessionDir })` select artifact storage without saving a conversation. Job and log paths are absolute, including with relative SDK session directories.
+
+`AgentSession` owns notifications without requiring `bindExtensions()`. Completed jobs enter after the foreground tool batch or during idle, giving queued input and user Bash priority. Terminal status results and completion entries acknowledge jobs across reload/resume. Cancelling the agent leaves commands running and preserves their results without waking the model; a new admitted run clears that suppression. `background_command cancel` instead cancels the command itself.
+
+`waitForIdle()` does not wait for external jobs. Print/JSON invocations can exit before completion; use synchronous `bash` when that invocation must consume the result. Checkpoint holds pause native notification writes, and checkpoint restore waits for explicit input. The host still owns external process quiescence.
+
+Standalone `createBackgroundCommandTool(cwd, { sessionManager, ...shellOptions })` requires an explicit owner (or native execution context). `createCodingTools` and `createAllTools` accept that owner under `background_command`; automatic notifications belong to `AgentSession`. Hosts that collect startup input asynchronously can set `deferBackgroundCommandNotifications: true`, then bind their `getQueuedInputCount` before admitting prompts. Native CLI modes do this themselves.
+
+Background workers use the running Pi code, independently of the `PI_PACKAGE_DIR` asset override. They support native local shell execution, not custom `BashOperations` backends. Shell permission guards and Bash overrides must also handle `background_command` with `action: "start"`; overriding or excluding `bash` alone does not intercept or disable this separate tool. The shipped sandbox and SSH examples block background starts while their custom backend is active; status and cancellation remain available.
+
+New sessions include this tool by default. Existing saved selections and explicit allowlists are preserved. SDK hosts can enable it with `session.setActiveToolsByName([...session.getActiveToolNames(), "background_command"])` when the permitted registry includes it.
+
 ### Native asynchronous tools and steering
+
+Built-in GPT-6 Astra, Sol and Luna enable `compat.supportsAsyncTools`, `compat.supportsSteering`, and `compat.supportsReasoningEffortUpdates` on OpenAI and Cloudflare OpenAI Responses routes and OpenAI Codex Responses. Defaults survive remote catalog overlays; explicit `false` and user model overrides take precedence. Other model IDs and provider/API combinations are not enabled by this default.
 
 Set `async: true` on a `ToolDefinition` for capable Responses routes. Execution begins only after an authoritative completed async call, argument preparation, validation, and `tool_call` hooks. The journal records the original provider item and admitted arguments before side effects. `executionMode` still controls local sequential/parallel execution.
 
@@ -96,9 +114,11 @@ A durable tool can implement `resume(toolCallId, params, signal, onUpdate, ctx)`
 
 Only an aborted native async invocation whose external owner retains durable work may return `{ ...result, pending: true }`. Pi emits `tool_execution_detached` without a final result. Local settlement may follow while external work remains. `session.getPendingToolCalls()` and `ctx.getPendingToolCalls()` expose `{ toolCallId, toolName, namespace?, state: "pending" | "started" | "detached" }`; the next prompt or continuation reattaches journaled started calls. Ordinary background launch-handle results are unchanged. Detect host support by method presence and model support separately through `compat.supportsAsyncTools`.
 
-Live steering reports `queued`, `accepted`, `pending`, `applied`, `failed`, or `unknown`. Acceptance does not prove application. Input waiting for tools continues on the same connection with the original results. Disconnect recovery reconstructs known items, results, and one logical input from local history; unobserved remote application stays unknown. Images are normalized before delivery.
+Live steering reports `queued`, `accepted`, `pending`, `applied`, `failed`, or `unknown`. Acceptance does not prove application. Pending-message getters, counts, queue updates, and `clearQueue()` reflect only the native queues: input already handed to a live response is no longer recallable, even before remote acknowledgement. Alt+Up restores only still-queued input; it cannot recall a sent steering message. Removing a queued message prevents its later native or ordinary dispatch. Raw steering outcomes remain in the journal without technical status notifications in the interactive UI. Input waiting for tools continues on the same connection with the original results. Disconnect recovery reconstructs known items, results, and one logical input from local history; unobserved remote application stays unknown. Images are normalized before delivery.
 
 Automatic successors have separate assistant lifecycles and usage. `message_start.continuationInput` snapshots the user inputs and submitted results added to the preceding response: absent on the first response, empty for a known empty delta. They already have message events; do not append them twice. `message_checkpoint` is an execution snapshot of the same response, not another billable response. See [JSON events](json.md) and [session persistence](session-format.md#sessionmessageentry).
+
+Initial native `message_start.inputToolCallIds` reports post-`onPayload` logical result membership, before transport delta extraction: `[]` is known empty and absence is unknown. Custom native streams must provide this snapshot to prove initial consumption; unknown histories conservatively retain receipts. Successful successors still prove their explicit incremental inputs. Session projection places explicitly identified concurrent receipts after the response that excluded them, while journal, events, and UI retain arrival order. This preserves eligible delta requests; it does not guarantee provider cache hits.
 
 Routes with `compat.supportsReasoningEffortUpdates` retain initial effort, persist `providerThinkingLevel`, and insert coalesced positional updates. Omitted Astra effort is recorded as `medium`. Automatic provider compaction, truncation, and nonstandard reasoning modes do not use this path; explicit opaque compaction items are replayed unchanged.
 
@@ -172,6 +192,8 @@ For factory-registered providers needed before selection, create services with `
 
 `getContextUsage()` is synchronous. It preserves matching measured usage, including opaque reasoning, and estimates changes to prompt/tools and trailing input relative to that total. It does not count earlier output again. Model/provider/API changes, edits, and context boundaries invalidate inapplicable measurements; ending a request-only forced prompt preserves idle usage.
 
+Request transforms may insert messages or append content blocks without losing measured usage, provided they preserve the original messages, fields, and content in order. Omissions, rewrites, truncation, and reordering invalidate that measurement.
+
 `source` is `reported`, `estimated`, or `unknown`; tokens may be null after compaction. Estimates are not exact provider counts. A resumed session without a captured request prefix uses the larger of matching reported usage and visible-context estimates. Extensions should use `ctx.getCompactionSettings()` for current effective per-model thresholds rather than rereading files.
 
 ### Settings and reload
@@ -214,7 +236,7 @@ Publication follows existing/dangling final symlinks, checks target write access
 
 Custom `BashOperations` and `PowerShellOperations` producers must call `onData(data, source)` with unchanged Buffer bytes and `stdout`/`stderr` identity, then `onEnd(source)` once after each pipe's final data, including errors. Stop callbacks before resolving/rejecting `exec`; cancellation alone is not EOF. Each pipe is decoded independently so interleaved output preserves split UTF-8. Cross-pipe ordering is not guaranteed. Wrappers forwarding options unchanged need no adaptation.
 
-`pi.registerBashCwdHook((cwd) => nextCwd)` changes cwd before built-in Bash preflight and native user Bash operations. Synchronous hooks chain in extension load/registration order and are replaced on reload/session replacement; errors stop execution. This does not change session headers, project resources, other tools, overridden Bash tools, or factory spawn hooks. Detect support by method presence.
+`pi.registerBashCwdHook((cwd) => nextCwd)` changes cwd before built-in Bash and background-command preflight and native user Bash operations. Synchronous hooks chain in extension load/registration order and are replaced on reload/session replacement; errors stop execution. This does not change session headers, project resources, other tools, overridden Bash tools, or factory spawn hooks. Detect support by method presence.
 
 ## Examples
 

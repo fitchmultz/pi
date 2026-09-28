@@ -3,8 +3,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-	copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
-	realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+	copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
+	realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -40,11 +40,12 @@ export function resolveBuildTools() {
 }
 
 export function isolatedEnvironment(home, tools) {
-	mkdirSync(home, { recursive: true });
+	mkdirSync(join(home, "tmp"), { recursive: true });
 	return {
 		PATH: tools.path,
 		HOME: home,
 		USERPROFILE: home,
+		TMPDIR: join(home, "tmp"),
 		XDG_CONFIG_HOME: join(home, "config"),
 		XDG_CACHE_HOME: join(home, "cache"),
 		XDG_DATA_HOME: join(home, "data"),
@@ -55,7 +56,35 @@ export function isolatedEnvironment(home, tools) {
 		JITI_FS_CACHE: "0",
 		npm_config_cache: join(home, "npm-cache"),
 		npm_config_userconfig: join(home, ".npmrc"),
+		...(process.platform === "android" ? {
+			PREFIX: process.env.PREFIX,
+			LD_PRELOAD: process.env.LD_PRELOAD,
+			npm_config_script_shell: join(dirname(tools.node), "bash"),
+		} : {}),
 	};
+}
+
+export function prepareTermuxCompiler(source, tools, env) {
+	// tsgo has no Android package; its pinned Linux binary is statically linked.
+	const name = `@typescript/native-preview-linux-${process.arch}`;
+	const key = `node_modules/${name}`;
+	const locked = JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8")).packages[key];
+	if (!locked?.version || !locked.integrity) throw new Error(`Missing locked compiler: ${name}`);
+	const directory = join(source, "node_modules/.termux-compiler");
+	mkdirSync(directory, { recursive: true });
+	const optionalDependencies = { [name]: locked.version };
+	writeFileSync(join(directory, "package.json"), JSON.stringify({ private: true, optionalDependencies }));
+	writeFileSync(join(directory, "package-lock.json"), JSON.stringify({
+		lockfileVersion: 3, requires: true,
+		packages: { "": { optionalDependencies }, [key]: locked },
+	}));
+	run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--os=linux", "--include=optional", "--no-audit", "--no-fund"], {
+		cwd: directory, env,
+	});
+	const binary = join(directory, key, "lib/tsgo");
+	const version = run(binary, ["--version"], { env, stdio: "pipe" });
+	if (version !== `Version ${locked.version}`) throw new Error(`Unexpected compiler version: ${version}`);
+	replaceSymlink(binary, join(source, "node_modules/.bin/tsgo"));
 }
 
 export function releaseIdentity(receipt) {
@@ -115,6 +144,51 @@ export function activateRelease(releases, identity, selector) {
 	}
 	replaceSymlink(release.packageDir, selector);
 	return { ...release, previous, changed: true };
+}
+
+// lsof sees open files, mapped native modules and working directories; ps sees concrete command paths.
+// ponytail: a worker that loaded only JavaScript through the selector holds nothing open in its
+// release, so neither sees it and --keep is the guard. Exact protection needs a live-worker registry.
+function liveProcessPaths() {
+	const capture = (command, args) => run(command, args, { stdio: "pipe", maxBuffer: Infinity });
+	// Without -ww, procps truncates command lines to COLUMNS even when piped.
+	return `${capture("lsof", ["-Fn"])}\n${capture("ps", ["-axww", "-o", "args="])}`;
+}
+
+function resolvedLink(link) {
+	try {
+		return realpathSync(link);
+	} catch (error) {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+export function pruneReleases({ releases, selector, keep }, livePaths = liveProcessPaths) {
+	const selected = [selector, `${selector}.previous`].map(resolvedLink);
+	const live = livePaths();
+	const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
+	const validated = [];
+	for (const identity of readdirSync(releases)) {
+		const directory = join(releases, identity);
+		try {
+			readVerifiedRelease(directory);
+		} catch {
+			continue; // Legacy releases and installations still in progress have no valid receipt.
+		}
+		validated.push({ directory, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
+	}
+	validated.sort((a, b) => b.validatedAt - a.validatedAt);
+	const removed = [];
+	for (const { directory } of validated.slice(keep)) {
+		const real = realpathSync(directory);
+		if (selected.some((path) => path === real || path?.startsWith(`${real}/`)) || mentioned(directory) || mentioned(real)) {
+			continue;
+		}
+		rmSync(directory, { recursive: true, force: true });
+		removed.push(basename(directory));
+	}
+	return { kept: validated.length - removed.length, removed };
 }
 
 // The callback builds/installs/tests only a NEW candidate. The receipt is written
@@ -181,6 +255,14 @@ mkdirSync(cwd);
 const agentDir = process.env.PI_CODING_AGENT_DIR;
 const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
 const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, allowModelNetwork: false });
+for (const provider of ["openai", "openai-codex", "cloudflare-ai-gateway"]) {
+  for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) {
+    const compat = modelRuntime.getModel(provider, id)?.compat;
+    for (const capability of ["supportsAsyncTools", "supportsSteering", "supportsReasoningEffortUpdates"]) {
+      assert.equal(compat?.[capability], true, provider + "/" + id + ": " + capability);
+    }
+  }
+}
 async function create(checkpoint) {
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
     additionalExtensionPaths: [${JSON.stringify(extension)}], noSkills: true, noPromptTemplates: true, noThemes: true });
@@ -210,7 +292,7 @@ try {
   assert.equal(restored.model, undefined);
   assert.deepEqual(restored.getActiveToolNames(), checkpoint.selection.activeTools);
 } finally { restored.dispose(); }
-console.log("Installed SDK, extension identity and native checkpoint restore passed.");
+console.log("Installed SDK, GPT-6 lifecycle capabilities, extension identity and native checkpoint restore passed.");
 `);
 		run(tools.node, [entry], { cwd: env.HOME, env, timeout: 60_000 });
 	} finally {
@@ -223,6 +305,7 @@ function printUsage() {
 	console.log(`Usage: node scripts/install-fork.mjs [--ref <commit>] [--source-archive <file>] [--stage]
        node scripts/install-fork.mjs --activate <identity>
        node scripts/install-fork.mjs --rollback <identity>
+       node scripts/install-fork.mjs --prune --keep <count>
 
 Builds an exact local commit (default HEAD) with the checkout's ALREADY hydrated
 model-data snapshot using create-source-archive.sh and build:offline. An optional
@@ -234,6 +317,8 @@ with npm installed alongside it, Git, tar, and tmux for real-terminal validation
 --stage                 Build/install/validate without changing the selector
 --activate <identity>   Select an existing validated release, without rebuilding
 --rollback <identity>   Select an older validated release (same native operation)
+--prune --keep <count>  Delete validated releases older than the newest <count>,
+                        except selected, .previous and visibly running ones
 --releases <directory>  Default: ~/.local/share/pi-fork/releases
 --selector <symlink>    Default: ~/.local/share/npm-global/lib/node_modules/${codingAgentName}
 --help                  Show this help
@@ -250,7 +335,7 @@ already-running older launcher needs one full CLI launch to follow selections.
 
 export async function main(args = process.argv.slice(2)) {
 	const options = {
-		ref: "HEAD", stage: false,
+		ref: "HEAD", stage: false, prune: false,
 		releases: join(homedir(), ".local/share/pi-fork/releases"),
 		selector: join(homedir(), ".local/share/npm-global/lib/node_modules", codingAgentName),
 	};
@@ -259,7 +344,8 @@ export async function main(args = process.argv.slice(2)) {
 		const arg = args[i];
 		if (arg === "--help") { printUsage(); return; }
 		if (arg === "--stage") { options.stage = true; continue; }
-		if (!["--ref", "--source-archive", "--releases", "--selector", "--activate", "--rollback"].includes(arg)) throw new Error(`Unknown option: ${arg}`);
+		if (arg === "--prune") { options.prune = true; continue; }
+		if (!["--ref", "--source-archive", "--releases", "--selector", "--activate", "--rollback", "--keep"].includes(arg)) throw new Error(`Unknown option: ${arg}`);
 		const value = args[++i];
 		if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
 		if (arg === "--activate" || arg === "--rollback") {
@@ -269,6 +355,16 @@ export async function main(args = process.argv.slice(2)) {
 	}
 	options.releases = resolve(options.releases);
 	options.selector = resolve(options.selector);
+	if (options.prune !== (options.keep !== undefined)) throw new Error("Use --prune with --keep <count>");
+	if (options.prune) {
+		if (selection || options.stage || args.includes("--ref") || options["source-archive"]) {
+			throw new Error("--prune cannot combine with installation or activation");
+		}
+		if (!/^\d+$/.test(options.keep)) throw new Error("--keep requires a non-negative integer");
+		const result = pruneReleases({ ...options, keep: Number(options.keep) });
+		console.log(JSON.stringify(result, null, 2));
+		return result;
+	}
 	if (selection && (options.stage || args.includes("--ref") || options["source-archive"])) {
 		throw new Error("Activation cannot combine with --stage, --ref or --source-archive");
 	}
@@ -321,10 +417,13 @@ export async function main(args = process.argv.slice(2)) {
 			writeFileSync(join(directory, "source.commit"), `${commit}\n`);
 			run("tmux", ["-V"], { env }); // Missing tmux must fail, not silently skip the acceptance tests.
 			run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: source, env });
+			if (process.platform === "android") prepareTermuxCompiler(source, tools, env);
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
 			const packages = getPublicWorkspacePackages(join(source, "packages"));
 			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { npm: tools.npm, env });
-			installCodingAgentConsumer(directory, tarballs, tools.npm, { env });
+			installCodingAgentConsumer(directory, tarballs, tools.npm, {
+				env, lockDirectory: join(source, "packages/coding-agent/install-lock"),
+			});
 			smokeTestInstalledRuntime(directory, tools, env);
 			run(tools.node, [join(source, "node_modules/vitest/vitest.mjs"), "run", "test/restart-tui.test.ts", "--maxWorkers=1"], {
 				cwd: join(source, "packages/coding-agent"),
@@ -338,6 +437,6 @@ export async function main(args = process.argv.slice(2)) {
 	}
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (import.meta.main) {
 	main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

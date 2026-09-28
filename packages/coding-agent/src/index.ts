@@ -26,6 +26,7 @@ export {
 	type SessionStats,
 } from "./core/agent-session.ts";
 export { readStoredCredential } from "./core/auth-storage.ts";
+export type { BackgroundCommandJob, BackgroundCommandOwner } from "./core/background-command.ts";
 export type { CacheWarmingDecision, CacheWarmingStatus } from "./core/cache-warmer.ts";
 export {
 	type CheckpointBoundary,
@@ -78,6 +79,8 @@ export type {
 	AutocompleteProviderFactory,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	BackgroundCommandToolCallEvent,
+	BackgroundCommandToolResultEvent,
 	BashCwdHook,
 	BashToolCallEvent,
 	BeforeAgentStartEvent,
@@ -97,6 +100,8 @@ export type {
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
+	ContextWindowHook,
+	ContextWindowHookEvent,
 	ContextWithSystemEvent,
 	CustomEntryDraft,
 	CustomMessageEntryDraft,
@@ -130,6 +135,8 @@ export type {
 	InputEventResult,
 	InputSource,
 	KeybindingsManager,
+	LiveToolResultEvent,
+	LiveToolResultEventResult,
 	LoadExtensionsResult,
 	LsToolCallEvent,
 	MarkdownTransformContext,
@@ -187,6 +194,8 @@ export type {
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolDefinition,
+	ToolDiscovery,
+	ToolDiscoveryGroup,
 	ToolExecutionEndEvent,
 	ToolExecutionMode,
 	ToolExecutionStartEvent,
@@ -214,6 +223,7 @@ export {
 	defineTool,
 	discoverAndLoadExtensions,
 	ExtensionRunner,
+	isBackgroundCommandToolResult,
 	isBashToolResult,
 	isEditToolResult,
 	isFindToolResult,
@@ -272,6 +282,7 @@ export {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
+	createBackgroundCommandTool,
 	createBashTool,
 	// Tool factories (for custom cwd)
 	createCodingTools,
@@ -345,12 +356,16 @@ export { createSyntheticSourceInfo } from "./core/source-info.ts";
 export { type EditDiffResult, generateDiffString, generateUnifiedPatch } from "./core/tools/edit-diff.ts";
 // Tools
 export {
+	type BackgroundCommandToolDetails,
+	type BackgroundCommandToolInput,
+	type BackgroundCommandToolOptions,
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
 	type BashToolDetails,
 	type BashToolInput,
 	type BashToolOptions,
+	createBackgroundCommandToolDefinition,
 	createBashToolDefinition,
 	createEditToolDefinition,
 	createFindToolDefinition,

@@ -95,6 +95,26 @@ const usage = {
 };
 
 describe("pi-messages", () => {
+	it("keeps host-only system anchors out of the request without changing transcript content", async () => {
+		const { baseUrl, requests } = await startServer({ events: [{ type: "done", reason: "stop", usage }] });
+		const system = {
+			role: "system" as const,
+			content: "Base",
+			contextWindowId: "host-only-window",
+			nativeHead: true as const,
+			timestamp: 0,
+		};
+		await stream(createModel(baseUrl), normalizeContext({ messages: [system, ...context.messages] }), {
+			apiKey: "test-key",
+		}).result();
+		expect((requests[0].body as { context: { messages: unknown[] } }).context.messages).toEqual([
+			{ role: "system", content: "Base", timestamp: 0 },
+			...context.messages,
+		]);
+		expect(JSON.stringify(requests[0].body)).not.toContain("host-only-window");
+		expect(system.contextWindowId).toBe("host-only-window");
+	});
+
 	it("streams text and tool calls and resolves the terminal message", async () => {
 		const { baseUrl, requests } = await startServer({
 			events: [

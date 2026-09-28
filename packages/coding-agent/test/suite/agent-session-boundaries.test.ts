@@ -174,8 +174,9 @@ describe("AgentSession actionable boundaries", () => {
 		const requests: string[] = [];
 		const instruction = "EXACT-REPLACEMENT-INSTRUCTION ".repeat(100);
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 2_000, maxTokens: 100 }],
-			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
+			// Trigger policy compaction while the retained instruction still fits physical capacity.
+			models: [{ id: "faux-1", contextWindow: 4_000, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 2_000 } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("turn_end", (event, ctx) => {
@@ -220,7 +221,7 @@ describe("AgentSession actionable boundaries", () => {
 
 		expect(harness.eventsOfType("compaction_start").length).toBeGreaterThan(0);
 		expect(requests).toHaveLength(1);
-		expect(requests[0]).toContain("EXACT-REPLACEMENT-INSTRUCTION");
+		expect(requests[0]).toContain(instruction);
 	});
 
 	it("keeps boundary input verbatim through threshold compaction when metadata follows it", async () => {
@@ -228,8 +229,9 @@ describe("AgentSession actionable boundaries", () => {
 		const requests: string[] = [];
 		const instruction = "EXACT-UNSENT-INSTRUCTION ".repeat(100);
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 2_000, maxTokens: 100 }],
-			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
+			// Trigger policy compaction while the retained instruction still fits physical capacity.
+			models: [{ id: "faux-1", contextWindow: 4_000, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 2_000 } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("turn_end", () => {
@@ -271,7 +273,7 @@ describe("AgentSession actionable boundaries", () => {
 
 		expect(harness.eventsOfType("compaction_start").length).toBeGreaterThan(0);
 		expect(requests).toHaveLength(1);
-		expect(requests[0]).toContain("EXACT-UNSENT-INSTRUCTION");
+		expect(requests[0]).toContain(instruction);
 	});
 
 	it("refreshes canonical context before publishing boundary entry notifications", async () => {
@@ -550,6 +552,8 @@ describe("AgentSession actionable boundaries", () => {
 	it("does not compact from usage belonging to a boundary-omitted assistant", async () => {
 		let handled = false;
 		const harness = await createHarness({
+			// Keep this accounting fixture's tool budget independent of newly added defaults.
+			initialActiveToolNames: ["read", "bash", "edit", "write"],
 			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 300 } },
 			extensionFactories: [
@@ -585,6 +589,8 @@ describe("AgentSession actionable boundaries", () => {
 	it("does not trigger successful-response overflow from usage captured before a boundary edit", async () => {
 		let handled = false;
 		const harness = await createHarness({
+			// Keep this accounting fixture's tool budget independent of newly added defaults.
+			initialActiveToolNames: ["read", "bash", "edit", "write"],
 			models: [{ id: "faux-1", contextWindow: 5_000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
@@ -829,7 +835,7 @@ describe("durable length recovery", () => {
 			execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
 		};
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			tools: [tool],
 			extensionFactories: [
@@ -872,7 +878,7 @@ describe("durable length recovery", () => {
 	it("gives a distinct queued follow-up its own length-recovery budget", async () => {
 		let queued = false;
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -974,7 +980,7 @@ describe("durable length recovery", () => {
 		let replaced = false;
 		let overflowId: string | undefined;
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1_000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -1076,7 +1082,7 @@ describe("durable length recovery", () => {
 
 	it("keeps omissions and does not retry when recovery compaction fails", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			settings: {
 				compaction: { keepRecentTokens: 1, reserveTokens: 0 },
 				retry: { enabled: false, maxRetries: 0, baseDelayMs: 1 },

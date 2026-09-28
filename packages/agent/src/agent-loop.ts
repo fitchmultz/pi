@@ -5,6 +5,7 @@
 
 import {
 	type AssistantMessage,
+	declarationsEqual,
 	EventStream,
 	findTool,
 	getCurrentTools,
@@ -16,6 +17,7 @@ import {
 	type Tool,
 	type ToolResultMessage,
 	type ToolStateChanges,
+	toolId,
 	toolKey,
 	toToolDeclaration,
 	type UserMessage,
@@ -242,6 +244,7 @@ async function runLoop(
 	streamFunction: StreamFn,
 ): Promise<void> {
 	let currentContext = initialContext;
+	const turnScope = {};
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	let explicitContinuation = false;
@@ -251,9 +254,13 @@ async function runLoop(
 	let asyncFailure: unknown;
 	let activeControl: ResponseControl | undefined;
 	let exclusiveCall: { scope: object; task: Promise<ExecutedToolCallBatch> } | undefined;
-	let pendingNewContext: NewContextRequest | undefined;
+	let pendingNewContext: { request: NewContextRequest; scope: object } | undefined;
+	const failedScopes = new WeakSet<object>();
+	const recordNewContext = (batch: ExecutedToolCallBatch, scope: object): void => {
+		if (batch.newContext && !failedScopes.has(scope)) pendingNewContext ??= { request: batch.newContext, scope };
+	};
 	let responseRetired = false;
-	const retireForNewContext = (): void => {
+	const retireResponse = (): void => {
 		if (!activeControl) return;
 		responseRetired = true;
 		activeControl.retire();
@@ -263,8 +270,10 @@ async function runLoop(
 	const needsResultTurn = (batch: ExecutedToolCallBatch): boolean =>
 		!!batch.newContext ||
 		(!batch.terminate && batch.messages.some((message) => !deliveredResults.has(message.toolCallId)));
-	const resultIds = new Set(
-		currentContext.messages.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
+	const restoredResults = new Map(
+		currentContext.messages.flatMap((message) =>
+			message.role === "toolResult" ? [[message.toolCallId, message] as const] : [],
+		),
 	);
 	const pendingTasks = (scope?: object): Promise<ExecutedToolCallBatch>[] =>
 		[...pendingCalls.values()]
@@ -315,9 +324,9 @@ async function runLoop(
 			.then(
 				(batch) => {
 					readyBatches.push(batch);
-					pendingNewContext ??= batch.newContext;
-					if (pendingNewContext) retireForNewContext();
-					else activeControl?.submitToolResults(savedResults);
+					recordNewContext(batch, scope);
+					if (pendingNewContext) retireResponse();
+					else activeControl?.submitToolResults(savedResults, config.toolResultModelContent);
 				},
 				(error: unknown) => {
 					asyncFailure = error;
@@ -335,15 +344,186 @@ async function runLoop(
 		await Promise.allSettled(pendingTasks(scope));
 		if (asyncFailure) throw asyncFailure;
 	};
+	const takeNewContext = async (): Promise<NewContextRequest | undefined> => {
+		if (!pendingNewContext) return undefined;
+		const pending = pendingNewContext;
+		pendingNewContext = undefined;
+		// Ordinary checkpoint siblings must succeed; independent native work can finish in the new window.
+		return !signal?.aborted && !failedScopes.has(pending.scope) ? pending.request : undefined;
+	};
+	// Preparation may return a context snapshotted before these results arrived; they still belong in the request.
+	const keepResultsSavedSince = (count: number): void => {
+		for (const result of savedResults.slice(count))
+			if (
+				!currentContext.messages.some(
+					(message) => message.role === "toolResult" && message.toolCallId === result.toolCallId,
+				)
+			)
+				currentContext.messages.push(result);
+	};
+	// In an ordered batch, a call waits until every earlier sibling in its response has started.
+	const waitsForEarlierSiblings = (calls: AgentToolCall[], call: AgentToolCall): boolean =>
+		calls
+			.slice(
+				0,
+				calls.findIndex((sibling) => sibling.id === call.id),
+			)
+			.some((sibling) => !startedCalls.has(sibling.id)) &&
+		(config.toolExecution === "sequential" ||
+			calls.some((sibling) => findTool(currentContext.tools ?? [], sibling)?.executionMode === "sequential"));
+	const finishToolCalls = async (
+		message: AssistantMessage,
+		scope: object,
+		steered = false,
+	): Promise<ExecutedToolCallBatch | undefined> => {
+		const calls = message.content.filter(
+			(call): call is AgentToolCall => call.type === "toolCall" && !startedCalls.has(call.id),
+		);
+		const sequential =
+			config.toolExecution === "sequential" ||
+			calls.some((call) => findTool(currentContext.tools ?? [], call)?.executionMode === "sequential");
+		const batches: ExecutedToolCallBatch[] = [];
+		for (let index = 0; index < calls.length; ) {
+			const call = calls[index];
+			if (message.stopReason !== "length" && isNativeAsyncCall(call, currentContext, config)) {
+				await startAsyncCall(message, call, scope);
+				index++;
+				continue;
+			}
+			const start = index++;
+			while (
+				index < calls.length &&
+				(message.stopReason === "length" || !isNativeAsyncCall(calls[index], currentContext, config))
+			)
+				index++;
+			let synchronousCalls = calls.slice(start, index);
+			const predecessors = sequential
+				? pendingTasks(scope)
+				: exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope)
+					? [exclusiveCall.task]
+					: [];
+			let interrupted = false;
+			if (predecessors.length > 0) {
+				let unsubscribe: (() => void) | undefined;
+				let inputReceived = false;
+				const input = new Promise<void>((resolve) => {
+					unsubscribe = config.subscribeSteering?.(() => {
+						inputReceived = true;
+						resolve();
+					});
+				});
+				try {
+					// Observe input without draining it: finishTurn or abort may still end this run.
+					interrupted = steered || inputReceived || !!activeControl?.waitingForSuccessor;
+					if (!interrupted) {
+						await Promise.race([Promise.all(predecessors), input]);
+						interrupted = inputReceived || !!activeControl?.waitingForSuccessor;
+					}
+					if (asyncFailure) throw asyncFailure;
+				} finally {
+					unsubscribe?.();
+				}
+			}
+			if (interrupted) {
+				// The suffix may depend on skipped work (for example, change_dir then write).
+				synchronousCalls = calls.slice(start);
+				index = calls.length;
+				retireResponse();
+			}
+			for (const call of synchronousCalls) startedCalls.add(call.id);
+			const batch =
+				interrupted || message.stopReason === "length"
+					? await failToolCalls(
+							synchronousCalls,
+							emit,
+							interrupted
+								? "steering interrupted the wait for earlier tools. Re-issue the call if it is still needed."
+								: "the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
+						)
+					: await executeToolCalls(
+							currentContext,
+							message,
+							sequential ? { ...config, toolExecution: "sequential" } : config,
+							signal,
+							emit,
+							synchronousCalls,
+						);
+			for (const result of batch.messages) {
+				currentContext.messages.push(result);
+				newMessages.push(result);
+				savedResults.push(result);
+			}
+			batches.push(batch);
+			if (batch.messages.some((message) => message.isError)) failedScopes.add(scope);
+			recordNewContext(batch, scope);
+		}
+		if (batches.length === 0) return undefined;
+		return {
+			messages: batches.flatMap((batch) => batch.messages),
+			terminate: batches.every((batch) => batch.terminate),
+			newContext: batches.find((batch) => batch.newContext)?.newContext,
+		};
+	};
 	try {
+		const unstarted: AgentToolCall[] = [];
+		const interrupted: AgentToolCall[] = [];
 		for (const message of currentContext.messages.slice()) {
 			if (message.role !== "assistant") continue;
-			for (const call of message.content) {
-				if (call.type !== "toolCall") continue;
-				if (resultIds.has(call.id)) startedCalls.add(call.id);
-				else if (call.executionStarted || (call.async && call.responsesItem))
+			if (message.toolExecutionFailed) failedScopes.add(message);
+			const calls = message.content.filter((block): block is AgentToolCall => block.type === "toolCall");
+			for (const call of calls) {
+				const result = restoredResults.get(call.id);
+				if (result) {
+					startedCalls.add(call.id);
+					if (result.isError && (result.executionSkipped || !(call.async && call.responsesItem?.async)))
+						failedScopes.add(message);
+				} else if (
+					call.async &&
+					call.responsesItem &&
+					!call.executionStarted &&
+					(message.stopReason === "error" ||
+						message.stopReason === "aborted" ||
+						// Admission may already have seen later siblings, so judge the whole response.
+						waitsForEarlierSiblings(calls, call))
+				) {
+					// Its response ended, or an ordered sibling never finished, before it ran (for example, the process
+					// stopped). Starting it now could undo an abort or run it out of order.
+					unstarted.push(call);
+					// Like its receipt once restored, the skipped call keeps sibling work from resetting context.
+					failedScopes.add(message);
+				} else if (call.executionStarted || (call.async && call.responsesItem))
 					await startAsyncCall(message, call, message);
+				else if (message.stopReason === "toolUse") {
+					const ordered =
+						config.toolExecution === "sequential" ||
+						calls.some(
+							(sibling) => findTool(currentContext.tools ?? [], sibling)?.executionMode === "sequential",
+						);
+					const earlier = calls.slice(0, calls.indexOf(call));
+					if (
+						// Not-executed receipts are written in call order, so an earlier one puts this call in an
+						// unattempted suffix. An ordered call also waits for every earlier sibling to finish with a
+						// result; detaching requires an abort, after which nothing later runs.
+						earlier.some((sibling) => restoredResults.get(sibling.id)?.executionSkipped) ||
+						(ordered && earlier.some((sibling) => !restoredResults.has(sibling.id)))
+					) {
+						unstarted.push(call);
+					} else {
+						// A completed response runs its synchronous calls at once and does not journal them, so one
+						// without a result was cut off (for example, the process stopped) and may have partly run.
+						interrupted.push(call);
+					}
+					failedScopes.add(message);
+				}
 			}
+		}
+		for (const result of [
+			...(await failToolCalls(interrupted, emit, UNKNOWN_TOOL_OUTCOME, false)).messages,
+			...(await failToolCalls(unstarted, emit, INTERRUPTED_CALL)).messages,
+		]) {
+			currentContext.messages.push(result);
+			newMessages.push(result);
+			savedResults.push(result);
 		}
 		// Check for steering messages at start (user may have typed while waiting)
 		let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
@@ -358,13 +538,13 @@ async function runLoop(
 				if (lastCompletedTurn) {
 					if (config.getTools) currentContext = { ...currentContext, tools: [...config.getTools()] };
 					if (pendingNewContext) {
-						await joinPendingCalls();
-						lastCompletedTurn.newContext ??= pendingNewContext;
-						pendingNewContext = undefined;
+						lastCompletedTurn.newContext ??= await takeNewContext();
 					}
+					const resultsBeforeTurn = savedResults.length;
 					const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
 					if (nextTurnSnapshot) {
 						currentContext = nextTurnSnapshot.context ?? currentContext;
+						keepResultsSavedSince(resultsBeforeTurn);
 						preparedMessages = nextTurnSnapshot.messages ?? [];
 						config = {
 							...config,
@@ -398,6 +578,7 @@ async function runLoop(
 					preparedMessages = [];
 					pendingMessages = [];
 
+					const resultsBeforeRequest = savedResults.length;
 					const requestUpdate = await config.prepareRequest?.(
 						{
 							context: currentContext,
@@ -408,6 +589,7 @@ async function runLoop(
 					);
 					if (requestUpdate) {
 						currentContext = requestUpdate.context ?? currentContext;
+						keepResultsSavedSince(resultsBeforeRequest);
 						config = {
 							...config,
 							model: requestUpdate.model ?? config.model,
@@ -420,10 +602,32 @@ async function runLoop(
 						};
 					}
 					signal?.throwIfAborted();
-					if (!config.prepareRequest || !pollAfterRequestPreparation) break;
+					if (!pollAfterRequestPreparation) break;
+					// Other routes require adjacent synchronous pairs, so finish outstanding work before switching.
+					// That work may be waiting on steering (for example, a subagent's question), so input ends the wait.
+					if (
+						pendingCalls.size > 0 &&
+						((config.model.api !== "openai-responses" && config.model.api !== "openai-codex-responses") ||
+							!(
+								config.model.compat &&
+								"supportsAsyncTools" in config.model.compat &&
+								config.model.compat.supportsAsyncTools
+							))
+					) {
+						let unsubscribe: (() => void) | undefined;
+						const input = new Promise<void>((resolve) => {
+							unsubscribe = config.subscribeSteering?.(resolve);
+						});
+						try {
+							await Promise.race([Promise.allSettled(pendingTasks()), input]);
+						} finally {
+							unsubscribe?.();
+						}
+						if (asyncFailure) throw asyncFailure;
+					} else if (!config.prepareRequest) break;
 
-					// Pick up one steering drain that arrived during long request preparation, then
-					// prepare again with those messages included.
+					// Pick up one steering drain that arrived during long request preparation or the wait above,
+					// then prepare again with those messages included.
 					pendingMessages = (await config.getSteeringMessages?.()) || [];
 					if (pendingMessages.length === 0) break;
 					pollAfterRequestPreparation = false;
@@ -438,16 +642,6 @@ async function runLoop(
 					newMessages.push(message);
 				}
 
-				// Other routes require adjacent synchronous pairs, so finish outstanding work before switching.
-				if (
-					(config.model.api !== "openai-responses" && config.model.api !== "openai-codex-responses") ||
-					!(
-						config.model.compat &&
-						"supportsAsyncTools" in config.model.compat &&
-						config.model.compat.supportsAsyncTools
-					)
-				)
-					await joinPendingCalls();
 				// Results already in this request's context have been delivered; later completions wake another turn.
 				readyBatches.length = 0;
 				responseRetired = false;
@@ -460,8 +654,8 @@ async function runLoop(
 							if (activeControl) for (const id of activeControl.deliveredToolCallIds) deliveredResults.add(id);
 							activeControl = control;
 							config.onResponseControl?.(control);
-							if (pendingNewContext) retireForNewContext();
-							else control?.submitToolResults(savedResults);
+							if (pendingNewContext) retireResponse();
+							else control?.submitToolResults(savedResults, config.toolResultModelContent);
 						},
 					},
 					signal,
@@ -469,43 +663,30 @@ async function runLoop(
 					(model, context, options) => {
 						for (const message of context.messages)
 							if (message.role === "toolResult") deliveredResults.add(message.toolCallId);
-						return streamFunction(model, context, options);
+						return streamFunction(model, context, { ...options, turnScope });
 					},
-					startAsyncCall,
-					async (message, scope) => {
-						const calls = message.content.filter(
-							(call): call is AgentToolCall => call.type === "toolCall" && !startedCalls.has(call.id),
-						);
-						if (calls.length === 0) return;
-						if (exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope))
-							await exclusiveCall.task;
-						if (
-							config.toolExecution === "sequential" ||
-							calls.some((call) => findTool(currentContext.tools ?? [], call)?.executionMode === "sequential")
-						)
-							await joinPendingCalls(scope);
-						for (const call of calls) startedCalls.add(call.id);
-						const batch =
-							message.stopReason === "length"
-								? await failToolCallsFromTruncatedMessage(calls, emit)
-								: await executeToolCalls(currentContext, message, config, signal, emit, calls);
-						for (const result of batch.messages) {
-							currentContext.messages.push(result);
-							newMessages.push(result);
-							savedResults.push(result);
-						}
-						readyBatches.push(batch);
-						pendingNewContext ??= batch.newContext;
-						if (pendingNewContext) retireForNewContext();
-						else activeControl?.submitToolResults(savedResults);
+					async (message, call, scope, partial) => {
+						const calls = partial.content.filter((block): block is AgentToolCall => block.type === "toolCall");
+						// Synchronous siblings wait for response end; ordered async calls must not overtake them.
+						if (waitsForEarlierSiblings(calls, call)) return;
+						await startAsyncCall(message, call, scope);
+					},
+					async (message, scope, steered) => {
+						const batch = await finishToolCalls(message, scope, steered);
+						if (batch) readyBatches.push(batch);
+						if (pendingNewContext) retireResponse();
+						else activeControl?.submitToolResults(savedResults, config.toolResultModelContent);
 					},
 				);
 				const message = streamed.message;
 				const scope = streamed.scope;
+				const steered = streamed.needsContinuation;
 				streamed.needsContinuation ||= responseRetired;
 				if (asyncFailure) throw asyncFailure;
 
-				if ((message.stopReason === "error" && !streamed.needsContinuation) || message.stopReason === "aborted") {
+				const errored = message.stopReason === "error";
+				const failed = errored && !streamed.needsContinuation;
+				if (message.stopReason === "aborted" || (failed && pendingCalls.size === 0)) {
 					await joinPendingCalls();
 					const toolResults = readyBatches.flatMap((batch) => batch.messages);
 					lastCompletedTurn = { message, toolResults, context: currentContext, newMessages };
@@ -515,38 +696,18 @@ async function runLoop(
 					return;
 				}
 
-				const toolCalls = message.content.filter(
-					(c): c is AgentToolCall => c.type === "toolCall" && !startedCalls.has(c.id),
-				);
 				const toolResults: ToolResultMessage[] = [];
-				let newContext: NewContextRequest | undefined;
 				hasMoreToolCalls = streamed.needsContinuation;
-				if (toolCalls.length > 0) {
-					if (exclusiveCall && (config.toolExecution === "sequential" || exclusiveCall.scope === scope))
-						await exclusiveCall.task;
-					if (
-						config.toolExecution === "sequential" ||
-						toolCalls.some((call) => findTool(currentContext.tools ?? [], call)?.executionMode === "sequential")
-					)
-						await joinPendingCalls(scope);
-					for (const call of toolCalls) startedCalls.add(call.id);
-					// A length stop can leave apparently valid but truncated arguments; never execute them.
-					const executedToolBatch =
-						message.stopReason === "length"
-							? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-							: await executeToolCalls(currentContext, message, config, signal, emit, toolCalls);
+				// A failed response's unfinished calls never run and its native work cannot reset context, but that work may still need steering.
+				if (errored) failedScopes.add(scope);
+				const executedToolBatch = errored ? undefined : await finishToolCalls(message, scope, steered);
+				if (executedToolBatch) {
 					toolResults.push(...executedToolBatch.messages);
-					newContext = executedToolBatch.newContext;
-					hasMoreToolCalls = !executedToolBatch.terminate || newContext !== undefined;
-					for (const result of toolResults) {
-						currentContext.messages.push(result);
-						newMessages.push(result);
-					}
+					hasMoreToolCalls = !executedToolBatch.terminate || executedToolBatch.newContext !== undefined;
 				}
 
-				if (newContext) await joinPendingCalls();
+				const newContext = await takeNewContext();
 				toolResults.push(...readyBatches.flatMap((batch) => batch.messages));
-				newContext ??= pendingNewContext ?? readyBatches.find((batch) => batch.newContext)?.newContext;
 				hasMoreToolCalls ||= newContext !== undefined || readyBatches.some(needsResultTurn);
 				lastCompletedTurn = { message, toolResults, context: currentContext, newMessages, newContext };
 				const decision = await config.finishTurn?.(lastCompletedTurn, signal);
@@ -554,7 +715,8 @@ async function runLoop(
 
 				if ((decision?.action === "end" && !newContext) || signal?.aborted) {
 					await joinPendingCalls();
-					if (!pendingNewContext || signal?.aborted) {
+					lastCompletedTurn.newContext = await takeNewContext();
+					if (!lastCompletedTurn.newContext || signal?.aborted) {
 						await emit({ type: "agent_end", messages: newMessages });
 						return;
 					}
@@ -563,7 +725,12 @@ async function runLoop(
 
 				explicitContinuation = decision?.action === "continue";
 				pendingMessages = (await config.getSteeringMessages?.()) || [];
-				while (!hasMoreToolCalls && pendingMessages.length === 0 && pendingCalls.size > 0) {
+				while (
+					!explicitContinuation &&
+					(failed || !hasMoreToolCalls) &&
+					pendingMessages.length === 0 &&
+					pendingCalls.size > 0
+				) {
 					let unsubscribe: (() => void) | undefined;
 					const input = new Promise<void>((resolve) => {
 						unsubscribe = config.subscribeSteering?.(resolve);
@@ -571,13 +738,39 @@ async function runLoop(
 					try {
 						// Subscribe before polling again so an input arriving at this boundary cannot be missed.
 						pendingMessages = (await config.getSteeringMessages?.()) || [];
-						if (pendingMessages.length === 0) await Promise.race([...pendingTasks(), input]);
+						// The last running call can settle during the poll; racing steering alone could then wait forever.
+						if (pendingMessages.length === 0 && pendingCalls.size > 0)
+							await Promise.race([...pendingTasks(), input]);
 					} finally {
 						unsubscribe?.();
 					}
 					if (asyncFailure) throw asyncFailure;
 					if (pendingMessages.length === 0) pendingMessages = (await config.getSteeringMessages?.()) || [];
 					hasMoreToolCalls = readyBatches.some(needsResultTurn);
+				}
+				// A result that settled after the check above skipped the wait but still needs a turn.
+				hasMoreToolCalls ||= readyBatches.some(needsResultTurn);
+				// Without new input, the host recovers the failed response after its native work settles.
+				if (failed && !explicitContinuation && pendingMessages.length === 0) {
+					await joinPendingCalls();
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+				if (errored) {
+					// Continuing replays the failed response, so its completed calls that never started need not-executed receipts.
+					const receipts = await failToolCalls(
+						message.content.filter(
+							(call): call is AgentToolCall =>
+								call.type === "toolCall" && !!call.responsesItem && !startedCalls.has(call.id),
+						),
+						emit,
+						INTERRUPTED_CALL,
+					);
+					for (const result of receipts.messages) {
+						currentContext.messages.push(result);
+						newMessages.push(result);
+						savedResults.push(result);
+					}
 				}
 				if (hasMoreToolCalls || pendingMessages.length > 0) explicitContinuation = false;
 			}
@@ -645,6 +838,18 @@ function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage
 
 const NO_CHANGES: ToolStateChanges = { toolsAdded: [], toolsRemoved: [] };
 
+function isNativeAsyncCall(call: AgentToolCall, context: AgentContext, config: AgentLoopConfig): boolean {
+	return (
+		call.async === true &&
+		call.responsesItem?.async === true &&
+		findTool(context.tools ?? [], call)?.async === true &&
+		(config.model.api === "openai-responses" || config.model.api === "openai-codex-responses") &&
+		!!config.model.compat &&
+		"supportsAsyncTools" in config.model.compat &&
+		config.model.compat.supportsAsyncTools === true
+	);
+}
+
 /** Copy a system message with its tool fields replaced by `changes`; empty lists omit the field. */
 function withToolChanges(message: SystemMessage, { toolsAdded, toolsRemoved }: ToolStateChanges): SystemMessage {
 	const { toolsAdded: _added, toolsRemoved: _removed, ...rest } = message;
@@ -666,8 +871,13 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
-	startAsyncCall: (message: AssistantMessage, call: AgentToolCall, scope: object) => Promise<void>,
-	finishIntermediateResponse: (message: AssistantMessage, scope: object) => Promise<void>,
+	startAsyncCall: (
+		message: AssistantMessage,
+		call: AgentToolCall,
+		scope: object,
+		partial: AssistantMessage,
+	) => Promise<void>,
+	finishIntermediateResponse: (message: AssistantMessage, scope: object, steered: boolean) => Promise<void>,
 ): Promise<{ message: AssistantMessage; needsContinuation: boolean; scope: object }> {
 	let messages = context.messages;
 	if (config.transformContext) messages = await config.transformContext(messages, signal);
@@ -727,6 +937,7 @@ async function streamAssistantResponse(
 					await emit({
 						type: "message_start",
 						message: { ...partialMessage },
+						...(event.inputToolCallIds === undefined ? {} : { inputToolCallIds: event.inputToolCallIds }),
 						...(event.continuationInput === undefined ? {} : { continuationInput: event.continuationInput }),
 					});
 					break;
@@ -736,7 +947,11 @@ async function streamAssistantResponse(
 					if (!partialMessage) await commitInputs();
 					break;
 				case "response_end":
-					await finishIntermediateResponse(await commit(event.message), scope);
+					await finishIntermediateResponse(
+						await commit(event.message),
+						scope,
+						[...steering.values()].some((status) => status !== "applied"),
+					);
 					break;
 				case "text_start":
 				case "text_delta":
@@ -758,23 +973,12 @@ async function streamAssistantResponse(
 					if (event.type === "text_end" || event.type === "thinking_end" || event.type === "toolcall_end")
 						completeContent.add(event.contentIndex);
 					if (event.type !== "toolcall_end") break;
-					const tool = findTool(context.tools ?? [], event.toolCall);
-					if (!event.toolCall.async || !tool?.async) break;
-					if (
-						!event.toolCall.responsesItem?.async ||
-						(config.model.api !== "openai-responses" && config.model.api !== "openai-codex-responses") ||
-						!(
-							config.model.compat &&
-							"supportsAsyncTools" in config.model.compat &&
-							config.model.compat.supportsAsyncTools
-						)
-					)
-						break;
+					if (!isNativeAsyncCall(event.toolCall, context, config)) break;
 					const checkpoint = {
 						...partialMessage,
 						content: partialMessage.content.filter((_block, index) => completeContent.has(index)),
 					};
-					await startAsyncCall(checkpoint, event.toolCall, scope);
+					await startAsyncCall(checkpoint, event.toolCall, scope, partialMessage);
 					break;
 				}
 				case "done":
@@ -802,15 +1006,14 @@ async function streamAssistantResponse(
 }
 
 /**
- * Fail all tool calls from an assistant message that was truncated by the
- * output token limit. Streamed tool-call arguments are finalized with a
- * best-effort JSON salvage parser, so a truncated message can yield tool calls
- * whose arguments parse and validate but are silently incomplete. None of them
- * are safe to execute; report each as an error so the model can re-issue them.
+ * Receipt calls that ended without a result: untouched ones as not executed so the model can re-issue
+ * them, or with the caller's outcome when the call may have partly run.
  */
-async function failToolCallsFromTruncatedMessage(
+async function failToolCalls(
 	toolCalls: AgentToolCall[],
 	emit: AgentEventSink,
+	reason: string,
+	executionSkipped = true,
 ): Promise<ExecutedToolCallBatch> {
 	const messages: ToolResultMessage[] = [];
 	for (const toolCall of toolCalls) {
@@ -824,12 +1027,13 @@ async function failToolCallsFromTruncatedMessage(
 		const finalized: FinalizedToolCallOutcome = {
 			toolCall,
 			result: createErrorToolResult(
-				`Tool call "${toolCall.name}" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.`,
+				executionSkipped ? `Tool call "${toolCall.name}" was not executed: ${reason}` : reason,
 			),
 			isError: true,
 		};
 		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
+		if (executionSkipped) toolResultMessage.executionSkipped = true;
 		await emitToolResultMessage(toolResultMessage, emit);
 		messages.push(toolResultMessage);
 	}
@@ -873,7 +1077,7 @@ async function executeToolCallsSequential(
 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
 	const messages: ToolResultMessage[] = [];
 
-	for (const toolCall of toolCalls) {
+	for (const [index, toolCall] of toolCalls.entries()) {
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -891,7 +1095,14 @@ async function executeToolCallsSequential(
 				isError: preparation.isError,
 			};
 		} else {
-			const executed = await executePreparedToolCall(preparation, assistantMessage, signal, emit);
+			const executed = await executePreparedToolCall(
+				preparation,
+				assistantMessage,
+				currentContext,
+				config,
+				signal,
+				emit,
+			);
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -911,6 +1122,9 @@ async function executeToolCallsSequential(
 		}
 
 		if (signal?.aborted) {
+			// The remaining calls never started; without receipts a later run would mistake them for
+			// executions cut off mid-flight.
+			messages.push(...(await failToolCalls(toolCalls.slice(index + 1), emit, INTERRUPTED_CALL)).messages);
 			break;
 		}
 	}
@@ -931,8 +1145,18 @@ async function executeToolCallsParallel(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallEntry[] = [];
+	const errors: unknown[] = [];
+	// Completed operations still need receipts when a completion listener or journal write fails.
+	const emitCompletedEvent: AgentEventSink = async (event) => {
+		try {
+			await emit(event);
+		} catch (error) {
+			errors.push(error);
+		}
+	};
 
-	for (const toolCall of toolCalls) {
+	let abortedSuffix: AgentToolCall[] = [];
+	for (const [index, toolCall] of toolCalls.entries()) {
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -951,6 +1175,7 @@ async function executeToolCallsParallel(
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
 			if (signal?.aborted) {
+				abortedSuffix = toolCalls.slice(index + 1);
 				break;
 			}
 			continue;
@@ -963,10 +1188,17 @@ async function executeToolCallsParallel(
 					result: createErrorToolResult("Operation aborted"),
 					isError: true,
 				} satisfies FinalizedToolCallOutcome;
-				await emitToolExecutionEnd(finalized, emit);
+				await emitToolExecutionEnd(finalized, emitCompletedEvent);
 				return finalized;
 			}
-			const executed = await executePreparedToolCall(preparation, assistantMessage, signal, emit);
+			const executed = await executePreparedToolCall(
+				preparation,
+				assistantMessage,
+				currentContext,
+				config,
+				signal,
+				emit,
+			);
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -975,24 +1207,34 @@ async function executeToolCallsParallel(
 				config,
 				signal,
 			);
-			await emitToolExecutionEnd(finalized, emit);
+			await emitToolExecutionEnd(finalized, emitCompletedEvent);
 			return finalized;
 		});
 		if (signal?.aborted) {
+			abortedSuffix = toolCalls.slice(index + 1);
 			break;
 		}
 	}
 
 	const tasks = finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry)));
-	// A rejected listener does not stop sibling tools; join them before ending the run.
-	const orderedFinalizedCalls = await Promise.all(tasks).finally(() => Promise.allSettled(tasks));
+	const orderedFinalizedCalls: FinalizedToolCallOutcome[] = [];
+	for (const outcome of await Promise.allSettled(tasks)) {
+		if (outcome.status === "fulfilled") orderedFinalizedCalls.push(outcome.value);
+		else errors.push(outcome.reason);
+	}
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
 		if (finalized.detached) continue;
 		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, emit);
+		await emitToolResultMessage(toolResultMessage, emitCompletedEvent);
 		messages.push(toolResultMessage);
 	}
+	if (abortedSuffix.length > 0) {
+		// The remaining calls never started; without receipts a later run would mistake them for
+		// executions cut off mid-flight.
+		messages.push(...(await failToolCalls(abortedSuffix, emitCompletedEvent, INTERRUPTED_CALL)).messages);
+	}
+	if (errors.length > 0) throw errors[0];
 
 	return {
 		messages,
@@ -1065,8 +1307,8 @@ async function prepareToolCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
-	const tool = findTool(currentContext.tools ?? [], toolCall);
-	if (!tool || (toolCall.kind === "toolSearch" && !tool.toolSearch)) {
+	const available = findTool(config.getTools?.() ?? currentContext.tools ?? [], toolCall);
+	if (!available || (toolCall.kind === "toolSearch" && !available.toolSearch)) {
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(
@@ -1077,6 +1319,8 @@ async function prepareToolCall(
 	}
 
 	try {
+		// Hooks may mutate the live object in place: snapshot functions and clone the schema.
+		const tool = { ...available, ...toToolDeclaration(available) };
 		if (toolCall.executionStarted) {
 			if (!tool.resume)
 				return { kind: "immediate", result: createErrorToolResult(UNKNOWN_TOOL_OUTCOME), isError: true };
@@ -1139,6 +1383,8 @@ async function prepareToolCall(
 const UNKNOWN_TOOL_OUTCOME =
 	"Previous tool execution was interrupted; its outcome is unknown. Do not assume the operation did not occur.";
 
+const INTERRUPTED_CALL = "it was interrupted before it started. Re-issue the call if it is still needed.";
+
 /** Only this call's execution state is current; sibling snapshots may predate their admission or detachment. */
 function createToolCallCheckpoint(message: AssistantMessage, toolCall: AgentToolCall): AssistantMessage {
 	return structuredClone({
@@ -1161,6 +1407,8 @@ function createToolCallCheckpoint(message: AssistantMessage, toolCall: AgentTool
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	assistantMessage: AssistantMessage,
+	currentContext: AgentContext,
+	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallOutcome> {
@@ -1190,6 +1438,20 @@ async function executePreparedToolCall(
 	let acceptingUpdates = true;
 
 	try {
+		// Preparation hooks, queued siblings, and checkpoint sinks can revoke or replace
+		// a tool. Recheck after those awaits, immediately before invoking its executor.
+		const live = findTool(config.getTools?.() ?? currentContext.tools ?? [], prepared.toolCall);
+		if (
+			!live ||
+			live.execute !== prepared.tool.execute ||
+			live.resume !== prepared.tool.resume ||
+			live.prepareArguments !== prepared.tool.prepareArguments ||
+			!declarationsEqual(live, prepared.tool)
+		) {
+			throw new Error(
+				`Tool ${toolId(prepared.toolCall)} is no longer available or changed before execution. Re-issue the call if it is still permitted.`,
+			);
+		}
 		const execute = resume ? prepared.tool.resume : prepared.tool.execute;
 		const result = await execute?.(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
 			if (!acceptingUpdates) return;

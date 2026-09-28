@@ -56,6 +56,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	sessionManager: SessionManager;
 	checkpoint?: CreateAgentSessionOptions["checkpoint"];
 	sessionStartEvent?: SessionStartEvent;
+	deferBackgroundCommandNotifications?: boolean;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -219,5 +220,6 @@ export async function createAgentSessionFromServices(
 		noTools: options.noTools,
 		customTools: options.customTools,
 		sessionStartEvent: options.sessionStartEvent,
+		deferBackgroundCommandNotifications: options.deferBackgroundCommandNotifications,
 	});
 }

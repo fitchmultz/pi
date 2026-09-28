@@ -96,6 +96,44 @@ describe("extension command output", () => {
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
+	it.each(
+		(["abort", "timeout"] as const).flatMap((cancellation) =>
+			[false, true].map((exited) => ({ cancellation, exited })),
+		),
+	)(
+		"stops inherited output on $cancellation after actual exit (already exited=$exited)",
+		async ({ cancellation, exited }) => {
+			vi.useFakeTimers();
+			const child = fakeChild();
+			const controller = new AbortController();
+			let settled = false;
+			const pending = execCommand("unused", [], process.cwd(), {
+				signal: controller.signal,
+				timeout: cancellation === "timeout" ? 50 : undefined,
+			}).then((result) => {
+				settled = true;
+				return result;
+			});
+			if (exited) child.emit("exit", 0);
+			child.stdout.write("inherited output");
+			if (cancellation === "abort") controller.abort();
+			await vi.advanceTimersByTimeAsync(50);
+			if (!exited) {
+				expect(settled).toBe(false);
+				child.emit("exit", null);
+			}
+			for (let i = 0; i < 5; i++) {
+				child.stdout.emit("data", Buffer.from("late"));
+				await vi.advanceTimersByTimeAsync(50);
+			}
+			expect(settled).toBe(true);
+			expect(await pending).toMatchObject({ killed: true, code: 0 });
+			expect(child.stdout.destroyed).toBe(true);
+			expect(child.stderr.destroyed).toBe(true);
+			expect(vi.getTimerCount()).toBe(0);
+		},
+	);
+
 	it("captures complete separate strings from a real child", async () => {
 		const result = await execCommand(
 			process.execPath,

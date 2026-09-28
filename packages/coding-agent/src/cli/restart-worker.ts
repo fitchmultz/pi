@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { ExtensionContext, InlineExtension } from "../core/extensions/types.ts";
 import type { SessionManager } from "../core/session-manager.ts";
 import { parseArgs } from "./args.ts";
@@ -165,10 +165,11 @@ export function createRestartControl(options: {
 				}
 				directory = mkdtempSync(join(tmpdir(), "pi-restart-"));
 				// Leave room for the terminating NUL in sockaddr_un.sun_path.
-				const maxSocketBytes = process.platform === "linux" ? 107 : 103;
+				const maxSocketBytes = process.platform === "linux" || process.platform === "android" ? 107 : 103;
 				if (process.platform !== "win32" && Buffer.byteLength(join(directory, "s")) > maxSocketBytes) {
 					rmSync(directory, { recursive: true, force: true });
-					directory = mkdtempSync("/tmp/pi-restart-");
+					const shortTmp = process.platform === "android" ? resolve(dirname(process.execPath), "../tmp") : "/tmp";
+					directory = mkdtempSync(join(shortTmp, "pi-restart-"));
 				}
 				socketPath =
 					process.platform === "win32" ? `\\\\.\\pipe\\pi-restart-${randomUUID()}` : join(directory, "s");

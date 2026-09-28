@@ -198,6 +198,57 @@ describe("native direct Responses WebSockets", () => {
 		},
 	);
 
+	it("continues a client tool search with only its output", async () => {
+		const search = {
+			type: "tool_search_call",
+			id: "tsc_1",
+			call_id: "search_1",
+			execution: "client",
+			status: "completed",
+			arguments: { query: "records" },
+		};
+		const server = await createResponsesServer((request) =>
+			replyWithOutput(request, `resp_${server.requests.length}`, [search]),
+		);
+		servers.push(server);
+		const model = { ...server.model, compat: { supportsToolSearch: true } };
+		const context: Context = {
+			systemPrompt: "Find tools",
+			messages: [{ role: "user", content: "Find records", timestamp: 0 }],
+			tools: [
+				{
+					name: "discover",
+					description: "Discover tools",
+					parameters: Type.Object({ query: Type.String() }),
+					toolSearch: true,
+				},
+			],
+		};
+		const options = { apiKey: "local-key", sessionId: "tool-search-session" };
+		context.messages.push(await streamSimple(model, context, options).result(), {
+			role: "toolResult",
+			toolCallId: "search_1|tsc_1",
+			toolName: "discover",
+			toolCallKind: "toolSearch",
+			toolsAdded: [
+				{
+					name: "lookup",
+					namespace: "records",
+					description: "Find a record",
+					parameters: Type.Object({ id: Type.String() }),
+				},
+			],
+			content: [{ type: "text", text: "Loaded records.lookup" }],
+			isError: false,
+			timestamp: 1,
+		});
+		await streamSimple(model, context, options).result();
+		expect(server.requests[1].body.previous_response_id).toBe("resp_1");
+		expect(
+			(server.requests[1].body.input as { type?: string; role?: string }[]).map((item) => item.type ?? item.role),
+		).toEqual(["tool_search_output", "user"]);
+	});
+
 	it.each(["previous_response_not_found", "websocket_connection_limit_reached"])(
 		"recovers %s with full current input on a fresh connection, without duplicate events",
 		async (code) => {
@@ -395,14 +446,15 @@ describe("native direct Responses WebSockets", () => {
 		servers.push(server);
 		const text = "x".repeat(2 * 1024 * 1024);
 		const result = await streamSimple(
-			server.model,
+			// Exercise transport queueing with input that fits the model's physical context.
+			{ ...server.model, contextWindow: 1_000_000 },
 			{ messages: [{ role: "user", content: text, timestamp: 0 }] },
 			{
 				apiKey: "local-key",
 				sessionId: "large-session",
 			},
 		).result();
-		expect(result.stopReason).toBe("stop");
+		expect(result.stopReason, result.errorMessage).toBe("stop");
 		expect(server.requests.map((request) => request.transport)).toEqual(["websocket"]);
 		expect(server.requests[0].bytes).toBeGreaterThan(2 * 1024 * 1024);
 		expect(server.requests[0].body.input).toEqual([{ role: "user", content: [{ type: "input_text", text }] }]);

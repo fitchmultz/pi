@@ -219,7 +219,7 @@ describe("native declaration selection", () => {
 	});
 });
 
-it("does not reload a removed native search result during full-state fallback", () => {
+it("retains search history with an unavailability notice, or drops removed schemas on full-state fallback", () => {
 	const previous = {
 		...output(),
 		stopReason: "toolUse",
@@ -244,14 +244,16 @@ it("does not reload a removed native search result during full-state fallback", 
 	});
 	for (const supportsMidConvoSystemMessages of [false, true]) {
 		const projected = resolveResponsesTranscript(context, supportsMidConvoSystemMessages, true);
-		expect(getCurrentTools(projected.messages)).toEqual([search]);
+		expect(getCurrentTools(projected.messages)).toEqual(supportsMidConvoSystemMessages ? [search, record] : [search]);
+		expect(getCurrentTools(context.messages)).toEqual([search]);
 		const wire = convertResponsesMessages(model, context, new Set(["openai"]), {
 			supportsMidConvoSystemMessages,
 			supportsToolSearch: true,
 			supportsAdditionalTools: true,
 		});
-		expect(wire.some((item) => item.type === "tool_search_output")).toBe(false);
-		expect(wire.some((item) => item.type === "function_call_output")).toBe(true);
+		expect(wire.some((item) => item.type === "tool_search_output")).toBe(supportsMidConvoSystemMessages);
+		expect(wire.some((item) => item.type === "function_call_output")).toBe(!supportsMidConvoSystemMessages);
+		if (supportsMidConvoSystemMessages) expect(JSON.stringify(wire.at(-1))).toContain("no longer available");
 	}
 });
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { packageNameFromLockPath, readJson } from "./coding-agent-lock-helpers.mjs";
 import { getPublicWorkspacePackages } from "./release-packages.mjs";
 
 const codingAgentName = "@earendil-works/pi-coding-agent";
@@ -39,7 +41,10 @@ export function packReleasePackages(packages, tarballDirectory, { npm = "npm", e
 	return tarballs;
 }
 
-export function installCodingAgentConsumer(directory, tarballs, packageManager = "npm", { env = process.env } = {}) {
+export function installCodingAgentConsumer(directory, tarballs, packageManager = "npm", {
+	env = process.env,
+	lockDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "../packages/coding-agent/install-lock"),
+} = {}) {
 	mkdirSync(directory, { recursive: true });
 	const overrides = Object.fromEntries([...tarballs].map(([name, path]) => [
 		name, `file:./${relative(directory, path).replaceAll("\\", "/")}`,
@@ -48,13 +53,27 @@ export function installCodingAgentConsumer(directory, tarballs, packageManager =
 	// Only coding-agent is a direct dependency. Overrides select local artifacts
 	// for declared transitive dependencies without installing undeclared packages.
 	const manifest = {
-		private: true,
+		...readJson(join(lockDirectory, "package.json")),
 		dependencies: { [codingAgentName]: overrides[codingAgentName] },
-		overrides,
 	};
+	manifest.overrides = { ...manifest.overrides, ...overrides };
+	// Local-file packages do not reliably load their nested shrinkwrap in npm.
+	// Freeze the consumer root instead, changing only the internal artifacts.
+	const lock = readJson(join(lockDirectory, "package-lock.json"));
+	lock.packages[""].dependencies = manifest.dependencies;
+	for (const [path, entry] of Object.entries(lock.packages)) {
+		const name = packageNameFromLockPath(path);
+		const tarball = tarballs.get(name);
+		if (!tarball) continue;
+		entry.resolved = overrides[name];
+		entry.integrity = `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`;
+	}
 	writeFileSync(join(directory, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
-	const installArgs = packageManager === "bun" ? ["--production"] : ["--omit=dev", "--no-audit", "--no-fund"];
-	run(packageManager, ["install", "--ignore-scripts", ...installArgs], { cwd: directory, env });
+	writeFileSync(join(directory, "package-lock.json"), `${JSON.stringify(lock, null, "\t")}\n`);
+	const installArgs = packageManager === "bun"
+		? ["install", "--production"]
+		: ["ci", "--omit=dev", "--no-audit", "--no-fund"];
+	run(packageManager, [...installArgs, "--ignore-scripts"], { cwd: directory, env });
 }
 
 function checkInstalledPackages(nodeModules, seen = new Set()) {

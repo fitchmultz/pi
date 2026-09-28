@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 const telemetryIndex = fileURLToPath(new URL("../../telemetry/src/index.ts", import.meta.url));
+const aiSrc = fileURLToPath(new URL("../../ai/src/", import.meta.url));
 const aiIndex = fileURLToPath(new URL("../../ai/src/index.ts", import.meta.url));
 const agentIndex = fileURLToPath(new URL("../../agent/src/index.ts", import.meta.url));
 const agentNode = fileURLToPath(new URL("../../agent/src/node.ts", import.meta.url));
@@ -31,6 +32,7 @@ export default defineConfig({
 			{ find: /^@earendil-works\/pi-agent-core\/harness\/session\/testing$/, replacement: agentSessionTesting },
 			{ find: /^@earendil-works\/pi-agent-core$/, replacement: agentIndex },
 			{ find: /^@earendil-works\/pi-ai$/, replacement: aiIndex },
+			{ find: /^@earendil-works\/pi-ai\/(.+)$/, replacement: `${aiSrc}$1.ts` },
 		],
 	},
 	ssr: { resolve: { conditions: ["source"] } },

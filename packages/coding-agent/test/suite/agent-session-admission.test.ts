@@ -21,6 +21,103 @@ describe("AgentSession prompt admission", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
+	it.each(["manual compaction", "tree navigation"] as const)(
+		"rejects new turns while %s awaits its summary",
+		async (operation) => {
+			const inputEntered = createDeferred();
+			const inputReleased = createDeferred();
+			const summaryEntered = createDeferred();
+			const summaryReleased = createDeferred();
+			const preflight: boolean[] = [];
+			const harness = await createHarness({
+				tools: [],
+				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("input", async (event) => {
+							if (event.text !== "held input") return;
+							inputEntered.resolve();
+							await inputReleased.promise;
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.sessionManager.appendMessage({ role: "user", content: "original request", timestamp: 1 });
+			const target = harness.sessionManager.appendMessage(fauxAssistantMessage("original answer"));
+			harness.sessionManager.appendMessage({ role: "user", content: "abandoned request", timestamp: 2 });
+			harness.sessionManager.appendMessage(fauxAssistantMessage("abandoned answer"));
+			harness.session.refreshContext();
+			const entriesBefore = harness.sessionManager.getEntries();
+			const leafBefore = harness.sessionManager.getLeafId();
+			harness.setResponses([
+				async () => {
+					summaryEntered.resolve();
+					await summaryReleased.promise;
+					return fauxAssistantMessage("branch summary");
+				},
+				...(operation === "manual compaction" ? [fauxAssistantMessage("turn prefix summary")] : []),
+				fauxAssistantMessage("accepted answer"),
+			]);
+			const heldInput = Promise.allSettled([
+				harness.session.prompt("held input", { preflightResult: (accepted) => preflight.push(accepted) }),
+			]);
+			await inputEntered.promise;
+			const transition =
+				operation === "manual compaction"
+					? harness.session.compact()
+					: harness.session.navigateTree(target, { summarize: true });
+			try {
+				await Promise.race([
+					summaryEntered.promise,
+					transition.then(() => {
+						throw new Error("Transition finished before summary generation");
+					}),
+				]);
+				expect(harness.session.isCompacting).toBe(true);
+				expect(harness.session.isStreaming).toBe(false);
+				await expect(
+					harness.session.prompt("concurrent request", {
+						preflightResult: (accepted) => preflight.push(accepted),
+					}),
+				).rejects.toThrow("compaction");
+				await expect(
+					harness.session.sendCustomMessage(custom("concurrent custom"), { triggerTurn: true }),
+				).rejects.toThrow("compaction");
+				inputReleased.resolve();
+				expect(await heldInput).toEqual([
+					{
+						status: "rejected",
+						reason: expect.objectContaining({ message: expect.stringContaining("compaction") }),
+					},
+				]);
+				expect(preflight).toEqual([false, false]);
+				expect(harness.session.pendingInputCount).toBe(0);
+				expect(harness.session.isStreaming).toBe(false);
+				expect(harness.sessionManager.getEntries()).toEqual(entriesBefore);
+				expect(harness.sessionManager.getLeafId()).toBe(leafBefore);
+				expect(harness.faux.state.callCount).toBe(1);
+				expect(harness.eventsOfType("agent_start")).toEqual([]);
+
+				summaryReleased.resolve();
+				await transition;
+				expect(harness.session.isIdle).toBe(true);
+				await harness.session.prompt("accepted request");
+				const context = harness.sessionManager.buildSessionContext().messages.map(getMessageText);
+				expect(context.slice(-2)).toEqual(["accepted request", "accepted answer"]);
+				expect(context).not.toContain("concurrent request");
+				expect(context).not.toContain("concurrent custom");
+				expect(context).not.toContain("held input");
+				expect(harness.faux.state.callCount).toBe(operation === "manual compaction" ? 3 : 2);
+				expect(harness.getPendingResponseCount()).toBe(0);
+			} finally {
+				inputReleased.resolve();
+				summaryReleased.resolve();
+				await Promise.allSettled([heldInput, transition]);
+			}
+		},
+	);
+
 	it.each(["prompt", "steer", "followUp"] as const)(
 		"counts concurrent %s input through handling and reload without counting commands",
 		async (method) => {
@@ -668,6 +765,14 @@ describe("AgentSession prompt admission", () => {
 				requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
 				return fauxAssistantMessage("answer");
 			},
+			(context) => {
+				requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
+				return fauxAssistantMessage("steering answer");
+			},
+			(context) => {
+				requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
+				return fauxAssistantMessage("follow-up answer");
+			},
 		]);
 		const preflight: boolean[] = [];
 		const rejectedPreflight: boolean[] = [];
@@ -691,6 +796,8 @@ describe("AgentSession prompt admission", () => {
 				idle = true;
 			});
 			await harness.session.sendCustomMessage(custom("compaction-wakeup"), { triggerTurn: true });
+			await harness.session.prompt("queued steering", { streamingBehavior: "steer" });
+			await harness.session.prompt("queued follow-up", { streamingBehavior: "followUp" });
 			await expect(
 				harness.session.prompt("rejected", {
 					preflightResult: (accepted) => rejectedPreflight.push(accepted),
@@ -711,9 +818,15 @@ describe("AgentSession prompt admission", () => {
 				{ reason: "threshold", contextWindowStarted: true },
 			]);
 			expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
-			expect(requests).toEqual([
-				[expect.stringContaining("preflight handoff"), "after-compaction", "compaction-aside", "compaction-wakeup"],
+			expect(requests).toHaveLength(3);
+			expect(requests[0]).toEqual([
+				expect.stringContaining("preflight handoff"),
+				"after-compaction",
+				"compaction-aside",
+				"compaction-wakeup",
 			]);
+			expect(requests[1]).toEqual([...requests[0], "answer", "queued steering"]);
+			expect(requests[2]).toEqual([...requests[1], "steering answer", "queued follow-up"]);
 			expect(
 				harness.sessionManager
 					.getEntries()

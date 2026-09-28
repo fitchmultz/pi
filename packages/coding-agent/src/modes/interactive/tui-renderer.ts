@@ -31,6 +31,11 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				const label = ` ↓ Jump to latest message${shortcut ? ` · ${shortcut}` : ""} `;
 				return theme.bg("selectedBg", theme.fg("text", label));
 			},
+			scrollToStartIndicator: () => {
+				const shortcut = keyDisplayText("tui.altScreen.top");
+				const label = ` ↑ Jump to latest message${shortcut ? ` · ${shortcut}` : ""} `;
+				return theme.bg("selectedBg", theme.fg("text", label));
+			},
 			openUrl: openBrowser,
 			onRightClickPaste: options.onRightClickPaste,
 			copyOnSelect: options.fullscreenCopyOnSelect,

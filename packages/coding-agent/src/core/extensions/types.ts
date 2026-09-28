@@ -81,6 +81,8 @@ import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } fro
 import type { BashOperations } from "../tools/bash.ts";
 import type { EditToolDetails } from "../tools/edit.ts";
 import type {
+	BackgroundCommandToolDetails,
+	BackgroundCommandToolInput,
 	BashToolDetails,
 	BashToolInput,
 	EditToolInput,
@@ -480,6 +482,20 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	isError: boolean;
 }
 
+/** Extension-owned capability description shared by its registered tools. */
+export interface ToolDiscoveryGroup {
+	name: string;
+	description: string;
+	/** Custom prompt sections rendered when any permitted group member is selected. */
+	sections?: readonly string[];
+}
+
+export interface ToolDiscovery {
+	group: ToolDiscoveryGroup;
+	/** Entry tools activate on discovery; advanced tools remain behind the extension's own loader. */
+	role: "entry" | "advanced";
+}
+
 /**
  * Tool definition for registerTool().
  */
@@ -492,6 +508,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	namespace?: string;
 	/** Set by registerToolSearch. */
 	toolSearch?: true;
+	/** Optional extension-owned discovery metadata; ordinary exposure on unsupported hosts/models. */
+	discovery?: ToolDiscovery;
 	/** Human-readable label for UI */
 	label: string;
 	/** Description for LLM */
@@ -660,6 +678,8 @@ export interface SessionBeforeForkEvent {
 export interface SessionBeforeAutoCompactEvent {
 	type: "session_before_auto_compact";
 	branchEntries: SessionEntry[];
+	/** Original native receipt IDs a fresh window would retain now; recomputed after awaited handlers. */
+	retainedToolResultIds: string[];
 	/** Inputs included in the pending provider request but not yet persisted in branchEntries. */
 	pendingMessages: AgentMessage[];
 	reason: "threshold" | "overflow";
@@ -795,11 +815,23 @@ export interface ContextEvent {
 /**
  * Fired before each LLM call, after every `context` handler has run and Pi has restored
  * the prompt and tool state. `messages` is the full transcript including system messages,
- * and the result is sent as returned: the handler owns the prompt and tool declarations.
+ * and handlers may edit its content and sections. A marked `nativeHead` declaration
+ * keeps its position at index zero, identity, and initial tool state; Pi restores these
+ * fields and reports a warning if changed. Unmarked legacy windows retain the old behavior.
  */
 export interface ContextWithSystemEvent {
 	type: "context_with_system";
 	messages: AgentMessage[];
+}
+
+/**
+ * Fired after a finalized tool result is saved. A live native response continuation sends that
+ * result without running context hooks; returned `content` replaces it in that frame only. The
+ * saved result is unchanged, and ordinary requests still run `context` and `context_with_system`.
+ */
+export interface LiveToolResultEvent {
+	type: "live_tool_result";
+	message: ToolResultMessage;
 }
 
 /** Fired before a provider request is sent. Can replace the payload. */
@@ -1039,6 +1071,18 @@ export interface ThinkingLevelSelectEvent {
 /** Synchronously resolve the working directory for native Bash execution. */
 export type BashCwdHook = (cwd: string) => string;
 
+/** Final fresh-window projection, before canonical refresh or provider dispatch. */
+export interface ContextWindowHookEvent {
+	contextEntries: ProjectedSessionEntry[];
+	pendingMessages: AgentMessage[];
+}
+
+/** Synchronous durable messages and content edits; originals remain in the session journal. */
+export type ContextWindowHook = (
+	event: ContextWindowHookEvent,
+	ctx: ExtensionContext,
+) => (ContextEditEntryDraft | CustomMessageEntryDraft)[] | undefined;
+
 /** Fired when user executes a bash command via ! or !! prefix */
 export interface UserBashEvent {
 	type: "user_bash";
@@ -1091,6 +1135,11 @@ export interface BashToolCallEvent extends ToolCallEventBase {
 	input: BashToolInput;
 }
 
+export interface BackgroundCommandToolCallEvent extends ToolCallEventBase {
+	toolName: "background_command";
+	input: BackgroundCommandToolInput;
+}
+
 export interface PowerShellToolCallEvent extends ToolCallEventBase {
 	toolName: "powershell";
 	input: PowerShellToolInput;
@@ -1139,6 +1188,7 @@ export interface CustomToolCallEvent extends ToolCallEventBase {
  */
 export type ToolCallEvent =
 	| BashToolCallEvent
+	| BackgroundCommandToolCallEvent
 	| PowerShellToolCallEvent
 	| ReadToolCallEvent
 	| EditToolCallEvent
@@ -1162,6 +1212,11 @@ interface ToolResultEventBase {
 export interface BashToolResultEvent extends ToolResultEventBase {
 	toolName: "bash";
 	details: BashToolDetails | undefined;
+}
+
+export interface BackgroundCommandToolResultEvent extends ToolResultEventBase {
+	toolName: "background_command";
+	details: BackgroundCommandToolDetails | undefined;
 }
 
 export interface PowerShellToolResultEvent extends ToolResultEventBase {
@@ -1207,6 +1262,7 @@ export interface CustomToolResultEvent extends ToolResultEventBase {
 /** Fired after a tool executes. Can modify result. */
 export type ToolResultEvent =
 	| BashToolResultEvent
+	| BackgroundCommandToolResultEvent
 	| PowerShellToolResultEvent
 	| ReadToolResultEvent
 	| EditToolResultEvent
@@ -1217,6 +1273,9 @@ export type ToolResultEvent =
 	| CustomToolResultEvent;
 
 // Type guards for ToolResultEvent
+export function isBackgroundCommandToolResult(e: ToolResultEvent): e is BackgroundCommandToolResultEvent {
+	return e.namespace === undefined && e.toolName === "background_command";
+}
 export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
 	return e.namespace === undefined && e.toolName === "bash";
 }
@@ -1263,6 +1322,10 @@ export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
  * CustomToolCallEvent.toolName is `string` which overlaps with all literals.
  */
 export function isToolCallEventType(toolName: "bash", event: ToolCallEvent): event is BashToolCallEvent;
+export function isToolCallEventType(
+	toolName: "background_command",
+	event: ToolCallEvent,
+): event is BackgroundCommandToolCallEvent;
 export function isToolCallEventType(toolName: "powershell", event: ToolCallEvent): event is PowerShellToolCallEvent;
 export function isToolCallEventType(toolName: "read", event: ToolCallEvent): event is ReadToolCallEvent;
 export function isToolCallEventType(toolName: "edit", event: ToolCallEvent): event is EditToolCallEvent;
@@ -1285,6 +1348,7 @@ export type ExtensionEvent =
 	| SessionEvent
 	| ContextEvent
 	| ContextWithSystemEvent
+	| LiveToolResultEvent
 	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
@@ -1366,6 +1430,11 @@ export interface ToolResultEventResult {
 export interface MessageEndEventResult {
 	/** Replace the finalized message. The replacement must keep the original message role. */
 	message?: AgentMessage;
+}
+
+export interface LiveToolResultEventResult {
+	/** Content sent in place of the saved content on a live continuation. Later handlers see it. */
+	content?: (TextContent | ImageContent)[];
 }
 
 export interface BeforeAgentStartEventResult {
@@ -1556,6 +1625,7 @@ export interface ExtensionAPI {
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): () => void;
 	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): () => void;
 	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent, MessageEndEventResult>): () => void;
+	on(event: "live_tool_result", handler: ExtensionHandler<LiveToolResultEvent, LiveToolResultEventResult>): () => void;
 	on(
 		event: "tool_execution_prepared",
 		handler: ExtensionHandler<Extract<AgentEvent, { type: "tool_execution_prepared" }>>,
@@ -1594,6 +1664,9 @@ export interface ExtensionAPI {
 	 * Hooks chain in extension load/registration order. Custom tools are unaffected.
 	 */
 	registerBashCwdHook(hook: BashCwdHook): void;
+
+	/** Shape the final fresh window with context edits or durable custom messages. Errors stop rollover. */
+	registerContextWindowHook(hook: ContextWindowHook): void;
 
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
@@ -1819,6 +1892,13 @@ export interface ProviderConfig {
 	/** API key literal, env interpolation ($ENV_VAR or ${ENV_VAR}), or leading !command. Required when defining models (unless oauth provided). */
 	apiKey?: string;
 	/**
+	 * Ignore this provider's stored credentials during requests, availability checks and catalog refresh.
+	 * Explicit runtime/request keys still win. Login/logout still deliberately update stored credentials.
+	 * Scoped to this registration; false or unregister restores stored auth. Defaults to false.
+	 * Feature-detect with ModelRuntime.supportsIgnoreStoredCredentials on older/official hosts.
+	 */
+	ignoreStoredCredentials?: boolean;
+	/**
 	 * Override ambient auth without replacing native login, catalogs, or transports.
 	 * Called only without a stored/runtime credential or configured apiKey; receives no credential.
 	 * Both callbacks must honor signal. check reports the actual auth type (including OAuth).
@@ -1962,7 +2042,7 @@ export type GetActiveToolsHandler = () => string[];
 /** Tool info with name, description, parameter schema, prompt guidelines, and source metadata. */
 export type ToolInfo = Pick<
 	ToolDefinition,
-	"name" | "namespace" | "toolSearch" | "description" | "parameters" | "promptGuidelines"
+	"name" | "namespace" | "toolSearch" | "discovery" | "description" | "parameters" | "promptGuidelines"
 > & {
 	/** Registered public ID accepted by setActiveTools; namespaced IDs are opaque. */
 	id: string;
@@ -2105,6 +2185,7 @@ export interface Extension {
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool>;
 	bashCwdHooks?: BashCwdHook[];
+	contextWindowHooks?: ContextWindowHook[];
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;

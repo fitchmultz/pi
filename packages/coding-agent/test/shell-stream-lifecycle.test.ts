@@ -1,4 +1,6 @@
+import { EventEmitter } from "node:events";
 import { readFile, rm } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 import { spawn } from "child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
@@ -8,7 +10,10 @@ import { createPowerShellTool } from "../src/core/tools/powershell.ts";
 
 vi.mock("child_process", { spy: true });
 
-afterEach(() => vi.mocked(spawn).mockClear());
+afterEach(() => {
+	vi.mocked(spawn).mockReset();
+	vi.useRealTimers();
+});
 
 function text(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content.map((part) => part.text ?? "").join("");
@@ -107,6 +112,56 @@ describe("legacy shell stream lifecycle", () => {
 		expect(Buffer.concat(chunks.stderr).toString()).toBe("err");
 		expect(ends.sort()).toEqual(["stderr", "stdout"]);
 	});
+
+	it.each(
+		(["abort", "timeout"] as const).flatMap((cancellation) =>
+			[false, true].map((exited) => ({ cancellation, exited })),
+		),
+	)(
+		"stops inherited output on $cancellation after actual exit (already exited=$exited)",
+		async ({ cancellation, exited }) => {
+			vi.useFakeTimers();
+			const child = Object.assign(new EventEmitter(), {
+				stdout: new PassThrough(),
+				stderr: new PassThrough(),
+			});
+			vi.mocked(spawn).mockReturnValueOnce(child as unknown as ReturnType<typeof spawn>);
+			const operations = createLocalShellOperations("node", () => ({ shell: process.execPath, args: ["-e"] }));
+			const controller = new AbortController();
+			const ends: string[] = [];
+			let settled = false;
+			const pending = operations
+				.exec("unused", process.cwd(), {
+					onData: () => {},
+					onEnd: (source) => ends.push(source),
+					signal: controller.signal,
+					timeout: cancellation === "timeout" ? 0.05 : undefined,
+				})
+				.catch((error: unknown) => {
+					settled = true;
+					return error;
+				});
+			await vi.waitFor(() => expect(child.listenerCount("exit")).toBe(1), { interval: 1 });
+			if (exited) child.emit("exit", 0);
+			child.stdout.write("inherited output");
+			if (cancellation === "abort") controller.abort();
+			await vi.advanceTimersByTimeAsync(50);
+			if (!exited) {
+				expect(settled).toBe(false);
+				child.emit("exit", null);
+			}
+			for (let i = 0; i < 5; i++) {
+				child.stderr.emit("data", Buffer.from("late"));
+				await vi.advanceTimersByTimeAsync(50);
+			}
+			expect(settled).toBe(true);
+			expect(await pending).toEqual(new Error(cancellation === "abort" ? "aborted" : "timeout:0.05"));
+			expect(ends.sort()).toEqual(["stderr", "stdout"]);
+			expect(child.stdout.destroyed).toBe(true);
+			expect(child.stderr.destroyed).toBe(true);
+			expect(vi.getTimerCount()).toBe(0);
+		},
+	);
 
 	it("handles native read failures, flushes the received tail, and detaches callbacks", async () => {
 		const failure = new Error("read failed");

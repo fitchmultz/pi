@@ -1258,6 +1258,7 @@ interface OpenAICompletionsCompat {
 }
 
 interface OpenAIResponsesCompat {
+  supportsAllowedTools?: boolean;    // Public Responses allowed_tools restrictions (default: true on api.openai.com; false elsewhere)
   supportsDeveloperRole?: boolean;   // Whether provider supports `developer` role vs `system` (default: true)
   sessionAffinityFormat?: 'openai' | 'openai-nosession' | 'openrouter'; // Session-affinity header format: 'openai' sends `session_id` and `x-client-request-id`; 'openai-nosession' sends `x-client-request-id`; 'openrouter' sends `x-session-id`. Does not affect the `prompt_cache_key` body param (default: auto-detected)
   supportsLongCacheRetention?: boolean; // Whether provider supports `prompt_cache_retention: "24h"` (default: true)
@@ -1435,7 +1436,18 @@ getCurrentTools(messages);        // []
 
 A custom `Provider` or `ProviderStreams` implementation reads the prompt and tools the same way from `context.messages`; `context.systemPrompt` and `context.tools` do not exist at that layer.
 
-Models that accept system messages mid-conversation (`supportsMidConvoSystemMessages` in the model's compat settings, set by the generated catalog for verified models) receive each later system message in place, so the cached prefix stays intact; section changes are framed by name for the model. Every other model, and every model when a later system message has `replace` set, receives `collapseSystemMessages(transcript)`: the replayed prompt and current tools as the leading system message, with later system messages dropped. Anthropic models that also set `supportsMidConvoToolChanges` send tool changes as native `tool_addition`/`tool_removal` blocks: the initial tools stay active at the top level, every later declaration is sent with `defer_loading` (plus a stable deferred placeholder from the first request, which keeps Anthropic's deferred-tool scaffolding in the cached prefix), and removed tools stay declared, so tool changes do not invalidate the prompt cache. That needs at least one initial tool and no same-name redefinition; otherwise the current tool list is sent at the top level with the system text only. OpenAI Responses models with `supportsAdditionalTools` or `supportsToolSearch` anchor additive tool changes at their message; everything else sends the current tool list at the top level.
+Models with `supportsMidConvoSystemMessages` receive later system/developer instructions in place; section updates and removals are framed by name. Models without that capability, and explicit `replace` messages, still rebuild the leading prompt immediately. Append instruction updates instead of editing `Context.systemPrompt` or earlier messages.
+
+Tool changes preserve the request prefix where possible:
+
+- **Anthropic native tool changes:** `supportsMidConvoToolChanges` uses `tool_addition`/`tool_removal` references. Initial tools remain active; later first declarations are deferred, with a stable deferred placeholder from the first request. New prefixes on the official Anthropic endpoint select `inline-tools-2026-09-15` immediately, so later redefinitions can carry full definitions in `tool_addition` without changing earlier schemas or signed thinking. Persist assistant diagnostics: `anthropic_tool_protocol` binds this choice to the current context window across replay, resume, and fork. Compaction/fresh-window checkpoints carry a host-only `contextWindowId`; the next window chooses independently even when it retains earlier responses. Historical responses without a binding keep reference mode until the next checkpointed window. Checkpoint-less legacy windows conservatively retain transcript-wide binding until a later checkpoint provides an identity; no synthetic system message is inserted. Conflicting configured tool-protocol beta headers are ignored with a `provider_configuration_warning` diagnostic; unrelated beta headers are preserved. Reference additions require an initial active tool. Inline mode instead defines new tools by value when starting without tools: the first introduction can incur one provider cache miss, then further additions remain positional.
+- **Responses, Codex, Azure, and other instruction-capable routes:** removals keep the historical wire declaration and append an unavailability notice. Description-only edits append updated guidance without changing the earlier declaration. These are not deferred permission changes: Pi's agent executor checks live availability before preparation and again immediately before invocation, rejecting revoked or replaced executors. Custom execution loops must likewise validate against their current allowed tools, not the historical wire list.
+- **Public OpenAI Responses:** ordinary unnamespaced tools additionally use documented `allowed_tools` restrictions (or `none` when all tools are revoked). `supportsAllowedTools` defaults on for `api.openai.com`; it is not sent to Codex or Azure. Namespaced/search tools and explicit forced-tool choices use the notice plus executor checks rather than an unverified selector.
+- **Anthropic placement:** content-bearing system updates follow a user turn (including tool results), before the next assistant turn or at the end. Pending changes wait for the next user boundary in the existing transcript, never between tool use and its result. An assistant tail, including a paused turn, without a legal following boundary causes an immediate rebuild instead of deferring the update. Pi does not currently replay server-tool-result blocks, so it cannot use that provider-specific assistant-boundary exception.
+- **Native Responses search identity:** the first search-declaration group binds the nameless `tool_search` wire identity. Removing that callback never renames it to a replacement; later callbacks use ordinary named functions, and the live executor rejects calls to revoked identities.
+- **Schema changes without inline support:** rebuild the tool baseline at that change, then append subsequent supported updates. A fresh context window drops historical withdrawn definitions and starts with current descriptions and schemas. Retained schemas count toward context limits. If retaining them would exceed the context window but the current-tool representation fits, Pi rebuilds the tool baseline for that request rather than rejecting it. This sacrifices prefix caching to keep otherwise-fitting requests usable.
+
+Responses additions continue to use `additional_tools` or native tool search, and Kimi additions use tool-bearing system messages. Routes without an append-only addition mechanism rebuild for new tools. The persisted transcript and `getCurrentTools()` remain authoritative current state; wire-only retention never reactivates an executor.
 
 ## Context Serialization
 
@@ -1725,90 +1737,9 @@ Compat is a strict superset of the root entrypoint, so a file can switch its imp
 
 ### Adding a New Provider
 
-Adding a new LLM provider requires changes across multiple files. The layered layout: API implementations live in `src/api/`, provider factories in `src/providers/`, stable generated catalog wrappers live in `src/providers/<id>.models.ts`, and `src/models.generated.ts` registers them. This checklist covers all necessary steps:
+Provider factories in `src/providers/` own catalogs and auth and compose API implementations from `src/api/` through lazy wrappers. Reuse an existing API implementation when the provider uses a supported wire protocol. Stable generated catalog wrappers live in `src/providers/<id>.models.ts`; update the model-generation scripts rather than editing generated catalogs directly.
 
-#### 1. Core Types (`src/types.ts`)
-
-- Add the API identifier to `KnownApi` (for example `"bedrock-converse-stream"`), if it is a new API
-- Add the provider name to `KnownProvider` (for example `"amazon-bedrock"`)
-- Add the options type to `ApiOptionsMap`
-
-#### 2. API Implementation (`src/api/<api-id>.ts`, only for a new API)
-
-Create a new API implementation file (for example `bedrock-converse-stream.ts`) that exports exactly `stream` and `streamSimple`, plus:
-
-- An options interface extending `StreamOptions` (for example `BedrockOptions`)
-- Message conversion functions to transform the `TranscriptContext` messages to provider format; read the prompt and tools from the transcript with `getInitialSystemMessage()`, `getCurrentTools()`, and `resolveTranscript()`
-- Tool conversion if the provider supports tools
-- Response parsing to emit standardized events (`text`, `tool_call`, `thinking`, `usage`, `stop`)
-
-Add a lazy wrapper `src/api/<api-id>.lazy.ts` (`<name>Api()` via `lazyApi()`) so providers can reference the implementation without importing its SDK. Add any root-level `export type` re-exports in `src/index.ts` that should remain available from `@earendil-works/pi-ai`.
-
-#### 3. Model Generation (`scripts/generate-models.ts`, `scripts/generate-image-models.ts`)
-
-- Add logic to fetch and parse models from the provider's source (e.g., models.dev API)
-- Map chat/tool-capable provider model data to the standardized `Model` interface via `scripts/generate-models.ts`; hydration groups the ignored `src/providers/data/<id>.json` values by API, while stable `src/providers/<id>.models.ts` wrappers derive exact model/API types directly from those JSON keys
-- Map image-generation provider model data to the standardized `ImagesModel` interface via `scripts/generate-image-models.ts`
-- Handle provider-specific quirks (pricing format, capability flags, model ID transformations)
-
-#### 4. Provider Factory (`src/providers/<id>.ts`)
-
-- `createProvider()` wiring catalog + auth + the lazy API wrapper
-- Auth: `envApiKeyAuth` for standard key providers, a custom `ApiKeyAuth` for ambient auth (AWS profiles, ADC), `lazyOAuth` where an OAuth flow exists
-- Register the factory in `src/providers/all.ts`
-- If it is a new API: register it in the builtin list in `src/compat.ts` and add the package subpath export in `package.json`
-
-#### 5. Tests (`test/`)
-
-Create or update test files to cover the new provider:
-
-- `stream.test.ts` - Basic streaming and tool use
-- `tokens.test.ts` - Token usage reporting
-- `abort.test.ts` - Request cancellation
-- `empty.test.ts` - Empty message handling
-- `context-overflow.test.ts` - Context limit errors
-- `image-limits.test.ts` - Image support (if applicable)
-- `unicode-surrogate.test.ts` - Unicode handling
-- `tool-call-without-result.test.ts` - Orphaned tool calls
-- `image-tool-result.test.ts` - Images in tool results
-- `total-tokens.test.ts` - Token counting accuracy
-- `cross-provider-handoff.test.ts` - Cross-provider context replay
-- `providers.test.ts` - Provider listing and auth resolution
-
-For `cross-provider-handoff.test.ts`, add at least one provider/model pair. If the provider exposes multiple model families (for example GPT and Claude), add at least one pair per family.
-
-For providers with non-standard auth (AWS, Google Vertex), create a utility like `bedrock-utils.ts` with credential detection helpers.
-
-#### 6. Coding Agent Integration (`../coding-agent/`)
-
-Update `src/core/model-resolver.ts`:
-
-- Add a default model ID for the provider in `DEFAULT_MODELS`
-
-Update `src/cli/args.ts`:
-
-- Add environment variable documentation in the help text
-
-Update `README.md`:
-
-- Add the provider to the providers section with setup instructions
-
-#### 7. Documentation
-
-Update `packages/ai/README.md`:
-
-- Add to the Supported Providers table
-- Document any provider-specific options or authentication requirements
-- Add environment variable to the Environment Variables section
-
-#### 8. Changelog
-
-Add an entry to `packages/ai/CHANGELOG.md` under `## [Unreleased]`:
-
-```markdown
-### Added
-- Added support for [Provider Name] provider ([#PR](link) by [@author](link))
-```
+Follow the [provider implementation checklist](https://github.com/fitchmultz/pi/blob/main/.pi/skills/add-llm-provider.md) ([source checkout](../../.pi/skills/add-llm-provider.md)) for the canonical implementation steps and required test matrix, including coding-agent integration. See [CONTRIBUTING.md](https://github.com/fitchmultz/pi/blob/main/CONTRIBUTING.md) ([source checkout](../../CONTRIBUTING.md)) for the contributor and maintainer workflow, including changelog ownership.
 
 ## License
 

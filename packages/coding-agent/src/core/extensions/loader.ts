@@ -21,6 +21,7 @@ import { createSyntheticSourceInfo } from "../source-info.ts";
 import { time } from "../timings.ts";
 import type {
 	BashCwdHook,
+	ContextWindowHook,
 	EntryRenderer,
 	Extension,
 	ExtensionAPI,
@@ -316,6 +317,12 @@ function createExtensionAPI(
 			assertActive();
 			extension.bashCwdHooks ??= [];
 			extension.bashCwdHooks.push(hook);
+		},
+
+		registerContextWindowHook(hook: ContextWindowHook): void {
+			assertActive();
+			extension.contextWindowHooks ??= [];
+			extension.contextWindowHooks.push(hook);
 		},
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {

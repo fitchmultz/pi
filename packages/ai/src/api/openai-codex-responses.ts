@@ -4,6 +4,7 @@ import type {
 	ResponseCreateParamsStreaming,
 	ResponseInput,
 	ResponseStreamEvent,
+	ResponsesClientEvent,
 	ResponsesServerEvent,
 } from "openai/resources/responses/responses.js";
 
@@ -35,7 +36,6 @@ import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getSystemMessageText } from "../utils/text.ts";
 import {
-	getCurrentTools,
 	getDeclaredTools,
 	getInitialSystemMessage,
 	normalizeContext,
@@ -56,13 +56,15 @@ import {
 	finishResponsesDiagnostics,
 	type ResponsesDiagnostics,
 	recordResponsesEvent,
+	recordResponsesRequest,
 } from "./openai-responses-diagnostics.ts";
 import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	createResponsesSuccessor,
 	getInitialResponsesEffort,
-	getNativeToolSearch,
+	getResponsesInputToolCallIds,
+	getTranscriptNativeToolSearch,
 	processResponsesStream,
 	resolveResponsesEffort,
 	resolveResponsesTranscript,
@@ -274,6 +276,8 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 		context,
 		model.compat?.supportsMidConvoSystemMessages,
 		model.compat?.supportsToolSearch,
+		model,
+		model.compat?.supportsAdditionalTools,
 	);
 
 	(async () => {
@@ -305,14 +309,31 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 			}
 
 			const accountId = extractAccountId(apiKey);
+			let turnState: WebSocketTurnState | undefined;
+			if (options?.turnScope) {
+				const authDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(apiKey)));
+				const owner = JSON.stringify([
+					resolveCodexUrl(model.baseUrl),
+					model.provider,
+					accountId,
+					Array.from(authDigest),
+				]);
+				turnState = websocketTurnStates.get(options.turnScope);
+				if (!turnState || turnState.owner !== owner) {
+					// Invalidate overlapping old-owner streams as well as later requests.
+					if (turnState) {
+						turnState.token = undefined;
+						turnState.invalidated = true;
+					}
+					turnState = { owner };
+					websocketTurnStates.set(options.turnScope, turnState);
+				}
+			}
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				getDeclaredTools(normalizedContext.messages),
 				model.compat?.supportsOpenAIGrammarTools ?? false,
 			);
-			const toolSearchTool = getNativeToolSearch(
-				getCurrentTools(normalizedContext.messages),
-				model.compat?.supportsToolSearch,
-			);
+			const toolSearchTool = getTranscriptNativeToolSearch(normalizedContext, model.compat?.supportsToolSearch);
 			const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
 			const codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
 			let body = buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties);
@@ -328,6 +349,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 			} finally {
 				details.onPayloadMs = performance.now() - hookStartedAt;
 			}
+			const inputToolCallIds = getResponsesInputToolCallIds(body);
 			details.requestedServiceTier = diagnosticServiceTier(body.service_tier);
 			const websocketRequestId = codexSessionId || uuidv7();
 			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
@@ -339,7 +361,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 				websocketRequestId,
 			);
 			const bodyJson = JSON.stringify(body);
-			details.fullBodyBytes = utf8ByteLength(bodyJson);
+			recordResponsesRequest(diagnostics, bodyJson);
 			details.requestReadyMs = performance.now() - diagnostics.startedAt;
 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
@@ -377,7 +399,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 								websocketStarted = true;
 								if (!startEmitted) {
 									startEmitted = true;
-									stream.push({ type: "start", partial: output });
+									stream.push({ type: "start", partial: output, inputToolCallIds });
 								}
 							},
 							() => {
@@ -390,6 +412,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 							grammarToolInputProperties,
 							toolSearchTool,
 							diagnostics,
+							turnState,
 							options,
 							(message) => {
 								output = message;
@@ -574,7 +597,7 @@ const streamRaw: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOp
 
 			if (!startEmitted) {
 				startEmitted = true;
-				stream.push({ type: "start", partial: output });
+				stream.push({ type: "start", partial: output, inputToolCallIds });
 			}
 			await processStream(
 				response,
@@ -672,7 +695,7 @@ function buildRequestBody(
 	const transcriptTools = resolveTranscriptTools(context.messages, supportsAdditionalTools || supportsToolSearch);
 	const effort = resolveResponsesEffort(model, options?.reasoningEffort);
 	const positional = supportsPositionalResponsesEffort(model);
-	const toolSearchTool = getNativeToolSearch(getCurrentTools(context.messages), supportsToolSearch);
+	const toolSearchTool = getTranscriptNativeToolSearch(context, supportsToolSearch);
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		reasoningEffort: positional ? effort : undefined,
 		includeSystemPrompt: false,
@@ -1039,6 +1062,29 @@ const websocketDebugStats = new Map<string, OpenAICodexWebSocketDebugStats>();
 const websocketSseFallbackSessions = new Set<string>();
 // Two consecutive drops get one HTTP request, not a permanent transport downgrade.
 const websocketConsecutiveFailures = new Map<string, number>();
+const websocketLocalCloses = new WeakMap<object, string>();
+
+// A turn outlives a socket, but never its caller-owned scope or authentication owner.
+interface WebSocketTurnState {
+	owner: string;
+	token?: string;
+	invalidated?: boolean;
+}
+const websocketTurnStates = new WeakMap<object, WebSocketTurnState>();
+
+function observeTurnState(event: Record<string, unknown>, state: WebSocketTurnState | undefined): void {
+	if (!state || state.invalidated || state.token !== undefined || event.type !== "response.metadata") return;
+	if (!event.headers || typeof event.headers !== "object" || Array.isArray(event.headers)) return;
+	for (const [name, header] of Object.entries(event.headers)) {
+		if (name.toLowerCase() !== "x-codex-turn-state") continue;
+		let value: unknown = header;
+		while (Array.isArray(value)) value = value[0];
+		if (typeof value === "string") {
+			state.token = value;
+			return;
+		}
+	}
+}
 
 function getOrCreateWebSocketDebugStats(sessionId: string): OpenAICodexWebSocketDebugStats {
 	let stats = websocketDebugStats.get(sessionId);
@@ -1192,6 +1238,7 @@ function isWebSocketSessionExpired(entry: CachedWebSocketConnection): boolean {
 
 function closeWebSocketSilently(socket: WebSocketLike, code = 1000, reason = "done"): void {
 	try {
+		if (!websocketLocalCloses.has(socket)) websocketLocalCloses.set(socket, reason);
 		recordWebSocketLocalClose(socket, reason);
 		socket.close(code, reason);
 	} catch {}
@@ -1480,6 +1527,7 @@ async function* parseWebSocket(
 	idleTimeoutMs?: number,
 	control?: ReturnType<typeof createResponsesControl>,
 	onControl?: OpenAICodexResponsesOptions["onResponseControl"],
+	turnState?: WebSocketTurnState,
 ): AsyncGenerator<Record<string, unknown>> {
 	const queue: Record<string, unknown>[] = [];
 	let pending: (() => void) | null = null;
@@ -1502,6 +1550,15 @@ async function* parseWebSocket(
 				text = await decodeWebSocketData((event as { data?: unknown }).data);
 				if (!text) return;
 				const parsed = JSON.parse(text) as Record<string, unknown>;
+				if (
+					parsed.type === "response.completed" ||
+					parsed.type === "response.done" ||
+					parsed.type === "response.incomplete" ||
+					parsed.type === "response.failed"
+				) {
+					const response = parsed.response as { id?: unknown } | undefined;
+					if (typeof response?.id === "string") control?.observeTerminal(response.id);
+				}
 
 				queue.push(parsed);
 				wake();
@@ -1524,7 +1581,24 @@ async function* parseWebSocket(
 
 	const onClose: WebSocketListener = (event) => {
 		recordWebSocketClose(diagnostics, event);
-		if (sawCompletion && !control?.waiting) {
+		const localReason = websocketLocalCloses.get(socket);
+		const reason = (event as { reason?: unknown } | undefined)?.reason;
+		// Remote close text is untrusted and can contain credentials or payload fragments.
+		diagnostics.details.closeReason = localReason ?? (reason === "" ? "" : "redacted");
+		diagnostics.details.closeInitiator = localReason
+			? "local"
+			: diagnostics.details.closeCode === undefined || diagnostics.details.closeCode === 1006
+				? "unknown"
+				: "remote";
+		if (diagnostics.details.terminalEventMs !== undefined)
+			diagnostics.details.sinceParentTerminalMs =
+				performance.now() - diagnostics.startedAt - diagnostics.details.terminalEventMs;
+		// A clean successor gap leaves the parent complete; unresolved steering can continue on a fresh request.
+		if (
+			sawCompletion &&
+			(!control?.waiting ||
+				(!failed && diagnostics.details.closeCode === 1000 && diagnostics.details.closeWasClean === true))
+		) {
 			done = true;
 			wake();
 			return;
@@ -1556,6 +1630,7 @@ async function* parseWebSocket(
 			}
 			if (queue.length > 0) {
 				const event = queue.shift()!;
+				observeTurnState(event, turnState);
 				const terminal =
 					event.type === "response.completed" ||
 					event.type === "response.done" ||
@@ -1685,6 +1760,8 @@ async function* observeWebSocketOutput(
 			!started &&
 			(startOnCreated || event.type !== "response.created") &&
 			event.type !== "response.in_progress" &&
+			(event.type as string) !== "response.metadata" &&
+			(event.type as string) !== "codex.response.metadata" &&
 			(event.type as string) !== "codex.rate_limits"
 		) {
 			started = true;
@@ -1710,6 +1787,7 @@ async function processWebSocketStream(
 	grammarToolInputProperties: Map<string, string>,
 	toolSearchTool: ToolReference | undefined,
 	diagnostics: ResponsesDiagnostics,
+	turnState: WebSocketTurnState | undefined,
 	options?: OpenAICodexResponsesOptions,
 	onAssistantMessage?: (message: AssistantMessage) => void,
 ): Promise<void> {
@@ -1718,6 +1796,9 @@ async function processWebSocketStream(
 	delete details.closeCode;
 	delete details.closeWasClean;
 	delete details.closeMs;
+	delete details.closeReason;
+	delete details.closeInitiator;
+	delete details.sinceParentTerminalMs;
 	delete details.localTimeout;
 	delete details.localTimeoutMs;
 	delete details.connectMs;
@@ -1737,6 +1818,7 @@ async function processWebSocketStream(
 	details.lastAttemptStartMs = performance.now() - diagnostics.startedAt;
 	details.websocketConnectTimeoutMs = websocketConnectTimeoutMs ?? DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 	if (idleTimeoutMs !== undefined) details.websocketIdleTimeoutMs = idleTimeoutMs;
+	const fullBody = structuredClone(body);
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1753,7 +1835,6 @@ async function processWebSocketStream(
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
-	const fullBody = body;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
@@ -1773,16 +1854,28 @@ async function processWebSocketStream(
 			stats.lastPreviousResponseId = undefined;
 		}
 	}
+	const serialize = (event: ResponsesClientEvent | (RequestBody & { type: "response.create" })): string =>
+		JSON.stringify(
+			event.type === "response.create" && turnState?.token !== undefined
+				? {
+						...event,
+						client_metadata: {
+							...("client_metadata" in event ? (event.client_metadata as Record<string, unknown>) : {}),
+							"x-codex-turn-state": turnState.token,
+						},
+					}
+				: event,
+		);
 	const control = createResponsesControl(
 		model,
 		body as ResponseCreateParamsStreaming,
-		(event) => socket.send(JSON.stringify(event)),
+		(event) => socket.send(serialize(event)),
 		(event) => stream.push(event),
 		() => closeWebSocketSilently(socket, 1000, "context_replaced"),
 		grammarToolInputProperties,
 	);
 	try {
-		const requestJson = JSON.stringify({ type: "response.create", ...requestBody });
+		const requestJson = serialize({ type: "response.create", ...requestBody });
 		details.websocketSendBytes = utf8ByteLength(requestJson);
 		details.websocketRequestMode = requestBody === fullBody ? "full" : "delta";
 		details.websocketSendMs = performance.now() - diagnostics.startedAt;
@@ -1790,7 +1883,15 @@ async function processWebSocketStream(
 		await processResponsesStream(
 			observeWebSocketOutput(
 				mapCodexEvents(
-					parseWebSocket(socket, diagnostics, options?.signal, idleTimeoutMs, control, options?.onResponseControl),
+					parseWebSocket(
+						socket,
+						diagnostics,
+						options?.signal,
+						idleTimeoutMs,
+						control,
+						options?.onResponseControl,
+						turnState,
+					),
 					diagnostics,
 					true,
 				),
@@ -1821,7 +1922,7 @@ async function processWebSocketStream(
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			},
 		);
-		if (options?.signal?.aborted || control.control.retired) {
+		if (options?.signal?.aborted || !control.reusable) {
 			keepConnection = false;
 		} else if (!control.used && useCachedContext && entry && output.responseId) {
 			const responseItems = convertResponsesMessages(
@@ -1834,15 +1935,17 @@ async function processWebSocketStream(
 					grammarToolInputProperties,
 				},
 			).filter(
+				// Placeholder results for this response's calls are not response items; tool search adds a user message too.
 				(item) =>
 					item.type !== "function_call_output" &&
 					item.type !== "custom_tool_call_output" &&
-					item.type !== "tool_search_output",
+					item.type !== "tool_search_output" &&
+					!("role" in item && item.role === "user"),
 			);
 			entry.continuation = {
 				lastRequestBody: fullBody,
 				lastResponseId: output.responseId,
-				lastResponseItems: responseItems,
+				lastResponseItems: structuredClone(responseItems),
 			};
 		} else if (entry) {
 			// Control successors are not represented by fullBody; the previous baseline is no longer valid.
@@ -1856,10 +1959,26 @@ async function processWebSocketStream(
 		keepConnection = false;
 		throw error;
 	} finally {
-		control.close();
-		options?.onResponseControl?.(undefined);
+		if (!keepConnection && details.closeInitiator === undefined) {
+			const reason = options?.signal?.aborted
+				? "aborted"
+				: control.control.retired
+					? "context_replaced"
+					: "stream_error";
+			closeWebSocketSilently(socket, 1000, reason);
+			details.closeInitiator = "local";
+			details.closeReason = websocketLocalCloses.get(socket);
+		}
+		if (control.used && !control.reusable && details.terminalEventMs !== undefined)
+			details.sinceParentTerminalMs ??= performance.now() - diagnostics.startedAt - details.terminalEventMs;
 		const socketDetails = snapshotWebSocketSocket(socket);
 		if (socketDetails) details.socket = socketDetails;
+		control.close({
+			type: "provider_transport_close",
+			timestamp: Date.now(),
+			details: structuredClone(details),
+		});
+		options?.onResponseControl?.(undefined);
 		release({ keep: keepConnection });
 	}
 }

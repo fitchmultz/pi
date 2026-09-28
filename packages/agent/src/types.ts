@@ -261,21 +261,23 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * tool batch requested a fresh context window. Cancellation always ends the run.
 	 * On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
 	 * follow-up scheduling can satisfy that request and adds no extra request; otherwise the loop continues once
-	 * with the current context. Returning undefined preserves normal scheduling. Error and aborted responses remain
-	 * hard exits.
+	 * with the current context. Returning undefined preserves normal scheduling. Aborted responses remain hard exits,
+	 * as do error responses unless steering must still be delivered or native work is still running.
 	 */
 	finishTurn?: FinishTurn;
 
 	/**
 	 * Called immediately before every conversational provider request, including the first.
 	 * Pending messages have already been appended. The returned context, model, and thinking level
-	 * replace the runtime values for this and later requests in the run. This hook does not poll queues.
+	 * replace the runtime values for this and later requests in the run. Tool results that arrive while it runs
+	 * are appended to a returned context that lacks them. This hook does not poll queues.
 	 */
 	prepareRequest?: PrepareRequest;
 
 	/**
 	 * Called after `turn_end` when the loop will continue, immediately before the next turn starts.
 	 * Return replacement context/model/thinking state or messages to append to affect that turn.
+	 * Tool results that arrive while it runs are appended to a returned context that lacks them.
 	 * Return undefined to keep using the current context/config.
 	 */
 	prepareNextTurn?: (
@@ -285,17 +287,27 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *
-	 * Called after the current assistant turn finishes executing its tool calls, unless `finishTurn` ends the run.
+	 * Polled before requests and after turns, unless `finishTurn` or cancellation ends the run.
 	 * If messages are returned, they are added to the context before the next LLM call.
-	 * Tool calls from the current assistant message are not skipped.
+	 * Native async work may still be running. Steering can interrupt an ordered sibling wait;
+	 * untouched calls then receive not-executed errors.
 	 *
 	 * Use this for "steering" the agent while it's working.
 	 *
 	 * Return [] when no steering messages are available.
 	 */
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
-	/** Wake the pending-tool wait when new steering input arrives. */
+	/**
+	 * Wake pending-tool waits without consuming input. Notify immediately if steering is already
+	 * queued, then whenever new input arrives. Return a function that removes the listener.
+	 */
 	subscribeSteering?: (listener: () => void) => () => void;
+
+	/**
+	 * Model-only content for a saved tool result delivered on a live response continuation.
+	 * Those frames bypass `transformContext`; ordinary requests use it instead. Return undefined to send the saved content.
+	 */
+	toolResultModelContent?: (result: ToolResultMessage) => ToolResultMessage["content"] | undefined;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -443,7 +455,7 @@ export interface AgentToolResult<T = JsonValue | undefined> {
 	details: T;
 	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
 	usage?: Usage;
-	/** Start the next turn in a fresh context window after the full tool batch succeeds. */
+	/** Start the next turn in a fresh context window after ordinary tool siblings succeed; native async work can continue. */
 	newContext?: NewContextRequest;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
@@ -522,6 +534,8 @@ export type AgentEvent =
 	| {
 			type: "message_start";
 			message: AgentMessage;
+			/** Initial native payload's result call IDs; [] is known empty, absent is unknown. */
+			inputToolCallIds?: readonly string[];
 			/** Provider-captured input delta for an automatic successor. */
 			continuationInput?: readonly (UserMessage | ToolResultMessage)[];
 	  }
