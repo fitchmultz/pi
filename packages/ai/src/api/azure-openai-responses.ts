@@ -91,7 +91,7 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 		context,
 		model.compat?.supportsMidConvoSystemMessages,
 		model.compat?.supportsToolSearch,
-		model.contextWindow,
+		model,
 		model.compat?.supportsAdditionalTools,
 	);
 

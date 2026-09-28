@@ -202,7 +202,11 @@ export function resolveTranscript(
 	context: TranscriptContext,
 	supportsMidConvoSystemMessages: boolean | undefined,
 	retainTools?: "all" | "descriptions",
-	inputBudget?: { contextWindow: number; tools: "inline" | "current" | "declared" },
+	inputBudget?: {
+		contextWindow: number;
+		tools: "inline" | "current" | "declared";
+		transform: (messages: Message[]) => Message[];
+	},
 ): TranscriptContext {
 	const lateReplacement = context.messages.some(
 		(message, index) => index > 0 && isSystemMessage(message) && message.replace === true,
@@ -216,11 +220,11 @@ export function resolveTranscript(
 				: inputBudget.tools === "declared"
 					? getDeclaredTools(retained.messages, "first")
 					: getCurrentTools(retained.messages);
-		if (estimateProviderInputTokens(retained, tools) > inputBudget.contextWindow) {
+		if (estimateProviderInputTokens(inputBudget.transform(retained.messages), tools) > inputBudget.contextWindow) {
 			const rebuilt = rebaselineToolDeclarations(context, context.messages.length - 1);
 			if (
 				estimateProviderInputTokens(
-					rebuilt,
+					inputBudget.transform(rebuilt.messages),
 					inputBudget.tools === "inline" ? undefined : getCurrentTools(rebuilt.messages),
 				) <= inputBudget.contextWindow
 			)

@@ -152,7 +152,7 @@ const streamRaw = (
 		context,
 		getCompat(model).supportsMidConvoSystemMessages,
 		getCompat(model).supportsToolSearch,
-		model.contextWindow,
+		model,
 		getCompat(model).supportsAdditionalTools,
 	);
 

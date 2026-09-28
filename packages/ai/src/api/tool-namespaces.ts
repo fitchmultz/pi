@@ -15,6 +15,7 @@ import { shortHash } from "../utils/hash.ts";
 import { toolKey, toToolReference } from "../utils/tool-identity.ts";
 import { normalizeContext, resolveTranscript } from "../utils/transcript.ts";
 import { lazyStream } from "./lazy.ts";
+import { transformMessages } from "./transform-messages.ts";
 
 // Models, provider factories, and direct adapters can wrap the same request.
 const namespaceMapping = Symbol("namespaceMapping");
@@ -36,6 +37,7 @@ export function withToolNamespaces(
 	const declarationContext = compat?.supportsMidConvoSystemMessages
 		? resolveTranscript(context, true, "all", {
 				contextWindow: model.contextWindow,
+				transform: (messages) => transformMessages(messages, model),
 				tools: compat.supportsToolSearch || compat.supportsAdditionalTools ? "inline" : "current",
 			})
 		: context;

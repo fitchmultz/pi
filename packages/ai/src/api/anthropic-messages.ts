@@ -597,6 +597,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 		inlineToolDefinitions ? undefined : toolProtocol === MID_CONVERSATION_TOOL_CHANGES_BETA ? "descriptions" : "all",
 		{
 			contextWindow: model.contextWindow,
+			transform: (messages) => transformMessages(messages, model, normalizeToolCallId),
 			tools: inlineToolDefinitions
 				? "inline"
 				: toolProtocol === MID_CONVERSATION_TOOL_CHANGES_BETA

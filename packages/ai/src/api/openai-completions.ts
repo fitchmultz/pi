@@ -306,6 +306,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 	const stream = new AssistantMessageEventStream();
 	const normalizedContext = resolveTranscript(context, getCompat(model).supportsMidConvoSystemMessages, "all", {
 		contextWindow: model.contextWindow,
+		transform: (messages) => transformMessages(messages, model),
 		tools: getCompat(model).supportsMidConvoToolAdditions ? "inline" : "current",
 	});
 
@@ -1197,6 +1198,7 @@ export function convertMessages(
 ): ChatCompletionMessageParam[] {
 	const normalizedContext = resolveTranscript(context, compat.supportsMidConvoSystemMessages, "all", {
 		contextWindow: model.contextWindow,
+		transform: (messages) => transformMessages(messages, model),
 		tools: compat.supportsMidConvoToolAdditions ? "inline" : "current",
 	});
 	const params: ChatCompletionMessageParam[] = [];

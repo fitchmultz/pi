@@ -379,8 +379,10 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 				context: {
 					...context,
 					messages: context.messages.map((message) => {
-						if (message.role !== "system" || message.contextWindowId === undefined) return message;
-						const { contextWindowId: _contextWindowId, ...wireMessage } = message;
+						if (message.role !== "system" || (message.contextWindowId === undefined && !message.nativeHead))
+							return message;
+						// Host-only anchors never reach the server.
+						const { contextWindowId: _contextWindowId, nativeHead: _nativeHead, ...wireMessage } = message;
 						return wireMessage;
 					}),
 				},

@@ -45,6 +45,39 @@ const mistralModel = { ...model("mistral-conversations"), compat: { supportsMidC
 const options = { apiKey: "offline-placeholder", maxRetries: 0 };
 
 describe("native provider input admission", () => {
+	it("rebuilds when a synthetic orphaned-call result pushes retained input over the limit", async () => {
+		const small: Tool = { name: "small", description: "small", parameters: Type.Object({}) };
+		const withdrawn: Tool = { name: "huge", description: "x".repeat(1000), parameters: Type.Object({}) };
+		const context = normalizeContext({
+			messages: [
+				{ role: "system", content: "base", toolsAdded: [small, withdrawn], timestamp: 0 },
+				{ role: "system", content: "removed", toolsRemoved: [{ name: "huge" }], timestamp: 1 },
+				{
+					...fauxAssistantMessage(fauxToolCall("small", {})),
+					api: completionsModel.api,
+					provider: "test",
+					model: "admission",
+				},
+			],
+		});
+		const bodies: string[] = [];
+		const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+			bodies.push(String(init?.body));
+			return new Response('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		// The retained input needs 319 tokens before orphan repair, but 324 afterward.
+		const result = await streamCompletions({ ...completionsModel, contextWindow: 319 }, context, {
+			...options,
+			fetch,
+		}).result();
+		expect(result.stopReason, result.errorMessage).toBe("stop");
+		expect(fetch).toHaveBeenCalledOnce();
+		expect(bodies[0]).toContain("No result provided");
+		expect(bodies[0]).not.toContain(withdrawn.description);
+	});
+
 	it("counts Anthropic inline declarations even when the request has no top-level tools", async () => {
 		const fetch = vi.fn<typeof globalThis.fetch>();
 		const result = await streamAnthropic(
