@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed confirmed GPT-6 Astra Ultrafast responses being priced at standard rates across OpenAI and Codex, including long-context and cache costs, without inferring Ultrafast from the requested tier.
 - Fixed OpenAI Codex WebSocket continuation baselines changing after later in-memory edits.
 - Fixed Anthropic strict schema requests exceeding per-request limits by admitting optional strict tools within those limits.
 

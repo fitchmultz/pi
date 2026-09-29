@@ -288,6 +288,25 @@ restart a live old-format session directly into this runtime.
 
 ### Continuing contracts
 
+OpenAI Responses (API keys and Sign in with ChatGPT) and legacy Codex Responses
+price exact `gpt-6-astra` at 6x standard only when the terminal response confirms
+`service_tier: "ultrafast"`. This includes every input, cached-input, cache-write,
+and output component after standard long-context pricing is selected. Missing,
+unknown, or `default` returned tiers do not confirm Ultrafast; existing Fast,
+priority, and flex fallback behavior is unchanged. Sol preview is not included.
+The 8x included-allowance consumption rate is not a monetary estimate.
+Sources: [Ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode)
+and [pricing](https://developers.openai.com/api/docs/pricing?latest-pricing=ultrafast),
+verified September 29, 2026.
+
+The pinned OpenAI SDK already accepts `ultrafast`. Inspect requested
+`service_tier` through `onPayload` (`before_provider_request` in extensions) and
+returned `response.service_tier` through `onProviderStreamEvent`
+(`provider_stream_event` in extensions). These existing raw hooks preserve absent
+and unknown values without treating them as confirmation. They are not persisted
+tier metadata. Direct OpenAI uses HTTP/SSE; legacy Codex supports SSE and WebSocket.
+No retired diagnostic whitelist, transport, header, or new configuration is needed.
+
 The target does not waive these independent outcomes. Reuse upstream equivalents
 where available; adapt existing tests to the chosen behavior rather than retaining
 old machinery solely to keep tests unchanged.

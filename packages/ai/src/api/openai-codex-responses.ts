@@ -619,6 +619,8 @@ function getServiceTierCostMultiplier(
 	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 ): number {
 	switch (serviceTier) {
+		case "ultrafast":
+			return model.id === "gpt-6-astra" ? 6 : 1;
 		case "flex":
 			return 0.5;
 		case "priority":
