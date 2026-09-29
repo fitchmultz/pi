@@ -702,9 +702,11 @@ export async function processResponsesStream<TApi extends Api>(
 		}
 		calculateCost(model, output.usage);
 		if (options?.applyServiceTierPricing) {
+			// Ultrafast pricing requires provider confirmation, never a request-only estimate.
+			const requestServiceTier = options.serviceTier === "ultrafast" ? undefined : options.serviceTier;
 			const serviceTier = options.resolveServiceTier
-				? options.resolveServiceTier(response?.service_tier, options.serviceTier)
-				: (response?.service_tier ?? options.serviceTier);
+				? options.resolveServiceTier(response?.service_tier, requestServiceTier)
+				: (response?.service_tier ?? requestServiceTier);
 			options.applyServiceTierPricing(output.usage, serviceTier);
 		}
 		// Map status to stop reason. For incomplete responses, retain the provider's
