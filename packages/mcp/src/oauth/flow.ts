@@ -86,7 +86,8 @@ function loopback(hostname: string): boolean {
 
 function secureEndpoint(value: string | URL): URL {
 	const url = new URL(value);
-	if (url.protocol !== "https:" && !loopback(url.hostname)) throw new OAuthInsecureEndpointError(url.href);
+	if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback(url.hostname)))
+		throw new OAuthInsecureEndpointError(url.href);
 	return url;
 }
 
@@ -150,7 +151,7 @@ export async function startAuthorization(
 	if (metadata?.code_challenge_methods_supported && !metadata.code_challenge_methods_supported.includes("S256")) {
 		throw new Error("Authorization server does not support PKCE S256");
 	}
-	const url = new URL(metadata?.authorization_endpoint ?? new URL("/authorize", authorizationServerUrl));
+	const url = secureEndpoint(metadata?.authorization_endpoint ?? new URL("/authorize", authorizationServerUrl));
 	const { verifier, challenge } = await pkce();
 	url.searchParams.set("response_type", "code");
 	url.searchParams.set("client_id", options.clientInformation.client_id);
@@ -216,7 +217,7 @@ export async function registerClient(
 	if (options.metadata && !endpoint)
 		throw new Error("Authorization server does not support dynamic client registration");
 	const response = await (options.fetch ?? globalThis.fetch)(
-		new URL(endpoint ?? new URL("/register", authorizationServerUrl)),
+		secureEndpoint(endpoint ?? new URL("/register", authorizationServerUrl)),
 		{
 			method: "POST",
 			headers: { Accept: "application/json", "content-type": "application/json" },

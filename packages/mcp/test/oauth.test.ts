@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { McpClient, StreamableHttpTransport } from "../src/index.ts";
 import {
 	adaptOAuthProvider,
@@ -13,8 +13,11 @@ import {
 	type OAuthClientInformationMixed,
 	type OAuthClientProvider,
 	type OAuthDiscoveryState,
+	OAuthInsecureEndpointError,
 	OAuthIssuerMismatchError,
 	type OAuthTokens,
+	registerClient,
+	startAuthorization,
 } from "../src/oauth/index.ts";
 import { closeServers, listen, readBody } from "./helpers.ts";
 
@@ -90,6 +93,68 @@ class TestOAuthProvider implements OAuthClientProvider {
 afterEach(closeServers);
 
 describe("MCP OAuth", () => {
+	it.each([
+		["authorization_endpoint", "http://auth.example/authorize"],
+		["registration_endpoint", "http://auth.example/register"],
+		["authorization_endpoint", "ftp://localhost/authorize"],
+		["registration_endpoint", "ftp://localhost/register"],
+	] as const)("rejects an insecure %s at %s before registration or redirect", async (endpoint, url) => {
+		const provider = new TestOAuthProvider("http://127.0.0.1/callback");
+		if (endpoint === "authorization_endpoint") provider.client = { client_id: "client" };
+		provider.discovery = {
+			authorizationServerUrl: "https://auth.example",
+			authorizationServerMetadata: {
+				issuer: "https://auth.example",
+				authorization_endpoint: "https://auth.example/authorize",
+				registration_endpoint: "https://auth.example/register",
+				token_endpoint: "https://auth.example/token",
+				response_types_supported: ["code"],
+				[endpoint]: url,
+			},
+		};
+		const fetch = vi.fn(async () =>
+			Response.json({ client_id: "client", redirect_uris: [provider.redirectUrl] }, { status: 201 }),
+		);
+		await expect(authorizeMcp(provider, { serverUrl: "https://server.example/mcp", fetch })).rejects.toBeInstanceOf(
+			OAuthInsecureEndpointError,
+		);
+		expect(fetch).not.toHaveBeenCalled();
+		expect(provider.authorizationUrl).toBeUndefined();
+		expect(provider.verifier).toBeUndefined();
+	});
+
+	it.each(["http://auth.example", "ftp://localhost"])("rejects insecure fallback endpoints on %s", async (origin) => {
+		const provider = new TestOAuthProvider("http://127.0.0.1/callback");
+		const fetch = vi.fn(async () => Response.json({ client_id: "client" }, { status: 201 }));
+		await expect(
+			startAuthorization(origin, { clientInformation: { client_id: "client" }, redirectUrl: provider.redirectUrl }),
+		).rejects.toBeInstanceOf(OAuthInsecureEndpointError);
+		await expect(registerClient(origin, { clientMetadata: provider.clientMetadata, fetch })).rejects.toBeInstanceOf(
+			OAuthInsecureEndpointError,
+		);
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it.each(["https://auth.example", "http://localhost", "http://127.0.0.1", "http://[::1]"])(
+		"permits secure or HTTP loopback fallback endpoints on %s",
+		async (origin) => {
+			const provider = new TestOAuthProvider("http://127.0.0.1/callback");
+			const fetch = vi.fn(async () => Response.json({ client_id: "client" }, { status: 201 }));
+			const { authorizationUrl } = await startAuthorization(origin, {
+				clientInformation: { client_id: "client" },
+				redirectUrl: provider.redirectUrl,
+			});
+			expect(authorizationUrl.origin).toBe(origin);
+			expect(authorizationUrl.pathname).toBe("/authorize");
+			await expect(
+				registerClient(origin, { clientMetadata: provider.clientMetadata, fetch }),
+			).resolves.toMatchObject({
+				client_id: "client",
+			});
+			expect(fetch).toHaveBeenCalledOnce();
+		},
+	);
+
 	it("discovers, registers, authorizes with PKCE, and refreshes on 401", async () => {
 		let expectedChallenge: string | undefined;
 		let refreshes = 0;
