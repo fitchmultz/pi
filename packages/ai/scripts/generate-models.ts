@@ -368,6 +368,7 @@ const OPENAI_TOOL_SEARCH_MODEL_IDS = new Set([
 	"gpt-5.6-luna",
 	"gpt-6-astra",
 	"gpt-6-sol",
+	"gpt-6.1-sol",
 	"gpt-6-luna",
 ]);
 const OPENAI_ADDITIONAL_TOOLS_MODEL_IDS = OPENAI_TOOL_SEARCH_MODEL_IDS;
@@ -378,6 +379,7 @@ const OPENAI_CODEX_ADDITIONAL_TOOLS_MODEL_IDS = new Set([
 	"gpt-5.6-luna",
 	"gpt-6-astra",
 	"gpt-6-sol",
+	"gpt-6.1-sol",
 	"gpt-6-luna",
 ]);
 const OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272000;
@@ -389,6 +391,7 @@ const OPENAI_SHORT_CONTEXT_CAPPED_MODEL_IDS = new Set([
 	"gpt-5.6-luna",
 	"gpt-6-astra",
 	"gpt-6-sol",
+	"gpt-6.1-sol",
 	"gpt-6-luna",
 ]);
 const OPENAI_LONG_CONTEXT_PRICING_MODEL_IDS = new Set([
@@ -401,6 +404,7 @@ const OPENAI_LONG_CONTEXT_PRICING_MODEL_IDS = new Set([
 	"gpt-5.6-luna",
 	"gpt-6-astra",
 	"gpt-6-sol",
+	"gpt-6.1-sol",
 	"gpt-6-luna",
 ]);
 
@@ -439,6 +443,7 @@ const OPENAI_STANDARD_COSTS: Record<string, ModelCost> = {
 	"gpt-6-astra": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 	"gpt-6-luna": { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
 	"gpt-6-sol": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+	"gpt-6.1-sol": { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
 };
 
 const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
@@ -1028,13 +1033,13 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, { off: null });
 	}
 	if (
-		(model.id === "gpt-6-astra" || model.id === "gpt-6-sol" || model.id === "gpt-6-luna") &&
+		(model.id === "gpt-6-astra" || model.id === "gpt-6-sol" || model.id === "gpt-6.1-sol" || model.id === "gpt-6-luna") &&
 		(model.api === "openai-responses" ||
 			model.api === "azure-openai-responses" ||
 			model.api === "openai-codex-responses")
 	) {
 		mergeThinkingLevelMap(model, {
-			off: model.id === "gpt-6-astra" ? null : "none",
+			off: model.id === "gpt-6-astra" || model.id === "gpt-6.1-sol" ? null : "none",
 			minimal: null,
 			low: "low",
 			medium: "medium",
@@ -1120,7 +1125,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.provider === "groq" && model.id === "qwen/qwen3.6-27b") {
 		mergeThinkingLevelMap(model, { minimal: null, low: null, medium: null, high: "default" });
 	}
-	if (model.provider === "openai-codex" && supportsOpenAiXhigh(model.id)) {
+	if (model.provider === "openai-codex" && supportsOpenAiXhigh(model.id) && model.id !== "gpt-6.1-sol") {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
 	if (
@@ -2950,6 +2955,21 @@ async function generateModels() {
 
 	// Add missing gpt models
 	const missingOpenAiModels: Model<"openai-responses">[] = [
+		// https://developers.openai.com/api/docs/models/gpt-6.1-sol
+		// Official capacity is 1,050,000 (922,000 input + 128,000 output).
+		// Retain the short-tier default; context overrides retain long-context pricing.
+		{
+			id: "gpt-6.1-sol",
+			name: "GPT-6.1 Sol",
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com/v1",
+			provider: "openai",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: withOpenAiLongContextPricing(OPENAI_STANDARD_COSTS["gpt-6.1-sol"]),
+			contextWindow: OPENAI_LONG_CONTEXT_INPUT_THRESHOLD,
+			maxTokens: 128000,
+		},
 		{
 			id: "gpt-6-astra",
 			name: "GPT-6 Astra",
@@ -3183,6 +3203,18 @@ async function generateModels() {
 	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
+		{
+			id: "gpt-6.1-sol",
+			name: "GPT-6.1 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: withOpenAiLongContextPricing(OPENAI_STANDARD_COSTS["gpt-6.1-sol"]),
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
 		{
 			id: "gpt-6-astra",
 			name: "GPT-6 Astra",
