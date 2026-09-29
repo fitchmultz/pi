@@ -902,8 +902,8 @@ export class InteractiveMode {
 		if (this.renderer.mode === "fullscreen" && fullscreenExitOutput === "transcript") {
 			while (this.renderer.hasOverlayEntries) this.renderer.hideOverlay();
 			this.updateTranscriptOrderPresentation("oldest-first");
-			this.switchTuiMode("regular", false, false);
-			this.renderer.renderNow();
+			this.switchTuiMode("regular", false);
+			this.renderer.renderNow(true);
 		}
 		this.ui.stop({ preserveScreen: this.renderer.mode === "fullscreen" });
 	}
@@ -934,7 +934,7 @@ export class InteractiveMode {
 		this.ui.requestRender(true);
 	}
 
-	private switchTuiMode(mode: TuiMode, restoreProgress = true, startRenderer = true): boolean {
+	private switchTuiMode(mode: TuiMode, restoreProgress = true): boolean {
 		const previousUi = this.renderer;
 		if (mode === previousUi.mode) return true;
 		if (previousUi.hasOverlayEntries) return false;
@@ -973,7 +973,6 @@ export class InteractiveMode {
 		this.mountInteractiveTui(nextUi, components);
 		nextUi.invalidate();
 		nextUi.setFocus(focus);
-		if (!startRenderer) return true;
 		this.bindCheckpointInputGuard();
 		nextUi.start();
 		this.themeController.rebindTui();
