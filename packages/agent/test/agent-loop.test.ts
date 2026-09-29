@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { agentLoop, agentLoopContinue, runAgentLoop, runToolCall } from "../src/agent-loop.ts";
+import { agentLoop, agentLoopContinue, runAgentLoop, runAgentLoopContinue, runToolCall } from "../src/agent-loop.ts";
 import { setDefaultStreamFn } from "../src/index.ts";
 import type {
 	AgentContext,
@@ -121,6 +121,120 @@ describe("default stream function compatibility", () => {
 		} finally {
 			setDefaultStreamFn(undefined);
 		}
+	});
+});
+
+describe("public loop stream failures", () => {
+	it.each(["prompt", "continue"] as const)(
+		"settles %s stream on preparation, provider, and admission failures",
+		async (entry) => {
+			for (const phase of ["preparation", "provider", "admission"] as const) {
+				const failure = new Error(`${phase} failed`);
+				const model = createModel();
+				if (phase === "admission") model.contextWindow = 1;
+				const config: AgentLoopConfig = {
+					model,
+					convertToLlm: identityConverter,
+					prepareRequest: () => {
+						if (phase === "preparation") throw failure;
+					},
+				};
+				const prompt = createUserMessage("Hello");
+				const streamFn = () => {
+					if (phase === "provider") throw failure;
+					throw new Error("Provider should not run");
+				};
+				const stream =
+					entry === "prompt"
+						? agentLoop([prompt], { messages: [], tools: [] }, config, undefined, streamFn)
+						: agentLoopContinue({ messages: [prompt], tools: [] }, config, undefined, streamFn);
+				const events: AgentEvent[] = [];
+				for await (const event of stream) events.push(event);
+				const messages = await stream.result();
+				expect(messages.map((message) => message.role)).toEqual(
+					entry === "prompt" ? ["user", "assistant"] : ["assistant"],
+				);
+				const terminal = messages.at(-1);
+				expect(terminal).toMatchObject({
+					role: "assistant",
+					stopReason: "error",
+					errorMessage: phase === "admission" ? expect.stringContaining("exceeds") : failure.message,
+				});
+				expect(events.at(-2)).toMatchObject({ type: "turn_end", message: terminal, toolResults: [] });
+				expect(events.at(-1)).toEqual({ type: "agent_end", messages });
+				expect(events.filter((event) => event.type === "message_end").map((event) => event.message)).toEqual(
+					messages,
+				);
+			}
+		},
+	);
+
+	it.each(["prompt", "continue"] as const)(
+		"retains earlier completed messages on %s stream failure",
+		async (entry) => {
+			const prompt = createUserMessage("Hello");
+			const reply = createAssistantMessage([{ type: "text", text: "first" }]);
+			const failure = new Error("second request failed");
+			let requests = 0;
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				finishTurn: () => (requests === 1 ? { action: "continue" } : undefined),
+				prepareRequest: () => {
+					if (requests === 1) throw failure;
+				},
+			};
+			const streamFn = () => {
+				requests++;
+				const response = new MockAssistantStream();
+				queueMicrotask(() => response.push({ type: "done", reason: "stop", message: reply }));
+				return response;
+			};
+			const stream =
+				entry === "prompt"
+					? agentLoop([prompt], { messages: [], tools: [] }, config, undefined, streamFn)
+					: agentLoopContinue({ messages: [prompt], tools: [] }, config, undefined, streamFn);
+			const events: AgentEvent[] = [];
+			for await (const event of stream) events.push(event);
+			const messages = await stream.result();
+			expect(messages).toEqual([
+				...(entry === "prompt" ? [prompt] : []),
+				{ ...reply, thinkingLevel: "off" },
+				expect.objectContaining({ role: "assistant", stopReason: "error", errorMessage: failure.message }),
+			]);
+			expect(events.at(-1)).toEqual({ type: "agent_end", messages });
+		},
+	);
+
+	it("reports an aborted failure while awaited runners still reject", async () => {
+		const controller = new AbortController();
+		const failure = new Error("request canceled");
+		const prompt = createUserMessage("Hello");
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareRequest: () => {
+				controller.abort();
+				throw failure;
+			},
+		};
+		const streamFn = () => {
+			throw new Error("Provider should not run");
+		};
+		const stream = agentLoop([prompt], { messages: [], tools: [] }, config, controller.signal, streamFn);
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+		expect(await stream.result()).toMatchObject([
+			prompt,
+			{ role: "assistant", stopReason: "aborted", errorMessage: failure.message },
+		]);
+		expect(events.at(-1)?.type).toBe("agent_end");
+		await expect(
+			runAgentLoop([prompt], { messages: [], tools: [] }, config, () => {}, controller.signal, streamFn),
+		).rejects.toBe(failure);
+		await expect(
+			runAgentLoopContinue({ messages: [prompt], tools: [] }, config, () => {}, controller.signal, streamFn),
+		).rejects.toBe(failure);
 	});
 });
 
@@ -2121,6 +2235,43 @@ describe("runToolCall", () => {
 		id,
 		name,
 		arguments: args,
+	});
+
+	it.each(["before", "during"] as const)("skips nested tool hooks after %s preparation abort", async (timing) => {
+		const controller = new AbortController();
+		const calls: string[] = [];
+		const tool: AgentTool<typeof echoSchema> = {
+			...echo,
+			prepareArguments(args) {
+				calls.push("prepare");
+				controller.abort();
+				return args as { value: string };
+			},
+			async execute() {
+				calls.push("execute");
+				return { content: [{ type: "text", text: "unexpected" }], details: {} };
+			},
+		};
+		if (timing === "before") controller.abort();
+		const outcome = await runToolCall(call("canceled", "echo", { value: "test" }), {
+			tools: [tool],
+			assistantMessage,
+			context: { messages: [] },
+			signal: controller.signal,
+			beforeToolCall: async () => {
+				calls.push("before");
+				return undefined;
+			},
+			afterToolCall: async () => {
+				calls.push("after");
+				return undefined;
+			},
+		});
+		expect(outcome).toMatchObject({
+			isError: true,
+			result: { content: [{ type: "text", text: "Operation aborted" }] },
+		});
+		expect(calls).toEqual(timing === "before" ? [] : ["prepare"]);
 	});
 
 	it("validates, runs the hooks, and reports failures as error outcomes", async () => {

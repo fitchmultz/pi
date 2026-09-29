@@ -46,18 +46,9 @@ export function agentLoop(
 ): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
 
-	void runAgentLoop(
-		prompts,
-		context,
-		config,
-		async (event) => {
-			stream.push(event);
-		},
-		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	void settleAgentStream(stream, config, signal, (emit) =>
+		runAgentLoop(prompts, context, config, emit, signal, streamFn),
+	);
 
 	return stream;
 }
@@ -86,17 +77,9 @@ export function agentLoopContinue(
 
 	const stream = createAgentStream();
 
-	void runAgentLoopContinue(
-		context,
-		config,
-		async (event) => {
-			stream.push(event);
-		},
-		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	void settleAgentStream(stream, config, signal, (emit) =>
+		runAgentLoopContinue(context, config, emit, signal, streamFn),
+	);
 
 	return stream;
 }
@@ -157,6 +140,47 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 		(event: AgentEvent) => event.type === "agent_end",
 		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
 	);
+}
+
+async function settleAgentStream(
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	run: (emit: AgentEventSink) => Promise<AgentMessage[]>,
+): Promise<void> {
+	const messages: AgentMessage[] = [];
+	try {
+		const completed = await run((event) => {
+			if (event.type === "message_end") messages.push(event.message);
+			stream.push(event);
+		});
+		stream.end(completed);
+	} catch (error) {
+		const failure: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: config.model.api,
+			provider: config.model.provider,
+			model: config.model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: signal?.aborted ? "aborted" : "error",
+			errorMessage: error instanceof Error ? error.message : String(error),
+			timestamp: Date.now(),
+		};
+		stream.push({ type: "message_start", message: failure });
+		stream.push({ type: "message_end", message: failure });
+		messages.push(failure);
+		stream.push({ type: "turn_end", message: failure, toolResults: [] });
+		stream.push({ type: "agent_end", messages });
+		stream.end(messages);
+	}
 }
 
 /**
@@ -582,10 +606,6 @@ async function executeToolCallsSequential(
 		await emitToolResultMessage(toolResultMessage, emit);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
-
-		if (signal?.aborted) {
-			break;
-		}
 	}
 
 	return {
@@ -630,9 +650,6 @@ async function executeToolCallsParallel(
 			} satisfies FinalizedToolCallOutcome;
 			await emitToolExecutionEnd(finalized, emitCompletedEvent);
 			finalizedCalls.push(finalized);
-			if (signal?.aborted) {
-				break;
-			}
 			continue;
 		}
 
@@ -663,9 +680,6 @@ async function executeToolCallsParallel(
 			await emitToolExecutionEnd(finalized, emitCompletedEvent);
 			return finalized;
 		});
-		if (signal?.aborted) {
-			break;
-		}
 	}
 
 	const orderedFinalizedCalls = await Promise.all(
@@ -739,6 +753,10 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 	};
 }
 
+function abortedToolCall(): ImmediateToolCallOutcome {
+	return { kind: "immediate", result: createErrorToolResult("Operation aborted"), isError: true };
+}
+
 async function prepareToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -747,6 +765,7 @@ async function prepareToolCall(
 	signal: AbortSignal | undefined,
 	tools: readonly AgentTool<any>[] = currentContext.tools ?? [],
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+	if (signal?.aborted) return abortedToolCall();
 	const tool = tools.find((t) => t.name === toolCall.name);
 	if (!tool) {
 		return {
@@ -760,6 +779,7 @@ async function prepareToolCall(
 		const declaration = toolExecutionSignature(tool);
 		const { execute, prepareArguments, executionMode } = tool;
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
+		if (signal?.aborted) return abortedToolCall();
 		const validatedArgs = validateToolArguments(tool, preparedToolCall);
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
@@ -771,13 +791,7 @@ async function prepareToolCall(
 				},
 				signal,
 			);
-			if (signal?.aborted) {
-				return {
-					kind: "immediate",
-					result: createErrorToolResult("Operation aborted"),
-					isError: true,
-				};
-			}
+			if (signal?.aborted) return abortedToolCall();
 			if (beforeResult?.block) {
 				const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
 				if (beforeResult.terminate === true) {
@@ -790,13 +804,7 @@ async function prepareToolCall(
 				};
 			}
 		}
-		if (signal?.aborted) {
-			return {
-				kind: "immediate",
-				result: createErrorToolResult("Operation aborted"),
-				isError: true,
-			};
-		}
+		if (signal?.aborted) return abortedToolCall();
 		return {
 			kind: "prepared",
 			toolCall,
@@ -808,6 +816,7 @@ async function prepareToolCall(
 			executionMode,
 		};
 	} catch (error) {
+		if (signal?.aborted) return abortedToolCall();
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
