@@ -368,8 +368,8 @@ const OPENAI_TOOL_SEARCH_MODEL_IDS = new Set([
 	"gpt-5.6-luna",
 	"gpt-6-astra",
 	"gpt-6-sol",
-	"gpt-6.1-sol",
 	"gpt-6-luna",
+	"gpt-6.1-sol",
 ]);
 const OPENAI_ADDITIONAL_TOOLS_MODEL_IDS = OPENAI_TOOL_SEARCH_MODEL_IDS;
 const OPENAI_MID_CONVO_SYSTEM_MESSAGE_MODEL_IDS = OPENAI_TOOL_SEARCH_MODEL_IDS;
@@ -379,8 +379,8 @@ const OPENAI_CODEX_ADDITIONAL_TOOLS_MODEL_IDS = new Set([
 	"gpt-5.6-luna",
 	"gpt-6-astra",
 	"gpt-6-sol",
-	"gpt-6.1-sol",
 	"gpt-6-luna",
+	"gpt-6.1-sol",
 ]);
 const OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272000;
 const OPENAI_SHORT_CONTEXT_CAPPED_MODEL_IDS = new Set([
@@ -391,8 +391,8 @@ const OPENAI_SHORT_CONTEXT_CAPPED_MODEL_IDS = new Set([
 	"gpt-5.6-luna",
 	"gpt-6-astra",
 	"gpt-6-sol",
-	"gpt-6.1-sol",
 	"gpt-6-luna",
+	"gpt-6.1-sol",
 ]);
 const OPENAI_LONG_CONTEXT_PRICING_MODEL_IDS = new Set([
 	"gpt-5.4",
@@ -404,8 +404,8 @@ const OPENAI_LONG_CONTEXT_PRICING_MODEL_IDS = new Set([
 	"gpt-5.6-luna",
 	"gpt-6-astra",
 	"gpt-6-sol",
-	"gpt-6.1-sol",
 	"gpt-6-luna",
+	"gpt-6.1-sol",
 ]);
 
 // Keep the generated default no less restrictive than coding-agent's historical
@@ -1033,12 +1033,16 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, { off: null });
 	}
 	if (
-		(model.id === "gpt-6-astra" || model.id === "gpt-6-sol" || model.id === "gpt-6.1-sol" || model.id === "gpt-6-luna") &&
+		(model.id === "gpt-6-astra" ||
+			model.id === "gpt-6-sol" ||
+			model.id === "gpt-6-luna" ||
+			model.id === "gpt-6.1-sol") &&
 		(model.api === "openai-responses" ||
 			model.api === "azure-openai-responses" ||
 			model.api === "openai-codex-responses")
 	) {
 		mergeThinkingLevelMap(model, {
+			// GPT-6 Astra and GPT-6.1 Sol reject reasoning.effort "none".
 			off: model.id === "gpt-6-astra" || model.id === "gpt-6.1-sol" ? null : "none",
 			minimal: null,
 			low: "low",
@@ -2686,7 +2690,8 @@ async function loadModelsDevClassifierModels(): Promise<ClassifierModel<"typesaf
 				provider: "typesafe",
 				baseUrl: "https://api.typesafe.ai/v1/",
 				input: metadata.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-				// The canonical models.dev entry has no direct-provider pricing and System One reports no token usage.
+				// The canonical models.dev entry has no direct-provider pricing. System One reports token usage,
+				// so classify() results carry token counts but price them at zero.
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: metadata.limit?.context || 64000,
 			},

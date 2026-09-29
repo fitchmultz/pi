@@ -31,6 +31,7 @@ import {
 	type ImagesContext,
 	type ImagesOptions,
 	isModelType,
+	type LoginOptions,
 	lazyStream,
 	type Message,
 	type Model,
@@ -1022,10 +1023,15 @@ export class ModelRuntime implements Models {
 		}
 	}
 
-	login(providerId: string, type: AuthType, interaction: AuthInteraction): Promise<Credential> {
+	login(
+		providerId: string,
+		type: AuthType,
+		interaction: AuthInteraction,
+		options?: LoginOptions,
+	): Promise<Credential> {
 		const signal = operationSignal(interaction.signal);
 		return this.enqueueCredentialOperation(providerId, signal, async () => {
-			const credential = await this.models.login(providerId, type, { ...interaction, signal });
+			const credential = await this.models.login(providerId, type, { ...interaction, signal }, options);
 			await this.synchronizeCredentialState(providerId, "login", credential, signal);
 			return credential;
 		});

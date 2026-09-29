@@ -129,7 +129,6 @@ describe("TUI render scheduling", () => {
 		tui.setShowHardwareCursor(false);
 		tui.requestRender();
 		tui.requestRender(true);
-		tui.renderNow();
 		await new Promise<void>((resolve) => setTimeout(resolve, 20));
 		assert.deepStrictEqual(terminal.writes, []);
 
@@ -150,7 +149,6 @@ describe("TUI render scheduling", () => {
 		tui.setShowHardwareCursor(false);
 		tui.requestRender();
 		tui.requestRender(true);
-		tui.renderNow();
 		await new Promise<void>((resolve) => setTimeout(resolve, 20));
 		assert.deepStrictEqual(terminal.writes, []);
 
@@ -158,6 +156,25 @@ describe("TUI render scheduling", () => {
 		await new Promise<void>((resolve) => setTimeout(resolve, 20));
 		assert.match(terminal.writes.join(""), /restarted content/);
 		tui.stop();
+	});
+
+	it("allows an explicit render without starting terminal input", () => {
+		const terminal = new (class extends BoundedWriteTerminal {
+			startCount = 0;
+			override start(onInput: (data: string) => void, onResize: () => void): void {
+				this.startCount++;
+				super.start(onInput, onResize);
+			}
+		})();
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		component.lines = ["explicit content"];
+		tui.addChild(component);
+
+		tui.renderNow(true);
+
+		assert.match(terminal.writes.join(""), /explicit content/);
+		assert.strictEqual(terminal.startCount, 0);
 	});
 
 	it("renders keyboard input without waiting for a throttled frame", async () => {

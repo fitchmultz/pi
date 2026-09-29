@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.99.1] - 2026-09-29
+
+## [0.99.0] - 2026-09-29
+
 ### Breaking Changes
 
 - Reordered Storage scan arguments so the limit precedes the cursor.
@@ -27,6 +31,9 @@
 - Added document checkpoint selection, lazy version migration, and `Session.snapshotAsOf()` for rewindable conversation documents.
 - Added policy-driven backend-side conversation document copying when creating forks.
 - Added indexed conversation ownership queries and guaranteed no-effect Storage rejection handling.
+- Added the JSONL storage backend (`@earendil-works/pi-durable/storage/jsonl`, and `openNodeJsonlStorage()` from `@earendil-works/pi-durable/storage/jsonl/node`), including sidecar reclamation.
+- Added the execution environment (`@earendil-works/pi-durable/env`, and `NodeExecutionEnv` from `@earendil-works/pi-durable/env/node`) for file access and shell execution with bounded output capture and truncation.
+- Added the `@earendil-works/pi-durable/testing` export with the scoped storage conformance suite (`createStorageConformance()`, `registerStorageConformance()`) and storage benchmark workloads ([#9977](https://github.com/earendil-works/pi/pull/9977) by [@christianklotz](https://github.com/christianklotz)).
 - Added incarnation-bound read-only Chord document states and serialized asynchronous document watches with bounded exact-frame buffering.
 - Added `deltasSinceBase` checkpoint predicate information so definitions can bound replay without value counters.
 - Added `Harness.open()` with lazy root creation, atomic conversation creation and forks with `init`, conversation-bound commits, fork-aware entry pagination, model context derivation, and the built-in `ConversationConfig` document with model, thinking level, and active tool accessors.

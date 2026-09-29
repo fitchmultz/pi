@@ -238,8 +238,9 @@ history; session research notes are supporting evidence, not another policy.
 
 ### Integration policy
 
-This integration merges upstream `33e203354391ba26937cd1e8a210b4db10e82c66` into
-fork baseline `9430ac72ae93952e211afbf95265b607e570cf93`, preserving both ancestries.
+This integration merges all 93 outstanding upstream commits through
+`6a4af07d6145c88dad4e3472acebe75cc57af88f` (0.99.1) into fork baseline
+`9430ac72ae93952e211afbf95265b607e570cf93`, preserving both ancestries.
 The following approved outcomes govern implementation and review. Source integration
 does not select a runtime: merging, installation, and paid tests retain separate
 authorization and verification gates.

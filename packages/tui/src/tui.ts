@@ -1013,7 +1013,6 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	renderNow(force = false): void {
-		if (this.stopped) return;
 		if (force) this.resetRenderState();
 		this.renderRequested = false;
 		this.cancelRenderTimer();

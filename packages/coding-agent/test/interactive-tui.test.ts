@@ -212,7 +212,7 @@ describe("createInteractiveTui", () => {
 				const altExit = exitWrites.indexOf("\x1b[?1049l");
 				expect(altExit).toBeGreaterThanOrEqual(0);
 				expect(exitWrites.slice(altExit + "\x1b[?1049l".length)).toContain("content");
-				expect([terminal.startCount, terminal.stopCount]).toEqual([3, 3]);
+				expect([terminal.startCount, terminal.stopCount]).toEqual([2, 3]);
 			} else {
 				expect([terminal.startCount, terminal.stopCount]).toEqual([2, 2]);
 			}
