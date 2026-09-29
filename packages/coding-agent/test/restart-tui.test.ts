@@ -377,14 +377,14 @@ export default function(pi) {
 		{
 			name: "defaults",
 			args: [],
-			initialTools: ["read", "bash", "background_command", "edit", "write"],
+			initialTools: ["read", "bash", "background_command", "edit", "write", "discover_tools"],
 			todo: true,
 			cold: false,
 		},
 		{
 			name: "cold checkpoint without builtin defaults",
 			args: ["--no-builtin-tools"],
-			initialTools: [],
+			initialTools: ["discover_tools"],
 			todo: true,
 			cold: true,
 		},
@@ -569,7 +569,7 @@ export default function(pi) {
 				await vi.waitFor(() => expect(events().filter((event) => event.event === "start")).toHaveLength(4));
 				send("/inspect-selection");
 				await vi.waitFor(() => expect(events().at(-1)?.event).toBe("inspect"));
-				expect.soft(events().at(-1)?.active).toEqual(todo ? ["todo"] : ["read"]);
+				expect.soft(events().at(-1)?.active).toEqual(todo ? ["todo", "discover_tools"] : ["read"]);
 				send("/quit");
 			}
 			await vi.waitFor(() => expect(existsSync(status), terminal.screen()).toBe(true));

@@ -4,7 +4,13 @@ import { PassThrough } from "node:stream";
 import { spawn } from "child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
-import { type BashOperations, createBashTool, createLocalShellOperations } from "../src/core/tools/bash.ts";
+import {
+	type BashOperations,
+	type BashToolDetails,
+	type BashToolOutput,
+	createBashTool,
+	createLocalShellOperations,
+} from "../src/core/tools/bash.ts";
 import { OutputAccumulator } from "../src/core/tools/output-accumulator.ts";
 import { createPowerShellTool } from "../src/core/tools/powershell.ts";
 
@@ -29,10 +35,55 @@ const interleaved: BashOperations = {
 };
 
 describe("legacy shell stream lifecycle", () => {
-	it.each([createBashTool, createPowerShellTool])("keeps split stdout separate from stderr", async (factory) => {
-		const tool = factory(process.cwd(), { operations: interleaved });
-		expect(text(await tool.execute("split", { command: "unused" }))).toBe("WARN\n€");
-	});
+	it.each(
+		(
+			[
+				["bash", createBashTool],
+				["PowerShell", createPowerShellTool],
+			] as const
+		).flatMap(([shell, factory]) =>
+			[
+				{ length: 0, extra: "" },
+				{ length: 20000, extra: "" },
+				{ length: 349522, extra: "x" },
+				{ length: 349522, extra: "xx" },
+				{ length: 400000, extra: "" },
+			].map((suffix) => ({ shell, factory, ...suffix })),
+		),
+	)(
+		"keeps split stdout separate from stderr in $shell results ($length trailing characters + $extra)",
+		async ({ factory, length, extra }) => {
+			const suffix = length ? `|${"€".repeat(length)}${extra}` : "";
+			const decoded = `WARN\n€${suffix}`;
+			const tool = factory(process.cwd(), {
+				operations: {
+					exec: async (command, cwd, options) => {
+						const result = await interleaved.exec(command, cwd, options);
+						options.onData(Buffer.from(suffix), "stdout");
+						return result;
+					},
+				},
+			});
+			const result = await tool.execute("split", { command: "unused" });
+			const fullOutputPath = (result.details as BashToolDetails | undefined)?.fullOutputPath;
+			try {
+				if (!length) expect(text(result)).toBe("WARN\n€");
+				expect(text(result)).not.toContain("�");
+				const output = result.structuredContent as BashToolOutput;
+				if (Buffer.byteLength(decoded) <= 1024 * 1024) {
+					expect(output.output).toBe(decoded);
+					expect(output.truncated).toBe(false);
+				} else {
+					expect(output.output.startsWith("WARN\n€|")).toBe(true);
+					expect(output.output.endsWith(extra || "€")).toBe(true);
+					expect(output.output).not.toContain("�");
+					expect(output.truncated).toBe(true);
+				}
+			} finally {
+				if (fullOutputPath) await rm(fullOutputPath);
+			}
+		},
+	);
 
 	it.each(["success", "failure", "abort"] as const)("publishes the EOF tail before %s settles", async (outcome) => {
 		const updates: string[] = [];

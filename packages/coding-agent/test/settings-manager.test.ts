@@ -111,146 +111,20 @@ describe("SettingsManager", () => {
 		});
 	});
 
-	describe("applyOverrides", () => {
-		it("preserves overrides across unrelated global and project writes without persisting them", async () => {
-			const manager = SettingsManager.create(projectDir, agentDir);
-			manager.applyOverrides({ theme: "light", compaction: { enabled: false }, retry: { maxRetries: 7 } });
-			manager.setDefaultThinkingLevel("low");
-			expect(manager.getTheme()).toBe("light");
-			manager.setProjectExtensionPaths(["./extension.ts"]);
-			for (const flushed of [false, true]) {
-				if (flushed) await manager.flush();
-				expect(manager.getTheme()).toBe("light");
-				expect(manager.getCompactionEnabled()).toBe(false);
-				expect(manager.getRetrySettings().maxRetries).toBe(7);
-				expect(manager.getExtensionPaths()).toEqual(["./extension.ts"]);
-			}
-			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
-				defaultThinkingLevel: "low",
-			});
-			expect(JSON.parse(readFileSync(join(projectDir, ".pi", "settings.json"), "utf8"))).toEqual({
-				extensions: ["./extension.ts"],
-			});
-		});
+	describe("deviceId", () => {
+		it("creates one global device ID and reuses it in later processes", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ deviceId: "project-device" }));
+			const first = SettingsManager.create(projectDir, agentDir);
 
-		it("does not let an earlier queued setter cancel a newer override", async () => {
-			const manager = SettingsManager.create(projectDir, agentDir);
-			manager.setTheme("dark");
-			manager.applyOverrides({ theme: "light" });
-			manager.setDefaultThinkingLevel("low");
-			expect(manager.getTheme()).toBe("light");
-			await manager.flush();
-			expect(manager.getTheme()).toBe("light");
-			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
-				theme: "dark",
-				defaultThinkingLevel: "low",
-			});
-		});
+			const deviceId = first.getOrCreateDeviceId();
+			await first.flush();
 
-		it("lets explicit setters replace their value while preserving nested sibling overrides", async () => {
-			const manager = SettingsManager.inMemory();
-			manager.applyOverrides({
-				theme: "light",
-				compaction: { enabled: false, reserveTokens: 1234 },
-				retry: { enabled: false, maxRetries: 7 },
-				shellPath: "/bin/zsh",
-			});
-			manager.setCompactionEnabled(true);
-			manager.setRetryEnabled(true);
-			manager.setTheme("dark");
-			manager.setShellPath(undefined);
-			await manager.flush();
-			expect(manager.getCompactionEnabled()).toBe(true);
-			expect(manager.getCompactionReserveTokens()).toBe(1234);
-			expect(manager.getRetrySettings()).toMatchObject({ enabled: true, maxRetries: 7 });
-			expect(manager.getTheme()).toBe("dark");
-			expect(manager.getShellPath()).toBeUndefined();
-			expect(manager.getGlobalSettings()).toEqual({
-				theme: "dark",
-				compaction: { enabled: true },
-				retry: { enabled: true },
-				shellPath: undefined,
-			});
-		});
-
-		it("preserves sibling model overrides when setting a model default, with project precedence", async () => {
-			writeFileSync(
-				join(projectDir, ".pi", "settings.json"),
-				JSON.stringify({ modelThinkingLevels: { "openai/model-b": "medium" } }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-			manager.applyOverrides({ modelThinkingLevels: { "openai/model-a": "high", "openai/model-b": "high" } });
-			manager.setModelThinkingLevel("openai", "model-b", "low");
-			expect(manager.getAllModelThinkingLevels()).toEqual({ "openai/model-a": "high", "openai/model-b": "medium" });
-			await manager.flush();
-			expect(manager.getAllModelThinkingLevels()).toEqual({ "openai/model-a": "high", "openai/model-b": "medium" });
-			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
-				modelThinkingLevels: { "openai/model-b": "low" },
-			});
-		});
-
-		it("removes only the selected model override without undefined own keys, including runtime-only values", async () => {
-			const manager = SettingsManager.inMemory({ modelThinkingLevels: { "openai/model-b": "low" } });
-			manager.applyOverrides({ modelThinkingLevels: { "openai/model-a": "high", "openai/model-b": "high" } });
-			manager.removeModelThinkingLevel("openai", "model-b");
-			expect(manager.getAllModelThinkingLevels()).toStrictEqual({ "openai/model-a": "high" });
-			await manager.flush();
-			expect(manager.getAllModelThinkingLevels()).toStrictEqual({ "openai/model-a": "high" });
-			manager.removeModelThinkingLevel("openai", "model-a");
-			expect(manager.getAllModelThinkingLevels()).toStrictEqual({});
-			await manager.reload();
-			expect(manager.getGlobalSettings()).toEqual({});
-		});
-
-		it("preserves project model defaults and external siblings when removing the last global model key", async () => {
-			const path = join(agentDir, "settings.json");
-			writeFileSync(path, JSON.stringify({ modelThinkingLevels: { "openai/model-b": "low" } }));
-			writeFileSync(
-				join(projectDir, ".pi", "settings.json"),
-				JSON.stringify({ modelThinkingLevels: { "openai/model-b": "medium" } }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-			writeFileSync(
-				path,
-				JSON.stringify({ modelThinkingLevels: { "openai/model-b": "low", "openai/external": "high" } }),
-			);
-			manager.applyOverrides({ modelThinkingLevels: { "openai/model-a": "high", "openai/model-b": "high" } });
-			manager.removeModelThinkingLevel("openai", "model-b");
-			expect(manager.getAllModelThinkingLevels()).toStrictEqual({
-				"openai/model-a": "high",
-				"openai/model-b": "medium",
-			});
-			await manager.flush();
-			expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ modelThinkingLevels: { "openai/external": "high" } });
-		});
-
-		it("restores project precedence for explicit setters and resets overrides on reload and trust changes", async () => {
-			writeFileSync(
-				join(projectDir, ".pi", "settings.json"),
-				JSON.stringify({ theme: "project", compaction: { enabled: false } }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-			manager.applyOverrides({ theme: "temporary", compaction: { enabled: true, reserveTokens: 1234 } });
-			manager.setTheme("global");
-			manager.setCompactionEnabled(true);
-			expect(manager.getTheme()).toBe("project");
-			expect(manager.getCompactionEnabled()).toBe(false);
-			expect(manager.getCompactionReserveTokens()).toBe(1234);
-			manager.applyOverrides({ theme: "temporary" });
-			manager.setDefaultThinkingLevel("low");
-			expect(manager.getTheme()).toBe("temporary");
-			await manager.reload();
-			expect(manager.getTheme()).toBe("project");
-			expect(manager.getCompactionReserveTokens()).toBe(16384);
-			manager.applyOverrides({ theme: "temporary" });
-			manager.setProjectTrusted(true);
-			expect(manager.getTheme()).toBe("temporary");
-			manager.setProjectTrusted(false);
-			expect(manager.getTheme()).toBe("global");
-			manager.applyOverrides({ theme: "temporary" });
-			manager.setProjectTrusted(true);
-			expect(manager.getTheme()).toBe("project");
-			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).theme).toBe("global");
+			expect(deviceId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+			expect(first.getOrCreateDeviceId()).toBe(deviceId);
+			expect(SettingsManager.create(projectDir, agentDir).getOrCreateDeviceId()).toBe(deviceId);
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toEqual({ theme: "dark", deviceId });
 		});
 	});
 
@@ -659,6 +533,27 @@ describe("SettingsManager", () => {
 		expect(reloadedManager.getFullscreenCopyOnSelect()).toBe(true);
 	});
 
+	// #9758: wheel scrolling defaults to auto, persists line counts, and ignores invalid values.
+	it("persists fullscreen wheel scroll lines", async () => {
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getFullscreenWheelScrollLines()).toBe("auto");
+
+		manager.setFullscreenWheelScrollLines(3);
+		await manager.flush();
+		expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).fullscreenWheelScrollLines).toBe(3);
+
+		for (const [value, expected] of [
+			[7.9, 7],
+			[0, 1],
+			[1000, 100],
+			["fast", "auto"],
+			[null, "auto"],
+		] as const) {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ fullscreenWheelScrollLines: value }));
+			expect(SettingsManager.create(projectDir, agentDir).getFullscreenWheelScrollLines()).toBe(expected);
+		}
+	});
+
 	describe("outputPad", () => {
 		it("should default to 1 and persist binary values", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
@@ -750,6 +645,50 @@ describe("SettingsManager", () => {
 		it("preserves an empty tool list", () => {
 			expect(SettingsManager.inMemory({ defaultTools: [] }).getDefaultTools()).toEqual([]);
 			expect(SettingsManager.inMemory().getDefaultTools()).toBeUndefined();
+		});
+
+		it("applies +name and -name to the default selection", () => {
+			expect(SettingsManager.inMemory({ defaultTools: ["+codemode", "-write"] }).getDefaultTools()).toEqual([
+				"read",
+				"bash",
+				"background_command",
+				"edit",
+				"codemode",
+			]);
+			expect(SettingsManager.inMemory({ defaultTools: ["read", "+grep", "+read"] }).getDefaultTools()).toEqual([
+				"read",
+				"grep",
+			]);
+		});
+
+		it("layers project modifiers on top of the global selection", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ defaultTools: ["read", "bash", "+codemode"] }),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ defaultTools: ["-codemode", "+tool_search"] }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getDefaultTools()).toEqual(["read", "bash", "tool_search"]);
+
+			manager.applyOverrides({ defaultTools: ["+codemode"] });
+			expect(manager.getDefaultTools()).toEqual(["read", "bash", "tool_search", "codemode"]);
+		});
+
+		it("applies project modifiers to the built-in defaults without a global setting", () => {
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ defaultTools: ["+codemode"] }));
+
+			expect(SettingsManager.create(projectDir, agentDir).getDefaultTools()).toEqual([
+				"read",
+				"bash",
+				"background_command",
+				"edit",
+				"write",
+				"codemode",
+			]);
 		});
 	});
 

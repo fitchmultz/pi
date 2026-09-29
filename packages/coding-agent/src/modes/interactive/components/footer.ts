@@ -2,6 +2,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
+import type { ContextUsage } from "../../../core/extensions/types.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import { addUsageToTotals, createUsageTotals, type UsageTotals } from "../../../core/usage-totals.ts";
 import { theme } from "../theme/theme.ts";
@@ -43,6 +44,18 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
 }
 
+interface SessionStats {
+	session: AgentSession;
+	sessionId: string;
+	leafId: string | null;
+	entriesRevision: number;
+	limitsModel: unknown;
+	usageTotals: UsageTotals;
+	latestCacheHitRate: number | undefined;
+	contextUsage: ContextUsage | undefined;
+	sessionName: string | undefined;
+}
+
 /**
  * Footer component that shows pwd, token stats, and context usage.
  * Computes token/context stats from session, gets git branch and extension statuses from provider.
@@ -51,12 +64,7 @@ export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
-	private sessionStats?: {
-		revision: number;
-		usageTotals: UsageTotals;
-		latestCacheHitRate: number | undefined;
-		sessionName: string | undefined;
-	};
+	private sessionStats?: SessionStats;
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -65,7 +73,6 @@ export class FooterComponent implements Component {
 
 	setSession(session: AgentSession): void {
 		this.session = session;
-		this.sessionStats = undefined;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -88,42 +95,71 @@ export class FooterComponent implements Component {
 		// Git watcher cleanup handled by provider
 	}
 
-	render(width: number): string[] {
-		const state = this.session.state;
-
-		const revision = this.session.sessionManager.getEntriesRevision();
-		if (this.sessionStats?.revision !== revision) {
-			// File-wide totals include abandoned branches; the active leaf alone cannot invalidate them.
-			const usageTotals = createUsageTotals();
-			let latestCacheHitRate: number | undefined;
-			for (const entry of this.session.sessionManager.getEntries()) {
-				if (entry.type === "usage") {
-					addUsageToTotals(usageTotals, entry.usage);
-				} else if (entry.type === "message" && !entry.checkpoint && entry.message.role === "assistant") {
-					addUsageToTotals(usageTotals, entry.message.usage);
-
-					const latestPromptTokens =
-						entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
-					latestCacheHitRate =
-						latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
-				} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
-					addUsageToTotals(usageTotals, entry.message.usage);
-				} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
-					addUsageToTotals(usageTotals, entry.usage);
-				}
-			}
-			this.sessionStats = {
-				revision,
-				usageTotals,
-				latestCacheHitRate,
-				sessionName: this.session.sessionManager.getSessionName(),
-			};
+	/**
+	 * Usage totals and context usage scan the whole session, and the footer renders on every frame.
+	 * The entry revision also changes when a session is reloaded with the same IDs and count.
+	 * Keep the name in this cache because finding the latest name scans session entries.
+	 */
+	private getSessionStats(): SessionStats {
+		const sessionManager = this.session.sessionManager;
+		const entriesRevision = sessionManager.getEntriesRevision();
+		const sessionId = sessionManager.getSessionId();
+		const leafId = sessionManager.getLeafId();
+		const limitsModel = this.session.routedModel?.model ?? this.session.model;
+		const cached = this.sessionStats;
+		if (
+			cached &&
+			cached.session === this.session &&
+			cached.sessionId === sessionId &&
+			cached.leafId === leafId &&
+			cached.entriesRevision === entriesRevision &&
+			cached.limitsModel === limitsModel
+		) {
+			return cached;
 		}
-		const { usageTotals, latestCacheHitRate, sessionName } = this.sessionStats;
+
+		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
+		const usageTotals = createUsageTotals();
+		let latestCacheHitRate: number | undefined;
+
+		for (const entry of sessionManager.getEntries()) {
+			if (entry.type === "usage") {
+				addUsageToTotals(usageTotals, entry.usage);
+			} else if (entry.type === "message" && entry.message.role === "assistant") {
+				addUsageToTotals(usageTotals, entry.message.usage);
+
+				const latestPromptTokens =
+					entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
+				latestCacheHitRate =
+					latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
+			} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
+				addUsageToTotals(usageTotals, entry.message.usage);
+			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
+				addUsageToTotals(usageTotals, entry.usage);
+			}
+		}
 
 		// Calculate context usage from session (handles compaction correctly).
 		// After compaction, tokens are unknown until the next LLM response.
 		const contextUsage = this.session.getContextUsage();
+		const sessionName = sessionManager.getSessionName();
+		this.sessionStats = {
+			session: this.session,
+			sessionId,
+			leafId,
+			entriesRevision,
+			limitsModel,
+			usageTotals,
+			latestCacheHitRate,
+			contextUsage,
+			sessionName,
+		};
+		return this.sessionStats;
+	}
+
+	render(width: number): string[] {
+		const state = this.session.state;
+		const { usageTotals, latestCacheHitRate, contextUsage, sessionName } = this.getSessionStats();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
@@ -202,6 +238,12 @@ export class FooterComponent implements Component {
 			const thinkingLevel = state.thinkingLevel || "off";
 			rightSideWithoutProvider =
 				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
+		}
+		// A virtual model routes each request; show where the latest response went.
+		const routed = this.session.routedModel;
+		if (routed) {
+			const level = routed.thinkingLevel ? ` • ${routed.thinkingLevel}` : "";
+			rightSideWithoutProvider += ` → ${routed.model.id}${level}`;
 		}
 
 		// Prepend the provider in parentheses if there are multiple providers and there's enough room

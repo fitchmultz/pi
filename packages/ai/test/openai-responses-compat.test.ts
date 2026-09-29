@@ -57,7 +57,7 @@ async function captureOpenAIResponseHeaders(
 			systemPrompt: "sys",
 			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 		}),
-		{ apiKey: "test-key", transport: "sse", ...options },
+		{ apiKey: "sk-test-key", ...options },
 	);
 
 	for await (const event of stream) {
@@ -90,8 +90,7 @@ describe("openai-responses provider defaults", () => {
 				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 			}),
 			{
-				apiKey: "test-key",
-				transport: "sse",
+				apiKey: "sk-test-key",
 				onPayload: (payload) => {
 					capturedPayload = payload;
 				},
@@ -137,8 +136,7 @@ describe("openai-responses provider defaults", () => {
 				],
 			}),
 			{
-				apiKey: "test-key",
-				transport: "sse",
+				apiKey: "sk-test-key",
 				toolChoice: "required",
 				onPayload: (payload) => {
 					capturedPayload = payload;
@@ -189,8 +187,7 @@ describe("openai-responses provider defaults", () => {
 				],
 			}),
 			{
-				apiKey: "test-key",
-				transport: "sse",
+				apiKey: "sk-test-key",
 				onPayload: (payload) => {
 					capturedPayload = payload as CapturedResponsesPayload;
 				},
@@ -239,8 +236,7 @@ describe("openai-responses provider defaults", () => {
 				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 			}),
 			{
-				apiKey: "test-key",
-				transport: "sse",
+				apiKey: "sk-test-key",
 				onPayload: (payload) => {
 					capturedPayload = payload;
 				},
@@ -276,8 +272,7 @@ describe("openai-responses provider defaults", () => {
 					messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 				}),
 				{
-					apiKey: "test-key",
-					transport: "sse",
+					apiKey: "sk-test-key",
 					onPayload: (payload) => {
 						capturedPayload = payload;
 					},
@@ -318,8 +313,7 @@ describe("openai-responses provider defaults", () => {
 				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 			}),
 			{
-				apiKey: "test-key",
-				transport: "sse",
+				apiKey: "sk-test-key",
 				sessionId,
 				onPayload: (payload) => {
 					capturedPayload = payload as Pick<CapturedResponsesPayload, "prompt_cache_key">;
@@ -484,60 +478,60 @@ describe("openai-responses provider defaults", () => {
 	});
 
 	it.each([
-		["gpt-5.4", "priority", 2],
-		["gpt-5.5", "priority", 2.5],
-		["gpt-5.5", "flex", 0.5],
-		["gpt-6-astra", "fast", 2],
-		["gpt-6-astra", "default", 1],
-		["gpt-6-astra", "priority", 2],
-		["gpt-6-astra", "flex", 0.5],
-	] as const)("applies %s %s returned service-tier cost multiplier", async (modelId, serviceTier, multiplier) => {
-		const model = getModel("openai", modelId);
-		const tokenCount = 10_000;
-		const tokenScale = tokenCount / 1_000_000;
-		const sse = `${[
-			`data: ${JSON.stringify({
-				type: "response.completed",
-				response: {
-					status: "completed",
-					service_tier: serviceTier,
-					usage: {
-						input_tokens: tokenCount * 3,
-						output_tokens: tokenCount,
-						total_tokens: tokenCount * 4,
-						input_tokens_details: { cached_tokens: tokenCount, cache_write_tokens: tokenCount },
+		["gpt-5.4", "priority", "priority", 2],
+		["gpt-5.5", "priority", "priority", 2.5],
+		["gpt-5.5", "flex", "flex", 0.5],
+		// GPT-6 models report Fast mode as "fast" even when "priority" is requested (#10034)
+		["gpt-6-luna", "priority", "fast", 2],
+		["gpt-6-luna", "fast", "fast", 2],
+	] as const)(
+		"applies %s cost multiplier for requested %s and returned %s service tier",
+		async (modelId, serviceTier, responseServiceTier, multiplier) => {
+			const model = getModel("openai", modelId);
+			const tokenCount = 100_000;
+			const tokenScale = tokenCount / 1_000_000;
+			const sse = `${[
+				`data: ${JSON.stringify({
+					type: "response.completed",
+					response: {
+						status: "completed",
+						service_tier: responseServiceTier,
+						usage: {
+							input_tokens: tokenCount,
+							output_tokens: tokenCount,
+							total_tokens: tokenCount * 2,
+							input_tokens_details: { cached_tokens: 0 },
+						},
 					},
-				},
-			})}`,
-		].join("\n\n")}\n\n`;
+				})}`,
+			].join("\n\n")}\n\n`;
 
-		vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response(sse, {
-				status: 200,
-				headers: { "content-type": "text/event-stream" },
-			}),
-		);
+			vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(sse, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+			);
 
-		const stream = streamOpenAIResponses(
-			model,
-			normalizeContext({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 }] }),
-			{ apiKey: "test-key", transport: "sse", serviceTier: "priority" },
-		);
+			const stream = streamOpenAIResponses(
+				model,
+				normalizeContext({
+					systemPrompt: "sys",
+					messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+				}),
+				{ apiKey: "sk-test-key", serviceTier },
+			);
 
-		const result = await stream.result();
+			const result = await stream.result();
 
-		expect(result.stopReason).toBe("stop");
-		for (const field of ["input", "output", "cacheRead", "cacheWrite"] as const) {
-			expect(result.usage[field]).toBe(tokenCount);
-			expect(result.usage.cost[field]).toBeCloseTo(model.cost[field] * multiplier * tokenScale, 12);
-		}
-		expect(result.usage.cost.total).toBeCloseTo(
-			(model.cost.input + model.cost.output + model.cost.cacheRead + model.cost.cacheWrite) *
-				multiplier *
-				tokenScale,
-			12,
-		);
-	});
+			expect(result.usage.cost.input).toBeCloseTo(model.cost.input * multiplier * tokenScale, 12);
+			expect(result.usage.cost.output).toBeCloseTo(model.cost.output * multiplier * tokenScale, 12);
+			expect(result.usage.cost.total).toBeCloseTo(
+				(model.cost.input + model.cost.output) * multiplier * tokenScale,
+				12,
+			);
+		},
+	);
 });
 
 describe("openai-responses max_output_tokens compat", () => {
@@ -562,8 +556,7 @@ describe("openai-responses max_output_tokens compat", () => {
 				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 			}),
 			{
-				apiKey: "test-key",
-				transport: "sse",
+				apiKey: "sk-test-key",
 				maxTokens: 1024,
 				onPayload: (payload) => {
 					capturedPayload = payload as { max_output_tokens?: number };
@@ -600,8 +593,7 @@ describe("openai-responses max_output_tokens compat", () => {
 				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 			}),
 			{
-				apiKey: "test-key",
-				transport: "sse",
+				apiKey: "sk-test-key",
 				maxTokens: 1024,
 				onPayload: (payload) => {
 					capturedPayload = payload as { max_output_tokens?: number };

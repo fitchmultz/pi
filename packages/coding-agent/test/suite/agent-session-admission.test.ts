@@ -28,7 +28,7 @@ describe("AgentSession prompt admission", () => {
 			const inputReleased = createDeferred();
 			const summaryEntered = createDeferred();
 			const summaryReleased = createDeferred();
-			const preflight: boolean[] = [];
+			const preflight: string[] = [];
 			const harness = await createHarness({
 				tools: [],
 				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
@@ -83,7 +83,7 @@ describe("AgentSession prompt admission", () => {
 				).rejects.toThrow("compaction");
 				await expect(
 					harness.session.sendCustomMessage(custom("concurrent custom"), { triggerTurn: true }),
-				).rejects.toThrow("compaction");
+				).rejects.toThrow("already processing");
 				inputReleased.resolve();
 				expect(await heldInput).toEqual([
 					{
@@ -91,7 +91,7 @@ describe("AgentSession prompt admission", () => {
 						reason: expect.objectContaining({ message: expect.stringContaining("compaction") }),
 					},
 				]);
-				expect(preflight).toEqual([false, false]);
+				expect(preflight).toEqual([]);
 				expect(harness.session.pendingInputCount).toBe(0);
 				expect(harness.session.isStreaming).toBe(false);
 				expect(harness.sessionManager.getEntries()).toEqual(entriesBefore);
@@ -227,8 +227,8 @@ describe("AgentSession prompt admission", () => {
 		const startupStates: Array<{ prompt: string; idle: boolean }> = [];
 		const settledStates: Array<{ idle: boolean; signal: AbortSignal | undefined }> = [];
 		const requests: Array<{ systemPrompt: string | undefined; texts: string[] }> = [];
-		const preflight: boolean[] = [];
-		const rejectedPreflight: boolean[] = [];
+		const preflight: string[] = [];
+		const rejectedPreflight: string[] = [];
 		const harness = await createHarness({
 			tools: [],
 			settings: { compaction: { enabled: false }, retry: { enabled: false } },
@@ -336,7 +336,6 @@ describe("AgentSession prompt admission", () => {
 				cancelled: false,
 				truncated: false,
 			});
-			harness.session.newContext({ handoff: "active handoff" });
 			inputReleased.resolve();
 			expect(await rejected).toEqual([
 				{
@@ -344,9 +343,9 @@ describe("AgentSession prompt admission", () => {
 					reason: expect.objectContaining({ message: expect.stringContaining("already processing") }),
 				},
 			]);
-			expect(rejectedPreflight).toEqual([false]);
+			expect(rejectedPreflight).toEqual([]);
 			expect(harness.session.pendingInputCount).toBe(0);
-			expect(preflight).toEqual([true]);
+			expect(preflight).toEqual(["started"]);
 			expect(harness.session.isStreaming).toBe(true);
 			expect(harness.session.isIdle).toBe(false);
 			expect(harness.session.agent.state.isStreaming).toBe(true);
@@ -375,17 +374,14 @@ describe("AgentSession prompt admission", () => {
 			expect(harness.session.agent.state.isStreaming).toBe(false);
 			expect(harness.session.hasPendingMessages).toBe(abort);
 			expect(harness.session.hasPendingBashMessages).toBe(false);
-			expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_window")).toHaveLength(
-				abort ? 0 : 1,
-			);
 			expect(requests[0]).toEqual({
 				systemPrompt: "original instructions",
-				texts: ["original", "before-aside", "guidance:original", "wakeup"],
+				texts: ["original", "before-aside", "startup-aside", "guidance:original", "wakeup"],
 			});
 			if (!abort) {
 				expect(requests[1]).toEqual({
 					systemPrompt: "original instructions",
-					texts: [expect.stringContaining("active handoff"), "retained"],
+					texts: expect.arrayContaining(["original", "owner answer", "retained"]),
 				});
 			}
 			await harness.session.prompt("next");
@@ -409,8 +405,8 @@ describe("AgentSession prompt admission", () => {
 					entry.type === "message" && entry.message.role === "user" ? [getMessageText(entry.message)] : [],
 				),
 			).toEqual(["original", "next"]);
-			expect(preflight).toEqual([true]);
-			expect(rejectedPreflight).toEqual([false]);
+			expect(preflight).toEqual(["started"]);
+			expect(rejectedPreflight).toEqual([]);
 		} finally {
 			inputReleased.resolve();
 			startupReleased.resolve();
@@ -466,7 +462,7 @@ describe("AgentSession prompt admission", () => {
 			harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 			await harness.session.sendCustomMessage(custom("before-aside"), { deliverAs: "nextTurn" });
 			harness.setResponses([fauxAssistantMessage("must not reach provider")]);
-			const preflight: boolean[] = [];
+			const preflight: string[] = [];
 			const run = Promise.allSettled([
 				harness.session.prompt("cancelled prompt", {
 					preflightResult: (accepted) => preflight.push(accepted),
@@ -485,14 +481,13 @@ describe("AgentSession prompt admission", () => {
 				expect(harness.session.pendingInputCount).toBe(1);
 				await harness.session.sendCustomMessage(custom("late-aside"), { deliverAs: "nextTurn" });
 				await harness.session.steer("retained steering");
-				harness.session.newContext({ handoff: "cancelled handoff" });
 				abort = harness.session.abort();
 				expect(harness.session.isIdle).toBe(false);
 				released.resolve();
 				const [result] = await Promise.all([run, abort]);
 				expect(harness.faux.state.callCount).toBe(0);
 				expect(result).toEqual([{ status: "rejected", reason: expect.objectContaining({ name: "AbortError" }) }]);
-				expect(preflight).toEqual([false]);
+				expect(preflight).toEqual([]);
 				expect(harness.session.isIdle).toBe(true);
 				expect(harness.session.pendingInputCount).toBe(0);
 				expect(harness.session.pendingNextTurnCount).toBe(2);
@@ -516,7 +511,6 @@ describe("AgentSession prompt admission", () => {
 				expect(requests[0]).not.toContain("cancelled prompt");
 				expect(harness.session.pendingNextTurnCount).toBe(0);
 				expect(harness.session.hasPendingMessages).toBe(false);
-				expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_window")).toEqual([]);
 				expect(harness.session.getLastAssistantText()).toBe("recovered");
 			} finally {
 				released.resolve();
@@ -536,7 +530,7 @@ describe("AgentSession prompt admission", () => {
 			await harness.session.sendCustomMessage(custom("retained aside"), { deliverAs: "nextTurn" });
 			const accepted = createDeferred();
 			const order: string[] = [];
-			const preflight: boolean[] = [];
+			const preflight: string[] = [];
 			harness.session.subscribe((event) => {
 				if (event.type === "agent_start") order.push("agent_start");
 			});
@@ -555,7 +549,7 @@ describe("AgentSession prompt admission", () => {
 			await accepted.promise;
 			if (boundary === "awaited") abort = harness.session.abort();
 			const [result] = await Promise.all([run, abort]);
-			expect(preflight).toEqual([true]);
+			expect(preflight).toEqual(["started"]);
 			expect(harness.session.pendingInputCount).toBe(0);
 			expect(harness.session.isIdle).toBe(true);
 			const asides = () =>
@@ -563,18 +557,11 @@ describe("AgentSession prompt admission", () => {
 					.getEntries()
 					.filter((entry) => entry.type === "custom_message" && entry.customType === "admission");
 			expect(harness.session.pendingNextTurnCount + asides().length).toBe(1);
-			if (boundary === "callback") {
-				expect(harness.faux.state.callCount).toBe(0);
-				expect(result).toEqual([{ status: "rejected", reason: expect.objectContaining({ name: "AbortError" }) }]);
-				expect(harness.session.pendingNextTurnCount).toBe(1);
-				expect(harness.session.messages).toEqual([]);
-				expect(order).toEqual(["accepted"]);
-			} else {
-				expect(result).toEqual([{ status: "fulfilled", value: undefined }]);
-				expect(harness.session.pendingNextTurnCount).toBe(0);
-				expect(order).toEqual(["accepted", "agent_start"]);
-				expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
-			}
+			expect(harness.faux.state.callCount).toBe(0);
+			expect(result).toEqual([{ status: "rejected", reason: expect.objectContaining({ name: "AbortError" }) }]);
+			expect(harness.session.pendingNextTurnCount).toBe(1);
+			expect(harness.session.messages).toEqual([]);
+			expect(order).toEqual(["accepted"]);
 			const requests: string[][] = [];
 			harness.setResponses([
 				(context) => {
@@ -620,9 +607,9 @@ describe("AgentSession prompt admission", () => {
 		await harness.session.modelRuntime.refresh({ allowNetwork: false });
 		const systemPrompt = harness.session.systemPrompt;
 		await harness.session.sendCustomMessage(custom("before-aside"), { deliverAs: "nextTurn" });
-		const preflight: boolean[] = [];
-		const queuedPreflight: boolean[] = [];
-		const rejectedPreflight: boolean[] = [];
+		const preflight: string[] = [];
+		const queuedPreflight: string[] = [];
+		const rejectedPreflight: string[] = [];
 		const idleResults: string[] = [];
 		const waits: Promise<void>[] = [];
 		authState = "fail";
@@ -658,9 +645,9 @@ describe("AgentSession prompt admission", () => {
 			);
 			await harness.session.sendCustomMessage(custom("late-aside"), { deliverAs: "nextTurn" });
 			expect(preflight).toEqual([]);
-			expect(queuedPreflight).toEqual([true]);
+			expect(queuedPreflight).toEqual(["queued"]);
 			expect(harness.session.pendingInputCount).toBe(1);
-			expect(rejectedPreflight).toEqual([false]);
+			expect(rejectedPreflight).toEqual([]);
 			expect(idleResults).toEqual([]);
 			expect(harness.faux.state.callCount).toBe(0);
 			authReleased.resolve();
@@ -672,7 +659,7 @@ describe("AgentSession prompt admission", () => {
 			]);
 			await Promise.all(waits);
 			expect(idleResults).toEqual(["auth", "after-rejection"]);
-			expect(preflight).toEqual([false]);
+			expect(preflight).toEqual([]);
 			expect(harness.session.pendingInputCount).toBe(0);
 			expect(harness.eventsOfType("agent_start")).toEqual([]);
 			expect(harness.eventsOfType("agent_settled")).toEqual([]);
@@ -692,7 +679,7 @@ describe("AgentSession prompt admission", () => {
 			]);
 			await harness.session.prompt("retry", { preflightResult: (accepted) => preflight.push(accepted) });
 			expect(requests).toEqual([["passive", "retry", "before-aside", "late-aside", "held-custom"]]);
-			expect(preflight).toEqual([false, true]);
+			expect(preflight).toEqual(["started"]);
 			expect(harness.faux.state.callCount).toBe(2);
 			expect(harness.session.hasPendingMessages).toBe(false);
 			expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
@@ -715,7 +702,7 @@ describe("AgentSession prompt admission", () => {
 						preflightResult: (accepted) => preflight.push(accepted),
 					}),
 				).rejects.toThrow("settlement observer failed");
-				expect(preflight).toEqual([false, true, true]);
+				expect(preflight).toEqual(["started", "started"]);
 				expect(harness.session.isIdle).toBe(true);
 			} finally {
 				unsubscribe();
@@ -735,10 +722,17 @@ describe("AgentSession prompt admission", () => {
 			settings: { compaction: { enabled: true, reserveTokens: 0, keepRecentTokens: 1 } },
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_auto_compact", async () => {
+					pi.on("session_before_compact", async (event, ctx) => {
 						compactionEntered.resolve();
 						await compactionReleased.promise;
-						return { newContext: { handoff: "preflight handoff" } };
+						pi.appendEntry("posthorse-boundary", {});
+						return {
+							compaction: {
+								summary: "",
+								firstKeptEntryId: ctx.sessionManager.getLeafId()!,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
 					});
 					pi.on("before_agent_start", () => ({ systemPrompt: "short instructions" }));
 				},
@@ -774,8 +768,8 @@ describe("AgentSession prompt admission", () => {
 				return fauxAssistantMessage("follow-up answer");
 			},
 		]);
-		const preflight: boolean[] = [];
-		const rejectedPreflight: boolean[] = [];
+		const preflight: string[] = [];
+		const rejectedPreflight: string[] = [];
 		const run = Promise.allSettled([
 			harness.session.prompt("after-compaction", { preflightResult: (accepted) => preflight.push(accepted) }),
 		]);
@@ -804,7 +798,7 @@ describe("AgentSession prompt admission", () => {
 				}),
 			).rejects.toThrow("already processing");
 			expect(preflight).toEqual([]);
-			expect(rejectedPreflight).toEqual([false]);
+			expect(rejectedPreflight).toEqual([]);
 			expect(harness.faux.state.callCount).toBe(0);
 			expect(harness.eventsOfType("agent_settled")).toEqual([]);
 			expect(idle).toBe(false);
@@ -812,15 +806,15 @@ describe("AgentSession prompt admission", () => {
 			expect(await run).toEqual([{ status: "fulfilled", value: undefined }]);
 			await wait;
 			expect(idle).toBe(true);
-			expect(preflight).toEqual([true]);
+			expect(preflight).toEqual(["started"]);
 			expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
 			expect(harness.eventsOfType("compaction_end")).toMatchObject([
-				{ reason: "threshold", contextWindowStarted: true },
+				{ reason: "threshold", result: { summary: "" } },
 			]);
 			expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 			expect(requests).toHaveLength(3);
 			expect(requests[0]).toEqual([
-				expect.stringContaining("preflight handoff"),
+				expect.stringContaining("<summary>"),
 				"after-compaction",
 				"compaction-aside",
 				"compaction-wakeup",

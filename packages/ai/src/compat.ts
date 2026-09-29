@@ -38,7 +38,6 @@ import { openAICodexResponsesApi } from "./api/openai-codex-responses.lazy.ts";
 import { openAICompletionsApi } from "./api/openai-completions.lazy.ts";
 import { openAIResponsesApi } from "./api/openai-responses.lazy.ts";
 import { piMessagesApi } from "./api/pi-messages.lazy.ts";
-import { withToolNamespaces } from "./api/tool-namespaces.ts";
 import { getEnvApiKey } from "./env-api-keys.ts";
 import type { ModelsApiStreamOptions } from "./models.ts";
 import { builtinModels, getBuiltinModel, getBuiltinModels, getBuiltinProviders } from "./providers/all.ts";
@@ -110,16 +109,7 @@ function wrapStream<TApi extends Api, TOptions extends StreamOptions>(
 		if (model.api !== api) {
 			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
 		}
-		return withToolNamespaces(
-			model,
-			context,
-			(mapped, mapControl) =>
-				stream(model as Model<TApi>, mapped, {
-					...options,
-					onResponseControl: (control) => options?.onResponseControl?.(mapControl(control)),
-				} as TOptions),
-			options?.signal,
-		);
+		return stream(model as Model<TApi>, context, options as TOptions);
 	};
 }
 
@@ -131,16 +121,7 @@ function wrapStreamSimple<TApi extends Api>(
 		if (model.api !== api) {
 			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
 		}
-		return withToolNamespaces(
-			model,
-			context,
-			(mapped, mapControl) =>
-				streamSimple(model as Model<TApi>, mapped, {
-					...options,
-					onResponseControl: (control) => options?.onResponseControl?.(mapControl(control)),
-				}),
-			options?.signal,
-		);
+		return streamSimple(model as Model<TApi>, context, options);
 	};
 }
 

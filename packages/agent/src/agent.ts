@@ -1,22 +1,17 @@
 import {
-	collapseSystemMessages,
 	createInitialSystemMessage,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
 	type ImageContent,
 	type Message,
 	type Model,
-	mergeAssistantCheckpoint,
-	type ResponseControl,
 	type SimpleStreamOptions,
 	type TextContent,
 	type ThinkingBudgets,
 	type Transport,
 	toToolDeclaration,
 } from "@earendil-works/pi-ai";
-import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages";
-import { assertContextFits } from "@earendil-works/pi-ai/utils/estimate";
-import { getPendingToolCalls, runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AfterToolCallContext,
@@ -124,6 +119,7 @@ export interface AgentOptions {
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
+	onProviderStreamEvent?: SimpleStreamOptions["onProviderStreamEvent"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	finishTurn?: FinishTurn;
@@ -208,28 +204,22 @@ export class Agent {
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
-	private responseControl?: ResponseControl;
-	private readonly steeringListeners = new Set<() => void>();
-	private steeringPreparation?: Promise<void>;
-	/** Normalize newly admitted live user input before sending it on a duplex transport. */
-	public prepareSteering?: (message: AgentMessage) => Promise<void>;
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	public streamFunction: StreamFn;
-	/** Host signal that closes new requests without aborting responses already in flight. */
+	/** Close new requests without aborting responses already in flight. */
 	public requestAdmissionSignal?: AbortSignal;
-	/** Shared invocation boundary for agent turns and host-owned requests such as summaries. */
+	/** Shared admission boundary for agent turns and host-owned requests such as summaries. */
 	public readonly streamResponse: StreamFn = (model, context, options) => {
 		this.requestAdmissionSignal?.throwIfAborted();
-		// Provider-independent floor for custom streams; native adapters also admit their resolved input.
-		assertContextFits(model, transformMessages(collapseSystemMessages(context).messages, model));
-		const streamFunction = this.streamFunction;
-		return streamFunction(model, context, options);
+		options?.signal?.throwIfAborted();
+		return this.streamFunction(model, context, options);
 	};
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
+	public onProviderStreamEvent?: SimpleStreamOptions["onProviderStreamEvent"];
 	public beforeToolCall?: (
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
@@ -239,6 +229,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
 	public finishTurn?: FinishTurn;
+	/** Awaited after every turn-end listener, before the next request can start. */
+	public afterTurn?: (signal: AbortSignal) => Promise<void>;
 	public prepareRequest?: PrepareRequest;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
@@ -247,10 +239,6 @@ export class Agent {
 		context: PrepareNextTurnContext,
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
-	/** Awaited after all turn_end subscribers, before the loop can drain queues or start another turn. */
-	public afterTurn?: (signal: AbortSignal) => Promise<void>;
-	/** Model-only content for saved tool results sent on a live response continuation. */
-	public toolResultModelContent?: AgentLoopConfig["toolResultModelContent"];
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
@@ -273,6 +261,7 @@ export class Agent {
 		this.getApiKey = runtimeOptions.getApiKey;
 		this.onPayload = runtimeOptions.onPayload;
 		this.onResponse = runtimeOptions.onResponse;
+		this.onProviderStreamEvent = runtimeOptions.onProviderStreamEvent;
 		this.beforeToolCall = runtimeOptions.beforeToolCall;
 		this.afterToolCall = runtimeOptions.afterToolCall;
 		this.finishTurn = runtimeOptions.finishTurn;
@@ -312,12 +301,11 @@ export class Agent {
 		return this._state;
 	}
 
-	/** The selected model, excluding the internal placeholder used before model selection. */
-	get selectedModel(): Model<any> | undefined {
+	get selectedModel(): Model<string> | undefined {
 		return this._state.model === DEFAULT_MODEL ? undefined : this._state.model;
 	}
 
-	set selectedModel(model: Model<any> | undefined) {
+	set selectedModel(model: Model<string> | undefined) {
 		this._state.model = model ?? DEFAULT_MODEL;
 	}
 
@@ -342,17 +330,6 @@ export class Agent {
 	/** Queue a message to be injected after the current assistant turn finishes. */
 	steer(message: AgentMessage): void {
 		this.steeringQueue.enqueue(message);
-		if (message.role === "user" && this.responseControl) {
-			// Queue first: normal draining owns the input if the socket ends during normalization.
-			this.steeringPreparation = (this.steeringPreparation ?? Promise.resolve()).then(async () => {
-				await this.prepareSteering?.(message);
-				if (this.steeringQueue.snapshot().includes(message) && this.responseControl?.steer(message)) {
-					this.steeringQueue.take((queued) => queued === message);
-				}
-			});
-			void this.steeringPreparation.catch(() => {});
-		}
-		for (const listener of this.steeringListeners) listener();
 	}
 
 	/** Queue a message to run only after the agent would otherwise stop. */
@@ -381,7 +358,7 @@ export class Agent {
 		return [...this.steeringQueue.take(predicate), ...this.followUpQueue.take(predicate)];
 	}
 
-	/** Non-consuming queue snapshot. Message objects retain their native content, including images. */
+	/** Non-consuming complete queue snapshot, including image content. */
 	getQueuedMessages(): { steering: AgentMessage[]; followUp: AgentMessage[] } {
 		return { steering: this.steeringQueue.snapshot(), followUp: this.followUpQueue.snapshot() };
 	}
@@ -450,8 +427,8 @@ export class Agent {
 		await this.runPromptMessages(messages);
 	}
 
-	/** Continue the transcript, consuming queued input first after an assistant or fresh-window boundary. */
-	async continue(): Promise<void> {
+	/** Continue from the current transcript. The last message must be a user or tool-result message. */
+	async continue(options?: { drainQueuedInput?: boolean }): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
 		}
@@ -461,18 +438,7 @@ export class Agent {
 			throw new Error("No messages to continue from");
 		}
 
-		// Window hooks may append custom metadata after the marker. Do not look past
-		// actual conversation or tool receipts: those still need their own continuation.
-		let freshWindow = false;
-		for (let index = this._state.messages.length - 1; index >= 0; index--) {
-			const message = this._state.messages[index];
-			if (message.role !== "custom") break;
-			if ("customType" in message && message.customType === "context-window") {
-				freshWindow = true;
-				break;
-			}
-		}
-		if (lastMessage.role === "assistant" || freshWindow) {
+		if (options?.drainQueuedInput !== false && lastMessage.role !== "user" && lastMessage.role !== "toolResult") {
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
 				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
@@ -485,9 +451,10 @@ export class Agent {
 				return;
 			}
 		}
-
-		if (lastMessage.role === "assistant" && getPendingToolCalls(this._state.messages).length === 0)
+		if (lastMessage.role === "assistant") {
 			throw new Error("Cannot continue from message role: assistant");
+		}
+
 		await this.runContinuation();
 	}
 
@@ -546,23 +513,14 @@ export class Agent {
 	}
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
-		// continue() started this run with one steering message; a poll before its request would add another.
-		let skipSteeringPolls = options.skipInitialSteeringPoll === true;
-		const convertToLlm = this.convertToLlm;
+		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,
-			onResponseControl: (control) => {
-				this.responseControl = control;
-			},
-			subscribeSteering: (listener) => {
-				this.steeringListeners.add(listener);
-				if (this.steeringQueue.hasItems()) listener();
-				return () => this.steeringListeners.delete(listener);
-			},
+			onProviderStreamEvent: this.onProviderStreamEvent,
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
@@ -581,25 +539,19 @@ export class Agent {
 							return await this.prepareNextTurn?.(this.signal);
 						}
 					: undefined,
-			convertToLlm: (messages) => {
-				// Runs once per request, as the request is built.
-				skipSteeringPolls = false;
-				return convertToLlm(messages);
-			},
+			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
-			toolResultModelContent: this.toolResultModelContent,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
-				const preparation = this.steeringPreparation;
-				try {
-					await preparation;
-				} finally {
-					if (this.steeringPreparation === preparation) this.steeringPreparation = undefined;
+				if (this.signal?.aborted || this.requestAdmissionSignal?.aborted) return [];
+				if (skipInitialSteeringPoll) {
+					skipInitialSteeringPoll = false;
+					return [];
 				}
-				if (skipSteeringPolls) return [];
 				return this.steeringQueue.drain();
 			},
-			getFollowUpMessages: async () => this.followUpQueue.drain(),
+			getFollowUpMessages: async () =>
+				this.signal?.aborted || this.requestAdmissionSignal?.aborted ? [] : this.followUpQueue.drain(),
 		};
 	}
 
@@ -623,7 +575,6 @@ export class Agent {
 			await executor(abortController.signal);
 		} catch (error) {
 			if (this.requestAdmissionSignal?.aborted && error === this.requestAdmissionSignal.reason) {
-				// A request that never started is not an assistant failure.
 				await this.processEvents({ type: "agent_end", messages: [] });
 			} else {
 				await this.handleRunFailure(error, abortController.signal.aborted);
@@ -652,7 +603,6 @@ export class Agent {
 	}
 
 	private finishRun(): void {
-		this.responseControl = undefined;
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
@@ -670,31 +620,17 @@ export class Agent {
 	private async processEvents(event: AgentEvent): Promise<void> {
 		switch (event.type) {
 			case "message_start":
-				if (event.message.role === "assistant") this._state.streamingMessage = event.message;
+				this._state.streamingMessage = event.message;
 				break;
 
 			case "message_update":
 				this._state.streamingMessage = event.message;
 				break;
 
-			case "message_checkpoint":
-			case "message_end": {
-				const message = event.message;
-				if (message.role === "assistant") {
-					if (event.type === "message_end") this._state.streamingMessage = undefined;
-					const index = message.responseId
-						? this._state.messages.findIndex(
-								(saved) => saved.role === "assistant" && saved.responseId === message.responseId,
-							)
-						: -1;
-					if (index >= 0) {
-						const saved = this._state.messages[index];
-						this._state.messages[index] =
-							saved.role === "assistant" ? mergeAssistantCheckpoint(saved, message) : message;
-					} else this._state.messages.push(message);
-				} else this._state.messages.push(message);
+			case "message_end":
+				this._state.streamingMessage = undefined;
+				this._state.messages.push(event.message);
 				break;
-			}
 
 			case "tool_execution_start": {
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
@@ -703,7 +639,6 @@ export class Agent {
 				break;
 			}
 
-			case "tool_execution_detached":
 			case "tool_execution_end": {
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
 				pendingToolCalls.delete(event.toolCallId);

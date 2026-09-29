@@ -18,7 +18,7 @@ This reference lists user-configurable settings, their types, defaults, and purp
 | `showCacheMissNotices` | boolean | `false` | Show notices for significant cache misses, successful cache warming, compaction usage, and provider recovery. |
 | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"streaming"` | Keep eligible provider prompt caches warm during active runs or, with `"idle"`, between runs. Global setting only. |
 
-Cache miss notices report tokens not read from cache relative to the smaller of the previous and current prompts, separately from any actual decline in cached reads. Dollar amounts are estimated extra cost, not a billing adjustment. Notices and `/session` list observed changes, not proven causes: model changes, older async results admitted, service tier changes, tool definition or instruction size changes, new connections, full resends after delta requests, and idle gaps beyond the known cache lifetime (five minutes when unknown). Provider-supplied reasons are shown as plain text when available; unavailable diagnostics are omitted, and dropped thinking blocks are grouped by reason with a count. Otherwise unexplained misses are `unclassified`. Multiple observations can apply to one miss. Equal-size instruction or tool edits cannot be detected from byte counts alone. Idle detection uses the configured model and retention lifetime; journals do not retain per-request lifetime overrides.
+Cache miss notices report tokens not read from cache relative to the smaller of the previous and current prompts, separately from any actual decline in cached reads. Dollar amounts are estimated extra cost, not a billing adjustment. Notices and `/session` list observed changes, not proven causes: model changes, service tier changes, tool definition or instruction size changes, new connections, full resends after delta requests, and idle gaps beyond the known cache lifetime (five minutes when unknown). Provider-supplied reasons are shown as plain text when available; unavailable diagnostics are omitted, and dropped thinking blocks are grouped by reason with a count. Otherwise unexplained misses are `unclassified`. Multiple observations can apply to one miss. Equal-size instruction or tool edits cannot be detected from byte counts alone. Idle detection uses the configured model and retention lifetime; journals do not retain per-request lifetime overrides.
 
 Cache warming runs only when the model declares a cache lifetime and Pi estimates at least $0.05 in avoided cache-miss cost. Refresh usage counts toward session totals but does not enter model context. `/session` shows the next decision; extensions can override it with `cache_warming_decision`. See [Prompt Cache Lifetimes](models.md#prompt-cache-lifetimes).
 
@@ -39,11 +39,23 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `defaultTools` | `string[]` | `read`, `bash`, `background_command`, `edit`, `write` | Built-in tools enabled at startup. An empty array disables all built-in tools but not extension or SDK tools. |
+| `defaultTools` | `string[]` | `read`, `bash`, `background_command`, `edit`, `write` | Tools enabled at startup. Plain names replace the defaults; `+name` adds a tool and `-name` removes one. An empty array disables all built-in tools but not extension or SDK tools. |
+| `codemode.mode` | `"on"` \| `"only"` | `"on"` | How the `codemode` tool presents tools while it is active. `on`: declared tools get their `codemode` declaration appended to their description, and `codemode` lists only tools that are not declared (MCP `codemode` exposure). `only`: `codemode` lists every tool scripts can call, and active built-in and extension tools are hidden from the model, so it reaches them through `codemode`. |
+| `codemode.inlineBudget` | number | `3000` | Estimated tokens (characters / 4) the `codemode` tool's description may spend on tool declarations. Tools that do not fit are left out and found with `searchTools()`. `0` lists only namespaces. |
 
-Optional integrations use [extension-owned tool discovery](tool-discovery.md) automatically on capable models. No user-maintained tool inventory is required.
+Available built-in tools are `read`, `bash`, `background_command`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. `defaultTools` can also name `codemode` and `tool_search`, which built-in extensions register inactive, and other extension tools registered inactive.
 
-Available built-in tools are `read`, `bash`, `background_command`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. CLI tool options override this setting for one invocation. See [Command Line](cli.md#tools).
+A list of only `+name` and `-name` entries changes the inherited selection instead of replacing it. For example, this enables `codemode` next to the default tools:
+
+```json
+{
+  "defaultTools": ["+codemode"]
+}
+```
+
+This replaces `bash` with `powershell` and enables `grep`: `["-bash", "+powershell", "+grep"]`. Project settings apply on top of user settings: a project list with only `+name` and `-name` entries changes the user's selection, and a project list with a plain name replaces it. In one list, plain names form the selection, and `+name` and `-name` then apply in order.
+
+CLI tool options override this setting for one invocation; `--tools` does not accept `+name` or `-name`. See [Command Line](cli.md#tools).
 
 ## Sessions and context
 
@@ -77,13 +89,14 @@ See [Compaction Reference](compaction.md) for trigger, summarization, and valida
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `theme` | string | Detected | Built-in or custom theme name. |
+| `theme` | string | `"system"` | Built-in or custom theme name. `system` derives colors from the terminal theme. |
 | `quietStartup` | boolean | `false` | Hide the startup header. |
 | `compactView` | boolean | `false` | Group tools and operational updates behind Activity rows. Global default for new interactive instances; project settings cannot override it. |
 | `tuiMode` | `"regular" \| "fullscreen"` | `"regular"` | Interactive terminal UI mode. |
 | `fullscreenExitOutput` | `"transcript" \| "resume-hint"` | `"transcript"` | Output printed when fullscreen mode exits. |
 | `fullscreenScrollbar` | `"auto" \| "always" \| "hidden"` | `"auto"` | Fullscreen transcript scrollbar behavior. |
 | `fullscreenCopyOnSelect` | boolean | `true` | Copy selected text automatically in fullscreen mode. |
+| `fullscreenWheelScrollLines` | `"auto"` \| number | `"auto"` | Lines per mouse-wheel event in fullscreen mode, from 1 to 100. `"auto"` moves one line per event in local macOS terminals, which already accelerate wheel and trackpad input; elsewhere, and over SSH, it speeds up fast wheel spins to at most 6 lines per event. Alt+wheel moves five times as far. |
 | `editorPaddingX` | number | `0` | Horizontal editor padding from 0 to 3 cells. |
 | `outputPad` | `0 \| 1` | `1` | Horizontal transcript padding. |
 | `autocompleteMaxVisible` | number | `5` | Visible autocomplete entries, from 3 to 20. |
@@ -128,7 +141,7 @@ Enabling compact view collapses existing groups and cards. Disabling it restores
 
 Keep `retry.provider.maxRetries` at `0` unless provider-level retries are required. Provider retries can delay Pi from handling quota and usage-limit errors itself.
 
-For direct `openai`, `auto` and `websocket-cached` prefer persistent Responses WebSockets with incremental continuation; `websocket` reuses the connection but sends full current input. `sse` uses HTTP. Transport failures before output starts fall back to HTTP with full input. A fresh context window never continues the previous response chain. Other compatible providers retain their own transport behavior. See [OpenAI Responses Transport](../../ai/README.md#openai-responses-transport).
+Direct `openai` Responses requests use HTTP streaming; selecting a WebSocket transport does not enable direct OpenAI Responses WebSockets. Transport preferences apply only where the provider implements them.
 
 For `openai-codex`, recovery reconnects before falling back and returns to WebSockets after temporary HTTP recovery. See [Codex WebSocket recovery](websocket-recovery.md).
 
@@ -156,6 +169,8 @@ Resource paths in user settings resolve from the agent directory. Paths in proje
 | `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands. |
 
 Resource arrays support glob exclusions with `!pattern`, exact inclusion with `+path`, and exact exclusion with `-path`. Pi loads resources listed in both user-level and project settings.
+
+The built-in extensions are named `builtin:mcp`, `builtin:llama.cpp`, `builtin:codemode`, and `builtin:tool-search` in `extensions`. They load by default; `-builtin:mcp` disables one. A `+builtin:<name>` or `-builtin:<name>` entry in project settings overrides the user setting. `pi config` lists them under Built-in. `--no-extensions` disables them too, and `-e builtin:<name>` loads one explicitly.
 
 ## Updates, telemetry, and warnings
 

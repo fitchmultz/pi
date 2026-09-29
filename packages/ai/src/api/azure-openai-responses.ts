@@ -1,5 +1,4 @@
 import { AzureOpenAI } from "openai";
-import { APIConnectionTimeoutError } from "openai/core/error";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
 import type {
@@ -21,19 +20,12 @@ import { getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
-	createResponsesDiagnostics,
-	diagnosticServiceTier,
-	finishResponsesDiagnostics,
-} from "./openai-responses-diagnostics.ts";
-import {
 	convertResponsesMessages,
 	convertResponsesTools,
-	getTranscriptNativeToolSearch,
 	processResponsesStream,
 	resolveResponsesTranscript,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
-import { withToolNamespaces } from "./tool-namespaces.ts";
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 const AZURE_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "azure-openai-responses"]);
@@ -81,19 +73,13 @@ export interface AzureOpenAIResponsesOptions extends StreamOptions {
 /**
  * Generate function for Azure OpenAI Responses API
  */
-const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions> = (
+export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions> = (
 	model: Model<"azure-openai-responses">,
 	context: TranscriptContext,
 	options?: AzureOpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveResponsesTranscript(
-		context,
-		model.compat?.supportsMidConvoSystemMessages,
-		model.compat?.supportsToolSearch,
-		model,
-		model.compat?.supportsAdditionalTools,
-	);
+	const normalizedContext = resolveResponsesTranscript(model, context, model.compat?.supportsMidConvoSystemMessages);
 
 	// Start async processing
 	(async () => {
@@ -117,9 +103,6 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 			timestamp: Date.now(),
 		};
 
-		const diagnostics = createResponsesDiagnostics(output);
-		const details = diagnostics.details;
-
 		try {
 			// Create Azure OpenAI client
 			const apiKey = options?.apiKey;
@@ -132,52 +115,29 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 				model.compat?.supportsOpenAIGrammarTools ?? false,
 			);
 			let params = buildParams(model, normalizedContext, options, deploymentName, grammarToolInputProperties);
-			details.prepareMs = performance.now() - diagnostics.startedAt;
-			const hookStartedAt = performance.now();
-			try {
-				const nextParams = await options?.onPayload?.(params, model);
-				if (nextParams !== undefined) {
-					params = nextParams as ResponseCreateParamsStreaming;
-				}
-			} finally {
-				details.onPayloadMs = performance.now() - hookStartedAt;
+			const nextParams = await options?.onPayload?.(params, model);
+			if (nextParams !== undefined) {
+				params = nextParams as ResponseCreateParamsStreaming;
 			}
-			details.requestedServiceTier = diagnosticServiceTier(params.service_tier);
-			details.requestReadyMs = performance.now() - diagnostics.startedAt;
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: 0,
 			};
 			const { data: openaiStream, response } = await retryProviderRequest(
-				async () => {
-					details.transport = "sse";
-					details.sseAttempts++;
-					details.lastAttemptStartMs = performance.now() - diagnostics.startedAt;
-					try {
-						return await client.responses.create(params, requestOptions).withResponse();
-					} catch (error) {
-						if (error instanceof APIConnectionTimeoutError) {
-							details.localTimeout = "sdk_request";
-							if (options?.timeoutMs !== undefined) details.localTimeoutMs = options.timeoutMs;
-						}
-						throw error;
-					}
-				},
+				() => client.responses.create(params, requestOptions).withResponse(),
 				{
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					signal: options?.signal,
 				},
 			);
-			details.headersMs = performance.now() - diagnostics.startedAt;
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(openaiStream, output, stream, model, {
-				diagnostics,
+				onProviderStreamEvent: options?.onProviderStreamEvent,
 				grammarToolInputProperties,
-				toolSearchTool: getTranscriptNativeToolSearch(normalizedContext, model.compat?.supportsToolSearch),
 			});
 
 			if (options?.signal?.aborted) {
@@ -191,7 +151,6 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
 
-			finishResponsesDiagnostics(diagnostics);
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
@@ -203,7 +162,6 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatAzureOpenAIError(error);
-			finishResponsesDiagnostics(diagnostics);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -211,22 +169,6 @@ const streamRaw: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOp
 
 	return stream;
 };
-
-export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions> = (
-	model,
-	context,
-	options,
-) =>
-	withToolNamespaces(
-		model,
-		context,
-		(mapped, mapControl) =>
-			streamRaw(model, mapped, {
-				...options,
-				onResponseControl: (control) => options?.onResponseControl?.(control ? mapControl(control) : undefined),
-			}),
-		options?.signal,
-	);
 
 export const streamSimple: StreamFunction<"azure-openai-responses", SimpleStreamOptions> = (
 	model: Model<"azure-openai-responses">,
@@ -359,7 +301,6 @@ function buildParams(
 		supportsAdditionalTools,
 		supportsToolSearch,
 		toolOptions: {
-			toolSearchTool: getTranscriptNativeToolSearch(context, supportsToolSearch),
 			supportsStrictMode: model.compat?.supportsStrictMode ?? true,
 			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
 		},
@@ -383,7 +324,6 @@ function buildParams(
 
 	if (transcriptTools.requestTools.length > 0) {
 		params.tools = convertResponsesTools(transcriptTools.requestTools, {
-			toolSearchTool: getTranscriptNativeToolSearch(context, supportsToolSearch),
 			supportsStrictMode: model.compat?.supportsStrictMode ?? true,
 			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
 		});
@@ -409,10 +349,8 @@ function buildParams(
 		}
 	}
 
-	// Last so custom keys override the named request fields.
-	if (options?.samplingParams) {
-		Object.assign(params, options.samplingParams);
-	}
+	// Last so custom keys override the named request fields. Per-request keys override model defaults.
+	Object.assign(params, model.samplingParams, options?.samplingParams);
 
 	return params;
 }

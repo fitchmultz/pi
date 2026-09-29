@@ -6,9 +6,14 @@ import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareTermuxCompiler, resolveBuildTools } from "./install-fork.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
+if (args.length === 1 && ["-h", "--help"].includes(args[0])) {
+	console.log("Usage: node scripts/verify-fork.mjs [--suite full|runtime]\nExample: node scripts/verify-fork.mjs --suite runtime\nExits 0 on success, 1 on failure. Requires frozen dependencies, model data and tmux.");
+	process.exit(0);
+}
 if (args.length && (args.length !== 2 || args[0] !== "--suite" || !["full", "runtime"].includes(args[1]))) {
 	console.error("Usage: node scripts/verify-fork.mjs [--suite full|runtime]");
 	process.exit(1);
@@ -25,6 +30,7 @@ try {
 	// restart-tui.test.ts normally skips without tmux. Delivery must not.
 	run("tmux", ["-V"]);
 	run(npm, ["run", "check:model-data"]);
+	if (process.platform === "android") prepareTermuxCompiler(root, resolveBuildTools(), env);
 	run(npm, ["run", "build:offline"]);
 	if (suite === "full") run(npm, ["run", "check"]);
 	const cli = join(root, "packages/coding-agent/dist/bundle/cli.js");

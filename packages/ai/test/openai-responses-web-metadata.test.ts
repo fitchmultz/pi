@@ -9,6 +9,7 @@ import type {
 } from "openai/resources/responses/responses.js";
 import { describe, expect, it } from "vitest";
 import { stream as streamCodex } from "../src/api/openai-codex-responses.ts";
+import { stream as streamResponses } from "../src/api/openai-responses.ts";
 import { convertResponsesMessages, processResponsesStream } from "../src/api/openai-responses-shared.ts";
 import type { AssistantMessage, Model } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
@@ -140,8 +141,53 @@ async function process(events: ResponseStreamEvent[], output = createOutput()): 
 }
 
 describe("Responses web-search metadata", () => {
+	it("preserves opaque compaction items without manufacturing a summary", async () => {
+		const item: ResponseOutputItem = { type: "compaction", id: "cmp_1", encrypted_content: "opaque" };
+		const output = await process(completedEvents([item]));
+		expect(output.content).toEqual([{ type: "thinking", thinking: "", thinkingSignature: JSON.stringify(item) }]);
+		expect(
+			convertResponsesMessages(model, normalizeContext({ messages: [output] }), new Set([model.provider])),
+		).toEqual([item]);
+	});
+
+	it.each([false, true])("retains failed-response usage before raising (Codex=%s)", async (codex) => {
+		const options = {
+			apiKey: `x.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } })).toString("base64url")}.x`,
+			transport: "sse" as const,
+			maxRetries: 0,
+			fetch: async () =>
+				new globalThis.Response(
+					`data: ${JSON.stringify({
+						type: "response.failed",
+						response: {
+							id: "failed",
+							status: "failed",
+							output: [],
+							error: { code: "failed", message: "fixture" },
+							usage: {
+								input_tokens: 100,
+								output_tokens: 10,
+								total_tokens: 110,
+								input_tokens_details: { cached_tokens: 30, cache_write_tokens: 5 },
+							},
+						},
+					})}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+		};
+		const context = normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] });
+		const output = await (codex
+			? streamCodex(model, context, options)
+			: streamResponses({ ...model, api: "openai-responses" }, context, options)
+		).result();
+		expect(output).toMatchObject({
+			stopReason: "error",
+			responseId: "failed",
+			usage: { input: 65, output: 10, cacheRead: 30, cacheWrite: 5, totalTokens: 110 },
+		});
+	});
+
 	it("retains native calls and citation positions without duplicating terminal records or creating local tool calls", async () => {
-		const wireItem = structuredClone(local);
 		const output = await process(completedEvents([...calls, message, local]));
 		expect(JSON.parse(JSON.stringify(output)).webSearch).toEqual({ calls, citations: expectedCitations });
 		expect(output.content).toEqual([
@@ -151,7 +197,6 @@ describe("Responses web-search metadata", () => {
 				id: "call_local|fc_local",
 				name: "read",
 				arguments: { path: "README.md" },
-				responsesItem: wireItem,
 			},
 		]);
 		expect(output.stopReason).toBe("toolUse");

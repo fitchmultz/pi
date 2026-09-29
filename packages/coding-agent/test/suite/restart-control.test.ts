@@ -92,7 +92,6 @@ describe("native restart control at session boundaries", () => {
 		await harness.session.prompt("Second turn");
 		const updates = harness.session.messages.slice(start).filter((message) => message.role === "system");
 		expect(updates).toHaveLength(1);
-		expect.soft(updates[0].replace).not.toBe(true);
 		expect.soft(updates[0].content).toBe("");
 		expect.soft(updates[0].sections?.tools).toContain("read");
 		expect.soft(updates[0].sections?.tools).not.toContain("bash");
@@ -125,7 +124,7 @@ describe("native restart control at session boundaries", () => {
 		expect(getCurrentSystemMessage(harness.session.messages)?.sections).toBeDefined();
 		expect(prompt?.sections).toBeUndefined();
 		expect(prompt?.content).toBe(
-			'Exact custom instructions.\n\nTo activate changed extension or runtime code, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. This queues a restart after final idle; it does not replay completed commands.',
+			'Exact custom instructions.\n\nUse /reload to apply changed extension source and resources. For core/runtime or clean-process changes, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. Restart waits for final idle and does not replay completed commands.',
 		);
 	});
 

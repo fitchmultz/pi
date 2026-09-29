@@ -24,13 +24,9 @@ export function buildBaseOptions(
 	options?: SimpleStreamOptions,
 	apiKey?: string,
 ): StreamOptions {
-	const samplingParams =
-		model.samplingParams || options?.samplingParams
-			? { ...model.samplingParams, ...options?.samplingParams }
-			: undefined;
 	return {
 		temperature: options?.temperature,
-		samplingParams,
+		samplingParams: options?.samplingParams,
 		maxTokens: clampMaxTokensToContext(model, context, options?.maxTokens ?? model.maxTokens),
 		signal: options?.signal,
 		telemetryContext: options?.telemetryContext,
@@ -39,11 +35,10 @@ export function buildBaseOptions(
 		transport: options?.transport,
 		cacheRetention: options?.cacheRetention,
 		sessionId: options?.sessionId,
-		turnScope: options?.turnScope,
 		headers: options?.headers,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
-		onResponseControl: options?.onResponseControl,
+		onProviderStreamEvent: options?.onProviderStreamEvent,
 		timeoutMs: options?.timeoutMs,
 		websocketConnectTimeoutMs: options?.websocketConnectTimeoutMs,
 		maxRetries: options?.maxRetries,

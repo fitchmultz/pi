@@ -3,40 +3,44 @@
  *
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
+import * as nodeModule from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import { type Provider, type ToolReference, toolId, toolKey } from "@earendil-works/pi-ai";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import type { Provider } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
-import type { createJiti } from "jiti";
+import type { createJiti, Jiti } from "jiti";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { CheckpointActivity } from "../checkpoint.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
+import { type McpServerConfig, McpServerRegistry, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
-import { createSyntheticSourceInfo } from "../source-info.ts";
+import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
+import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
 import type {
 	BashCwdHook,
-	ContextWindowHook,
 	EntryRenderer,
 	Extension,
 	ExtensionAPI,
+	ExtensionContext,
 	ExtensionFactory,
 	ExtensionRuntime,
+	ExtensionVirtualModel,
 	LoadExtensionsResult,
 	MarkdownTransformer,
 	MessageRenderer,
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
-	ToolSearchDefinition,
 } from "./types.ts";
 
-const require = createRequire(import.meta.url);
+const require = nodeModule.createRequire(import.meta.url);
 
 const isNodeSeaBinary =
 	("sea" in process.features && process.features.sea === true) ||
@@ -87,7 +91,6 @@ function getAliases(): Record<string, string> {
 
 	const piCodingAgentEntry = packageIndex;
 	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@earendil-works/pi-agent-core");
-	const piAgentNodeEntry = resolveWorkspaceOrImport("agent/dist/node.js", "@earendil-works/pi-agent-core/node");
 	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@earendil-works/pi-tui");
 	// Extensions resolve the pi-ai root to the compat entrypoint (a strict
 	// superset of the core entrypoint): existing extensions using the old
@@ -101,20 +104,20 @@ function getAliases(): Record<string, string> {
 
 	_aliases = {
 		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
-		"@earendil-works/pi-agent-core/node": piAgentNodeEntry,
+		"@earendil-works/pi-agent-core/": path.dirname(piAgentCoreEntry),
 		"@earendil-works/pi-agent-core": piAgentCoreEntry,
 		"@earendil-works/pi-tui": piTuiEntry,
+		"@earendil-works/pi-ai/": path.dirname(piAiCompatEntry),
 		"@earendil-works/pi-ai/providers/all": piAiProvidersEntry,
-		"@earendil-works/pi-ai/providers": path.dirname(piAiProvidersEntry),
 		"@earendil-works/pi-ai/compat": piAiCompatEntry,
 		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
 		"@earendil-works/pi-ai": piAiCompatEntry,
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
-		"@mariozechner/pi-agent-core/node": piAgentNodeEntry,
+		"@mariozechner/pi-agent-core/": path.dirname(piAgentCoreEntry),
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
 		"@mariozechner/pi-tui": piTuiEntry,
+		"@mariozechner/pi-ai/": path.dirname(piAiCompatEntry),
 		"@mariozechner/pi-ai/providers/all": piAiProvidersEntry,
-		"@mariozechner/pi-ai/providers": path.dirname(piAiProvidersEntry),
 		"@mariozechner/pi-ai/compat": piAiCompatEntry,
 		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
 		"@mariozechner/pi-ai": piAiCompatEntry,
@@ -134,6 +137,40 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 let extensionCacheCwd: string | undefined;
 let extensionCacheGeneration = 0;
 const extensionCache = new Map<string, ExtensionFactory>();
+
+const nativeExtensionImport = new AsyncLocalStorage<{ entry: string; version: string }>();
+const nativeReloadParameter = `pi-extension-${randomUUID()}`;
+let nativeReloadHookRegistered = false;
+
+function registerNativeReloadHook(): void {
+	if (nativeReloadHookRegistered || typeof nodeModule.registerHooks !== "function") return;
+	nodeModule.registerHooks({
+		resolve(specifier, context, nextResolve) {
+			const resolved = nextResolve(specifier, context);
+			if (!context.conditions.includes("import") || !resolved.url.startsWith("file:")) return resolved;
+			const url = new URL(resolved.url);
+			const entry = nativeExtensionImport.getStore();
+			let version = entry?.entry === resolved.url ? entry.version : undefined;
+			if (!version && context.parentURL?.startsWith("file:")) {
+				// Follow only local imports from our marked graph. Bare package imports
+				// (including symlinked packages) retain their physical singleton identity.
+				const local = specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("file:");
+				if (
+					local &&
+					!specifier.split("/").includes("node_modules") &&
+					!url.pathname.split("/").includes("node_modules") &&
+					resolved.format !== "commonjs"
+				) {
+					version = new URL(context.parentURL).searchParams.get(nativeReloadParameter) ?? undefined;
+				}
+			}
+			if (!version) return resolved;
+			url.searchParams.set(nativeReloadParameter, version);
+			return { ...resolved, url: url.href };
+		},
+	});
+	nativeReloadHookRegistered = true;
+}
 
 interface ExtensionCacheToken {
 	cwd: string;
@@ -172,18 +209,17 @@ export function createExtensionRuntime(): ExtensionRuntime {
 	};
 
 	const runtime: ExtensionRuntime = {
-		checkpointActivity: new CheckpointActivity(),
 		sendMessage: notInitialized,
 		sendUserMessage: notInitialized,
 		appendEntry: notInitialized,
 		recordUsage: notInitialized,
+		checkpointActivity: new CheckpointActivity(),
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
 		setLabel: notInitialized,
 		getActiveTools: notInitialized,
-		getActiveToolReferences: notInitialized,
-		setActiveToolReferences: notInitialized,
 		getAllTools: notInitialized,
+		getSettings: notInitialized,
 		setActiveTools: notInitialized,
 		// registerTool() is valid during extension load; refresh is only needed post-bind.
 		refreshTools: () => {},
@@ -194,6 +230,9 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		pendingNativeProviderRegistrations: [],
+		mcpServers: new McpServerRegistry(),
+		pendingVirtualModelRegistrations: [],
+		createContext: notInitialized,
 		assertActive,
 		invalidate: (message) => {
 			if (state.staleMessage) return;
@@ -228,6 +267,14 @@ export function createExtensionRuntime(): ExtensionRuntime {
 				(r) => r.provider.id !== name,
 			);
 		},
+		registerVirtualModel: (definition, extensionPath = "<unknown>") => {
+			runtime.pendingVirtualModelRegistrations.push({ definition, extensionPath });
+		},
+		unregisterVirtualModel: (provider, id) => {
+			runtime.pendingVirtualModelRegistrations = runtime.pendingVirtualModelRegistrations.filter(
+				({ definition }) => definition.provider !== provider || definition.id !== id,
+			);
+		},
 	};
 
 	return runtime;
@@ -244,8 +291,6 @@ function createExtensionAPI(
 	cwd: string,
 	eventBus: EventBus,
 ): { api: ExtensionAPI; commit: () => void; discard: () => void } {
-	runtime.checkpointActivity ??= new CheckpointActivity();
-	const checkpointActivity = runtime.checkpointActivity;
 	const pendingFlagValues = new Map<string, boolean | string>();
 	const pendingRuntimeChanges: Array<() => void> = [];
 	const loadingUnsubscribers: Array<() => void> = [];
@@ -270,7 +315,7 @@ function createExtensionAPI(
 		// Registration methods - write to extension
 		on(event: string, handler: HandlerFn): () => void {
 			assertActive();
-			const registeredHandler: HandlerFn = (...args) => handler(...args);
+			const registeredHandler: HandlerFn = (...args) => runtime.checkpointActivity.run(() => handler(...args));
 			const list = extension.handlers.get(event) ?? [];
 			list.push(registeredHandler);
 			extension.handlers.set(event, list);
@@ -285,6 +330,12 @@ function createExtensionAPI(
 			};
 		},
 
+		registerBashCwdHook(hook: BashCwdHook): void {
+			assertActive();
+			extension.bashCwdHooks ??= [];
+			extension.bashCwdHooks.push(hook);
+		},
+
 		registerTool(tool: ToolDefinition): void {
 			assertActive();
 			if (typeof tool.parameters !== "object" || tool.parameters === null || Array.isArray(tool.parameters)) {
@@ -292,37 +343,11 @@ function createExtensionAPI(
 					`Tool "${tool.name}" registered by extension "${extension.path}" must define an object parameter schema.`,
 				);
 			}
-			const key = toolKey(tool);
-			for (const existing of extension.tools.values()) {
-				if (toolId(existing.definition) === toolId(tool) && toolKey(existing.definition) !== key) {
-					throw new Error(`Ambiguous public tool ID ${JSON.stringify(toolId(tool))}`);
-				}
-			}
-			const previous = extension.tools.get(key);
-			extension.tools.set(key, { definition: tool, sourceInfo: extension.sourceInfo });
-			try {
-				runtime.refreshTools();
-			} catch (error) {
-				if (previous) extension.tools.set(key, previous);
-				else extension.tools.delete(key);
-				throw error;
-			}
-		},
-
-		registerToolSearch(tool: ToolSearchDefinition): void {
-			api.registerTool({ ...tool, toolSearch: true });
-		},
-
-		registerBashCwdHook(hook: BashCwdHook): void {
-			assertActive();
-			extension.bashCwdHooks ??= [];
-			extension.bashCwdHooks.push(hook);
-		},
-
-		registerContextWindowHook(hook: ContextWindowHook): void {
-			assertActive();
-			extension.contextWindowHooks ??= [];
-			extension.contextWindowHooks.push(hook);
+			extension.tools.set(tool.name, {
+				definition: tool,
+				sourceInfo: extension.sourceInfo,
+			});
+			runtime.refreshTools();
 		},
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
@@ -331,6 +356,7 @@ function createExtensionAPI(
 				name,
 				sourceInfo: extension.sourceInfo,
 				...options,
+				handler: (args, ctx) => runtime.checkpointActivity.run(() => options.handler(args, ctx)),
 			});
 		},
 
@@ -338,11 +364,16 @@ function createExtensionAPI(
 			shortcut: KeyId,
 			options: {
 				description?: string;
-				handler: (ctx: import("./types.ts").ExtensionContext) => Promise<void> | void;
+				handler: (ctx: ExtensionContext) => Promise<void> | void;
 			},
 		): void {
 			assertActive();
-			extension.shortcuts.set(shortcut, { shortcut, extensionPath: extension.path, ...options });
+			extension.shortcuts.set(shortcut, {
+				shortcut,
+				extensionPath: extension.path,
+				...options,
+				handler: (ctx) => runtime.checkpointActivity.run(() => options.handler(ctx)),
+			});
 		},
 
 		registerFlag(
@@ -426,7 +457,7 @@ function createExtensionAPI(
 
 		exec(command: string, args: string[], options?: ExecOptions) {
 			assertActive();
-			return checkpointActivity.run(() => execCommand(command, args, options?.cwd ?? cwd, options));
+			return runtime.checkpointActivity.run(() => execCommand(command, args, options?.cwd ?? cwd, options));
 		},
 
 		getActiveTools(): string[] {
@@ -434,21 +465,14 @@ function createExtensionAPI(
 			return runtime.getActiveTools();
 		},
 
-		getActiveToolReferences(): ToolReference[] {
-			assertActive();
-			if (!runtime.getActiveToolReferences) throw new Error("Runtime does not support tool references");
-			return runtime.getActiveToolReferences();
-		},
-
-		setActiveToolReferences(tools: ToolReference[]): void {
-			assertActive();
-			if (!runtime.setActiveToolReferences) throw new Error("Runtime does not support tool references");
-			runtime.setActiveToolReferences(tools);
-		},
-
 		getAllTools() {
 			assertActive();
 			return runtime.getAllTools();
+		},
+
+		getSettings() {
+			assertActive();
+			return runtime.getSettings();
 		},
 
 		setActiveTools(toolNames: string[]): void {
@@ -463,7 +487,7 @@ function createExtensionAPI(
 
 		setModel(model) {
 			assertActive();
-			return checkpointActivity.run(() => runtime.setModel(model));
+			return runtime.setModel(model);
 		},
 
 		getThinkingLevel() {
@@ -491,6 +515,46 @@ function createExtensionAPI(
 			applyRuntimeChange(() => runtime.unregisterProvider(name, extension.path));
 		},
 
+		registerMcpServer(name: string, config: McpServerConfig) {
+			assertActive();
+			const validated = validateMcpServerConfig(name, config);
+			if (typeof validated === "string") {
+				throw new Error(`Invalid MCP server registered by extension "${extension.path}": ${validated}`);
+			}
+			const owner = runtime.mcpServers.get(name)?.extensionPath;
+			if (owner !== undefined && owner !== extension.path) {
+				throw new Error(`MCP server "${name}" is already registered by extension "${owner}"`);
+			}
+			const server = { name, config: structuredClone(validated), extensionPath: extension.path };
+			applyRuntimeChange(() => runtime.mcpServers.register(server));
+		},
+
+		unregisterMcpServer(name: string) {
+			assertActive();
+			applyRuntimeChange(() => runtime.mcpServers.unregister(name, extension.path));
+		},
+
+		getMcpServers() {
+			assertActive();
+			return runtime.mcpServers.list();
+		},
+
+		registerVirtualModel<TState>(model: ExtensionVirtualModel<TState>) {
+			assertActive();
+			// Routing runs after the runner binds, so the context is created per request. The state
+			// comes from the session branch that this router wrote.
+			const definition: VirtualModelDefinition = {
+				...model,
+				route: (request) => model.route(request as ModelRouteRequest<TState>, runtime.createContext()),
+			};
+			applyRuntimeChange(() => runtime.registerVirtualModel(definition, extension.path));
+		},
+
+		unregisterVirtualModel(provider: string, id: string) {
+			assertActive();
+			applyRuntimeChange(() => runtime.unregisterVirtualModel(provider, id));
+		},
+
 		events: {
 			emit(channel, data) {
 				assertActive();
@@ -499,7 +563,7 @@ function createExtensionAPI(
 			on(channel, handler) {
 				assertActive();
 				const unsubscribe = runtime.trackEventBusSubscription(
-					eventBus.on(channel, (data) => checkpointActivity.run(() => handler(data))),
+					eventBus.on(channel, (data) => runtime.checkpointActivity.run(() => handler(data))),
 				);
 				if (state === "loading") loadingUnsubscribers.push(unsubscribe);
 				return unsubscribe;
@@ -553,12 +617,64 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 		: isTypeScriptSourceRuntime
 			? { virtualModules: await getVirtualModules(), tsconfigPaths: true }
 			: { alias: getAliases() };
-	const jiti = createJitiImpl(import.meta.url, {
+	let jiti = createJitiImpl(import.meta.url, {
 		moduleCache: false,
 		...resolutionOptions,
 	});
+	const importContext = { entry: pathToFileURL(fs.realpathSync(extensionPath)).href, version: randomUUID() };
+	if (typeof nodeModule.registerHooks === "function") {
+		const transform = jiti.transform;
+		const reloadModule = `pi:extension-reload/${importContext.version}`;
+		jiti = createJitiImpl(import.meta.url, {
+			...jiti.options,
+			// Cache the original transform via the first instance, not the per-load
+			// instrumentation containing this generation's private virtual module.
+			fsCache: false,
+			transform(options) {
+				const code = transform(options);
+				const context = nativeExtensionImport.getStore();
+				if (
+					!options.async ||
+					!options.filename ||
+					context?.entry !== pathToFileURL(fs.realpathSync(options.filename)).href
+				) {
+					return { code };
+				}
+				// Pinned Jiti 2.6.1 supplies these parameters to transformed modules.
+				// Wrapping the contextual importer also covers later lazy TS→JS imports.
+				return {
+					code: `"use strict"; jitiImport = require(${JSON.stringify(reloadModule)})(jitiImport, jitiESMResolve);${code}`,
+				};
+			},
+			virtualModules: {
+				...jiti.options.virtualModules,
+				[reloadModule]: (load: Jiti["import"], resolve: Jiti["esmResolve"]) => {
+					return (id: string, options?: Parameters<Jiti["import"]>[1]) => {
+						const local = id.startsWith(".") || id.startsWith("/") || id.startsWith("file:");
+						if (!local || id.split("/").includes("node_modules")) return load(id, options);
+						const entry = resolve(id, options);
+						if (!entry.startsWith("file:") || new URL(entry).pathname.split("/").includes("node_modules")) {
+							return load(id, options);
+						}
+						return nativeExtensionImport.run(
+							{
+								entry: pathToFileURL(fs.realpathSync(fileURLToPath(entry))).href,
+								version: importContext.version,
+							},
+							() => load(id, options),
+						);
+					};
+				},
+			},
+		});
+	}
 
-	const module = await jiti.import(extensionPath, { default: true });
+	// Jiti delegates JS ESM to Node even with moduleCache:false. Keep native
+	// async evaluation, but give this entry and its local ESM graph a fresh URL.
+	// ponytail: Node retains these module versions until exit; restart long-lived
+	// hosts periodically if repeated reloads consume significant memory.
+	registerNativeReloadHook();
+	const module = await nativeExtensionImport.run(importContext, () => jiti.import(extensionPath, { default: true }));
 	const factory = module as ExtensionFactory;
 	if (typeof factory !== "function") {
 		return undefined;
@@ -573,11 +689,8 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
  * Create an Extension object with empty collections.
  */
 function createExtension(extensionPath: string, resolvedPath: string): Extension {
-	const source =
-		extensionPath.startsWith("<") && extensionPath.endsWith(">")
-			? extensionPath.slice(1, -1).split(":")[0] || "temporary"
-			: "local";
-	const baseDir = extensionPath.startsWith("<") ? undefined : path.dirname(resolvedPath);
+	const source = getSyntheticPathSource(extensionPath) ?? "local";
+	const baseDir = isSyntheticPath(extensionPath) ? undefined : path.dirname(resolvedPath);
 
 	return {
 		path: extensionPath,
@@ -665,6 +778,7 @@ async function loadExtensionsInternal(
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
+	const warnings: Array<{ path: string; warning: string }> = [];
 	const cacheToken = useCache ? useExtensionCacheCwd(cwd) : undefined;
 	const resolvedCwd = cacheToken?.cwd ?? resolvePath(cwd);
 	const resolvedEventBus = eventBus ?? createEventBus();
@@ -692,6 +806,7 @@ async function loadExtensionsInternal(
 	return {
 		extensions,
 		errors,
+		warnings,
 		runtime: resolvedRuntime,
 	};
 }

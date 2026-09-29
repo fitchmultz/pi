@@ -66,14 +66,14 @@ describe("SessionManager session names", () => {
 	});
 });
 
-describe("SessionManager context windows", () => {
-	it("restores the active window without deleting earlier transcript entries", () => {
+describe("SessionManager compaction boundaries", () => {
+	it("restores retain-none compaction without deleting earlier transcript entries", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-context-window-"));
 		try {
 			const session = SessionManager.create("/test/project", dir);
 			session.appendMessage({ role: "user", content: "old request", timestamp: 1 });
 			session.appendMessage(fauxAssistantMessage("old response"));
-			const windowId = session.appendContextWindow("continue here", 1234);
+			const compactionId = session.appendCompaction("continue here", null, 1234);
 			session.appendMessage({ role: "user", content: "new request", timestamp: 2 });
 
 			const file = session.getSessionFile();
@@ -81,13 +81,23 @@ describe("SessionManager context windows", () => {
 			const restored = SessionManager.open(file!, dir);
 
 			expect(restored.getEntries()).toHaveLength(4);
-			expect(restored.getEntry(windowId)?.type).toBe("context_window");
-			expect(restored.buildSessionContext().messages.map((message) => message.role)).toEqual(["custom", "user"]);
+			expect(restored.getEntry(compactionId)).toMatchObject({
+				type: "compaction",
+				summary: "continue here",
+				firstKeptEntryId: compactionId,
+			});
+			expect(restored.buildSessionContext().messages.map((message) => message.role)).toEqual([
+				"compactionSummary",
+				"user",
+			]);
 
 			const forkFile = restored.createBranchedSession(restored.getLeafId()!);
 			const fork = SessionManager.open(forkFile!, dir);
-			expect(fork.getEntry(windowId)?.type).toBe("context_window");
-			expect(fork.buildSessionContext().messages.map((message) => message.role)).toEqual(["custom", "user"]);
+			expect(fork.getEntries()).toEqual(restored.getEntries());
+			expect(fork.buildSessionContext().messages).toEqual([
+				expect.objectContaining({ role: "compactionSummary", summary: "continue here" }),
+				expect.objectContaining({ role: "user", content: "new request" }),
+			]);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

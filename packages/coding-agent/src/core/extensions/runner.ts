@@ -2,20 +2,13 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import { isDeepStrictEqual } from "node:util";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
-	hasNonAdditiveToolChanges,
 	type ImageContent,
 	type Model,
 	type Provider,
 	type ProviderHeaders,
-	type SystemMessage,
-	type ToolResultMessage,
-	type ToolSelection,
-	toolKey,
-	withoutToolSearchState,
 } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
@@ -24,7 +17,6 @@ import { CheckpointActivity } from "../checkpoint.ts";
 import type { CompactionSettings } from "../compaction/index.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
-import { isMessagePreserved } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
 import type { SessionManager } from "../session-manager.ts";
@@ -34,6 +26,7 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "../system-prompt.ts";
+import type { VirtualModelDefinition } from "../virtual-models.ts";
 import type {
 	AgentBeforeSettleEvent,
 	BeforeAgentStartEvent,
@@ -45,14 +38,12 @@ import type {
 	CacheWarmingDecisionEvent,
 	CacheWarmingDecisionEventResult,
 	CompactOptions,
-	ContextEditEntryDraft,
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
-	ContextWindowHookEvent,
 	ContextWithSystemEvent,
-	CustomMessageEntryDraft,
 	EntryRenderer,
+	ExecuteToolOptions,
 	Extension,
 	ExtensionActions,
 	ExtensionCommandContext,
@@ -65,12 +56,11 @@ import type {
 	ExtensionMode,
 	ExtensionRuntime,
 	ExtensionShortcut,
+	ExtensionToolContext,
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
 	InputSource,
-	LiveToolResultEvent,
-	LiveToolResultEventResult,
 	LoadExtensionsResult,
 	MarkdownTransformer,
 	MessageEndEvent,
@@ -86,7 +76,6 @@ import type {
 	ResolvedCommand,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
-	SessionBeforeAutoCompactResult,
 	SessionBeforeCompactResult,
 	SessionBeforeForkResult,
 	SessionBeforeSwitchResult,
@@ -209,20 +198,12 @@ type RunnerEmitEvent = Exclude<
 
 type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
-	{
-		type:
-			| "session_before_switch"
-			| "session_before_fork"
-			| "session_before_auto_compact"
-			| "session_before_compact"
-			| "session_before_tree";
-	}
+	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
 >;
 
 type SessionBeforeEventResult =
 	| SessionBeforeSwitchResult
 	| SessionBeforeForkResult
-	| SessionBeforeAutoCompactResult
 	| SessionBeforeCompactResult
 	| SessionBeforeTreeResult;
 
@@ -230,13 +211,11 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 	? SessionBeforeSwitchResult | undefined
 	: TEvent extends { type: "session_before_fork" }
 		? SessionBeforeForkResult | undefined
-		: TEvent extends { type: "session_before_auto_compact" }
-			? SessionBeforeAutoCompactResult | undefined
-			: TEvent extends { type: "session_before_compact" }
-				? SessionBeforeCompactResult | undefined
-				: TEvent extends { type: "session_before_tree" }
-					? SessionBeforeTreeResult | undefined
-					: undefined;
+		: TEvent extends { type: "session_before_compact" }
+			? SessionBeforeCompactResult | undefined
+			: TEvent extends { type: "session_before_tree" }
+				? SessionBeforeTreeResult | undefined
+				: undefined;
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
@@ -300,9 +279,12 @@ function sameMessages(left: AgentMessage[], right: AgentMessage[]): boolean {
 }
 
 /**
- * Restore Pi-owned system state after a conversation-only `context` handler. Additive
- * transforms keep every system and search anchor. Other transforms fold system messages,
- * keeping surviving search declarations in place only when tool history still replays safely.
+ * Re-attach the prompt and tool state after a `context` handler. Handlers only see the
+ * conversation; the system messages belong to Pi. An unchanged conversation keeps every
+ * system message in place, so models with mid-conversation support keep their cached
+ * prefix. A changed one gets the replayed prompt sections and tool declarations as one
+ * leading system message, so pruning, windowing, or slicing from a compaction summary
+ * cannot drop them.
  */
 function restoreSystemMessages(
 	current: AgentMessage[],
@@ -310,31 +292,8 @@ function restoreSystemMessages(
 	returned: AgentMessage[],
 ): AgentMessage[] {
 	if (sameMessages(returned, visible)) return current;
-	const restored: AgentMessage[] = [];
-	let index = 0;
-	for (const message of current) {
-		if (message.role === "system") {
-			restored.push(message);
-			continue;
-		}
-		while (index < returned.length && !isMessagePreserved(message, returned[index])) {
-			restored.push(returned[index++]);
-		}
-		if (index === returned.length) {
-			const anchored =
-				!hasNonAdditiveToolChanges(current) &&
-				!current.some((message, index) => index > 0 && message.role === "system" && message.replace) &&
-				current.every(
-					(message) => message.role !== "toolResult" || !message.toolsAdded || returned.includes(message),
-				);
-			const head = getCurrentSystemMessage(
-				anchored ? current.filter((message) => message.role === "system") : current,
-			);
-			return head ? [head, ...(anchored ? returned : withoutToolSearchState(returned))] : returned;
-		}
-		restored.push(returned[index++]);
-	}
-	return [...restored, ...returned.slice(index)];
+	const head = getCurrentSystemMessage(current);
+	return head ? [head, ...returned] : returned;
 }
 
 export async function emitProjectTrustEvent(
@@ -411,23 +370,25 @@ export class ExtensionRunner {
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
-	private isBashRunningFn!: () => boolean;
 	private isProjectTrustedFn: () => boolean = () => true;
 	private getSignalFn: () => AbortSignal | undefined = () => undefined;
 	private waitForIdleFn: () => Promise<void> = async () => {};
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
+	private isBashRunningFn: () => boolean = () => false;
 	private hasPendingSteeringMessagesFn: () => boolean = () => false;
-	private getPendingNextTurnCountFn!: () => number;
-	private getPendingInputCountFn!: () => number;
-	private getPendingToolCallsFn: ExtensionContext["getPendingToolCalls"] = () => [];
+	private getPendingNextTurnCountFn: () => number = () => 0;
+	private getPendingInputCountFn: () => number = () => 0;
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private getCompactionSettingsFn!: () => CompactionSettings;
-	private newContextFn: NonNullable<ExtensionContextActions["newContext"]> = () => {};
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () =>
 		normalizeBuildSystemPromptOptions({ cwd: this.cwd });
+	private executeToolFn: ExtensionContextActions["executeTool"];
+	private getCallableToolsFn: () => readonly AgentTool[] = () => [];
+	/** Registered MCP servers already reported as unhandled. */
+	private readonly reportedMcpServers = new Set<string>();
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	private forkHandler: ForkHandler = async () => ({ cancelled: false });
 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -439,6 +400,7 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
+
 	readonly checkpointActivity: CheckpointActivity;
 
 	/** Optional persistence barrier; legacy persisted entries need no hook. Never run shutdown to save. */
@@ -487,6 +449,8 @@ export class ExtensionRunner {
 			registerProvider?: (name: string, config: ProviderConfig) => void;
 			registerNativeProvider?: (provider: Provider) => void;
 			unregisterProvider?: (name: string) => void;
+			registerVirtualModel?: (definition: VirtualModelDefinition) => void;
+			unregisterVirtualModel?: (provider: string, id: string) => void;
 		},
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
@@ -498,37 +462,44 @@ export class ExtensionRunner {
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setLabel = actions.setLabel;
 		this.runtime.getActiveTools = actions.getActiveTools;
-		this.runtime.getActiveToolReferences = actions.getActiveToolReferences;
-		this.runtime.setActiveToolReferences = actions.setActiveToolReferences;
 		this.runtime.getAllTools = actions.getAllTools;
+		this.runtime.getSettings = actions.getSettings;
 		this.runtime.setActiveTools = actions.setActiveTools;
 		this.runtime.refreshTools = actions.refreshTools;
 		this.runtime.getCommands = actions.getCommands;
 		this.runtime.setModel = actions.setModel;
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
+		this.runtime.createContext = () => this.createContext();
 
 		// Context actions (required)
 		this.getModel = contextActions.getModel;
 		this.getScopedModels = contextActions.getScopedModels;
 		this.isIdleFn = contextActions.isIdle;
-		this.isBashRunningFn = contextActions.isBashRunning;
 		this.isProjectTrustedFn = contextActions.isProjectTrusted;
 		this.getSignalFn = contextActions.getSignal;
 		this.abortFn = contextActions.abort;
 		this.hasPendingMessagesFn = contextActions.hasPendingMessages;
-		this.hasPendingSteeringMessagesFn = contextActions.hasPendingSteeringMessages;
-		this.getPendingNextTurnCountFn = contextActions.getPendingNextTurnCount;
-		this.getPendingInputCountFn = contextActions.getPendingInputCount;
-		this.getPendingToolCallsFn = contextActions.getPendingToolCalls ?? (() => []);
+		this.isBashRunningFn = contextActions.isBashRunning ?? (() => false);
+		this.hasPendingSteeringMessagesFn = contextActions.hasPendingSteeringMessages ?? (() => false);
+		this.getPendingNextTurnCountFn = contextActions.getPendingNextTurnCount ?? (() => 0);
+		this.getPendingInputCountFn = contextActions.getPendingInputCount ?? (() => 0);
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.getCompactionSettingsFn = contextActions.getCompactionSettings;
-		this.newContextFn = contextActions.newContext ?? (() => {});
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 		this.getSystemPromptOptionsFn =
 			contextActions.getSystemPromptOptions ?? (() => normalizeBuildSystemPromptOptions({ cwd: this.cwd }));
+		this.executeToolFn = contextActions.executeTool;
+		this.getCallableToolsFn = contextActions.getCallableTools ?? (() => []);
+
+		// Servers registered from now on reach the extension that connects them right away. Servers
+		// registered during loading are read on session_start.
+		this.runtime.mcpServers.setChangeListener(() => {
+			void this.emit({ type: "mcp_servers_change", servers: this.runtime.mcpServers.list() });
+			this.reportUnhandledMcpServers();
+		});
 
 		// Flush provider registrations queued during extension loading
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
@@ -565,6 +536,23 @@ export class ExtensionRunner {
 			}
 		}
 		this.runtime.pendingNativeProviderRegistrations = [];
+		const registerVirtualModel = (definition: VirtualModelDefinition) => {
+			if (providerActions?.registerVirtualModel) providerActions.registerVirtualModel(definition);
+			else this.modelRegistry.registerVirtualModel(definition);
+		};
+		for (const { definition, extensionPath } of this.runtime.pendingVirtualModelRegistrations) {
+			try {
+				registerVirtualModel(definition);
+			} catch (err) {
+				this.emitError({
+					extensionPath,
+					event: "register_virtual_model",
+					error: err instanceof Error ? err.message : String(err),
+					stack: err instanceof Error ? err.stack : undefined,
+				});
+			}
+		}
+		this.runtime.pendingVirtualModelRegistrations = [];
 
 		// From this point on, provider registration/unregistration takes effect immediately
 		// without requiring a /reload.
@@ -588,6 +576,11 @@ export class ExtensionRunner {
 				return;
 			}
 			this.modelRegistry.unregisterProvider(name);
+		};
+		this.runtime.registerVirtualModel = registerVirtualModel;
+		this.runtime.unregisterVirtualModel = (provider, id) => {
+			if (providerActions?.unregisterVirtualModel) providerActions.unregisterVirtualModel(provider, id);
+			else this.modelRegistry.unregisterVirtualModel(provider, id);
 		};
 	}
 
@@ -649,7 +642,7 @@ export class ExtensionRunner {
 		};
 
 		try {
-			return run().finally(finish);
+			return this.checkpointActivity.run(run).finally(finish);
 		} catch (err) {
 			finish();
 			throw err;
@@ -657,9 +650,8 @@ export class ExtensionRunner {
 	}
 
 	private emitUIPromptEvent(event: Extract<RunnerEmitEvent, { type: "ui_prompt_start" | "ui_prompt_end" }>): void {
-		void this.checkpointActivity.run(async () => {
-			await Promise.resolve();
-			await this.emit(event);
+		queueMicrotask(() => {
+			void this.emit(event);
 		});
 	}
 
@@ -671,36 +663,34 @@ export class ExtensionRunner {
 		return this.uiContext !== noOpUIContext;
 	}
 
-	getExtensionPaths(): string[] {
-		return this.extensions.map((e) => e.path);
-	}
-
 	resolveBashCwd(cwd: string): string {
 		for (const extension of this.extensions) {
-			for (const hook of extension.bashCwdHooks ?? []) {
-				cwd = hook(cwd);
-			}
+			for (const hook of extension.bashCwdHooks ?? []) cwd = hook(cwd);
 		}
 		return cwd;
 	}
 
-	/** Get all registered tools from all extensions (first registration per exact identity wins). */
+	getExtensionPaths(): string[] {
+		return this.extensions.map((e) => e.path);
+	}
+
+	/** Get all registered tools from all extensions (first registration per name wins). */
 	getAllRegisteredTools(): RegisteredTool[] {
 		const toolsByName = new Map<string, RegisteredTool>();
 		for (const ext of this.extensions) {
 			for (const tool of ext.tools.values()) {
-				if (!toolsByName.has(toolKey(tool.definition))) {
-					toolsByName.set(toolKey(tool.definition), tool);
+				if (!toolsByName.has(tool.definition.name)) {
+					toolsByName.set(tool.definition.name, tool);
 				}
 			}
 		}
 		return Array.from(toolsByName.values());
 	}
 
-	/** Get a tool definition by exact identity. Bare strings select unnamespaced tools. */
-	getToolDefinition(toolName: ToolSelection): RegisteredTool["definition"] | undefined {
+	/** Get a tool definition by name. Returns undefined if not found. */
+	getToolDefinition(toolName: string): RegisteredTool["definition"] | undefined {
 		for (const ext of this.extensions) {
-			const tool = ext.tools.get(toolKey(toolName));
+			const tool = ext.tools.get(toolName);
 			if (tool) {
 				return tool.definition;
 			}
@@ -800,6 +790,23 @@ export class ExtensionRunner {
 	emitError(error: ExtensionError): void {
 		for (const listener of this.errorListeners) {
 			listener(error);
+		}
+	}
+
+	/**
+	 * Report registered MCP servers when no extension handles `mcp_servers_change`, which means
+	 * nothing connects them (for example when another MCP extension replaced the built-in one).
+	 */
+	reportUnhandledMcpServers(): void {
+		if (this.hasHandlers("mcp_servers_change")) return;
+		for (const server of this.runtime.mcpServers.list()) {
+			if (this.reportedMcpServers.has(server.name)) continue;
+			this.reportedMcpServers.add(server.name);
+			this.emitError({
+				extensionPath: server.extensionPath,
+				event: "register_mcp_server",
+				error: `MCP server "${server.name}" is registered, but no loaded extension connects MCP servers; another extension may have replaced the built-in MCP support`,
+			});
 		}
 	}
 
@@ -907,7 +914,7 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
-	createContext(sessionManager = this.sessionManager): ExtensionContext {
+	createContext(): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
 		const getScopedModels = this.getScopedModels;
@@ -930,7 +937,7 @@ export class ExtensionRunner {
 			},
 			get sessionManager() {
 				runner.assertActive();
-				return sessionManager;
+				return runner.sessionManager;
 			},
 			get modelRegistry() {
 				runner.assertActive();
@@ -952,10 +959,6 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.isIdleFn();
 			},
-			isBashRunning: () => {
-				runner.assertActive();
-				return runner.isBashRunningFn();
-			},
 			isProjectTrusted: () => {
 				runner.assertActive();
 				return runner.isProjectTrustedFn();
@@ -968,9 +971,9 @@ export class ExtensionRunner {
 				runner.assertActive();
 				runner.abortFn();
 			},
-			hasPendingMessages: () => {
+			isBashRunning: () => {
 				runner.assertActive();
-				return runner.hasPendingMessagesFn();
+				return runner.isBashRunningFn();
 			},
 			hasPendingSteeringMessages: () => {
 				runner.assertActive();
@@ -984,25 +987,21 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.getPendingInputCountFn();
 			},
-			getPendingToolCalls: () => {
+			hasPendingMessages: () => {
 				runner.assertActive();
-				return runner.getPendingToolCallsFn();
+				return runner.hasPendingMessagesFn();
 			},
 			shutdown: () => {
 				runner.assertActive();
 				runner.shutdownHandler();
 			},
-			getContextUsage: () => {
-				runner.assertActive();
-				return runner.getContextUsageFn();
-			},
 			getCompactionSettings: () => {
 				runner.assertActive();
 				return runner.getCompactionSettingsFn();
 			},
-			newContext: (options) => {
+			getContextUsage: () => {
 				runner.assertActive();
-				runner.newContextFn(options);
+				return runner.getContextUsageFn();
 			},
 			compact: (options) => {
 				runner.assertActive();
@@ -1013,6 +1012,39 @@ export class ExtensionRunner {
 				return runner.getSystemPromptFn();
 			},
 		};
+	}
+
+	/**
+	 * Create the context for executing the tool call `toolCallId`: the extension context plus
+	 * `tools` and `executeTool()`. `signal` is the default signal of nested calls.
+	 */
+	createToolContext(toolCallId: string, signal: AbortSignal | undefined): ExtensionToolContext {
+		const runner = this;
+		// createContext() returns a fresh object, so adding properties does not affect other contexts.
+		return Object.defineProperties(this.createContext() as ExtensionToolContext, {
+			tools: {
+				get() {
+					runner.assertActive();
+					return runner.getCallableToolsFn();
+				},
+			},
+			executeTool: {
+				value: async (name: string, args: unknown, options: ExecuteToolOptions = {}) => {
+					runner.assertActive();
+					if (!runner.executeToolFn) {
+						return {
+							toolCall: { type: "toolCall", id: `${toolCallId}/0`, name, arguments: {} },
+							result: {
+								content: [{ type: "text", text: "Nested tool calls are not available in this context" }],
+								details: {},
+							},
+							isError: true,
+						};
+					}
+					return runner.executeToolFn(toolCallId, name, args, { ...options, signal: options.signal ?? signal });
+				},
+			},
+		});
 	}
 
 	createCommandContext(): ExtensionCommandContext {
@@ -1054,68 +1086,7 @@ export class ExtensionRunner {
 		return context;
 	}
 
-	runContextWindowHooks(
-		buildEvent: () => ContextWindowHookEvent,
-		apply: (drafts: (ContextEditEntryDraft | CustomMessageEntryDraft)[]) => void,
-		sessionManager: SessionManager,
-	): void {
-		const ctx = this.createContext(sessionManager);
-		for (const extension of this.extensions) {
-			for (const hook of extension.contextWindowHooks ?? []) {
-				const result: unknown = hook(buildEvent(), ctx);
-				if (result === undefined) continue;
-				if (result instanceof Promise) {
-					void result.catch(() => {});
-					throw new Error("Context window hooks must return synchronously");
-				}
-				if (
-					!Array.isArray(result) ||
-					result.some(
-						(draft) =>
-							!draft ||
-							typeof draft !== "object" ||
-							(draft.type !== "context_edit" && draft.type !== "custom_message"),
-					)
-				) {
-					throw new Error("Context window hooks may only return context_edit or custom_message drafts");
-				}
-				for (const draft of result) {
-					if (
-						draft.type === "custom_message" &&
-						(typeof draft.customType !== "string" ||
-							typeof draft.display !== "boolean" ||
-							(typeof draft.content !== "string" &&
-								(!Array.isArray(draft.content) ||
-									draft.content.some(
-										(block: unknown) =>
-											!block ||
-											typeof block !== "object" ||
-											!("type" in block) ||
-											(block.type === "text"
-												? !("text" in block) || typeof block.text !== "string"
-												: block.type !== "image" ||
-													!("data" in block) ||
-													typeof block.data !== "string" ||
-													!("mimeType" in block) ||
-													typeof block.mimeType !== "string"),
-									))))
-					) {
-						throw new Error("Invalid context window custom_message draft");
-					}
-				}
-				apply(result);
-			}
-		}
-	}
-
-	emitBoundary(
-		baseEvent: BoundaryBaseEvent,
-		buildContext: (entries: SessionBoundaryDraft[]) => BoundaryContextPreview | Promise<BoundaryContextPreview>,
-	): Promise<BoundaryDispatchResult> {
-		return this.checkpointActivity.run(() => this.emitBoundaryEvent(baseEvent, buildContext));
-	}
-
-	private async emitBoundaryEvent(
+	async emitBoundary(
 		baseEvent: BoundaryBaseEvent,
 		buildContext: (entries: SessionBoundaryDraft[]) => BoundaryContextPreview | Promise<BoundaryContextPreview>,
 	): Promise<BoundaryDispatchResult> {
@@ -1170,17 +1141,12 @@ export class ExtensionRunner {
 		return (
 			event.type === "session_before_switch" ||
 			event.type === "session_before_fork" ||
-			event.type === "session_before_auto_compact" ||
 			event.type === "session_before_compact" ||
 			event.type === "session_before_tree"
 		);
 	}
 
-	emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
-		return this.checkpointActivity.run(() => this.emitEvent(event));
-	}
-
-	private async emitEvent<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
 		const ctx = this.createContext();
 		let result: SessionBeforeEventResult | undefined;
 
@@ -1191,7 +1157,7 @@ export class ExtensionRunner {
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
-						if ("cancel" in result && result.cancel) {
+						if (result.cancel) {
 							return result as RunnerEmitResult<TEvent>;
 						}
 					}
@@ -1212,11 +1178,7 @@ export class ExtensionRunner {
 	}
 
 	/** Returns the event's own action unless a handler overrides it; the last override wins. */
-	emitCacheWarmingDecision(event: CacheWarmingDecisionEvent): Promise<CacheWarmingAction> {
-		return this.checkpointActivity.run(() => this.emitCacheWarmingDecisionEvent(event));
-	}
-
-	private async emitCacheWarmingDecisionEvent(event: CacheWarmingDecisionEvent): Promise<CacheWarmingAction> {
+	async emitCacheWarmingDecision(event: CacheWarmingDecisionEvent): Promise<CacheWarmingAction> {
 		const ctx = this.createContext();
 		let action = event.action;
 
@@ -1278,43 +1240,6 @@ export class ExtensionRunner {
 		return modified ? currentMessage : undefined;
 	}
 
-	async emitLiveToolResult(message: ToolResultMessage): Promise<ToolResultMessage["content"] | undefined> {
-		const ctx = this.createContext();
-		let content: ToolResultMessage["content"] | undefined;
-
-		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "live_tool_result")) {
-			for (const handler of handlers) {
-				try {
-					// Handlers get copies: the saved message backs the session and terminal output.
-					const event: LiveToolResultEvent = {
-						type: "live_tool_result",
-						message: structuredClone({ ...message, content: content ?? message.content }),
-					};
-					const handlerResult = (await handler(event, ctx)) as LiveToolResultEventResult | undefined;
-					if (handlerResult?.content === undefined) continue;
-					if (!Array.isArray(handlerResult.content)) {
-						this.emitError({
-							extensionPath: ext.path,
-							event: "live_tool_result",
-							error: "live_tool_result handlers must return a content array",
-						});
-						continue;
-					}
-					content = structuredClone(handlerResult.content);
-				} catch (err) {
-					this.emitError({
-						extensionPath: ext.path,
-						event: "live_tool_result",
-						error: err instanceof Error ? err.message : String(err),
-						stack: err instanceof Error ? err.stack : undefined,
-					});
-				}
-			}
-		}
-
-		return content;
-	}
-
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
 		const ctx = this.createContext();
 		const currentEvent: ToolResultEvent = { ...event };
@@ -1328,10 +1253,16 @@ export class ExtensionRunner {
 
 					if (handlerResult.content !== undefined) {
 						currentEvent.content = handlerResult.content;
+						// Structured content that is not replaced along with the content may no longer match it.
+						if (handlerResult.structuredContent === undefined) delete currentEvent.structuredContent;
 						modified = true;
 					}
 					if (handlerResult.details !== undefined) {
 						currentEvent.details = handlerResult.details;
+						modified = true;
+					}
+					if (handlerResult.structuredContent !== undefined) {
+						currentEvent.structuredContent = handlerResult.structuredContent;
 						modified = true;
 					}
 					if (handlerResult.isError !== undefined) {
@@ -1362,6 +1293,7 @@ export class ExtensionRunner {
 		return {
 			content: currentEvent.content,
 			details: currentEvent.details,
+			structuredContent: currentEvent.structuredContent,
 			isError: currentEvent.isError,
 			usage: currentEvent.usage,
 		};
@@ -1421,7 +1353,7 @@ export class ExtensionRunner {
 	/**
 	 * Run the request-time transforms in two phases. `context` handlers see the conversation
 	 * only and Pi restores the prompt and tool state after each; `context_with_system`
-	 * handlers then see the full transcript. New-session native heads retain their position and tools.
+	 * handlers then see the full transcript and their output is used as returned.
 	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
 		const ctx = this.createContext();
@@ -1456,13 +1388,6 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "context_with_system")) {
 			for (const handler of handlers) {
-				const head = currentMessages[0];
-				const nativeHead = head?.role === "system" && head.nativeHead ? structuredClone(head) : undefined;
-				const otherSystemMessages = nativeHead
-					? currentMessages.slice(1).filter((message) => message.role === "system")
-					: [];
-				const isOtherSystemMessage = (message: AgentMessage) =>
-					otherSystemMessages.some((other) => other === message || isDeepStrictEqual(other, message));
 				try {
 					const hadLeadingSystemMessage = currentMessages[0]?.role === "system";
 					const event: ContextWithSystemEvent = { type: "context_with_system", messages: currentMessages };
@@ -1470,7 +1395,7 @@ export class ExtensionRunner {
 					currentMessages = handlerResult?.messages ?? currentMessages;
 					// Providers read the prompt and initial tools from the leading system message.
 					// Losing it is never intended; report it but honor the handler's output.
-					if (!nativeHead && hadLeadingSystemMessage && currentMessages[0]?.role !== "system") {
+					if (hadLeadingSystemMessage && currentMessages[0]?.role !== "system") {
 						this.emitError({
 							extensionPath: ext.path,
 							event: "context_with_system",
@@ -1486,62 +1411,6 @@ export class ExtensionRunner {
 						error: message,
 						stack,
 					});
-				} finally {
-					if (nativeHead) {
-						let index = currentMessages.findIndex(
-							(message) => message === head || (message.role === "system" && message.nativeHead),
-						);
-						// Reconstructed heads can omit the marker. Match their retained timestamp,
-						// excluding existing policy messages that happen to share that timestamp.
-						if (index < 0)
-							index = currentMessages.findIndex(
-								(message) =>
-									message.role === "system" &&
-									message.timestamp === nativeHead.timestamp &&
-									!isOtherSystemMessage(message),
-							);
-						// A rebuilt head can also get a fresh timestamp. Its host-owned declarations
-						// still identify it; position alone cannot tell it from a new policy message.
-						const declarations = (message: SystemMessage) => [
-							message.toolsAdded,
-							message.toolsRemoved,
-							message.deferredToolEntries,
-							message.replace,
-						];
-						if (index < 0) {
-							const matches = currentMessages.flatMap((message, position) =>
-								message.role === "system" &&
-								!isOtherSystemMessage(message) &&
-								isDeepStrictEqual(declarations(message), declarations(nativeHead))
-									? [position]
-									: [],
-							);
-							// Tool-less heads share empty declarations with ordinary policy; never guess.
-							if (matches.length === 1) index = matches[0];
-						}
-						const edited = currentMessages[index];
-						const restored = nativeHead;
-						if (edited?.role === "system") {
-							restored.content = edited.content;
-							if (edited.sections === undefined) delete restored.sections;
-							else restored.sections = edited.sections;
-						}
-						const remaining = currentMessages.filter(
-							(message, position) => position !== index && !(message.role === "system" && message.nativeHead),
-						);
-						if (
-							index !== 0 ||
-							!isDeepStrictEqual(edited, restored) ||
-							remaining.length !== currentMessages.length - 1
-						) {
-							this.emitError({
-								extensionPath: ext.path,
-								event: "context_with_system",
-								error: "Restored the native initial declaration at index 0. Keep its nativeHead marker and initial tools; append policy and tool changes after it.",
-							});
-						}
-						currentMessages = [restored, ...remaining];
-					}
 				}
 			}
 		}

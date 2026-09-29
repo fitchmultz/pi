@@ -200,11 +200,20 @@ function summarizeNormalizedTimeBuckets(records, bucket) {
 }
 
 function summarizeNormalizedTimeBucketsByKey(records, keyFn) {
-	const bucketGroups = Map.groupBy(records, keyFn);
+	const bucketGroups = new Map();
+	for (const record of records) {
+		const bucketKey = keyFn(record);
+		if (!bucketGroups.has(bucketKey)) bucketGroups.set(bucketKey, []);
+		bucketGroups.get(bucketKey).push(record);
+	}
 
 	return [...bucketGroups.entries()]
 		.map(([key, bucketRecords]) => {
-			const sessionGroups = Map.groupBy(bucketRecords, (record) => record.sessionFile);
+			const sessionGroups = new Map();
+			for (const record of bucketRecords) {
+				if (!sessionGroups.has(record.sessionFile)) sessionGroups.set(record.sessionFile, []);
+				sessionGroups.get(record.sessionFile).push(record);
+			}
 			const sessions = [...sessionGroups.values()].map((sessionRecords) => {
 				const full = sessionRecords.filter((record) => record.mode === "full").length;
 				const partial = sessionRecords.length - full;
@@ -231,7 +240,12 @@ function summarizeNormalizedTimeBucketsByKey(records, keyFn) {
 }
 
 function summarizeGroups(records, keyFn) {
-	const groups = Map.groupBy(records, keyFn);
+	const groups = new Map();
+	for (const record of records) {
+		const key = keyFn(record);
+		if (!groups.has(key)) groups.set(key, []);
+		groups.get(key).push(record);
+	}
 	return [...groups.entries()]
 		.map(([key, group]) => {
 			const full = group.filter((record) => record.mode === "full").length;
@@ -299,6 +313,18 @@ function buildSummary(records, meta, options) {
 	};
 }
 
+function buildHumanReport(summary) {
+	const lines = [];
+	const originalLog = console.log;
+	console.log = (line = "") => lines.push(String(line));
+	try {
+		printHumanReport(summary);
+	} finally {
+		console.log = originalLog;
+	}
+	return lines.join("\n") + "\n";
+}
+
 function escapeHtml(text) {
 	return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -315,87 +341,85 @@ pre { font: 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; 
 <pre>${escapeHtml(text)}</pre>`);
 }
 
-function buildHumanReport(summary) {
-	const lines = [];
+function printHumanReport(summary) {
 	const { scan, counts, timeStats, normalizedTimeStats, timeOfDayStats, normalizedTimeOfDayStats, timeStatsByProvider, filters } = summary;
-	lines.push(`Scanned ${formatInt(scan.sessionFilesIncluded)} session files in ${scan.sessionsDir}`);
-	lines.push(`Report timezone: ${REPORT_TIME_ZONE} (CET/CEST)`);
+	console.log(`Scanned ${formatInt(scan.sessionFilesIncluded)} session files in ${scan.sessionsDir}`);
+	console.log(`Report timezone: ${REPORT_TIME_ZONE} (CET/CEST)`);
 	if (scan.since) {
-		lines.push(`Session filter: files created at or after ${scan.since.iso} (${scan.since.source})`);
-		lines.push(`Skipped older session files: ${formatInt(scan.sessionFilesSkippedOlderThanSince)} of ${formatInt(scan.sessionFilesScanned)}`);
+		console.log(`Session filter: files created at or after ${scan.since.iso} (${scan.since.source})`);
+		console.log(`Skipped older session files: ${formatInt(scan.sessionFilesSkippedOlderThanSince)} of ${formatInt(scan.sessionFilesScanned)}`);
 	}
-	lines.push(`Found ${formatInt(counts.totalReadCalls)} read tool calls in ${formatInt(counts.assistantMessagesWithReadCalls)} assistant messages`);
-	if (filters.model) lines.push(`Filters: model contains "${filters.model}"`);
+	console.log(`Found ${formatInt(counts.totalReadCalls)} read tool calls in ${formatInt(counts.assistantMessagesWithReadCalls)} assistant messages`);
+	if (filters.model) console.log(`Filters: model contains "${filters.model}"`);
 
-	lines.push("\nFull vs partial reads");
-	lines.push(`  full:    ${formatInt(counts.full).padStart(8)}  ${formatPercent(counts.full, counts.totalReadCalls).padStart(6)}  ${bar(counts.full, counts.totalReadCalls)}`);
-	lines.push(`  partial: ${formatInt(counts.partial).padStart(8)}  ${formatPercent(counts.partial, counts.totalReadCalls).padStart(6)}  ${bar(counts.partial, counts.totalReadCalls)}`);
+	console.log("\nFull vs partial reads");
+	console.log(`  full:    ${formatInt(counts.full).padStart(8)}  ${formatPercent(counts.full, counts.totalReadCalls).padStart(6)}  ${bar(counts.full, counts.totalReadCalls)}`);
+	console.log(`  partial: ${formatInt(counts.partial).padStart(8)}  ${formatPercent(counts.partial, counts.totalReadCalls).padStart(6)}  ${bar(counts.partial, counts.totalReadCalls)}`);
 
-	lines.push(`\nBy ${filters.bucket}`);
+	console.log(`\nBy ${filters.bucket}`);
 	for (const group of timeStats) {
-		lines.push(
+		console.log(
 			`  ${group.key} reads=${formatInt(group.reads).padStart(5)} full=${formatPercent(group.full, group.reads).padStart(6)} partial=${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`
 		);
 	}
 
-	lines.push("\nBy time of day");
+	console.log("\nBy time of day");
 	for (const group of timeOfDayStats) {
-		lines.push(
+		console.log(
 			`  ${group.key} reads=${formatInt(group.reads).padStart(5)} full=${formatPercent(group.full, group.reads).padStart(6)} partial=${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`
 		);
 	}
 
-	lines.push("\nBy time of day, session-normalized");
+	console.log("\nBy time of day, session-normalized");
 	for (const group of normalizedTimeOfDayStats) {
-		lines.push(
+		console.log(
 			`  ${group.key} sessions=${formatInt(group.sessions).padStart(4)} reads/session=${formatRate(group.readsPerSession).padStart(5)} full/session=${formatRate(group.fullPerSession).padStart(5)} partial/session=${formatRate(group.partialPerSession).padStart(5)} medianSessionPartial=${group.medianSessionPartialRate === null ? "n/a" : formatPercent(group.medianSessionPartialRate, 1).padStart(6)} ${bar(group.medianSessionPartialRate ?? 0, 1)}`
 		);
 	}
 
-	lines.push(`\nBy ${filters.bucket}, session-normalized`);
+	console.log(`\nBy ${filters.bucket}, session-normalized`);
 	for (const group of normalizedTimeStats) {
-		lines.push(
+		console.log(
 			`  ${group.key} sessions=${formatInt(group.sessions).padStart(4)} reads/session=${formatRate(group.readsPerSession).padStart(5)} full/session=${formatRate(group.fullPerSession).padStart(5)} partial/session=${formatRate(group.partialPerSession).padStart(5)} medianSessionPartial=${group.medianSessionPartialRate === null ? "n/a" : formatPercent(group.medianSessionPartialRate, 1).padStart(6)} ${bar(group.medianSessionPartialRate ?? 0, 1)}`
 		);
 	}
 
-	lines.push(`\nBy provider/model, then by ${filters.bucket}`);
+	console.log(`\nBy provider/model, then by ${filters.bucket}`);
 	for (const group of timeStatsByProvider) {
-		lines.push(`\n${group.providerModel}`);
-		lines.push(`  total reads=${formatInt(group.reads)} assistantMessages=${formatInt(group.assistantMessages)}`);
-		lines.push(`  total full    ${formatInt(group.full).padStart(8)} ${formatPercent(group.full, group.reads).padStart(6)} ${bar(group.full, group.reads)}`);
-		lines.push(`  total partial ${formatInt(group.partial).padStart(8)} ${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`);
-		lines.push(`  By ${filters.bucket}`);
+		console.log(`\n${group.providerModel}`);
+		console.log(`  total reads=${formatInt(group.reads)} assistantMessages=${formatInt(group.assistantMessages)}`);
+		console.log(`  total full    ${formatInt(group.full).padStart(8)} ${formatPercent(group.full, group.reads).padStart(6)} ${bar(group.full, group.reads)}`);
+		console.log(`  total partial ${formatInt(group.partial).padStart(8)} ${formatPercent(group.partial, group.reads).padStart(6)} ${bar(group.partial, group.reads)}`);
+		console.log(`  By ${filters.bucket}`);
 		for (const bucket of group.timeStats) {
-			lines.push(
+			console.log(
 				`    ${bucket.key} reads=${formatInt(bucket.reads).padStart(5)} full=${formatPercent(bucket.full, bucket.reads).padStart(6)} partial=${formatPercent(bucket.partial, bucket.reads).padStart(6)} ${bar(bucket.partial, bucket.reads)}`
 			);
 		}
-		lines.push(`  By ${filters.bucket}, session-normalized`);
+		console.log(`  By ${filters.bucket}, session-normalized`);
 		for (const bucket of group.normalizedTimeStats) {
-			lines.push(
+			console.log(
 				`    ${bucket.key} sessions=${formatInt(bucket.sessions).padStart(4)} reads/session=${formatRate(bucket.readsPerSession).padStart(5)} full/session=${formatRate(bucket.fullPerSession).padStart(5)} partial/session=${formatRate(bucket.partialPerSession).padStart(5)} medianSessionPartial=${bucket.medianSessionPartialRate === null ? "n/a" : formatPercent(bucket.medianSessionPartialRate, 1).padStart(6)} ${bar(bucket.medianSessionPartialRate ?? 0, 1)}`
 			);
 		}
-		lines.push("  By time of day");
+		console.log("  By time of day");
 		for (const bucket of group.timeOfDayStats) {
-			lines.push(
+			console.log(
 				`    ${bucket.key} reads=${formatInt(bucket.reads).padStart(5)} full=${formatPercent(bucket.full, bucket.reads).padStart(6)} partial=${formatPercent(bucket.partial, bucket.reads).padStart(6)} ${bar(bucket.partial, bucket.reads)}`
 			);
 		}
-		lines.push("  By time of day, session-normalized");
+		console.log("  By time of day, session-normalized");
 		for (const bucket of group.normalizedTimeOfDayStats) {
-			lines.push(
+			console.log(
 				`    ${bucket.key} sessions=${formatInt(bucket.sessions).padStart(4)} reads/session=${formatRate(bucket.readsPerSession).padStart(5)} full/session=${formatRate(bucket.fullPerSession).padStart(5)} partial/session=${formatRate(bucket.partialPerSession).padStart(5)} medianSessionPartial=${bucket.medianSessionPartialRate === null ? "n/a" : formatPercent(bucket.medianSessionPartialRate, 1).padStart(6)} ${bar(bucket.medianSessionPartialRate ?? 0, 1)}`
 			);
 		}
 	}
 
 	if (scan.malformedLines > 0) {
-		lines.push("\nParser notes");
-		lines.push(`  malformed lines skipped: ${formatInt(scan.malformedLines)}`);
+		console.log("\nParser notes");
+		console.log(`  malformed lines skipped: ${formatInt(scan.malformedLines)}`);
 	}
-	return `${lines.join("\n")}\n`;
 }
 
 async function scanSessions(sessionsDir, since) {
@@ -469,7 +493,7 @@ async function main() {
 		return;
 	}
 	if (options.text) {
-		process.stdout.write(buildHumanReport(summary));
+		printHumanReport(summary);
 		return;
 	}
 	printHtmlReport(summary);

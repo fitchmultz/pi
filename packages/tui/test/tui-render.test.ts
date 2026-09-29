@@ -114,6 +114,69 @@ function getCellItalic(terminal: VirtualTerminal, row: number, col: number): num
 }
 
 describe("TUI render scheduling", () => {
+	it("keeps inactive terminal writes silent and renders on start and restart", async () => {
+		const terminal = new (class extends BoundedWriteTerminal {
+			override hideCursor(): void {
+				this.writes.push("\x1b[?25l");
+			}
+		})();
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		component.lines = ["initial content"];
+		tui.addChild(component);
+
+		tui.setShowHardwareCursor(true);
+		tui.setShowHardwareCursor(false);
+		tui.requestRender();
+		tui.requestRender(true);
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		assert.deepStrictEqual(terminal.writes, []);
+
+		tui.start();
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		assert.match(terminal.writes.join(""), /initial content/);
+
+		tui.stop();
+		terminal.writes.length = 0;
+		tui.start();
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		assert.match(terminal.writes.join(""), /initial content/);
+
+		tui.stop();
+		terminal.writes.length = 0;
+		component.lines = ["restarted content"];
+		tui.setShowHardwareCursor(true);
+		tui.setShowHardwareCursor(false);
+		tui.requestRender();
+		tui.requestRender(true);
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		assert.deepStrictEqual(terminal.writes, []);
+
+		tui.start();
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		assert.match(terminal.writes.join(""), /restarted content/);
+		tui.stop();
+	});
+
+	it("allows an explicit render without starting terminal input", () => {
+		const terminal = new (class extends BoundedWriteTerminal {
+			startCount = 0;
+			override start(onInput: (data: string) => void, onResize: () => void): void {
+				this.startCount++;
+				super.start(onInput, onResize);
+			}
+		})();
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		component.lines = ["explicit content"];
+		tui.addChild(component);
+
+		tui.renderNow(true);
+
+		assert.match(terminal.writes.join(""), /explicit content/);
+		assert.strictEqual(terminal.startCount, 0);
+	});
+
 	it("renders keyboard input without waiting for a throttled frame", async () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const tui: TUI = new TuiMainScreen(terminal);
@@ -170,6 +233,8 @@ describe("TUI bounded render output", () => {
 		component.lines = [kittyLine, kittyLine];
 		tui.addChild(component);
 
+		tui.start();
+		terminal.writes.length = 0;
 		tui.renderNow();
 
 		assert.ok(terminal.writes.length > 2, "large output should be split across terminal writes");
@@ -182,6 +247,7 @@ describe("TUI bounded render output", () => {
 			`\x1b[?2026h${kittyLine}\r\n${kittyLine}\x1b[?2026l`,
 			"chunking must preserve the synchronized render output",
 		);
+		tui.stop();
 	});
 
 	it("splits large differential updates without a full redraw", () => {
@@ -190,6 +256,7 @@ describe("TUI bounded render output", () => {
 		const component = new TestComponent();
 		tui.addChild(component);
 		component.lines = ["before"];
+		tui.start();
 		tui.renderNow();
 		terminal.writes.length = 0;
 
@@ -203,6 +270,7 @@ describe("TUI bounded render output", () => {
 		assert.ok(output.startsWith("\x1b[?2026h"));
 		assert.ok(output.endsWith("\x1b[?2026l"));
 		assert.ok(!output.includes("\x1b[2J"), "the update should stay on the differential render path");
+		tui.stop();
 	});
 });
 

@@ -122,7 +122,8 @@ interface LegacyV3IndexBase {
 }
 
 type RetainedLegacyV3IndexEntry = LegacyV3IndexBase & { mappedId: string; seq: number } & (
-		| { type: "message" | "custom" | "custom_message" | "branch_summary" }
+		| { type: "message" | "custom" | "custom_message" }
+		| { type: "branch_summary"; fromId: string }
 		| { type: "compaction"; firstKeptEntryId: string }
 	);
 
@@ -436,6 +437,8 @@ function indexLegacyV3Entry(
 		seq,
 	};
 	switch (entry.type) {
+		case "branch_summary":
+			return { ...retained, type: entry.type, fromId: entry.fromId };
 		case "compaction":
 			return { ...retained, type: entry.type, firstKeptEntryId: entry.firstKeptEntryId };
 		default:

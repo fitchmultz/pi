@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { EditorFactory, ExtensionUIContext } from "../src/core/extensions/index.ts";
-import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { type createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import type { RpcSessionState } from "../src/modes/rpc/rpc-types.ts";
@@ -14,7 +14,7 @@ const rpcIo = vi.hoisted(() => ({
 	lineHandler: undefined as ((line: string) => void) | undefined,
 }));
 
-vi.mock("../src/core/output-guard.js", () => ({
+vi.mock("../src/core/output-guard.ts", () => ({
 	flushRawStdout: vi.fn(async () => {}),
 	restoreStdout: vi.fn(),
 	takeOverStdout: vi.fn(),
@@ -22,7 +22,7 @@ vi.mock("../src/core/output-guard.js", () => ({
 	writeRawStdout: (line: string) => rpcIo.outputLines.push(line),
 }));
 
-vi.mock("../src/modes/rpc/jsonl.js", () => ({
+vi.mock("../src/modes/rpc/jsonl.ts", () => ({
 	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
 		rpcIo.lineHandler = onLine;
 		return () => {
@@ -85,19 +85,13 @@ async function startNativeRpc(harness: Harness) {
 	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 	initTheme("dark");
 	const runtime = createRuntimeHost(harness);
-	const interactiveMode = new InteractiveMode(runtime);
+	const terminal = new VirtualTerminal(100, 30);
+	const interactiveMode = new InteractiveMode(runtime, { terminal });
 	const view = interactiveMode as unknown as {
 		renderer: ReturnType<typeof createInteractiveTui>;
 		chatContainer: Container;
 		editorContainer: Container;
 	};
-	const terminal = new VirtualTerminal(100, 30);
-	view.renderer = createInteractiveTui({
-		tuiMode: "regular",
-		terminal,
-		showHardwareCursor: false,
-		logDirectory: harness.tempDir,
-	});
 	onTestFinished(() => {
 		interactiveMode.stop();
 		harness.cleanup();
@@ -218,6 +212,19 @@ describe("RPC TUI handoff", () => {
 		expect(parseOutput().filter((record) => record.type === "extension_error")).toHaveLength(2);
 	});
 
+	it("keeps status rendering and title updates off the terminal before attachment", async () => {
+		const harness = await createHarness();
+		const { terminal, interactiveMode } = await startNativeRpc(harness);
+		const writes = vi.spyOn(terminal, "write");
+		const titles = vi.spyOn(terminal, "setTitle");
+		harness.session.extensionRunner.getUIContext().setStatus("background", "pending");
+		await new Promise<void>((resolve) => setTimeout(resolve, 1100));
+		await harness.session.reload();
+		interactiveMode.stop();
+		expect(writes).not.toHaveBeenCalled();
+		expect(titles).not.toHaveBeenCalled();
+	});
+
 	it("preserves frontend mode across reload without starting extensions on handoff", async () => {
 		const starts: string[] = [];
 		const harness = await createHarness({
@@ -229,11 +236,13 @@ describe("RPC TUI handoff", () => {
 				},
 			],
 		});
-		const { interactiveMode, detach } = await startNativeRpc(harness);
+		const { interactiveMode, terminal, detach } = await startNativeRpc(harness);
+		const titles = vi.spyOn(terminal, "setTitle");
 		expect(starts).toEqual(["rpc"]);
 		rpcIo.lineHandler?.(JSON.stringify({ type: "attach_tui" }));
 		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeUndefined());
 		await interactiveMode.init();
+		await vi.waitFor(() => expect(titles).toHaveBeenCalled());
 		expect(harness.session.extensionRunner.createContext().mode).toBe("tui");
 		expect(starts).toEqual(["rpc"]);
 		await harness.session.reload();
@@ -241,9 +250,13 @@ describe("RPC TUI handoff", () => {
 		expect(starts).toEqual(["rpc", "tui"]);
 		detach?.("SIGUSR2");
 		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+		const titlesAtDetach = titles.mock.calls.length;
 		await harness.session.reload();
 		expect(harness.session.extensionRunner.createContext().mode).toBe("rpc");
 		expect(starts).toEqual(["rpc", "tui", "rpc"]);
+		expect(titles).toHaveBeenCalledTimes(titlesAtDetach);
+		rpcIo.lineHandler?.(JSON.stringify({ type: "attach_tui" }));
+		await vi.waitFor(() => expect(titles.mock.calls.length).toBeGreaterThan(titlesAtDetach));
 	});
 
 	// PR #1: RPC answers must dismiss the actual native multiline editor, not just its pending request.

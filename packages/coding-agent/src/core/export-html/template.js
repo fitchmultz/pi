@@ -126,49 +126,7 @@
           }
           current = byId.get(current.parentId);
         }
-        const positions = new Map();
-        const display = [];
-        for (const entry of path) {
-          if (entry.type === 'message' && entry.message.role === 'assistant' && entry.message.responseId) {
-            const index = positions.get(entry.message.responseId);
-            if (index !== undefined) {
-              const previous = display[index];
-              display[index] = {
-                ...entry,
-                checkpointIds: [...(previous.checkpointIds || [previous.id]), entry.id],
-                message: mergeAssistantCheckpoint(previous.message, entry.message)
-              };
-              continue;
-            }
-            positions.set(entry.message.responseId, display.length);
-          }
-          display.push(entry);
-        }
-        return display;
-      }
-
-      // Browser counterpart of pi-ai's mergeAssistantCheckpoint; raw journal entries stay untouched.
-      function mergeAssistantCheckpoint(message, checkpoint) {
-        const latest = checkpoint.stopReason === 'pending' &&
-          (message.stopReason !== 'pending' || message.content.length > checkpoint.content.length)
-          ? message : checkpoint;
-        const executions = new Map();
-        for (const frame of [message, checkpoint]) {
-          for (const call of frame.content) {
-            if (call.type !== 'toolCall' || call.executionStarted === undefined) continue;
-            executions.set(call.id, {
-              ...executions.get(call.id),
-              executionStarted: call.executionStarted,
-              ...(call.executionArguments === undefined ? {} : { executionArguments: call.executionArguments }),
-              ...(call.executionDetached === undefined ? {} : { executionDetached: call.executionDetached })
-            });
-          }
-        }
-        return {
-          ...latest,
-          content: latest.content.map(block =>
-            block.type === 'toolCall' && executions.has(block.id) ? { ...block, ...executions.get(block.id) } : block)
-        };
+        return path;
       }
 
       // Tree node lookup for finding leaves
@@ -374,9 +332,6 @@
             break;
           case 'compaction':
             parts.push('compaction');
-            break;
-          case 'context_window':
-            parts.push('context window', entry.handoff || '');
             break;
           case 'branch_summary':
             parts.push('branch summary', entry.summary);
@@ -602,12 +557,12 @@
       }
 
       function toolDisplayName(tool) {
-        return tool.namespace === undefined ? tool.name : `${tool.namespace}.${tool.name}`;
+        return tool.name;
       }
 
       function formatToolCall(tool) {
-        const args = tool.executionArguments ?? tool.arguments ?? {};
-        switch (tool.namespace === undefined ? tool.name : null) {
+        const args = tool.arguments ?? {};
+        switch (tool.name) {
           case 'read': {
             const path = shortenPath(String(args.path || args.file_path || ''));
             const offset = args.offset;
@@ -715,7 +670,7 @@
               if (toolCall) {
                 return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall))}</span>`;
               }
-              return labelHtml + `<span class="tree-role-tool">[${escapeHtml(toolDisplayName({ name: msg.toolName || 'tool', namespace: msg.namespace }))}]</span>`;
+              return labelHtml + `<span class="tree-role-tool">[${escapeHtml(toolDisplayName({ name: msg.toolName || 'tool' }))}]</span>`;
             }
             if (msg.role === 'bashExecution') {
               const cmd = truncate(normalize(msg.command || ''));
@@ -725,11 +680,6 @@
           }
           case 'compaction':
             return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
-          case 'context_window': {
-            const tokens = entry.tokensBefore == null ? '' : `: ${Math.round(entry.tokensBefore/1000)}k tokens`;
-            const handoff = entry.handoff ? ` ${truncate(normalize(entry.handoff))}` : '';
-            return labelHtml + `<span class="tree-compaction">[context window${tokens}]</span>${escapeHtml(handoff)}`;
-          }
           case 'branch_summary': {
             const summary = truncate(normalize(entry.summary || ''));
             return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
@@ -975,14 +925,29 @@
             '</div>';
         };
 
+        // Calls this tool made to other tools (for example from a codemode script), recorded without results.
+        const renderNestedCalls = () => {
+          const nested = result?.nestedCalls;
+          if (!nested || !Array.isArray(nested.calls) || nested.calls.length === 0) return '';
+          const icons = { ok: '✓', error: '✗', unfinished: '…' };
+          const lines = nested.calls.map(c => {
+            const args = c.arguments ? JSON.stringify(c.arguments) : `[arguments omitted, ${c.argumentsBytes} bytes]`;
+            const duration = c.durationMs !== undefined ? ` ${c.durationMs}ms` : '';
+            const error = c.error ? `\n    ${c.error.split('\n').join('\n    ')}` : '';
+            return `${icons[c.status] || '?'} ${c.name} ${args}${duration}${error}`;
+          });
+          const title = `Nested calls: ${nested.calls.length}${nested.complete ? '' : ' (incomplete record)'}`;
+          return formatExpandableOutput([title, ...lines].join('\n'), 1);
+        };
+
         const toolDomId = `tool-call-${escapeHtml(call.id)}`;
         let html = `<div class="tool-execution ${statusClass}" id="${toolDomId}">`;
-        const args = call.executionArguments ?? call.arguments ?? {};
+        const args = call.arguments ?? {};
         const name = toolDisplayName(call);
 
         const invalidArg = '<span class="tool-error">[invalid arg]</span>';
 
-        switch (call.namespace === undefined ? call.name : null) {
+        switch (call.name) {
           case 'bash': {
             const command = str(args.command);
             const cmdDisplay = command === null ? invalidArg : escapeHtml(command || '...');
@@ -1112,6 +1077,7 @@
           }
         }
 
+        html += renderNestedCalls();
         html += '</div>';
         return html;
       }
@@ -1353,14 +1319,6 @@
           </div>`;
         }
 
-        if (entry.type === 'context_window') {
-          const handoff = entry.handoff ? `**Handoff from the previous window:**\n\n${entry.handoff}` : 'Fresh context window started.';
-          return `<div class="hook-message" id="${entryDomId}">${tsHtml}
-            <div class="hook-type">[context window]</div>
-            <div class="markdown-content">${safeMarkedParse(handoff)}</div>
-          </div>`;
-        }
-
         if (entry.type === 'branch_summary') {
           return `<div class="branch-summary" id="${entryDomId}">${tsHtml}
             <div class="branch-summary-header">Branch Summary</div>
@@ -1368,9 +1326,10 @@
           </div>`;
         }
 
-        if (entry.type === 'custom_message' && entry.display) {
-          return `<div class="hook-message" id="${entryDomId}">${tsHtml}
-            <div class="hook-type">[${escapeHtml(entry.customType)}]</div>
+        if (entry.type === 'custom_message') {
+          const hidden = entry.display === false;
+          return `<div class="hook-message${hidden ? ' hook-message-hidden' : ''}" id="${entryDomId}">${tsHtml}
+            <div class="hook-type">[${escapeHtml(entry.customType)}]${hidden ? ' · Hidden in terminal' : ''}</div>
             <div class="markdown-content">${safeMarkedParse(typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content))}</div>
           </div>`;
         }
@@ -1390,7 +1349,7 @@
         const models = new Set();
 
         for (const entry of entryList) {
-          if (entry.type === 'message' && !entry.checkpoint) {
+          if (entry.type === 'message') {
             const msg = entry.message;
             if (msg.role === 'user') userMessages++;
             if (msg.role === 'assistant') {
@@ -1446,10 +1405,11 @@
           <div class="header">
             <h1>Session: ${escapeHtml(header?.id || 'unknown')}</h1>
             <div class="help-bar">
-              <span class="help-hint">T toggle thinking · O toggle tools</span>
+              <span class="help-hint">T toggle thinking · O toggle tools · H toggle hidden messages</span>
               <div class="help-actions">
-                <button type="button" class="header-toggle-btn" data-action="toggle-thinking" title="Toggle thinking (T)">Toggle thinking</button>
-                <button type="button" class="header-toggle-btn" data-action="toggle-tools" title="Toggle tools (O)">Toggle tools</button>
+                <button type="button" class="header-toggle-btn" data-action="toggle-thinking" aria-pressed="${thinkingExpanded}" title="Toggle thinking (T)">Toggle thinking</button>
+                <button type="button" class="header-toggle-btn" data-action="toggle-tools" aria-pressed="${toolOutputsExpanded}" title="Toggle tools (O)">Toggle tools</button>
+                <button type="button" class="header-toggle-btn" data-action="toggle-hidden-messages" aria-pressed="${showHiddenMessages}" title="Show custom messages marked as hidden in the terminal (H).">${showHiddenMessages ? 'Hide hidden messages' : 'Show hidden messages'}</button>
                 <button type="button" class="download-json-btn" onclick="downloadSessionJson()" title="Download session as JSONL">↓ JSONL</button>
               </div>
             </div>
@@ -1530,12 +1490,11 @@
           // were already resolved from the escaped id rendered by renderToolCall().
           return `tool-call-${entry.message.toolCallId}`;
         }
-        const displayEntry = currentPath.find(entry => entry.checkpointIds?.includes(entryId));
-        return `entry-${displayEntry?.id || entryId}`;
+        return `entry-${entryId}`;
       }
 
       function renderEntryToNode(entry) {
-        // Assistant cards include branch-dependent results and merged execution checkpoints.
+        // Assistant cards include branch-dependent results.
         const cacheable = entry.type !== 'message' || entry.message.role !== 'assistant';
         if (cacheable && entryCache.has(entry.id)) {
           return entryCache.get(entry.id).cloneNode(true);
@@ -1559,6 +1518,10 @@
       function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null) {
         currentLeafId = targetId;
         currentTargetId = scrollToEntryId || targetId;
+        const targetEntry = byId.get(currentTargetId);
+        if (scrollMode === 'target' && targetEntry?.type === 'custom_message' && targetEntry.display === false) {
+          setHiddenMessagesVisible(true);
+        }
         const path = getPath(targetId);
         currentPath = path;
         treeRendered = false;
@@ -1581,6 +1544,10 @@
 
         messagesEl.innerHTML = '';
         messagesEl.appendChild(fragment);
+
+        // Cached nodes contain their initial presentation; reapply the viewer's toggle states.
+        setThinkingExpanded(thinkingExpanded);
+        setToolOutputsExpanded(toolOutputsExpanded);
 
         // Attach click handlers for copy-link buttons
         messagesEl.querySelectorAll('.copy-link-btn').forEach(btn => {
@@ -1854,19 +1821,32 @@
       // Toggle states
       let thinkingExpanded = true;
       let toolOutputsExpanded = false;
+      let showHiddenMessages = false;
 
-      const toggleThinking = () => {
-        thinkingExpanded = !thinkingExpanded;
+      function setHiddenMessagesVisible(visible) {
+        showHiddenMessages = visible;
+        document.body.classList.toggle('show-hidden-messages', visible);
+        const button = document.querySelector('[data-action="toggle-hidden-messages"]');
+        if (button) {
+          button.setAttribute('aria-pressed', String(visible));
+          button.textContent = visible ? 'Hide hidden messages' : 'Show hidden messages';
+        }
+      }
+
+      function setThinkingExpanded(expanded) {
+        thinkingExpanded = expanded;
+        document.querySelector('[data-action="toggle-thinking"]')?.setAttribute('aria-pressed', String(expanded));
         document.querySelectorAll('.thinking-text').forEach(el => {
           el.style.display = thinkingExpanded ? '' : 'none';
         });
         document.querySelectorAll('.thinking-collapsed').forEach(el => {
           el.style.display = thinkingExpanded ? 'none' : 'block';
         });
-      };
+      }
 
-      const toggleToolOutputs = () => {
-        toolOutputsExpanded = !toolOutputsExpanded;
+      function setToolOutputsExpanded(expanded) {
+        toolOutputsExpanded = expanded;
+        document.querySelector('[data-action="toggle-tools"]')?.setAttribute('aria-pressed', String(expanded));
         document.querySelectorAll('.tool-output.expandable').forEach(el => {
           el.classList.toggle('expanded', toolOutputsExpanded);
         });
@@ -1876,11 +1856,18 @@
         document.querySelectorAll('.skill-invocation').forEach(el => {
           el.classList.toggle('expanded', toolOutputsExpanded);
         });
-      };
+      }
 
       const attachHeaderHandlers = () => {
-        document.querySelector('[data-action="toggle-thinking"]')?.addEventListener('click', toggleThinking);
-        document.querySelector('[data-action="toggle-tools"]')?.addEventListener('click', toggleToolOutputs);
+        document.querySelector('[data-action="toggle-thinking"]')?.addEventListener('click', () => {
+          setThinkingExpanded(!thinkingExpanded);
+        });
+        document.querySelector('[data-action="toggle-tools"]')?.addEventListener('click', () => {
+          setToolOutputsExpanded(!toolOutputsExpanded);
+        });
+        document.querySelector('[data-action="toggle-hidden-messages"]')?.addEventListener('click', () => {
+          setHiddenMessagesVisible(!showHiddenMessages);
+        });
       };
 
       const isEditableTarget = (element) => {
@@ -1900,17 +1887,20 @@
           navigateTo(leafId, 'bottom');
         }
 
-        if (isEditableTarget(document.activeElement)) {
+        if (e.ctrlKey || e.metaKey || e.altKey || isEditableTarget(document.activeElement)) {
           return;
         }
 
         const key = e.key.toLowerCase();
         if (key === 't') {
           e.preventDefault();
-          toggleThinking();
+          setThinkingExpanded(!thinkingExpanded);
         } else if (key === 'o') {
           e.preventDefault();
-          toggleToolOutputs();
+          setToolOutputsExpanded(!toolOutputsExpanded);
+        } else if (key === 'h') {
+          e.preventDefault();
+          setHiddenMessagesVisible(!showHiddenMessages);
         }
       });
 

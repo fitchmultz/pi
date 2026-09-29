@@ -13,7 +13,6 @@ import {
 } from "../src/api/openai-responses-shared.ts";
 import type { AssistantMessage, Model, Tool, ToolCall } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
-import { toolKey } from "../src/utils/tool-identity.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 function makeModel(): Model<"openai-responses"> {
@@ -290,14 +289,14 @@ describe("constrained tool sampling", () => {
 			replayedToolCall.arguments = invalidArguments;
 			expect(() =>
 				convertResponsesMessages(makeModel(), context, new Set(["openai"]), {
-					grammarToolInputProperties: new Map([[toolKey({ name: "sample_tool" }), "payload"]]),
+					grammarToolInputProperties: new Map([["sample_tool", "payload"]]),
 				}),
 			).toThrow('Grammar tool call "sample_tool" requires argument "payload" to be a string');
 		}
 
 		replayedToolCall.arguments = { payload: "abc" };
 		const messages = convertResponsesMessages(makeModel(), context, new Set(["openai"]), {
-			grammarToolInputProperties: new Map([[toolKey({ name: "sample_tool" }), "payload"]]),
+			grammarToolInputProperties: new Map([["sample_tool", "payload"]]),
 		});
 
 		expect(messages).toContainEqual({
@@ -360,25 +359,13 @@ describe("constrained tool sampling", () => {
 		] as ResponseStreamEvent[];
 
 		await processResponsesStream(iterateEvents(events), output, stream, makeModel(), {
-			grammarToolInputProperties: new Map([[toolKey({ name: "sample_tool" }), "payload"]]),
+			grammarToolInputProperties: new Map([["sample_tool", "payload"]]),
 		});
 
 		expect(output.stopReason).toBe("toolUse");
 		expect(starts).toEqual([{ payload: "a" }]);
 		expect(output.content).toEqual([
-			{
-				type: "toolCall",
-				id: "call_1|ctc_1",
-				name: "sample_tool",
-				arguments: { payload: "abc" },
-				responsesItem: {
-					type: "custom_tool_call",
-					call_id: "call_1",
-					id: "ctc_1",
-					name: "sample_tool",
-					input: "abc",
-				},
-			},
+			{ type: "toolCall", id: "call_1|ctc_1", name: "sample_tool", arguments: { payload: "abc" } },
 		]);
 		expect(JSON.parse(deltas.join(""))).toEqual({ payload: "abc" });
 	});

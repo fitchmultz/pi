@@ -27,6 +27,30 @@ export function addUsageToTotals(totals: UsageTotals, usage: Usage): void {
 	totals.cost += usage.cost.total;
 }
 
+/** Sum of two usages, keeping the optional token splits when either side reports them. */
+export function combineUsage(first: Usage, second: Usage): Usage {
+	return {
+		input: first.input + second.input,
+		output: first.output + second.output,
+		cacheRead: first.cacheRead + second.cacheRead,
+		cacheWrite: first.cacheWrite + second.cacheWrite,
+		...(first.cacheWrite1h !== undefined || second.cacheWrite1h !== undefined
+			? { cacheWrite1h: (first.cacheWrite1h ?? 0) + (second.cacheWrite1h ?? 0) }
+			: {}),
+		...(first.reasoning !== undefined || second.reasoning !== undefined
+			? { reasoning: (first.reasoning ?? 0) + (second.reasoning ?? 0) }
+			: {}),
+		totalTokens: first.totalTokens + second.totalTokens,
+		cost: {
+			input: first.cost.input + second.cost.input,
+			output: first.cost.output + second.cost.output,
+			cacheRead: first.cost.cacheRead + second.cost.cacheRead,
+			cacheWrite: first.cost.cacheWrite + second.cost.cacheWrite,
+			total: first.cost.total + second.cost.total,
+		},
+	};
+}
+
 export interface UsageCostBreakdownEntry {
 	key: string;
 	cost: number;
@@ -40,7 +64,7 @@ export function getUsageCostBreakdown(entries: SessionEntry[]): UsageCostBreakdo
 	for (const entry of entries) {
 		let key: string | undefined;
 		let usage: Usage | undefined;
-		if (entry.type === "message" && !entry.checkpoint && entry.message.role === "assistant") {
+		if (entry.type === "message" && entry.message.role === "assistant") {
 			key = `${entry.message.provider}/${entry.message.responseModel ?? entry.message.model}`;
 			usage = entry.message.usage;
 		} else if (entry.type === "usage") {

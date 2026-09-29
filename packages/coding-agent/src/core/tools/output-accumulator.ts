@@ -9,6 +9,7 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTa
 export interface OutputAccumulatorOptions {
 	maxLines?: number;
 	maxBytes?: number;
+	fullOutputMaxBytes?: number;
 	tempFilePrefix?: string;
 }
 
@@ -16,6 +17,12 @@ export interface OutputSnapshot {
 	content: string;
 	truncation: TruncationResult;
 	fullOutputPath?: string;
+}
+
+export interface FullOutput {
+	content: string;
+	/** Whether `content` omits part of the output. */
+	truncated: boolean;
 }
 
 function defaultTempFilePath(prefix: string): string {
@@ -38,6 +45,9 @@ export class OutputAccumulator {
 	private readonly maxLines: number;
 	private readonly maxBytes: number;
 	private readonly maxRollingBytes: number;
+	private readonly fullOutputMaxBytes: number;
+	private readonly head: Buffer;
+	private headBytes = 0;
 	private readonly tempFilePrefix: string;
 	private readonly decoder = new ShellDecoder();
 
@@ -60,7 +70,9 @@ export class OutputAccumulator {
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
+		this.fullOutputMaxBytes = options.fullOutputMaxBytes ?? 0;
+		this.head = Buffer.alloc(Math.floor(this.fullOutputMaxBytes / 2));
+		this.maxRollingBytes = Math.max(this.maxBytes * 2, Math.ceil(this.fullOutputMaxBytes / 2), 1);
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
 	}
 
@@ -139,6 +151,25 @@ export class OutputAccumulator {
 		await this.tempFileCompletion;
 	}
 
+	/**
+	 * Source-aware decoded output for programmatic callers. Call after `finish()` and
+	 * `closeTempFile()`. Longer output keeps its first and last halves around an omission marker;
+	 * the spill file separately preserves the original bytes in callback order.
+	 */
+	getFullOutput(): FullOutput {
+		if (this.totalDecodedBytes <= this.fullOutputMaxBytes) {
+			return { content: this.tailText, truncated: false };
+		}
+		const headText = this.head.subarray(0, this.headBytes).toString("utf-8");
+		const tail = Buffer.from(this.tailText, "utf-8");
+		const tailBytes = this.fullOutputMaxBytes - this.head.length;
+		let tailStart = Math.max(0, tail.length - tailBytes);
+		while (tailStart < tail.length && (tail[tailStart] & 0xc0) === 0x80) tailStart++;
+		const tailText = tail.subarray(tailStart).toString("utf-8");
+		const omitted = this.totalDecodedBytes - this.headBytes - (tail.length - tailStart);
+		return { content: `${headText}\n\n[... ${omitted} bytes omitted ...]\n\n${tailText}`, truncated: true };
+	}
+
 	getLastLineBytes(): number {
 		return this.currentLineBytes;
 	}
@@ -149,6 +180,8 @@ export class OutputAccumulator {
 		}
 
 		const bytes = byteLength(text);
+		const headLimit = this.head.length - this.totalDecodedBytes;
+		if (headLimit > 0) this.headBytes += this.head.write(text, this.headBytes, headLimit, "utf-8");
 		this.totalDecodedBytes += bytes;
 		this.tailText += text;
 		this.tailBytes += bytes;

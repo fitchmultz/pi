@@ -149,7 +149,7 @@ it.each([grammarError, "Schema is too complex for compilation."])(
 		]);
 		const fresh = normalizeContext({
 			messages: [
-				{ role: "system", content: "", toolsAdded: tools, contextWindowId: "next-window", timestamp: 2 },
+				{ role: "system", content: "", toolsAdded: tools, timestamp: 2 },
 				result,
 				{ role: "user", content: "Hello again", timestamp: 3 },
 			],

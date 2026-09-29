@@ -4,6 +4,12 @@ import { globSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const args = process.argv.slice(2);
+if (args.length === 1 && ["-h", "--help"].includes(args[0])) {
+	console.log("Usage: node scripts/generate-extension-provider-modules.mjs [--check]\nExample: node scripts/generate-extension-provider-modules.mjs --check\nWithout --check, writes the provider module registry. Exits 0 on success, 1 on failure.");
+	process.exit(0);
+}
+if (args.length > 1 || (args.length === 1 && args[0] !== "--check")) throw new Error("Expected --check or --help");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const aiDir = resolve(root, "packages/ai");
 const manifest = JSON.parse(readFileSync(resolve(aiDir, "package.json"), "utf8"));

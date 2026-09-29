@@ -80,15 +80,17 @@ function rebuildBashResultRenderComponent(
 		} else {
 			component.addChild({
 				render: (width: number) => {
+					// Cache the complete output: this renders on every frame for every bash result in the transcript.
 					if (state.cachedLines === undefined || state.cachedWidth !== width) {
 						const preview = truncateToVisualLines(styledOutput, BASH_PREVIEW_LINES, width);
-						state.cachedLines = ["", ...preview.visualLines];
+						const hintLines: string[] = [];
 						if (preview.skippedCount > 0) {
 							const hint =
 								theme.fg("muted", `... (${preview.skippedCount} earlier lines,`) +
 								` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
-							state.cachedLines.splice(1, 0, truncateToWidth(hint, width, "..."));
+							hintLines.push(truncateToWidth(hint, width, "..."));
 						}
+						state.cachedLines = ["", ...hintLines, ...preview.visualLines];
 						state.cachedWidth = width;
 					}
 					return state.cachedLines;

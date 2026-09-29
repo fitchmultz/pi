@@ -1,4 +1,4 @@
-import { linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -29,7 +29,12 @@ describe("HTML export", () => {
 			expect(readFileSync(source, "utf8")).toBe(before);
 
 			const output = join(dir, "session.html");
+			const previousOutput = join(dir, "previous.html");
+			writeFileSync(output, "previous export");
+			linkSync(output, previousOutput);
 			await expect(exportSession(manager, output)).resolves.toBe(output);
+			expect(readFileSync(previousOutput, "utf8")).toBe("previous export");
+			expect(readdirSync(dir).filter((name) => name.startsWith(".pi-write-"))).toEqual([]);
 			expect(readFileSync(output, "utf8")).toContain("<!DOCTYPE html>");
 			expect(readFileSync(source, "utf8")).toBe(before);
 		} finally {

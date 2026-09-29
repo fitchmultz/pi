@@ -1,12 +1,13 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import {
+	clampThinkingLevel,
 	getCurrentSystemMessage,
-	type ModelsSimpleStreamOptions,
-	type ToolSelection,
-	toolKey,
-} from "@earendil-works/pi-ai";
-import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
+	type Message,
+	type Model,
+	streamSimple,
+} from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
@@ -22,7 +23,7 @@ import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
-import { SettingsManager } from "./settings-manager.ts";
+import { DEFAULT_TOOL_NAMES, SettingsManager } from "./settings-manager.ts";
 import { time } from "./timings.ts";
 import {
 	createBackgroundCommandTool,
@@ -36,9 +37,9 @@ import {
 	createReadOnlyTools,
 	createReadTool,
 	createWriteTool,
-	type ToolName,
 	withFileMutationQueue,
 } from "./tools/index.ts";
+import { getBranchSelection } from "./virtual-models.ts";
 
 // Preserve the pre-0.81 fallback for extensions that construct Agent instances
 // or invoke low-level agent loops without supplying streamFn. Agent core remains
@@ -46,6 +47,9 @@ import {
 setDefaultStreamFn(streamSimple);
 
 export interface CreateAgentSessionOptions {
+	checkpoint?: SessionCheckpoint;
+	/** Hosts bind startup input before completion notifications may wake the model. */
+	deferBackgroundCommandNotifications?: boolean;
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: ~/.pi/agent */
@@ -65,31 +69,27 @@ export interface CreateAgentSessionOptions {
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
 	 *
 	 * - "all": start with no tools enabled
-	 * - "builtin": disable the default built-in tools (read, bash, background_command, edit, write)
+	 * - "builtin": disable the default built-in tools (read, bash, edit, write)
 	 *   but keep extension/custom tools enabled
 	 */
 	noTools?: "all" | "builtin";
 	/**
 	 * Optional allowlist of tool names.
 	 *
-	 * When omitted, pi restores the tool selection from an existing transcript.
-	 * For a new session, pi uses the `defaultTools` setting for the initial built-in
+	 * When omitted, pi uses the resolved `defaultTools` setting for the initial
 	 * selection when configured. Otherwise it enables the default built-in tools
-	 * (read, bash, background_command, edit, write). Extension/custom tools remain enabled unless
+	 * (read, bash, edit, write). Extension/custom tools remain enabled unless
 	 * `noTools` changes that default. When provided, only the listed tool names are
 	 * enabled.
 	 */
-	tools?: ToolSelection[];
+	tools?: string[];
 	/** Optional denylist of tool names to disable. Applies after `tools` when both are provided. */
-	excludeTools?: ToolSelection[];
+	excludeTools?: string[];
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
-
-	/** Restore exact native selection and pending queues without starting a run. */
-	checkpoint?: SessionCheckpoint;
 
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
@@ -98,8 +98,6 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Defer background notifications until bindExtensions installs the host's startup input queue. */
-	deferBackgroundCommandNotifications?: boolean;
 }
 
 /** Result from createAgentSession */
@@ -135,8 +133,8 @@ export {
 	createCodingTools,
 	createReadOnlyTools,
 	createReadTool,
-	createBashTool,
 	createBackgroundCommandTool,
+	createBashTool,
 	createEditTool,
 	createWriteTool,
 	createGrepTool,
@@ -222,9 +220,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (checkpoint?.selection.model && !model) throw new Error("Checkpoint model unavailable");
 	let modelFallbackMessage: string | undefined;
 
+	// Assistant messages name the physical model that answered, so a virtual selection is only in
+	// model_change entries.
+	const sessionModel = getBranchSelection(sessionManager.getBranch(), (provider, modelId) =>
+		modelRuntime.getModel(provider, modelId),
+	);
+
 	// If session has data, try to restore model from it
-	if (!checkpoint && !model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRuntime.getModel(existingSession.model.provider, existingSession.model.modelId);
+	if (!checkpoint && !model && hasExistingSession && sessionModel) {
+		const restoredModel = modelRuntime.getModel(sessionModel.provider, sessionModel.modelId);
 		if (
 			restoredModel &&
 			(modelRuntime.hasConfiguredAuth(restoredModel.provider) ||
@@ -233,7 +237,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			model = restoredModel;
 		}
 		if (!model) {
-			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
+			modelFallbackMessage = `Could not restore model ${sessionModel.provider}/${sessionModel.modelId}`;
 		}
 	}
 
@@ -283,16 +287,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames: ToolName[] = ["read", "bash", "background_command", "edit", "write"];
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
-	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames.map(toolKey)) : undefined;
+	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
 	const initialActiveToolNames =
 		options.tools === undefined && options.noTools === undefined && getCurrentSystemMessage(existingSession.messages)
 			? undefined
-			: (options.tools ?? (options.noTools ? [] : (configuredDefaultToolNames ?? defaultActiveToolNames))).filter(
-					(name) => !excludedToolNameSet?.has(toolKey(name)),
+			: (options.tools ?? (options.noTools ? [] : (configuredDefaultToolNames ?? DEFAULT_TOOL_NAMES))).filter(
+					(name) => !excludedToolNameSet?.has(name),
 				);
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
@@ -366,6 +369,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			},
 		};
 	};
+	// Warm only requests for the selected model. Requests a virtual selection routed, or that an
+	// extension redirected, may not be repeated by the next request, so warming them could be wasted.
 	const cacheContextIsCurrent = (requestModel: Model<any>) => {
 		const messages = agent.state.messages;
 		return () => {
@@ -393,6 +398,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			headers: response.headers,
 		});
 	};
+	const handleProviderStreamEvent: NonNullable<ModelsSimpleStreamOptions["onProviderStreamEvent"]> = async (
+		data,
+		model,
+	) => {
+		const runner = extensionRunnerRef.current;
+		if (!runner?.hasHandlers("provider_stream_event")) return;
+		await runner.emit({
+			data,
+			type: "provider_stream_event",
+			provider: model.provider,
+			api: model.api,
+			model: model.id,
+		});
+	};
 
 	const agent = new Agent({
 		initialState: {
@@ -417,6 +436,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		onPayload: transformProviderPayload,
 		onResponse: handleProviderResponse,
+		onProviderStreamEvent: handleProviderStreamEvent,
 		sessionId: sessionManager.getSessionId(),
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;
@@ -455,14 +475,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		modelRuntime,
 		cacheWarmer,
 		initialActiveToolNames,
-		noBuiltinTools: options.noTools === "builtin",
 		allowedToolNames,
+		noBuiltinTools: options.noTools === "builtin",
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
 		deferBackgroundCommandNotifications: options.deferBackgroundCommandNotifications,
 	});
-	if (checkpoint) restoreSessionCheckpoint(session, checkpoint);
+
+	if (options.checkpoint) restoreSessionCheckpoint(session, options.checkpoint);
 
 	const extensionsResult = resourceLoader.getExtensions();
 

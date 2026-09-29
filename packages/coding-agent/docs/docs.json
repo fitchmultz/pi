@@ -99,6 +99,10 @@
             {
               "title": "Use Pi Packages",
               "path": "packages.md"
+            },
+            {
+              "title": "Connect MCP Servers",
+              "path": "mcp.md"
             }
           ]
         },
@@ -110,8 +114,16 @@
               "path": "extensions.md"
             },
             {
+              "title": "Group On-demand Instructions",
+              "path": "instruction-groups.md"
+            },
+            {
               "title": "Add Custom Providers",
               "path": "custom-provider.md"
+            },
+            {
+              "title": "Route with Virtual Models",
+              "path": "virtual-models.md"
             },
             {
               "title": "Build Terminal UI Components",

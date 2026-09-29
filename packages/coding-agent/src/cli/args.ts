@@ -305,7 +305,9 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
   ${APP_NAME} auth <command>            Print credentials or check provider readiness
   ${APP_NAME} restart [options]         Queue a managed restart from a Pi shell tool (Node CLI)
-  ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list/config/auth
+  ${APP_NAME} mcp <command>             Check MCP servers, sign in to or out of OAuth servers
+  ${APP_NAME} convert-session <in> <out> Convert settled legacy history into a new file
+  ${APP_NAME} <command> --help          Show command-specific help
 
 ${chalk.bold("Options:")}
   --provider <name>              Provider name (default: google)
@@ -335,8 +337,8 @@ ${chalk.bold("Options:")}
   --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable
                                  Applies to built-in, extension, and custom tools
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max
-  --extension, -e <path>         Load an extension file (can be used multiple times)
-  --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
+  --extension, -e <path>         Load an extension file or builtin:<name> (can be used multiple times)
+  --no-extensions, -ne           Disable extension discovery and built-in extensions (explicit -e paths still work)
   --skill <path>                 Load a skill file or directory (can be used multiple times)
   --no-skills, -ns               Disable skills discovery and loading
   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)

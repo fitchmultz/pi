@@ -2,6 +2,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
+import type { PromptDisposition } from "../../src/core/agent-session.ts";
 import { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import { createInteractiveTui, InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
@@ -258,7 +259,7 @@ describe("native shutdown prompt admission", () => {
 		const entered = deferred();
 		const released = deferred();
 		const drainReleased = deferred();
-		const preflight: boolean[] = [];
+		const preflight: PromptDisposition[] = [];
 		const harness = await createHarness({
 			tools: [],
 			settings: { compaction: { enabled: false }, retry: { enabled: false } },
@@ -303,7 +304,7 @@ describe("native shutdown prompt admission", () => {
 			expect(await run).toEqual([{ status: "rejected", reason: expect.objectContaining({ name: "AbortError" }) }]);
 			await idle;
 			expect(harness.faux.state.callCount).toBe(0);
-			expect(preflight).toEqual(stage === "input" ? [false] : []);
+			expect(preflight).toEqual([]);
 			expect(harness.session.isIdle).toBe(true);
 			expect(harness.session.pendingInputCount).toBe(0);
 			expect(harness.session.pendingNextTurnCount).toBe(1);
@@ -502,7 +503,11 @@ describe("native shutdown prompt admission", () => {
 						{ triggerTurn: true },
 					),
 				).rejects.toMatchObject({ name: "AbortError" });
-				expect(harness.sessionManager.getEntries().some((entry) => entry.type === "custom")).toBe(false);
+				expect(
+					harness.sessionManager
+						.getEntries()
+						.some((entry) => entry.type === "custom" && entry.customType === "shutdown-state"),
+				).toBe(false);
 			} finally {
 				drainReleased.resolve();
 				await closing;

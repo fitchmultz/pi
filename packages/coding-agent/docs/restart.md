@@ -6,7 +6,7 @@ By default, each restart loads the release selected by the original CLI invocati
 
 The standard installer identifies its release `.bin/pi` entrypoint through `PI_MANAGED_INSTALL_ROOT`. Running that same entrypoint from a managed Pi shell also follows `current-version` on restart. To stay on a specific release, use `--runtime <package-dir>` or launch its concrete `dist/bundle/cli.js`.
 
-This is different from `/reload`, which refreshes resources but retains cached extension code.
+This is different from `/reload`, which applies extension code and resources in the existing process. Use restart for core runtime changes or when a clean process is required.
 
 ## Request a Restart
 

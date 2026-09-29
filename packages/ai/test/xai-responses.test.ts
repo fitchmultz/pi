@@ -273,7 +273,7 @@ describe("xAI Responses provider", () => {
 		const result = await streamOpenAIResponses(
 			openaiModel,
 			normalizeContext({ messages: [{ role: "user", content: "hello", timestamp: 1 }] }),
-			{ apiKey: "test-token", transport: "sse" },
+			{ apiKey: "test-token" },
 		).result();
 
 		expect(result.stopReason, result.errorMessage).toBe("stop");

@@ -65,8 +65,9 @@ export function isolatedEnvironment(home, tools) {
 }
 
 export function prepareTermuxCompiler(source, tools, env) {
-	// tsgo has no Android package; its pinned Linux binary is statically linked.
-	const name = `@typescript/native-preview-linux-${process.arch}`;
+	// TypeScript 7 has no Android package. Use the lockfile-pinned Linux compiler.
+	// ponytail: fixture coverage verifies installation, not execution on real Termux hardware.
+	const name = `@typescript/typescript-linux-${process.arch}`;
 	const key = `node_modules/${name}`;
 	const locked = JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8")).packages[key];
 	if (!locked?.version || !locked.integrity) throw new Error(`Missing locked compiler: ${name}`);
@@ -81,10 +82,10 @@ export function prepareTermuxCompiler(source, tools, env) {
 	run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--os=linux", "--include=optional", "--no-audit", "--no-fund"], {
 		cwd: directory, env,
 	});
-	const binary = join(directory, key, "lib/tsgo");
+	const binary = join(directory, key, "lib/tsc");
 	const version = run(binary, ["--version"], { env, stdio: "pipe" });
 	if (version !== `Version ${locked.version}`) throw new Error(`Unexpected compiler version: ${version}`);
-	replaceSymlink(binary, join(source, "node_modules/.bin/tsgo"));
+	replaceSymlink(binary, join(source, "node_modules/.bin/tsc"));
 }
 
 export function releaseIdentity(receipt) {
@@ -242,27 +243,34 @@ export default function(pi) {
 }
 `);
 		writeFileSync(entry, `import assert from "node:assert/strict";
-import { mkdirSync, realpathSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { CodemodeSandbox } from "@earendil-works/pi-codemode";
+import { parseJsonRpcMessage } from "@earendil-works/pi-mcp";
 import { createAgentSession, DefaultResourceLoader, getPackageDir, ModelRuntime, SessionManager, SettingsManager,
   readSessionCheckpoint, writeSessionCheckpoint } from "${codingAgentName}";
 import { getRestartRuntimeWorker } from ${JSON.stringify(pathToFileURL(join(pkg, "dist/cli/launcher.js")).href)};
 const expected = realpathSync(${JSON.stringify(pkg)});
 assert.equal(realpathSync(getPackageDir()), expected);
 assert.equal(getRestartRuntimeWorker(expected), realpathSync(join(expected, "dist/bundle/cli-worker.js")));
+assert.equal(parseJsonRpcMessage({ jsonrpc: "2.0", id: 1, result: {} }).id, 1);
+const chunks = join(expected, "dist/bundle/chunks");
+const worker = readdirSync(chunks).find(name => name === "codemode-worker.js");
+assert.ok(worker, "Missing bundled codemode worker");
+for (const workerUrl of [undefined, pathToFileURL(join(chunks, worker))]) {
+  const sandbox = new CodemodeSandbox({ workerUrl, timeoutMs: 10000 });
+  try {
+    const result = await sandbox.execute("return 6 * 7;");
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.value, 42);
+  } finally { await sandbox.close(); }
+}
 const cwd = join(process.env.HOME, "sdk-work");
 mkdirSync(cwd);
 const agentDir = process.env.PI_CODING_AGENT_DIR;
 const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
 const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, allowModelNetwork: false });
-for (const provider of ["openai", "openai-codex", "cloudflare-ai-gateway"]) {
-  for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) {
-    const compat = modelRuntime.getModel(provider, id)?.compat;
-    for (const capability of ["supportsAsyncTools", "supportsSteering", "supportsReasoningEffortUpdates"]) {
-      assert.equal(compat?.[capability], true, provider + "/" + id + ": " + capability);
-    }
-  }
-}
 async function create(checkpoint) {
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
     additionalExtensionPaths: [${JSON.stringify(extension)}], noSkills: true, noPromptTemplates: true, noThemes: true });
@@ -292,7 +300,7 @@ try {
   assert.equal(restored.model, undefined);
   assert.deepEqual(restored.getActiveToolNames(), checkpoint.selection.activeTools);
 } finally { restored.dispose(); }
-console.log("Installed SDK, GPT-6 lifecycle capabilities, extension identity and native checkpoint restore passed.");
+console.log("Installed SDK, MCP, WASM, both codemode workers, extension identity and native checkpoint restore passed.");
 `);
 		run(tools.node, [entry], { cwd: env.HOME, env, timeout: 60_000 });
 	} finally {
@@ -321,7 +329,10 @@ with npm installed alongside it, Git, tar, and tmux for real-terminal validation
                         except selected, .previous and visibly running ones
 --releases <directory>  Default: ~/.local/share/pi-fork/releases
 --selector <symlink>    Default: ~/.local/share/npm-global/lib/node_modules/${codingAgentName}
---help                  Show this help
+-h, --help              Show this help
+
+Example: node scripts/install-fork.mjs --ref HEAD --stage
+Exit codes: 0 success, 1 failure.
 
 Selection atomically replaces only the package symlink; its old target is kept
 at <selector>.previous. Existing releases and user settings/auth/sessions are
@@ -342,7 +353,7 @@ export async function main(args = process.argv.slice(2)) {
 	let selection;
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
-		if (arg === "--help") { printUsage(); return; }
+		if (arg === "--help" || arg === "-h") { printUsage(); return; }
 		if (arg === "--stage") { options.stage = true; continue; }
 		if (arg === "--prune") { options.prune = true; continue; }
 		if (!["--ref", "--source-archive", "--releases", "--selector", "--activate", "--rollback", "--keep"].includes(arg)) throw new Error(`Unknown option: ${arg}`);

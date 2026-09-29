@@ -33,16 +33,22 @@ async function collect(source: LegacyV3Source, selected?: (id: string) => boolea
 
 class ObservedEnv extends NodeExecutionEnv {
 	lineReads = 0;
+	opens = 0;
+	closes = 0;
 
 	override async openTextLineReader(path: string, context: Context): Promise<Result<TextLineReader, FileError>> {
 		const opened = await super.openTextLineReader(path, context);
 		if (!opened.ok) return opened;
+		this.opens++;
 		return ok({
 			readLine: (readContext: Context) => {
 				this.lineReads++;
 				return opened.value.readLine(readContext);
 			},
-			close: (closeContext: Context) => opened.value.close(closeContext),
+			close: async (closeContext: Context) => {
+				this.closes++;
+				await opened.value.close(closeContext);
+			},
 		});
 	}
 }
@@ -61,6 +67,7 @@ describe("streaming legacy v3 normalization", () => {
 		getOrThrow(await fileSystem.writeFile(path, content, BACKGROUND_CONTEXT));
 		return {
 			path,
+			content,
 			reader: fileSystem,
 			read: () => LegacyV3Source.read(fileSystem, path, BACKGROUND_CONTEXT),
 		};

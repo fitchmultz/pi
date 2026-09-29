@@ -39,8 +39,7 @@ describe("SettingsManager - External Edit Preservation", () => {
 
 	it("serializes concurrent first writes before reading and merging settings", async () => {
 		const workerOptions = {
-			execArgv: ["--import", "tsx"],
-			env: { ...process.env, TSX_TSCONFIG_PATH: fileURLToPath(new URL("../../../tsconfig.json", import.meta.url)) },
+			execArgv: ["--import", fileURLToPath(new URL("../src/experimental/source-resolver.ts", import.meta.url))],
 		};
 		const data = { cwd: projectDir, agentDir, barrier: new SharedArrayBuffer(4) };
 		const workerPath = new URL("./fixtures/settings-first-write-worker.ts", import.meta.url);

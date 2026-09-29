@@ -10,9 +10,7 @@ function normalizeEventOrder(events: Harness["events"]): string[] {
 		const label =
 			event.type === "message_start" || event.type === "message_end"
 				? `${event.type}:${event.message.role}`
-				: event.type === "tool_execution_start" ||
-						event.type === "tool_execution_prepared" ||
-						event.type === "tool_execution_end"
+				: event.type === "tool_execution_start" || event.type === "tool_execution_end"
 					? `${event.type}:${event.toolName}`
 					: event.type;
 		if (label === "message_update" && normalized[normalized.length - 1] === "message_update") {
@@ -93,14 +91,6 @@ describe("AgentSession retry and event characterization", () => {
 									id: "call|fc_call",
 									name: "work",
 									arguments: {},
-									responsesItem: {
-										type: "function_call",
-										id: "fc_call",
-										call_id: "call",
-										name: "work",
-										arguments: "{}",
-										status: "completed",
-									},
 								},
 					{ type: "text", text: "unfinished answer" },
 				],
@@ -463,6 +453,7 @@ describe("AgentSession retry and event characterization", () => {
 			"turn_start",
 			"message_start:system",
 			"message_end:system",
+			"queue_update",
 			"message_start:user",
 			"message_end:user",
 			"message_start:assistant",
@@ -502,13 +493,13 @@ describe("AgentSession retry and event characterization", () => {
 			"turn_start",
 			"message_start:system",
 			"message_end:system",
+			"queue_update",
 			"message_start:user",
 			"message_end:user",
 			"message_start:assistant",
 			"message_update",
 			"message_end:assistant",
 			"tool_execution_start:echo",
-			"tool_execution_prepared:echo",
 			"tool_execution_end:echo",
 			"message_start:toolResult",
 			"message_end:toolResult",

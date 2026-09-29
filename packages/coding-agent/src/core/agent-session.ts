@@ -17,18 +17,22 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type {
-	Agent,
-	AgentContext,
-	AgentEvent,
-	AgentMessage,
-	AgentState,
-	AgentTool,
-	NewContextRequest,
-	PrepareNextTurnContext,
-	ThinkingLevel,
+import {
+	type AfterToolCallContext,
+	type AfterToolCallResult,
+	type Agent,
+	type AgentContext,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentState,
+	type AgentTool,
+	type AgentToolCallOutcome,
+	type BeforeToolCallContext,
+	type BeforeToolCallResult,
+	type PrepareNextTurnContext,
+	runToolCall,
+	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { getPendingToolCalls } from "@earendil-works/pi-agent-core";
 import {
 	contentText,
 	getCurrentSystemMessage,
@@ -36,13 +40,7 @@ import {
 	getCurrentTools,
 	getToolStateChanges,
 	retryDelayMs,
-	type ToolReference,
-	type ToolSelection,
-	toolId,
-	toolKey,
 	toToolDeclaration,
-	toToolReference,
-	withoutToolSearchState,
 } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
@@ -69,7 +67,7 @@ import {
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
 import { Clone } from "typebox/value";
-import { APP_NAME, ENV_SESSION_DIR, getAgentDir } from "../config.ts";
+import { ENV_SESSION_DIR, getAgentDir } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { processImage } from "../utils/image-process.ts";
@@ -107,8 +105,8 @@ import {
 	estimateProjectedContextTokens,
 	estimateTokens,
 	generateBranchSummary,
-	isContextUsageInvalidatingEntry,
 	prepareCompaction,
+	prepareCompactionForExtension,
 	shouldCompact,
 } from "./compaction/index.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
@@ -116,10 +114,9 @@ import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
 	type AgentActivityOutcome,
-	type AutoRetryEndEvent,
-	type AutoRetryStartEvent,
 	type BoundaryContextPreview,
 	type ContextUsage,
+	type ExecuteToolOptions,
 	type ExtensionCommandContextActions,
 	type ExtensionErrorListener,
 	type ExtensionMode,
@@ -136,14 +133,13 @@ import {
 	type SessionCompactFailedEvent,
 	type SessionStartEvent,
 	type ShutdownHandler,
-	type SummarizationRetryAttemptStartEvent,
-	type SummarizationRetryFinishedEvent,
-	type SummarizationRetryScheduledEvent,
 	type ToolDefinition,
 	type ToolExecutionEndEvent,
 	type ToolExecutionStartEvent,
 	type ToolExecutionUpdateEvent,
+	type ToolExposure,
 	type ToolInfo,
+	type ToolLoadout,
 	type TreePreparation,
 	type TurnStartEvent,
 	wrapRegisteredTools,
@@ -152,6 +148,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type BashExecutionMessage, type CustomMessage, convertToLlm, isMessagePreserved } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
+import { NestedToolCallRunner } from "./nested-tool-calls.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
@@ -159,13 +156,14 @@ import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	type ContextEditEntry,
+	getLatestCompactionEntry,
 	type SessionEntry,
 	SessionManager,
-	sessionEntryToContextMessages,
+	type SessionProjection,
 } from "./session-manager.ts";
 import type { CacheWarmingMode, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
-import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { BUILTIN_PATH_PREFIX, createSyntheticSourceInfo, isSyntheticPath, type SourceInfo } from "./source-info.ts";
 import {
 	buildSystemPrompt,
 	buildSystemPromptSections,
@@ -174,21 +172,55 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
-import {
-	type AvailableDiscoveryGroup,
-	availableDiscoveryGroups,
-	createDiscoverToolsDefinition,
-	DISCOVER_TOOLS_NAME,
-	discoverySectionTools,
-	supportsToolDiscovery,
-} from "./tool-discovery.ts";
 import type { BackgroundCommandToolDetails } from "./tools/background-command.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
-import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
+import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
+import {
+	findLatestResponse,
+	getBranchSelection,
+	getVirtualModelState,
+	isVirtualModel,
+	VIRTUAL_MODEL_STATE_ENTRY,
+	type VirtualModelStateData,
+} from "./virtual-models.ts";
 
-const MAX_CONTEXT_HANDOFF_CHARS = 20_000;
+const TOOL_LOADOUT_SELECTION = "pi-tool-loadout";
+
+interface ReportedUsagePrefix {
+	provider: string;
+	api: string;
+	model: string;
+	systemPrompt: string;
+	transcriptSystemPrompt: string;
+	toolKeys: string[];
+	canonicalConversation: unknown[];
+	conversationPreserved: boolean;
+	systemTokens: number;
+	response?: AssistantMessage;
+	responseSnapshot?: unknown;
+}
+
+function isSameResponse(message: AgentMessage, response: AssistantMessage): boolean {
+	return (
+		message === response ||
+		(message.role === "assistant" &&
+			!!response.responseId &&
+			message.responseId === response.responseId &&
+			message.provider === response.provider &&
+			message.api === response.api &&
+			message.model === response.model)
+	);
+}
+
+function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
+	return convertToLlm(messages.filter((message) => message.role !== "system")).map((message) => {
+		if (message.role !== "assistant") return JSON.parse(JSON.stringify({ ...message, timestamp: 0 }));
+		const { usage: _usage, ...response } = message;
+		return JSON.parse(JSON.stringify({ ...response, timestamp: 0 }));
+	});
+}
 
 // ============================================================================
 // Skill Block Parsing
@@ -217,23 +249,27 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 	};
 }
 
+/** Tool execution events of calls a tool made through `ctx.executeTool()` carry `parentToolCallId`. */
+type WithParentToolCallId<E> = E extends {
+	type: "tool_execution_start" | "tool_execution_update" | "tool_execution_end";
+}
+	? E & { parentToolCallId?: string }
+	: E;
+
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
-	| Exclude<AgentEvent, { type: "agent_end" | "message_end" }>
-	| (Extract<AgentEvent, { type: "message_end" }> & { consumedToolResultIds?: string[] })
+	| WithParentToolCallId<Exclude<AgentEvent, { type: "agent_end" }>>
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
 			willRetry: boolean;
-			pendingToolCalls?: ReturnType<typeof getPendingToolCalls>;
 	  }
-	| { type: "agent_settled"; pendingToolCalls?: ReturnType<typeof getPendingToolCalls> }
+	| { type: "agent_settled" }
 	| {
 			type: "queue_update";
 			steering: readonly string[];
 			followUp: readonly string[];
 	  }
-	| { type: "context_window_started"; pendingMessages: AgentMessage[] }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "entry_appended"; entry: SessionEntry }
 	| { type: "session_info_changed"; name: string | undefined }
@@ -244,10 +280,8 @@ export type AgentSessionEvent =
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
-			contextWindowStarted?: boolean;
-			/** Live inputs to retain when the UI rebuilds before request preparation finishes. */
-			pendingMessages?: AgentMessage[];
 			errorMessage?: string;
+			pendingMessages?: boolean;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
@@ -285,7 +319,6 @@ export interface AgentSessionConfig {
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	cwd: string;
-	/** App-data root for artifacts when the session has no journal directory. */
 	agentDir?: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -297,16 +330,15 @@ export interface AgentSessionConfig {
 	modelRuntime: ModelRuntime;
 	/** Keeps the prompt cache entry of the last session request warm. */
 	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
-	/** Initial active built-in tool names. Default: [read, bash, background_command, edit, write] */
-	initialActiveToolNames?: ToolSelection[];
-	/** Hosts with startup input bind their input queue before enabling background notifications. */
+	/** Initial active built-in tool names. Defaults to DEFAULT_TOOL_NAMES. */
+	initialActiveToolNames?: string[];
 	deferBackgroundCommandNotifications?: boolean;
-	/** Suppress default built-ins, retaining extension tools and explicit selection. */
+	/** Suppress default built-ins while retaining extension tools and explicit selections. */
 	noBuiltinTools?: boolean;
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
-	allowedToolNames?: ToolSelection[];
+	allowedToolNames?: string[];
 	/** Optional denylist of tool names. When provided, these tool names are not exposed. */
-	excludedToolNames?: ToolSelection[];
+	excludedToolNames?: string[];
 	/**
 	 * Override base tools (useful for custom runtimes).
 	 *
@@ -324,12 +356,15 @@ export interface ExtensionBindings {
 	uiContext?: ExtensionUIContext;
 	mode?: ExtensionMode;
 	commandContextActions?: ExtensionCommandContextActions;
-	/** User inputs held by the mode before they reach prompt(). */
-	getQueuedInputCount?: () => number;
 	abortHandler?: () => void;
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
+	/** Host-owned accepted input not yet handed to this session. */
+	getQueuedInputCount?: () => number;
 }
+
+export type QueuedInputDisposition = "handled" | "queued";
+export type PromptDisposition = QueuedInputDisposition | "started";
 
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
@@ -341,8 +376,8 @@ export interface PromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	/** Source of input for extension input event handlers. Defaults to "interactive". */
 	source?: InputSource;
-	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
-	preflightResult?: (success: boolean) => void;
+	/** Internal hook used by RPC mode to observe how an accepted prompt was dispatched. Not called if the prompt is rejected. */
+	preflightResult?: (disposition: PromptDisposition) => void;
 }
 
 /** Options for model/thinking mutations. */
@@ -384,101 +419,12 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
-interface ProviderRequestPrefix {
-	provider: string;
-	api: string;
-	model: string;
-	systemPrompt: string;
-	/** Structured prompt at dispatch; idle usage stays valid when a request-only force ends. */
-	transcriptSystemPrompt: string;
-	toolKeys: readonly string[];
-	/** Immutable pre-transform input; measured usage applies only while this baseline is unchanged. */
-	canonicalConversation: unknown[];
-	conversationPreserved: boolean;
-	/** Only results actually sent can be retired at a context boundary. */
-	toolResultIds: ReadonlySet<string>;
-	/** Raw branch frontier captured beside canonical input, before request preparation can await. */
-	frontier: string | null;
-	/** Native post-payload membership. Undefined is unknown, not an empty set. */
-	inputToolCallIds?: ReadonlySet<string>;
-	systemTokens: number;
-	response?: AssistantMessage;
-	responseSnapshot?: unknown;
-}
-
-function isSameResponse(message: AgentMessage, response: AssistantMessage): boolean {
-	return (
-		message === response ||
-		(message.role === "assistant" &&
-			!!response.responseId &&
-			message.responseId === response.responseId &&
-			message.provider === response.provider &&
-			message.api === response.api &&
-			message.model === response.model)
-	);
-}
-
-/** Match persisted JSON's optional fields without reserializing large conversation strings. */
-function withoutUndefined(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map((item) => withoutUndefined(item ?? null));
-	if (value === null || typeof value !== "object") return value;
-	return Object.fromEntries(
-		Object.entries(value)
-			.filter(([, item]) => item !== undefined)
-			.map(([key, item]) => [key, withoutUndefined(item)]),
-	);
-}
-
-/** Snapshot provider content; execution checkpoints and request diagnostics are local bookkeeping. */
-function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
-	return convertToLlm(messages.filter((message) => message.role !== "system")).map((message) => {
-		if (message.role !== "assistant") return withoutUndefined({ ...message, timestamp: 0 });
-		const {
-			usage: _usage,
-			diagnostics: _diagnostics,
-			toolExecutionFailed: _toolExecutionFailed,
-			...response
-		} = message;
-		return withoutUndefined({
-			...response,
-			timestamp: 0,
-			content: message.content.map((block) => {
-				if (block.type !== "toolCall") return block;
-				const {
-					executionStarted: _started,
-					executionArguments: _arguments,
-					executionDetached: _detached,
-					...call
-				} = block;
-				return call;
-			}),
-		});
-	});
-}
-
-/** Request decorations may insert messages or append blocks, but must retain the original input in order. */
-function providerConversationCovers(canonical: readonly unknown[], sent: readonly unknown[]): boolean {
-	let index = 0;
-	for (const message of sent) {
-		if (index === canonical.length) break;
-		if (isMessagePreserved(canonical[index], message)) index++;
+function estimateMessagesTokens(messages: AgentMessage[]): number {
+	let tokens = 0;
+	for (const message of messages) {
+		tokens += estimateTokens(message);
 	}
-	return index === canonical.length;
-}
-
-function providerToolResultIds(conversation: readonly unknown[]): Set<string> {
-	return new Set(
-		conversation.flatMap((message) =>
-			message &&
-			typeof message === "object" &&
-			"role" in message &&
-			message.role === "toolResult" &&
-			"toolCallId" in message &&
-			typeof message.toolCallId === "string"
-				? [message.toolCallId]
-				: [],
-		),
-	);
+	return tokens;
 }
 
 // ============================================================================
@@ -490,37 +436,16 @@ export class AgentSession {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
 
-	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
-
-	// Event subscription state
-	private _unsubscribeAgent?: () => void;
-	private _eventListeners: AgentSessionEventListener[] = [];
-	private _isAgentRunActive = false;
-	private _promptAbortController: AbortController | undefined;
 	private readonly _shutdownAbortController = new AbortController();
-	private _agentRunAbortRequested = false;
-	private readonly _idleWaiters = new Set<() => void>();
-	private readonly _deferredSettlement = new AsyncLocalStorage<{ barriers: number }>();
-
-	/** Presentation fingerprint only; recallability always comes from Agent's queues. */
-	private _lastQueueUpdate = JSON.stringify({ steering: [], followUp: [] });
-	/** Messages queued to be included with the next user prompt as context ("asides"). */
-	private _pendingNextTurnMessages: CustomMessage[] = [];
-	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
-	private _pendingCustomMessages: CustomMessage[] = [];
-	/** Opted-in streamed customs owned here until message_end, including drained but undelivered messages. */
-	private _cancelPersistentCustomMessages = new Set<CustomMessage>();
-	/** Provider-bound inputs waiting until request preparation can no longer add a context boundary. */
-	private _pendingProviderMessages: AgentMessage[] = [];
-	/** Native inputs awaiting handling, admission, queueing, or rejection. */
+	private _promptAbortController?: AbortController;
 	private _pendingInputCount = 0;
-	/** Idle prompts normalize during admission; queued inputs normalize at native delivery, only once. */
-	private _normalizedUserMessages = new WeakSet<UserMessage>();
 	private _activeCommands = 0;
-	private _settling = 0;
+	private _extensionGetQueuedInputCount?: () => number;
+	private readonly _normalizedUserMessages = new WeakSet<UserMessage>();
+	private readonly _cancelPersistentCustomMessages = new Set<CustomMessage>();
 	private _checkpointHeld = false;
 	private _checkpointRestored = false;
-	private _checkpointActiveTools?: ToolSelection[];
+	private _checkpointActiveTools?: string[];
 	private _checkpointEntryPersistence?: AbortSignal;
 	private readonly _shutdownCheckpointWaiters = new Set<() => void>();
 	private _checkpointRequest?: {
@@ -529,23 +454,32 @@ export class AgentSession {
 		run: (boundary: CheckpointBoundary) => Promise<void>;
 		cancel: () => void;
 	};
+	private _backgroundTimer?: NodeJS.Timeout;
+	private _backgroundWakeSuppressed = false;
+	private _backgroundNotificationsReady: boolean;
+	private readonly _backgroundCommandSessionDir: string;
+	private _backgroundCheckpointPaused = false;
+	private readonly _backgroundPending = new Set<string>();
+
+	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+
+	// Event subscription state
+	private _unsubscribeAgent?: () => void;
+	private _eventListeners: AgentSessionEventListener[] = [];
+	private _isAgentRunActive = false;
+	private _agentRunAbortRequested = false;
+	private readonly _idleWaiters = new Set<() => void>();
+	private readonly _deferredSettlement = new AsyncLocalStorage<{ barriers: number }>();
+
+	/** Messages queued to be included with the next user prompt as context ("asides"). */
+	private _pendingNextTurnMessages: CustomMessage[] = [];
+	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
+	private _pendingCustomMessages: CustomMessage[] = [];
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
-	private _pendingNewContext: NewContextRequest | undefined;
-	private _reportedUsagePrefix: ProviderRequestPrefix | null | undefined;
-	private _providerRequestPrefix: ProviderRequestPrefix | undefined;
-	/** live_tool_result replacements for this run's saved results, keyed by tool call ID. */
-	private readonly _liveToolResultContent = new Map<string, ToolResultMessage["content"]>();
-	private _toolPrefixKeys = new WeakMap<AgentTool, string>();
-	private _contextUsageCache?: {
-		inputs: unknown;
-		prefix: ProviderRequestPrefix | null | undefined;
-		usage: ContextUsage;
-	};
-	private _skipNextProviderRequestPreflight = false;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -553,18 +487,15 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
-	/** A failed response whose retry was already decided during its run, so post-run handling must not retry it again. */
-	private _inRunRetryMessage: AssistantMessage | undefined;
+	/**
+	 * Failed response that the next request repeats, set by auto-retry and overflow recovery. The
+	 * retry is routed with it as `failed`, since the context no longer contains it.
+	 */
+	private _failedResponse: AssistantMessage | undefined;
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
 	private _pendingBashMessages: BashExecutionMessage[] = [];
-	private _backgroundTimer?: NodeJS.Timeout;
-	private _backgroundWakeSuppressed = false;
-	private _backgroundNotificationsReady: boolean;
-	private readonly _backgroundCommandSessionDir: string;
-	private _backgroundCheckpointPaused = false;
-	private readonly _backgroundPending = new Set<string>();
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
@@ -578,22 +509,24 @@ export class AgentSession {
 	private _abortDuringBeforeSettle = false;
 	private _isEmittingAgentSettled = false;
 	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
+	private _settling = 0;
+	// Checkpoints may cut the last admitted child run, but must not skip queued actions.
+	private _pendingSettledActions = 0;
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
-	private _initialActiveToolNames?: ToolSelection[];
+	private _initialActiveToolNames?: string[];
 	private _noBuiltinTools: boolean;
-	private _allowedToolNames?: ToolSelection[];
-	private _excludedToolNames?: ToolSelection[];
+	private _allowedToolNames?: Set<string>;
+	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode?: ExtensionMode;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
-	private _extensionGetQueuedInputCount?: () => number;
 	private _extensionAbortHandler?: () => void;
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
@@ -604,35 +537,40 @@ export class AgentSession {
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
-	private _toolIds = new Map<string, string>();
+	/** Created on the first `ctx.executeTool()` call. */
+	private _nestedToolCalls: NestedToolCallRunner | undefined;
+	/** Declared tools whose declarations requests leave out, from `prepareLoadout` hooks. */
+	private _hiddenDeclarations: ReadonlySet<string> = new Set();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
-	private _toolDiscoveryGroups: AvailableDiscoveryGroup[] = [];
 
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
+	private _baseSystemPromptBaseline!: NormalizedBuildSystemPromptOptions;
+	private _hasPreparedPrompt = false;
+	private _reportedUsagePrefix?: ReportedUsagePrefix;
+	private _providerRequestPrefix?: ReportedUsagePrefix;
+	private _pendingProviderMessages: AgentMessage[] = [];
+	private _skipNextProviderRequestPreflight = false;
+	private _contextUsageCache?: { inputs: unknown; prefix?: ReportedUsagePrefix; usage: ContextUsage };
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
-	/** Snapshot of base inputs; navigation replaces only its selected tools, preserving other pending edits. */
-	private _baseSystemPromptBaseline!: NormalizedBuildSystemPromptOptions;
-	/** Startup discovery completes initial inputs only until a loadout has been prepared. */
-	private _hasPreparedPrompt = false;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.agent.requestAdmissionSignal = this._shutdownAbortController.signal;
-		this.sessionManager = config.sessionManager;
 		this._backgroundNotificationsReady = !config.deferBackgroundCommandNotifications;
-		for (const entry of this.sessionManager.getEntries()) {
+		this._backgroundCommandSessionDir = resolvePath(
+			process.env[ENV_SESSION_DIR] ||
+				config.settingsManager.getSessionDir() ||
+				join(config.agentDir ?? getAgentDir(), "sessions"),
+		);
+		for (const entry of config.sessionManager.getEntries()) {
 			if (entry.type === "custom" && entry.customType === BACKGROUND_COMMAND_RUN_STATE)
 				this._backgroundWakeSuppressed = entry.data === true;
 		}
+		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
-		this._backgroundCommandSessionDir = resolvePath(
-			process.env[ENV_SESSION_DIR] ||
-				this.settingsManager.getSessionDir() ||
-				join(config.agentDir ?? getAgentDir(), "sessions"),
-		);
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
@@ -645,39 +583,28 @@ export class AgentSession {
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._noBuiltinTools = config.noBuiltinTools ?? false;
-		this._allowedToolNames = config.allowedToolNames?.slice();
-		this._excludedToolNames = config.excludedToolNames?.slice();
+		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
+		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
-		const afterTurn = this.agent.afterTurn;
-		this.agent.afterTurn = async (signal) => {
-			await afterTurn?.(signal);
-			await this._checkpointSafePoint("turn");
-		};
-		this.agent.prepareSteering = async (message) => {
-			if (message.role === "user") await this._normalizeUserMessageImages(message);
-		};
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
 		this._installAgentRequestProjection();
 		this._installAgentBoundaryHooks();
-		this._installAgentForcedPromptProjection();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
-		const restoredSystemMessage = getCurrentSystemMessage(this.messages);
-		// Resume itself does not schedule a reset of a persisted before_agent_start override.
-		// Use the saved selection as the baseline so explicit startup tool changes stay pending.
+		const restoredSystem = getCurrentSystemMessage(this.messages);
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions({
 			...this._baseSystemPromptOptions,
-			selectedTools: restoredSystemMessage
-				? (restoredSystemMessage.toolsAdded ?? []).map(toToolReference)
+			selectedTools: restoredSystem
+				? (restoredSystem.toolsAdded ?? []).map((tool) => tool.name)
 				: this._baseSystemPromptOptions.selectedTools,
 		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
@@ -729,33 +656,75 @@ export class AgentSession {
 	}
 
 	private async _getSummarizationRequestAuth(
-		model: Model<any>,
+		selectedModel: Model<any>,
 		signal?: AbortSignal,
 	): Promise<{
 		model: Model<any>;
 		apiKey?: string;
 		headers?: Record<string, string>;
 		env?: Record<string, string>;
+		thinkingLevel: ThinkingLevel;
 	}> {
-		this._shutdownAbortController.signal.throwIfAborted();
+		// Route a virtual model first: summaries size their input and output from the model they get.
+		const { model, thinkingLevel } = isVirtualModel(selectedModel)
+			? await this._modelRuntime.resolveModel(selectedModel, convertToLlm(this.messages), {
+					reason: "direct",
+					thinkingLevel: this.thinkingLevel,
+					signal,
+				})
+			: { model: selectedModel, thinkingLevel: this.thinkingLevel };
 		if (this.agent.streamFunction === streamSimple) {
-			return this._getRequiredRequestAuth(model, signal);
+			return { ...(await this._getRequiredRequestAuth(model, signal)), thinkingLevel };
 		}
 
 		try {
 			const result = await this._modelRuntime.getAuth(model, { signal });
-			if (!result) return { model };
+			if (!result) return { model, thinkingLevel };
 			const requestModel = result.auth.baseUrl ? { ...model, baseUrl: result.auth.baseUrl } : model;
 			return {
 				model: requestModel,
 				apiKey: result.auth.apiKey,
 				headers: withoutDeletedHeaders(result.auth.headers),
 				env: result.env,
+				thinkingLevel,
 			};
 		} catch (error) {
 			if (signal?.aborted) throw error;
-			return { model };
+			return { model, thinkingLevel };
 		}
+	}
+
+	/**
+	 * The model whose limits apply to `message`, or undefined when the message came from another
+	 * model. Under a virtual selection, that is the physical model that produced it.
+	 */
+	private _modelForMessage(message: AssistantMessage): Model<any> | undefined {
+		const model = this.model;
+		if (model && isVirtualModel(model)) return this._modelRuntime.getPhysicalModel(message.provider, message.model);
+		return model?.provider === message.provider && model.id === message.model ? model : undefined;
+	}
+
+	/**
+	 * Record the selection on the current branch when the branch implies another one, so a resume
+	 * restores it. Tree navigation can leave the latest `model_change` on another branch; responses
+	 * cannot record a virtual selection because they name physical models. Responses do record a
+	 * physical selection unless the branch holds a virtual one; checking a physical selection against
+	 * responses would record it on every prompt while `prepareRequest` redirects to another model.
+	 */
+	private _recordSelection(): void {
+		const model = this.model;
+		if (!model) return;
+		const getModel = (provider: string, modelId: string) => this._modelRuntime.getModel(provider, modelId);
+		const recorded = getBranchSelection(this.sessionManager.getBranch(), getModel);
+		if (!recorded || (recorded.provider === model.provider && recorded.modelId === model.id)) return;
+		const recordedModel = getModel(recorded.provider, recorded.modelId);
+		if (!isVirtualModel(model) && !(recordedModel && isVirtualModel(recordedModel))) return;
+		this.sessionManager.appendModelChange(model.provider, model.id);
+	}
+
+	/** The model whose limits apply to the conversation. */
+	private _limitsModel(): Model<any> | undefined {
+		return this.routedModel?.model ?? this.model;
 	}
 
 	/**
@@ -767,241 +736,270 @@ export class AgentSession {
 	 * happens here instead of in wrappers.
 	 */
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = async ({ toolCall, args }) => {
-			const runner = this._extensionRunner;
-			if (!runner.hasHandlers("tool_call")) {
-				return undefined;
-			}
-
-			try {
-				return await runner.emitToolCall({
-					type: "tool_call",
-					toolName: toolCall.name,
-					namespace: toolCall.namespace,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
-				});
-			} catch (err) {
-				if (err instanceof Error) {
-					throw err;
-				}
-				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
-			}
-		};
-
-		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
-			const runner = this._extensionRunner;
-			const hookResult = runner.hasHandlers("tool_result")
-				? await runner.emitToolResult({
-						type: "tool_result",
-						toolName: toolCall.name,
-						namespace: toolCall.namespace,
-						toolCallId: toolCall.id,
-						input: args as Record<string, unknown>,
-						content: result.content,
-						details: result.details,
-						isError,
-						usage: result.usage,
-					})
-				: undefined;
-
-			const content = hookResult?.content ?? result.content ?? [];
-			// Runs after the extension hook so images injected or replaced by extensions are normalized too.
-			const resizeOptions = this.model?.inputLimits?.images?.resize;
-			const normalizedContent = await normalizeToolResultImages(content, {
-				autoResizeImages: this.settingsManager.getImageAutoResize(),
-				...(resizeOptions ? { resizeOptions } : {}),
-			});
-
-			if (!hookResult && normalizedContent === content) {
-				return undefined;
-			}
-
-			return {
-				content: normalizedContent,
-				details: hookResult?.details,
-				isError: hookResult?.isError ?? isError,
-				usage: hookResult?.usage,
-			};
-		};
+		this.agent.beforeToolCall = (context) => this._beforeToolCall(context);
+		this.agent.afterToolCall = (context) => this._afterToolCall(context);
 	}
 
-	private _getRetainedToolResultIds(): string[] {
-		const projection = this.sessionManager.buildSessionProjection();
-		const nativeCallIds = new Set(
-			projection.messages.flatMap((message) =>
-				message.role === "assistant"
-					? message.content.flatMap((block) =>
-							block.type === "toolCall" && block.async && block.responsesItem ? [block.id] : [],
-						)
-					: [],
-			),
-		);
-		// A prepared or failed request must not hide earlier proof of consumed input.
-		const prefix = [this._providerRequestPrefix, this._reportedUsagePrefix].find(
-			(candidate) => candidate?.response && ["stop", "length", "toolUse"].includes(candidate.response.stopReason),
-		);
-		const consumedResultIds = prefix?.toolResultIds;
-		const consumedEntryIds = new Set(
-			this.sessionManager
-				.getBranch()
-				.flatMap((entry) => (entry.type === "message" ? (entry.consumedToolResultIds ?? []) : [])),
-		);
-		return projection.entries.flatMap((entry) =>
-			!consumedEntryIds.has(entry.sourceEntry.id) &&
-			entry.messages.some(
-				(message) =>
-					message.role === "toolResult" &&
-					nativeCallIds.has(message.toolCallId) &&
-					!consumedResultIds?.has(message.toolCallId),
-			)
-				? [entry.sourceEntry.id]
-				: [],
-		);
-	}
-
-	private _consumeNewContext(request?: NewContextRequest): AgentContext | undefined {
-		const next = request ?? this._pendingNewContext;
-		this._pendingNewContext = undefined;
-		if (
-			!next ||
-			this._shutdownAbortController.signal.aborted ||
-			this.agent.signal?.aborted ||
-			this._autoCompactionAbortController?.signal.aborted
-		)
+	/** `tool_call` handlers. `parentToolCallId` is set for calls another tool made. */
+	private async _beforeToolCall(
+		{ toolCall, args }: BeforeToolCallContext,
+		parentToolCallId?: string,
+	): Promise<BeforeToolCallResult | undefined> {
+		const runner = this._extensionRunner;
+		if (!runner.hasHandlers("tool_call")) {
 			return undefined;
-
-		const handoff = next.handoff?.trim().slice(0, MAX_CONTEXT_HANDOFF_CHARS) || undefined;
-		const usage = this.getContextUsage();
-		const preview = this._createBoundaryPreviewManager([]);
-		const windowId = preview.appendContextWindow(handoff, usage?.tokens ?? null, this._getRetainedToolResultIds());
-		this._extensionRunner.runContextWindowHooks(
-			() => ({
-				contextEntries: preview.buildSessionProjection().entries,
-				pendingMessages: this._pendingProviderMessages.slice(),
-			}),
-			(drafts) => this._applyBoundaryDrafts(preview, drafts),
-			preview,
-		);
-		const prepared = preview.getBranch();
-		const edits = prepared.slice(prepared.findIndex((entry) => entry.id === windowId) + 1);
-		try {
-			this.sessionManager.appendPreparedContextWindow(preview, windowId);
-		} finally {
-			// Publication can still fail at journal I/O; reflect only entries actually accepted.
-			if (this.sessionManager.getEntry(windowId)) {
-				this._reportedUsagePrefix = null;
-				this._refreshFinalizedContext();
-				this._restorePendingProviderMessages(this.agent.state);
-				for (const entry of edits) {
-					if (this.sessionManager.getEntry(entry.id)) this._emit({ type: "entry_appended", entry });
-				}
-				const marker = this.agent.state.messages.find(
-					(message) => message.role === "custom" && message.customType === "context-window",
-				)!;
-				this._emit({ type: "message_start", message: marker });
-				this._emit({ type: "message_end", message: marker });
-				this._emit({ type: "context_window_started", pendingMessages: this._pendingProviderMessages.slice() });
-			}
 		}
 
+		try {
+			return await runner.emitToolCall({
+				type: "tool_call",
+				toolName: toolCall.name,
+				toolCallId: toolCall.id,
+				...(parentToolCallId ? { parentToolCallId } : {}),
+				input: args as Record<string, unknown>,
+			});
+		} catch (err) {
+			if (err instanceof Error) {
+				throw err;
+			}
+			throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+		}
+	}
+
+	/** `tool_result` handlers and image normalization. `parentToolCallId` is set for calls another tool made. */
+	private async _afterToolCall(
+		{ toolCall, args, result, isError }: AfterToolCallContext,
+		parentToolCallId?: string,
+	): Promise<AfterToolCallResult | undefined> {
+		const runner = this._extensionRunner;
+		const hookResult = runner.hasHandlers("tool_result")
+			? await runner.emitToolResult({
+					type: "tool_result",
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					...(parentToolCallId ? { parentToolCallId } : {}),
+					input: args as Record<string, unknown>,
+					content: result.content,
+					details: result.details,
+					...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+					isError,
+					usage: result.usage,
+				})
+			: undefined;
+
+		const content = hookResult?.content ?? result.content ?? [];
+		// Runs after the extension hook so images injected or replaced by extensions are normalized too.
+		const resizeOptions = this._limitsModel()?.inputLimits?.images?.resize;
+		const normalizedContent = await normalizeToolResultImages(content, {
+			autoResizeImages: this.settingsManager.getImageAutoResize(),
+			...(resizeOptions ? { resizeOptions } : {}),
+		});
+
+		if (!hookResult && normalizedContent === content) {
+			return undefined;
+		}
+
+		// The hook result already dropped structured content that replaced content no longer matches.
 		return {
-			messages: this.agent.state.messages.slice(),
-			tools: this.agent.state.tools.slice(),
+			content: normalizedContent,
+			details: hookResult?.details,
+			structuredContent: hookResult ? hookResult.structuredContent : result.structuredContent,
+			isError: hookResult?.isError ?? isError,
+			usage: hookResult?.usage,
 		};
 	}
 
-	/** Start a fresh model context while preserving the full session transcript. */
-	newContext(options: NewContextRequest = {}): void {
-		this._assertNotCheckpointHeld();
-		const request = { handoff: options.handoff?.trim() || undefined };
-		if (this.isStreaming) {
-			this._pendingNewContext = request;
-			return;
-		}
-		this._consumeNewContext(request);
+	/**
+	 * Run a call that the tool call `parentToolCallId` made through `ctx.executeTool()`. It goes
+	 * through the agent's tool pipeline with the session's hooks, against the callable tools.
+	 */
+	private async _executeNestedToolCall(
+		parentToolCallId: string,
+		name: string,
+		args: unknown,
+		options: ExecuteToolOptions,
+	): Promise<AgentToolCallOutcome> {
+		this._nestedToolCalls ??= new NestedToolCallRunner({
+			getTools: () => this._getCallableTools(),
+			isSequential: () => this.agent.toolExecution === "sequential",
+			runToolCall: (toolCall, parentId, signal, onUpdate) => {
+				const assistantMessage = this._findLastAssistantMessage();
+				if (!assistantMessage) {
+					return Promise.resolve({
+						toolCall,
+						result: { content: [{ type: "text", text: "No assistant message issued this call" }], details: {} },
+						isError: true,
+					});
+				}
+				return runToolCall(toolCall, {
+					tools: this._getCallableTools(),
+					getTools: () => this._getCallableTools(),
+					assistantMessage,
+					context: { messages: this.agent.state.messages, tools: this.agent.state.tools },
+					beforeToolCall: (context) => this._beforeToolCall(context, parentId),
+					afterToolCall: (context) => this._afterToolCall(context, parentId),
+					signal,
+					onUpdate,
+				});
+			},
+			emit: async (event) => {
+				await this._extensionRunner.emit(event);
+				this._emit(event);
+			},
+		});
+		return this._nestedToolCalls.execute(parentToolCallId, name, args, options);
+	}
+
+	/** Whether `projection`, the current session projection, exceeds the compaction threshold of `model`. */
+	private _exceedsCompactionThreshold(
+		model: Model<any>,
+		projection: SessionProjection,
+		context: AgentContext = { messages: projection.messages, tools: this.agent.state.tools },
+	): boolean {
+		if (model.contextWindow <= 0) return false;
+		return shouldCompact(
+			this._estimateContextTokens(context, model).tokens,
+			model.contextWindow,
+			this.settingsManager.getCompactionSettings(this.model),
+		);
 	}
 
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
+		const projection = this.sessionManager.buildSessionProjection();
+		// A virtual selection is checked in prepareRequest, against the model the request is routed to.
 		const model = this.model;
-		const settings = this.settingsManager.getCompactionSettings(model);
-		if (
-			!model ||
-			model.contextWindow <= 0 ||
-			!shouldCompact(this._estimateContextTokens(context).tokens, model.contextWindow, settings)
-		) {
-			return context;
+		if (!model || isVirtualModel(model) || !this._exceedsCompactionThreshold(model, projection)) {
+			return { ...context, messages: projection.messages };
 		}
-
 		await this._runAutoCompaction("threshold", false);
-		return this._restorePendingProviderMessages({
-			...context,
-			messages: this.sessionManager.buildSessionProjection().messages,
-		});
+		return { ...context, messages: this.sessionManager.buildSessionProjection().messages };
 	}
 
 	private _installAgentRequestProjection(): void {
 		const previousPrepareRequest = this.agent.prepareRequest;
-		let frontier: string | null = null;
+		let requestModel: Model<any> | undefined;
 		this.agent.prepareRequest = async (request, signal) => {
 			this._shutdownAbortController.signal.throwIfAborted();
-			frontier = this.sessionManager.getLeafId();
-			const canonicalContext = this._restorePendingProviderMessages({
-				...request.context,
-				messages: this.sessionManager.buildSessionProjection().messages,
-				// Transcript declarations and executable implementations share the same loadout.
-				tools: this.agent.state.tools.slice(),
-			});
-			const previous = await previousPrepareRequest?.(
-				{
-					...request,
-					context: canonicalContext,
-					model: this.agent.state.model,
-					thinkingLevel: this.agent.state.thinkingLevel,
-				},
-				signal,
-			);
-			let prepared = previous?.context ?? canonicalContext;
-			if (!this._skipNextProviderRequestPreflight) {
-				prepared = await this._compactBeforeNextAssistantResponse(prepared);
-			}
-			prepared = this._restorePendingProviderMessages(this._consumeNewContext() ?? prepared);
-			return {
-				...previous,
-				context: prepared,
-				model: previous?.model ?? this.agent.state.model,
-				thinkingLevel: previous?.thinkingLevel ?? this.agent.state.thinkingLevel,
+			const failed = this._failedResponse;
+			this._failedResponse = undefined;
+			const prepare = async () => {
+				const projection = this.sessionManager.buildSessionProjection();
+				const canonicalContext = {
+					...request.context,
+					messages: [...projection.messages, ...this._pendingProviderMessages],
+					// Messages declare the provider-visible loadout; context.tools keeps executable implementations.
+					tools: this.agent.state.tools.slice(),
+				};
+				const previous = await previousPrepareRequest?.(
+					{
+						...request,
+						context: canonicalContext,
+						model: this.agent.state.model,
+						thinkingLevel: this.agent.state.thinkingLevel,
+					},
+					signal,
+				);
+				this._shutdownAbortController.signal.throwIfAborted();
+				signal?.throwIfAborted();
+				return { previous, context: previous?.context ?? canonicalContext, projection };
 			};
+			let { previous, context, projection } = await prepare();
+			const model = previous?.model ?? this.agent.state.model;
+			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
+			if (!isVirtualModel(model)) {
+				if (
+					!this._skipNextProviderRequestPreflight &&
+					shouldCompact(
+						this._estimateContextTokens(context, model).tokens,
+						model.contextWindow,
+						this.settingsManager.getCompactionSettings(this.model),
+					)
+				) {
+					await this._runAutoCompaction("threshold", false);
+					({ previous, context } = await prepare());
+				}
+				requestModel = model;
+				return { ...previous, context, model, thinkingLevel };
+			}
+
+			// The selection stays in agent state; only this request uses the routed model. A routing
+			// failure rejects, which ends the run with an error response. Only messages the user wrote
+			// start a turn; extension messages can follow them, e.g. from before_agent_start.
+			const lastResponse = context.messages.findLastIndex((message) => message.role === "assistant");
+			const userTurn = context.messages.slice(lastResponse + 1).some((message) => message.role === "user");
+			const state = getVirtualModelState(this.sessionManager.getBranch(), model.provider, model.id);
+			const route = await this._modelRuntime.resolveModel(model, convertToLlm(context.messages), {
+				reason: failed ? "retry" : userTurn ? "user" : "continuation",
+				thinkingLevel,
+				signal,
+				failed,
+				state,
+			});
+			if (route.state !== undefined && route.state !== state) {
+				const data: VirtualModelStateData = { provider: model.provider, modelId: model.id, state: route.state };
+				const entry = this.sessionManager.getEntry(
+					this.sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, data),
+				);
+				if (entry) this._emit({ type: "entry_appended", entry });
+			}
+			// The route stands: the router already decided this request. The state entry does not change
+			// the projection.
+			if (
+				!this._skipNextProviderRequestPreflight &&
+				this._exceedsCompactionThreshold(route.model, projection, context)
+			) {
+				await this._runAutoCompaction("threshold", false);
+				({ previous, context } = await prepare());
+			}
+			this._shutdownAbortController.signal.throwIfAborted();
+			signal?.throwIfAborted();
+			requestModel = route.model;
+			return { ...previous, context, model: route.model, thinkingLevel: route.thinkingLevel };
 		};
-
-		this.agent.toolResultModelContent = (result) => this._liveToolResultContent.get(result.toolCallId);
-
 		const previousTransform = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
-			// Final input/tool declarations can now be persisted exactly once. Refresh the
-			// inspection cache without replacing request-only edits from prepareRequest.
 			this._flushPendingProviderMessages();
 			this._refreshFinalizedContext();
-			const headIndex = messages.findIndex((message) => message.role === "system" && message.nativeHead);
-			if (headIndex > 0)
-				messages = [messages[headIndex], ...messages.slice(0, headIndex), ...messages.slice(headIndex + 1)];
-			const model = this.model;
-			const systemPrompt = getCurrentSystemPrompt(messages);
+			const model = requestModel;
 			const canonicalConversation = snapshotProviderConversation(messages);
+			const transcriptSystemPrompt = getCurrentSystemPrompt(messages);
+			// Project forced text before extension context handlers inspect the provider input.
+			const forced = this._runSystemPromptOptions?.forceSystemPrompt;
+			if (forced !== undefined) {
+				const current = getCurrentSystemMessage(messages);
+				messages = [
+					{
+						role: "system",
+						content: forced,
+						...(current?.toolsAdded ? { toolsAdded: current.toolsAdded } : {}),
+						timestamp: current?.timestamp ?? Date.now(),
+					},
+					...messages.filter((message) => message.role !== "system"),
+				];
+			}
 			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
-			const sentConversation = snapshotProviderConversation(transformed);
+			const sent = snapshotProviderConversation(transformed);
+			let index = 0;
+			for (const message of sent) {
+				if (index === canonicalConversation.length) break;
+				if (isMessagePreserved(canonicalConversation[index], message)) index++;
+			}
 			this._providerRequestPrefix = model
 				? {
 						provider: model.provider,
 						api: model.api,
 						model: model.id,
 						systemPrompt: getCurrentSystemPrompt(transformed),
-						transcriptSystemPrompt: systemPrompt,
-						toolKeys: this.agent.state.tools.map((tool) => this._captureToolPrefix(tool)),
+						transcriptSystemPrompt,
+						toolKeys: this.agent.state.tools
+							.filter((tool) => !this._hiddenDeclarations.has(tool.name))
+							.map((tool) =>
+								JSON.stringify(
+									toToolDeclaration({ ...tool, constrainedSampling: tool.constrainedSampling || undefined }),
+								),
+							),
 						canonicalConversation,
-						conversationPreserved: providerConversationCovers(canonicalConversation, sentConversation),
-						toolResultIds: providerToolResultIds(sentConversation),
-						frontier,
+						conversationPreserved: index === canonicalConversation.length,
 						systemTokens: this._projectEstimatedMessages(transformed).reduce(
 							(sum, message) => sum + (message.role === "system" ? estimateTokens(message) : 0),
 							0,
@@ -1010,6 +1008,151 @@ export class AgentSession {
 				: undefined;
 			return transformed;
 		};
+	}
+
+	/** Keep measured conversation usage while accounting for pending prompt and tool changes. */
+	private _estimateContextTokens(context: AgentContext = this.agent.state, model = this._limitsModel()) {
+		const usageState = this._getContextUsageState(context.messages, model);
+		const options = { model, useReportedUsage: usageState.useReportedUsage };
+		const prefix = this._reportedUsagePrefix;
+		const lastUsageIndex = estimateContextTokens(context.messages, { model }).lastUsageIndex;
+		const conversationApplies =
+			options.useReportedUsage &&
+			prefix?.response &&
+			model &&
+			prefix.provider === model.provider &&
+			prefix.api === model.api &&
+			prefix.model === model.id &&
+			prefix.conversationPreserved &&
+			lastUsageIndex !== null &&
+			isSameResponse(context.messages[lastUsageIndex], prefix.response) &&
+			isDeepStrictEqual(
+				snapshotProviderConversation([context.messages[lastUsageIndex]])[0],
+				prefix.responseSnapshot,
+			) &&
+			isDeepStrictEqual(
+				snapshotProviderConversation(context.messages.slice(0, lastUsageIndex)),
+				prefix.canonicalConversation,
+			);
+		const pending = this._getPendingSystemPromptOptions();
+		const systemPrompt = pending ? buildSystemPrompt(pending) : getCurrentSystemPrompt(context.messages);
+		const tools = (context.tools ?? []).filter((tool) => !this._hiddenDeclarations.has(tool.name));
+		if (
+			conversationApplies &&
+			(pending ? prefix.systemPrompt : prefix.transcriptSystemPrompt) === systemPrompt &&
+			isDeepStrictEqual(
+				prefix.toolKeys,
+				tools.map((tool) =>
+					JSON.stringify(
+						toToolDeclaration({ ...tool, constrainedSampling: tool.constrainedSampling || undefined }),
+					),
+				),
+			)
+		) {
+			return estimateContextTokens(
+				this._runSystemPromptOptions?.forceSystemPrompt === undefined
+					? context.messages
+					: context.messages.filter((message) => message.role !== "system"),
+				options,
+			);
+		}
+		const current = getCurrentSystemMessage(context.messages);
+		const desired = pending ? buildSystemPromptState(pending) : undefined;
+		const replace =
+			desired &&
+			(desired.sections === undefined ||
+				(current && (current.sections === undefined || contentText(current.content).length > 0)));
+		const sections =
+			desired && !replace ? diffSystemPromptSections(current?.sections ?? {}, desired.sections ?? {}) : undefined;
+		const changes = getToolStateChanges(getCurrentTools(context.messages), tools);
+		const messages: AgentMessage[] = replace
+			? [
+					{ role: "system", ...desired, toolsAdded: tools.map(toToolDeclaration), timestamp: Date.now() },
+					...context.messages.filter((message) => message.role !== "system"),
+				]
+			: sections || changes.toolsAdded.length || changes.toolsRemoved.length
+				? [...context.messages, { role: "system", content: "", sections, ...changes, timestamp: Date.now() }]
+				: context.messages;
+		const forced = pending?.forceSystemPrompt;
+		const estimatedMessages = this._projectEstimatedMessages(messages, forced !== undefined);
+		if (conversationApplies) {
+			const estimate = estimateContextTokens(
+				context.messages.filter((message) => message.role !== "system"),
+				options,
+			);
+			const systemTokens = estimatedMessages.reduce(
+				(sum, message) => sum + (message.role === "system" ? estimateTokens(message) : 0),
+				0,
+			);
+			return {
+				...estimate,
+				tokens: Math.max(0, estimate.tokens + systemTokens - prefix.systemTokens),
+				source: "estimated" as const,
+			};
+		}
+		const fullEstimate = estimateContextTokens(estimatedMessages, { ...options, useReportedUsage: false });
+		if (forced !== undefined || prefix !== undefined || !options.useReportedUsage) return fullEstimate;
+		const historicalEstimate = estimateContextTokens(context.messages, options);
+		return historicalEstimate.tokens > fullEstimate.tokens
+			? { ...historicalEstimate, source: "estimated" as const }
+			: fullEstimate;
+	}
+
+	private _flushPendingProviderMessages(): void {
+		while (this._pendingProviderMessages.length > 0) {
+			const message = this._pendingProviderMessages.shift()!;
+			let id: string | undefined;
+			if (message.role === "custom")
+				id = this.sessionManager.appendCustomMessageEntry(
+					message.customType,
+					message.content,
+					message.display,
+					message.details,
+				);
+			else if (message.role === "system" || message.role === "user") id = this.sessionManager.appendMessage(message);
+			if (id) this._entryIdsByMessage.set(message, id);
+		}
+	}
+
+	private _getContextUsageState(
+		messages: AgentMessage[],
+		model = this._limitsModel(),
+	): {
+		hasPostCompactionUsage: boolean;
+		useReportedUsage: boolean;
+	} {
+		let invalidated = false;
+		let entry = this.sessionManager.getLeafEntry();
+		while (entry) {
+			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
+			if (entry.type === "context_edit") invalidated = true;
+			if (model && entry.type === "message" && entry.message.role === "assistant") {
+				const message = entry.message;
+				const entryId = entry.id;
+				if (
+					message.provider === model.provider &&
+					message.api === model.api &&
+					message.model === model.id &&
+					message.stopReason !== "aborted" &&
+					message.stopReason !== "error" &&
+					calculateContextTokens(message.usage) > 0 &&
+					messages.some(
+						(projected) =>
+							isSameResponse(projected, message) || this._entryIdsByMessage.get(projected) === entryId,
+					)
+				) {
+					return { hasPostCompactionUsage: true, useReportedUsage: !invalidated };
+				}
+			}
+			entry = entry.parentId ? this.sessionManager.getEntry(entry.parentId) : undefined;
+		}
+		return { hasPostCompactionUsage: true, useReportedUsage: false };
+	}
+
+	private _projectEstimatedMessages(messages: AgentMessage[], forceCollapse = false): AgentMessage[] {
+		return forceCollapse
+			? [getCurrentSystemMessage(messages)!, ...messages.filter((message) => message.role !== "system")]
+			: messages;
 	}
 
 	private async _dispatchTurnEndBoundary(
@@ -1053,197 +1196,22 @@ export class AgentSession {
 	}
 
 	private _installAgentBoundaryHooks(): void {
+		const previousAfterTurn = this.agent.afterTurn;
+		this.agent.afterTurn = async (signal) => {
+			await previousAfterTurn?.(signal);
+			await this._checkpointSafePoint("turn");
+		};
 		const previousFinishTurn = this.agent.finishTurn;
 		this.agent.finishTurn = async (turn, signal) => {
 			this._boundaryDispatchedMessages.add(turn.message);
 			const extensionContinue = await this._dispatchTurnEndBoundary(turn.message, turn.toolResults);
 			const previousDecision = await previousFinishTurn?.(turn, signal);
-			if (turn.message.stopReason !== "error" && turn.message.stopReason !== "aborted")
-				await this._inspectBackgroundCommands(true);
-			if (this._shutdownAbortController.signal.aborted) return { action: "end" };
+			await this._inspectBackgroundCommands(true);
+			if (this._shutdownAbortController.signal.aborted || signal?.aborted) return { action: "end" };
 			if (previousDecision?.action === "end") return previousDecision;
-			// Running native work keeps the run open, so a failed response retries here. Omitting the attempt could hide a
-			// native call that starts after the omission, and replay already drops the attempt's unfinished output.
-			if (
-				turn.message.stopReason === "error" &&
-				this.agent.state.pendingToolCalls.size > 0 &&
-				this._isRetryableError(turn.message)
-			) {
-				this._inRunRetryMessage = turn.message;
-				if (await this._prepareRetry(turn.message, false)) return { action: "continue" };
-			}
 			if (extensionContinue || previousDecision?.action === "continue") return { action: "continue" };
 			return undefined;
 		};
-	}
-
-	/**
-	 * Keep measured usage for retained conversations, estimating changed prefixes and new input.
-	 * Unknown legacy prefixes use the larger of matching usage and the full visible estimate.
-	 */
-	private _estimateContextTokens(
-		context: AgentContext = this.agent.state,
-		usageState = this._getContextUsageState(context.messages),
-	) {
-		const options = { model: this.model, useReportedUsage: usageState.useReportedUsage };
-		if (options.useReportedUsage && this._reportedUsageApplies(context)) {
-			const messages =
-				this._runSystemPromptOptions?.forceSystemPrompt === undefined
-					? context.messages
-					: context.messages.filter((message) => message.role !== "system");
-			return estimateContextTokens(messages, options);
-		}
-		// Include unsent prompt/tool changes without mutating or persisting the transcript.
-		const pendingOptions = this._getPendingSystemPromptOptions();
-		const current = getCurrentSystemMessage(context.messages);
-		const desired = pendingOptions ? buildSystemPromptState(pendingOptions) : undefined;
-		const replace =
-			desired &&
-			(desired.sections === undefined ||
-				(current && (current.sections === undefined || contentText(current.content).length > 0)));
-		const sections =
-			desired && !replace ? diffSystemPromptSections(current?.sections ?? {}, desired.sections ?? {}) : undefined;
-		const changes = getToolStateChanges(getCurrentTools(context.messages), context.tools ?? []);
-		const messages: AgentMessage[] = replace
-			? [
-					...context.messages,
-					{
-						role: "system",
-						...desired,
-						replace: true,
-						toolsAdded: (context.tools ?? []).map(toToolDeclaration),
-						timestamp: Date.now(),
-					},
-				]
-			: sections || changes.toolsAdded.length || changes.toolsRemoved.length
-				? [...context.messages, { role: "system", content: "", sections, ...changes, timestamp: Date.now() }]
-				: context.messages;
-		const forced = pendingOptions?.forceSystemPrompt;
-		const estimatedMessages = this._projectEstimatedMessages(messages, forced !== undefined);
-		if (options.useReportedUsage && this._reportedConversationApplies(context)) {
-			const estimate = estimateContextTokens(
-				context.messages.filter((message) => message.role !== "system"),
-				options,
-			);
-			const systemTokens = estimatedMessages.reduce(
-				(sum, message) => sum + (message.role === "system" ? estimateTokens(message) : 0),
-				0,
-			);
-			return {
-				...estimate,
-				tokens: Math.max(0, estimate.tokens + systemTokens - this._reportedUsagePrefix!.systemTokens),
-				source: "estimated" as const,
-			};
-		}
-		const fullEstimate = estimateContextTokens(estimatedMessages, { ...options, useReportedUsage: false });
-		if (forced !== undefined || this._reportedUsagePrefix !== undefined || !usageState.hasPostCompactionUsage) {
-			return fullEstimate;
-		}
-
-		const historicalEstimate = estimateContextTokens(context.messages, options);
-		return historicalEstimate.tokens > fullEstimate.tokens
-			? { ...historicalEstimate, source: "estimated" as const }
-			: fullEstimate;
-	}
-
-	/** Match native replacement replay for both captured and adjusted prefix estimates. */
-	private _projectEstimatedMessages(messages: AgentMessage[], forceCollapse = false): AgentMessage[] {
-		return forceCollapse ||
-			messages.some((message, index) => index > 0 && message.role === "system" && message.replace)
-			? [getCurrentSystemMessage(messages)!, ...messages.filter((message) => message.role !== "system")]
-			: messages;
-	}
-
-	private _captureToolPrefix(tool: AgentTool): string {
-		const key = JSON.stringify(
-			toToolDeclaration({ ...tool, constrainedSampling: tool.constrainedSampling || undefined }),
-		);
-		this._toolPrefixKeys.set(tool, key);
-		return key;
-	}
-
-	private _reportedConversationApplies(context: AgentContext): boolean {
-		const prefix = this._reportedUsagePrefix;
-		const model = this.model;
-		if (
-			!prefix?.response ||
-			!prefix.conversationPreserved ||
-			!model ||
-			prefix.provider !== model.provider ||
-			prefix.api !== model.api ||
-			prefix.model !== model.id
-		)
-			return false;
-		const { lastUsageIndex } = estimateContextTokens(context.messages, { model });
-		return (
-			lastUsageIndex !== null &&
-			isSameResponse(context.messages[lastUsageIndex], prefix.response) &&
-			isDeepStrictEqual(
-				snapshotProviderConversation([context.messages[lastUsageIndex]])[0],
-				prefix.responseSnapshot,
-			) &&
-			isDeepStrictEqual(
-				snapshotProviderConversation(context.messages.slice(0, lastUsageIndex)),
-				prefix.canonicalConversation,
-			)
-		);
-	}
-
-	private _reportedUsageApplies(context: AgentContext): boolean {
-		const prefix = this._reportedUsagePrefix;
-		if (!prefix || !this._reportedConversationApplies(context)) return false;
-		const tools = context.tools ?? [];
-		const pendingOptions = this._getPendingSystemPromptOptions();
-		const systemPrompt = pendingOptions
-			? buildSystemPrompt(pendingOptions)
-			: getCurrentSystemPrompt(context.messages);
-		return (
-			(pendingOptions ? prefix.systemPrompt : prefix.transcriptSystemPrompt) === systemPrompt &&
-			prefix.toolKeys.length === tools.length &&
-			tools.every(
-				(tool, index) =>
-					prefix.toolKeys[index] === (this._toolPrefixKeys.get(tool) ?? this._captureToolPrefix(tool)),
-			)
-		);
-	}
-
-	private _getContextUsageState(messages: AgentMessage[]): {
-		hasPostCompactionUsage: boolean;
-		useReportedUsage: boolean;
-	} {
-		const model = this.model;
-		let invalidated = false;
-		let entry = this.sessionManager.getLeafEntry();
-		// Walk only to the latest relevant response or boundary. The context meter must
-		// not materialize all history on each render, even after many native windows.
-		while (entry) {
-			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
-			if (entry.type === "context_window") return { hasPostCompactionUsage: true, useReportedUsage: false };
-			if (isContextUsageInvalidatingEntry(entry)) invalidated = true;
-			// Execution checkpoints can arrive after a window boundary. Only the original
-			// final response anchors measured usage; keep walking to it or the boundary.
-			if (model && entry.type === "message" && !entry.checkpoint && entry.message.role === "assistant") {
-				const message = entry.message;
-				const entryId = entry.id;
-				if (
-					message.provider === model.provider &&
-					message.api === model.api &&
-					message.model === model.id &&
-					message.stopReason !== "aborted" &&
-					message.stopReason !== "error" &&
-					message.usage &&
-					calculateContextTokens(message.usage) > 0 &&
-					messages.some(
-						(projected) =>
-							isSameResponse(projected, message) || this._entryIdsByMessage.get(projected) === entryId,
-					)
-				) {
-					return { hasPostCompactionUsage: true, useReportedUsage: !invalidated };
-				}
-			}
-			entry = entry.parentId ? this.sessionManager.getEntry(entry.parentId) : undefined;
-		}
-		return { hasPostCompactionUsage: true, useReportedUsage: false };
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -1253,19 +1221,15 @@ export class AgentSession {
 				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
-			const context = this._consumeNewContext(turn.newContext) ?? {
-				...turn.context,
-				messages: this.sessionManager.buildSessionProjection().messages,
-			};
+			const context = await this._compactBeforeNextAssistantResponse(turn.context);
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
 			const options = normalizeBuildSystemPromptOptions({
 				...runOptions,
-				selectedTools: this.getActiveToolReferences(),
+				selectedTools: this.getActiveToolNames(),
 				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
 				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
-				sectionTools: { ...runOptions.sectionTools, ...this._baseSystemPromptOptions.sectionTools },
 			});
 			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
 			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
@@ -1284,102 +1248,6 @@ export class AgentSession {
 				thinkingLevel: this.agent.state.thinkingLevel,
 			};
 		};
-	}
-
-	private _restorePendingProviderMessages(context: AgentContext): AgentContext {
-		for (const message of this._pendingProviderMessages) {
-			if (!context.messages.includes(message)) context.messages.push(message);
-			if (!this.agent.state.messages.includes(message)) this.agent.state.messages.push(message);
-		}
-		return context;
-	}
-
-	private _concurrentToolResultIds(
-		message: AgentMessage,
-		prefix: ProviderRequestPrefix | undefined,
-	): string[] | undefined {
-		if (
-			message.role !== "assistant" ||
-			!message.responseId ||
-			!message.content.length ||
-			!prefix?.inputToolCallIds ||
-			message.provider !== prefix.provider ||
-			message.api !== prefix.api ||
-			message.model !== prefix.model
-		)
-			return undefined;
-		const branch = this.sessionManager.getBranch();
-		// The first real snapshot already anchors older responses, including late execution checkpoints.
-		if (branch.some((entry) => entry.type === "message" && isSameResponse(entry.message, message))) return undefined;
-		const frontier = prefix.frontier === null ? -1 : branch.findIndex((entry) => entry.id === prefix.frontier);
-		if (prefix.frontier !== null && frontier < 0) return undefined;
-		// Preparation can summarize or omit receipts after the captured frontier.
-		// Ordering provenance must not bring those discarded contributions back.
-		const retained = new Set(
-			this.sessionManager
-				.buildSessionProjection()
-				.entries.flatMap((entry) =>
-					entry.messages.some((message) => message.role === "toolResult") ? [entry.sourceEntry.id] : [],
-				),
-		);
-		const nativeCalls = new Set(
-			branch.flatMap((entry) =>
-				entry.type === "message" && entry.message.role === "assistant"
-					? (entry.message.content ?? []).flatMap((call) =>
-							call.type === "toolCall" && call.async && call.responsesItem?.async ? [call.id] : [],
-						)
-					: [],
-			),
-		);
-		return branch
-			.slice(frontier + 1)
-			.flatMap((entry) =>
-				entry.type === "message" &&
-				entry.message.role === "toolResult" &&
-				retained.has(entry.id) &&
-				nativeCalls.has(entry.message.toolCallId) &&
-				!prefix.inputToolCallIds!.has(entry.message.toolCallId.split("|")[0])
-					? [entry.id]
-					: [],
-			);
-	}
-
-	private _persistMessage(
-		message: AgentMessage,
-		consumedToolResultIds?: string[],
-		prefix?: ProviderRequestPrefix,
-	): void {
-		let entryId: string | undefined;
-		if (message.role === "custom") {
-			entryId = this.sessionManager.appendCustomMessageEntry(
-				message.customType,
-				message.content,
-				message.display,
-				message.details,
-			);
-		} else if (
-			message.role === "system" ||
-			message.role === "user" ||
-			message.role === "assistant" ||
-			message.role === "toolResult"
-		) {
-			entryId = this.sessionManager.appendMessage(
-				message.role === "assistant" && message.content.some((block) => block.type === "toolCall" && block.async)
-					? structuredClone(message)
-					: message,
-				false,
-				consumedToolResultIds,
-				this._concurrentToolResultIds(message, prefix),
-			);
-		}
-		if (entryId) this._entryIdsByMessage.set(message, entryId);
-	}
-
-	private _flushPendingProviderMessages(): void {
-		while (this._pendingProviderMessages.length > 0) {
-			// SessionManager updates its tree before I/O; an I/O error must not append the input twice.
-			this._persistMessage(this._pendingProviderMessages.shift()!);
-		}
 	}
 
 	// =========================================================================
@@ -1488,30 +1356,36 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
-		for (const l of this._eventListeners) {
+		if (event.type === "compaction_end")
+			event.pendingMessages = this.hasPendingMessages || this.pendingInputCount > 0;
+		for (const l of [...this._eventListeners]) {
 			l(event);
 		}
 	}
 
 	private async _emitRetryEvent(
-		event:
-			| AutoRetryStartEvent
-			| AutoRetryEndEvent
-			| SummarizationRetryScheduledEvent
-			| SummarizationRetryAttemptStartEvent
-			| SummarizationRetryFinishedEvent,
+		event: Extract<
+			AgentSessionEvent,
+			{
+				type:
+					| "auto_retry_start"
+					| "auto_retry_end"
+					| "summarization_retry_scheduled"
+					| "summarization_retry_attempt_start"
+					| "summarization_retry_finished";
+			}
+		>,
 	): Promise<void> {
 		await this._extensionRunner.emit(event);
 		this._emit(event);
 	}
 
-	private _emitQueueUpdate(onlyIfChanged = false): void {
-		const queues = { steering: this.getSteeringMessages(), followUp: this.getFollowUpMessages() };
-		const fingerprint = JSON.stringify(queues);
-		if (onlyIfChanged && fingerprint === this._lastQueueUpdate) return;
-		// Update before notifying synchronous listeners, which may themselves modify queues.
-		this._lastQueueUpdate = fingerprint;
-		this._emit({ type: "queue_update", ...queues });
+	private _emitQueueUpdate(): void {
+		this._emit({
+			type: "queue_update",
+			steering: this.getSteeringMessages(),
+			followUp: this.getFollowUpMessages(),
+		});
 	}
 
 	private async _emitSessionCompactFailed(event: Omit<SessionCompactFailedEvent, "type">): Promise<void> {
@@ -1527,39 +1401,34 @@ export class AgentSession {
 	}
 
 	private async _emitAgentSettled(): Promise<void> {
-		this._cacheWarmer?.onAgentSettled();
+		if (!this._shutdownAbortController.signal.aborted) this._cacheWarmer?.onAgentSettled();
 		this._isAgentRunActive = false;
 		this._settling++;
 		this._isEmittingAgentSettled = true;
 		try {
 			try {
-				const pendingToolCalls = this.getPendingToolCalls();
-				const event = { type: "agent_settled" as const, ...(pendingToolCalls.length ? { pendingToolCalls } : {}) };
-				await this._extensionRunner.emit(event);
-				this._emit(event);
+				await this._extensionRunner.emit({ type: "agent_settled" });
+				this._emit({ type: "agent_settled" });
 			} finally {
 				this._isEmittingAgentSettled = false;
 			}
-			// Deferred closures are not checkpoint queues. Keep the barrier until the last
-			// action starts; its native run then owns ordinary turn and settlement cuts.
 			const deferred = this._deferredSettledActions.splice(0);
-			const last = deferred.pop();
-			for (const action of deferred) {
-				// An action may join child work, but cannot wait for its own enclosing drain.
-				const scope = { barriers: this._settling };
-				try {
-					await this._deferredSettlement.run(scope, action);
-				} finally {
-					scope.barriers = 0;
+			let remaining = deferred.length;
+			this._pendingSettledActions += remaining;
+			try {
+				for (const action of deferred) {
+					remaining--;
+					this._pendingSettledActions--;
+					// A deferred command may join its child run, not its enclosing settlement.
+					const scope = { barriers: this._settling };
+					try {
+						await this._deferredSettlement.run(scope, action);
+					} finally {
+						scope.barriers = 0;
+					}
 				}
-			}
-			if (last) {
-				this._settling--;
-				try {
-					await last();
-				} finally {
-					this._settling++;
-				}
+			} finally {
+				this._pendingSettledActions -= remaining;
 			}
 		} finally {
 			this._settling--;
@@ -1570,203 +1439,106 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
-		if (event.type === "message_checkpoint") {
-			this._flushPendingProviderMessages();
-			const entryId = this.sessionManager.appendMessage(
-				structuredClone(event.message),
-				true,
-				undefined,
-				this._concurrentToolResultIds(event.message, this._providerRequestPrefix),
-			);
-			this._entryIdsByMessage.set(event.message, entryId);
-			this._emit(event);
-			return;
+		// Record the calls a tool made through ctx.executeTool() and their usage on its result message.
+		if (this._nestedToolCalls) {
+			if (event.type === "message_start" && event.message.role === "toolResult") {
+				const message = event.message;
+				const summary = this._nestedToolCalls.takeRecord(message.toolCallId);
+				if (summary?.calls) message.nestedCalls = summary.calls;
+				if (summary?.usage) {
+					message.usage = message.usage ? combineUsage(message.usage, summary.usage) : summary.usage;
+				}
+			} else if (event.type === "agent_end") {
+				this._nestedToolCalls.clear();
+			}
 		}
-		if (event.type === "steering") {
-			// Native control now owns sent input; it is no longer recallable from the queue.
-			this._emitQueueUpdate(true);
-			// Status is independent of input delivery. An accepted send is not application.
-			this.sessionManager.appendCustomEntry("response-steering", {
-				message: event.message,
-				status: event.status,
-				steeringId: event.steeringId,
-				responseId: event.responseId,
-				errorMessage: event.errorMessage,
-				...(event.diagnostic ? { diagnostic: event.diagnostic } : {}),
-			});
-			await this._extensionRunner.emit(event);
-			this._emit(event);
-			return;
+		if (event.type === "message_start" && event.message.role === "user") {
+			this._overflowRecoveryAttempted = false;
+			this._emitQueueUpdate();
+			await this._normalizeUserMessageImages(event.message);
 		}
-		if (event.type === "tool_execution_prepared" || event.type === "tool_execution_detached") {
-			await this._extensionRunner.emit(event);
-			this._emit(event);
-			return;
+		if (event.type === "message_start" && event.message.role === "system") {
+			this._projectNewToolDeclarations(event.message);
 		}
-		const requestEnded = event.type === "message_end" && event.message.role === "assistant";
-		const requestPrefix = requestEnded ? this._providerRequestPrefix : undefined;
-		// Capture proof before message_end handlers can change context. Journal order cannot
-		// distinguish a result in this request from one completed while it was streaming.
-		const consumedCallIds =
-			requestPrefix &&
-			event.type === "message_end" &&
-			event.message.role === "assistant" &&
-			["stop", "length", "toolUse"].includes(event.message.stopReason)
-				? requestPrefix.toolResultIds
-				: undefined;
-		const consumedToolResultIds = consumedCallIds?.size
-			? this.sessionManager
-					.getBranch()
-					.flatMap((entry) =>
-						entry.type === "message" &&
-						entry.message.role === "toolResult" &&
-						consumedCallIds.has(entry.message.toolCallId)
-							? [entry.id]
-							: [],
-					)
-			: undefined;
+
+		if (event.type === "message_end" && event.message.role === "assistant")
+			this._skipNextProviderRequestPreflight = false;
 		const responseSnapshot =
 			event.type === "message_end" && event.message.role === "assistant"
 				? snapshotProviderConversation([event.message])[0]
 				: undefined;
-		if (requestEnded) this._skipNextProviderRequestPreflight = false;
-		if (event.type === "agent_end") {
-			this._providerRequestPrefix = undefined;
-			this._liveToolResultContent.clear();
-		}
-		if (event.type === "message_start" && event.message.role === "assistant") {
-			if (this._providerRequestPrefix) {
-				const continuation = snapshotProviderConversation([...(event.continuationInput ?? [])]);
-				const native = event.message.api === "openai-responses" || event.message.api === "openai-codex-responses";
-				const initialIds = event.inputToolCallIds === undefined ? undefined : new Set(event.inputToolCallIds);
-				const initialResults = native
-					? this.sessionManager
-							.getBranch()
-							.flatMap((entry) =>
-								entry.type === "message" &&
-								entry.message.role === "toolResult" &&
-								initialIds?.has(entry.message.toolCallId.split("|")[0])
-									? [entry.message.toolCallId]
-									: [],
-							)
-					: this._providerRequestPrefix.toolResultIds;
-				this._providerRequestPrefix = {
-					...this._providerRequestPrefix,
-					response: undefined,
-					inputToolCallIds:
-						event.continuationInput === undefined
-							? initialIds
-							: this._providerRequestPrefix.inputToolCallIds === undefined
-								? undefined
-								: new Set([
-										...this._providerRequestPrefix.inputToolCallIds,
-										...[...providerToolResultIds(continuation)].map((id) => id.split("|")[0]),
-									]),
-					canonicalConversation: [...this._providerRequestPrefix.canonicalConversation, ...continuation],
-					toolResultIds: new Set([
-						...(event.continuationInput === undefined
-							? initialResults
-							: this._providerRequestPrefix.toolResultIds),
-						...providerToolResultIds(continuation),
-					]),
-				};
-			}
-			this._flushPendingProviderMessages();
-		}
-
-		if (event.type === "message_start" && event.message.role === "user") {
-			this._overflowRecoveryAttempted = false;
-			// Reflect the native drain, including its entire batch in "all" mode.
-			this._emitQueueUpdate(true);
-			// The loop owns this await after draining the native queue. Awaiting image work in
-			// _queueSteer/_queueFollowUp instead could enqueue after the run has already settled.
-			// Finish accepted delivery even on abort; request preflight prevents further dispatch.
-			await this._normalizeUserMessageImages(event.message);
-		}
-
 		// Emit to extensions first, then notify public listeners.
 		await this._emitExtensionEvent(event);
-
-		if (requestPrefix && event.type === "message_end" && event.message.role === "assistant") {
-			const message = event.message;
-			if (
-				requestPrefix.provider === message.provider &&
-				requestPrefix.api === message.api &&
-				requestPrefix.model === message.model &&
-				message.stopReason !== "error" &&
-				message.stopReason !== "aborted" &&
-				calculateContextTokens(message.usage) > 0
-			) {
-				this._reportedUsagePrefix = {
-					...requestPrefix,
-					response: message,
-					responseSnapshot,
-				};
-			}
-			this._providerRequestPrefix = {
-				...requestPrefix,
-				response: message,
-				canonicalConversation: [...requestPrefix.canonicalConversation, responseSnapshot],
-			};
-		}
-
 		try {
-			this._emit(
-				event.type === "agent_end"
-					? {
-							...event,
-							willRetry: this._willRetryAfterAgentEnd(event),
-							...(this.getPendingToolCalls().length ? { pendingToolCalls: this.getPendingToolCalls() } : {}),
-						}
-					: event.type === "message_end"
-						? { ...event, consumedToolResultIds }
-						: event,
-			);
+			this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 		} finally {
-			// A throwing subscriber must not skip persistence of the completed message.
+			// A throwing subscriber must not discard a completed message or tool receipt.
 			if (event.type === "message_end") {
+				if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
+				let entryId: string | undefined;
+				// Inputs persist only after request preflight, so compaction cannot discard newly admitted input.
 				if (
 					this._isAgentRunActive &&
 					(event.message.role === "system" || event.message.role === "user" || event.message.role === "custom")
 				) {
 					this._pendingProviderMessages.push(event.message);
-					if (event.message.role === "custom") this._cancelPersistentCustomMessages.delete(event.message);
-				} else {
-					this._persistMessage(event.message, consumedToolResultIds, requestPrefix);
+				} else if (event.message.role === "custom") {
+					// Persist as CustomMessageEntry
+					entryId = this.sessionManager.appendCustomMessageEntry(
+						event.message.customType,
+						event.message.content,
+						event.message.display,
+						event.message.details,
+					);
+				} else if (
+					event.message.role === "system" ||
+					event.message.role === "user" ||
+					event.message.role === "assistant" ||
+					event.message.role === "toolResult"
+				) {
+					// Regular LLM message - persist as SessionMessageEntry
+					entryId = this.sessionManager.appendMessage(event.message);
 				}
+				if (entryId) this._entryIdsByMessage.set(event.message, entryId);
 				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
+
+				if (event.message.role === "assistant") {
+					const assistantMsg = event.message as AssistantMessage;
+					const prefix = this._providerRequestPrefix;
+					this._providerRequestPrefix = undefined;
+					if (
+						prefix &&
+						prefix.provider === assistantMsg.provider &&
+						prefix.api === assistantMsg.api &&
+						prefix.model === assistantMsg.model &&
+						assistantMsg.stopReason !== "error" &&
+						assistantMsg.stopReason !== "aborted" &&
+						calculateContextTokens(assistantMsg.usage) > 0
+					) {
+						this._reportedUsagePrefix = {
+							...prefix,
+							response: assistantMsg,
+							responseSnapshot,
+						};
+					}
+					this._lastAssistantMessage = assistantMsg;
+					if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
+						this._overflowRecoveryAttempted = false;
+					}
+
+					// Reset retry counter immediately on successful assistant response
+					// This prevents accumulation across multiple LLM calls within a turn
+					if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
+						await this._emitRetryEvent({
+							type: "auto_retry_end",
+							success: true,
+							attempt: this._retryAttempt,
+						});
+						this._retryAttempt = 0;
+					}
+				}
 			}
 		}
-
-		// The loop awaits this before it can submit the result on a live continuation.
-		if (
-			event.type === "message_end" &&
-			event.message.role === "toolResult" &&
-			this._extensionRunner.hasHandlers("live_tool_result")
-		) {
-			const content = await this._extensionRunner.emitLiveToolResult(event.message);
-			if (content) this._liveToolResultContent.set(event.message.toolCallId, content);
-		}
-
-		if (event.type === "message_end" && event.message.role === "assistant") {
-			const assistantMsg = event.message as AssistantMessage;
-			this._lastAssistantMessage = assistantMsg;
-			if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
-				this._overflowRecoveryAttempted = false;
-			}
-
-			// Reset retry counter immediately on successful assistant response
-			// This prevents accumulation across multiple LLM calls within a turn
-			if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
-				await this._emitRetryEvent({
-					type: "auto_retry_end",
-					success: true,
-					attempt: this._retryAttempt,
-				});
-				this._retryAttempt = 0;
-			}
-		}
-
 		// A turn ends after its assistant message and every tool result has been appended,
 		// so this is the first point in the run where a context-only custom message can be
 		// inserted without landing between a tool call and its result. Flushing after the
@@ -1788,11 +1560,7 @@ export class AgentSession {
 		for (let i = event.messages.length - 1; i >= 0; i--) {
 			const message = event.messages[i];
 			if (message.role === "assistant") {
-				// A late native checkpoint can replace this entry, so identify the response by its end event.
-				return (
-					this._lastAssistantMessage !== this._inRunRetryMessage &&
-					this._isRetryableError(message as AssistantMessage)
-				);
+				return this._isRetryableError(message as AssistantMessage);
 			}
 		}
 		return false;
@@ -1830,40 +1598,9 @@ export class AgentSession {
 		if (unresolvedProjectedTarget) {
 			throw new Error("Cannot persist recovery omission because a projected message has no source entry");
 		}
-		// Native admission precedes preflight; even a blocked call owns its recorded result.
-		const committedCallIds = new Set(
-			message.content.flatMap((block) =>
-				block.type === "toolCall" && (block.executionStarted || (block.async && block.responsesItem))
-					? [block.id]
-					: [],
-			),
-		);
-		for (const [index, targetId] of targetIds.entries()) {
+		for (const targetId of targetIds) {
 			if (!targetId) continue;
-			const target = targets[index];
-			// Late async results can belong to earlier responses; omit only this attempt's removed calls.
-			if (
-				target.role === "toolResult" &&
-				(committedCallIds.has(target.toolCallId) ||
-					!message.content.some((block) => block.type === "toolCall" && block.id === target.toolCallId))
-			)
-				continue;
-			const committed =
-				target?.role === "assistant" && committedCallIds.size > 0
-					? target.content.filter((block) =>
-							block.type === "toolCall"
-								? committedCallIds.has(block.id)
-								: block.type === "text"
-									? !!block.textSignature
-									: !!block.thinkingSignature,
-						)
-					: [];
-			// Retained reasoning must still have a following completed text or call.
-			while (committed.at(-1)?.type === "thinking") committed.pop();
-			const editId = this.sessionManager.appendContextEdit(
-				targetId,
-				committed.length > 0 ? { content: committed } : null,
-			);
+			const editId = this.sessionManager.appendContextEdit(targetId, null);
 			const entry = this.sessionManager.getEntry(editId);
 			if (entry) this._emit({ type: "entry_appended", entry });
 		}
@@ -1954,7 +1691,6 @@ export class AgentSession {
 				type: "tool_execution_start",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
-				namespace: event.namespace,
 				args: event.args,
 			};
 			await this._extensionRunner.emit(extensionEvent);
@@ -1963,7 +1699,6 @@ export class AgentSession {
 				type: "tool_execution_update",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
-				namespace: event.namespace,
 				args: event.args,
 				partialResult: event.partialResult,
 			};
@@ -1973,7 +1708,6 @@ export class AgentSession {
 				type: "tool_execution_end",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
-				namespace: event.namespace,
 				result: event.result,
 				isError: event.isError,
 			};
@@ -2006,12 +1740,13 @@ export class AgentSession {
 		}
 	}
 
-	/** Close admission before host cleanup yields. Active responses are aborted only at final disposal. */
+	/** Close ingress synchronously before shutdown handlers or host teardown yield. */
 	beginShutdown(): void {
-		clearInterval(this._backgroundTimer);
-		this._extensionUIContext?.setStatus("background-command", undefined);
 		this._cacheWarmer?.cancel();
-		this._checkpointRequest?.cancel();
+		clearInterval(this._backgroundTimer);
+		this._backgroundTimer = undefined;
+		this._extensionUIContext?.setStatus("background-command", undefined);
+		this.cancelCheckpoint();
 		this._shutdownAbortController.abort();
 		this._promptAbortController?.abort();
 	}
@@ -2021,16 +1756,12 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
-		clearInterval(this._backgroundTimer);
-		this._extensionUIContext?.setStatus("background-command", undefined);
-		this._checkpointRequest?.cancel();
-		this._shutdownAbortController.abort();
+		this.beginShutdown();
 		try {
 			this.abortRetry();
 			this.abortCompaction();
 			this.abortBranchSummary();
 			this.abortBash();
-			this._promptAbortController?.abort();
 			this.agent.abort();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
@@ -2046,7 +1777,6 @@ export class AgentSession {
 			this._cacheWarmer.cancel();
 		}
 		cleanupSessionResources(this.sessionId);
-		this._deferredSettlement.disable();
 	}
 
 	// =========================================================================
@@ -2055,18 +1785,12 @@ export class AgentSession {
 
 	/** Refresh the public finalized transcript from the canonical session projection. */
 	refreshContext(): void {
-		this._assertNotCheckpointHeld();
 		this._refreshFinalizedContext();
 	}
 
 	/** Full agent state */
 	get state(): AgentState {
 		return this.agent.state;
-	}
-
-	/** Native call obligations in the active branch/window. Detached work can remain after local idle. */
-	getPendingToolCalls(): ReturnType<typeof getPendingToolCalls> {
-		return getPendingToolCalls(this.agent.state.messages);
 	}
 
 	/** Current cache-warming state and the policy inputs that produced it. */
@@ -2091,7 +1815,15 @@ export class AgentSession {
 		return this.agent.state.thinkingLevel;
 	}
 
-	/** Whether the session is preparing an admitted prompt, running the agent, or continuing it. */
+	/** Under a virtual selection, the physical model and thinking level of the latest successful response. */
+	get routedModel(): { model: Model<any>; thinkingLevel?: ThinkingLevel } | undefined {
+		if (!this.model || !isVirtualModel(this.model)) return undefined;
+		const latest = findLatestResponse(this.agent.state.messages);
+		const model = latest && this._modelRuntime.getPhysicalModel(latest.provider, latest.model);
+		return model && { model, thinkingLevel: latest?.thinkingLevel };
+	}
+
+	/** Whether the session is currently processing an agent run or post-run continuation. */
 	get isStreaming(): boolean {
 		return this._isAgentRunActive;
 	}
@@ -2103,16 +1835,12 @@ export class AgentSession {
 
 	/** Current effective system prompt, including changes not yet sent to the model. */
 	get systemPrompt(): string {
-		const pendingOptions = this._getPendingSystemPromptOptions();
-		return pendingOptions ? buildSystemPrompt(pendingOptions) : getCurrentSystemPrompt(this.messages);
+		const pending = this._getPendingSystemPromptOptions();
+		return pending ? buildSystemPrompt(pending) : getCurrentSystemPrompt(this.messages);
 	}
 
 	private _getPendingSystemPromptOptions(): NormalizedBuildSystemPromptOptions | undefined {
 		if (this._runSystemPromptOptions) return this._runSystemPromptOptions;
-		// Structured before_agent_start edits remain in the transcript after a run ends.
-		// Forced text is request-only; saved replacement records still replay until the next run.
-		// Compare rendered inputs so mutable getSystemPromptOptions() edits are detected too.
-		// Empty contexts need the initial prompt, but do not erase the baseline used when navigating back.
 		return getCurrentSystemMessage(this.messages) &&
 			buildSystemPrompt(this._baseSystemPromptOptions) === buildSystemPrompt(this._baseSystemPromptBaseline)
 			? undefined
@@ -2124,57 +1852,116 @@ export class AgentSession {
 		return this._retryAttempt;
 	}
 
-	/** Return every active tool's public ID, accepted by setActiveToolsByName. */
+	/**
+	 * Get the names of currently active tools, which are the tools declared to the model.
+	 * Tools with `codemode` or `deferred` exposure are callable from other tools without being active.
+	 */
 	getActiveToolNames(): string[] {
-		return this.agent.state.tools.map(toolId);
+		return this.agent.state.tools.map((t) => t.name);
 	}
 
-	/** Return the complete active loadout with exact namespace/name identities. */
-	getActiveToolReferences(): ToolReference[] {
-		return this.agent.state.tools.map(toToolReference);
+	/** Get the names of the tools that tools can call through `ctx.executeTool()`. */
+	getCallableToolNames(): string[] {
+		return this._getCallableTools().map((t) => t.name);
 	}
 
-	/** Get all permitted tools with public IDs, declarations, and source metadata. */
+	/**
+	 * Get all configured tools with name, description, parameter schema, prompt guidelines, and source metadata.
+	 */
 	getAllTools(): ToolInfo[] {
 		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
-			id: toolId(definition),
-			...toToolReference(definition),
-			...(definition.toolSearch ? { toolSearch: definition.toolSearch } : {}),
+			name: definition.name,
 			description: definition.description,
 			parameters: definition.parameters,
 			promptGuidelines: definition.promptGuidelines,
-			discovery: definition.discovery,
+			exposure: this._getToolExposure(definition.name),
+			...(definition.namespace ? { namespace: definition.namespace } : {}),
+			...(definition.annotations ? { annotations: { ...definition.annotations } } : {}),
 			sourceInfo,
 		}));
 	}
 
-	getToolDefinition(name: ToolSelection): ToolDefinition | undefined {
-		return this._toolDefinitions.get(this._toolSelectionKey(name))?.definition;
+	getToolDefinition(name: string): ToolDefinition | undefined {
+		return this._toolDefinitions.get(name)?.definition;
 	}
 
-	/** Replace the complete active loadout by public ID; unknown IDs are ignored. */
+	/**
+	 * Set active tools by name.
+	 * Only tools in the registry can be enabled. Unknown and hidden tool names are ignored.
+	 * Also rebuilds the system prompt to reflect the new tool set.
+	 * Changes take effect on the next agent turn.
+	 */
 	setActiveToolsByName(toolNames: string[]): void {
-		this._setActiveTools(toolNames);
-	}
-
-	private _toolSelectionKey(tool: ToolSelection): string {
-		return typeof tool === "string" ? (this._toolIds.get(tool) ?? toolKey(tool)) : toolKey(tool);
-	}
-
-	setActiveToolReferences(references: ToolReference[]): void {
-		this._setActiveTools(references);
-	}
-
-	private _setActiveTools(references: ToolSelection[]): void {
 		this._assertNotCheckpointHeld();
-		const selected = new Map<string, AgentTool>();
-		for (const reference of references) {
-			const key = this._toolSelectionKey(reference);
-			const tool = this._toolRegistry.get(key);
-			if (tool) selected.set(key, tool);
+		const tools = this._applyToolLoadout(toolNames);
+		this._rebuildSystemPrompt(tools.map((tool) => tool.name));
+	}
+
+	private _getToolExposure(name: string): ToolExposure {
+		return this._toolDefinitions.get(name)?.definition.exposure ?? "direct";
+	}
+
+	/**
+	 * Tools callable through `ctx.executeTool()`: the active `direct` tools and every registered
+	 * `codemode` or `deferred` tool.
+	 */
+	private _getCallableTools(active: ReadonlySet<string> = new Set(this.getActiveToolNames())): AgentTool[] {
+		return [...this._toolRegistry.values()].filter((tool) => {
+			const exposure = this._getToolExposure(tool.name);
+			return exposure === "codemode" || exposure === "deferred" || (exposure === "direct" && active.has(tool.name));
+		});
+	}
+
+	/**
+	 * Set the agent's tools for the given active tool names and return them. The active tools are
+	 * the registered, non-hidden ones; they are declared to the model. Active tools with a
+	 * `prepareLoadout` hook can change the declared descriptions and hide declarations from
+	 * requests (see {@link _installHiddenDeclarationsProjection}).
+	 */
+	private _applyToolLoadout(toolNames: string[]): AgentTool[] {
+		const tools = [...new Set(toolNames)].flatMap((name) => {
+			const tool = this._toolRegistry.get(name);
+			return tool && this._getToolExposure(name) !== "hidden" ? [tool] : [];
+		});
+		const hooks = tools.flatMap((tool) => {
+			const entry = this._toolDefinitions.get(tool.name);
+			return entry?.definition.prepareLoadout ? [entry] : [];
+		});
+		const hidden = new Set<string>();
+		let declared = tools;
+		if (hooks.length > 0) {
+			const loadout: ToolLoadout = {
+				declared: tools,
+				callable: this._getCallableTools(new Set(tools.map((tool) => tool.name))),
+				registered: [...this._toolRegistry.values()],
+				getExposure: (name) => this._getToolExposure(name),
+				getNamespace: (name) => this._toolDefinitions.get(name)?.definition.namespace,
+			};
+			const descriptions = new Map<string, string>();
+			for (const { definition, sourceInfo } of hooks) {
+				try {
+					const changes = definition.prepareLoadout?.(loadout);
+					for (const [name, description] of Object.entries(changes?.descriptions ?? {})) {
+						descriptions.set(name, description);
+					}
+					for (const name of changes?.hiddenDeclarations ?? []) hidden.add(name);
+				} catch (error) {
+					this._extensionRunner.emitError({
+						extensionPath: sourceInfo.path,
+						event: "prepare_loadout",
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				}
+			}
+			declared = tools.map((tool) => {
+				const description = descriptions.get(tool.name);
+				return description === undefined ? tool : { ...tool, description };
+			});
 		}
-		this.agent.state.tools = [...selected.values()];
-		this._rebuildSystemPrompt(this.getActiveToolReferences());
+		this._hiddenDeclarations = hidden;
+		this.agent.state.tools = declared;
+		return declared;
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -2256,8 +2043,8 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
-	private _rebuildSystemPrompt(toolNames: ToolSelection[]): void {
-		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(this._toolSelectionKey(name)));
+	private _rebuildSystemPrompt(toolNames: string[]): void {
+		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
 		for (const name of this._toolRegistry.keys()) {
 			const snippet = this._toolPromptSnippets.get(name);
@@ -2279,7 +2066,6 @@ export class AgentSession {
 			selectedTools: validToolNames,
 			toolSnippets,
 			toolGuidelines: Object.fromEntries(this._toolPromptGuidelines),
-			sectionTools: discoverySectionTools(this._toolDiscoveryGroups),
 		});
 	}
 
@@ -2291,185 +2077,111 @@ export class AgentSession {
 	 *
 	 * A forced prompt does not affect the transcript: the structured sections are still diffed
 	 * and persisted, and the forced text is projected onto the request by
-	 * {@link _installAgentForcedPromptProjection}.
+	 * the request projection.
 	 */
 	private _preparePromptAndToolLoadout(
 		options: NormalizedBuildSystemPromptOptions,
 		messages: AgentMessage[] = this.agent.state.messages,
 	): SystemMessage | undefined {
-		options.selectedTools = [...new Map(options.selectedTools.map((tool) => [toolKey(tool), tool])).values()].filter(
-			(tool) => this._toolRegistry.has(this._toolSelectionKey(tool)),
-		);
-		this.agent.state.tools = options.selectedTools.flatMap((name) => {
-			const tool = this._toolRegistry.get(this._toolSelectionKey(name));
-			return tool ? [tool] : [];
-		});
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions(this._baseSystemPromptOptions);
 		this._hasPreparedPrompt = true;
-		const current = getCurrentSystemMessage(messages);
-		const deferredToolEntries = this._toolDiscoveryGroups.flatMap((group) => group.defaultTools);
-		const discoveryChanged = !isDeepStrictEqual(current?.deferredToolEntries, deferredToolEntries);
-		const desired = buildSystemPromptSections(options);
-		// Saved full-prompt replacements must not become a permanent opaque prefix.
-		if (current && (current.sections === undefined || contentText(current.content).length > 0)) {
-			return {
-				role: "system",
-				content: "",
-				sections: desired,
-				deferredToolEntries,
-				replace: true,
-				timestamp: Date.now(),
-			};
-		}
-		const sections = diffSystemPromptSections(current?.sections ?? {}, desired);
-		// Never retrofit a declaration into a prefix that has already been bound by a response.
-		const lastBinding =
-			!current &&
-			this.sessionManager
-				.getBranch()
-				.reverse()
-				.find(
-					(entry) =>
-						entry.type === "compaction" ||
-						entry.type === "context_window" ||
-						(entry.type === "message" && (entry.message.role === "system" || entry.message.role === "assistant")),
-				);
-		const nativeHead =
-			!current && (!lastBinding || lastBinding.type === "compaction" || lastBinding.type === "context_window");
-		return sections || discoveryChanged
-			? {
-					role: "system",
-					content: "",
-					...(nativeHead ? { nativeHead: true as const } : {}),
-					sections,
-					...(discoveryChanged ? { deferredToolEntries } : {}),
-					timestamp: Date.now(),
-				}
+		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
+		this._recordToolSelection();
+		const sections = diffSystemPromptSections(
+			getCurrentSystemMessage(messages)?.sections ?? {},
+			buildSystemPromptSections(options),
+		);
+		const declared = new Set((getCurrentSystemMessage(messages)?.toolsAdded ?? []).map((tool) => tool.name));
+		const visible = options.selectedTools.filter((name) => !this._hiddenDeclarations.has(name));
+		const visibilityChanged = visible.length !== declared.size || visible.some((name) => !declared.has(name));
+		return sections || visibilityChanged
+			? { role: "system", content: "", ...(sections ? { sections } : {}), timestamp: Date.now() }
 			: undefined;
 	}
 
-	/**
-	 * Send a forced prompt as the provider's leading system prompt without recording it.
-	 *
-	 * A `before_agent_start` handler that returns `systemPrompt` needs that exact text at the
-	 * head of the request; a mid-conversation system message would leave the original prompt
-	 * in place. The forced text is a rendering of the current prompt, so the transcript keeps
-	 * its structured sections and the request is projected instead: the system messages
-	 * collapse into one head holding the forced text and the current tools. Runs after the
-	 * `context` extension handlers.
-	 */
-	private _installAgentForcedPromptProjection(): void {
-		const previousTransformContext = this.agent.transformContext;
-		this.agent.transformContext = async (messages, signal) => {
-			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
-			const forced = this._runSystemPromptOptions?.forceSystemPrompt;
-			if (this._providerRequestPrefix) {
-				this._providerRequestPrefix.systemPrompt = forced ?? getCurrentSystemPrompt(transformed);
-			}
-			if (forced === undefined) return transformed;
-			const current = getCurrentSystemMessage(transformed);
-			const head: SystemMessage = {
-				role: "system",
-				content: forced,
-				...(current?.toolsAdded ? { toolsAdded: current.toolsAdded } : {}),
-				timestamp: current?.timestamp ?? Date.now(),
-			};
-			if (this._providerRequestPrefix) this._providerRequestPrefix.systemTokens = estimateTokens(head);
-			return [head, ...withoutToolSearchState(transformed.filter((message) => message.role !== "system"))];
-		};
+	/** Project visibility only at the new declaration boundary; never rewrite historical loadouts. */
+	private _projectNewToolDeclarations(message: SystemMessage): void {
+		const current = getCurrentSystemMessage(this.sessionManager.buildSessionProjection().messages);
+		const hidden = this._hiddenDeclarations;
+		const removed = new Map((message.toolsRemoved ?? []).map((tool) => [tool.name, tool]));
+		for (const tool of current?.toolsAdded ?? []) {
+			if (hidden.has(tool.name)) removed.set(tool.name, { name: tool.name });
+		}
+		message.toolsAdded = message.toolsAdded?.filter((tool) => !hidden.has(tool.name));
+		message.toolsRemoved = [...removed.values()];
+		if (!message.toolsAdded?.length) delete message.toolsAdded;
+		if (!message.toolsRemoved.length) delete message.toolsRemoved;
 	}
 
-	/** Restore the active tool loadout declared by the session transcript, if it declares one. */
+	private _recordToolSelection(): void {
+		const names = this.getActiveToolNames();
+		const previous = this.sessionManager
+			.getBranch()
+			.findLast((entry) => entry.type === "custom" && entry.customType === TOOL_LOADOUT_SELECTION);
+		if (previous?.type === "custom" && JSON.stringify(previous.data) === JSON.stringify(names)) return;
+		this.sessionManager.appendCustomEntry(TOOL_LOADOUT_SELECTION, names);
+	}
+
+	/** Restore the callable selection without discarding pending prompt edits. */
 	private _restoreToolsFromTranscript(): void {
+		const selection = this.sessionManager
+			.getBranch()
+			.findLast((entry) => entry.type === "custom" && entry.customType === TOOL_LOADOUT_SELECTION);
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
-		// Without a declaration there is no saved selection to restore. Preserve native
-		// behavior, including lifecycle-hook activations and pending prompt edits.
-		if (!current) return;
-		const loaderSelected = (current.toolsAdded ?? []).some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME));
-		const deferredKeys = new Set(this._toolDiscoveryGroups.flatMap((group) => group.tools.map(toolKey)));
-		// Unannotated history cannot distinguish retired entries from deliberately omitted ordinary tools.
-		// Preserve its legacy fallback only when the loader itself is no longer available.
-		const retiredEntries = current.deferredToolEntries
-			? current.deferredToolEntries.filter((tool) => !deferredKeys.has(toolKey(tool)))
-			: !this._toolRegistry.has(toolKey(DISCOVER_TOOLS_NAME))
-				? this.getActiveToolReferences()
-				: [];
-		const toolNames = [
-			...(current.toolsAdded ?? []).map(toToolReference),
-			...(loaderSelected
-				? retiredEntries.filter((tool) => this._toolDefinitions.get(toolKey(tool))?.sourceInfo.source !== "builtin")
-				: []),
-		].filter(
-			(tool, index, tools) =>
-				this._toolRegistry.has(this._toolSelectionKey(tool)) &&
-				tools.findIndex((other) => toolKey(other) === toolKey(tool)) === index,
-		);
-		// Older selections have never declared the loader. Keep it available for newly
-		// installed deferred integrations, but respect empty selections and a deliberate
-		// removal recorded after discovery was already available in this branch.
-		if (
-			toolNames.length &&
-			this._toolRegistry.has(toolKey(DISCOVER_TOOLS_NAME)) &&
-			!toolNames.some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME)) &&
-			!this.sessionManager
-				.getBranch()
-				.some(
-					(entry) =>
-						entry.type === "message" &&
-						(entry.message.role === "system" || entry.message.role === "toolResult") &&
-						entry.message.toolsAdded?.some((tool) => toolKey(tool) === toolKey(DISCOVER_TOOLS_NAME)),
-				)
-		) {
-			toolNames.push({ name: DISCOVER_TOOLS_NAME });
-		}
-		this.agent.state.tools = toolNames.flatMap((name) => {
-			const registered = this._toolRegistry.get(toolKey(name));
-			return registered ? [registered] : [];
-		});
-		// Restoration changes the selected tools, not local prompt edits or loaded resources.
+		const selected =
+			selection?.type === "custom" &&
+			Array.isArray(selection.data) &&
+			selection.data.every((name) => typeof name === "string")
+				? (selection.data as string[])
+				: current?.toolsAdded?.map((tool) => tool.name);
+		if (!selected) return;
+		const names = this._applyToolLoadout(selected).map((tool) => tool.name);
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
 			...this._baseSystemPromptOptions,
-			selectedTools: toolNames,
+			selectedTools: names,
 		});
-		// The destination supersedes pending tool selections on both sides of the comparison.
-		// All other baseline inputs remain unchanged, so genuine prompt/resource edits still differ.
-		this._baseSystemPromptBaseline = { ...this._baseSystemPromptBaseline, selectedTools: toolNames };
+		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions({
+			...this._baseSystemPromptBaseline,
+			selectedTools: names,
+		});
 	}
 
 	// =========================================================================
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(prepare: (signal: AbortSignal) => Promise<() => AgentMessage[]>): Promise<void> {
+	private async _runAgentPrompt(
+		input: AgentMessage | AgentMessage[] | ((signal: AbortSignal) => Promise<AgentMessage[] | undefined>),
+	): Promise<void> {
 		this._assertNotCheckpointHeld();
 		this._shutdownAbortController.signal.throwIfAborted();
 		if (this._checkpointActiveTools) throw new Error("Checkpoint restore requires extension initialization");
-		if (this._isAgentRunActive || this.agent.state.isStreaming) {
-			throw new Error("Agent is already processing.");
-		}
-		if (this.isCompacting) {
-			throw new Error(
-				"Cannot submit a prompt while compaction or tree navigation is in progress. Wait for it to finish and retry.",
-			);
-		}
+		if (!this.isIdle) throw new Error("Agent is already processing");
+		this._promptAbortController = new AbortController();
 		this._agentRunAbortRequested = false;
+		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
+		this._failedResponse = undefined;
+		this._recordSelection();
 		this._isAgentRunActive = true;
-		const controller = new AbortController();
-		this._promptAbortController = controller;
-		const previousBaseSystemPromptBaseline = this._baseSystemPromptBaseline;
+		this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
+		const previousPromptBaseline = this._baseSystemPromptBaseline;
 		let started = false;
 		try {
-			const accept = await prepare(controller.signal);
-			controller.signal.throwIfAborted();
-			const messages = accept();
 			this._backgroundCheckpointPaused = false;
 			this._setBackgroundWakeSuppressed(false);
-			this._skipNextProviderRequestPreflight = this.agent.state.messages.length === 0;
+			const messages = typeof input === "function" ? await input(this._promptAbortController.signal) : input;
+			this._promptAbortController.signal.throwIfAborted();
+			this._shutdownAbortController.signal.throwIfAborted();
+			if (!messages) return;
+			const accepted = new Set(Array.isArray(messages) ? messages : [messages]);
+			this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter((message) => !accepted.has(message));
 			started = true;
+			// Tool declarations must diff against the same persisted transcript used for requests.
+			this._refreshFinalizedContext();
 			let run = this.agent.prompt(messages);
 			while (true) {
-				// Keep extension cancellation alive when the low-level Agent releases its signal.
 				const signal = this.agent.signal;
+				const controller = this._promptAbortController;
 				const abort = () => controller.abort(signal?.reason);
 				if (signal?.aborted) abort();
 				signal?.addEventListener("abort", abort, { once: true });
@@ -2478,92 +2190,53 @@ export class AgentSession {
 				} finally {
 					signal?.removeEventListener("abort", abort);
 				}
-				const continueRun = await this._handlePostAgentRun(signal);
 				if (this._agentRunAbortRequested || signal?.aborted || this._shutdownAbortController.signal.aborted) break;
-				if (!continueRun && !(await this._runBeforeSettleBoundary())) break;
+				const postRunContinue = await this._handlePostAgentRun();
+				const boundaryContinue = postRunContinue ? undefined : await this._runBeforeSettleBoundary();
+				if (!postRunContinue && !boundaryContinue) break;
 				if (this._agentRunAbortRequested || this._shutdownAbortController.signal.aborted) break;
-				run = this.agent.continue();
+				run = this.agent.continue({ drainQueuedInput: boundaryContinue !== "explicit" });
 			}
 		} catch (error) {
-			if (!started) controller.signal.throwIfAborted();
+			if (!started) this._promptAbortController.signal.throwIfAborted();
 			throw error;
 		} finally {
+			if (!started) this._baseSystemPromptBaseline = previousPromptBaseline;
+			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
+			this._failedResponse = undefined;
+			this._runSystemPromptOptions = undefined;
+			this._promptAbortController = undefined;
 			try {
-				if (controller.signal.aborted || this._agentRunAbortRequested) this._setBackgroundWakeSuppressed(true);
-				if (controller.signal.aborted) this._pendingNewContext = undefined;
-				this._skipNextProviderRequestPreflight = false;
-				if (this._agentRunAbortRequested) await this._finishCancelledRetry();
-				this._runSystemPromptOptions = undefined;
-				if (!started) this._baseSystemPromptBaseline = previousBaseSystemPromptBaseline;
-				// No further retry or continuation can deliver these messages. Recover both queued
-				// and drained-but-undelivered customs without starting another turn.
-				this._preserveUndeliveredCustomMessages(true);
 				this._flushPendingProviderMessages();
+				this._preserveUndeliveredCustomMessages(true);
 				this._flushPendingBashMessages();
 				this._flushPendingCustomMessages();
 			} finally {
-				this._promptAbortController = undefined;
-				if (started) {
-					await this._emitAgentSettled();
-				} else {
+				if (started) await this._emitAgentSettled();
+				else {
 					this._isAgentRunActive = false;
 					this._resolveIdleWaitIfIdle();
+					this.notifyCheckpointStateChanged();
 				}
 			}
 		}
 	}
 
-	private async _prepareAgentStart(prompt: string, images?: ImageContent[]): Promise<AgentMessage[]> {
-		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
-		const result = await this._extensionRunner.emitBeforeAgentStart(prompt, images, this._baseSystemPromptOptions);
-		// Explicit selectedTools edits win; otherwise honor live setActiveTools() calls.
-		const handlerEditedTools =
-			result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
-			result.systemPromptOptions.selectedTools.some(
-				(name, index) => toolKey(name) !== toolKey(selectedToolsBefore[index]),
-			);
-		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolReferences();
-		const messages: AgentMessage[] = result.messages.map((message) => ({
-			role: "custom",
-			customType: message.customType,
-			content: message.content ?? [],
-			display: message.display,
-			details: message.details,
-			timestamp: Date.now(),
-		}));
-		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
-		this._runSystemPromptOptions = result.systemPromptOptions;
-		if (updateMessage) messages.unshift(updateMessage);
-		return messages;
-	}
-
-	private async _handlePostAgentRun(signal: AbortSignal | undefined): Promise<boolean> {
+	private async _handlePostAgentRun(): Promise<boolean> {
+		if (this._shutdownAbortController.signal.aborted) return false;
 		const message = this._lastAssistantMessage;
 		const toolResults = this._lastAssistantToolResults;
 		this._lastAssistantMessage = undefined;
 		this._lastAssistantToolResults = [];
-		if (
-			this._agentRunAbortRequested ||
-			this._shutdownAbortController.signal.aborted ||
-			signal?.aborted ||
-			message?.stopReason === "aborted"
-		) {
-			this._pendingNewContext = undefined;
+		if (this._agentRunAbortRequested) {
 			await this._finishCancelledRetry();
 			return false;
 		}
 		if (!message) return this.agent.hasQueuedMessages();
 
-		if (this._consumeNewContext()) {
-			return message.stopReason !== "stop" || this.agent.hasQueuedMessages();
-		}
-
-		if (
-			message !== this._inRunRetryMessage &&
-			this._isRetryableError(message) &&
-			(await this._prepareRetry(message))
-		) {
+		if (this._isRetryableError(message) && (await this._prepareRetry(message))) {
 			if (this._agentRunAbortRequested) await this._finishCancelledRetry();
+			this._failedResponse = message;
 			return !this._agentRunAbortRequested;
 		}
 		if (this._agentRunAbortRequested) {
@@ -2581,19 +2254,18 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		const compacted = await this._checkCompaction(message, true, toolResults);
-		if (this._agentRunAbortRequested || this._shutdownAbortController.signal.aborted) return false;
-		if (this._consumeNewContext()) {
-			return message.stopReason !== "stop" || this.agent.hasQueuedMessages();
+		// A stopped tool-use run has no next assistant request to prepare, e.g. a terminating batch.
+		if (message.stopReason === "toolUse") return this.agent.hasQueuedMessages();
+		if (await this._checkCompaction(message, true, toolResults)) {
+			return !this._agentRunAbortRequested;
 		}
-		if (compacted) return true;
 
 		// The low-level loop drains both queues before agent_end. Messages queued by
 		// agent_end handlers require a fresh run before pre-settlement handlers fire.
 		return !this._agentRunAbortRequested && this.agent.hasQueuedMessages();
 	}
 
-	private async _runBeforeSettleBoundary(): Promise<boolean> {
+	private async _runBeforeSettleBoundary(): Promise<boolean | "explicit"> {
 		if (!this._extensionRunner.hasHandlers("agent_before_settle")) return this.agent.hasQueuedMessages();
 		this._isBeforeSettle = true;
 		this._abortDuringBeforeSettle = false;
@@ -2611,7 +2283,7 @@ export class AgentSession {
 				if (result.continue) this._reportInvalidBoundaryContinuation("agent_before_settle");
 				return false;
 			}
-			return shouldContinue;
+			return result.continue ? "explicit" : shouldContinue;
 		} finally {
 			this._isBeforeSettle = false;
 		}
@@ -2650,7 +2322,7 @@ export class AgentSession {
 			}
 			const processed = await processImage(Buffer.from(part.data, "base64"), part.mimeType, {
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
-				resizeOptions: this.model?.inputLimits?.images?.resize,
+				resizeOptions: this._limitsModel()?.inputLimits?.images?.resize,
 			});
 			if (!processed.ok) {
 				hints.push(processed.message);
@@ -2672,6 +2344,28 @@ export class AgentSession {
 		this._normalizedUserMessages.add(message);
 	}
 
+	private async _normalizePromptImages(
+		images: ImageContent[] | undefined,
+	): Promise<{ images: ImageContent[]; hints: string[] }> {
+		if (!images) return { images: [], hints: [] };
+
+		const normalizedImages: ImageContent[] = [];
+		const hints: string[] = [];
+		for (const image of images) {
+			const processed = await processImage(Buffer.from(image.data, "base64"), image.mimeType, {
+				autoResizeImages: this.settingsManager.getImageAutoResize(),
+				resizeOptions: this._limitsModel()?.inputLimits?.images?.resize,
+			});
+			if (!processed.ok) {
+				hints.push(processed.message);
+				continue;
+			}
+			normalizedImages.push({ type: "image", data: processed.data, mimeType: processed.mimeType });
+			hints.push(...processed.hints);
+		}
+		return { images: normalizedImages, hints };
+	}
+
 	/**
 	 * Send a prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
@@ -2685,80 +2379,73 @@ export class AgentSession {
 		this._assertNotCheckpointHeld();
 		this._shutdownAbortController.signal.throwIfAborted();
 		if (this._isEmittingAgentSettled) {
-			this._deferredSettledActions.push(async () => await this.prompt(text, options));
+			this._deferredSettledActions.push(() => this.prompt(text, options));
 			return;
 		}
-		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
-		let preflightComplete = false;
-		let pendingInput = false;
-		const preflightResult = (success: boolean) => {
-			preflightComplete = true;
-			if (pendingInput) {
-				pendingInput = false;
-				this._pendingInputCount--;
-			}
-			options?.preflightResult?.(success);
+		this._pendingInputCount++;
+		let released = false;
+		const releaseInput = () => {
+			if (released) return;
+			released = true;
+			this._pendingInputCount--;
+			this.notifyCheckpointStateChanged();
 		};
-
+		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
+		const preflightResult = options?.preflightResult;
 		try {
-			// Handle extension commands first (execute immediately, even during streaming)
-			// Extension commands manage their own LLM interaction via pi.sendMessage()
-			if (expandPromptTemplates && text.startsWith("/")) {
-				const handled = await this._tryExecuteExtensionCommand(text);
-				if (handled) {
-					// Extension command executed, no prompt to send
-					preflightResult(true);
-					return;
-				}
+			if (
+				expandPromptTemplates &&
+				text.startsWith("/") &&
+				this._extensionRunner.getCommand(text.slice(1).split(" ", 1)[0])
+			) {
+				releaseInput();
+				await this._tryExecuteExtensionCommand(text);
+				preflightResult?.("handled");
+				return;
 			}
-
-			if (this._compactionAbortController !== undefined) {
+			if (this._compactionAbortController || this._branchSummaryAbortController)
 				throw new Error(
 					"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
 				);
-			}
-
-			this._pendingInputCount++;
-			pendingInput = true;
-
-			// Emit input event for extension interception (before skill/template expansion)
 			const processedInput = await this._runInputHandlers(
 				text,
 				options?.images,
 				options?.source ?? "interactive",
 				this.isStreaming ? options?.streamingBehavior : undefined,
 			);
+			this._shutdownAbortController.signal.throwIfAborted();
 			if (!processedInput) {
-				preflightResult(true);
+				preflightResult?.("handled");
 				return;
 			}
-			const { text: currentText, images: currentImages } = processedInput;
-
-			// Expand skill commands (/skill:name args) and prompt templates (/template args)
-			let expandedText = currentText;
-			if (expandPromptTemplates) {
-				expandedText = this._expandSkillCommand(expandedText);
-				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-			}
-
-			// If streaming, queue via steer() or followUp() based on option
+			if (this._compactionAbortController || this._branchSummaryAbortController)
+				throw new Error(
+					"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
+				);
 			if (this.isStreaming) {
-				if (!options?.streamingBehavior) {
+				if (!options?.streamingBehavior)
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
-				}
-				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages);
-				} else {
-					await this._queueSteer(expandedText, currentImages);
-				}
-				preflightResult(true);
+				const expanded = expandPromptTemplates
+					? expandPromptTemplate(this._expandSkillCommand(processedInput.text), [...this.promptTemplates])
+					: processedInput.text;
+				if (options.streamingBehavior === "steer") await this._queueSteer(expanded, processedInput.images);
+				else await this._queueFollowUp(expanded, processedInput.images);
+				preflightResult?.("queued");
 				return;
 			}
-
 			await this._runAgentPrompt(async (signal) => {
-				// Reserve before auth, compaction, or startup hooks can yield and mutate shared run state.
+				const { text: currentText, images: currentImages } = processedInput;
+
+				// Expand skill commands (/skill:name args) and prompt templates (/template args)
+				let expandedText = currentText;
+				if (expandPromptTemplates) {
+					expandedText = this._expandSkillCommand(expandedText);
+					expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+				}
+
+				// Flush any pending bash and custom messages before the new prompt
 				this._flushPendingBashMessages();
 				this._flushPendingCustomMessages();
 
@@ -2783,41 +2470,76 @@ export class AgentSession {
 					throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 				}
 
-				// Consume only these asides after startup succeeds; asides added by the hook stay queued.
-				const nextTurnMessages = this._pendingNextTurnMessages.slice();
-				const startupMessages = await this._prepareAgentStart(expandedText, currentImages);
-				signal.throwIfAborted();
-				// Hook-driven model selection determines the resize profile for request and history.
-				const userMessage: UserMessage = {
-					role: "user",
-					content: [{ type: "text", text: expandedText }, ...(currentImages ?? [])],
-					timestamp: Date.now(),
-				};
-				await this._normalizeUserMessageImages(userMessage);
-				signal.throwIfAborted();
-				const messages: AgentMessage[] = [userMessage, ...nextTurnMessages];
-				// Renew request-only guidance before checking the budget, but keep compaction
-				// inside admission. Provider preflight also counts the new input and asides.
+				// Check if we need to compact before sending (catches aborted responses).
+				// The user's new prompt is sent below, so do not call agent.continue() here.
 				const lastAssistant = this._findLastAssistantMessage();
 				if (lastAssistant) {
 					await this._checkCompaction(lastAssistant, false);
 				}
+
 				signal.throwIfAborted();
-				messages.unshift(...startupMessages.filter((message) => message.role === "system"));
-				messages.push(...startupMessages.filter((message) => message.role !== "system"));
-				return () => {
-					preflightResult(true);
-					signal.throwIfAborted();
-					// No await between consuming these asides and handing them to Agent.
-					this._pendingNextTurnMessages.splice(0, nextTurnMessages.length);
-					return messages;
+				// Emit before_agent_start before normalizing images so extension-driven model
+				// selection determines the resize profile used for the request and history.
+				const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
+				const result = await this._extensionRunner.emitBeforeAgentStart(
+					expandedText,
+					currentImages,
+					this._baseSystemPromptOptions,
+				);
+				signal.throwIfAborted();
+				// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
+				// which updates the live loadout instead. An explicit edit wins; otherwise the live
+				// loadout is authoritative, so a setActiveTools() call is not undone here.
+				const handlerEditedTools =
+					result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
+					result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
+				if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
+
+				const normalized = await this._normalizePromptImages(currentImages);
+				signal.throwIfAborted();
+				const userText =
+					normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
+
+				// Build messages only after hooks and image normalization have completed.
+				const messages: AgentMessage[] = [];
+				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: userText }];
+				userContent.push(...normalized.images);
+				const userMessage: UserMessage = {
+					role: "user",
+					content: userContent,
+					timestamp: Date.now(),
 				};
+				this._normalizedUserMessages.add(userMessage);
+				messages.push(userMessage);
+
+				// Inject any pending "nextTurn" messages as context alongside the user message
+				for (const msg of this._pendingNextTurnMessages) {
+					messages.push(msg);
+				}
+
+				for (const msg of result.messages) {
+					messages.push({
+						role: "custom",
+						customType: msg.customType,
+						// Untyped extensions can pass null/missing content; normalize at ingestion.
+						content: msg.content ?? [],
+						display: msg.display,
+						details: msg.details,
+						timestamp: Date.now(),
+					});
+				}
+				const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
+				this._runSystemPromptOptions = result.systemPromptOptions;
+				if (updateMessage) messages.unshift(updateMessage);
+
+				this._promptAbortController?.signal.throwIfAborted();
+				this._shutdownAbortController.signal.throwIfAborted();
+				releaseInput();
+				preflightResult?.("started");
+				return messages;
 			});
-		} catch (error) {
-			if (!preflightComplete) preflightResult(false);
-			throw error;
 		} finally {
-			await this._checkpointSafePoint("settled");
+			releaseInput();
 		}
 	}
 
@@ -2850,7 +2572,7 @@ export class AgentSession {
 			return true;
 		} finally {
 			this._activeCommands--;
-			await this._checkpointSafePoint("settled");
+			this.notifyCheckpointStateChanged();
 		}
 	}
 
@@ -2890,21 +2612,23 @@ export class AgentSession {
 		images: ImageContent[] | undefined,
 		behavior: "steer" | "followUp",
 		source: InputSource,
-	): Promise<void> {
+	): Promise<QueuedInputDisposition> {
 		this._assertNotCheckpointHeld();
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
-		}
-
+		this._shutdownAbortController.signal.throwIfAborted();
 		this._pendingInputCount++;
 		try {
+			if (text.startsWith("/")) {
+				this._throwIfExtensionCommand(text);
+			}
+
 			const processedInput = await this._runInputHandlers(
 				text,
 				images,
 				source,
 				this.isStreaming ? behavior : undefined,
 			);
-			if (!processedInput) return;
+			this._shutdownAbortController.signal.throwIfAborted();
+			if (!processedInput) return "handled";
 
 			let expandedText = this._expandSkillCommand(processedInput.text);
 			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
@@ -2914,9 +2638,10 @@ export class AgentSession {
 			} else {
 				await this._queueFollowUp(expandedText, processedInput.images);
 			}
+			return "queued";
 		} finally {
 			this._pendingInputCount--;
-			await this._checkpointSafePoint("settled");
+			this.notifyCheckpointStateChanged();
 		}
 	}
 
@@ -2929,8 +2654,12 @@ export class AgentSession {
 	 * @param options Input source; defaults to interactive
 	 * @throws Error if text is an extension command
 	 */
-	async steer(text: string, images?: ImageContent[], options?: { source?: InputSource }): Promise<void> {
-		await this._queueUserInput(text, images, "steer", options?.source ?? "interactive");
+	async steer(
+		text: string,
+		images?: ImageContent[],
+		options?: { source?: InputSource },
+	): Promise<QueuedInputDisposition> {
+		return this._queueUserInput(text, images, "steer", options?.source ?? "interactive");
 	}
 
 	/**
@@ -2941,8 +2670,12 @@ export class AgentSession {
 	 * @param options Input source; defaults to interactive
 	 * @throws Error if text is an extension command
 	 */
-	async followUp(text: string, images?: ImageContent[], options?: { source?: InputSource }): Promise<void> {
-		await this._queueUserInput(text, images, "followUp", options?.source ?? "interactive");
+	async followUp(
+		text: string,
+		images?: ImageContent[],
+		options?: { source?: InputSource },
+	): Promise<QueuedInputDisposition> {
+		return this._queueUserInput(text, images, "followUp", options?.source ?? "interactive");
 	}
 
 	/**
@@ -3008,17 +2741,13 @@ export class AgentSession {
 	 * @param message Custom message with customType, content, display, details
 	 * @param options.triggerTurn If true and not streaming, triggers a new LLM turn
 	 * @param options.deliverAs Delivery mode: "steer", "followUp", or "nextTurn"
-	 * @param options.persistOnCancel Preserve undelivered streamed messages without waking on cancellation, final stop, or clearQueue. Ignored for nextTurn.
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: {
-			triggerTurn?: boolean;
-			deliverAs?: "steer" | "followUp" | "nextTurn";
-			persistOnCancel?: boolean;
-		},
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; persistOnCancel?: boolean },
 	): Promise<void> {
 		this._assertNotCheckpointHeld();
+		if (options?.triggerTurn !== false) this._shutdownAbortController.signal.throwIfAborted();
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
@@ -3039,17 +2768,33 @@ export class AgentSession {
 			}
 		} else if (options?.triggerTurn) {
 			if (this._isEmittingAgentSettled) {
-				this._deferredSettledActions.push(async () => await this.sendCustomMessage(appMessage, options));
+				this._deferredSettledActions.push(async () => await this.sendCustomMessage(message, options));
 				return;
 			}
-			await this._runAgentPrompt(async () => {
-				const startupMessages = await this._prepareAgentStart("");
-				const messages = [
-					...startupMessages.filter((message) => message.role === "system"),
+			await this._runAgentPrompt(async (signal) => {
+				const selected = this._baseSystemPromptOptions.selectedTools;
+				const start = await this._extensionRunner.emitBeforeAgentStart(
+					"",
+					undefined,
+					this._baseSystemPromptOptions,
+				);
+				signal.throwIfAborted();
+				if (JSON.stringify(start.systemPromptOptions.selectedTools) === JSON.stringify(selected))
+					start.systemPromptOptions.selectedTools = this.getActiveToolNames();
+				const update = this._preparePromptAndToolLoadout(start.systemPromptOptions);
+				this._runSystemPromptOptions = start.systemPromptOptions;
+				return [
+					...(update ? [update] : []),
 					appMessage,
-					...startupMessages.filter((message) => message.role !== "system"),
+					...start.messages.map(
+						(message): CustomMessage => ({
+							...message,
+							content: message.content ?? [],
+							role: "custom",
+							timestamp: Date.now(),
+						}),
+					),
 				];
-				return () => messages;
 			});
 		} else if (this.isStreaming) {
 			// Appending now would put the message between an assistant tool call and its
@@ -3077,10 +2822,16 @@ export class AgentSession {
 	}
 
 	private _appendCustomMessage(appMessage: CustomMessage): void {
-		// Appending one accepted message does not change the earlier projection. Keep it
-		// inspectable even if the journal's subsequent disk write fails.
-		this.agent.state.messages.push(appMessage);
-		this._persistMessage(appMessage);
+		try {
+			this.sessionManager.appendCustomMessageEntry(
+				appMessage.customType,
+				appMessage.content,
+				appMessage.display,
+				appMessage.details,
+			);
+		} finally {
+			this._refreshFinalizedContext();
+		}
 		this._emit({ type: "message_start", message: appMessage });
 		this._emit({ type: "message_end", message: appMessage });
 	}
@@ -3090,10 +2841,9 @@ export class AgentSession {
 	 * Called once the current turn's tool results are in agent state and session history.
 	 */
 	private _flushPendingCustomMessages(): void {
-		while (this._pendingCustomMessages.length > 0) {
-			// SessionManager owns the attempted entry even if persistence fails.
-			this._appendCustomMessage(this._pendingCustomMessages.shift()!);
-		}
+		if (this._pendingCustomMessages.length === 0) return;
+
+		while (this._pendingCustomMessages.length) this._appendCustomMessage(this._pendingCustomMessages.shift()!);
 	}
 
 	/**
@@ -3137,7 +2887,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Clear queued steering/follow-up messages and return their user text.
+	 * Clear all queued messages and return them.
 	 * Useful for restoring to editor when user aborts.
 	 * @returns Object with steering and followUp arrays
 	 */
@@ -3149,7 +2899,6 @@ export class AgentSession {
 		this.agent.clearAllQueues();
 		this._emitQueueUpdate();
 		if (!this.isStreaming) {
-			this._flushPendingProviderMessages();
 			this._flushPendingCustomMessages();
 		}
 		return { steering, followUp };
@@ -3222,7 +2971,7 @@ export class AgentSession {
 				model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
 				thinkingLevel: this.thinkingLevel,
 				activeTools: this.getActiveToolNames(),
-				knownTools: this.getAllTools().map((tool) => tool.id),
+				knownTools: this.getAllTools().map((tool) => tool.name),
 			},
 			header,
 			entries: this.sessionManager.getEntries(),
@@ -3267,7 +3016,7 @@ export class AgentSession {
 		return (
 			this.isIdle &&
 			!this.agent.state.isStreaming &&
-			!this._settling &&
+			!this._isEmittingAgentSettled &&
 			!this._pendingInputCount &&
 			!this._activeCommands &&
 			!this.isBashRunning &&
@@ -3280,7 +3029,6 @@ export class AgentSession {
 	/** Caller owns stopped ingress and completed shutdown handlers. Never use this as a live-process sleep receipt. */
 	async captureShutdownCheckpoint(): Promise<ShutdownCheckpoint> {
 		if (!this._shutdownAbortController.signal.aborted) throw new Error("Session shutdown has not begun");
-		this._flushPendingProviderMessages();
 		this._flushPendingBashMessages();
 		this._flushPendingCustomMessages();
 		await this._modelRuntime.flushForCheckpoint({ requireSuccessfulPersistence: true });
@@ -3349,7 +3097,6 @@ export class AgentSession {
 					});
 					try {
 						unquiesce = options.quiesce?.();
-						this._flushPendingProviderMessages();
 						this._flushPendingBashMessages();
 						this._flushPendingCustomMessages();
 						this._checkpointEntryPersistence = holdController.signal;
@@ -3378,6 +3125,7 @@ export class AgentSession {
 								"Selected provider uses a runtime-only API key; persist native authentication first",
 							);
 						if (!options.quiesce) sleepBlockers.push("Host input is not quiesced");
+						if (this._baseToolsOverride) sleepBlockers.push("Runtime-only base tools cannot be restored");
 						if (!checkpoint.settled) sleepBlockers.push("Native run has not settled");
 						resolve({
 							checkpoint,
@@ -3395,14 +3143,20 @@ export class AgentSession {
 				},
 			};
 			options.signal?.addEventListener("abort", cancel, { once: true });
-			if (this.isIdle && !this._settling) void this._checkpointSafePoint("settled");
+			if (this.isIdle && !this._isEmittingAgentSettled) void this._checkpointSafePoint("settled");
 		});
 	}
 
 	private async _checkpointSafePoint(boundary: CheckpointBoundary): Promise<void> {
 		this._notifyShutdownCheckpointWaiters();
 		const request = this._checkpointRequest;
-		if (!request || this._checkpointHeld || this._settling || (boundary === "turn" && request.boundary === "settled"))
+		if (
+			!request ||
+			this._checkpointHeld ||
+			this._isEmittingAgentSettled ||
+			this._pendingSettledActions > 0 ||
+			(boundary === "turn" && request.boundary === "settled")
+		)
 			return;
 		if (
 			this.pendingInputCount ||
@@ -3456,16 +3210,18 @@ export class AgentSession {
 	}
 
 	/** Startup handlers may reconstruct tools; apply the exact saved selection after they finish. */
-	restoreCheckpointTools(names: ToolSelection[], configuration?: SessionCheckpoint["toolConfiguration"]): void {
+	restoreCheckpointTools(names: string[], configuration?: SessionCheckpoint["toolConfiguration"]): void {
 		this._assertNotCheckpointHeld();
 		if (configuration) {
 			this._noBuiltinTools = configuration.noBuiltinTools ?? false;
-			this._allowedToolNames = configuration.allowedToolNames?.slice();
-			this._excludedToolNames = configuration.excludedToolNames?.slice();
+			this._allowedToolNames = configuration.allowedToolNames ? new Set(configuration.allowedToolNames) : undefined;
+			this._excludedToolNames = configuration.excludedToolNames
+				? new Set(configuration.excludedToolNames)
+				: undefined;
 			this._refreshToolRegistry();
 		}
 		this._checkpointActiveTools = [...names];
-		this._setActiveTools(names);
+		this.setActiveToolsByName(names);
 		if (!this.hasExtensionHandlers("session_start") && !this.hasExtensionHandlers("resources_discover"))
 			this._finishCheckpointToolRestore();
 	}
@@ -3473,9 +3229,9 @@ export class AgentSession {
 	private _finishCheckpointToolRestore(): void {
 		const names = this._checkpointActiveTools;
 		if (!names) return;
-		if (names.some((name) => !this._toolRegistry.has(this._toolSelectionKey(name))))
+		if (names.some((name) => !this._toolRegistry.has(name)))
 			throw new Error("Checkpoint tools unavailable after extension initialization");
-		this._setActiveTools(names);
+		this.setActiveToolsByName(names);
 		this._checkpointActiveTools = undefined;
 	}
 
@@ -3508,11 +3264,11 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
-		this._checkpointRequest?.cancel();
+		this.cancelCheckpoint();
 		this._promptAbortController?.abort();
+		if (this.isStreaming) this._setBackgroundWakeSuppressed(true);
 		if (this._isAgentRunActive) {
 			this._agentRunAbortRequested = true;
-			this._setBackgroundWakeSuppressed(true);
 		}
 		this.abortRetry();
 		this.abortCompaction();
@@ -3545,11 +3301,6 @@ export class AgentSession {
 		previousModel: Model<any> | undefined,
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
-		if (
-			supportsToolDiscovery(previousModel) !== supportsToolDiscovery(nextModel) &&
-			[...this._toolDefinitions.values()].some(({ definition }) => definition.discovery)
-		)
-			this._refreshToolRegistry();
 		if (modelsAreEqual(previousModel, nextModel)) return;
 		await this._extensionRunner.emit({
 			type: "model_select",
@@ -3613,7 +3364,6 @@ export class AgentSession {
 		direction: "forward" | "backward" = "forward",
 		options: ModelMutationOptions = {},
 	): Promise<ModelCycleResult | undefined> {
-		this._assertNotCheckpointHeld();
 		if (this._scopedModels.length > 0) {
 			return this._cycleScopedModel(direction, options);
 		}
@@ -3815,24 +3565,23 @@ export class AgentSession {
 	/** Generate Pi's built-in compaction summary for manual and automatic compaction. */
 	private async _runDefaultCompaction(
 		preparation: CompactionPreparation,
-		requestModel: Model<any>,
-		apiKey: string | undefined,
-		headers: Record<string, string> | undefined,
+		model: Model<any>,
 		customInstructions: string | undefined,
 		signal: AbortSignal,
-		env: Record<string, string> | undefined,
 		reason: "manual" | "threshold" | "overflow",
 	): Promise<CompactionResult> {
+		// Resolve the request only when Pi summarizes itself: routing may call models or fail.
+		const request = await this._getSummarizationRequestAuth(model, signal);
 		return compact(
 			preparation,
-			requestModel,
-			apiKey,
-			headers,
+			request.model,
+			request.apiKey,
+			request.headers,
 			customInstructions,
 			signal,
-			this.thinkingLevel,
-			this.agent.streamResponse,
-			env,
+			request.thinkingLevel,
+			this.agent.streamFunction,
+			request.env,
 			this.settingsManager.getRetrySettings(),
 			this._summarizationRetryCallbacks({ source: "compaction", reason }),
 			undefined, // sessionId
@@ -3863,6 +3612,7 @@ export class AgentSession {
 		this._assertNotCheckpointHeld();
 		this._shutdownAbortController.signal.throwIfAborted();
 		await this.abort();
+		this._shutdownAbortController.signal.throwIfAborted();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;
@@ -3875,13 +3625,6 @@ export class AgentSession {
 			}
 
 			const settings = this.settingsManager.getCompactionSettings(model);
-			const {
-				model: requestModel,
-				apiKey,
-				headers,
-				env,
-			} = await this._getSummarizationRequestAuth(model, this._compactionAbortController.signal);
-
 			const pathEntries = this.sessionManager.getBranch();
 
 			const preparation = prepareCompaction(pathEntries, settings);
@@ -3906,6 +3649,8 @@ export class AgentSession {
 					willRetry: false,
 					signal: this._compactionAbortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
+				this._compactionAbortController.signal.throwIfAborted();
+				this._shutdownAbortController.signal.throwIfAborted();
 
 				if (result?.cancel) {
 					cancelledByExtension = true;
@@ -3935,12 +3680,9 @@ export class AgentSession {
 				// Shared default summary generator, also used by automatic compaction.
 				const result = await this._runDefaultCompaction(
 					preparation,
-					requestModel,
-					apiKey,
-					headers,
+					model,
 					customInstructions,
 					this._compactionAbortController.signal,
-					env,
 					"manual",
 				);
 				summary = result.summary;
@@ -3955,14 +3697,11 @@ export class AgentSession {
 			}
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			this._reportedUsagePrefix = null;
+			// Retain admitted input after the new boundary before compaction observers rebuild the transcript.
+			this._flushPendingProviderMessages();
 			const newEntries = this.sessionManager.getEntries();
 			this._refreshFinalizedContext();
-			const estimatedTokensAfter = estimateProjectedContextTokens(
-				this.sessionManager.buildSessionProjection(),
-				this.sessionManager.getBranch(),
-				{ model: this.model, useReportedUsage: false },
-			).tokens;
+			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
 			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
@@ -4070,23 +3809,36 @@ export class AgentSession {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
 
-		const contextWindow = this.model?.contextWindow ?? 0;
-
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
-		// shouldn't trigger compaction for the new model.
-		const sameModel =
-			this.model &&
-			assistantMessage.provider === this.model.provider &&
-			assistantMessage.api === this.model.api &&
-			assistantMessage.model === this.model.id;
+		// shouldn't trigger compaction for the new model. Under a virtual selection, the
+		// physical model that produced the message supplies the limits.
+		const messageModel = this._modelForMessage(assistantMessage);
+		const sameModel = messageModel !== undefined;
+		const contextWindow = (messageModel ?? this.model)?.contextWindow ?? 0;
+
+		// Skip compaction checks if this assistant message is older than the latest
+		// compaction boundary. This prevents a stale pre-compaction usage/error
+		// from retriggering compaction on the first prompt after compaction.
+		const branch = this.sessionManager.getBranch();
+		const compactionEntry = getLatestCompactionEntry(branch);
+		const assistantEntryId = this._findPersistedMessageEntryId(assistantMessage);
+		const assistantIndex = assistantEntryId ? branch.findIndex((entry) => entry.id === assistantEntryId) : -1;
+		// Explicit errors use journal order: provider timestamps can precede a just-completed reset.
+		const assistantIsFromBeforeCompaction =
+			compactionEntry !== null &&
+			(assistantIndex >= 0 && assistantMessage.stopReason === "error" && isContextOverflow(assistantMessage)
+				? assistantIndex < branch.findIndex((entry) => entry.id === compactionEntry.id)
+				: assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime());
+		if (assistantIsFromBeforeCompaction) {
+			return false;
+		}
 
 		// Automatic cases 1 and 2: context overflow.
 		// A length stop is recoverable when output ended below the model's original desired limit,
 		// independent of the configured context size or any context-clamped provider request limit.
 		const currentProjection = this.sessionManager.buildSessionProjection();
-		const assistantEntryId = this._findPersistedMessageEntryId(assistantMessage);
 		const assistantIsProjected =
 			assistantEntryId === undefined ||
 			currentProjection.entries.some(
@@ -4094,14 +3846,7 @@ export class AgentSession {
 					entry.sourceEntry.id === assistantEntryId &&
 					entry.messages.some((message) => message.role === "assistant"),
 			);
-		const branch = this.sessionManager.getBranch();
-		const assistantIndex = assistantEntryId ? branch.findIndex((entry) => entry.id === assistantEntryId) : -1;
 		const entriesAfterAssistant = assistantIndex >= 0 ? branch.slice(assistantIndex + 1) : [];
-		// Raw branch order, not provider timestamps, determines whether this attempt
-		// predates a completed compaction/window. Kept usage cannot retrigger recovery.
-		if (entriesAfterAssistant.some((entry) => entry.type === "compaction" || entry.type === "context_window")) {
-			return false;
-		}
 		const hasPostAssistantContextEdit = entriesAfterAssistant.some((entry) => entry.type === "context_edit");
 		const latestAssistantEdit = entriesAfterAssistant
 			.filter(
@@ -4109,16 +3854,17 @@ export class AgentSession {
 			)
 			.at(-1);
 		const assistantRetainedForExplicitRecovery =
-			assistantEntryId === undefined || latestAssistantEdit?.replacement !== null;
-		const assistantUsageMatchesProjection =
-			assistantIsProjected && !hasPostAssistantContextEdit && this._reportedUsageApplies(this.agent.state);
+			assistantEntryId === undefined ||
+			(!entriesAfterAssistant.some((entry) => entry.type === "compaction") &&
+				latestAssistantEdit?.replacement !== null);
+		const assistantUsageMatchesProjection = assistantIsProjected && !hasPostAssistantContextEdit;
 		const explicitOverflow = assistantMessage.stopReason === "error" && isContextOverflow(assistantMessage);
 		const contextOverflow =
 			sameModel &&
 			((explicitOverflow && assistantRetainedForExplicitRecovery) ||
 				(assistantUsageMatchesProjection && isContextOverflow(assistantMessage, contextWindow)));
 		const recoverableLength =
-			sameModel && assistantIsProjected && isRecoverableLength(assistantMessage, this.model?.maxTokens ?? 0);
+			sameModel && assistantIsProjected && isRecoverableLength(assistantMessage, messageModel.maxTokens);
 		if (contextOverflow || recoverableLength) {
 			const willRetry = assistantMessage.stopReason !== "stop";
 
@@ -4153,29 +3899,13 @@ export class AgentSession {
 			// Persistently omit the selected final attempt before post-run recovery compaction.
 			this._overflowRecoveryAttempted = true;
 			this._omitRecoveryAttempt(assistantMessage, toolResults);
-			return await this._runAutoCompaction("overflow", willRetry);
+			const retry = await this._runAutoCompaction("overflow", willRetry);
+			if (retry) this._failedResponse = assistantMessage;
+			return retry;
 		}
 
-		// Case 3: threshold compaction without retry.
-		// For error messages or all-zero usage messages, estimate from the last valid response.
-		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
-		// responses can still compact and do not reset context accounting.
-		// At settlement, valid usage describes the completed request. Trailing tool
-		// results need a budget check only if another request is actually admitted;
-		// request preflight already owns that check (including terminating batches).
-		const directContextTokens =
-			sameModel &&
-			assistantUsageMatchesProjection &&
-			assistantMessage.stopReason !== "error" &&
-			assistantMessage.stopReason !== "aborted"
-				? calculateContextTokens(assistantMessage.usage)
-				: 0;
-		const contextTokens =
-			directContextTokens ||
-			this._estimateContextTokens({
-				...this.agent.state,
-				messages: currentProjection.messages,
-			}).tokens;
+		// Use the same model- and prefix-aware accounting as request preflight and the context meter.
+		const contextTokens = this._estimateContextTokens().tokens;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			return await this._runAutoCompaction("threshold", false);
 		}
@@ -4198,9 +3928,7 @@ export class AgentSession {
 		let abortController: AbortController | undefined;
 		let started = false;
 		let fromExtension = false;
-		let signal: AbortSignal | undefined;
 		let cancelledByExtension = false;
-		let claimedWindow = false;
 
 		try {
 			if (!model) {
@@ -4208,56 +3936,19 @@ export class AgentSession {
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
+			const defaultPreparation = prepareCompaction(pathEntries, settings);
+			const preparation =
+				defaultPreparation ??
+				(this._extensionRunner.hasHandlers("session_before_compact")
+					? prepareCompactionForExtension(pathEntries, settings)
+					: undefined);
+			if (!preparation) return false;
+
 			abortController = new AbortController();
 			this._autoCompactionAbortController = abortController;
-			signal = AbortSignal.any([
-				abortController.signal,
-				this._shutdownAbortController.signal,
-				...(this.agent.signal ? [this.agent.signal] : []),
-				...(this._promptAbortController ? [this._promptAbortController.signal] : []),
-			]);
 			started = true;
 			this._emit({ type: "compaction_start", reason });
-			signal.throwIfAborted();
-
-			// An extension may claim the automatic trigger with a fresh context window. This runs before
-			// summarization auth and summary preparation, which a summary-free rollover does not need.
-			// A claimed trigger never reaches session_before_compact.
-			if (this._extensionRunner.hasHandlers("session_before_auto_compact")) {
-				const claim = await this._extensionRunner.emit({
-					type: "session_before_auto_compact",
-					branchEntries: pathEntries,
-					retainedToolResultIds: this._getRetainedToolResultIds(),
-					pendingMessages: this._pendingProviderMessages.slice(),
-					reason,
-					willRetry,
-					signal,
-				});
-				signal.throwIfAborted();
-				if (claim?.newContext) {
-					claimedWindow = true;
-					const contextWindowStarted = !!this._consumeNewContext(claim.newContext);
-					this._emit({
-						type: "compaction_end",
-						reason,
-						result: undefined,
-						aborted: true,
-						willRetry: contextWindowStarted && willRetry,
-						contextWindowStarted,
-						pendingMessages: this._pendingProviderMessages.slice(),
-					});
-					return contextWindowStarted && (willRetry || this.agent.hasQueuedMessages());
-				}
-			}
-
-			const preparation = prepareCompaction(pathEntries, settings);
-			if (!preparation) {
-				this._emit({ type: "compaction_end", reason, result: undefined, aborted: false, willRetry: false });
-				return false;
-			}
-
-			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model, signal);
-			signal.throwIfAborted();
+			abortController.signal.throwIfAborted();
 
 			let extensionCompaction: CompactionResult | undefined;
 
@@ -4269,28 +3960,12 @@ export class AgentSession {
 					customInstructions: undefined,
 					reason,
 					willRetry,
-					signal,
+					signal: abortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (extensionResult?.cancel) {
 					cancelledByExtension = true;
 					throw new Error("Compaction cancelled");
-				}
-				signal.throwIfAborted();
-
-				if (extensionResult?.newContext) {
-					claimedWindow = true;
-					const contextWindowStarted = !!this._consumeNewContext(extensionResult.newContext);
-					this._emit({
-						type: "compaction_end",
-						reason,
-						result: undefined,
-						aborted: true,
-						willRetry: contextWindowStarted && willRetry,
-						contextWindowStarted,
-						pendingMessages: this._pendingProviderMessages.slice(),
-					});
-					return contextWindowStarted && (willRetry || this.agent.hasQueuedMessages());
 				}
 
 				if (extensionResult?.compaction) {
@@ -4298,7 +3973,7 @@ export class AgentSession {
 					fromExtension = true;
 				}
 			}
-			signal.throwIfAborted();
+			abortController.signal.throwIfAborted();
 
 			let summary: string;
 			let firstKeptEntryId: string;
@@ -4314,15 +3989,23 @@ export class AgentSession {
 				usage = extensionCompaction.usage;
 				details = extensionCompaction.details;
 			} else {
+				if (!defaultPreparation) {
+					this._emit({
+						type: "compaction_end",
+						reason,
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+						pendingMessages: this.hasPendingMessages,
+					});
+					return false;
+				}
 				// Shared default summary generator, also used by manual compaction.
 				const compactResult = await this._runDefaultCompaction(
 					preparation,
-					requestModel,
-					apiKey,
-					headers,
+					model,
 					undefined,
-					signal,
-					env,
+					abortController.signal,
 					reason,
 				);
 				summary = compactResult.summary;
@@ -4331,17 +4014,14 @@ export class AgentSession {
 				usage = compactResult.usage;
 				details = compactResult.details;
 			}
-			signal.throwIfAborted();
+			abortController.signal.throwIfAborted();
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			this._reportedUsagePrefix = null;
+			// Retain admitted input after the new boundary before compaction observers rebuild the transcript.
+			this._flushPendingProviderMessages();
 			const newEntries = this.sessionManager.getEntries();
 			this._refreshFinalizedContext();
-			const estimatedTokensAfter = estimateProjectedContextTokens(
-				this.sessionManager.buildSessionProjection(),
-				this.sessionManager.getBranch(),
-				{ model: this.model, useReportedUsage: false },
-			).tokens;
+			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
 			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
@@ -4366,14 +4046,7 @@ export class AgentSession {
 				usage,
 				details,
 			};
-			this._emit({
-				type: "compaction_end",
-				reason,
-				result,
-				aborted: false,
-				willRetry,
-				pendingMessages: this._pendingProviderMessages.slice(),
-			});
+			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 
 			if (willRetry) return true;
 
@@ -4382,7 +4055,7 @@ export class AgentSession {
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "compaction failed";
-			const aborted = signal?.aborted === true || cancelledByExtension;
+			const aborted = abortController?.signal.aborted === true || cancelledByExtension;
 			if (started) {
 				const errorMessage = aborted
 					? undefined
@@ -4405,10 +4078,8 @@ export class AgentSession {
 					fromExtension,
 				});
 			}
-			if (claimedWindow) throw error;
 			return false;
 		} finally {
-			if (signal?.aborted) this._pendingNewContext = undefined;
 			if (this._autoCompactionAbortController === abortController) {
 				this._autoCompactionAbortController = undefined;
 			}
@@ -4420,7 +4091,6 @@ export class AgentSession {
 	 * Toggle auto-compaction setting.
 	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
-		this._assertNotCheckpointHeld();
 		this.settingsManager.setCompactionEnabled(enabled);
 	}
 
@@ -4429,13 +4099,8 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
-	/** Change frontend ownership without re-running extension startup. Retained across reloads. */
-	setExtensionMode(mode: ExtensionMode): void {
-		this._extensionMode = mode;
-		this._extensionRunner.setUIContext(this._extensionUIContext, mode);
-	}
-
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
+		if (bindings.getQueuedInputCount) this._extensionGetQueuedInputCount = bindings.getQueuedInputCount;
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
 		}
@@ -4444,9 +4109,6 @@ export class AgentSession {
 		}
 		if (bindings.commandContextActions !== undefined) {
 			this._extensionCommandContextActions = bindings.commandContextActions;
-		}
-		if (bindings.getQueuedInputCount !== undefined) {
-			this._extensionGetQueuedInputCount = bindings.getQueuedInputCount;
 		}
 		if (bindings.abortHandler !== undefined) {
 			this._extensionAbortHandler = bindings.abortHandler;
@@ -4460,9 +4122,15 @@ export class AgentSession {
 
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
+		this._extensionRunner.reportUnhandledMcpServers();
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
 		this._finishCheckpointToolRestore();
 		this._backgroundNotificationsReady = true;
+	}
+
+	setExtensionMode(mode: ExtensionMode): void {
+		this._extensionMode = mode;
+		this._applyExtensionBindings(this._extensionRunner);
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -4486,14 +4154,10 @@ export class AgentSession {
 		};
 
 		this._resourceLoader.extendResources(extensionPaths);
-		// Discovery adds skills, prompts and themes; only skills affect the system prompt.
-		// Do not rebuild unrelated inputs and discard local prompt edits or tool choices.
 		if (skillPaths.length === 0) return;
 		const skills = this._resourceLoader.getSkills().skills;
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({ ...this._baseSystemPromptOptions, skills });
 		if (reason === "startup" && !this._hasPreparedPrompt) {
-			// These are initial resources, not a pending reset of a resumed before_agent_start prompt.
-			// Adopt only the discovered input, retaining the saved tool selection and other baseline fields.
 			this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions({
 				...this._baseSystemPromptBaseline,
 				skills,
@@ -4507,7 +4171,7 @@ export class AgentSession {
 	}> {
 		return entries.map((entry) => {
 			const source = this.getExtensionSourceLabel(entry.extensionPath);
-			const baseDir = entry.extensionPath.startsWith("<") ? undefined : dirname(entry.extensionPath);
+			const baseDir = isSyntheticPath(entry.extensionPath) ? undefined : dirname(entry.extensionPath);
 			return {
 				path: entry.path,
 				metadata: {
@@ -4521,7 +4185,7 @@ export class AgentSession {
 	}
 
 	private getExtensionSourceLabel(extensionPath: string): string {
-		if (extensionPath.startsWith("<")) {
+		if (isSyntheticPath(extensionPath)) {
 			return `extension:${extensionPath.replace(/[<>]/g, "")}`;
 		}
 		const base = basename(extensionPath);
@@ -4551,11 +4215,6 @@ export class AgentSession {
 		}
 
 		this.agent.state.model = refreshedModel;
-		if (
-			supportsToolDiscovery(currentModel) !== supportsToolDiscovery(refreshedModel) &&
-			[...this._toolDefinitions.values()].some(({ definition }) => definition.discovery)
-		)
-			this._refreshToolRegistry();
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -4587,7 +4246,6 @@ export class AgentSession {
 		runner.bindCore(
 			{
 				sendMessage: (message, options) => {
-					if (this.isCheckpointHeld) this.cancelCheckpoint();
 					this.sendCustomMessage(message, options).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
@@ -4597,7 +4255,6 @@ export class AgentSession {
 					});
 				},
 				sendUserMessage: (content, options) => {
-					if (this.isCheckpointHeld) this.cancelCheckpoint();
 					this.sendUserMessage(content, options).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
@@ -4634,9 +4291,8 @@ export class AgentSession {
 					this.sessionManager.appendLabelChange(entryId, label);
 				},
 				getActiveTools: () => this.getActiveToolNames(),
-				getActiveToolReferences: () => this.getActiveToolReferences(),
-				setActiveToolReferences: (tools) => this.setActiveToolReferences(tools),
 				getAllTools: () => this.getAllTools(),
+				getSettings: () => this.settingsManager.getSettings(),
 				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
 				refreshTools: () => this._refreshToolRegistry(),
 				getCommands,
@@ -4652,7 +4308,6 @@ export class AgentSession {
 				getModel: () => this.model,
 				getScopedModels: () => this._scopedModels,
 				isIdle: () => !this._shutdownAbortController.signal.aborted && this.isIdle,
-				isBashRunning: () => this.isBashRunning,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 				getSignal: () => this._promptAbortController?.signal ?? this.agent.signal,
 				abort: () => {
@@ -4663,16 +4318,15 @@ export class AgentSession {
 					void this.abort();
 				},
 				hasPendingMessages: () => this.hasPendingMessages,
+				isBashRunning: () => this.isBashRunning,
 				hasPendingSteeringMessages: () => this.agent.hasQueuedSteeringMessages(),
 				getPendingNextTurnCount: () => this.pendingNextTurnCount,
 				getPendingInputCount: () => this.pendingInputCount,
-				getPendingToolCalls: () => this.getPendingToolCalls(),
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
 				},
 				getContextUsage: () => this.getContextUsage(),
 				getCompactionSettings: () => this.settingsManager.getCompactionSettings(this.model),
-				newContext: (options) => this.newContext(options),
 				compact: (options) => {
 					void runner.checkpointActivity.run(async () => {
 						try {
@@ -4686,6 +4340,8 @@ export class AgentSession {
 				},
 				getSystemPrompt: () => this.systemPrompt,
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
+				executeTool: (callerId, name, args, options) => this._executeNestedToolCall(callerId, name, args, options),
+				getCallableTools: () => this._getCallableTools(),
 			},
 			{
 				registerProvider: (name, config) => {
@@ -4700,21 +4356,29 @@ export class AgentSession {
 					this._modelRuntime.unregisterProvider(name);
 					this._refreshCurrentModelFromRegistry();
 				},
+				registerVirtualModel: (definition) => {
+					this._modelRuntime.registerVirtualModel(definition);
+					this._refreshCurrentModelFromRegistry();
+				},
+				unregisterVirtualModel: (provider, id) => {
+					this._modelRuntime.unregisterVirtualModel(provider, id);
+					this._refreshCurrentModelFromRegistry();
+				},
 			},
 		);
 	}
 
-	private _refreshToolRegistry(options?: {
-		activeToolNames?: ToolSelection[];
-		includeAllExtensionTools?: boolean;
-	}): void {
-		const previousRegistryNames = new Set(this._toolRegistry.keys());
-		const previousActiveToolNames = this.getActiveToolReferences();
-		const previousActiveKeys = new Set(previousActiveToolNames.map(toolKey));
-		const allowedToolNames = this._allowedToolNames ? new Set(this._allowedToolNames.map(toolKey)) : undefined;
-		const excludedToolNames = this._excludedToolNames ? new Set(this._excludedToolNames.map(toolKey)) : undefined;
-		const isAllowedTool = (tool: ToolSelection): boolean =>
-			(!allowedToolNames || allowedToolNames.has(toolKey(tool))) && !excludedToolNames?.has(toolKey(tool));
+	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+		// Tools that were already activated on registration. A tool whose exposure changes to
+		// `direct` or `model-only` (for example from `hidden`) is activated like a new tool.
+		const previousActivatedOnRegistration = new Set(
+			[...this._toolRegistry.keys()].filter((name) => this._isActivatedOnRegistration(name)),
+		);
+		const previousActiveToolNames = this.getActiveToolNames();
+		const allowedToolNames = this._allowedToolNames;
+		const excludedToolNames = this._excludedToolNames;
+		const isAllowedTool = (name: string): boolean =>
+			(!allowedToolNames || allowedToolNames.has(name)) && !excludedToolNames?.has(name);
 
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
 		const allCustomTools = [
@@ -4723,70 +4387,32 @@ export class AgentSession {
 				definition,
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
-		].filter((tool) => isAllowedTool(tool.definition));
-		const baseToolSource = this._baseToolsOverride ? "sdk" : "builtin";
+		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
-				.filter(([, definition]) => isAllowedTool(definition))
+				.filter(([name]) => isAllowedTool(name))
 				.map(([name, definition]) => [
 					name,
 					{
 						definition,
-						sourceInfo: createSyntheticSourceInfo(`<${baseToolSource}:${definition.name}>`, {
-							source: baseToolSource,
-						}),
+						sourceInfo: this._baseToolsOverride
+							? createSyntheticSourceInfo(`<sdk:${name}>`, { source: "sdk" })
+							: createSyntheticSourceInfo(`${BUILTIN_PATH_PREFIX}${name}`, { source: "builtin" }),
 					},
 				]),
 		);
 		for (const tool of allCustomTools) {
-			definitionRegistry.set(toolKey(tool.definition), {
+			definitionRegistry.set(tool.definition.name, {
 				definition: tool.definition,
 				sourceInfo: tool.sourceInfo,
 			});
-		}
-		const previousDiscoveryGroups = this._toolDiscoveryGroups;
-		const groups = availableDiscoveryGroups(
-			[...definitionRegistry.values()]
-				.filter(({ sourceInfo }) => sourceInfo.source !== "builtin")
-				.map(({ definition }) => definition),
-		);
-		// Explicit host allowlists remain explicit. Excluding the loader must never strand capabilities.
-		const useDiscovery =
-			this._allowedToolNames === undefined &&
-			isAllowedTool(DISCOVER_TOOLS_NAME) &&
-			supportsToolDiscovery(this.model);
-		this._toolDiscoveryGroups = useDiscovery ? groups : [];
-		if (this._toolDiscoveryGroups.length) {
-			if (definitionRegistry.has(toolKey(DISCOVER_TOOLS_NAME)))
-				throw new Error(`Tool discovery conflicts with registered ${DISCOVER_TOOLS_NAME}`);
-			const definition = createDiscoverToolsDefinition({
-				groups: this._toolDiscoveryGroups,
-				getGroups: () => this._toolDiscoveryGroups,
-				getActive: () => this.getActiveToolReferences(),
-				setActive: (tools) => this.setActiveToolReferences(tools),
-			});
-			const tool = {
-				definition,
-				sourceInfo: createSyntheticSourceInfo(`<builtin:${DISCOVER_TOOLS_NAME}>`, { source: "builtin" }),
-			};
-			definitionRegistry.set(toolKey(definition), tool);
-			allCustomTools.push(tool);
-		}
-		const deferredKeys = new Set(this._toolDiscoveryGroups.flatMap((group) => group.tools.map(toolKey)));
-		const publicIds = new Map<string, string>();
-		for (const [key, { definition }] of definitionRegistry) {
-			const id = toolId(definition);
-			const previous = publicIds.get(id);
-			if (previous !== undefined && previous !== key)
-				throw new Error(`Ambiguous public tool ID ${JSON.stringify(id)}`);
-			publicIds.set(id, key);
 		}
 		this._toolDefinitions = definitionRegistry;
 		this._toolPromptSnippets = new Map(
 			Array.from(definitionRegistry.values())
 				.map(({ definition }) => {
 					const snippet = this._normalizePromptSnippet(definition.promptSnippet);
-					return snippet ? ([toolKey(definition), snippet] as const) : undefined;
+					return snippet ? ([definition.name, snippet] as const) : undefined;
 				})
 				.filter((entry): entry is readonly [string, string] => entry !== undefined),
 		);
@@ -4794,7 +4420,7 @@ export class AgentSession {
 			Array.from(definitionRegistry.values())
 				.map(({ definition }) => {
 					const guidelines = this._normalizePromptGuidelines(definition.promptGuidelines);
-					return guidelines.length > 0 ? ([toolKey(definition), guidelines] as const) : undefined;
+					return guidelines.length > 0 ? ([definition.name, guidelines] as const) : undefined;
 				})
 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
 		);
@@ -4802,63 +4428,61 @@ export class AgentSession {
 		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
 		const wrappedBuiltInTools = wrapRegisteredTools(
 			Array.from(this._baseToolDefinitions.values())
-				.filter((definition) => isAllowedTool(definition))
+				.filter((definition) => isAllowedTool(definition.name))
 				.map((definition) => ({
 					definition,
-					sourceInfo: createSyntheticSourceInfo(`<${baseToolSource}:${definition.name}>`, {
-						source: baseToolSource,
+					sourceInfo: createSyntheticSourceInfo(`${BUILTIN_PATH_PREFIX}${definition.name}`, {
+						source: "builtin",
 					}),
 				})),
 			runner,
 		);
 
-		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [toolKey(tool), tool]));
+		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
-			toolRegistry.set(toolKey(tool), tool);
+			toolRegistry.set(tool.name, tool);
 		}
 		this._toolRegistry = toolRegistry;
-		this._toolIds = publicIds;
 
 		const nextActiveToolNames = (
 			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
 		).filter((name) => isAllowedTool(name));
 
-		if (options?.includeAllExtensionTools) {
+		if (allowedToolNames) {
+			for (const toolName of this._toolRegistry.keys()) {
+				// Naming a tool activates it even when it is not active by default.
+				if (allowedToolNames.has(toolName) && this._isDeclarable(toolName)) {
+					nextActiveToolNames.push(toolName);
+				}
+			}
+		} else if (options?.includeAllExtensionTools) {
 			for (const tool of wrappedExtensionTools) {
-				if (!deferredKeys.has(toolKey(tool))) nextActiveToolNames.push(toToolReference(tool));
+				if (this._isActivatedOnRegistration(tool.name)) nextActiveToolNames.push(tool.name);
 			}
 		} else if (!options?.activeToolNames) {
-			for (const [key, tool] of this._toolRegistry) {
-				// A reappearing loader must not make previously deselected entry tools reachable.
-				// Genuinely new integrations still follow normal late-registration behavior.
-				const wouldWidenSelection =
-					key === toolKey(DISCOVER_TOOLS_NAME) &&
-					previousRegistryNames.size > 0 &&
-					(previousActiveKeys.size === 0 ||
-						this._toolDiscoveryGroups.some((group) =>
-							group.defaultTools.some(
-								(tool) => previousRegistryNames.has(toolKey(tool)) && !previousActiveKeys.has(toolKey(tool)),
-							),
-						));
-				if (!previousRegistryNames.has(key) && !deferredKeys.has(key) && !wouldWidenSelection)
-					nextActiveToolNames.push(toToolReference(tool));
-			}
-		}
-		// Removing metadata or switching to an unsupported model restores the ordinary front doors,
-		// not advanced tools that the integration itself normally keeps inactive.
-		if (previousActiveKeys.has(toolKey(DISCOVER_TOOLS_NAME))) {
-			for (const group of previousDiscoveryGroups) {
-				for (const tool of group.defaultTools) {
-					if (!deferredKeys.has(toolKey(tool)) && isAllowedTool(tool)) nextActiveToolNames.push(tool);
+			for (const toolName of this._toolRegistry.keys()) {
+				if (!previousActivatedOnRegistration.has(toolName) && this._isActivatedOnRegistration(toolName)) {
+					nextActiveToolNames.push(toolName);
 				}
 			}
 		}
 
-		this.setActiveToolReferences(nextActiveToolNames.map(toToolReference));
+		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
+	}
+
+	/** Whether activating the tool declares it to the model. */
+	private _isDeclarable(name: string): boolean {
+		const exposure = this._getToolExposure(name);
+		return exposure === "direct" || exposure === "model-only";
+	}
+
+	/** Whether registering the tool activates it, which declares it to the model. */
+	private _isActivatedOnRegistration(name: string): boolean {
+		return this._isDeclarable(name) && this._toolDefinitions.get(name)?.definition.defaultActive !== false;
 	}
 
 	private _buildRuntime(options: {
-		activeToolNames?: ToolSelection[];
+		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 	}): void {
@@ -4880,18 +4504,18 @@ export class AgentSession {
 						spawnHook: (context) => ({ ...context, cwd: this._extensionRunner.resolveBashCwd(context.cwd) }),
 					},
 					background_command: {
+						spawnHook: (context) => ({ ...context, cwd: this._extensionRunner.resolveBashCwd(context.cwd) }),
 						sessionManager: this.sessionManager,
 						sessionDir: this._backgroundCommandSessionDir,
 						isOneShot: () => this._extensionMode === "print" || this._extensionMode === "json",
 						commandPrefix: shellCommandPrefix,
 						shellPath,
-						spawnHook: (context) => ({ ...context, cwd: this._extensionRunner.resolveBashCwd(context.cwd) }),
 						onStart: () => this._startBackgroundCommandMonitor(),
 					},
 				});
 
 		this._baseToolDefinitions = new Map(
-			Object.values(baseToolDefinitions).map((tool) => [toolKey(tool), tool as ToolDefinition]),
+			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
@@ -4908,10 +4532,7 @@ export class AgentSession {
 			this.sessionManager,
 			new ModelRegistry(this._modelRuntime),
 		);
-		this._extensionRunner.checkpointActivity.onIdle = () => {
-			// Let the enclosing native callback finish its continuation before checking settlement.
-			this.notifyCheckpointStateChanged();
-		};
+		this._extensionRunner.checkpointActivity.onIdle = () => this.notifyCheckpointStateChanged();
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}
@@ -4930,20 +4551,22 @@ export class AgentSession {
 		});
 	}
 
-	/** Refresh resources and reinitialize extensions. Extension code updates require a process restart. */
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
-		this._checkpointRequest?.cancel();
+		this.cancelCheckpoint();
 		this._backgroundNotificationsReady = false;
+		await this.abort();
+		this.sessionManager.flush();
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
+		this.sessionManager.flush();
 		oldRunner.invalidate();
 		await this.settingsManager.reload();
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
 		await this._resourceLoader.reload();
 		this._buildRuntime({
-			activeToolNames: this.getActiveToolReferences(),
+			activeToolNames: this.getActiveToolNames(),
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
@@ -4956,9 +4579,9 @@ export class AgentSession {
 		if (hasBindings) {
 			await options?.beforeSessionStart?.();
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
+			this._extensionRunner.reportUnhandledMcpServers();
 			await this.extendResourcesFromExtensions("reload");
 		}
-		this._extensionUIContext?.notify(`Restart ${APP_NAME} to apply extension code changes.`, "warning");
 		this._backgroundNotificationsReady = true;
 	}
 
@@ -4972,7 +4595,7 @@ export class AgentSession {
 	 */
 	private _isRetryableError(message: AssistantMessage): boolean {
 		// Context overflow is handled by compaction, not retry.
-		if (isContextOverflow(message, this.model?.contextWindow ?? 0)) return false;
+		if (isContextOverflow(message, (this._modelForMessage(message) ?? this.model)?.contextWindow ?? 0)) return false;
 		return isRetryableAssistantError(message);
 	}
 
@@ -5000,6 +4623,7 @@ export class AgentSession {
 					type: "summarization_retry_attempt_start",
 					...source,
 				});
+				this._shutdownAbortController.signal.throwIfAborted();
 			},
 			onRetryFinished: async () => {
 				await this._emitRetryEvent({ type: "summarization_retry_finished" });
@@ -5023,7 +4647,7 @@ export class AgentSession {
 	 * Prepare a retryable error for continuation with exponential backoff.
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
-	private async _prepareRetry(message: AssistantMessage, omit = true): Promise<boolean> {
+	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) {
 			return false;
@@ -5049,10 +4673,8 @@ export class AgentSession {
 				delayMs,
 				errorMessage: message.errorMessage || "Unknown error",
 			});
-
-			// Keep raw history while durably omitting the selected attempt from future requests.
-			if (omit) this._omitRecoveryAttempt(message);
-
+			// Retain raw history while omitting the failed attempt from model projection.
+			this._omitRecoveryAttempt(message);
 			await sleep(delayMs, this._retryAbortController.signal);
 			this._retryAbortController.signal.throwIfAborted();
 		} catch (error) {
@@ -5070,7 +4692,6 @@ export class AgentSession {
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
-		if (this._retryAbortController) this._setBackgroundWakeSuppressed(true);
 		this._retryAbortController?.abort();
 	}
 
@@ -5088,7 +4709,6 @@ export class AgentSession {
 	 * Toggle auto-retry setting.
 	 */
 	setAutoRetryEnabled(enabled: boolean): void {
-		this._assertNotCheckpointHeld();
 		this.settingsManager.setRetryEnabled(enabled);
 	}
 
@@ -5126,7 +4746,7 @@ export class AgentSession {
 				running ? `background: ${running} running` : undefined,
 			);
 			if (
-				(!atTurnEnd && (!this.isIdle || this._settling > 0)) ||
+				(!atTurnEnd && (!this.isIdle || this._isEmittingAgentSettled)) ||
 				this.isBashRunning ||
 				this.isCompacting ||
 				this.isRetrying ||
@@ -5145,7 +4765,6 @@ export class AgentSession {
 					entry.type === "message" &&
 					entry.message.role === "toolResult" &&
 					entry.message.toolName === "background_command" &&
-					!entry.message.namespace &&
 					!entry.message.isError
 				) {
 					const details = entry.message.details as BackgroundCommandToolDetails | undefined;
@@ -5205,7 +4824,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Execute a user bash command, including user_bash interception.
+	 * Execute a bash command.
 	 * Adds result to agent context and session.
 	 * @param command The bash command to execute
 	 * @param onChunk Optional streaming callback for output
@@ -5219,11 +4838,11 @@ export class AgentSession {
 		options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations },
 	): Promise<BashResult> {
 		this._assertNotCheckpointHeld();
+		this._shutdownAbortController.signal.throwIfAborted();
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
 		try {
-			// Own activity before any interceptor can await or return a replacement result.
 			const intercepted = this._extensionRunner.hasHandlers("user_bash")
 				? await this._extensionRunner.emitUserBash({
 						type: "user_bash",
@@ -5239,11 +4858,12 @@ export class AgentSession {
 				if (result.output) onChunk?.(result.output);
 			} else {
 				const prefix = this.settingsManager.getShellCommandPrefix();
-				const shellPath = this.settingsManager.getShellPath();
 				result = await executeBashWithOperations(
 					prefix ? `${prefix}\n${command}` : command,
 					this._extensionRunner.resolveBashCwd(this.sessionManager.getCwd()),
-					intercepted?.operations ?? options?.operations ?? createLocalBashOperations({ shellPath }),
+					intercepted?.operations ??
+						options?.operations ??
+						createLocalBashOperations({ shellPath: this.settingsManager.getShellPath() }),
 					{
 						onChunk: (delta) => {
 							onChunk?.(delta);
@@ -5253,12 +4873,11 @@ export class AgentSession {
 					},
 				);
 			}
-
 			this.recordBashResult(command, result, options);
 			return result;
 		} finally {
 			this._bashAbortControllers.delete(abortController);
-			await this._checkpointSafePoint("settled");
+			this.notifyCheckpointStateChanged();
 		}
 	}
 
@@ -5267,7 +4886,6 @@ export class AgentSession {
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
-		this._assertNotCheckpointHeld();
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
 			command,
@@ -5299,7 +4917,7 @@ export class AgentSession {
 		}
 	}
 
-	/** Whether any user Bash dispatch or execution is unfinished, including async interceptors. */
+	/** Whether a bash command is currently running */
 	get isBashRunning(): boolean {
 		return this._bashAbortControllers.size > 0;
 	}
@@ -5316,10 +4934,7 @@ export class AgentSession {
 	private _flushPendingBashMessages(): void {
 		if (this._pendingBashMessages.length === 0) return;
 
-		while (this._pendingBashMessages.length > 0) {
-			// SessionManager owns the attempted entry even if persistence fails.
-			this.sessionManager.appendMessage(this._pendingBashMessages.shift()!);
-		}
+		while (this._pendingBashMessages.length) this.sessionManager.appendMessage(this._pendingBashMessages.shift()!);
 		this._refreshFinalizedContext();
 	}
 
@@ -5357,7 +4972,6 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
-		this._assertNotCheckpointHeld();
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish before navigating the session tree.");
 		}
@@ -5448,19 +5062,16 @@ export class AgentSession {
 			let summaryDetails: unknown;
 			let summaryUsage: Usage | undefined;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
-				const model = this.model!;
-				const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
+				this._shutdownAbortController.signal.throwIfAborted();
+				const signal = this._branchSummaryAbortController.signal;
 				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
 				const result = await generateBranchSummary(entriesToSummarize, {
-					model: requestModel,
-					apiKey,
-					headers,
-					env,
-					signal: this._branchSummaryAbortController.signal,
+					...(await this._getSummarizationRequestAuth(this.model!, signal)),
+					signal,
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
-					streamFn: this.agent.streamResponse,
+					streamFn: this.agent.streamFunction,
 					retry: this.settingsManager.getRetrySettings(),
 					callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
 				});
@@ -5530,8 +5141,9 @@ export class AgentSession {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			this._refreshFinalizedContext();
+			// A restored branch has no live request-prefix receipt.
 			this._reportedUsagePrefix = undefined;
+			this._refreshFinalizedContext();
 			this._restoreToolsFromTranscript();
 
 			// Emit session_tree event
@@ -5591,7 +5203,7 @@ export class AgentSession {
 			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 				addUsageToTotals(usageTotals, entry.usage);
 			}
-			if (entry.type !== "message" || entry.checkpoint) continue;
+			if (entry.type !== "message") continue;
 			totalMessages++;
 			const message = entry.message;
 			if (message.role === "user") {
@@ -5632,43 +5244,30 @@ export class AgentSession {
 	}
 
 	getContextUsage(): ContextUsage | undefined {
-		const model = this.model;
-		if (!model) return undefined;
-
-		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return undefined;
-
+		const model = this._limitsModel();
+		if (!model || model.contextWindow <= 0) return undefined;
 		const usageState = this._getContextUsageState(this.messages);
 		const inputs = {
-			model: [model.provider, model.api, model.id, contextWindow],
+			model: [model.provider, model.api, model.id, model.contextWindow],
 			messages: this.messages,
 			tools: this.agent.state.tools,
 			basePrompt: this._baseSystemPromptOptions,
-			baseBaseline: this._baseSystemPromptBaseline,
+			baseline: this._baseSystemPromptBaseline,
 			runPrompt: this._runSystemPromptOptions,
 			usageState,
 		};
-		// SDK state and prompt options are mutable, including nested content and schemas.
-		// Compare a retained snapshot instead of rebuilding provider input on every UI render.
 		const cached = this._contextUsageCache;
-		if (cached && cached.prefix === this._reportedUsagePrefix && isDeepStrictEqual(cached.inputs, inputs)) {
+		if (cached && cached.prefix === this._reportedUsagePrefix && isDeepStrictEqual(cached.inputs, inputs))
 			return { ...cached.usage };
-		}
-
-		this._toolPrefixKeys = new WeakMap();
-		// Retained pre-compaction usage is unknown until a matching projected response arrives.
-		const estimate = usageState.hasPostCompactionUsage
-			? this._estimateContextTokens(this.agent.state, usageState)
-			: undefined;
+		const estimate = usageState.hasPostCompactionUsage ? this._estimateContextTokens() : undefined;
 		const usage: ContextUsage = estimate
 			? {
 					tokens: estimate.tokens,
 					source: estimate.source,
-					contextWindow,
-					percent: (estimate.tokens / contextWindow) * 100,
+					contextWindow: model.contextWindow,
+					percent: (estimate.tokens / model.contextWindow) * 100,
 				}
-			: { tokens: null, contextWindow, percent: null, source: "unknown" };
-		// TypeBox's clone preserves schema metadata and executable tool references.
+			: { tokens: null, contextWindow: model.contextWindow, percent: null, source: "unknown" };
 		this._contextUsageCache = { inputs: Clone(inputs), prefix: this._reportedUsagePrefix, usage };
 		return { ...usage };
 	}
@@ -5717,16 +5316,11 @@ export class AgentSession {
 		if (!model) {
 			throw new Error("No model selected");
 		}
-		const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
 		return generateBugReportSummary({
+			...(await this._getSummarizationRequestAuth(model, options.signal)),
 			messages: this.messages,
 			hint: options.hint,
-			model: requestModel,
-			apiKey,
-			headers,
-			env,
 			signal: options.signal,
-			thinkingLevel: this.thinkingLevel,
 			streamFn: this.agent.streamFunction,
 			retry: this.settingsManager.getRetrySettings(),
 			sessionId: this.sessionId,
@@ -5745,15 +5339,18 @@ export class AgentSession {
 	getLastAssistantText(): string | undefined {
 		const isEligibleAssistant = (message: AgentMessage): message is AssistantMessage =>
 			message.role === "assistant" && !(message.stopReason === "aborted" && message.content.length === 0);
-		// Active state includes message_end output before persistence; older windows live on the selected branch.
+		// The active projection can omit completed answers after compaction; /copy still owns the raw branch.
 		const lastAssistant =
-			this.messages.slice().reverse().find(isEligibleAssistant) ??
-			this.sessionManager.getBranch().flatMap(sessionEntryToContextMessages).reverse().find(isEligibleAssistant);
+			this.messages.findLast(isEligibleAssistant) ??
+			this.sessionManager
+				.getBranch()
+				.flatMap((entry) => (entry.type === "message" ? [entry.message] : []))
+				.findLast(isEligibleAssistant);
 
 		if (!lastAssistant) return undefined;
 
 		let text = "";
-		for (const content of lastAssistant.content) {
+		for (const content of (lastAssistant as AssistantMessage).content) {
 			if (content.type === "text") {
 				text += content.text;
 			}

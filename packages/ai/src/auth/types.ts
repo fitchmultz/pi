@@ -45,6 +45,15 @@ export interface CredentialInfo {
 /** Optional cancellation for public auth and credential operations. */
 export interface AuthOperationOptions {
 	signal?: AbortSignal;
+	/** Availability enumeration only: one observation from the same credential read and check per provider. */
+	onAuthResult?: (providerId: string, observation: ProviderAuthObservation) => void;
+}
+
+/** Non-secret availability observation. Provider check errors are isolated; storage/cancellation still reject. */
+export interface ProviderAuthObservation {
+	stored: boolean;
+	auth: AuthCheck | undefined;
+	error: Error | undefined;
 }
 
 /**
@@ -155,12 +164,7 @@ export type AuthEvent =
  */
 export interface AuthInteraction {
 	signal?: AbortSignal;
-
-	/**
-	 * Anthropic OAuth: set false on server hosts to use only the existing
-	 * manual_code prompt, without opening a local callback listener. Omitted
-	 * or true preserves the local CLI callback race. Other flows ignore this.
-	 */
+	/** Anthropic OAuth: false skips binding a loopback listener and uses manual code entry. */
 	localCallbackServer?: boolean;
 
 	prompt(prompt: AuthPrompt): Promise<string>;
@@ -205,6 +209,16 @@ export interface ApiKeyAuth {
 	}): Promise<AuthResult | undefined>;
 }
 
+/** App-supplied context for `Models.login`. */
+export interface LoginOptions {
+	/**
+	 * Returns the stable ID of this app installation, e.g. sent to OpenAI as its
+	 * agent host ID. Called only by login flows that need it, so apps can create
+	 * the ID on first use and must return the same ID on every later call.
+	 */
+	getDeviceId?: () => string;
+}
+
 /**
  * OAuth auth. The `refresh`/`toAuth` split lets `Models` own the locked
  * refresh pattern: `refresh` produces a credential, `toAuth` derives request
@@ -220,7 +234,7 @@ export interface OAuthAuth {
 	/** Selector label for the OAuth login option, e.g. "Sign in with SuperGrok or X Premium". */
 	loginLabel?: string;
 
-	login(interaction: ProviderAuthInteraction): Promise<OAuthCredential>;
+	login(interaction: ProviderAuthInteraction, options?: LoginOptions): Promise<OAuthCredential>;
 
 	/**
 	 * Exchange the refresh token. Network call; throws on failure

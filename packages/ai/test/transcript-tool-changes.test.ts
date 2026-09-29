@@ -16,35 +16,21 @@ async function capturePayload<T>(
 ): Promise<{ payload: T; response: AssistantMessage; headers: Headers }> {
 	let captured: T | undefined;
 	let headers = new Headers();
-	const stream = streamSimple(
-		model,
-		{
-			...context,
-			messages: context.messages.map((message) =>
-				message.role === "system"
-					? { ...message, deferredToolEntries: [{ namespace: "host_only", name: "undeclared_entry" }] }
-					: message,
-			),
+	const stream = streamSimple(model, context, {
+		apiKey: `header.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } })).toString("base64url")}.signature`,
+		transport: "sse",
+		headers: configuredHeaders,
+		maxRetries: 0,
+		fetch: async (_url, init) => {
+			headers = new Headers(init?.headers);
+			throw new PayloadCaptured();
 		},
-		{
-			apiKey: `header.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } })).toString("base64url")}.signature`,
-			transport: "sse",
-			headers: configuredHeaders,
-			maxRetries: 0,
-			fetch: async (_url, init) => {
-				headers = new Headers(init?.headers);
-				throw new PayloadCaptured();
-			},
-			onPayload: (payload) => {
-				captured = JSON.parse(JSON.stringify(payload)) as T;
-			},
+		onPayload: (payload) => {
+			captured = JSON.parse(JSON.stringify(payload)) as T;
 		},
-	);
+	});
 	const response = await stream.result();
 	if (!captured) throw new Error("Expected payload capture");
-	expect(JSON.stringify(captured)).not.toContain("contextWindowId");
-	expect(JSON.stringify(captured)).not.toContain("deferredToolEntries");
-	expect(JSON.stringify(captured)).not.toContain("undeclared_entry");
 	return { payload: captured, response, headers };
 }
 
@@ -235,39 +221,6 @@ describe("transcript system messages", () => {
 		expect(next.response.diagnostics?.some((entry) => entry.type === "provider_configuration_warning")).toBe(true);
 	});
 
-	test.each(["openai-responses", "openai-codex-responses", "azure-openai-responses"] as const)(
-		"%s preserves the original native search identity after callback replacement",
-		async (api) => {
-			const model: Model<Api> = {
-				...modelBase,
-				id: "fixture",
-				name: "Fixture",
-				api,
-				provider: "openai",
-				compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true, supportsToolSearch: true },
-			};
-			const search = { ...baseTool, toolSearch: true as const };
-			const replacement = { ...search, name: "new_search" };
-			const messages: Context["messages"] = [
-				{ role: "system", content: "Base", toolsAdded: [search], timestamp: 0 },
-				{ role: "user", content: "Find tools", timestamp: 1 },
-			];
-			type Payload = { tools: unknown[]; input: Array<{ type?: string; tools?: unknown[] }> };
-			const { payload: first } = await capturePayload<Payload>(model, { messages });
-			const { payload: next } = await capturePayload<Payload>(model, {
-				messages: [
-					...messages,
-					{ role: "system", content: "", toolsRemoved: [search], toolsAdded: [replacement], timestamp: 2 },
-				],
-			});
-			expect(first.tools).toMatchObject([{ type: "tool_search" }]);
-			expect(next.tools).toEqual(first.tools);
-			expect(next.input.find((item) => item.type === "additional_tools")?.tools).toMatchObject([
-				{ type: "function", name: "new_search" },
-			]);
-		},
-	);
-
 	test("public Responses restricts retained tools with allowed_tools, including revoking every tool", async () => {
 		const model: Model<"openai-responses"> = {
 			...modelBase,
@@ -300,7 +253,12 @@ describe("transcript system messages", () => {
 		expect(initial.response.diagnostics).toContainEqual({
 			type: "anthropic_tool_protocol",
 			timestamp: expect.any(Number),
-			details: { inline: true, beta: "inline-tools-2026-09-15", windowId: null },
+			details: {
+				inline: true,
+				beta: "inline-tools-2026-09-15",
+				windowTimestamp: 0,
+				baseUrl: "https://api.anthropic.com",
+			},
 		});
 		const previous: AssistantMessage = {
 			...initial.response,
@@ -589,7 +547,7 @@ describe("transcript system messages", () => {
 		expect(payload.tools?.map((value) => value.name)).toEqual(["base_tool"]);
 		expect(payload.input.map((item) => item.type)).toContain("tool_search_call");
 		expect(payload.input.find((item) => item.type === "tool_search_output")?.tools).toMatchObject([
-			{ type: "namespace", tools: [{ name: "late_tool" }] },
+			{ type: "function", name: "late_tool" },
 		]);
 	});
 

@@ -2,14 +2,18 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `AgentLoopConfig.toolResultModelContent` and `Agent.toolResultModelContent` for model-only tool result content on live response continuations.
-- Added a per-run `turnScope` to agent-loop provider calls so providers can keep turn-scoped routing state across the run's requests.
-
 ### Fixed
 
-- Fixed the agent loop executing tools that were withdrawn while a response was generating or during tool hooks. Admission now checks the live tool set immediately before execution and rejects in-place schema or executor changes made by hooks.
+- Fixed tool execution after a tool is withdrawn during response generation or hooks; admission checks the live tool set before running it.
+
+## [0.99.1] - 2026-09-29
+
+## [0.99.0] - 2026-09-29
+
+### Added
+
+- Added the `onProviderStreamEvent` agent option, which is passed to provider streams to observe parsed provider events before normalization ([#9784](https://github.com/earendil-works/pi/issues/9784), [#9901](https://github.com/earendil-works/pi/pull/9901) by [@davidbrai](https://github.com/davidbrai)).
+- The agent loop now records the requested thinking level as `thinkingLevel` on each assistant message.
 
 ## [0.87.1] - 2026-09-22
 

@@ -1,18 +1,18 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type Api,
 	type AssistantMessage,
 	createAssistantMessageEventStream,
-	getCurrentTools,
 	type Model,
 	normalizeContext,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
@@ -83,15 +83,18 @@ describe("createAgentSession stream options", () => {
 		api: Api,
 		settings: Partial<Settings>,
 		requestOptions: SimpleStreamOptions = {},
-		extensionSource?: string,
+		extensionFactory?: ExtensionFactory,
+		providerEvent?: unknown,
 	): Promise<SimpleStreamOptions | undefined> {
 		const model = createModel(api);
 		const settingsManager = SettingsManager.inMemory(settings);
-		if (extensionSource) {
-			const extensionsDir = join(agentDir, "extensions");
-			mkdirSync(extensionsDir, { recursive: true });
-			writeFileSync(join(extensionsDir, "headers.ts"), extensionSource);
-		}
+		const resourceLoader = new DefaultResourceLoader({
+			cwd,
+			agentDir,
+			settingsManager,
+			extensionFactories: extensionFactory ? [extensionFactory] : [],
+		});
+		await resourceLoader.reload();
 
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "test-api-key" }));
@@ -101,9 +104,16 @@ describe("createAgentSession stream options", () => {
 		modelRegistry.registerProvider(model.provider, {
 			api,
 			headers: { "x-provider": "provider" },
-			streamSimple: (_model, _context, providerOptions) => {
+			streamSimple: (requestModel, _context, providerOptions) => {
 				capturedOptions = providerOptions;
-				return createDoneStream(api);
+				if (providerEvent === undefined) return createDoneStream(api);
+
+				const stream = createAssistantMessageEventStream();
+				void (async () => {
+					await providerOptions?.onProviderStreamEvent?.(providerEvent, requestModel);
+					stream.end(createDoneMessage(api));
+				})();
+				return stream;
 			},
 		});
 
@@ -116,11 +126,20 @@ describe("createAgentSession stream options", () => {
 			modelRuntime,
 			settingsManager,
 			sessionManager,
+			resourceLoader,
 		});
 
 		try {
-			const stream = await session.agent.streamFunction(model, normalizeContext({ messages: [] }), requestOptions);
-			await stream.result();
+			if (providerEvent === undefined) {
+				const stream = await session.agent.streamFunction(
+					model,
+					normalizeContext({ messages: [] }),
+					requestOptions,
+				);
+				await stream.result();
+			} else {
+				await session.prompt("test");
+			}
 			return capturedOptions;
 		} finally {
 			session.dispose();
@@ -132,7 +151,7 @@ describe("createAgentSession stream options", () => {
 		const model: Model<Api> = {
 			...createModel("anthropic-messages"),
 			cost: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
-			promptCache: { short: 300 },
+			promptCache: { short: 300, long: 300 },
 		};
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "test-api-key" }));
@@ -164,55 +183,6 @@ describe("createAgentSession stream options", () => {
 			},
 		};
 	}
-
-	it("gives extension-owned provider streams unique names for same-named namespaced tools", async () => {
-		const model = createModel("anthropic-messages");
-		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
-		await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "test-api-key" }));
-		const modelRegistry = await createModelRegistry(authStorage, join(agentDir, "models.json"));
-		let wireNames: string[] = [];
-		modelRegistry.registerProvider(model.provider, {
-			api: model.api,
-			streamSimple: (_model, context) => {
-				wireNames = getCurrentTools(context.messages).map((tool) => tool.name);
-				const message: AssistantMessage = {
-					...createDoneMessage(model.api),
-					content: [{ type: "toolCall", id: "call", name: wireNames[1] ?? "", arguments: {} }],
-					stopReason: "toolUse",
-				};
-				const stream = createAssistantMessageEventStream();
-				stream.push({ type: "start", partial: { ...message, content: [] } });
-				stream.push({ type: "done", reason: "toolUse", message });
-				return stream;
-			},
-		});
-		const { session } = await createAgentSession({
-			cwd,
-			agentDir,
-			model,
-			modelRuntime: getModelRuntime(modelRegistry),
-			settingsManager: SettingsManager.inMemory({}),
-			sessionManager: SessionManager.inMemory(cwd),
-		});
-		const tools = ["left", "right"].map((namespace) => ({
-			namespace,
-			name: "lookup",
-			description: namespace,
-			parameters: Type.Object({}),
-		}));
-
-		try {
-			const stream = await session.agent.streamFunction(model, normalizeContext({ tools, messages: [] }), {});
-			const message = await stream.result();
-			expect(new Set(wireNames).size).toBe(2);
-			expect(message.content).toEqual([
-				expect.objectContaining({ type: "toolCall", namespace: "right", name: "lookup" }),
-			]);
-		} finally {
-			session.dispose();
-			modelRegistry.unregisterProvider(model.provider);
-		}
-	});
 
 	it("schedules cache warming after a completed session request", async () => {
 		const fixture = await createCacheWarmingSession();
@@ -328,12 +298,41 @@ describe("createAgentSession stream options", () => {
 		expect(options?.maxRetryDelayMs).toBe(3000);
 	});
 
+	// Regression test for #9784.
+	it("forwards provider stream events to extensions", async () => {
+		const providerEvent = { openrouter_metadata: { strategy: "direct" } };
+		const extensionEvents: unknown[] = [];
+
+		const options = await captureStreamOptions(
+			"openai-completions",
+			{},
+			{},
+			(pi) => {
+				pi.on("provider_stream_event", (event) => {
+					extensionEvents.push(event);
+				});
+			},
+			providerEvent,
+		);
+
+		expect(options?.onProviderStreamEvent).toEqual(expect.any(Function));
+		expect(extensionEvents).toEqual([
+			{
+				data: providerEvent,
+				type: "provider_stream_event",
+				provider: "capture-provider",
+				api: "openai-completions",
+				model: "capture-model",
+			},
+		]);
+	});
+
 	it("runs before_provider_headers on assembled headers without forwarding the transform", async () => {
 		const options = await captureStreamOptions(
 			"openai-completions",
 			{},
 			{ headers: { "x-explicit": "explicit" } },
-			`export default function (pi) {
+			(pi) => {
 				pi.on("before_provider_headers", (event) => {
 					event.headers["x-hook"] = [
 						event.headers["x-provider"],
@@ -341,7 +340,7 @@ describe("createAgentSession stream options", () => {
 						event.headers["x-explicit"],
 					].join(":");
 				});
-			}`,
+			},
 		);
 
 		expect(options?.headers).toMatchObject({

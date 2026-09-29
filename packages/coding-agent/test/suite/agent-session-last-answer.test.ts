@@ -20,7 +20,7 @@ describe("AgentSession last answer", () => {
 			sessionManager: SessionManager.create(directory, directory),
 			extensionFactories: [
 				(pi) => {
-					pi.on("turn_end", (_event, ctx) => ctx.newContext({ handoff: "completed" }));
+					pi.on("turn_end", () => ({ entries: [{ type: "compaction", summary: "", firstKeptEntryId: null }] }));
 				},
 			],
 		});
@@ -41,8 +41,8 @@ describe("AgentSession last answer", () => {
 		});
 		onTestFinished(() => resumed.dispose());
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "custom"]);
-		expect(resumed.messages.map((message) => message.role)).toEqual(["system", "custom"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "compactionSummary"]);
+		expect(resumed.messages.map((message) => message.role)).toEqual(["system", "compactionSummary"]);
 		expect([liveAnswer, resumed.getLastAssistantText()]).toEqual(["finished", "finished"]);
 		expect(resumed.sessionId).toBe(harness.session.sessionId);
 		expect(harness.faux.state.callCount).toBe(1);
@@ -63,11 +63,13 @@ describe("AgentSession last answer", () => {
 			.find((entry) => entry.type === "message" && entry.message.role === "user")!.id;
 		const common = harness.sessionManager.getLeafId()!;
 		await harness.session.prompt("try A");
-		harness.session.newContext();
+		harness.sessionManager.appendCompaction("", null, 0);
+		harness.session.refreshContext();
 		const windowA = harness.sessionManager.getLeafId()!;
 		await harness.session.navigateTree(common);
 		await harness.session.prompt("try B");
-		harness.session.newContext();
+		harness.sessionManager.appendCompaction("", null, 0);
+		harness.session.refreshContext();
 		const windowB = harness.sessionManager.getLeafId()!;
 
 		await harness.session.navigateTree(windowA);
@@ -75,7 +77,7 @@ describe("AgentSession last answer", () => {
 		await harness.session.navigateTree(root);
 		const rootAnswer = harness.session.getLastAssistantText();
 		expect(harness.session.messages.map((message) => message.role)).toEqual(["system"]);
-		expect(harness.sessionManager.getBranch()).toHaveLength(1);
+		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "message")).toHaveLength(1);
 		await harness.session.navigateTree(windowB);
 
 		expect([answerA, rootAnswer, harness.session.getLastAssistantText()]).toEqual([
@@ -91,7 +93,8 @@ describe("AgentSession last answer", () => {
 		onTestFinished(() => harness.cleanup());
 		harness.setResponses([fauxAssistantMessage("older"), fauxAssistantMessage("newer")]);
 		await harness.session.prompt("first");
-		harness.session.newContext();
+		harness.sessionManager.appendCompaction("", null, 0);
+		harness.session.refreshContext();
 		const seen: Array<{ answer: string | undefined; persisted: string[] }> = [];
 		harness.session.subscribe((event) => {
 			if (event.type !== "message_end" || event.message.role !== "assistant") return;
@@ -192,10 +195,12 @@ describe("AgentSession last answer", () => {
 		onTestFinished(() => harness.cleanup());
 		harness.setResponses([fauxAssistantMessage("older"), response]);
 		await harness.session.prompt("first");
-		harness.session.newContext();
+		harness.sessionManager.appendCompaction("", null, 0);
+		harness.session.refreshContext();
 		await harness.session.prompt("second");
 		const activeAnswer = harness.session.getLastAssistantText();
-		harness.session.newContext();
+		harness.sessionManager.appendCompaction("", null, 0);
+		harness.session.refreshContext();
 
 		expect([activeAnswer, harness.session.getLastAssistantText()]).toEqual([expected, expected]);
 		expect(harness.faux.state.callCount).toBe(2);

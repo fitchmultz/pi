@@ -22,14 +22,15 @@ import type { MessageRenderer, MessageRenderOptions } from "../src/core/extensio
 import type { CustomMessage } from "../src/core/messages.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { createAllToolRenderers } from "../src/core/tools/renderers/index.ts";
+import { codemodeRenderers } from "../src/extensions/codemode/renderer.ts";
 import { createChatViewport } from "../src/modes/interactive/chat-viewport.ts";
 import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { ToolExecutionComponent, type ToolRenderers } from "../src/modes/interactive/components/tool-execution.ts";
-import { createInteractiveTui } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { createInteractiveTui } from "../src/modes/interactive/tui-renderer.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 const ui = { requestRender() {} } as TUI;
@@ -120,6 +121,31 @@ describe("compact tool cards", () => {
 			expect(result).toEqual(original);
 			expect(error.content[0].text).toBe("Operation aborted: requested cancellation");
 		}
+	});
+
+	test("expands compact codemode cards to reveal nested calls and script output", () => {
+		const component = new ToolExecutionComponent(
+			"codemode",
+			"code-call",
+			{ code: "await read({ path: 'nested.txt' })" },
+			{ compactView: true },
+			codemodeRenderers,
+			ui,
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.updateResult({
+			content: [{ type: "text", text: "script output" }],
+			details: {
+				calls: [{ id: "code-call/1", name: "read", args: '{"path":"nested.txt"}', status: "ok", durationMs: 5 }],
+			},
+			isError: false,
+		});
+		assertCompactRows(component, 80);
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(80).join("\n"));
+		expect(expanded).toContain('read {"path":"nested.txt"}');
+		expect(expanded).toContain("script output");
 	});
 
 	test("reuses unchanged compact previews while refreshing args, results, width and theme", () => {

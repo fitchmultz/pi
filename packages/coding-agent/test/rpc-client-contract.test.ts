@@ -44,6 +44,21 @@ afterEach(async () => {
 });
 
 describe("RpcClient response contract", () => {
+	it("dispatches a snapshot when a listener unsubscribes during settlement", async () => {
+		const client = await startClient(`
+			output({ type: "agent_settled" });
+			respond();
+		`);
+		const seen: string[] = [];
+		const unsubscribe = client.onEvent(() => {
+			seen.push("first");
+			unsubscribe();
+		});
+		client.onEvent(() => seen.push("second"));
+		await client.setSessionName("dispatch");
+		expect(seen).toEqual(["first", "second"]);
+	});
+
 	it.each([
 		["prompt", (client: RpcClient) => client.prompt("rejected")],
 		["setter", (client: RpcClient) => client.setSessionName("")],
@@ -64,7 +79,7 @@ describe("RpcClient response contract", () => {
 				output({ type: "agent_start" });
 				output({ type: "agent_settled" });
 			}
-			respond();
+			respond(command.type === "prompt" ? { data: { disposition: "started" } } : undefined);
 		`);
 		const events = await client.promptAndWait("finish", undefined, 100);
 		expect(events.map((event) => event.type)).toEqual(["agent_start", "agent_settled"]);
@@ -81,7 +96,10 @@ describe("RpcClient response contract", () => {
 	});
 
 	it("promptAndWait completes for handled input that starts no model run", async () => {
-		const client = await startClient("respond();");
+		const client = await startClient(`
+			if (command.type === "prompt") respond({ data: { disposition: "handled" } });
+			else respond({ success: false, error: "handled prompts must not wait" });
+		`);
 		await expect(client.promptAndWait("handled", undefined, 100)).resolves.toEqual([]);
 		expect(Reflect.get(client, "eventListeners")).toEqual([]);
 	});

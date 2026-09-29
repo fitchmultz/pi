@@ -34,15 +34,11 @@ contextTokens > contextWindow - reserveTokens
 
 By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
 
-Before a provider request, Pi checks the canonical projected context together with newly delivered input and the current prompt and tools. This check runs in `prepareRequest`; a bounded catch-up steering drain can repeat it with input received during preparation. Newly delivered input is persisted after any resulting context boundary, before the final request projection. The first request in an empty session is exempt from this preflight check. A terminating tool batch with no continuation starts no further request. Pi also checks before a new user prompt and performs final-attempt overflow recovery after the low-level run ends.
+Before a new user prompt, Pi checks whether the last assistant response calls for compaction. Before a subsequent assistant response, `prepareNextTurnWithContext` checks the session projection against the selected model's compaction threshold. For a virtual model, `prepareRequest` checks the projection against the routed model. After a run, `_checkCompaction` checks overflow or a recoverable length stop and may compact before a fresh retry; it also checks the threshold after a completed response. These are compaction policy checks, not a guarantee that every provider request fits the model's physical context window.
 
-Independently of compaction, Pi checks normal context transformations and the provider's native transcript projection, including the prompt and transmitted tool declarations, against the model's physical context window. Estimated input that exceeds that window is refused even for a first request or with compaction disabled. The compaction reserve is a policy threshold, not the physical input limit; fitting requests can use the provider's reduced output allocation. Raw wire replacements through `onPayload` / `before_provider_request` and custom transport implementations remain caller-owned; this estimate does not validate arbitrary replacement request objects.
+`session_before_compact` lets an extension cancel compaction or provide a custom result. Posthorse can supply a summary-free handoff at this upstream hook (an empty `summary`, selected kept boundary, and its own continuation state), without a separate native `context_window` entry or API. It can also receive early and post-reset overflow requests for which stock compaction cannot find a cut. If the extension declines those requests, Pi does not call the default summarizer. Manual `/compact` remains a summarization command unless an extension handles it.
 
-The fork's `session_before_auto_compact` hook runs before summary preparation and authentication. An extension can return `{ newContext: { handoff } }` to start a native context window without generating a summary. The original journal remains intact, and pending input follows the new window. Manual `/compact` keeps its ordinary summarization behavior.
-
-Fresh context windows preserve unresolved native asynchronous calls, unconsumed native results, and the original calls required by those results. Receipts that arrive while a handoff is being prepared stay available in the new window. Summary compaction also preserves unresolved calls and originals needed by retained results. Background work continues without waiting, cancellation, or replay, including work launched alongside a fresh-window request. Ordinary synchronous checkpoint tools must finish successfully before a tool-requested window starts; native asynchronous errors remain tool results and do not veto an independent reset. Configured sequential tool ordering still applies.
-
-A provider context-overflow error or an early final `stopReason: "length"` can select one compact-and-retry recovery attempt. Length responses with tool calls retain their synthetic failed tool results and follow the ordinary tool/queue scheduler rather than forcing the run to end.
+An overflow or recoverable length stop can retry after compaction; threshold compaction does not replay a completed response. Do not assume a checkpoint or external background job is replayed by compaction.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
 
@@ -97,12 +93,11 @@ persist final assistant response
 → extension/public turn_end
 → extension/public agent_end
 → append context_edit omissions for the selected attempt
-→ for overflow/length: offer session_before_auto_compact a fresh-window handoff
-→ if unclaimed: prepare the summary, run session_before_compact, and append compaction on success
+→ for overflow/length: prepare the summary, run session_before_compact, and append compaction on success
 → start the retry as a fresh run
 ```
 
-If recovery compaction fails or is cancelled, Pi keeps the omission edits, appends no compaction, and schedules no internal retry. Existing queued work remains governed by ordinary steering and follow-up rules. `agent_before_settle` sees the repaired projection after recovery processing. Raw transcript history, exports, billing totals, and history-search extensions can still inspect the omitted attempt.
+If recovery compaction fails or is cancelled, Pi keeps the omission edits, appends no compaction, and schedules no internal retry. Existing queued work remains governed by ordinary queued-input rules. `agent_before_settle` sees the repaired projection after recovery processing. Raw transcript history, exports, billing totals, and history-search extensions can still inspect the omitted attempt.
 
 ### Split user-message spans
 

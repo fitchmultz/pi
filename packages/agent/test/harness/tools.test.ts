@@ -186,6 +186,58 @@ function createTinyBmp(): Uint8Array {
 
 describe("AgentHarness tools", () => {
 	describe("read", () => {
+		it("extracts JSON before truncation and pages the selected fields", async () => {
+			const context = createContext();
+			getOrThrow(
+				await context.env.writeFile(
+					"data.json",
+					JSON.stringify({
+						large: "x".repeat(DEFAULT_MAX_BYTES * 2),
+						rows: [
+							{ name: "first", ignored: "hidden" },
+							{ name: "second", ignored: "hidden" },
+						],
+					}),
+					BACKGROUND_CONTEXT,
+				),
+			);
+			const result = await createReadTool().execute(
+				"json",
+				{
+					path: "data.json",
+					json: { path: "/rows", fields: ["name"] },
+					offset: 2,
+					limit: 3,
+				},
+				noUpdate,
+				context,
+				invocation,
+				BACKGROUND_CONTEXT,
+			);
+			expect(textOutput(result)).toContain('"name": "first"');
+			expect(textOutput(result)).not.toContain("hidden");
+			expect(textOutput(result)).not.toContain("second");
+			expect(textOutput(result)).toContain('offset=5 with the same json={"path":"/rows","fields":["name"]}');
+			expect(result.details).toBeUndefined();
+		});
+
+		it.each(["/rows/01", "/rows/-1", "/rows/0/missing", "/rows/0/~2", "/__proto__"])(
+			"rejects invalid or missing JSON selection %s",
+			async (path) => {
+				const context = createContext();
+				getOrThrow(await context.env.writeFile("data.json", '{"rows":[{"name":"first"}]}', BACKGROUND_CONTEXT));
+				await expect(
+					createReadTool().execute(
+						"json",
+						{ path: "data.json", json: { path } },
+						noUpdate,
+						context,
+						invocation,
+						BACKGROUND_CONTEXT,
+					),
+				).rejects.toThrow("JSON selection");
+			},
+		);
 		it.each(["GIF87a", "GIF89a"])("detects the complete %s signature", (signature) => {
 			expect(detectSupportedImageMimeType(Buffer.from(signature, "ascii"))).toBe("image/gif");
 		});

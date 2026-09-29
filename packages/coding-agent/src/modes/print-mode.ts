@@ -6,7 +6,7 @@
  * - `pi --mode json "prompt"` - JSON event stream
  */
 
-import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
@@ -36,8 +36,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
-	let lastAssistantMessage: AssistantMessage | undefined;
-	let contextWindowStarted = false;
+
 	let queuedInputCount = messages.length + (initialMessage ? 1 : 0);
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
@@ -76,8 +75,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
-		lastAssistantMessage = undefined;
-		contextWindowStarted = false;
+
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
 			getQueuedInputCount: () => queuedInputCount,
@@ -112,14 +110,6 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
-			if (event.type === "message_end") {
-				if (event.message.role === "assistant") {
-					lastAssistantMessage = event.message;
-					contextWindowStarted = false;
-				} else if (event.message.role === "custom" && event.message.customType === "context-window") {
-					contextWindowStarted = true;
-				}
-			}
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
 			}
@@ -151,8 +141,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		for (const message of messages) {
 			await session.waitForIdle();
 			queuedInputCount--;
-			lastAssistantMessage = undefined;
-			contextWindowStarted = false;
+
 			await session.prompt(message);
 		}
 
@@ -161,14 +150,21 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		if (mode === "text") {
 			const activeLastMessage = session.state.messages.at(-1);
-			const assistantMsg =
+			// Compaction and trailing context can hide the answer, but a newer user or tool
+			// message must prevent falling back to an earlier answer on the selected branch.
+			const lastMessage =
 				activeLastMessage?.role === "assistant"
 					? activeLastMessage
-					: contextWindowStarted
-						? lastAssistantMessage
-						: undefined;
+					: session.sessionManager
+							.getBranch()
+							.flatMap((entry) => (entry.type === "message" ? [entry.message] : []))
+							.findLast(
+								(message) =>
+									message.role === "assistant" || message.role === "user" || message.role === "toolResult",
+							);
+			const assistantMsg = lastMessage?.role === "assistant" ? lastMessage : undefined;
 
-			if (assistantMsg) {
+			if (assistantMsg && assistantMsg.stopReason !== "toolUse") {
 				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
 					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 					exitCode = 1;

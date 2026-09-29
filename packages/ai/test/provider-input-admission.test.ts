@@ -44,7 +44,7 @@ const completionsModel = { ...model("openai-completions"), compat: { supportsMid
 const mistralModel = { ...model("mistral-conversations"), compat: { supportsMidConvoSystemMessages: true } };
 const options = { apiKey: "offline-placeholder", maxRetries: 0 };
 
-describe("native provider input admission", () => {
+describe("provider input admission", () => {
 	it("rebuilds when a synthetic orphaned-call result pushes retained input over the limit", async () => {
 		const small: Tool = { name: "small", description: "small", parameters: Type.Object({}) };
 		const withdrawn: Tool = { name: "huge", description: "x".repeat(1000), parameters: Type.Object({}) };
@@ -200,23 +200,12 @@ describe("native provider input admission", () => {
 	});
 
 	it.each(["openai-responses", "pi-messages"] as const)(
-		"%s refuses native tool-search schemas before transport",
+		"%s refuses oversized active schemas before transport",
 		async (api) => {
-			const call = { ...fauxToolCall("search", { query: "huge" }), kind: "toolSearch" as const };
 			const context = normalizeContext({
 				messages: [
-					{ role: "user", content: "Find huge tool", timestamp: 1 },
-					{ ...fauxAssistantMessage(call), api, provider: "test", model: "admission" },
-					{
-						role: "toolResult",
-						toolCallId: call.id,
-						toolName: "search",
-						toolCallKind: "toolSearch",
-						content: [],
-						isError: false,
-						timestamp: 2,
-						toolsAdded: [hugeTool],
-					},
+					{ role: "system", content: "Base", toolsAdded: [hugeTool], timestamp: 0 },
+					{ role: "user", content: "Use tool", timestamp: 1 },
 				],
 			});
 			const fetch = vi.fn<typeof globalThis.fetch>(

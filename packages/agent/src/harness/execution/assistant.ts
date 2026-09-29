@@ -92,8 +92,8 @@ function createRequestOptions(
 
 function isUpdateEvent(
 	event: AssistantMessageEvent,
-): event is Extract<AssistantMessageEvent, { contentIndex: number }> {
-	return "contentIndex" in event;
+): event is Exclude<AssistantMessageEvent, { type: "start" | "done" | "error" }> {
+	return event.type !== "start" && event.type !== "done" && event.type !== "error";
 }
 
 export async function consumeAssistantStream(
@@ -106,9 +106,6 @@ export async function consumeAssistantStream(
 ): Promise<SettledAssistantMessage> {
 	let started = false;
 	for await (const event of stream) {
-		if (event.type === "response_end" || event.type === "steering") {
-			throw new Error("The experimental harness does not support live response steering; use Agent");
-		}
 		if (event.type === "start") {
 			if (started) throw new Error("Assistant message stream emitted more than one start event");
 			started = true;

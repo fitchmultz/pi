@@ -127,9 +127,14 @@ describe("admitted session cancellation", () => {
 		},
 	);
 
-	it.each([false, true])(
-		"lets a deferred command join child work without releasing external idle waits (child run: %s)",
-		async (childRun) => {
+	it.each([
+		{ childRun: false, laterRun: false },
+		{ childRun: true, laterRun: false },
+		{ childRun: false, laterRun: true },
+		{ childRun: true, laterRun: true },
+	])(
+		"keeps external idle waits pending through a deferred command (child: $childRun, later: $laterRun)",
+		async ({ childRun, laterRun }) => {
 			const commandEntered = deferred();
 			const commandRelease = deferred();
 			const childEntered = deferred();
@@ -155,10 +160,12 @@ describe("admitted session cancellation", () => {
 							if (queued) return;
 							queued = true;
 							pi.sendUserMessage("/wait-command", { expandPromptTemplates: true });
-							pi.sendMessage(
-								{ customType: "later", content: "later run", display: false },
-								{ triggerTurn: true },
-							);
+							if (laterRun) {
+								pi.sendMessage(
+									{ customType: "later", content: "later run", display: false },
+									{ triggerTurn: true },
+								);
+							}
 						});
 					},
 				],
@@ -182,7 +189,7 @@ describe("admitted session cancellation", () => {
 					},
 				]);
 			}
-			harness.appendResponses([fauxAssistantMessage("later done")]);
+			if (laterRun) harness.appendResponses([fauxAssistantMessage("later done")]);
 			const run = harness.session.prompt("start");
 			try {
 				await commandEntered.promise;
@@ -203,7 +210,7 @@ describe("admitted session cancellation", () => {
 				commandRelease.resolve();
 				await Promise.all([run, idle]);
 				expect(externalIdle).toBe(true);
-				expect(harness.faux.state.callCount).toBe(childRun ? 3 : 2);
+				expect(harness.faux.state.callCount).toBe(1 + Number(childRun) + Number(laterRun));
 			} finally {
 				childRelease.resolve();
 				commandRelease.resolve();

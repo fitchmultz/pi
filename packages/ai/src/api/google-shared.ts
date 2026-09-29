@@ -6,27 +6,21 @@ import {
 	type Content,
 	FinishReason,
 	FunctionCallingConfigMode,
-	type GenerateContentResponse,
 	ThinkingLevel as GoogleSdkThinkingLevel,
 	type Part,
 	type ThinkingConfig,
 } from "@google/genai";
-import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { clampThinkingLevel } from "../models.ts";
 import type {
-	AssistantMessage,
 	ImageContent,
-	JsonObject,
 	Model,
 	StopReason,
 	StreamOptions,
 	TextContent,
-	ThinkingContent,
 	ThinkingLevel,
 	Tool,
-	ToolCall,
 	TranscriptContext,
 } from "../types.ts";
-import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { collapseSystemMessages, withoutInitialSystemMessage } from "../utils/transcript.ts";
@@ -55,15 +49,6 @@ export function resolveGoogleThinkingLevel<T extends GoogleApiType>(
 	model: Model<T>,
 	level: ThinkingLevel,
 ): ResolvedGoogleThinkingLevel {
-	// Custom models without metadata retain the original family defaults.
-	if (model.thinkingLevelMap === undefined) {
-		if (/gemini-3(?:\.\d+)?-pro/i.test(model.id)) {
-			return level === "minimal" || level === "low" ? "low" : "high";
-		}
-		if (/gemma-?4/i.test(model.id)) {
-			return level === "minimal" || level === "low" ? "minimal" : "high";
-		}
-	}
 	const mapped = model.thinkingLevelMap?.[level];
 	const resolvedLevel = typeof mapped === "string" ? mapped.toLowerCase() : level;
 	switch (resolvedLevel) {
@@ -81,8 +66,8 @@ export function resolveGoogleThinkingLevel<T extends GoogleApiType>(
 
 /**
  * Whether this model uses Gemini's discrete `thinkingLevel` control instead of
- * the token-based `thinkingBudget` control. This only selects the Google wire format;
- * explicit thinking maps take precedence over family defaults.
+ * the token-based `thinkingBudget` control. Supported levels come from the
+ * model's `thinkingLevelMap`; this only selects the Google wire format.
  */
 export function usesGoogleThinkingLevel<T extends GoogleApiType>(model: Model<T>): boolean {
 	const id = model.id.toLowerCase();
@@ -116,7 +101,8 @@ export function toGoogleSdkThinkingLevel(level: GoogleApiThinkingLevel): GoogleS
 
 export function getDisabledGoogleThinkingConfig<T extends GoogleApiType>(model: Model<T>): ThinkingConfig {
 	if (!usesGoogleThinkingLevel(model)) return { thinkingBudget: 0 };
-	const fallback = model.thinkingLevelMap === undefined ? "minimal" : clampThinkingLevel(model, "off");
+
+	const fallback = clampThinkingLevel(model, "off");
 	if (fallback === "off") return { thinkingBudget: 0 };
 
 	const resolvedLevel = resolveGoogleThinkingLevel(model, fallback);
@@ -526,178 +512,4 @@ export function retryGoogleRequest<T>(
 			signal: options?.signal,
 		},
 	);
-}
-
-export async function decodeGoogleStream(
-	googleStream: AsyncIterable<GenerateContentResponse>,
-	model: Model<GoogleApiType>,
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
-	nextToolCallId: (name: string | undefined) => string,
-): Promise<void> {
-	stream.push({ type: "start", partial: output });
-	let currentBlock: TextContent | ThinkingContent | null = null;
-	const blocks = output.content;
-	const blockIndex = () => blocks.length - 1;
-	for await (const chunk of googleStream) {
-		// @google/genai documents GenerateContentResponse.responseId as an output-only field
-		// used to identify each response. Keep the first non-empty one from the stream.
-		output.responseId ||= chunk.responseId;
-		const candidate = chunk.candidates?.[0];
-		if (candidate?.content?.parts) {
-			for (const part of candidate.content.parts) {
-				if (part.text !== undefined) {
-					const isThinking = isThinkingPart(part);
-					if (
-						!currentBlock ||
-						(isThinking && currentBlock.type !== "thinking") ||
-						(!isThinking && currentBlock.type !== "text")
-					) {
-						if (currentBlock) {
-							if (currentBlock.type === "text") {
-								stream.push({
-									type: "text_end",
-									contentIndex: blocks.length - 1,
-									content: currentBlock.text,
-									partial: output,
-								});
-							} else {
-								stream.push({
-									type: "thinking_end",
-									contentIndex: blockIndex(),
-									content: currentBlock.thinking,
-									partial: output,
-								});
-							}
-						}
-						if (isThinking) {
-							currentBlock = { type: "thinking", thinking: "", thinkingSignature: undefined };
-							output.content.push(currentBlock);
-							stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
-						} else {
-							currentBlock = { type: "text", text: "" };
-							output.content.push(currentBlock);
-							stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-						}
-					}
-					if (currentBlock.type === "thinking") {
-						currentBlock.thinking += part.text;
-						currentBlock.thinkingSignature = retainThoughtSignature(
-							currentBlock.thinkingSignature,
-							part.thoughtSignature,
-						);
-						stream.push({
-							type: "thinking_delta",
-							contentIndex: blockIndex(),
-							delta: part.text,
-							partial: output,
-						});
-					} else {
-						currentBlock.text += part.text;
-						currentBlock.textSignature = retainThoughtSignature(
-							currentBlock.textSignature,
-							part.thoughtSignature,
-						);
-						stream.push({
-							type: "text_delta",
-							contentIndex: blockIndex(),
-							delta: part.text,
-							partial: output,
-						});
-					}
-				}
-
-				if (part.functionCall) {
-					if (currentBlock) {
-						if (currentBlock.type === "text") {
-							stream.push({
-								type: "text_end",
-								contentIndex: blockIndex(),
-								content: currentBlock.text,
-								partial: output,
-							});
-						} else {
-							stream.push({
-								type: "thinking_end",
-								contentIndex: blockIndex(),
-								content: currentBlock.thinking,
-								partial: output,
-							});
-						}
-						currentBlock = null;
-					}
-
-					// Generate unique ID if not provided or if it's a duplicate
-					const providedId = part.functionCall.id;
-					const needsNewId =
-						!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);
-					const toolCallId = needsNewId ? nextToolCallId(part.functionCall.name) : providedId;
-
-					const toolCall: ToolCall = {
-						type: "toolCall",
-						id: toolCallId,
-						name: part.functionCall.name || "",
-						// The SDK decodes these arguments from the provider's JSON response.
-						arguments: (part.functionCall.args ?? {}) as JsonObject,
-						...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
-					};
-
-					output.content.push(toolCall);
-					stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
-					stream.push({
-						type: "toolcall_delta",
-						contentIndex: blockIndex(),
-						delta: JSON.stringify(toolCall.arguments),
-						partial: output,
-					});
-					stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
-				}
-			}
-		}
-
-		if (candidate?.finishReason) {
-			output.rawStopReason = candidate.finishReason;
-			output.stopReason = mapStopReason(candidate.finishReason);
-			if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
-				output.stopReason = "toolUse";
-			}
-		}
-
-		if (chunk.usageMetadata) {
-			output.usage = {
-				input: (chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
-				output: (chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
-				cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
-				cacheWrite: 0,
-				reasoning: chunk.usageMetadata.thoughtsTokenCount || 0,
-				totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-				cost: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					total: 0,
-				},
-			};
-			calculateCost(model, output.usage);
-		}
-	}
-
-	if (currentBlock) {
-		if (currentBlock.type === "text") {
-			stream.push({
-				type: "text_end",
-				contentIndex: blockIndex(),
-				content: currentBlock.text,
-				partial: output,
-			});
-		} else {
-			stream.push({
-				type: "thinking_end",
-				contentIndex: blockIndex(),
-				content: currentBlock.thinking,
-				partial: output,
-			});
-		}
-	}
 }

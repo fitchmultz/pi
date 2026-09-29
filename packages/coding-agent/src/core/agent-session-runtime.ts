@@ -184,6 +184,7 @@ export class AgentSessionRuntime {
 		} catch (error) {
 			throw new SessionReplacementPersistenceError(error);
 		}
+		this.session.beginShutdown();
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",
 			reason,
@@ -276,7 +277,7 @@ export class AgentSessionRuntime {
 		const sessionDir = this.session.sessionManager.getSessionDir();
 		const sessionManager = this.session.sessionManager.isPersisted()
 			? SessionManager.create(this.cwd, sessionDir)
-			: SessionManager.inMemory(this.cwd, { sessionDir });
+			: SessionManager.inMemory(this.cwd);
 		if (options?.parentSession) {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
@@ -349,9 +350,7 @@ export class AgentSessionRuntime {
 			}
 
 			if (!existsSync(currentSessionFile)) {
-				throw new Error(
-					"This session has not been saved yet. Wait for the first assistant response before cloning or forking it.",
-				);
+				throw new Error("This session has not been saved yet. Send a message before cloning or forking it.");
 			}
 			const sessionManager = SessionManager.open(currentSessionFile, sessionDir, this.cwd);
 			const forkedSessionPath = sessionManager.createBranchedSession(targetLeafId);

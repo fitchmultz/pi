@@ -124,16 +124,16 @@ export function publishSync(worktree) {
 		throw new Error("Task does not contain its pinned upstream and fork base.");
 	}
 	run(worktree, "git", ["push", "--no-follow-tags", "--set-upstream", "fork", `${branch}:refs/heads/${branch}`]);
-	const existing = execFileSync("gh-personal", ["pr", "list", "--repo", "fitchmultz/pi", "--head", branch,
+	const existing = execFileSync("gh", ["pr", "list", "--repo", "fitchmultz/pi", "--head", branch,
 		"--json", "url", "--jq", ".[0].url // empty"], { cwd: worktree, encoding: "utf8" }).trim();
 	if (existing) console.log(existing);
 	else {
 		const body = resolve(worktree, git(worktree, "rev-parse", "--git-path", "pi-sync-pr.md"));
-		writeFileSync(body, `Merge pinned upstream commit ${target}, preserving fork ancestry.\n\nRun npm run verify:fork for local validation with frozen dependencies, offline build, nonmutating checks and isolated bundled tests. Required CI and independent review must pass before native merge approval.\n`);
-		run(worktree, "gh-personal", ["pr", "create", "--repo", "fitchmultz/pi", "--base", "main", "--head", branch,
+		writeFileSync(body, `Merge pinned upstream commit ${target}, preserving fork ancestry.\n\nRun npm run verify:fork for local validation with frozen dependencies, offline build, nonmutating checks and isolated bundled tests. Required local verification and independent review must pass before native merge approval.\n`);
+		run(worktree, "gh", ["pr", "create", "--repo", "fitchmultz/pi", "--base", "main", "--head", branch,
 			"--title", `Merge upstream ${target.slice(0, 12)}`, "--body-file", body]);
 	}
-	console.log(`Run local reviewers and gh-personal pr checks --repo fitchmultz/pi ${quote(branch)} --watch.\nMerge requires separate native approval. No runtime has been installed or selected.`);
+	console.log(`Run local reviewers and frozen local verification for ${quote(branch)}.\nMerge requires separate native approval. No runtime has been installed or selected.`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -150,8 +150,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 			publishSync(args[1]);
 		}
 		else if (args.length === 2 && args[0] === "--pr") publishSync(args[1]);
-		else if (args.length === 1 && args[0] === "--help") {
-			console.log("Usage: ./sync-upstream.sh [--ref origin/main|<upstream-ref>]\n       ./sync-upstream.sh --continue <worktree>\n       ./sync-upstream.sh --pr <worktree>");
+		else if (args.length === 1 && ["-h", "--help"].includes(args[0])) {
+			console.log("Usage: ./sync-upstream.sh [--ref origin/main|<upstream-ref>]\n       ./sync-upstream.sh --continue <worktree>\n       ./sync-upstream.sh --pr <worktree>\nExample: ./sync-upstream.sh --ref origin/main\nMay commit, push and create a PR; never installs a runtime. Exit codes: 0 success, 1 failure.");
 		} else throw new Error("Invalid arguments. Use ./sync-upstream.sh --help");
 	} catch (error) {
 		console.error(error.message);

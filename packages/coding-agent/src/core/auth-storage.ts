@@ -4,11 +4,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { resolveLocalFileTarget, resolveLocalOperationPath } from "@earendil-works/pi-agent-core/node";
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 import { constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { access, chmod, lstat, mkdtemp, rename, rm, writeFile } from "fs/promises";
-import { dirname, join } from "path";
+import { access, chmod, lstat, mkdtemp, realpath, rename, rm, writeFile } from "fs/promises";
+import { basename, dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { setTimeout as sleep } from "timers/promises";
 import { getAgentDir } from "../config.ts";
@@ -29,7 +28,17 @@ type LockResult<T> = {
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
 async function publishStoredFile(path: string, content: string, signal?: AbortSignal): Promise<void> {
-	const target = await resolveLocalFileTarget(resolveLocalOperationPath(process.cwd(), path));
+	// Resolve the parent separately if a mutation removed the file after locking it.
+	// This also preserves symlinked parent/.. traversal when recreating the file.
+	const target = await realpath(path).catch(async (error: NodeJS.ErrnoException) => {
+		if (error.code !== "ENOENT") throw error;
+		const entry = await lstat(path).catch((cause: NodeJS.ErrnoException) => {
+			if (cause.code === "ENOENT") return undefined;
+			throw cause;
+		});
+		if (entry) throw error; // Never replace a dangling symlink.
+		return join(await realpath(dirname(path)), basename(path));
+	});
 	const previous = await lstat(target).catch((error: NodeJS.ErrnoException) => {
 		if (error.code === "ENOENT") return undefined;
 		throw error;

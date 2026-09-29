@@ -2,7 +2,7 @@
  * System prompt construction and project context loading
  */
 
-import { getSystemMessageText, type ToolSelection, toolKey } from "@earendil-works/pi-ai";
+import { getSystemMessageText } from "@earendil-works/pi-ai";
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
@@ -11,8 +11,8 @@ export interface BuildSystemPromptOptions {
 	customPrompt?: string;
 	/** Exact full prompt replacement set by a before_agent_start handler. */
 	forceSystemPrompt?: string;
-	/** Tools to include in prompt. Default: [read, bash, background_command, edit, write]. */
-	selectedTools?: ToolSelection[];
+	/** Tools to include in prompt. Default: [read, bash, edit, write]. */
+	selectedTools?: string[];
 	/** Optional one-line tool snippets keyed by tool name. */
 	toolSnippets?: Record<string, string>;
 	/** Guideline bullets contributed by each tool, keyed by tool name. */
@@ -23,8 +23,6 @@ export interface BuildSystemPromptOptions {
 	appendSystemPrompt?: string;
 	/** Additional XML-wrapped prompt sections keyed by tag name. */
 	sections?: Record<string, string>;
-	/** Optional tool owners for custom sections. Render when any listed tool is active. */
-	sectionTools?: Record<string, ToolSelection[]>;
 	/** Working directory. */
 	cwd: string;
 	/** Pre-loaded context files. */
@@ -34,13 +32,12 @@ export interface BuildSystemPromptOptions {
 }
 
 export type NormalizedBuildSystemPromptOptions = BuildSystemPromptOptions & {
-	selectedTools: ToolSelection[];
+	selectedTools: string[];
 	toolSnippets: Record<string, string>;
 	toolGuidelines: Record<string, string[]>;
 	promptGuidelines: string[];
 	appendSystemPrompt: string;
 	sections: Record<string, string>;
-	sectionTools: Record<string, ToolSelection[]>;
 	contextFiles: Array<{ path: string; content: string }>;
 	skills: Skill[];
 };
@@ -58,9 +55,7 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 	return {
 		customPrompt: input.customPrompt,
 		forceSystemPrompt: input.forceSystemPrompt,
-		selectedTools: (input.selectedTools ?? ["read", "bash", "background_command", "edit", "write"]).map((tool) =>
-			typeof tool === "string" ? tool : tool.namespace === undefined ? tool.name : { ...tool },
-		),
+		selectedTools: [...(input.selectedTools ?? ["read", "bash", "edit", "write"])],
 		toolSnippets: { ...(input.toolSnippets ?? {}) },
 		toolGuidelines: Object.fromEntries(
 			Object.entries(input.toolGuidelines ?? {}).map(([name, guidelines]) => [name, [...guidelines]]),
@@ -68,12 +63,6 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 		promptGuidelines: [...(input.promptGuidelines ?? [])],
 		appendSystemPrompt: input.appendSystemPrompt ?? "",
 		sections: { ...(input.sections ?? {}) },
-		sectionTools: Object.fromEntries(
-			Object.entries(input.sectionTools ?? {}).map(([name, tools]) => [
-				name,
-				tools.map((tool) => (typeof tool === "string" ? tool : { ...tool })),
-			]),
-		),
 		cwd: input.cwd,
 		contextFiles: (input.contextFiles ?? []).map((file) => ({ ...file })),
 		skills: (input.skills ?? []).map((skill) => ({ ...skill })),
@@ -89,13 +78,8 @@ function renderProjectContext(contextFiles: Array<{ path: string; content: strin
 	].join("\n\n");
 }
 
-function toolPromptMetadata<T>(tool: ToolSelection, values: Record<string, T>): T | undefined {
-	const bareName = typeof tool === "string" ? tool : tool.namespace === undefined ? tool.name : undefined;
-	return values[toolKey(tool)] ?? (bareName === undefined ? undefined : values[bareName]);
-}
-
 function buildRules(
-	selectedTools: ToolSelection[],
+	selectedTools: string[],
 	toolGuidelines: Record<string, string[]>,
 	promptGuidelines: string[],
 ): string {
@@ -125,7 +109,7 @@ function buildRules(
 	}
 
 	for (const name of selectedTools) {
-		for (const rule of toolPromptMetadata(name, toolGuidelines) ?? []) addRule(rule);
+		for (const rule of toolGuidelines[name] ?? []) addRule(rule);
 	}
 	for (const rule of promptGuidelines) addRule(rule);
 	addRule("Be concise in your responses");
@@ -144,7 +128,6 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		promptGuidelines,
 		appendSystemPrompt,
 		sections: customSections,
-		sectionTools,
 		cwd,
 		contextFiles,
 		skills,
@@ -162,16 +145,9 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	} else {
 		promptSections.preamble =
 			"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
-		const visibleTools = selectedTools.filter((tool) => !!toolPromptMetadata(tool, toolSnippets));
+		const visibleTools = selectedTools.filter((name) => !!toolSnippets[name]);
 		const tools =
-			visibleTools.length > 0
-				? visibleTools
-						.map((tool) => {
-							const name = typeof tool === "string" ? tool : `${tool.namespace}.${tool.name}`;
-							return `- ${name}: ${toolPromptMetadata(tool, toolSnippets)}`;
-						})
-						.join("\n")
-				: "(none)";
+			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
 		promptSections.tools = `${tools}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.`;
 		promptSections.rules = buildRules(selectedTools, toolGuidelines, promptGuidelines);
 		promptSections.docs = `Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
@@ -179,7 +155,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 - Additional docs: ${getDocsPath()}
 - Examples: ${getExamplesPath()} (extensions, custom tools, SDK)
 - When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
-- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
+- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md)
 - For Pi work, inspect the version-matched documentation and examples for the affected APIs and behavior before implementing
 - Follow references needed to establish those contracts; use relevant sections of long references (e.g., tui.md for TUI API details)`;
 	}
@@ -192,10 +168,8 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		if (skillsPrompt) promptSections.skills = skillsPrompt;
 	}
 	promptSections.cwd = process.platform === "win32" ? cwd.replace(/\\/g, "/") : cwd;
-	const activeTools = new Set(selectedTools.map(toolKey));
 	for (const [name, content] of Object.entries(customSections)) {
-		const owners = Object.hasOwn(sectionTools, name) ? sectionTools[name] : undefined;
-		if (content && (!owners || owners.some((tool) => activeTools.has(toolKey(tool))))) promptSections[name] = content;
+		if (content) promptSections[name] = content;
 	}
 
 	const sections: SystemPromptSections = { preamble: promptSections.preamble };

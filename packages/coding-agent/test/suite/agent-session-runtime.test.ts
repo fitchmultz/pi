@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -189,8 +189,7 @@ describe("AgentSessionRuntime characterization", () => {
 		await runtime.newSession();
 		await runtime.session.bindExtensions({});
 
-		const toolCall = fauxToolCall("block", {});
-		faux.setResponses([fauxAssistantMessage(toolCall, { stopReason: "toolUse" })]);
+		faux.setResponses([fauxAssistantMessage(fauxToolCall("block", {}), { stopReason: "toolUse" })]);
 		const outgoingSession = runtime.session;
 		const promptPromise = outgoingSession.prompt("start blocking tool");
 		await toolStartedPromise;
@@ -206,89 +205,7 @@ describe("AgentSessionRuntime characterization", () => {
 			.getEntries()
 			.filter((entry) => entry.type === "message");
 		expect(outgoingEntries.map((entry) => entry.message.role)).toEqual(["system", "user", "assistant", "toolResult"]);
-		expect(outgoingEntries[3].message).toMatchObject({
-			role: "toolResult",
-			toolCallId: toolCall.id,
-			toolName: "block",
-			content: [{ type: "text", text: "tool aborted" }],
-		});
-	});
-
-	it.each(["resume", "import"] as const)(
-		"keeps shutdown entries on the active branch when %s selects the current session",
-		async (operation) => {
-			let shutdownEntryId: string | null = null;
-			let restoredBranch: string[] = [];
-			const { runtime } = await createRuntimeForTest((pi) => {
-				pi.on("session_shutdown", (event, ctx) => {
-					if (event.reason !== "resume") return;
-					pi.appendEntry("shutdown-state", {});
-					shutdownEntryId = ctx.sessionManager.getLeafId();
-				});
-				pi.on("session_start", (event, ctx) => {
-					if (event.reason === "resume") {
-						restoredBranch = ctx.sessionManager.getBranch().map((entry) => entry.id);
-					}
-				});
-			});
-			await runtime.session.prompt("hello");
-			const sessionFile = runtime.session.sessionFile!;
-
-			if (operation === "resume") await runtime.switchSession(sessionFile);
-			else await runtime.importFromJsonl(sessionFile);
-			await runtime.session.bindExtensions({});
-
-			expect(shutdownEntryId).toBeTruthy();
-			expect(SessionManager.open(sessionFile).getEntry(shutdownEntryId!)).toBeDefined();
-			expect(restoredBranch).toContain(shutdownEntryId);
-
-			runtime.session.sessionManager.appendCustomEntry("next-turn");
-			expect(
-				SessionManager.open(sessionFile)
-					.getBranch()
-					.map((entry) => entry.id),
-			).toContain(shutdownEntryId);
-		},
-	);
-
-	it("keeps the session cwd when self-resuming before its first journal write", async () => {
-		let shutdownEntryId: string | null = null;
-		const { runtime, tempDir } = await createRuntimeForTest((pi) => {
-			pi.on("session_shutdown", (event, ctx) => {
-				if (event.reason !== "resume") return;
-				pi.appendEntry("shutdown-state", {});
-				shutdownEntryId = ctx.sessionManager.getLeafId();
-			});
-		});
-		const sessionFile = runtime.session.sessionFile!;
-		expect(existsSync(sessionFile)).toBe(false);
-
-		await runtime.switchSession(sessionFile);
-		await runtime.session.bindExtensions({});
-
-		expect(runtime.cwd).toBe(tempDir);
-		expect(runtime.session.sessionManager.getBranch().map((entry) => entry.id)).toContain(shutdownEntryId);
-	});
-
-	it.skipIf(process.platform === "win32")("imports an alias of the current journal after shutdown", async () => {
-		let shutdownEntryId: string | null = null;
-		const { runtime, tempDir } = await createRuntimeForTest((pi) => {
-			pi.on("session_shutdown", (event, ctx) => {
-				if (event.reason !== "resume") return;
-				pi.appendEntry("shutdown-state", {});
-				shutdownEntryId = ctx.sessionManager.getLeafId();
-			});
-		});
-		await runtime.session.prompt("hello");
-		const sessionFile = runtime.session.sessionFile!;
-		const alias = join(tempDir, "alias.jsonl");
-		symlinkSync(sessionFile, alias);
-
-		await runtime.importFromJsonl(alias);
-		await runtime.session.bindExtensions({});
-
-		expect(runtime.session.sessionFile).toBe(sessionFile);
-		expect(runtime.session.sessionManager.getBranch().map((entry) => entry.id)).toContain(shutdownEntryId);
+		expect(faux.state.callCount).toBe(2);
 	});
 
 	it("preserves an existing session when importing a file with the same name", async () => {
@@ -462,7 +379,7 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(leafId).toBeTruthy();
 
 		await expect(runtime.fork(leafId!, { position: "at" })).rejects.toThrow(
-			"This session has not been saved yet. Wait for the first assistant response before cloning or forking it.",
+			"This session has not been saved yet. Send a message before cloning or forking it.",
 		);
 	});
 
@@ -506,7 +423,7 @@ describe("AgentSessionRuntime characterization", () => {
 		).toEqual(beforeMessages);
 	});
 
-	it("preserves in-memory storage when forking and starting a new session", async () => {
+	it("duplicates the current active branch in-memory when forking at the current position", async () => {
 		const tempDir = join(tmpdir(), `pi-runtime-suite-in-memory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -566,11 +483,10 @@ describe("AgentSessionRuntime characterization", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const sessionDir = join(tempDir, "job-artifacts");
 		const runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(tempDir, { sessionDir }),
+			sessionManager: SessionManager.inMemory(tempDir),
 		});
 		await runtime.session.bindExtensions({});
 		cleanups.push(async () => {
@@ -617,46 +533,6 @@ describe("AgentSessionRuntime characterization", () => {
 						: undefined,
 			})),
 		).toEqual(beforeMessages);
-		expect(runtime.session.sessionManager.getSessionDir()).toBe(sessionDir);
-
-		const previousSessionId = runtime.session.sessionId;
-		expect(await runtime.newSession()).toEqual({ cancelled: false });
-		expect(runtime.session.sessionId).not.toBe(previousSessionId);
-		expect(runtime.session.messages).toEqual([]);
-		expect(runtime.session.sessionManager.getSessionDir()).toBe(sessionDir);
-		expect(runtime.session.sessionManager.isPersisted()).toBe(false);
-		await runtime.session.prompt("new work");
-		expect(runtime.session.sessionFile).toBeUndefined();
-		expect(existsSync(sessionDir)).toBe(false);
-	});
-
-	it.each(["at", "before"] as const)("preserves the active cwd when forking %s a saved entry", async (position) => {
-		const { runtime, tempDir } = await createRuntimeForTest(() => {});
-		const savedCwd = join(tempDir, "old-worktree");
-		mkdirSync(savedCwd);
-		const saved = SessionManager.create(savedCwd, join(tempDir, "sessions"));
-		saved.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		saved.appendMessage(fauxAssistantMessage("one"));
-		const laterUser = saved.appendMessage({ role: "user", content: "second", timestamp: 2 });
-		const leaf = saved.appendMessage(fauxAssistantMessage("two"));
-		const sourceFile = saved.getSessionFile()!;
-
-		await runtime.switchSession(sourceFile, { cwdOverride: tempDir });
-		rmSync(savedCwd, { recursive: true });
-		const sourceBytes = readFileSync(sourceFile, "utf8");
-		let replacementCwd: string | undefined;
-		await runtime.fork(position === "at" ? leaf : laterUser, {
-			position,
-			withSession: async (ctx) => {
-				replacementCwd = ctx.cwd;
-			},
-		});
-
-		expect(runtime.cwd).toBe(tempDir);
-		expect(replacementCwd).toBe(tempDir);
-		expect(runtime.session.sessionManager.getHeader()).toMatchObject({ cwd: tempDir, parentSession: sourceFile });
-		expect(runtime.session.sessionManager.getSessionDir()).toBe(saved.getSessionDir());
-		expect(readFileSync(sourceFile, "utf8")).toBe(sourceBytes);
 	});
 
 	it("throws when forking with an invalid entry id", async () => {

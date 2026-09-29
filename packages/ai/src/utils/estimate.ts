@@ -53,11 +53,7 @@ export function estimateMessageTokens(message: Message, includeTools = true): nu
 		);
 	}
 	if (message.role === "user") return estimateTextAndImageContentTokens(message.content);
-	if (message.role === "toolResult")
-		return (
-			estimateTextAndImageContentTokens(message.content) +
-			(includeTools ? estimateToolsTokens(message.toolsAdded) : 0)
-		);
+	if (message.role === "toolResult") return estimateTextAndImageContentTokens(message.content);
 
 	for (const block of message.content) {
 		if (block.type === "text") {
@@ -71,7 +67,7 @@ export function estimateMessageTokens(message: Message, includeTools = true): nu
 	return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
-/** Estimate physical input without reusing earlier response usage. */
+/** Estimate the physical request without borrowing usage from an earlier response. */
 export function estimateProviderInputTokens(
 	context: TranscriptContext | readonly Message[],
 	tools?: readonly Tool[],
@@ -83,11 +79,10 @@ export function estimateProviderInputTokens(
 	);
 }
 
-/** Admit physical input after native prompt/tool projection, without reusing earlier response usage. */
+/** Refuse known oversized projected input before transport. This is an estimate, not provider tokenization. */
 export function assertContextFits(
 	model: { contextWindow: number },
 	context: TranscriptContext | readonly Message[],
-	/** Override transcript declarations when the adapter sends a resolved tool set instead. */
 	tools?: readonly Tool[],
 ): void {
 	if (!(model.contextWindow > 0)) return;

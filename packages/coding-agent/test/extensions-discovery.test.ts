@@ -3,9 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { toolKey } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
+import { discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -78,15 +77,14 @@ describe("extensions discovery", () => {
 				extensionPath,
 				`
 				import assert from "node:assert/strict";
-				import { getModel } from "${scope}/pi-ai";
 				import { ANTHROPIC_MODELS } from "${scope}/pi-ai/providers/anthropic.models";
 				import { anthropicProvider } from "${scope}/pi-ai/providers/anthropic";
-				import { getBuiltinModels } from "${scope}/pi-ai/providers/all";
+				import { getBuiltinModel, getBuiltinModels } from "${scope}/pi-ai/providers/all";
 				import * as oauth from "${scope}/pi-ai/oauth";
 				export default function(pi) {
 					const model = Object.values(ANTHROPIC_MODELS)[0];
 					assert.ok(model);
-					assert.equal(getModel("anthropic", model.id).id, model.id);
+					assert.equal(getBuiltinModel("anthropic", model.id).id, model.id);
 					assert.ok(getBuiltinModels("anthropic").some(candidate => candidate.id === model.id));
 					assert.equal(typeof anthropicProvider, "function");
 					assert.ok(oauth);
@@ -114,6 +112,41 @@ describe("extensions discovery", () => {
 			env: { ...process.env, HOME: tempDir, PI_CODING_AGENT_DIR: tempDir, PI_OFFLINE: "1", NODE_OPTIONS: "" },
 			timeout: 30_000,
 		});
+	});
+
+	it("does not infer package ownership from ancestor manifests", async () => {
+		// Regression for #9863.
+		const dependencyDir = path.join(tempDir, "node_modules", "@earendil-works", "pi-coding-agent");
+		fs.mkdirSync(dependencyDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, "package.json"),
+			JSON.stringify({
+				name: "application",
+				type: "module",
+				dependencies: { "@earendil-works/pi-coding-agent": "1.0.0" },
+			}),
+		);
+		fs.writeFileSync(
+			path.join(dependencyDir, "package.json"),
+			JSON.stringify({ name: "@earendil-works/pi-coding-agent", type: "module", exports: "./index.js" }),
+		);
+		fs.writeFileSync(path.join(dependencyDir, "index.js"), "export const physicalDependency = true;");
+		fs.writeFileSync(
+			path.join(extensionsDir, "compiled-esm-extension.js"),
+			`
+				import { physicalDependency } from "@earendil-works/pi-coding-agent";
+				export default function(pi) {
+					if (physicalDependency) pi.registerCommand("physical-dependency", { handler: async () => {} });
+				}
+			`,
+		);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toEqual([]);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].commands.has("physical-dependency")).toBe(true);
+		expect(result.warnings).toEqual([]);
 	});
 
 	it("keeps the type-only pi-ai OAuth compatibility barrel resolvable", async () => {
@@ -273,8 +306,8 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("custom.ts");
 		// Verify the right tool was registered
-		expect(result.extensions[0].tools.has(toolKey({ name: "from-custom" }))).toBe(true);
-		expect(result.extensions[0].tools.has(toolKey({ name: "from-index" }))).toBe(false);
+		expect(result.extensions[0].tools.has("from-custom")).toBe(true);
+		expect(result.extensions[0].tools.has("from-index")).toBe(false);
 	});
 
 	it("ignores package.json without pi field, falls back to index.ts", async () => {
@@ -380,7 +413,7 @@ describe("extensions discovery", () => {
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has(toolKey({ name: "my-tool" }))).toBe(true);
+		expect(result.extensions[0].tools.has("my-tool")).toBe(true);
 	});
 
 	it("reports errors for invalid extension code", async () => {
@@ -415,7 +448,7 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("with-deps");
 		// The extension registers a 'parse_duration' tool
-		expect(result.extensions[0].tools.has(toolKey({ name: "parse_duration" }))).toBe(true);
+		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
 	});
 
 	it("registers message and entry renderers", async () => {
@@ -488,8 +521,8 @@ describe("extensions discovery", () => {
 				allTools.add(name);
 			}
 		}
-		expect(allTools.has(toolKey({ name: "tool-a" }))).toBe(true);
-		expect(allTools.has(toolKey({ name: "tool-b" }))).toBe(true);
+		expect(allTools.has("tool-a")).toBe(true);
+		expect(allTools.has("tool-b")).toBe(true);
 	});
 
 	it("loads extension with event handlers", async () => {
@@ -556,13 +589,12 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(explicitPath, extensionCodeWithTool("explicit"));
 
 		// Use loadExtensions directly to skip discovery
-		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
 		const result = await loadExtensions([explicitPath], tempDir);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has(toolKey({ name: "explicit" }))).toBe(true);
-		expect(result.extensions[0].tools.has(toolKey({ name: "discovered" }))).toBe(false);
+		expect(result.extensions[0].tools.has("explicit")).toBe(true);
+		expect(result.extensions[0].tools.has("discovered")).toBe(false);
 	});
 
 	it("loadExtensions with no paths loads nothing", async () => {
@@ -570,7 +602,6 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCode);
 
 		// Use loadExtensions directly with empty paths
-		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
 		const result = await loadExtensions([], tempDir);
 
 		expect(result.errors).toHaveLength(0);

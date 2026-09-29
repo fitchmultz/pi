@@ -115,6 +115,10 @@ export function smokeTestCodingAgentConsumer(directory, runtime = process.execPa
 		PI_OFFLINE: "1",
 		PI_TELEMETRY: "0",
 	};
+	if (process.platform === "android") {
+		env.PREFIX = process.env.PREFIX;
+		env.LD_PRELOAD = process.env.LD_PRELOAD;
+	}
 	for (const name of ["SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"]) {
 		if (process.env[name]) env[name] = process.env[name];
 	}
@@ -144,7 +148,19 @@ for (const subpath of ["/client", "/experimental/plugin"]) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-	if (process.argv.length !== 2) throw new Error("Usage: node scripts/coding-agent-consumer.mjs");
+	if (process.argv.length === 3 && (process.argv[2] === "-h" || process.argv[2] === "--help")) {
+		console.log(`Usage: node scripts/coding-agent-consumer.mjs
+
+Pack release packages, install the coding agent in an isolated consumer, and smoke-test its SDK and CLI.
+
+Examples:
+  node scripts/coding-agent-consumer.mjs
+  node scripts/coding-agent-consumer.mjs --help
+
+Exit codes: 0 on success or help; nonzero on invalid arguments or smoke-test failure.`);
+		process.exit(0);
+	}
+	if (process.argv.length !== 2) throw new Error("Usage: node scripts/coding-agent-consumer.mjs [-h|--help]");
 	const root = mkdtempSync(join(tmpdir(), "pi-package-consumer-"));
 	try {
 		const tarballs = packReleasePackages(getPublicWorkspacePackages(), join(root, "tarballs"));

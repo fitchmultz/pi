@@ -3,35 +3,11 @@ import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type Model, type U
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { streamSimple as streamOpenAIResponses } from "../../../ai/src/api/openai-responses.ts";
-import type {
-	ExtensionAPI,
-	SessionBeforeAutoCompactEvent,
-	SessionBeforeCompactEvent,
-} from "../../src/core/extensions/index.ts";
+import type { ExtensionAPI, SessionBeforeCompactEvent } from "../../src/core/extensions/index.ts";
 import { createHarness, getMessageText, getUserTexts, type Harness } from "./harness.ts";
 
 const OVERFLOW = "prompt is too long: 300000 tokens > 128000 maximum";
-
-function overflowResponse() {
-	return fauxAssistantMessage("", { stopReason: "error", errorMessage: OVERFLOW });
-}
-
-function nativeSlowCall() {
-	const call = { ...fauxToolCall("slow", {}), async: true };
-	return {
-		...call,
-		responsesItem: {
-			type: "function_call" as const,
-			id: "fc_slow",
-			call_id: call.id,
-			name: call.name,
-			arguments: "{}",
-			async: true,
-			status: "completed" as const,
-		},
-	};
-}
-
+const overflowResponse = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: OVERFLOW });
 function usage(totalTokens: number): Usage {
 	return {
 		input: totalTokens,
@@ -43,116 +19,75 @@ function usage(totalTokens: number): Usage {
 	};
 }
 
-function claimRollover(seen: Array<{ reason: string; willRetry: boolean }> = []) {
+// Same public interception used by the official-host Posthorse path: the sentinel
+// retains no conversation and an empty summary performs no summarization request.
+function claimRollover(seen: SessionBeforeCompactEvent[] = []) {
 	return (pi: ExtensionAPI) => {
-		pi.on("session_before_auto_compact", (event) => {
-			seen.push({ reason: event.reason, willRetry: event.willRetry });
-			return { newContext: { handoff: `handoff after ${event.reason}` } };
+		pi.on("session_before_compact", (event, ctx) => {
+			if (event.reason === "manual") return;
+			seen.push(event);
+			pi.appendEntry("posthorse-boundary", {});
+			return {
+				compaction: {
+					summary: "",
+					firstKeptEntryId: ctx.sessionManager.getLeafId()!,
+					tokensBefore: event.preparation.tokensBefore,
+				},
+			};
 		});
 	};
 }
 
-function replacementTools(onRollover: () => void) {
-	return (pi: ExtensionAPI) => {
-		pi.registerTool({
-			name: "loader",
-			label: "Loader",
-			description: "Load the larger tool",
-			parameters: Type.Object({}),
-			execute: async () => {
-				pi.setActiveTools(["huge"]);
-				return { content: [{ type: "text" as const, text: "loaded" }], details: {} };
-			},
-		});
-		pi.registerTool({
-			name: "huge",
-			label: "Huge",
-			description: "x".repeat(24_000),
-			parameters: Type.Object({}),
-			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }], details: {} }),
-		});
-		pi.on("session_before_auto_compact", () => {
-			onRollover();
-			return { newContext: { handoff: "rollover" } };
-		});
-	};
+function compactions(harness: Harness) {
+	return harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction");
 }
 
-function entryTypes(harness: Harness): string[] {
-	return harness.sessionManager
-		.getBranch()
-		.filter((entry) => entry.type !== "message" || entry.message.role !== "system")
-		.map((entry) => entry.type);
-}
-
-function countType(harness: Harness, type: string): number {
-	return entryTypes(harness).filter((t) => t === type).length;
-}
-
-function forbidSummarizationAuth(harness: Harness): void {
-	(harness.session as unknown as { _getSummarizationRequestAuth: () => Promise<never> })._getSummarizationRequestAuth =
-		async () => {
-			throw new Error("summarization auth must not be resolved for a claimed rollover");
-		};
-}
-
-function runAutoCompaction(harness: Harness) {
-	return (
-		harness.session as unknown as {
-			_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
-		}
-	)._runAutoCompaction.bind(harness.session);
-}
-
-describe("session_before_auto_compact", () => {
+describe("summary-free automatic compaction through session_before_compact", () => {
 	const harnesses: Harness[] = [];
-
 	afterEach(() => {
-		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+		vi.restoreAllMocks();
+		while (harnesses.length) harnesses.pop()?.cleanup();
 	});
 
-	it.each(["local", "provider"] as const)(
-		"rolls over a %s-refused first owner turn without summarization auth",
-		async (refusal) => {
-			const seen: Array<{ reason: string; willRetry: boolean }> = [];
-			const harness = await createHarness({ extensionFactories: [claimRollover(seen)] });
+	it.each([false, true])(
+		"recovers a provider overflow on the first request (after reset: %s) without a summary request",
+		async (reset) => {
+			const seen: SessionBeforeCompactEvent[] = [];
+			const harness = await createHarness({ tools: [], extensionFactories: [claimRollover(seen)] });
 			harnesses.push(harness);
-			forbidSummarizationAuth(harness);
-			let entriesAtCompactionEnd: string[] = [];
-			harness.session.subscribe((event) => {
-				if (event.type === "compaction_end" && event.contextWindowStarted) {
-					entriesAtCompactionEnd = entryTypes(harness);
-				}
-			});
-			let retryTexts: string[] = [];
+			if (reset) {
+				harness.sessionManager.appendMessage({ role: "user", content: "old input", timestamp: 1 });
+				harness.sessionManager.appendMessage(fauxAssistantMessage("old answer"));
+				harness.sessionManager.appendCompaction("", null, 100);
+				harness.session.refreshContext();
+			}
+			const requests: string[][] = [];
 			harness.setResponses([
-				...(refusal === "provider" ? [overflowResponse()] : []),
+				overflowResponse(),
 				(context) => {
-					retryTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
-					return fauxAssistantMessage("continued in a fresh window");
+					requests.push(context.messages.map(getMessageText));
+					return fauxAssistantMessage("recovered");
 				},
 			]);
-
-			await harness.session.prompt("x".repeat(refusal === "local" ? 600_000 : 400_000));
-
-			expect(harness.faux.state.callCount).toBe(refusal === "local" ? 1 : 2);
-
-			expect(seen).toEqual([{ reason: "overflow", willRetry: true }]);
-			expect(entriesAtCompactionEnd).toContain("context_window");
-			expect(countType(harness, "context_window")).toBe(1);
-			expect(countType(harness, "compaction")).toBe(0);
-			expect(retryTexts).toEqual([expect.stringContaining("handoff after overflow")]);
-			expect(harness.session.messages.filter((message) => message.role !== "system").map((m) => m.role)).toEqual([
-				"custom",
-				"assistant",
+			await harness.session.prompt("new input");
+			expect(seen.map(({ reason, willRetry }) => ({ reason, willRetry }))).toEqual([
+				{ reason: "overflow", willRetry: true },
 			]);
+			expect(compactions(harness)).toHaveLength(reset ? 2 : 1);
+			expect(compactions(harness).at(-1)?.summary).toBe("");
+			expect(harness.faux.state.callCount).toBe(2);
 			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(requests).toHaveLength(1);
+			expect(requests[0]).not.toContain("new input");
+			expect(requests[0]).not.toContain("old input");
+			expect(harness.session.getLastAssistantText()).toBe("recovered");
 		},
 	);
 
-	it("keeps the first-request overflow exemption across repeated preparation", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
+	it("allows a physically fitting first request and delivers late preparation steering at the next boundary", async () => {
+		const seen: SessionBeforeCompactEvent[] = [];
 		const harness = await createHarness({
+			tools: [],
 			models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
 			settings: { compaction: { reserveTokens: 5000 } },
 			extensionFactories: [claimRollover(seen)],
@@ -168,547 +103,35 @@ describe("session_before_auto_compact", () => {
 			}
 			return prepared ?? undefined;
 		};
-		let hookCallsAtRequest = -1;
-		let requestTexts: string[] = [];
+		let hooksAtRequest = -1;
+		const requests: string[][] = [];
 		harness.setResponses([
 			(context) => {
-				hookCallsAtRequest = seen.length;
-				requestTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
-				return fauxAssistantMessage("done");
+				hooksAtRequest = seen.length;
+				requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
+				return fauxAssistantMessage("first");
+			},
+			(context) => {
+				requests.push(context.messages.filter((message) => message.role !== "system").map(getMessageText));
+				return fauxAssistantMessage("second");
 			},
 		]);
-
 		await harness.session.prompt("p".repeat(60_000));
-
-		expect(hookCallsAtRequest).toBe(0);
-		expect(requestTexts).toEqual(["p".repeat(60_000), "late steering"]);
-	});
-
-	it("rolls over when an oversized tool result crosses the threshold before the next response", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
-		const bigTool: AgentTool = {
-			name: "dump",
-			label: "Dump",
-			description: "Return a huge result",
-			parameters: Type.Object({}),
-			execute: async () => ({ content: [{ type: "text", text: "r".repeat(600_000) }], details: {} }),
-		};
-		const harness = await createHarness({ tools: [bigTool], extensionFactories: [claimRollover(seen)] });
-		harnesses.push(harness);
-		forbidSummarizationAuth(harness);
-		let secondTexts: string[] = [];
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" }),
-			(context) => {
-				secondTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		await harness.session.prompt("dump it");
-
-		expect(seen).toEqual([{ reason: "threshold", willRetry: false }]);
-		expect(countType(harness, "context_window")).toBe(1);
-		expect(countType(harness, "compaction")).toBe(0);
-		expect(secondTexts).toEqual([expect.stringContaining("handoff after threshold")]);
-		// The oversized result stays in the transcript for recovery, before the boundary.
-		expect(entryTypes(harness)).toEqual(["message", "message", "message", "context_window", "message"]);
-	});
-
-	it.each(["request preflight", "settlement threshold", "settlement overflow"] as const)(
-		"rolls over decorated opaque context at %s",
-		async (boundary) => {
-			const seen: Array<{ reason: string; willRetry: boolean }> = [];
-			let responses = 0;
-			const measured =
-				boundary === "request preflight" ? 430_000 : boundary === "settlement threshold" ? 447_778 : 510_000;
-			const harness = await createHarness({
-				tools: [],
-				models: [{ id: "faux-1", contextWindow: 500_000, maxTokens: 1000 }],
-				settings: { compaction: { enabled: true, reserveTokens: 64_000 } },
-				extensionFactories: [
-					claimRollover(seen),
-					(pi) => {
-						pi.on("context", (event) => ({
-							messages: [
-								{ role: "user", content: "Recovered todo: finish the task", timestamp: 0 },
-								...event.messages,
-							],
-						}));
-						pi.on("message_end", (event) => {
-							if (event.message.role === "assistant" && responses++ === 0) event.message.usage = usage(measured);
-						});
-					},
-				],
-			});
-			harnesses.push(harness);
-			harness.setResponses([
-				fauxAssistantMessage([
-					{ type: "thinking", thinking: "", thinkingSignature: "opaque-test" },
-					{ type: "text", text: "completed answer" },
-				]),
-			]);
-			await harness.session.prompt("original request");
-			if (boundary === "request preflight") {
-				expect(seen).toEqual([]);
-				expect(harness.session.getContextUsage()).toMatchObject({ tokens: measured, source: "reported" });
-				const next = `next request ${"n".repeat(28_000)}`;
-				harness.setResponses([
-					(context) => {
-						expect(seen).toEqual([{ reason: "threshold", willRetry: false }]);
-						const texts = context.messages.map(getMessageText);
-						expect(texts).toContain(next);
-						expect(texts).not.toContain("original request");
-						return fauxAssistantMessage("next answer");
-					},
-				]);
-				await harness.session.prompt(next);
-			}
-			expect(seen).toEqual([
-				{ reason: boundary === "settlement overflow" ? "overflow" : "threshold", willRetry: false },
-			]);
-			expect(countType(harness, "context_window")).toBe(1);
-			expect(countType(harness, "compaction")).toBe(0);
-			expect(harness.faux.state.callCount).toBe(boundary === "request preflight" ? 2 : 1);
-			expect(
-				harness.sessionManager
-					.getBranch()
-					.some((entry) => entry.type === "message" && getMessageText(entry.message) === "completed answer"),
-			).toBe(true);
-		},
-	);
-
-	it("applies session_before_compact newContext before a mid-run provider request", async () => {
-		const bigTool: AgentTool = {
-			name: "dump",
-			label: "Dump",
-			description: "Return a huge result",
-			parameters: Type.Object({}),
-			execute: async () => ({ content: [{ type: "text", text: "r".repeat(600_000) }], details: {} }),
-		};
-		const harness = await createHarness({
-			tools: [bigTool],
-			settings: { compaction: { keepRecentTokens: 155_000 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", (event) =>
-						event.reason === "manual" ? undefined : { newContext: { handoff: "legacy handoff" } },
-					);
-				},
-			],
-		});
-		harnesses.push(harness);
-		let secondTexts: string[] = [];
-		harness.setResponses([
-			fauxAssistantMessage("w".repeat(40_000)),
-			fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" }),
-			(context) => {
-				secondTexts = context.messages.filter((message) => message.role !== "system").map(getMessageText);
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		await harness.session.prompt("warm up");
-		await harness.session.prompt("dump it");
-
-		expect(secondTexts).toEqual([expect.stringContaining("legacy handoff")]);
-		expect(entryTypes(harness)).toEqual([
-			"message",
-			"message",
-			"message",
-			"message",
-			"message",
-			"context_window",
-			"message",
-		]);
-	});
-
-	it.each([
-		{ hook: "session_before_auto_compact", completion: "afterHook" },
-		{ hook: "session_before_compact", completion: "afterHook" },
-		{ hook: "session_before_auto_compact", completion: "duringHook" },
-		{ hook: "session_before_compact", completion: "duringHook" },
-		{ hook: "session_before_auto_compact", completion: "duringMessageEnd" },
-		{ hook: "session_before_compact", completion: "duringMessageEnd" },
-	] as const)(
-		"starts the claimed $hook window while native work completes (completion=$completion)",
-		async ({ hook, completion }) => {
-			let release!: () => void;
-			const gate = new Promise<void>((resolve) => {
-				release = resolve;
-			});
-			let messageEndStarted!: () => void;
-			const messageEndStart = new Promise<void>((resolve) => {
-				messageEndStarted = resolve;
-			});
-			let releaseMessageEnd!: () => void;
-			const messageEndGate = new Promise<void>((resolve) => {
-				releaseMessageEnd = resolve;
-			});
-			const owner = "NEW_OWNER_DECISION: work only on the revised request";
-			const receipt = "LATE_RECEIPT";
-			const call = nativeSlowCall();
-			const execute = vi.fn(async () => {
-				await gate;
-				return { content: [{ type: "text" as const, text: receipt }], details: {} };
-			});
-			const handoffs: string[] = [];
-			let pendingAtFirstHook: number | undefined;
-			let runningAtFirstHook: number | undefined;
-			const harness = await createHarness({
-				models: [{ id: "small", contextWindow: 100_000, maxTokens: 1000 }],
-				settings: {
-					compaction: { reserveTokens: 16_384, keepRecentTokens: 1 },
-					retry: { enabled: false },
-				},
-				tools: [
-					{
-						name: "slow",
-						label: "Slow",
-						description: "Return a delayed receipt",
-						parameters: Type.Object({}),
-						async: true,
-						execute,
-					},
-					{
-						name: "dump",
-						label: "Dump",
-						description: "Cross the context threshold",
-						parameters: Type.Object({}),
-						execute: async () => {
-							await harness.session.steer(owner);
-							if (completion === "duringMessageEnd") {
-								release();
-								await messageEndStart;
-							}
-							return { content: [{ type: "text", text: "x".repeat(340_000) }], details: {} };
-						},
-					},
-				],
-				extensionFactories: [
-					(pi) => {
-						pi.registerContextWindowHook((event) =>
-							event.contextEntries.flatMap((entry) =>
-								entry.messages.some(
-									(message) => message.role === "toolResult" && message.toolCallId === call.id,
-								)
-									? [
-											{
-												type: "context_edit" as const,
-												targetId: entry.sourceEntry.id,
-												replacement: { content: `${receipt} shaped at final cut` },
-											},
-										]
-									: [],
-							),
-						);
-						pi.on("message_end", async (event) => {
-							if (
-								completion === "duringMessageEnd" &&
-								event.message.role === "toolResult" &&
-								event.message.toolName === "slow"
-							) {
-								messageEndStarted();
-								await messageEndGate;
-							}
-						});
-						const claim = async (event: SessionBeforeAutoCompactEvent | SessionBeforeCompactEvent) => {
-							const handoff = event.branchEntries
-								.flatMap((entry) =>
-									entry.type === "message" ? [getMessageText(entry.message).slice(0, 100)] : [],
-								)
-								.join("\n");
-							handoffs.push(handoff);
-							if (handoffs.length === 1) {
-								pendingAtFirstHook = harness.session.getPendingToolCalls().length;
-								runningAtFirstHook = harness.session.agent.state.pendingToolCalls.size;
-								if (completion !== "afterHook") {
-									release();
-									releaseMessageEnd();
-									await vi.waitFor(() =>
-										expect(
-											harness.sessionManager
-												.getBranch()
-												.some(
-													(entry) => entry.type === "message" && getMessageText(entry.message) === receipt,
-												),
-										).toBe(true),
-									);
-								}
-							}
-							return { newContext: { handoff } };
-						};
-						if (hook === "session_before_auto_compact") pi.on("session_before_auto_compact", claim);
-						else pi.on("session_before_compact", claim);
-					},
-				],
-			});
-			harnesses.push(harness);
-			const stream = harness.session.agent.streamFunction;
-			harness.session.agent.state.model = {
-				...harness.getModel(),
-				api: "openai-responses",
-				compat: { supportsAsyncTools: true },
-			} as Model<"openai-responses">;
-			harness.session.agent.streamFunction = (_model, context, options) =>
-				stream(harness.getModel(), context, options);
-			const observations: Array<{ windows: number; pending: number; text: string }> = [];
-			harness.setResponses([
-				fauxAssistantMessage([call, fauxToolCall("dump", {})], {
-					responseId: "pending",
-					stopReason: "toolUse",
-				}),
-				(context) => {
-					observations.push({
-						windows: countType(harness, "context_window"),
-						pending: harness.session.getPendingToolCalls().length,
-						text: context.messages.map(getMessageText).join("\n"),
-					});
-					release();
-					return fauxAssistantMessage("Waiting for receipt");
-				},
-				(context) => {
-					observations.push({
-						windows: countType(harness, "context_window"),
-						pending: harness.session.getPendingToolCalls().length,
-						text: context.messages.map(getMessageText).join("\n"),
-					});
-					return fauxAssistantMessage("Done");
-				},
-			]);
-
-			try {
-				await harness.session.prompt("Run both tools and check their receipts");
-				if (completion !== "afterHook") await harness.session.prompt("Check the receipt in the fresh window");
-			} finally {
-				release();
-				releaseMessageEnd();
-			}
-
-			expect(observations).toHaveLength(2);
-			if (completion === "duringMessageEnd") {
-				expect(pendingAtFirstHook).toBe(0);
-				expect(runningAtFirstHook).toBe(0);
-			}
-			expect(observations[0]).toMatchObject({
-				windows: 1,
-				pending: completion === "afterHook" ? 1 : 0,
-				text: expect.stringContaining(owner),
-			});
-			expect(observations[1]).toMatchObject({ windows: 1, pending: 0, text: expect.stringContaining(owner) });
-			if (completion === "afterHook") expect(observations[0].text).not.toContain(receipt);
-			else expect(observations[0].text).toContain(`${receipt} shaped at final cut`);
-			expect(observations[1].text).toContain(receipt);
-			expect(execute).toHaveBeenCalledOnce();
-			expect(
-				harness.sessionManager
-					.getBranch()
-					.filter(
-						(entry) =>
-							entry.type === "message" &&
-							entry.message.role === "toolResult" &&
-							entry.message.toolCallId === call.id,
-					),
-			).toMatchObject([
-				{ message: { toolCallId: call.id, content: [{ type: "text", text: receipt }], isError: false } },
-			]);
-			expect(handoffs).toHaveLength(1);
-			expect(handoffs[0]).not.toContain(owner);
-			expect(handoffs[0]).not.toContain(receipt);
-			expect(harness.eventsOfType("compaction_end")).toMatchObject([{ contextWindowStarted: true }]);
-		},
-	);
-
-	it("estimates a replacement tool set before the next provider request", async () => {
-		let hookCalls = 0;
-		let hookCallsAtSecondRequest = -1;
-		const harness = await createHarness({
-			models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
-			settings: { compaction: { reserveTokens: 5000 } },
-			extensionFactories: [replacementTools(() => hookCalls++)],
-		});
-		harnesses.push(harness);
-		harness.session.setActiveToolsByName(["loader"]);
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("loader", {}), { stopReason: "toolUse" }),
-			(context) => {
-				hookCallsAtSecondRequest = hookCalls;
-				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toEqual(["huge"]);
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		await harness.session.prompt("p".repeat(36_000));
-
-		expect(hookCallsAtSecondRequest).toBe(1);
-		expect(countType(harness, "context_window")).toBe(1);
-	});
-
-	it("estimates idle tool replacements and the new prompt before the first provider request", async () => {
-		let hookCalls = 0;
-		const harness = await createHarness({
-			models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
-			settings: { compaction: { reserveTokens: 5000 } },
-			extensionFactories: [replacementTools(() => hookCalls++)],
-		});
-		harnesses.push(harness);
-		harness.session.setActiveToolsByName(["loader"]);
-		harness.setResponses([
-			fauxAssistantMessage("first done"),
-			(context) => {
-				expect(hookCalls).toBe(1);
-				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toEqual(["huge"]);
-				expect(context.messages.map(getMessageText)).toContain("p".repeat(28_000));
-				return fauxAssistantMessage("second done");
-			},
-		]);
-
-		await harness.session.prompt("f".repeat(12_000));
-		expect(hookCalls).toBe(0);
-		harness.session.setActiveToolsByName(["huge"]);
-		await harness.session.prompt("p".repeat(28_000));
-
-		expect(countType(harness, "context_window")).toBe(1);
-	});
-
-	it("keeps a newly submitted prompt after a preflight context boundary", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
-		let pendingTexts: string[] = [];
-		let pendingTextsAtCompactionEnd: string[] = [];
-		let branchTexts: string[] = [];
-		const harness = await createHarness({
-			models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
-			settings: { compaction: { reserveTokens: 5000 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_auto_compact", (event) => {
-						seen.push({ reason: event.reason, willRetry: event.willRetry });
-						pendingTexts = event.pendingMessages.map(getMessageText);
-						branchTexts = event.branchEntries.flatMap((entry) =>
-							entry.type === "message" ? [getMessageText(entry.message)] : [],
-						);
-						return { newContext: { handoff: `handoff after ${event.reason}` } };
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		let requestTexts: string[] = [];
-		harness.setResponses([
-			fauxAssistantMessage("short"),
-			(context) => {
-				requestTexts = context.messages.map(getMessageText);
-				return fauxAssistantMessage("done");
-			},
-		]);
-		await harness.session.prompt("p".repeat(36_000));
-		expect(seen).toEqual([]);
-		harness.session.subscribe((event) => {
-			if (event.type === "compaction_end") {
-				pendingTextsAtCompactionEnd = (event.pendingMessages ?? []).map(getMessageText);
-			}
-		});
-
-		const request = `PLEASE RENAME foo TO bar IN src/x.ts ${"q".repeat(28_000)}`;
-		await harness.session.prompt(request);
-
-		expect(seen).toEqual([{ reason: "threshold", willRetry: false }]);
-		expect(pendingTexts).toContain(request);
-		expect(pendingTextsAtCompactionEnd).toContain(request);
-		expect(branchTexts).not.toContain(request);
-		expect(requestTexts).toContain(request);
-		const branch = harness.sessionManager.getBranch();
-		const boundaryIndex = branch.findIndex((entry) => entry.type === "context_window");
-		const requestIndexes = branch.flatMap((entry, index) =>
-			entry.type === "message" && getMessageText(entry.message) === request ? [index] : [],
-		);
-		expect(requestIndexes).toHaveLength(1);
-		expect(requestIndexes[0]).toBeGreaterThan(boundaryIndex);
-	});
-
-	it("does not append a pending input twice when persistence throws after updating the tree", async () => {
-		const harness = await createHarness({ settings: { retry: { enabled: false } } });
-		harnesses.push(harness);
-		vi.spyOn(harness.sessionManager, "_persist").mockImplementationOnce(() => {
-			throw new Error("disk full");
-		});
-
-		await harness.session.prompt("keep this input once");
-
-		const inputs = harness.sessionManager
-			.getBranch()
-			.filter((entry) => entry.type === "message" && entry.message.role === "user");
-		expect(inputs).toHaveLength(1);
-		expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", errorMessage: "disk full" });
-	});
-
-	it("includes queued steering in preflight before the provider request", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
-		let hookCallsAtSecondRequest = -1;
-		let requestTexts: string[] = [];
-		const harness = await createHarness({
-			models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
-			settings: { compaction: { reserveTokens: 5000 } },
-			extensionFactories: [claimRollover(seen)],
-		});
-		harnesses.push(harness);
-		harness.setResponses([
-			() => {
-				void harness.session.steer("s".repeat(28_000));
-				return fauxAssistantMessage("first done");
-			},
-			(context) => {
-				hookCallsAtSecondRequest = seen.length;
-				requestTexts = context.messages.map(getMessageText);
-				return fauxAssistantMessage("second done");
-			},
-		]);
-
-		await harness.session.prompt("p".repeat(36_000));
-
-		expect(hookCallsAtSecondRequest).toBe(1);
-		expect(requestTexts).toContain("s".repeat(28_000));
-		expect(countType(harness, "context_window")).toBe(1);
-	});
-
-	it("includes idle trigger-turn custom messages in preflight before the provider request", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
-		let hookCallsAtSecondRequest = -1;
-		let requestTexts: string[] = [];
-		const harness = await createHarness({
-			models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
-			settings: { compaction: { reserveTokens: 5000 } },
-			extensionFactories: [claimRollover(seen)],
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("first done")]);
-		await harness.session.prompt("p".repeat(36_000));
-		harness.setResponses([
-			(context) => {
-				hookCallsAtSecondRequest = seen.length;
-				requestTexts = context.messages.map(getMessageText);
-				return fauxAssistantMessage("second done");
-			},
-		]);
-
-		await harness.session.sendCustomMessage(
-			{ customType: "test", content: "c".repeat(28_000), display: true },
-			{ triggerTurn: true },
-		);
-
-		expect(hookCallsAtSecondRequest).toBe(1);
-		expect(requestTexts).toContain("c".repeat(28_000));
-		expect(countType(harness, "context_window")).toBe(1);
+		expect(hooksAtRequest).toBe(0);
+		expect(requests[0]).toEqual(["p".repeat(60_000)]);
+		expect(requests).toHaveLength(2);
+		expect(requests[1]).toContain("late steering");
+		expect(harness.session.hasPendingMessages).toBe(false);
 	});
 
 	it("uses a full estimate when historical usage has no known prefix", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
+		const seen: SessionBeforeCompactEvent[] = [];
 		const huge: AgentTool = {
 			name: "huge",
 			label: "Huge",
 			description: "x".repeat(24_000),
 			parameters: Type.Object({}),
-			execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+			execute: async () => ({ content: [], details: {} }),
 		};
 		const harness = await createHarness({
 			tools: [huge],
@@ -727,238 +150,418 @@ describe("session_before_auto_compact", () => {
 			model: model.id,
 			usage: usage(10_000),
 		});
-		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+		harness.session.refreshContext();
 		harness.session.setActiveToolsByName(["huge"]);
-
 		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThan(15_000);
+		let hooksAtRequest = 0;
 		harness.setResponses([
 			() => {
-				expect(seen).toHaveLength(1);
+				hooksAtRequest = seen.length;
 				return fauxAssistantMessage("done");
 			},
 		]);
 		await harness.session.prompt("new");
+		expect(hooksAtRequest).toBe(1);
 	});
 
-	it("ignores kept pre-compaction usage before the first response after resume", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
-		const harness = await createHarness({
-			models: [{ id: "small", contextWindow: 200_000, maxTokens: 1000 }],
-			settings: { compaction: { reserveTokens: 16_384, keepRecentTokens: 20_000 } },
-			extensionFactories: [claimRollover(seen)],
-		});
+	it("recovers a locally refused first request without sending the oversized input", async () => {
+		const seen: SessionBeforeCompactEvent[] = [];
+		const harness = await createHarness({ tools: [], extensionFactories: [claimRollover(seen)] });
 		harnesses.push(harness);
-		const model = harness.getModel();
-		const now = Date.now();
-		harness.sessionManager.appendMessage({ role: "user", content: "before compaction", timestamp: now - 3000 });
-		const firstKeptEntryId = harness.sessionManager.getEntries().at(-1)!.id;
-		harness.sessionManager.appendMessage({
-			...fauxAssistantMessage("kept pre-compaction response", { timestamp: now - 2000 }),
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: usage(190_000),
-		});
-		harness.sessionManager.appendCompaction("summary of earlier work", firstKeptEntryId, 190_000, undefined, false);
-		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-		let requestTexts: string[] = [];
+		let sent = "";
 		harness.setResponses([
 			(context) => {
-				requestTexts = context.messages.map(getMessageText);
-				return fauxAssistantMessage("done");
+				sent = JSON.stringify(context.messages);
+				return fauxAssistantMessage("recovered");
 			},
 		]);
-
-		await harness.session.prompt("next");
-
-		expect(seen).toEqual([]);
-		expect(requestTexts.at(-1)).toBe("next");
-		expect(countType(harness, "context_window")).toBe(0);
-	});
-
-	it("associates provider usage with the prefix sent before lifecycle handlers mutate tools", async () => {
-		let hookCalls = 0;
-		let changedTools = false;
-		let hookCallsAtSecondRequest = -1;
-		const harness = await createHarness({
-			initialActiveToolNames: [],
-			models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
-			settings: { compaction: { reserveTokens: 5000 } },
-			extensionFactories: [
-				(pi) => {
-					pi.registerTool({
-						name: "huge",
-						label: "Huge",
-						description: "x".repeat(24_000),
-						parameters: Type.Object({}),
-						execute: async () => ({ content: [{ type: "text" as const, text: "ok" }], details: {} }),
-					});
-					pi.on("message_start", (event) => {
-						if (!changedTools && event.message.role === "assistant") {
-							changedTools = true;
-							pi.setActiveTools(["huge"]);
-						}
-					});
-					pi.on("session_before_auto_compact", () => {
-						hookCalls++;
-						return { newContext: { handoff: "rollover" } };
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		harness.setResponses([
-			(context) => {
-				expect(getCurrentTools(context.messages)).toEqual([]);
-				return fauxAssistantMessage("first done");
-			},
-			() => {
-				hookCallsAtSecondRequest = hookCalls;
-				return fauxAssistantMessage("second done");
-			},
+		await harness.session.prompt("x".repeat(600_000));
+		expect(seen.map(({ reason, willRetry }) => ({ reason, willRetry }))).toEqual([
+			{ reason: "overflow", willRetry: true },
 		]);
-
-		await harness.session.prompt("p".repeat(12_000));
-		expect(hookCalls).toBe(0);
-		await harness.session.prompt("q".repeat(24_000));
-
-		expect(hookCallsAtSecondRequest).toBe(1);
-		expect(countType(harness, "context_window")).toBe(1);
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(sent).not.toContain("x".repeat(100));
+		expect(harness.session.getLastAssistantText()).toBe("recovered");
 	});
 
-	it("rolls over when no summarization credentials exist", async () => {
-		const harness = await createHarness({ withConfiguredAuth: false, extensionFactories: [claimRollover()] });
-		harnesses.push(harness);
-		harness.sessionManager.appendMessage({ role: "user", content: "old request ".repeat(100), timestamp: 1 });
-		harness.sessionManager.appendMessage(fauxAssistantMessage("old response ".repeat(100)));
-		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-
-		await expect(runAutoCompaction(harness)("threshold", false)).resolves.toBe(false);
-
-		expect(countType(harness, "context_window")).toBe(1);
-		expect(harness.session.messages.map((m) => m.role)).toEqual(["custom"]);
-		expect(harness.eventsOfType("compaction_end")).toEqual([
-			expect.objectContaining({ reason: "threshold", contextWindowStarted: true, aborted: true, willRetry: false }),
-		]);
-	});
-
-	it("does not commit a rollover when cancellation arrives during either automatic hook", async () => {
-		for (const legacy of [false, true]) {
-			let hookCalled = false;
+	it.each(["preflight", "threshold", "overflow"] as const)(
+		"preserves decorated opaque usage for %s rollover",
+		async (boundary) => {
+			const seen: SessionBeforeCompactEvent[] = [];
+			const measured = boundary === "preflight" ? 430_000 : boundary === "threshold" ? 447_778 : 510_000;
+			let responses = 0;
 			const harness = await createHarness({
-				settings: { compaction: { keepRecentTokens: 1 } },
+				tools: [],
+				models: [{ id: "faux-1", contextWindow: 500_000, maxTokens: 1000 }],
+				settings: { compaction: { reserveTokens: 64_000 } },
 				extensionFactories: [
+					claimRollover(seen),
 					(pi) => {
-						const cancel = async () => {
-							await Promise.resolve();
-							hookCalled = true;
-							harness.session.abortCompaction();
-							return { newContext: { handoff: "must not commit" } };
-						};
-						if (legacy) pi.on("session_before_compact", cancel);
-						else pi.on("session_before_auto_compact", cancel);
+						pi.on("context", (event) => ({
+							messages: [{ role: "user", content: "Recovered todo", timestamp: 0 }, ...event.messages],
+						}));
+						pi.on("message_end", (event) => {
+							if (event.message.role === "assistant" && responses++ === 0) event.message.usage = usage(measured);
+						});
 					},
 				],
 			});
 			harnesses.push(harness);
-			harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
-			await harness.session.prompt("one");
-			await harness.session.prompt("two");
+			harness.setResponses([
+				fauxAssistantMessage([
+					{ type: "thinking", thinking: "", thinkingSignature: "opaque" },
+					{ type: "text", text: "completed" },
+				]),
+			]);
+			await harness.session.prompt("original request");
+			if (boundary === "preflight") {
+				expect(seen).toEqual([]);
+				expect(harness.session.getContextUsage()).toMatchObject({ tokens: measured, source: "reported" });
+				const next = "n".repeat(28_000);
+				let texts: string[] = [];
+				let hooksAtRequest = 0;
+				harness.setResponses([
+					(context) => {
+						hooksAtRequest = seen.length;
+						texts = context.messages.map(getMessageText);
+						return fauxAssistantMessage("next answer");
+					},
+				]);
+				await harness.session.prompt(next);
+				expect(hooksAtRequest).toBe(1);
+				expect(texts).toContain(next);
+				expect(texts).not.toContain("original request");
+			}
+			expect(seen.map(({ reason, willRetry }) => ({ reason, willRetry }))).toEqual([
+				{ reason: boundary === "overflow" ? "overflow" : "threshold", willRetry: false },
+			]);
+			expect(compactions(harness)).toHaveLength(1);
+			expect(harness.faux.state.callCount).toBe(boundary === "preflight" ? 2 : 1);
+		},
+	);
 
-			await runAutoCompaction(harness)("threshold", false);
-
-			expect(hookCalled).toBe(true);
-			expect(countType(harness, "context_window")).toBe(0);
-			expect(harness.eventsOfType("compaction_end").some((event) => event.contextWindowStarted)).toBe(false);
-		}
+	it("does not duplicate an input when persistence fails after updating the journal", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		const append = harness.sessionManager.appendMessage.bind(harness.sessionManager);
+		vi.spyOn(harness.sessionManager, "appendMessage").mockImplementation((message) => {
+			const id = append(message);
+			if (message.role === "user") throw new Error("disk full");
+			return id;
+		});
+		await harness.session.prompt("keep this input once");
+		expect(
+			harness.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "message" && entry.message.role === "user"),
+		).toHaveLength(1);
+		expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", errorMessage: "disk full" });
 	});
 
-	it.each([false, true])("honors a late Agent abort during the early automatic hook (abort: %s)", async (abort) => {
-		let markHookStarted!: () => void;
-		const hookStarted = new Promise<void>((resolve) => {
-			markHookStarted = resolve;
-		});
-		let releaseHook!: () => void;
-		const hookReleased = new Promise<void>((resolve) => {
-			releaseHook = resolve;
-		});
-		let hookSignal: AbortSignal | undefined;
-		let cancellation: Promise<void> | undefined;
+	it("retries overflow exactly once and reports a second failure", async () => {
+		const seen: SessionBeforeCompactEvent[] = [];
+		const failures: Array<string | undefined> = [];
 		const harness = await createHarness({
-			models: [{ id: "small", contextWindow: 64_000, maxTokens: 2048 }],
-			settings: { compaction: { reserveTokens: 16_000, keepRecentTokens: 20_000 }, retry: { enabled: false } },
-			tools: [
-				{
-					name: "dump",
-					label: "Dump",
-					description: "Return a large result",
-					parameters: Type.Object({}),
-					execute: async () => ({ content: [{ type: "text", text: "r".repeat(200_000) }], details: {} }),
-				},
-			],
+			tools: [],
 			extensionFactories: [
+				claimRollover(seen),
 				(pi) => {
-					pi.on("session_before_auto_compact", async (event) => {
-						hookSignal = event.signal;
-						markHookStarted();
-						await hookReleased;
-						return { newContext: { handoff: "tool batch complete" } };
+					pi.on("session_compact_failed", (event) => {
+						failures.push(event.errorMessage);
 					});
 				},
 			],
 		});
 		harnesses.push(harness);
+		harness.setResponses([overflowResponse(), overflowResponse(), fauxAssistantMessage("must remain unused")]);
+		await harness.session.prompt("small input");
+		expect(seen).toHaveLength(1);
+		expect(compactions(harness)).toHaveLength(1);
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(failures).toEqual([expect.stringContaining("after one compact-and-retry attempt")]);
+	});
+
+	it("preserves a completed answer and rolls over without requesting another response", async () => {
+		const seen: SessionBeforeCompactEvent[] = [];
+		const harness = await createHarness({
+			tools: [],
+			models: [{ id: "small", contextWindow: 4000 }],
+			settings: { compaction: { reserveTokens: 1000 } },
+			extensionFactories: [
+				claimRollover(seen),
+				(pi) => {
+					pi.on("message_end", (event) => {
+						if (event.message.role === "assistant") event.message.usage = usage(3500);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("completed"), fauxAssistantMessage("unused")]);
+		await harness.session.prompt("finish");
+		expect(seen.map(({ reason, willRetry }) => ({ reason, willRetry }))).toEqual([
+			{ reason: "threshold", willRetry: false },
+		]);
+		expect(compactions(harness)).toHaveLength(1);
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.session.getLastAssistantText()).toBe("completed");
+		expect(
+			harness.sessionManager
+				.getBranch()
+				.some((entry) => entry.type === "message" && getMessageText(entry.message) === "completed"),
+		).toBe(true);
+	});
+
+	it("rolls over an oversized tool result before the next provider request", async () => {
+		const seen: SessionBeforeCompactEvent[] = [];
+		const dump: AgentTool = {
+			name: "dump",
+			label: "Dump",
+			description: "Return a large result",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "r".repeat(600_000) }], details: {} }),
+		};
+		const harness = await createHarness({ tools: [dump], extensionFactories: [claimRollover(seen)] });
+		harnesses.push(harness);
+		let secondTexts: string[] = [];
+		let hooksAtSecondRequest = 0;
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("continued"),
+			(context) => {
+				hooksAtSecondRequest = seen.length;
+				secondTexts = context.messages.map(getMessageText);
+				return fauxAssistantMessage("done");
+			},
 		]);
+		await harness.session.prompt("dump it");
+		expect(hooksAtSecondRequest).toBe(1);
+		expect(secondTexts.join("\n")).not.toContain("r".repeat(100));
+		expect(compactions(harness)).toHaveLength(1);
+		expect(
+			harness.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "message" && entry.message.role === "toolResult"),
+		).toHaveLength(1);
+		expect(harness.faux.state.callCount).toBe(2);
+	});
 
-		const stream = vi.fn(harness.session.agent.streamFunction);
-		harness.session.agent.streamFunction = stream;
-		const run = harness.session.prompt("dump it");
+	it.each(["prompt", "steering", "custom"] as const)(
+		"preserves newly admitted %s input across preflight compaction",
+		async (kind) => {
+			const seen: SessionBeforeCompactEvent[] = [];
+			const harness = await createHarness({
+				tools: [],
+				models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
+				settings: { compaction: { reserveTokens: 5000 } },
+				extensionFactories: [claimRollover(seen)],
+			});
+			harnesses.push(harness);
+			const pending = `NEW_REQUEST ${"q".repeat(28_000)}`;
+			let hooksAtRequest = 0;
+			let texts: string[] = [];
+			harness.setResponses([
+				() => {
+					if (kind === "steering") void harness.session.steer(pending);
+					return fauxAssistantMessage("first");
+				},
+				(context) => {
+					hooksAtRequest = seen.length;
+					texts = context.messages.map(getMessageText);
+					return fauxAssistantMessage("second");
+				},
+			]);
+			await harness.session.prompt("p".repeat(36_000));
+			if (kind === "prompt") await harness.session.prompt(pending);
+			if (kind === "custom")
+				await harness.session.sendCustomMessage(
+					{ customType: "test", content: pending, display: true },
+					{ triggerTurn: true },
+				);
+			expect(hooksAtRequest).toBe(1);
+			expect(texts.filter((text) => text === pending)).toHaveLength(1);
+			expect(texts).not.toContain("p".repeat(36_000));
+			expect(compactions(harness)).toHaveLength(1);
+			expect(harness.getPendingResponseCount()).toBe(0);
+		},
+	);
+
+	it.each(["idle", "tool result", "message_start"] as const)(
+		"counts a changed tool schema at the next request (%s)",
+		async (boundary) => {
+			const seen: SessionBeforeCompactEvent[] = [];
+			let changed = false;
+			const harness = await createHarness({
+				tools: [],
+				models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
+				settings: { compaction: { reserveTokens: 5000 } },
+				extensionFactories: [
+					claimRollover(seen),
+					(pi) => {
+						pi.registerTool({
+							name: "loader",
+							label: "Loader",
+							description: "Load larger tool",
+							parameters: Type.Object({}),
+							execute: async () => {
+								pi.setActiveTools(["huge"]);
+								return { content: [{ type: "text", text: "loaded" }], details: {} };
+							},
+						});
+						pi.registerTool({
+							name: "huge",
+							label: "Huge",
+							description: "x".repeat(24_000),
+							parameters: Type.Object({}),
+							execute: async () => ({ content: [], details: {} }),
+						});
+						if (boundary === "message_start")
+							pi.on("message_start", (event) => {
+								if (!changed && event.message.role === "assistant") {
+									changed = true;
+									pi.setActiveTools(["huge"]);
+								}
+							});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.session.setActiveToolsByName(["loader"]);
+			let hooksAtRequest = 0;
+			let tools: string[] = [];
+			harness.setResponses([
+				boundary === "tool result"
+					? fauxAssistantMessage(fauxToolCall("loader", {}), { stopReason: "toolUse" })
+					: fauxAssistantMessage("first"),
+				(context) => {
+					hooksAtRequest = seen.length;
+					tools = getCurrentTools(context.messages).map((tool) => tool.name);
+					return fauxAssistantMessage("second");
+				},
+			]);
+			await harness.session.prompt("p".repeat(boundary === "tool result" ? 36_000 : 12_000));
+			if (boundary === "idle") harness.session.setActiveToolsByName(["huge"]);
+			if (boundary !== "tool result") await harness.session.prompt("q".repeat(28_000));
+			expect(hooksAtRequest).toBe(1);
+			expect(tools).toEqual(["huge"]);
+			expect(compactions(harness)).toHaveLength(1);
+		},
+	);
+
+	it.each([false, true])("honors cancellation while the automatic hook awaits (abort: %s)", async (abort) => {
+		let entered!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let hookSignal: AbortSignal | undefined;
+		const harness = await createHarness({
+			tools: [],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event, ctx) => {
+						hookSignal = event.signal;
+						entered();
+						await held;
+						pi.appendEntry("posthorse-boundary", {});
+						return {
+							compaction: {
+								summary: "",
+								firstKeptEntryId: ctx.sessionManager.getLeafId()!,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([overflowResponse(), fauxAssistantMessage("continued")]);
+		const run = harness.session.prompt("start");
+		let cancellation: Promise<void> | undefined;
 		try {
-			await hookStarted;
-			expect(harness.faux.state.callCount).toBe(1);
-			expect(harness.session.messages.at(-1)).toMatchObject({ role: "toolResult", isError: false });
-			expect(harness.session.isCompacting).toBe(true);
-			expect(harness.session.agent.signal).toBeDefined();
+			await started;
 			await harness.session.steer("DO NOT LOSE");
-			expect(harness.session.hasPendingMessages).toBe(true);
-			expect(getUserTexts(harness)).not.toContain("DO NOT LOSE");
 			if (abort) cancellation = harness.session.abort();
-			expect(harness.session.agent.signal?.aborted).toBe(abort);
 		} finally {
-			releaseHook();
+			release();
 			await Promise.all([run, cancellation]);
 		}
-
-		expect(stream).toHaveBeenCalledTimes(abort ? 1 : 2);
-		expect(harness.session.hasPendingMessages).toBe(abort);
+		expect(hookSignal?.aborted).toBe(abort);
+		expect(compactions(harness)).toHaveLength(abort ? 0 : 1);
+		expect(harness.faux.state.callCount).toBe(abort ? 1 : 2);
 		expect(harness.session.getSteeringMessages()).toEqual(abort ? ["DO NOT LOSE"] : []);
 		expect(getUserTexts(harness).includes("DO NOT LOSE")).toBe(!abort);
-		expect(JSON.stringify(harness.sessionManager.getBranch()).includes("DO NOT LOSE")).toBe(!abort);
-		if (abort) {
-			expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
-		}
-		expect(countType(harness, "context_window")).toBe(abort ? 0 : 1);
-		expect(harness.eventsOfType("compaction_end").filter((event) => event.contextWindowStarted)).toHaveLength(
-			abort ? 0 : 1,
-		);
-		expect(hookSignal?.aborted).toBe(abort);
-		expect(countType(harness, "compaction")).toBe(0);
-		expect(harness.session.isCompacting).toBe(false);
 		expect(harness.session.isIdle).toBe(true);
 		if (abort) {
 			await harness.session.prompt("continue");
-			expect(harness.session.hasPendingMessages).toBe(false);
 			expect(getUserTexts(harness)).toContain("DO NOT LOSE");
-			expect(stream).toHaveBeenCalledTimes(2);
 		}
 	});
 
-	it("reports a claimed rollover that cannot persist its boundary", async () => {
+	it("allows an extension compaction without summarization credentials", async () => {
+		const harness = await createHarness({
+			tools: [],
+			withConfiguredAuth: false,
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event, ctx) => {
+						pi.appendEntry("posthorse-boundary", {});
+						return {
+							compaction: {
+								summary: "",
+								firstKeptEntryId: ctx.sessionManager.getLeafId()!,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.sessionManager.appendMessage({ role: "user", content: "old input ".repeat(100), timestamp: 1 });
+		harness.sessionManager.appendMessage(fauxAssistantMessage("old response ".repeat(100)));
+		harness.session.refreshContext();
+		await expect(harness.session.compact()).resolves.toMatchObject({ summary: "" });
+		expect(harness.faux.state.callCount).toBe(0);
+		expect(compactions(harness)).toHaveLength(1);
+	});
+
+	it("does not commit a compaction cancelled through abortCompaction in its hook", async () => {
+		const harness = await createHarness({
+			tools: [],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						await Promise.resolve();
+						harness.session.abortCompaction();
+						return {
+							compaction: {
+								summary: "must not commit",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([overflowResponse(), fauxAssistantMessage("unused")]);
+		await harness.session.prompt("start");
+		expect(compactions(harness)).toEqual([]);
+		expect(harness.eventsOfType("compaction_end")).toMatchObject([{ aborted: true, willRetry: false }]);
+		expect(harness.faux.state.callCount).toBe(1);
+	});
+
+	it("reports a rollover persistence failure without dispatching the retry", async () => {
 		const failures: Array<string | undefined> = [];
 		const harness = await createHarness({
+			tools: [],
 			extensionFactories: [
 				claimRollover(),
 				(pi) => {
@@ -969,69 +572,52 @@ describe("session_before_auto_compact", () => {
 			],
 		});
 		harnesses.push(harness);
-		vi.spyOn(harness.sessionManager, "_persist").mockImplementation(() => {
-			throw new Error("disk full");
+		harness.session.subscribe((event) => {
+			if (event.type === "compaction_start")
+				vi.spyOn(harness.sessionManager, "appendCompaction").mockImplementation(() => {
+					throw new Error("disk full");
+				});
 		});
-
-		await expect(runAutoCompaction(harness)("threshold", false)).rejects.toThrow("disk full");
-
-		expect(harness.eventsOfType("compaction_end")).toEqual([
-			expect.objectContaining({ errorMessage: "Auto-compaction failed: disk full" }),
-		]);
-		expect(failures).toEqual(["Auto-compaction failed: disk full"]);
+		harness.setResponses([overflowResponse(), fauxAssistantMessage("must not dispatch")]);
+		await harness.session.prompt("start");
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(failures).toEqual([expect.stringContaining("disk full")]);
 	});
 
-	it.each(["promise", "invalid draft", "exception"] as const)(
-		"stops provider dispatch when final-window shaping returns %s",
-		async (failure) => {
-			const harness = await createHarness({
-				models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
-				settings: { compaction: { reserveTokens: 5000 }, retry: { enabled: false } },
-				extensionFactories: [
-					claimRollover(),
-					(pi) => {
-						pi.registerContextWindowHook(() => {
-							if (failure === "exception") throw new Error("receipt capacity exhausted");
-							// Exercise runtime validation for extensions loaded without typechecking.
-							return (failure === "promise" ? Promise.resolve([]) : [{ type: "custom" }]) as never;
-						});
-					},
-				],
-			});
-			harnesses.push(harness);
-			harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("must not dispatch")]);
-			await harness.session.prompt("p".repeat(36_000));
-			await expect(harness.session.prompt("q".repeat(28_000))).rejects.toThrow();
-			expect(harness.faux.state.callCount).toBe(1);
-			expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
-			expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionProjection().messages);
-			expect(harness.eventsOfType("context_window_started")).toHaveLength(0);
-			expect(countType(harness, "context_window")).toBe(0);
-			expect(countType(harness, "context_edit")).toBe(0);
-			expect(harness.eventsOfType("compaction_end").length).toBeGreaterThan(0);
-			for (const event of harness.eventsOfType("compaction_end")) {
-				expect(event.errorMessage).toContain("Auto-compaction failed:");
-			}
-			harness.session.setAutoCompactionEnabled(false);
-			harness.setResponses([
-				(context) => {
-					const text = context.messages.map(getMessageText).join("\n");
-					expect(text).toContain("q".repeat(28_000));
-					expect(text).toContain("p".repeat(36_000));
-					expect(text).not.toContain("Context window");
-					return fauxAssistantMessage("continued in the unchanged window");
-				},
-			]);
-			await harness.session.prompt("continue");
-			expect(harness.faux.state.callCount).toBe(2);
-		},
-	);
+	it("ignores kept pre-compaction usage after resume", async () => {
+		const seen: SessionBeforeCompactEvent[] = [];
+		const harness = await createHarness({
+			tools: [],
+			models: [{ id: "small", contextWindow: 200_000 }],
+			extensionFactories: [claimRollover(seen)],
+		});
+		harnesses.push(harness);
+		const kept = harness.sessionManager.appendMessage({
+			role: "user",
+			content: "retained",
+			timestamp: Date.now() - 3000,
+		});
+		harness.sessionManager.appendMessage({
+			...fauxAssistantMessage("old", { timestamp: Date.now() - 2000 }),
+			api: harness.getModel().api,
+			provider: harness.getModel().provider,
+			model: harness.getModel().id,
+			usage: usage(190_000),
+		});
+		harness.sessionManager.appendCompaction("summary", kept, 190_000);
+		harness.session.refreshContext();
+		harness.setResponses([fauxAssistantMessage("done")]);
+		await harness.session.prompt("next");
+		expect(seen).toEqual([]);
+		expect(harness.faux.state.callCount).toBe(1);
+	});
 
 	it.each(["forced prompt", "context", "tools", "conversion"] as const)(
-		"refuses physical overflow after the final %s transformation with compaction disabled",
+		"refuses physical overflow after final %s transformation when compaction is disabled",
 		async (source) => {
 			const oversized = "x".repeat(200_000);
 			const harness = await createHarness({
+				tools: [],
 				models: [{ id: "small", contextWindow: 40_000, maxTokens: 1000 }],
 				settings: { compaction: { enabled: false }, retry: { enabled: false } },
 				extensionFactories: [
@@ -1047,13 +633,7 @@ describe("session_before_auto_compact", () => {
 									{
 										role: "system",
 										content: "",
-										toolsAdded: [
-											{
-												name: "large",
-												description: oversized,
-												parameters: Type.Object({}),
-											},
-										],
+										toolsAdded: [{ name: "large", description: oversized, parameters: Type.Object({}) }],
 										timestamp: 1,
 									},
 									...event.messages.filter((message) => message.role !== "system"),
@@ -1070,31 +650,18 @@ describe("session_before_auto_compact", () => {
 					...(await convert(messages)),
 				];
 			}
-			// Prior low usage must not hide a request-only addition to its earlier prefix.
-			harness.sessionManager.appendMessage({
-				role: "user",
-				content: "earlier input",
-				timestamp: 1,
-			});
-			harness.sessionManager.appendMessage({
-				...fauxAssistantMessage("earlier successful answer", {
-					timestamp: Date.now() + 60_000,
-				}),
-				usage: usage(100),
-			});
-			harness.session.refreshContext();
 			harness.setResponses([fauxAssistantMessage("must not dispatch")]);
-			await harness.session.prompt("Initially fitting input");
+			await harness.session.prompt("fitting input");
 			expect(harness.faux.state.callCount).toBe(0);
 			expect(harness.session.state.errorMessage).toMatch(/Estimated provider input .* exceeds .*context window/);
-			expect(countType(harness, "context_window")).toBe(0);
 		},
 	);
 
 	it.each([false, true])(
-		"admits section/tool replacements using native transcript capabilities (mid-conversation=%s)",
+		"budgets section and tool replacement using provider positional capabilities (%s)",
 		async (supportsMidConvoSystemMessages) => {
 			const harness = await createHarness({
+				tools: [],
 				models: [{ id: "small", contextWindow: 40_000, maxTokens: 1000 }],
 				settings: { compaction: { enabled: false }, retry: { enabled: false } },
 				extensionFactories: [
@@ -1104,16 +671,8 @@ describe("session_before_auto_compact", () => {
 								{
 									role: "system",
 									content: "",
-									sections: {
-										policy: `OLD_LARGE_SECTION ${"x".repeat(200_000)}`,
-									},
-									toolsAdded: [
-										{
-											name: "old",
-											description: "OLD_LARGE_TOOL",
-											parameters: Type.Object({}),
-										},
-									],
+									sections: { policy: `OLD_LARGE_SECTION ${"x".repeat(200_000)}` },
+									toolsAdded: [{ name: "old", description: "OLD_LARGE_TOOL", parameters: Type.Object({}) }],
 									timestamp: 1,
 								},
 								...event.messages.filter((message) => message.role !== "system"),
@@ -1130,15 +689,16 @@ describe("session_before_auto_compact", () => {
 				],
 			});
 			harnesses.push(harness);
-			harness.session.agent.state.model = {
+			const model: Model<"openai-responses"> = {
 				...harness.getModel(),
 				api: "openai-responses",
 				baseUrl: "https://offline.invalid/v1",
 				compat: { supportsMidConvoSystemMessages },
-			} as Model<"openai-responses">;
+			};
+			harness.session.agent.state.model = model;
 			const payloads: string[] = [];
-			harness.session.agent.streamFunction = (model, context, options) =>
-				streamOpenAIResponses(model as Model<"openai-responses">, context, {
+			harness.session.agent.streamFunction = (_model, context, options) =>
+				streamOpenAIResponses(model, context, {
 					...options,
 					apiKey: "offline-placeholder",
 					transport: "sse",
@@ -1153,9 +713,9 @@ describe("session_before_auto_compact", () => {
 				});
 			await harness.session.prompt("Fitting current instructions");
 			expect(payloads).toHaveLength(supportsMidConvoSystemMessages ? 0 : 1);
-			if (supportsMidConvoSystemMessages) {
+			if (supportsMidConvoSystemMessages)
 				expect(harness.session.state.errorMessage).toMatch(/Estimated provider input .* exceeds .*context window/);
-			} else {
+			else {
 				expect(payloads[0]).toContain("CURRENT_SMALL_SECTION");
 				expect(payloads[0]).not.toContain("OLD_LARGE");
 				expect(harness.session.state.errorMessage).toBeUndefined();
@@ -1163,115 +723,30 @@ describe("session_before_auto_compact", () => {
 		},
 	);
 
-	it("retries an overflow exactly once", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
-		const harness = await createHarness({ extensionFactories: [claimRollover(seen)] });
-		harnesses.push(harness);
-		harness.setResponses([overflowResponse(), overflowResponse(), fauxAssistantMessage("must remain unused")]);
-
-		// The local estimate fits; a stricter provider token count still takes the overflow path.
-		await harness.session.prompt("x".repeat(400_000));
-
-		expect(seen).toHaveLength(1);
-		expect(countType(harness, "context_window")).toBe(1);
-		expect(harness.getPendingResponseCount()).toBe(1);
-		expect(harness.eventsOfType("compaction_end").map((e) => e.errorMessage ?? "rolled over")).toEqual([
-			"rolled over",
-			expect.stringContaining("Context overflow recovery failed after one compact-and-retry attempt"),
-		]);
-	});
-
-	it("falls through to normal compaction when no handler claims the trigger", async () => {
-		let autoHookCalls = 0;
-		let beforeCompactCalls = 0;
+	it("falls through to default summarization when an automatic hook declines", async () => {
+		const reasons: string[] = [];
 		const harness = await createHarness({
+			tools: [],
 			settings: { compaction: { keepRecentTokens: 1 } },
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_auto_compact", () => {
-						autoHookCalls++;
-						return undefined;
-					});
 					pi.on("session_before_compact", (event) => {
-						beforeCompactCalls++;
-						return {
-							compaction: {
-								summary: "extension summary",
-								firstKeptEntryId: event.preparation.firstKeptEntryId,
-								tokensBefore: 1,
-							},
-						};
+						reasons.push(event.reason);
 					});
 				},
 			],
 		});
 		harnesses.push(harness);
-		harness.sessionManager.appendMessage({ role: "user", content: "old request ".repeat(100), timestamp: 1 });
-		harness.sessionManager.appendMessage(fauxAssistantMessage("old response ".repeat(100)));
-		harness.sessionManager.appendMessage({ role: "user", content: "new request ".repeat(100), timestamp: 2 });
-		harness.sessionManager.appendMessage(fauxAssistantMessage("new response ".repeat(100)));
-		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-
-		await runAutoCompaction(harness)("threshold", false);
-
-		expect(autoHookCalls).toBe(1);
-		expect(beforeCompactCalls).toBe(1);
-		expect(countType(harness, "compaction")).toBe(1);
-		expect(countType(harness, "context_window")).toBe(0);
-	});
-
-	it("keeps default automatic summary compaction available with an unresolved native tool call", async () => {
-		const harness = await createHarness({ settings: { compaction: { keepRecentTokens: 100 } } });
-		harnesses.push(harness);
-		const call = nativeSlowCall();
-		harness.sessionManager.appendMessage({ role: "user", content: "old request ".repeat(1000), timestamp: 1 });
-		harness.sessionManager.appendMessage(
-			fauxAssistantMessage(call, { responseId: "pending", stopReason: "toolUse" }),
-		);
-		harness.sessionManager.appendMessage({ role: "user", content: "recent request ".repeat(100), timestamp: 2 });
-		harness.sessionManager.appendMessage(fauxAssistantMessage("recent response"));
-		harness.session.refreshContext();
-		harness.setResponses([fauxAssistantMessage("summary with pending work")]);
-
-		await runAutoCompaction(harness)("threshold", false);
-
-		expect(harness.eventsOfType("compaction_end")).toMatchObject([
-			{ result: { summary: expect.stringContaining("summary with pending work") }, aborted: false },
+		harness.setResponses([
+			fauxAssistantMessage("old answer"),
+			overflowResponse(),
+			fauxAssistantMessage("generated summary"),
+			fauxAssistantMessage("continued"),
 		]);
-		expect(countType(harness, "compaction")).toBe(1);
-		expect(countType(harness, "context_window")).toBe(0);
-		expect(harness.session.getPendingToolCalls()).toMatchObject([{ toolCallId: call.id }]);
+		await harness.session.prompt("old request");
+		await harness.session.prompt("new request");
+		expect(reasons).toEqual(["overflow"]);
+		expect(compactions(harness).at(-1)?.summary).toContain("generated summary");
 		expect(harness.getPendingResponseCount()).toBe(0);
-	});
-
-	it("does not fire for manual compaction", async () => {
-		const seen: Array<{ reason: string; willRetry: boolean }> = [];
-		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
-			extensionFactories: [
-				claimRollover(seen),
-				(pi) => {
-					pi.on("session_before_compact", (event) => ({
-						compaction: {
-							summary: "manual summary",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: 1,
-						},
-					}));
-				},
-			],
-		});
-		harnesses.push(harness);
-		harness.sessionManager.appendMessage({ role: "user", content: "old request ".repeat(100), timestamp: 1 });
-		harness.sessionManager.appendMessage(fauxAssistantMessage("old response ".repeat(100)));
-		harness.sessionManager.appendMessage({ role: "user", content: "new request ".repeat(100), timestamp: 2 });
-		harness.sessionManager.appendMessage(fauxAssistantMessage("new response ".repeat(100)));
-		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-
-		await harness.session.compact();
-
-		expect(seen).toEqual([]);
-		expect(countType(harness, "compaction")).toBe(1);
-		expect(countType(harness, "context_window")).toBe(0);
 	});
 });

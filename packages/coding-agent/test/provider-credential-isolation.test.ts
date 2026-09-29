@@ -22,6 +22,9 @@ describe("provider credential isolation", () => {
 		directory = mkdtempSync(join(tmpdir(), "pi-credential-isolation-"));
 		vi.stubEnv("HOME", directory);
 		vi.stubEnv("USERPROFILE", directory);
+		for (const name of Object.keys(process.env)) {
+			if (/KEY|TOKEN|SECRET|^AWS_|^GOOGLE_|^AZURE_|^CLOUDFLARE_/.test(name)) vi.stubEnv(name, undefined);
+		}
 		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected network request"));
 		credentials = AuthStorage.inMemory({ "openai-codex": storedOAuth });
 		runtime = await ModelRuntime.create({ credentials, modelsPath: null });
@@ -57,7 +60,7 @@ describe("provider credential isolation", () => {
 
 		// Catalog refresh also resolves credentials, independently of request preflight.
 		vi.mocked(globalThis.fetch).mockImplementation(async (url) => {
-			expect(String(url)).toBe("https://pi.dev/api/models/providers/openai-codex");
+			expect(String(url)).toBe("https://pi.dev/api/models/providers/openai-codex?types=chat%2Cimage%2Cclassifier");
 			return new Response(JSON.stringify({ models: [] }), {
 				headers: { "last-modified": new Date(Date.now() + 60_000).toUTCString() },
 			});

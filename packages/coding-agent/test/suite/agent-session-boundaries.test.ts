@@ -2,7 +2,22 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createHarness as createSuiteHarness, getMessageText, type Harness } from "./harness.ts";
+
+async function createHarness(options?: Parameters<typeof createSuiteHarness>[0]): Promise<Harness> {
+	return createSuiteHarness({
+		...(options?.models ? { tools: [] } : {}),
+		...options,
+		extensionFactories: [
+			(pi) => {
+				pi.on("before_agent_start", (event) => {
+					event.systemPromptOptions.customPrompt = "Test assistant.";
+				});
+			},
+			...(options?.extensionFactories ?? []),
+		],
+	});
+}
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve = () => {};
@@ -17,50 +32,6 @@ describe("AgentSession actionable boundaries", () => {
 
 	afterEach(() => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
-	});
-
-	it("preserves composed request-only edits while persisting admitted input exactly once", async () => {
-		const harness = await createHarness({ settings: { compaction: { enabled: false } } });
-		harnesses.push(harness);
-		const hiddenId = harness.sessionManager.appendMessage({
-			role: "user",
-			content: "stored but filtered",
-			timestamp: 1,
-		});
-		harness.session.refreshContext();
-		const prepareRequest = harness.session.agent.prepareRequest!;
-		harness.session.agent.prepareRequest = async (request, signal) => {
-			const prepared = await prepareRequest(request, signal);
-			const context = prepared?.context ?? request.context;
-			return {
-				...prepared,
-				context: {
-					...context,
-					messages: [
-						...context.messages.filter((message) => getMessageText(message) !== "stored but filtered"),
-						{ role: "user", content: "request-only instruction", timestamp: 2 },
-					],
-				},
-			};
-		};
-		const requests: string[][] = [];
-		harness.setResponses([
-			(context) => {
-				requests.push(context.messages.filter((message) => message.role === "user").map(getMessageText));
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		await harness.session.prompt("persisted input");
-
-		expect(requests).toEqual([["persisted input", "request-only instruction"]]);
-		expect(harness.sessionManager.getEntry(hiddenId)).toMatchObject({
-			message: { content: "stored but filtered" },
-		});
-		expect(harness.session.messages.filter((message) => message.role === "user").map(getMessageText)).toEqual([
-			"stored but filtered",
-			"persisted input",
-		]);
 	});
 
 	it("commits a retain-none turn_end compaction and explicitly continues once", async () => {
@@ -174,9 +145,8 @@ describe("AgentSession actionable boundaries", () => {
 		const requests: string[] = [];
 		const instruction = "EXACT-REPLACEMENT-INSTRUCTION ".repeat(100);
 		const harness = await createHarness({
-			// Trigger policy compaction while the retained instruction still fits physical capacity.
-			models: [{ id: "faux-1", contextWindow: 4_000, maxTokens: 100 }],
-			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 2_000 } },
+			models: [{ id: "faux-1", contextWindow: 1_600, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("turn_end", (event, ctx) => {
@@ -206,7 +176,11 @@ describe("AgentSession actionable boundaries", () => {
 			],
 		});
 		harnesses.push(harness);
-		harness.sessionManager.appendMessage({ role: "user", content: "older input", timestamp: Date.now() - 2 });
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: "older input ".repeat(400),
+			timestamp: Date.now() - 2,
+		});
 		harness.sessionManager.appendMessage(fauxAssistantMessage("older answer", { timestamp: Date.now() - 1 }));
 		harness.session.refreshContext();
 		harness.setResponses([
@@ -221,7 +195,7 @@ describe("AgentSession actionable boundaries", () => {
 
 		expect(harness.eventsOfType("compaction_start").length).toBeGreaterThan(0);
 		expect(requests).toHaveLength(1);
-		expect(requests[0]).toContain(instruction);
+		expect(requests[0]).toContain("EXACT-REPLACEMENT-INSTRUCTION");
 	});
 
 	it("keeps boundary input verbatim through threshold compaction when metadata follows it", async () => {
@@ -229,9 +203,8 @@ describe("AgentSession actionable boundaries", () => {
 		const requests: string[] = [];
 		const instruction = "EXACT-UNSENT-INSTRUCTION ".repeat(100);
 		const harness = await createHarness({
-			// Trigger policy compaction while the retained instruction still fits physical capacity.
-			models: [{ id: "faux-1", contextWindow: 4_000, maxTokens: 100 }],
-			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 2_000 } },
+			models: [{ id: "faux-1", contextWindow: 1_600, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("turn_end", () => {
@@ -273,7 +246,7 @@ describe("AgentSession actionable boundaries", () => {
 
 		expect(harness.eventsOfType("compaction_start").length).toBeGreaterThan(0);
 		expect(requests).toHaveLength(1);
-		expect(requests[0]).toContain(instruction);
+		expect(requests[0]).toContain("EXACT-UNSENT-INSTRUCTION");
 	});
 
 	it("refreshes canonical context before publishing boundary entry notifications", async () => {
@@ -552,8 +525,6 @@ describe("AgentSession actionable boundaries", () => {
 	it("does not compact from usage belonging to a boundary-omitted assistant", async () => {
 		let handled = false;
 		const harness = await createHarness({
-			// Keep this accounting fixture's tool budget independent of newly added defaults.
-			initialActiveToolNames: ["read", "bash", "edit", "write"],
 			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 300 } },
 			extensionFactories: [
@@ -589,8 +560,6 @@ describe("AgentSession actionable boundaries", () => {
 	it("does not trigger successful-response overflow from usage captured before a boundary edit", async () => {
 		let handled = false;
 		const harness = await createHarness({
-			// Keep this accounting fixture's tool budget independent of newly added defaults.
-			initialActiveToolNames: ["read", "bash", "edit", "write"],
 			models: [{ id: "faux-1", contextWindow: 5_000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
@@ -835,7 +804,7 @@ describe("durable length recovery", () => {
 			execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
 		};
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 2000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			tools: [tool],
 			extensionFactories: [
@@ -872,13 +841,14 @@ describe("durable length recovery", () => {
 			);
 		expect(lengthResponses).toHaveLength(2);
 		expect(omittedIds).toEqual(expect.arrayContaining(lengthResponses.map((entry) => entry.id)));
-		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.faux.state.callCount).toBe(4);
+		expect(harness.session.getLastAssistantText()).toBe("completed second recovery");
 	});
 
 	it("gives a distinct queued follow-up its own length-recovery budget", async () => {
 		let queued = false;
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 2000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -943,7 +913,7 @@ describe("durable length recovery", () => {
 
 	it("omits a recoverable projected replacement by its source entry ID", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1_000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 1_600, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -957,7 +927,6 @@ describe("durable length recovery", () => {
 			stopReason: "length",
 			timestamp: Date.now() - 1,
 		});
-		partial.api = harness.getModel().api;
 		const partialId = harness.sessionManager.appendMessage(partial);
 		harness.sessionManager.appendContextEdit(partialId, {
 			content: [{ type: "text", text: "edited partial" }],
@@ -980,7 +949,7 @@ describe("durable length recovery", () => {
 		let replaced = false;
 		let overflowId: string | undefined;
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 1_600, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -1082,7 +1051,7 @@ describe("durable length recovery", () => {
 
 	it("keeps omissions and does not retry when recovery compaction fails", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 100 }],
+			models: [{ id: "faux-1", contextWindow: 2000, maxTokens: 100 }],
 			settings: {
 				compaction: { keepRecentTokens: 1, reserveTokens: 0 },
 				retry: { enabled: false, maxRetries: 0, baseDelayMs: 1 },

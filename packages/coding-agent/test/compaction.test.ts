@@ -20,7 +20,6 @@ import {
 import {
 	buildSessionContext,
 	type CompactionEntry,
-	type ContextWindowEntry,
 	type CustomMessageEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,
@@ -106,20 +105,6 @@ function createCompactionEntry(summary: string, firstKeptEntryId: string): Compa
 		timestamp: new Date().toISOString(),
 		summary,
 		firstKeptEntryId,
-		tokensBefore: 10000,
-	};
-	lastId = id;
-	return entry;
-}
-
-function createContextWindowEntry(handoff?: string): ContextWindowEntry {
-	const id = `test-id-${entryCounter++}`;
-	const entry: ContextWindowEntry = {
-		type: "context_window",
-		id,
-		parentId: lastId,
-		timestamp: new Date().toISOString(),
-		handoff,
 		tokensBefore: 10000,
 	};
 	lastId = id;
@@ -558,91 +543,6 @@ describe("buildSessionContext", () => {
 	});
 });
 
-describe("prepareCompaction with context windows", () => {
-	// PR50: a window projects [system checkpoint, handoff], not just one message.
-	it.each([false, true])(
-		"preserves checkpoint-window handoffs through compaction (split turn: %s)",
-		async (splitTurn) => {
-			const session = SessionManager.inMemory();
-			const handoff = "Do not deploy without owner approval.";
-			const prompt = "System guidance that must not be summarized.";
-			session.appendMessage({ role: "system", content: prompt, timestamp: 1 });
-			session.appendMessage({ role: "user", content: "Earlier window secret", timestamp: 2 });
-			const windowId = session.appendContextWindow(handoff, 100);
-			expect(session.getEntry(windowId)).toMatchObject({ systemMessage: { role: "system", content: prompt } });
-			session.appendMessage(
-				splitTurn
-					? createAssistantMessage("Current progress")
-					: { role: "user", content: "Continue working", timestamp: 3 },
-			);
-			const recent = splitTurn
-				? createAssistantMessage("Recent work ".repeat(100))
-				: { role: "user" as const, content: "Recent request ".repeat(100), timestamp: 4 };
-			const recentId = session.appendMessage(recent);
-			expect(extractText(session.buildSessionContext().messages)).toContain(handoff);
-
-			const preparation = prepareCompaction(session.getBranch(), {
-				...DEFAULT_COMPACTION_SETTINGS,
-				keepRecentTokens: 100,
-			});
-			expect(preparation).toMatchObject({ firstKeptEntryId: recentId, isSplitTurn: splitTurn });
-			const summaryMessages = splitTurn ? preparation!.turnPrefixMessages : preparation!.messagesToSummarize;
-			expect(summaryMessages[0]).toMatchObject({ role: "custom", customType: "context-window" });
-			expect(extractText(summaryMessages)).toContain(handoff);
-			expect(summaryMessages.some((message) => message.role === "system")).toBe(false);
-
-			let requests = 0;
-			const result = await compact(
-				preparation!,
-				getModel("anthropic", "claude-sonnet-4-5")!,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				(_model, context) => {
-					requests++;
-					const conversation = extractText(context.messages);
-					expect(conversation).toContain(handoff);
-					expect(conversation).not.toContain(prompt);
-					expect(conversation).not.toContain("Earlier window secret");
-					const stream = new AssistantMessageEventStream();
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage(handoff) });
-					return stream;
-				},
-			);
-			session.appendCompaction(result.summary, result.firstKeptEntryId, result.tokensBefore);
-			const reloaded = session.buildSessionContext().messages;
-			expect(requests).toBe(1);
-			expect(reloaded.map((message) => message.role)).toEqual(["system", "compactionSummary", recent.role]);
-			expect(reloaded[0]).toMatchObject({ content: prompt });
-			expect(extractText(reloaded)).toContain(handoff);
-			expect(reloaded[2]).toEqual(recent);
-		},
-	);
-
-	it("never summarizes entries from an earlier window", () => {
-		const oldUser = createMessageEntry(createUserMessage("old secret ".repeat(100)));
-		const oldAssistant = createMessageEntry(createAssistantMessage("old response ".repeat(100)));
-		const boundary = createContextWindowEntry("current task");
-		const currentUser = createMessageEntry(createUserMessage("current first ".repeat(100)));
-		const currentAssistant = createMessageEntry(createAssistantMessage("current response ".repeat(100)));
-		const recentUser = createMessageEntry(createUserMessage("recent request ".repeat(100)));
-		const recentAssistant = createMessageEntry(createAssistantMessage("recent response ".repeat(100)));
-		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 100 };
-
-		const preparation = prepareCompaction(
-			[oldUser, oldAssistant, boundary, currentUser, currentAssistant, recentUser, recentAssistant],
-			settings,
-		);
-
-		expect(preparation).toBeDefined();
-		const summarizedText = extractText(preparation!.messagesToSummarize);
-		expect(summarizedText).toContain("current first");
-		expect(summarizedText).not.toContain("old secret");
-	});
-});
-
 describe("prepareCompaction", () => {
 	it("does not spend the retained conversation budget on a large system patch", () => {
 		const entries = [
@@ -683,26 +583,62 @@ describe("prepareCompaction", () => {
 });
 
 describe("prepareCompaction with previous compaction", () => {
-	it("never uses carried async calls as the retained boundary on repeated compaction", () => {
+	it.each([false, true])(
+		"keeps retain-none handoff and prompt state separate from new history (split: %s)",
+		async (splitTurn) => {
+			const session = SessionManager.inMemory();
+			const handoff = "Do not deploy without owner approval.";
+			const prompt = "System guidance that must not be summarized.";
+			session.appendMessage({ role: "system", content: prompt, timestamp: 1 });
+			session.appendMessage(createUserMessage("Earlier context secret"));
+			session.appendCompaction(handoff, null, 100);
+			session.appendMessage(createUserMessage("Current request"));
+			const recent = splitTurn
+				? createAssistantMessage("Recent work ".repeat(100))
+				: createUserMessage("Recent request ".repeat(100));
+			const recentId = session.appendMessage(recent);
+			const preparation = prepareCompaction(session.getBranch(), {
+				...DEFAULT_COMPACTION_SETTINGS,
+				keepRecentTokens: 100,
+			});
+			expect(preparation).toMatchObject({
+				firstKeptEntryId: recentId,
+				previousSummary: handoff,
+				isSplitTurn: splitTurn,
+			});
+			const summaryMessages = splitTurn ? preparation!.turnPrefixMessages : preparation!.messagesToSummarize;
+			expect(extractText(summaryMessages)).toBe("Current request");
+			const result = await compact(
+				preparation!,
+				getModel("anthropic", "claude-sonnet-4-5")!,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				(_model, context) => {
+					const conversation = extractText(context.messages);
+					expect(conversation).toContain("Current request");
+					expect(conversation).not.toContain(prompt);
+					expect(conversation).not.toContain("Earlier context secret");
+					if (!splitTurn) expect(conversation).toContain(handoff);
+					const stream = new AssistantMessageEventStream();
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage(handoff) });
+					return stream;
+				},
+			);
+			session.appendCompaction(result.summary, result.firstKeptEntryId, result.tokensBefore);
+			const reloaded = session.buildSessionContext().messages;
+			expect(reloaded.map((message) => message.role)).toEqual(["system", "compactionSummary", recent.role]);
+			expect(reloaded[0]).toMatchObject({ content: prompt });
+			expect(extractText(reloaded)).toContain(handoff);
+			expect(reloaded[2]).toEqual(recent);
+		},
+	);
+
+	it("bounds the retained tool history through repeated compaction and reload", () => {
 		const session = SessionManager.inMemory();
-		session.appendMessage(createUserMessage("Review in the background while inspecting files"));
-		const pendingCalls: AssistantMessage[] = [];
-		for (let i = 0; i < 8; i++) {
-			const call: AssistantMessage = {
-				...createAssistantMessage("", createMockUsage(0, 0)),
-				content: [
-					{
-						type: "toolCall",
-						id: `background-${i}`,
-						name: "review",
-						arguments: { task: "Review contracts. ".repeat(700) },
-						async: true,
-					},
-				],
-			};
-			pendingCalls.push(call);
-			session.appendMessage(call);
-		}
+		session.appendMessage(createUserMessage("Inspect files"));
 		for (let i = 0; i < 16; i++) {
 			session.appendMessage({
 				...createAssistantMessage("", createMockUsage(0, 0)),
@@ -725,10 +661,9 @@ describe("prepareCompaction with previous compaction", () => {
 		expect(
 			afterFirst.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
 		).toEqual(["read-15"]);
-		expect(afterFirst).toEqual(expect.arrayContaining(pendingCalls));
 
 		session.appendMessage(createUserMessage("Compact again"));
-		// The retained raw tail still fits, even though the carried calls exceed the budget.
+		// The retained tail still fits; do not summarize the discarded history again.
 		expect(prepareCompaction(session.getBranch(), DEFAULT_COMPACTION_SETTINGS)?.firstKeptEntryId).toBeUndefined();
 
 		const recentId = session.appendMessage(createUserMessage("New work ".repeat(10_000)));
@@ -740,7 +675,6 @@ describe("prepareCompaction with previous compaction", () => {
 		session.appendCompaction("Updated file inspection summary", second.firstKeptEntryId, second.tokensBefore);
 
 		const afterSecond = session.buildSessionContext().messages;
-		expect(afterSecond).toEqual(expect.arrayContaining(pendingCalls));
 		expect(afterSecond.some((message) => message.role === "toolResult")).toBe(false);
 		const reloadedEntries = parseSessionEntries(
 			session
@@ -871,56 +805,59 @@ describe("Large session fixture", () => {
 // LLM integration tests (skipped without API key)
 // ============================================================================
 
-describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
-	it("should generate a compaction result for the large session", async () => {
-		const entries = loadLargeSessionEntries();
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+describe.skipIf(process.env.PI_LIVE_PROVIDER_TESTS !== "1" || !process.env.ANTHROPIC_OAUTH_TOKEN)(
+	"LLM summarization",
+	() => {
+		it("should generate a compaction result for the large session", async () => {
+			const entries = loadLargeSessionEntries();
+			const model = getModel("anthropic", "claude-sonnet-4-5")!;
 
-		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
-		expect(preparation).toBeDefined();
+			const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
+			expect(preparation).toBeDefined();
 
-		const compactionResult = await compact(preparation!, model, process.env.ANTHROPIC_OAUTH_TOKEN!);
+			const compactionResult = await compact(preparation!, model, process.env.ANTHROPIC_OAUTH_TOKEN!);
 
-		expect(compactionResult.summary.length).toBeGreaterThan(100);
-		expect(compactionResult.firstKeptEntryId).toBeTruthy();
-		expect(compactionResult.tokensBefore).toBeGreaterThan(0);
+			expect(compactionResult.summary.length).toBeGreaterThan(100);
+			expect(compactionResult.firstKeptEntryId).toBeTruthy();
+			expect(compactionResult.tokensBefore).toBeGreaterThan(0);
 
-		console.log("Summary length:", compactionResult.summary.length);
-		console.log("First kept entry ID:", compactionResult.firstKeptEntryId);
-		console.log("Tokens before:", compactionResult.tokensBefore);
-		console.log("\n--- SUMMARY ---\n");
-		console.log(compactionResult.summary);
-	}, 60000);
+			console.log("Summary length:", compactionResult.summary.length);
+			console.log("First kept entry ID:", compactionResult.firstKeptEntryId);
+			console.log("Tokens before:", compactionResult.tokensBefore);
+			console.log("\n--- SUMMARY ---\n");
+			console.log(compactionResult.summary);
+		}, 60000);
 
-	it("should produce valid session after compaction", async () => {
-		const entries = loadLargeSessionEntries();
-		const loaded = buildSessionContext(entries);
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		it("should produce valid session after compaction", async () => {
+			const entries = loadLargeSessionEntries();
+			const loaded = buildSessionContext(entries);
+			const model = getModel("anthropic", "claude-sonnet-4-5")!;
 
-		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
-		expect(preparation).toBeDefined();
+			const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
+			expect(preparation).toBeDefined();
 
-		const compactionResult = await compact(preparation!, model, process.env.ANTHROPIC_OAUTH_TOKEN!);
+			const compactionResult = await compact(preparation!, model, process.env.ANTHROPIC_OAUTH_TOKEN!);
 
-		// Simulate appending compaction to entries by creating a proper entry
-		const lastEntry = entries[entries.length - 1];
-		const parentId = lastEntry.id;
-		const compactionEntry: CompactionEntry = {
-			type: "compaction",
-			id: "compaction-test-id",
-			parentId,
-			timestamp: new Date().toISOString(),
-			...compactionResult,
-		};
-		const newEntries = [...entries, compactionEntry];
-		const reloaded = buildSessionContext(newEntries);
+			// Simulate appending compaction to entries by creating a proper entry
+			const lastEntry = entries[entries.length - 1];
+			const parentId = lastEntry.id;
+			const compactionEntry: CompactionEntry = {
+				type: "compaction",
+				id: "compaction-test-id",
+				parentId,
+				timestamp: new Date().toISOString(),
+				...compactionResult,
+			};
+			const newEntries = [...entries, compactionEntry];
+			const reloaded = buildSessionContext(newEntries);
 
-		// Should have summary + kept messages
-		expect(reloaded.messages.length).toBeLessThan(loaded.messages.length);
-		expect(reloaded.messages[0].role).toBe("compactionSummary");
-		expect((reloaded.messages[0] as any).summary).toContain(compactionResult.summary);
+			// Should have summary + kept messages
+			expect(reloaded.messages.length).toBeLessThan(loaded.messages.length);
+			expect(reloaded.messages[0].role).toBe("compactionSummary");
+			expect((reloaded.messages[0] as any).summary).toContain(compactionResult.summary);
 
-		console.log("Original messages:", loaded.messages.length);
-		console.log("After compaction:", reloaded.messages.length);
-	}, 60000);
-});
+			console.log("Original messages:", loaded.messages.length);
+			console.log("After compaction:", reloaded.messages.length);
+		}, 60000);
+	},
+);
