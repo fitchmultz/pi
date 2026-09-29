@@ -5,12 +5,17 @@ import { fauxAssistantMessage } from "../src/providers/faux.ts";
 import type { Model, StreamOptions } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
-it.each(["openai-responses", "openai-codex-responses"] as const)(
-	"%s keeps initial effort stable and appends between-request changes only in standard mode",
-	async (api) => {
+it.each([
+	["openai-responses", "gpt-6-astra"],
+	["openai-codex-responses", "gpt-6-astra"],
+	["openai-responses", "gpt-6.1-sol"],
+	["openai-codex-responses", "gpt-6.1-sol"],
+] as const)(
+	"%s %s keeps initial effort stable and appends between-request changes only in standard mode",
+	async (api, modelId) => {
 		const model: Model<typeof api> = {
-			id: "gpt-6-astra",
-			name: "Astra",
+			id: modelId,
+			name: modelId,
 			api,
 			provider: api === "openai-responses" ? "openai" : "openai-codex",
 			baseUrl: api === "openai-responses" ? "https://api.openai.com/v1" : "https://chatgpt.com/backend-api",

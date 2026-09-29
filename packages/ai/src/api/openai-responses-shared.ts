@@ -423,7 +423,7 @@ export function supportsPositionalResponsesEffort(
 	params?: Record<string, unknown>,
 ): boolean {
 	const knownRoute =
-		["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"].includes(model.id) &&
+		["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"].includes(model.id) &&
 		((model.provider === "openai" && /^https:\/\/api\.openai\.com(?:\/|$)/.test(model.baseUrl)) ||
 			(model.provider === "openai-codex" && /^https:\/\/chatgpt\.com(?:\/|$)/.test(model.baseUrl)));
 	const reasoning = params?.reasoning as { mode?: string; effort?: unknown } | undefined;
