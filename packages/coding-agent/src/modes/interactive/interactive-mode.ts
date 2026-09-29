@@ -1168,6 +1168,7 @@ export class InteractiveMode {
 	 * Update terminal title with session name and cwd.
 	 */
 	private updateTerminalTitle(): void {
+		if (!this.isInitialized || (this.hosted && !this.hostedActive)) return;
 		const cwdBasename = path.basename(this.sessionManager.getCwd());
 		const sessionName = this.sessionManager.getSessionName();
 		if (sessionName) {
@@ -2719,6 +2720,7 @@ export class InteractiveMode {
 		}
 		this.ui.requestRender(true);
 		this.hostedActive = true;
+		this.updateTerminalTitle();
 	}
 
 	async deactivateHosted(): Promise<void> {

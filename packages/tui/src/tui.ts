@@ -515,7 +515,8 @@ export abstract class TuiBase extends Container implements TUI {
 	private showHardwareCursor = false;
 	private clearOnShrink = false;
 	protected fullRedrawCount = 0;
-	protected stopped = false;
+	protected stopped = true;
+	private hasStarted = false;
 	/**
 	 * Color queries waiting for their DA1 reply, oldest first. Terminals answer in order, so color
 	 * replies belong to the oldest one. Queries stay here after a timeout to collect late replies.
@@ -942,6 +943,9 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	start(): void {
+		const restarting = this.hasStarted;
+		this.hasStarted = true;
+		this.renderRequested = false;
 		this.stopped = false;
 		this.beforeTerminalStart();
 		this.terminal.start(
@@ -954,7 +958,7 @@ export abstract class TuiBase extends Container implements TUI {
 			this.terminal.write("\x1b[?2031h");
 		}
 		this.queryCellSize();
-		this.requestRender();
+		this.requestRender(restarting);
 	}
 
 	addInputListener(listener: TuiInputListener): () => void {
@@ -997,6 +1001,7 @@ export abstract class TuiBase extends Container implements TUI {
 
 	stop(options: TuiStopOptions = {}): void {
 		this.stopped = true;
+		this.renderRequested = false;
 		this.cancelRenderTimer();
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
@@ -1008,6 +1013,7 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	renderNow(force = false): void {
+		if (this.stopped) return;
 		if (force) this.resetRenderState();
 		this.renderRequested = false;
 		this.cancelRenderTimer();
@@ -1016,6 +1022,7 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	requestRender(force = false): void {
+		if (this.stopped) return;
 		if (force) {
 			this.resetRenderState();
 			this.requestImmediateRender();
