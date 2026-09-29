@@ -65,7 +65,7 @@ After a runtime replacement, subscriptions belong to the old `AgentSession` and 
 
 A prompt sent while the session is already streaming must specify whether it should steer the current run or follow it. Calling `prompt()` without that choice rejects rather than guessing.
 
-Steering uses live input on supported Responses WebSocket routes and otherwise queues for the next turn. A follow-up enters after the current run finishes its pending work. `steer()` and `followUp()` expose those behaviors directly.
+A steering message enters after the current assistant turn and its tool calls. A follow-up enters after the current run finishes its pending work. `steer()` and `followUp()` expose those behaviors directly and return `"queued"` if the input was queued (including after an extension transformed it), or `"handled"` if an extension consumed it.
 
 After extension commands and input interception, an idle session reserves the prompt before authentication, compaction, and `before_agent_start`. During preparation, `isStreaming` is true and `isIdle` is false; overlapping prompts obey the same queue/rejection rules. `PromptOptions.preflightResult` reports acceptance, queueing, handling, or rejection before `prompt()` resolves. Later provider failures use normal message events.
 
@@ -84,7 +84,7 @@ After extension commands and input interception, an idle session reserves the pr
 
 SDK hosts can supply `getQueuedInputCount` through `bindExtensions()` for their own input queue. These observations do not consume input or change idle semantics.
 
-`sendCustomMessage(message, { deliverAs: "steer", persistOnCancel: true })` opts undelivered streamed customs into once-only persistence before settlement, without requesting another turn. `clearQueue()` preserves opted-in messages, deferring append until a safe boundary while streaming, and returns queued user texts only. The default remains false; `nextTurn` asides survive queue clearing and reload.
+`sendCustomMessage()` delivers custom model-visible content through the ordinary queue. `clearQueue()` returns queued user texts; do not treat a queued message as applied until its turn runs.
 
 ### Background commands
 
@@ -100,35 +100,11 @@ Standalone `createBackgroundCommandTool(cwd, { sessionManager, ...shellOptions }
 
 Background workers use the running Pi code, independently of the `PI_PACKAGE_DIR` asset override. They support native local shell execution, not custom `BashOperations` backends. Shell permission guards and Bash overrides must also handle `background_command` with `action: "start"`; overriding or excluding `bash` alone does not intercept or disable this separate tool. The shipped sandbox and SSH examples block background starts while their custom backend is active; status and cancellation remain available.
 
-New sessions include this tool by default. Existing saved selections and explicit allowlists are preserved. SDK hosts can enable it with `session.setActiveToolsByName([...session.getActiveToolNames(), "background_command"])` when the permitted registry includes it.
-
-### Native asynchronous tools and steering
-
-Built-in GPT-6 Astra, Sol and Luna enable `compat.supportsAsyncTools`, `compat.supportsSteering`, and `compat.supportsReasoningEffortUpdates` on OpenAI and Cloudflare OpenAI Responses routes and OpenAI Codex Responses. Defaults survive remote catalog overlays; explicit `false` and user model overrides take precedence. Other model IDs and provider/API combinations are not enabled by this default.
-
-Set `async: true` on a `ToolDefinition` for capable Responses routes. Execution begins only after an authoritative completed async call, argument preparation, validation, and `tool_call` hooks. The journal records the original provider item and admitted arguments before side effects. `executionMode` still controls local sequential/parallel execution.
-
-`tool_execution_start` begins preflight; `tool_execution_prepared` provides admitted arguments. Final results preserve original call IDs and may arrive after later assistant messages. `elapsedMs` measures executor time, excluding validation and hooks; blocked calls omit it.
-
-A durable tool can implement `resume(toolCallId, params, signal, onUpdate, ctx)`. For a journaled started call without a result, Pi uses its saved admitted arguments without repeating preflight or `execute`. Return the actual result, or `undefined` when recovery is unavailable; missing recovery becomes an unknown/interrupted outcome.
-
-Only an aborted native async invocation whose external owner retains durable work may return `{ ...result, pending: true }`. Pi emits `tool_execution_detached` without a final result. Local settlement may follow while external work remains. `session.getPendingToolCalls()` and `ctx.getPendingToolCalls()` expose `{ toolCallId, toolName, namespace?, state: "pending" | "started" | "detached" }`; the next prompt or continuation reattaches journaled started calls. Ordinary background launch-handle results are unchanged. Detect host support by method presence and model support separately through `compat.supportsAsyncTools`.
-
-Live steering reports `queued`, `accepted`, `pending`, `applied`, `failed`, or `unknown`. Acceptance does not prove application. Pending-message getters, counts, queue updates, and `clearQueue()` reflect only the native queues: input already handed to a live response is no longer recallable, even before remote acknowledgement. Alt+Up restores only still-queued input; it cannot recall a sent steering message. Removing a queued message prevents its later native or ordinary dispatch. Raw steering outcomes remain in the journal without technical status notifications in the interactive UI. Input waiting for tools continues on the same connection with the original results. Disconnect recovery reconstructs known items, results, and one logical input from local history; unobserved remote application stays unknown. Images are normalized before delivery.
-
-Automatic successors have separate assistant lifecycles and usage. `message_start.continuationInput` snapshots the user inputs and submitted results added to the preceding response: absent on the first response, empty for a known empty delta. They already have message events; do not append them twice. `message_checkpoint` is an execution snapshot of the same response, not another billable response. See [JSON events](json.md) and [session persistence](session-format.md#sessionmessageentry).
-
-Initial native `message_start.inputToolCallIds` reports post-`onPayload` logical result membership, before transport delta extraction: `[]` is known empty and absence is unknown. Custom native streams must provide this snapshot to prove initial consumption; unknown histories conservatively retain receipts. Successful successors still prove their explicit incremental inputs. Session projection places explicitly identified concurrent receipts after the response that excluded them, while journal, events, and UI retain arrival order. This preserves eligible delta requests; it does not guarantee provider cache hits.
-
-Routes with `compat.supportsReasoningEffortUpdates` retain initial effort, persist `providerThinkingLevel`, and insert coalesced positional updates. Omitted Astra effort is recorded as `medium`. Automatic provider compaction, truncation, and nonstandard reasoning modes do not use this path; explicit opaque compaction items are replayed unchanged.
-
-### Fresh context windows
-
-`session.newContext({ handoff? })` preserves the complete journal while replacing model context with the current prompt/tools and an optional handoff. During a run, it applies at request preparation after native tool obligations drain; it never drops a still-pending call to force a boundary. `context_window_started` tells active-context UIs to rebuild. This differs from summary compaction, which retains selected conversation and tool dependencies. Extensions can claim automatic compaction with the same primitive through `session_before_auto_compact`; see [Compaction](compaction.md).
+New CLI sessions include this tool by default. Existing saved selections and explicit allowlists are preserved. SDK hosts can enable it with `session.setActiveToolsByName([...session.getActiveToolNames(), "background_command"])` when the permitted registry includes it.
 
 ### Working-session checkpoints
 
-`acquireCheckpoint({ boundary, signal?, quiesce? })` holds native activity after awaited persistence and callbacks. Release in `finally`; check the hold's abort signal throughout capture. `createAgentSession({ checkpoint: readSessionCheckpoint(path) })` restores exact selection, tool restrictions, and pending queues without running them. Bind extensions before prompting so startup can reconstruct dynamic tools and validate the saved selection. An absent saved model preserves no selection.
+`acquireCheckpoint({ boundary, signal?, quiesce? })` holds native activity after awaited persistence and callbacks. Release in `finally`; check the hold's abort signal throughout capture. `createAgentSession({ checkpoint: readSessionCheckpoint(path) })` restores saved selection, tool restrictions, and pending queues without running them. Bind extensions before prompting so startup can reconstruct dynamic tools and validate the saved selection. If the checkpoint has no selected model, restore preserves that unselected state; model prompts still require a selection.
 
 The hold's `sleepReady` and `sleepBlockers` describe the native session only. The archive owner still coordinates other writers and preserves the matching files. See [Working-session checkpoints](checkpoint.md).
 
@@ -160,7 +136,7 @@ Session events report message updates, tool execution, queues, compaction, retri
 
 `message_end` contains the authoritative completed message. `agent_end` marks the end of one low-level agent run, but automatic recovery or queued work can still follow.
 
-Use `agent_settled` when the host needs to know the local run will not continue automatically. Its optional `pendingToolCalls` identifies detached external obligations.
+Use `agent_settled` when the host needs to know the local run will not continue automatically. Durable background commands may finish separately; their receipts arrive through ordinary messages.
 
 ## Configuring a session
 
@@ -178,13 +154,21 @@ Use `DefaultResourceLoader` when you want standard discovery with selected overr
 
 <a id="inlineextension"></a>
 
-Inline extension factories can be supplied through `DefaultResourceLoader`. Give one an `InlineExtension` name only when it needs a stable name in diagnostics and startup output.
+Inline extension factories can be supplied through `DefaultResourceLoader`. Give one an `InlineExtension` name only when it needs a stable name in diagnostics and startup output. A named inline extension with `replaceable: true` is left out when another extension registers a tool, command, or flag with a name it registers during loading, instead of both loading with a conflict. The CLI's built-in codemode, tool search, and MCP extensions are replaceable. A named entry with `builtin: true` is not an inline extension: it supplies the code of the `builtin:<name>` extension, which loads like a configured extension file. It loads by default, is listed in `pi config`, and is disabled by `-builtin:<name>` in the `extensions` setting or by `noExtensions`; `additionalExtensionPaths: ["builtin:<name>"]` loads it explicitly. It loads after project trust is resolved, so it cannot handle `project_trust`. The CLI's built-in extensions use it.
+
+<a id="codemode-mcp"></a>
+
+The CLI loads `codemode`, `tool_search`, and MCP as built-in extensions. SDK sessions do not; add `createCodemodeExtension()`, `createToolSearchExtension()`, and `createMcpExtension()` to the `extensionFactories` of `DefaultResourceLoader`. `codemode` and `tool_search` are registered inactive: enable them through the `defaultTools` setting (`["+codemode", "+tool_search"]` keeps the other default tools), or let the MCP extension activate them: `codemode` for servers with `codemode` or `codemode-deferred` exposure, `tool_search` for servers with `deferred` exposure. The MCP extension connects its servers on `session_start`, so call `session.bindExtensions()`. See [Codemode and MCP](../examples/sdk/14-codemode-mcp.ts).
+
+For grouped on-demand owner instructions, also add the exported `instructionGroupsExtension` factory. It is separate from tool search and does not widen callable permissions. The CLI includes it by default; see [instruction groups](instruction-groups.md).
 
 See the focused examples for [models](../examples/sdk/02-custom-model.ts), [tools](../examples/sdk/05-tools.ts), [extensions](../examples/sdk/06-extensions.ts), and [full control](../examples/sdk/12-full-control.ts).
 
 ### Model availability
 
 Use `modelRuntime.getModel(provider, id)` to include configured overrides. `getAvailable()` returns healthy providers; a failed provider check does not silently replace an existing saved/default or explicitly scoped model. `getAuthCheckError(providerId)` and `getError()` expose diagnostics without inventing auth or subscription metadata. Direct provider availability/auth calls still reject on failure. A successful refresh clears its diagnostic. Cancellation and credential-store failures reject aggregate refresh without replacing the previous snapshot.
+
+Legacy fork sessions containing retired live-execution fields require one-time conversion with `pi convert-session SOURCE NEW_PATH` while all writers are stopped. The original remains unchanged, unsafe or uncertain work is refused without replay, and resuming the new copy starts a fresh provider request.
 
 For factory-registered providers needed before selection, create services with `createAgentSessionServices()` before `createAgentSessionFromServices()`. See [ambient authentication](custom-provider.md#ambient-authentication). RPC can inspect a pre-login session and run non-model extension commands; model prompts still require selection, and print/JSON require one at startup.
 
@@ -202,11 +186,11 @@ Request transforms may insert messages or append content blocks without losing m
 
 `DefaultResourceLoader.reload()` reloads settings too. Load resources before applying temporary overrides and pass that loader into `createAgentSession()` to avoid its implicit reload. `flush()` joins queued writes; `flush({ requireSuccessfulPersistence: true })` also rejects unresolved dirty fields/load failures, even after diagnostics are drained.
 
-`session.reload()` reinitializes cached extension factories and refreshes resource paths/settings. Restart the host to apply code or dependency updates; another session or working directory does not clear native module caches.
+`session.reload()` refreshes extension code, resource paths, and settings. Restart the host for core changes or a clean process; dependency updates already loaded by the host may need a restart.
 
 ### Tool identity and discovery
 
-`tools` and `excludeTools` accept bare names for unnamespaced tools or exact `{ name, namespace? }` references. Bare names never select a same-name namespaced tool. `getActiveToolNames()` returns opaque public IDs from `getAllTools()[].id`; pass them unchanged to `setActiveToolsByName()`. Selection replaces the full loadout, including `[]`, without widening permissions. Exact-reference getters/setters and extension discovery use the same registry. See [tool discovery](extensions.md#tool-discovery).
+`getActiveToolNames()` returns selected tool names; pass them to `setActiveToolsByName()`. `getAllTools()` supplies public names, descriptions, schemas, exposure, and source metadata. Selection replaces the loadout, including `[]`, without widening permissions. See [tool discovery](extensions.md#tool-discovery) and [instruction groups](instruction-groups.md).
 
 ### JSON selection with read
 
@@ -255,6 +239,7 @@ Custom `BashOperations` and `PowerShellOperations` producers must call `onData(d
 | [Sessions](../examples/sdk/11-sessions.ts) | Control session persistence and restoration |
 | [Full control](../examples/sdk/12-full-control.ts) | Replace default discovery and state services |
 | [Session runtime](../examples/sdk/13-session-runtime.ts) | Replace the active session safely |
+| [Codemode and MCP](../examples/sdk/14-codemode-mcp.ts) | Add the `codemode`, `tool_search`, and MCP extensions |
 
 <a id="exports"></a>
 

@@ -30,8 +30,6 @@ export type {
 	OAuthSelectOption,
 	OAuthSelectPrompt,
 } from "./compat/extension-oauth-types.ts";
-export * from "./images-models.ts";
-export { withOpenAIResponsesLifecycleDefaults } from "./model-catalog.ts";
 export * from "./models.ts";
 export * from "./models-store.ts";
 export * from "./providers/faux.ts";
@@ -39,12 +37,12 @@ export * from "./session-resources.ts";
 export * from "./types.ts";
 export * from "./utils/assistant-message-frame.ts";
 export * from "./utils/diagnostics.ts";
+export { assertContextFits } from "./utils/estimate.ts";
 export * from "./utils/event-stream.ts";
 export * from "./utils/json-parse.ts";
 export * from "./utils/overflow.ts";
 export * from "./utils/retry.ts";
 export { contentText, getSystemMessageText, renderSystemMessageUpdate } from "./utils/text.ts";
-export * from "./utils/tool-identity.ts";
 export * from "./utils/transcript.ts";
 export * from "./utils/typebox-helpers.ts";
 export { uuidv7 } from "./utils/uuid.ts";

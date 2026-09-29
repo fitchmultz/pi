@@ -25,6 +25,14 @@ export default function (pi) {
 		cliPath: process.env.PI_TEST_CLI ?? resolve(__dirname, "../src/cli.ts"),
 		cwd: root,
 		env: {
+			...Object.fromEntries(Object.keys(process.env).map((name) => [name, ""])),
+			PATH: process.env.PATH ?? "",
+			SystemRoot: process.env.SystemRoot ?? "",
+			HOME: root,
+			USERPROFILE: root,
+			PI_NO_LOCAL_LLM: "1",
+			AWS_EC2_METADATA_DISABLED: "true",
+			PI_OFFLINE: "1",
 			PI_CODING_AGENT_DIR: join(root, "agent"),
 			NODE_OPTIONS: process.env.PI_TEST_CLI
 				? ""

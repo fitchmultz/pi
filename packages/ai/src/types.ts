@@ -1,10 +1,5 @@
 import type { TelemetryContext } from "@earendil-works/pi-telemetry";
-import type {
-	ResponseCustomToolCall,
-	ResponseFunctionToolCall,
-	ResponseFunctionWebSearch,
-	ResponseOutputText,
-} from "openai/resources/responses/responses.js";
+import type { ResponseFunctionWebSearch, ResponseOutputText } from "openai/resources/responses/responses.js";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.ts";
 import type { BedrockOptions } from "./api/bedrock-converse-stream.ts";
@@ -34,9 +29,13 @@ export type KnownApi =
 
 export type Api = KnownApi | (string & {});
 
-export type KnownImagesApi = "openrouter-images";
+export type KnownImageApi = "openrouter-images";
 
-export type ImagesApi = KnownImagesApi | (string & {});
+export type ImageApi = KnownImageApi | (string & {});
+
+export type KnownClassifierApi = "typesafe-system-one" | "cloudflare-workers-ai-system-one" | "llama-cpp-classify";
+
+export type ClassifierApi = KnownClassifierApi | (string & {});
 
 export type KnownProvider =
 	| "amazon-bedrock"
@@ -48,6 +47,7 @@ export type KnownProvider =
 	| "azure-openai-responses"
 	| "openai-codex"
 	| "radius"
+	| "typesafe"
 	| "nvidia"
 	| "deepseek"
 	| "github-copilot"
@@ -81,10 +81,6 @@ export type KnownProvider =
 	| "xiaomi-token-plan-ams"
 	| "xiaomi-token-plan-sgp";
 export type ProviderId = KnownProvider | string;
-
-export type KnownImagesProvider = "openrouter";
-
-export type ImagesProviderId = KnownImagesProvider | string;
 
 export type ToolChoice = "auto" | "none";
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -189,36 +185,18 @@ export interface ProviderRequestOptions<TModel = Model<Api>> {
 	maxRetryDelayMs?: number;
 }
 
-export type SteeringStatus = "queued" | "accepted" | "pending" | "applied" | "unknown" | "failed";
-
-/** Control for the currently active duplex response. A successful send is not an application receipt. */
-export interface ResponseControl {
-	readonly waitingForSuccessor: boolean;
-	/** Original local call IDs submitted on this connection for an accepted steer continuation. */
-	readonly deliveredToolCallIds: ReadonlySet<string>;
-	steer(message: UserMessage): boolean;
-	/** Deliberate local retirement, distinct from an unexpected connection failure. */
-	readonly retired: boolean;
-	/** Retire the remote chain before starting a fresh local context. */
-	retire(): void;
-	/**
-	 * Deliver saved results when accepted steering is waiting for client tools. Never executes tools.
-	 * `modelContent` may replace a result's content in the sent frame only; continuation input keeps the saved result.
-	 */
-	submitToolResults(
-		results: ToolResultMessage[],
-		modelContent?: (result: ToolResultMessage) => ToolResultMessage["content"] | undefined,
-	): void;
-}
-
 export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
-	/** Present only while the selected transport can accept live input. Undefined releases ownership. */
-	onResponseControl?: (control: ResponseControl | undefined) => void;
 	/**
 	 * Optional callback invoked after an HTTP response is received and before
 	 * its body stream is consumed.
 	 */
 	onResponse?: (response: ProviderResponse, model: Model<Api>) => void | Promise<void>;
+	/**
+	 * Optional observer for each parsed provider stream event before Pi normalization.
+	 * Event data is adapter-owned and must be treated as read-only.
+	 * Adapter support is explicit; unsupported adapters do not invoke it.
+	 */
+	onProviderStreamEvent?: (data: unknown, model: Model<Api>) => void | Promise<void>;
 	temperature?: number;
 	/**
 	 * Arbitrary sampling parameters merged into the request body as-is, after the named request
@@ -245,12 +223,6 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 * session-aware features. Ignored by providers that don't support it.
 	 */
 	sessionId?: string;
-	/**
-	 * In-memory identity for one logical turn, shared across provider calls and reconnects.
-	 * Use a fresh object for each prompt/continue run. Omit to disable turn-scoped routing state.
-	 * Never serialized; independent of session-level connection caching.
-	 */
-	turnScope?: object;
 	/**
 	 * WebSocket connect timeout in milliseconds for providers that support
 	 * WebSocket transports. This covers the connection/open handshake only;
@@ -330,18 +302,36 @@ export interface ProviderStreams {
 /**
  * The uniform contract of an image-generation API implementation module:
  * every image API module under `src/api/` exports exactly `generateImages`,
- * so the module itself satisfies this interface. Lazy wrappers and image
- * provider factories pass these around as values.
+ * so the module itself satisfies this interface. Lazy wrappers and
+ * `createProvider({ images })` pass these around as values.
  */
 export interface ProviderImages {
 	generateImages(
-		model: ImagesModel<ImagesApi>,
+		model: ImageModel<ImageApi>,
 		context: ImagesContext,
 		options?: ImagesOptions,
 	): Promise<AssistantImages>;
 }
 
-export interface ImagesOptions extends ProviderRequestOptions<ImagesModel<ImagesApi>> {
+/** The uniform contract implemented by classifier API modules. */
+export interface ProviderClassifier {
+	classify(
+		model: ClassifierModel<ClassifierApi>,
+		context: ClassifierContext,
+		options?: ClassifierOptions,
+	): Promise<ClassifierResult>;
+}
+
+export interface ClassifierOptions extends ProviderRequestOptions<ClassifierModel<ClassifierApi>> {
+	/**
+	 * Divides the answer logits by this value before they are normalized into probabilities.
+	 * Values above 1 soften the distribution; values below 1 sharpen it. Must be positive.
+	 * APIs that cannot apply it ignore it.
+	 */
+	temperature?: number;
+}
+
+export interface ImagesOptions extends ProviderRequestOptions<ImageModel<ImageApi>> {
 	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
@@ -385,11 +375,17 @@ export type StreamFunction<TApi extends Api = Api, TOptions extends StreamOption
 	options?: TOptions,
 ) => AssistantMessageEventStream;
 
-export type ImagesFunction<TApi extends ImagesApi = ImagesApi, TOptions extends ImagesOptions = ImagesOptions> = (
-	model: ImagesModel<TApi>,
+export type ImagesFunction<TOptions extends ImagesOptions = ImagesOptions> = (
+	model: ImageModel<ImageApi>,
 	context: ImagesContext,
 	options?: TOptions,
 ) => Promise<AssistantImages>;
+
+export type ClassifierFunction<TOptions extends ClassifierOptions = ClassifierOptions> = (
+	model: ClassifierModel<ClassifierApi>,
+	context: ClassifierContext,
+	options?: TOptions,
+) => Promise<ClassifierResult>;
 
 export interface TextSignatureV1 {
 	v: 1;
@@ -421,18 +417,6 @@ export interface ImageContent {
 
 export interface ToolCall {
 	type: "toolCall";
-	/** Native client tool search; omitted for ordinary function calls. */
-	kind?: "toolSearch";
-	/** Provider permits this call to remain pending across subsequent responses. */
-	async?: boolean;
-	/** Authoritative completed Responses item, retained independently of today's tool declaration. */
-	responsesItem?: ResponseFunctionToolCall | ResponseCustomToolCall;
-	/** A local execution was admitted. A missing result after process loss has an unknown outcome. */
-	executionStarted?: boolean;
-	/** Validated, preflight-adjusted arguments admitted for execute/resume. The provider item stays unchanged. */
-	executionArguments?: JsonObject;
-	/** Local execution stopped while its durable external owner retained the unfinished operation. */
-	executionDetached?: boolean;
 	id: string;
 	name: string;
 	arguments: JsonObject;
@@ -471,28 +455,35 @@ export type JsonObject = { [key: string]: JsonValue };
 
 type IsAny<T> = 0 extends 1 & T ? true : false;
 type IsExactlyJsonValue<T> = [T] extends [JsonValue] ? ([JsonValue] extends [T] ? true : false) : false;
-// Build a lazy structural shape rather than recursively reducing each property
-// to a boolean. TypeScript can compare recursive shapes (including interfaces)
-// to JsonValue without circular mapped-property evaluation. Invalid leaves stay
-// non-JSON; using never would silently erase them from unions.
-type JsonCompatibilityShape<T> = IsAny<T> extends true
-	? symbol
+type IsJsonProperty<T> = IsAny<T> extends true
+	? false
 	: unknown extends T
-		? symbol
+		? false
+		: [Exclude<T, undefined>] extends [never]
+			? true
+			: IsJsonCompatible<Exclude<T, undefined>>;
+type InvalidJsonKeys<T extends object> = {
+	[TKey in keyof T]-?: TKey extends string | number ? (IsJsonProperty<T[TKey]> extends true ? never : TKey) : TKey;
+}[keyof T];
+type IsJsonCompatible<T> = IsAny<T> extends true
+	? false
+	: unknown extends T
+		? false
 		: IsExactlyJsonValue<T> extends true
-			? JsonValue
+			? true
 			: T extends null | boolean | number | string
-				? T
-				: T extends readonly unknown[]
-					? { [K in keyof T]: JsonCompatibilityShape<T[K]> }
-					: T extends (...args: never[]) => unknown
-						? symbol
-						: T extends object
-							? Extract<keyof T, symbol> extends never
-								? { [K in keyof T]: JsonCompatibilityShape<Exclude<T[K], undefined>> }
-								: symbol
-							: symbol;
-type IsJsonCompatible<T> = [JsonCompatibilityShape<T>] extends [JsonValue] ? true : false;
+				? true
+				: T extends undefined
+					? false
+					: T extends readonly (infer TItem)[]
+						? IsJsonCompatible<TItem>
+						: T extends (...args: never[]) => unknown
+							? false
+							: T extends object
+								? [InvalidJsonKeys<T>] extends [never]
+									? true
+									: false
+								: false;
 
 /** The JSON representation of a typed in-memory value. Optional object properties remain optional. */
 export type JsonRepresentation<T> = IsAny<T> extends true
@@ -525,18 +516,12 @@ export interface DeferredHandle {
  * The leading system message is the system prompt. Later system messages change it:
  * `content` adds instructions from that point on, `sections` replace or remove named
  * prompt sections, and `toolsAdded`/`toolsRemoved` change the tool set. Replaying
- * every system message in order yields the current prompt and tools. A message with
- * `replace` discards the replayed state first, so it is a complete new baseline.
- * Providers that accept system messages mid-conversation send each one in place; other
- * providers, and every provider after a replacement, rebuild the leading system message
- * from the replayed state.
+ * every system message in order yields the current prompt and tools. Providers that
+ * accept system messages mid-conversation send each one in place; other providers
+ * rebuild the leading system message from the replayed state.
  */
 export interface SystemMessage {
 	role: "system";
-	/** Host-only identity of the current compaction/fresh-window checkpoint; never serialized to providers. */
-	contextWindowId?: string;
-	/** Host-owned initial declaration anchor. Only new, unbound context windows opt in; never sent to providers. */
-	nativeHead?: true;
 	/** Instruction text. On the leading message this is the base prompt; later, additional instructions. */
 	content: string | TextContent[];
 	/**
@@ -550,16 +535,6 @@ export interface SystemMessage {
 	toolsAdded?: Tool[];
 	/** Tools that stop being available at this point. */
 	toolsRemoved?: ToolReference[];
-	/**
-	 * Host-only snapshot of source-owned deferred entry identities, never provider instructions or schemas.
-	 * Omitted patches preserve the prior snapshot; an array (including empty) replaces it.
-	 */
-	deferredToolEntries?: ToolReference[];
-	/**
-	 * Discard every earlier system message before applying this one, so its `content`,
-	 * `sections`, and `toolsAdded` are the complete prompt and tool state from here on.
-	 */
-	replace?: boolean;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
@@ -569,12 +544,12 @@ export interface UserMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
-/** Provider-reported Responses web actions and URL citations, not fetched page contents. */
+/** Provider-reported hosted web actions and URL citations, not fetched page contents. */
 export interface ResponsesWebSearchMetadata {
 	calls?: ResponseFunctionWebSearch[];
 	citations?: {
 		itemId: string;
-		/** Index in the original Responses message's content, not AssistantMessage.content. */
+		/** Index in the original Responses message content, not AssistantMessage.content. */
 		contentIndex: number;
 		annotation: ResponseOutputText.URLCitation;
 	}[];
@@ -590,16 +565,16 @@ export interface AssistantMessage {
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
 	providerThinkingLevel?: string;
-	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime request measurements, failures, and recoveries.
-	/** Observational metadata from completed Responses items; does not enable search or replay hosted calls. */
+	/** Pi thinking level the agent loop requested for this response. Absent outside the agent loop and for legacy responses. */
+	thinkingLevel?: ModelThinkingLevel;
+	/** Observational metadata only: hosted calls are never executed locally or replayed. */
 	webSearch?: ResponsesWebSearchMetadata;
+	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
 	usage: Usage;
 	stopReason: StopReason;
 	deferred?: DeferredHandle;
 	errorMessage?: string;
 	rawStopReason?: string;
-	/** Projection-derived foreground tool failure in this response; preserves its reset veto when receipts are omitted. */
-	toolExecutionFailed?: boolean;
 	/**
 	 * Provider indication of whether the model explicitly ended its turn.
 	 * Preserved for debugging and does not currently affect agent control flow.
@@ -608,24 +583,39 @@ export interface AssistantMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+/** A tool call that another tool made while it ran, for example from a codemode script. */
+export interface NestedToolCallRecord {
+	id: string;
+	name: string;
+	/** Omitted when over the size limits; `argumentsBytes` then gives their size. */
+	arguments?: JsonObject;
+	/** UTF-8 size of the arguments as JSON, set when `arguments` is omitted. */
+	argumentsBytes?: number;
+	/** `unfinished`: the call was still running when the calling tool finished. */
+	status: "ok" | "error" | "unfinished";
+	durationMs?: number;
+	/** Error text, truncated. */
+	error?: string;
+}
+
+/** Bounded record of the nested calls a tool made. Results are not recorded. */
+export interface NestedToolCalls {
+	calls: NestedToolCallRecord[];
+	/** False when calls were dropped, arguments omitted, or calls had not finished. */
+	complete: boolean;
+}
+
 export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails> extends true
 	? {
 			role: "toolResult";
 			toolCallId: string;
 			toolName: string;
-			namespace?: string;
-			/** Preserves native search call/result identity, including errors and empty results. */
-			toolCallKind?: "toolSearch";
-			/** Exact registered declarations resolved by the runtime after tool search. */
-			toolsAdded?: Tool[];
 			content: (TextContent | ImageContent)[]; // Supports text and images
 			details?: JsonRepresentation<TDetails>;
 			/** Usage from the tool execution itself, if available. Not part of main LLM context accounting. */
 			usage?: Usage;
-			/** Actual executor time, excluding validation, preflight and result hooks. Absent when never executed. */
-			elapsedMs?: number;
-			/** Foreground scheduling skipped this call (for example, truncated arguments), rather than native work failing. */
-			executionSkipped?: boolean;
+			/** Calls this tool made to other tools. Kept for the session record; not sent to the model. */
+			nestedCalls?: NestedToolCalls;
 			isError: boolean;
 			timestamp: number; // Unix timestamp in milliseconds
 		}
@@ -643,13 +633,69 @@ export interface ImagesContext {
 export type ImagesStopReason = "stop" | "error" | "aborted";
 
 export interface AssistantImages {
-	api: ImagesApi;
-	provider: ImagesProviderId;
+	api: ImageApi;
+	provider: ProviderId;
 	model: string;
 	output: ImagesOutputContent[];
 	responseId?: string;
 	usage?: Usage;
 	stopReason: ImagesStopReason;
+	errorMessage?: string;
+	timestamp: number; // Unix timestamp in milliseconds
+}
+
+export interface ClassifierChoiceQuestion {
+	type: "choice";
+	instructions: string;
+	criteria: Record<string, string>;
+}
+
+export interface ClassifierScoreQuestion {
+	type: "score";
+	instructions: string;
+	criteria: string[];
+}
+
+export interface ClassifierBoolQuestion {
+	type: "bool";
+	instructions: string;
+	criteria: { true: string; false: string };
+}
+
+export type ClassifierQuestion = ClassifierChoiceQuestion | ClassifierScoreQuestion | ClassifierBoolQuestion;
+
+export interface ClassifierContext {
+	state: JsonObject;
+	questions: Record<string, ClassifierQuestion>;
+}
+
+export interface ClassifierChoiceAnswer {
+	type: "choice";
+	choice: string;
+	probabilities: Record<string, number>;
+	confidence: number;
+}
+
+export interface ClassifierScoreAnswer {
+	type: "score";
+	score: number;
+	confidence: number;
+}
+
+export interface ClassifierBoolAnswer {
+	type: "bool";
+	probability: number;
+}
+
+export type ClassifierAnswer = ClassifierChoiceAnswer | ClassifierScoreAnswer | ClassifierBoolAnswer;
+export type ClassifierStopReason = "stop" | "error" | "aborted";
+
+export interface ClassifierResult {
+	api: ClassifierApi;
+	provider: ProviderId;
+	model: string;
+	answers: Record<string, ClassifierAnswer>;
+	stopReason: ClassifierStopReason;
 	errorMessage?: string;
 	timestamp: number; // Unix timestamp in milliseconds
 }
@@ -678,11 +724,8 @@ export type ConstrainedSamplingConfig =
 			variants: GrammarVariants;
 	  };
 
-export interface Tool<TParameters extends TSchema = TSchema> extends ToolReference {
-	/** Allow supported providers to issue asynchronous calls. Independent of local executionMode. */
-	async?: boolean;
-	/** A client search callback, exposed as a normal function on unsupported routes. */
-	toolSearch?: true;
+export interface Tool<TParameters extends TSchema = TSchema> {
+	name: string;
 	description: string;
 	parameters: TParameters;
 	constrainedSampling?: false | ConstrainedSamplingConfig;
@@ -690,11 +733,7 @@ export interface Tool<TParameters extends TSchema = TSchema> extends ToolReferen
 
 export interface ToolReference {
 	name: string;
-	namespace?: string;
 }
-
-/** Bare names select only unnamespaced tools. */
-export type ToolSelection = string | ToolReference;
 
 /**
  * Request input accepted by the public stream entry points (`Models.stream()`,
@@ -738,26 +777,7 @@ export type TranscriptContext = {
  * `toolcall_delta` carries subsequent JSON updates.
  */
 export type AssistantMessageEvent =
-	| {
-			type: "start";
-			partial: AssistantMessage;
-			/** Initial logical payload's result call IDs after onPayload, before delta extraction. [] is known empty; absent is unknown. */
-			inputToolCallIds?: readonly string[];
-			/** Inputs added to the preceding response by a native continuation. Absent on the first response. */
-			continuationInput?: readonly (UserMessage | ToolResultMessage)[];
-	  }
-	/** One response ended, but the duplex stream owns its automatic or tool-waiting successor. */
-	| { type: "response_end"; message: AssistantMessage }
-	| {
-			type: "steering";
-			message: UserMessage;
-			status: SteeringStatus;
-			steeringId?: string;
-			responseId?: string;
-			errorMessage?: string;
-			/** Durable transport snapshot when an unresolved submission loses its connection. */
-			diagnostic?: AssistantMessageDiagnostic;
-	  }
+	| { type: "start"; partial: AssistantMessage }
 	| { type: "text_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
 	| { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
@@ -859,6 +879,10 @@ export interface OpenAICompletionsCompat {
 
 /** Compatibility settings for OpenAI Responses APIs. */
 export interface OpenAIResponsesCompat {
+	/** Whether public Responses accepts tool_choice.allowed_tools. Default: true on api.openai.com; not used by Codex/Azure. */
+	supportsAllowedTools?: boolean;
+	/** Between-request positional reasoning updates in standard single-agent mode (not live steering). */
+	supportsReasoningEffortUpdates?: boolean;
 	/** Whether the provider supports the `developer` role (vs `system`). Default: true. */
 	supportsDeveloperRole?: boolean;
 	/** Whether the exact model accepts developer or system messages after the conversation has started. When false, later system messages are folded into the leading system message. Default: false; the generated model catalog enables it for verified models. */
@@ -873,20 +897,12 @@ export interface OpenAIResponsesCompat {
 	supportsOpenAIGrammarTools?: boolean;
 	/** Whether the model supports message-anchored `additional_tools` input items. Default: false. */
 	supportsAdditionalTools?: boolean;
-	/** Whether public Responses accepts `tool_choice: allowed_tools`. Defaults to true on api.openai.com, false elsewhere; not used by Codex or Azure adapters. */
-	supportsAllowedTools?: boolean;
 	/** Whether the model supports client-executed tool search for transcript-anchored additions. Default: false. */
 	supportsToolSearch?: boolean;
 	/** Whether the model accepts `prompt_cache_options` (OpenAI GPT-5.6+ prompt caching). Older OpenAI models reject the parameter. Default: false. */
 	supportsExplicitPromptCacheMode?: boolean;
 	/** Whether the provider accepts the `max_output_tokens` parameter. Some Codex-protocol gateways reject it. Default: true. */
 	supportsMaxOutputTokens?: boolean;
-	/** Whether this exact route supports native asynchronous function/custom calls. */
-	supportsAsyncTools?: boolean;
-	/** Whether the route supports response.steer on its WebSocket transport. */
-	supportsSteering?: boolean;
-	/** Whether standard single-agent requests support positional reasoning configuration updates. */
-	supportsReasoningEffortUpdates?: boolean;
 }
 
 /** Compatibility settings for Anthropic Messages-compatible APIs. */
@@ -902,14 +918,14 @@ export interface AnthropicMessagesCompat {
 	/** Whether the provider supports Anthropic long cache retention (`cache_control.ttl: "1h"`). Default: true. */
 	supportsLongCacheRetention?: boolean;
 	/**
-	 * Whether to send session-affinity headers from `options.sessionId` when
-	 * caching is enabled. Required for providers like Fireworks that use session
-	 * affinity for prompt cache routing (requests to the same replica maximize cache hits).
-	 * Default: true for the OpenRouter provider or an openrouter.ai base URL, false otherwise.
-	 * Set false to opt out.
+	 * Whether to send the `x-session-affinity` header from `options.sessionId`
+	 * when caching is enabled. Required for providers like Fireworks that use
+	 * session affinity for prompt cache routing (requests to the same replica
+	 * maximize cache hits).
+	 * Default: false.
 	 */
 	sendSessionAffinityHeaders?: boolean;
-	/** Session-affinity format. `"openrouter"` sends `x-session-id` and is the default for the OpenRouter provider or an openrouter.ai base URL. Otherwise, sends `x-session-affinity`. */
+	/** Session-affinity format. `"openrouter"` sends `x-session-id`; when unset, sends `x-session-affinity`. */
 	sessionAffinityFormat?: "openrouter";
 	/**
 	 * Whether the provider supports Anthropic-style `cache_control` markers on
@@ -1093,30 +1109,40 @@ export interface ModelInputLimits {
 	images?: ModelImageInputLimits;
 }
 
-// Model interface for the unified model system
-export interface Model<TApi extends Api> {
+/** Fields shared by every catalog entry, regardless of what you can do with it. */
+export interface BaseModel<TApi extends string> {
 	id: string;
 	name: string;
 	api: TApi;
 	provider: ProviderId;
 	baseUrl: string;
+	input: ("text" | "image")[];
+	/** Provider input limits and cache-safe preprocessing metadata. */
+	inputLimits?: ModelInputLimits;
+	cost: ModelCost;
+	headers?: Record<string, string>;
+}
+
+/** Chat model: usable with `stream()` and friends. */
+export interface Model<TApi extends Api> extends BaseModel<TApi> {
+	/**
+	 * Optional: chat is the default model type, so models without `type` are chat
+	 * models. Narrow mixed model lists with `isModelType()` instead of comparing
+	 * `type` directly.
+	 */
+	type?: "chat";
 	reasoning: boolean;
 	/**
 	 * Maps pi thinking levels to provider/model-specific values.
 	 * Missing keys use provider defaults. null marks a level as unsupported.
 	 */
 	thinkingLevelMap?: ThinkingLevelMap;
-	input: ("text" | "image")[];
-	/** Provider input limits and cache-safe preprocessing metadata. */
-	inputLimits?: ModelInputLimits;
-	cost: ModelCost;
 	/** Prompt cache lifetimes per retention tier. Unset when the provider's cache behavior is unknown. */
 	promptCache?: ModelPromptCache;
 	contextWindow: number;
 	maxTokens: number;
 	/** Default sampling parameters for this model. See {@link StreamOptions.samplingParams}; per-request keys override these. */
 	samplingParams?: Record<string, unknown>;
-	headers?: Record<string, string>;
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */
 	compat?: TApi extends "openai-completions"
 		? OpenAICompletionsCompat
@@ -1131,9 +1157,28 @@ export interface Model<TApi extends Api> {
 						: never;
 }
 
-export interface ImagesModel<TApi extends ImagesApi>
-	extends Omit<Model<Api>, "api" | "provider" | "reasoning" | "contextWindow" | "maxTokens" | "compat"> {
-	api: TApi;
-	provider: ImagesProviderId;
+/** Image-generation model: usable with `generateImages()` only. */
+export interface ImageModel<TApi extends ImageApi> extends BaseModel<TApi> {
+	type: "image";
+	/** Output modalities. Always includes `"image"`; `"text"` means the model can also return text blocks. */
 	output: ("text" | "image")[];
 }
+
+/** Structured classifier model: usable with `classify()` only. */
+export interface ClassifierModel<TApi extends ClassifierApi> extends BaseModel<TApi> {
+	type: "classifier";
+	contextWindow: number;
+}
+
+/** Model shape for each model type. */
+export interface ModelTypeMap {
+	chat: Model<Api>;
+	image: ImageModel<ImageApi>;
+	classifier: ClassifierModel<ClassifierApi>;
+}
+
+/** What a catalog entry is for. Decides which `Models` operation accepts it. */
+export type ModelType = keyof ModelTypeMap;
+
+/** Anything a provider can list. Narrow with `isModelType()`. */
+export type AnyModel = ModelTypeMap[ModelType];

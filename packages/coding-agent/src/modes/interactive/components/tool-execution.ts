@@ -34,7 +34,7 @@ export interface ToolRenderers {
 	) => Component;
 }
 
-import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { formatToolCallWithArgs, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
@@ -73,7 +73,6 @@ export class ToolExecutionComponent extends Container {
 	private ui: TUI;
 	private cwd: string;
 	private executionStarted = false;
-	private detached = false;
 	private argsComplete = false;
 	private result?: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -163,7 +162,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private createCallFallback(): Component {
-		return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
+		return new Text(formatToolCallWithArgs(this.toolName, this.args, theme, this.expanded), 0, 0);
 	}
 
 	private createResultFallback(): Component | undefined {
@@ -225,12 +224,6 @@ export class ToolExecutionComponent extends Container {
 		this.ui.requestRender();
 	}
 
-	markDetached(): void {
-		this.detached = true;
-		this.updateDisplay();
-		this.ui.requestRender();
-	}
-
 	setArgsComplete(): void {
 		this.argsComplete = true;
 		this.updateDisplay();
@@ -245,7 +238,6 @@ export class ToolExecutionComponent extends Container {
 		},
 		isPartial = false,
 	): void {
-		this.detached = false;
 		this.result = result;
 		this.isPartial = isPartial;
 		this.updateDisplay();
@@ -435,8 +427,6 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 
-			if (this.detached)
-				renderContainer.addChild(new Text(theme.fg("muted", "Detached; external work remains pending"), 0, 0));
 			if (this.result) {
 				const resultRenderer = this.getResultRenderer();
 				if (!resultRenderer) {
@@ -524,7 +514,6 @@ export class ToolExecutionComponent extends Container {
 		if (content && (!this.compactView || this.expanded)) {
 			text += `\n\n${content}`;
 		}
-		if (this.detached) text += `\n${theme.fg("muted", "Detached; external work remains pending")}`;
 		const output = this.getTextOutput();
 		if (output) {
 			text += `\n${output}`;

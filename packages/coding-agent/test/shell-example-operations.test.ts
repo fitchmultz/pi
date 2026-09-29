@@ -1,12 +1,11 @@
 import { EventEmitter, getEventListeners } from "node:events";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, stripTypeScriptTypes } from "node:module";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { setImmediate } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
 import type { ExecOptions } from "@earendil-works/gondolin";
-import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as GondolinExec from "../../../node_modules/@earendil-works/gondolin/dist/src/exec.d.ts";
 import { type BashOperations, createBashTool } from "../src/core/tools/bash.ts";
@@ -23,9 +22,7 @@ function loadFactory<T>(file: string, name: string, bindings: Record<string, unk
 	const end = source.indexOf("\nexport default", start);
 	expect(start).toBeGreaterThanOrEqual(0);
 	expect(end).toBeGreaterThan(start);
-	const { outputText } = ts.transpileModule(`${source.slice(start, end)}\n${name};`, {
-		compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-	});
+	const outputText = stripTypeScriptTypes(`${source.slice(start, end)}\n${name};`);
 	return runInNewContext(outputText, { AbortController, setTimeout, clearTimeout, ...bindings }) as T;
 }
 

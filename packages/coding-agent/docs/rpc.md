@@ -61,16 +61,18 @@ A successful `prompt` response means the prompt was accepted, queued, or handled
 
 ```json
 {"id":"req-2","type":"prompt","message":"Review this repository"}
-{"id":"req-2","type":"response","command":"prompt","success":true}
+{"id":"req-2","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
 ```
 
-Continue consuming [events](json.md) after that response. `agent_end` marks the end of one low-level agent run, but retries, overflow recovery, compaction, steering, or follow-up work can still follow. Wait for `agent_settled` when the client needs to know Pi will not continue automatically.
+`data.disposition` reports what happened to the prompt. If it is `"handled"`, no run started for this prompt, so don't wait for `agent_settled`. See [RPC Commands](rpc-commands.md#prompt) for all values.
+
+Continue consuming [events](json.md) after that response. `agent_end` marks the end of one low-level agent run, but retries, overflow recovery, compaction or queued input can still follow. Wait for `agent_settled` when the client needs to know Pi will not continue automatically.
 
 Subscribe before sending a prompt to avoid missing a fast completion. `RpcClient.promptAndWait()` subscribes before prompting, waits for acceptance and native idle, then returns collected events. Its timeout covers both acceptance and completion, and subscriptions are removed on success or failure.
 
 `RpcClient.waitForIdle(timeout)` uses [`wait_for_idle`](rpc-commands.md#wait_for_idle), so it also succeeds after settlement or input handled without a model run. The default timeout is 60 seconds. Timeout/process exit rejects and releases the client request without aborting host work; late responses are ignored. Await prompt acceptance before waiting for that prompt's completion.
 
-Local settlement can leave detached external work; inspect `pendingToolCalls` on run-end events. PTY-backed clients can transfer frontend ownership with [`attach_tui`](rpc-commands.md#attach_tui).
+Durable background shell jobs may complete after local settlement; inspect their ordinary completion receipts. PTY-backed clients can transfer frontend ownership with [`attach_tui`](rpc-commands.md#attach_tui); ordinary pipes cannot attach a TUI.
 
 ## Errors
 
@@ -92,7 +94,7 @@ All `RpcClient` command helpers reject with the host's error on `success: false`
 
 ## Reloading resources
 
-An extension command can call `ctx.reload()` to refresh resources and reinitialize cached factories. Success emits an `extension_ui_request` notification with `notifyType: "warning"` and `message: "Restart pi to apply extension code changes."` Stop and restart the subprocess to load updated code; use `--session` to resume saved work. Reload and session replacement do not establish that updated code is active.
+An extension command can call `ctx.reload()` to refresh resources and reinitialize cached factories. Reload applies extension code and resources in the current process. Restart the subprocess for core changes or a clean process, and use `--session` to resume saved work.
 
 ## Shutdown
 

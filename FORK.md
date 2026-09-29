@@ -15,6 +15,11 @@ No fork maintenance command publishes packages or upstream releases.
 
 ## Updating from upstream
 
+The commands below describe the current implementation, not permission to run it.
+`sync-upstream.sh` can commit, push, and create a PR automatically, including on
+`--continue`; do not use it for planning-only work. Implementation, Git delivery,
+runtime activation, and paid provider tests require their respective authorization.
+
 ```sh
 ./sync-upstream.sh                       # pin upstream origin/main
 ./sync-upstream.sh --ref <upstream-ref>   # pin a branch, tag or commit
@@ -157,12 +162,11 @@ static Linux TypeScript compiler into the disposable build. Restart sockets fall
 back to Termux's writable short temporary path when needed. The `pi update --fork`
 bootstrap preserves that same native shell/exec environment.
 
-GPT-6 Astra, Sol and Luna default to native async tools, steering and positional
-reasoning-effort updates on OpenAI and Cloudflare OpenAI Responses routes and
-OpenAI Codex Responses. These exact-model defaults apply when loading built-in
-and remote catalogs, so older data cannot silently omit them. Explicit capability
-values (including `false`) and user model overrides retain precedence; no local
-capability configuration is required.
+The integration uses upstream request-boundary execution and provider transports.
+Live native steering, async tool successors, and the parallel native context-window
+framework are removed. Steering and follow-up queues still deliver at request
+boundaries. Independent cache controls, durable shell jobs, checkpoints, and
+managed restart remain; see the [integration policy](#integration-policy).
 
 Cloudflare AI Gateway Claude models use Anthropic's hyphenated IDs in generated
 and remote catalogs. models.dev and pi.dev list dotted names, which the gateway's
@@ -198,9 +202,10 @@ Restart acknowledgment means queued, not ready. Verify the replacement process,
 loaded package directory, same session identity, tools and real provider operation.
 Omitting `-e` preserves explicit extensions. A failed or unready candidate
 returns to the exact prior worker, extensions and selection policy once; it
-does not undo file edits. `/reload` does not apply code changes. A running older
-launcher needs one full CLI launch to acquire this behavior; launcher changes
-also take effect only at a full launch. See
+does not undo file edits. `/reload` refreshes settings, resources, and extension
+code; use a fresh process for core changes or already-loaded package dependencies.
+A running older launcher needs one full CLI launch to acquire this behavior;
+launcher changes also take effect only at a full launch. See
 [Managed Restarts](packages/coding-agent/docs/restart.md).
 
 To return to an earlier installer-validated release, use `--rollback <identity>`
@@ -219,26 +224,111 @@ receipt, including legacy releases and installations in progress. A session
 that loaded only JavaScript through the selector is not visible, so keep enough
 releases for running sessions or restart them before pruning.
 
-## Fork patch intent
+## Upstream-first policy
 
-Keep patches at native boundaries and remove them when upstream provides the same
-behavior and passes the corresponding contracts. The table identifies continuing
-intent; Git history remains the detailed change record.
+Upstream public APIs and architecture are the default. Preserve approved outcomes,
+not fork implementations: use equivalent upstream behavior and remove the duplicate
+path. Adapt only real approved gaps. Do not disable upstream capabilities to keep
+fork internals, or preserve an obsolete API because old tests assert its shape.
+Behavior, cache stability, safety, and installed-consumer evidence decide parity.
+Ask about material unresolved behavior differences, not settled choices.
 
-| Intent | Contract / verification | Removal condition |
-| --- | --- | --- |
-| Fresh context windows without losing journal history | `interactive-context-window`, `context-window-system-state` tests | Upstream exposes equivalent context-window primitives used by Posthorse. |
-| Native checkpoint and managed restart, including tool selection and pending UI input | `checkpoint*`, `restart-*`, `interactive-shutdown-admission` tests; checkpoint/restart docs | Upstream round-trips the same session state and passes bundled lifecycle tests. |
-| Normalize newly delivered queued images like idle prompts | `agent-session-queued-images`, queue/admission/checkpoint suites | Upstream normalizes once at an awaited delivery boundary without queue races. |
-| Structured JSON read extraction | `read-json.test.ts` | Upstream supports the same JSON path/field extraction before output limits. |
-| Provider startup refresh, ambient account authentication and opt-in stored-credential isolation | `provider-startup-refresh`, `ambient-auth`, `provider-credential-isolation`, `model-runtime-auth-options`, availability tests | Upstream preserves refresh, credential selection and failure isolation contracts. |
-| Native async tools, steering and automatic Responses successors | `native-async*`, `native-steering`, `astra-native-protocol` and native session/context usage tests | Upstream preserves original-call durability, successor input snapshots and measured context through the same lifecycle. |
-| Exact tool namespaces and client-side discovery | Tool identity/search/namespace, retained projection and native renderer/export tests | Upstream keeps registered, wire and displayed identities consistent across discovery, execution and replay. |
-| Atomic local file publication and durable external usage | Publication, `extension-record-usage`, persistence and checkpoint billing tests | Upstream provides the same publication and journal accounting guarantees. |
-| Safe fork delivery with frozen inputs and immutable installation | Sync/installer script tests, local platform qualification and installed runtime smoke | Upstream tooling supports this fork's separate review, delivery and activation workflow. |
-| Provider tests stay offline unless explicitly requested | `PI_LIVE_PROVIDER_TESTS=1` | Upstream test runner hides ambient provider credentials by default. |
+This file is the canonical integration policy. Git history records implementation
+history; session research notes are supporting evidence, not another policy.
+
+### Integration policy
+
+This integration merges upstream `33e203354391ba26937cd1e8a210b4db10e82c66` into
+fork baseline `9430ac72ae93952e211afbf95265b607e570cf93`, preserving both ancestries.
+The following approved outcomes govern implementation and review. Source integration
+does not select a runtime: merging, installation, and paid tests retain separate
+authorization and verification gates.
+
+| # | Approved outcome and boundary |
+| --- | --- |
+| 1 | Adopt upstream public namespace/name APIs and migrate internals; no competing public registry or compatibility union. |
+| 2 | Integrate first-class upstream MCP, codemode, search, registry, OAuth, resources, and CLI. Assess the separate adapter independently; do not change personal server/auth configuration. |
+| 3 | Remove live native steering, async tools, automatic successors, and detach/resume core machinery. Use upstream request-boundary execution; keep independent stateless cache controls. |
+| 4 | Use upstream-based, summary-free Posthorse rollover, with a targeted early/after-reset overflow fix. Do not retain a parallel native context-window framework. |
+| 5 | Preserve durable background shell jobs, status, logs, survival across Pi exit, and completion delivery through ordinary receipts/messages. |
+| 6 | Preserve working-session checkpoints and safe sleep: exact queues, tool selection, ingress, quiescence, and refusal behavior. Adapt to upstream without retired native fields; do not promise arbitrary process or draft serialization. |
+| 7 | Preserve managed restart, safe-boundary and pending-input protection, and one-attempt rollback after failed startup. |
+| 8 | Convert settled old sessions once into new copies, preserving originals. Refuse unsafe in-flight or uncertain work and never replay it. Resume through a fresh provider request, not live continuation; no permanent old runtime. |
+| 9 | Preserve targeted cache protections around upstream with offline regression gates. Budget live cache-hit/latency checks separately; bound retained history and allow resets required by correctness, security, provider/schema changes, or rollover. |
+| 10 | Preserve grouped on-demand full instructions at extension level through upstream APIs; remove the duplicate core group registry. Discovery must not automatically widen callable permissions. |
+| 11 | Preserve an optional compact-density view on upstream rendering, including nested codemode, images, cards, and themes. |
+| 12 | Restore upstream extension-code `/reload`; keep managed restart separately for core or clean-process changes, with lifecycle and cache safeguards. |
+| 13 | Preserve background subagent usage/cost attribution without an explicit wait; deduplicate later result accounting. |
+| 14 | Preserve live PTY RPC-to-TUI handoff and return on upstream RPC; ordinary pipes cannot attach. |
+
+Posthorse uses its official-host compaction-hook path for summary-free rollover.
+The host offers early and after-reset overflow recovery without native context-window
+primitives. Qualify the exact emitted host and extension revisions together; stock
+host limitations or a version string alone do not identify this integration.
+
+Grouped instructions are a replaceable builtin extension, not a core registry.
+CLI sessions include it; SDK consumers opt in with `instructionGroupsExtension`.
+Discovery delivers owner-supplied full instructions and never expands callable
+permissions. Same-batch use is refused until an instruction-bearing request has
+occurred. See [extensions](packages/coding-agent/docs/extensions.md).
+
+The separate MCP adapter remains independently managed. It adds capabilities such
+as MCP Apps, elicitation, prompts, saved-result access, and additional transports
+and auth flows. Its `/mcp` command replaces the builtin session connector; it does
+not transparently share native configuration, credentials, or tool names. The
+builtin `pi mcp` CLI remains separate. This integration does not migrate personal
+servers or credentials or remove the adapter. See [MCP](packages/coding-agent/docs/mcp.md#other-mcp-extensions).
+
+Old native-window sessions require the standalone
+[`pi convert-session`](packages/coding-agent/docs/session-format.md) command before
+resuming in this runtime. Conversion writes a new file, preserves the original,
+and refuses unsafe or ambiguous work. Stop the old session writer first; do not
+restart a live old-format session directly into this runtime.
+
+### Continuing contracts
+
+The target does not waive these independent outcomes. Reuse upstream equivalents
+where available; adapt existing tests to the chosen behavior rather than retaining
+old machinery solely to keep tests unchanged.
+
+| Outcome | Verification |
+| --- | --- |
+| Newly delivered queued images normalize like idle prompts | Queue/admission tests prove one awaited normalization without races. |
+| Structured JSON read extraction | JSON path/field extraction occurs before output limits. |
+| Provider startup refresh, ambient authentication, opt-in stored-credential isolation | Refresh, credential selection, availability, and failure-isolation tests. |
+| Atomic local file publication and durable external usage | Publication failure safety, journal persistence, and deduplicated billing tests. |
+| Frozen fork delivery and immutable installation | Reviewed merge ancestry, frozen locks/catalogs, installer tests, installed-consumer and platform qualification, rollback. |
+| Offline provider tests by default | Isolated tests hide ambient provider credentials; live tests require explicit authorization, including `PI_LIVE_PROVIDER_TESTS=1` where applicable. |
+
+### Integration and documentation checklist
+
+- Keep the main worktree untouched during integration; preserve merge ancestry,
+  reviewed resolutions, frozen dependency/model inputs, and immutable rollback.
+  Verification must not rewrite tracked inputs. Do not invoke remote CI unless asked.
+- Trace each approved outcome through callers, extensions, persistence, provider
+  serialization, and UI. Remove superseded code and update behavior tests in the
+  same change. Prove conversion preserves originals and refuses unsafe work without
+  replay; prove checkpoint/restart admission and pending-input safety.
+- Gate cache changes on rendered payload/prefix regressions, independently of live
+  steering or async execution. Offline evidence is not a measured provider cache
+  hit. Validate additions, removals, description/reactivation changes, inline
+  Anthropic schemas, between-request effort, historical hidden loadouts, and
+  immutable Codex snapshots where retained; bound history and document resets.
+- Validate the actual installed consumer, worker and WASM assets, and tmux UI
+  lifecycle, including reload disposal/reinitialization, background accounting,
+  compact rendering, and PTY handoff. Qualify supported platforms separately;
+  TypeScript 7 uses a disposable static compiler on Termux, but fixture validation
+  is not qualification on real Termux hardware.
+- Update operational product docs alongside implementation, not before it:
+  extension/name/discovery SDK and event contracts; JSON/message/session formats
+  and conversion; compaction/Posthorse; model/cache/WebSocket behavior; reload,
+  restart, slash commands, packages, providers, and RPC; checkpoints, background
+  accounting, handoff, and user entrypoints. Update injected restart guidance in
+  `packages/coding-agent/src/cli/restart-worker.ts` at that same cutover.
+- Record exact tested revisions and remaining gaps in delivery evidence. Do not
+  turn design approval or offline checks into runtime, platform, or live-cache
+  qualification. Preserve frozen artifact identities through installation.
 
 Experimental Pico/micro remain opt-in; ordinary AgentSession extensions use the
 normal host. Install stock Pi separately if needed and verify before selecting it.
-Preserve fork releases and sessions. Posthorse requires the fork's native context
-window primitives and is not supported by the stock host.
+Preserve fork releases and sessions.

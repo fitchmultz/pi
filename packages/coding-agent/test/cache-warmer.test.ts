@@ -8,7 +8,7 @@ import {
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import {
 	CacheWarmer,
@@ -121,7 +121,11 @@ function request(model: Model<Api> = adaptiveModel, options: ModelsSimpleStreamO
 
 const current = () => true;
 
-afterEach(() => vi.useRealTimers());
+beforeEach(() => vi.stubEnv("PI_CACHE_RETENTION", "short"));
+afterEach(() => {
+	vi.useRealTimers();
+	vi.unstubAllEnvs();
+});
 
 describe("cache warming", () => {
 	it("derives eligibility and timing from retention and provider behavior", () => {
@@ -150,10 +154,7 @@ describe("cache warming", () => {
 		const signal = new AbortController().signal;
 		const transformHeaders = async () => ({});
 
-		warmer.start(
-			request(adaptiveModel, { reasoning: "high", signal, sessionId: "s", transformHeaders, turnScope: {} }),
-			current,
-		);
+		warmer.start(request(adaptiveModel, { reasoning: "high", signal, sessionId: "s", transformHeaders }), current);
 		await vi.advanceTimersByTimeAsync(270_000);
 
 		expect(calls[0]).toMatchObject({
@@ -161,7 +162,6 @@ describe("cache warming", () => {
 			options: { reasoning: "high", sessionId: "s", transformHeaders, maxTokens: 1, maxRetries: 0 },
 		});
 		expect(calls[0].options?.signal).not.toBe(signal);
-		expect(calls[0].options?.turnScope).toBeUndefined();
 		expect(events[0]).toMatchObject({
 			type: "cache_warming_decision",
 			continuationProbability: 1,

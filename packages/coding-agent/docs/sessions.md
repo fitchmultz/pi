@@ -68,9 +68,20 @@ Use `--session` when you already know the session path or ID. Use `--fork` to cr
 
 ## Restart or checkpoint a session
 
-The Node CLI's [managed restart](restart.md) resumes the same saved session after a staged runtime or extension update. `/reload` does not apply extension code changes.
+The Node CLI's [managed restart](restart.md) resumes the same saved session after a staged core runtime update or when a clean process is needed. `/reload` applies extension code and resource changes in the current process.
 
 [Working-session checkpoints](checkpoint.md) also preserve exact branch/model/tool selection and accepted queues. Restore the matching files before using `--checkpoint`; a stale artifact must not overwrite newer work. Checkpoints do not serialize arbitrary extension memory or running processes.
+
+## Convert a legacy fork session
+
+Stop every process that could write the source journal before conversion:
+
+```sh
+pi convert-session SOURCE NEW_PATH
+pi --session NEW_PATH
+```
+
+Conversion makes an exclusive new copy and preserves the original; an existing output is refused. Unsafe, unsettled, or uncertain work is refused, not replayed. Resuming the converted copy starts a fresh provider request rather than continuing a live response. Do not delete the source until you have inspected the converted session. See [Command Line](cli.md#convert-a-legacy-session).
 
 ## Export or share a session
 

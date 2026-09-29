@@ -27,7 +27,7 @@ Sessions have a version field in the header:
 - **Version 2**: Tree structure with `id`/`parentId` linking
 - **Version 3**: Renamed `hookMessage` role to `custom` (extensions unification)
 
-Existing sessions are automatically migrated to the current version (v3) when loaded.
+Ordinary v1/v2 sessions migrate to v3 when loaded. Legacy fork journals containing retired runtime fields require a separate, one-time copy conversion; they are not silently resumed.
 
 ## Source Files
 
@@ -77,24 +77,13 @@ For sessions with a parent (created via `/fork`, `/clone`, or `newSession({ pare
 
 ### SessionMessageEntry
 
-A message in the conversation. The `message` field contains an `AgentMessage`. System messages carry the prompt and tool loadout: the first request of a session persists one with every prompt section and tool declaration, and later changes persist as system messages that patch `sections` by name (`null` removes one) and list `toolsAdded`/`toolsRemoved`. Search results can also carry core-resolved `toolsAdded`. Replay system and tool-result declarations in order using exact `(namespace, name)` identity; there is no separate catalog in session state. Repeated identical search declarations remain valid.
-
-Assistant entries with `checkpoint: true` record completed native items before async tool side effects and when execution detaches/resumes. They are non-billable snapshots of the same `responseId`. Preserve their usage for context projection but exclude them from billing, response counts, and cache-request statistics. Context reconstruction coalesces them with final response content/usage. `responsesItem` retains the provider item; `executionStarted`, `executionArguments`, and `executionDetached` record admitted local execution. Missing results do not prove an operation never happened; recovery uses `resume`, never a repeated started `execute`.
-
-Optional `consumedToolResultIds` on a completed assistant entry names original tool-result entries included in that successful response's captured request or native continuation input. This branch-local proof survives reload, compaction, and forks. Journal ordering alone is not proof: a result can finish while an earlier request is streaming. Older entries without this metadata leave consumption unknown, so fresh windows conservatively retain those native receipts.
-
-Optional `concurrentToolResultIds` on an assistant entry names original native result entries arriving after its request's captured branch frontier, excluded from the finalized native input, and preceding its first real persisted snapshot. It is host-only ordering provenance, not consumption proof. Only nonempty relations are written. Coalescing preserves the first snapshot's relation alongside final entry identity/usage and admitted execution state. Later response relations can move the same receipt farther forward. Missing/off-branch references do nothing; unannotated histories keep their existing order. Ordering never moves receipts across an intervening compaction/window cut before retention selection. Only receipts surviving that cut may subsequently move after a related response; preparation-discarded receipts are not annotated. Failed, aborted, or pending responses never grant successful consumption proof.
-
-For native requests, input membership comes after payload hooks, not from pre-payload message transforms. Encrypted provider compaction summaries and opaque references leave initial membership unknown. Unknown initial membership supplies no consumption proof; explicitly known successor inputs can still supply their own successful proof. Existing saved proof remains valid.
-
-A forced `before_agent_start` prompt affects provider requests for that run only; the transcript and context checkpoints retain structured state. Older full-prompt records with `replace: true` clear preceding prompt/tools during replay. The next run writes a structured replacement baseline rather than accumulating opaque prompt text.
+A message in the conversation. The `message` field contains an [`AgentMessage`](message-types.md). System messages carry named prompt sections and public-name tool declarations. Replay additions/removals in order; `toolsRemoved` contains `{ name }` references, not strings or namespace pairs. A legacy journal with retired native execution fields requires [copy conversion](#convert-a-legacy-fork-session).
 
 ```json
-{"type":"message","id":"a0b1c2d3","parentId":null,"timestamp":"2024-12-03T14:00:00.000Z","message":{"role":"system","content":"","sections":{"preamble":"You are an expert coding assistant...","tools":"<tools>\n- read: ...\n</tools>","cwd":"/project"},"toolsAdded":[{"name":"read","description":"...","parameters":{}}],"timestamp":1733234400000}}
-{"type":"message","id":"d4e5f6g7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:04:00.000Z","message":{"role":"system","content":"","sections":{"skills":"<skills>...</skills>"},"toolsRemoved":[{"name":"write"}],"timestamp":1733234640000}}
+{"type":"message","id":"a0b1c2d3","parentId":null,"timestamp":"2024-12-03T14:00:00.000Z","message":{"role":"system","content":"","sections":{"preamble":"You are a coding assistant."},"toolsAdded":[{"name":"read","description":"Read a file","parameters":{}}],"timestamp":1733234400000}}
 ```
 
-Sessions created before system messages existed have no leading system message; the first request declares the current prompt as a later system message, which replays the same way.
+Sessions created before system messages existed have no leading system message; the first request declares the current prompt as a later system message.
 
 ```json
 {"type":"message","id":"a1b2c3d4","parentId":"prev1234","timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"user","content":"Hello","timestamp":1733234401000}}
@@ -102,9 +91,11 @@ Sessions created before system messages existed have no leading system message; 
 {"type":"message","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"output"}],"isError":false,"timestamp":1733234403000}}
 ```
 
+Assistant messages name the model that produced them. Newer messages also record `thinkingLevel`, the Pi thinking level requested for that response.
+
 ### ModelChangeEntry
 
-Emitted when the user switches models mid-session.
+Emitted when the user switches models mid-session. The latest entry is the selected model, which may be a [virtual model](virtual-models.md); assistant messages then name the physical model that answered.
 
 ```json
 {"type":"model_change","id":"d4e5f6g7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:05:00.000Z","provider":"openai","modelId":"gpt-4o"}
@@ -117,14 +108,6 @@ Emitted when the user changes the thinking/reasoning level.
 ```json
 {"type":"thinking_level_change","id":"e5f6g7h8","parentId":"d4e5f6g7","timestamp":"2024-12-03T14:06:00.000Z","thinkingLevel":"high"}
 ```
-
-### ContextWindowEntry
-
-A `context_window` starts fresh model context without deleting history. It stores optional `handoff`, `tokensBefore` (null when unknown), and an optional `systemMessage` checkpoint of the current prompt/tools. Replay places the checkpoint before the visible `context-window` custom-message marker, preserving tool selection without bringing earlier conversation into the new window.
-
-Native asynchronous work survives the boundary. Projection retains unresolved call items and the original calls needed by results in the new window, with their exact identities and admitted execution state. It does not retain old prose or already-consumed call/result pairs from previous windows.
-
-Optional `retainedToolResultIds` names original result entry IDs whose consumption by a successful provider response is not yet confirmed. This preserves receipts that arrive while a handoff is being prepared. Replay selects only matching earlier tool-result entries on the active branch, without copying messages or adding billable entries. A later window retains them only if its own list includes them; a later compaction can summarize or keep them normally.
 
 ### UsageEntry
 
@@ -140,13 +123,13 @@ Optional `contributionId` is an idempotency key separate from the entry ID. `pi.
 
 ### CompactionEntry
 
-Created when context is compacted. Stores a summary of earlier messages and a complete system prompt/tool checkpoint.
+Created when context is compacted. Stores a summary of earlier messages and, when available, a complete system prompt/tool checkpoint.
 
 ```json
 {"type":"compaction","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:10:00.000Z","summary":"User discussed X, Y, Z...","firstKeptEntryId":"c3d4e5f6","tokensBefore":50000,"systemMessage":{"role":"system","content":"You are a coding assistant.","toolsAdded":[],"timestamp":1733235000000}}
 ```
 
-`firstKeptEntryId` is required. It identifies the first entry retained from before the compaction entry. When rebuilding context, Pi replaces older summarized entries with the compaction summary and keeps the range beginning at this entry in causal model order. A retain-none compaction stores its own ID in this field, so no preceding entries are retained.
+`firstKeptEntryId` is required. It identifies the first entry retained from before the compaction entry. When rebuilding context, Pi replaces older entries with the compaction summary and keeps the range beginning at this entry. A summary-free extension handoff can use public compaction hooks without a separate context-window entry.
 
 Optional fields:
 - `systemMessage`: The replayed prompt sections and tool declarations at the compaction boundary; it becomes the leading system message of the compacted context, and system messages among the kept entries are dropped in its favor. It is absent on older session entries.
@@ -162,7 +145,7 @@ Append-only edit of one earlier context-producing entry. It changes only future 
 {"type":"context_edit","id":"g6h7i8j9","parentId":"f6g7h8i9","timestamp":"2024-12-03T14:11:00.000Z","targetId":"c3d4e5f6","replacement":null}
 ```
 
-Targets may be user, assistant, tool-result, or custom-message entries. `replacement: null` omits the target from model context. A non-null `replacement` replaces only the target message content. String replacements for assistant and tool-result entries are normalized to one text block because those roles require content arrays. If several edits target the same entry, the latest edit on the active branch wins. Edits are branch-relative: navigating to a point before the edit reveals the target's original contribution again.
+Targets may be user, assistant, tool-result, or custom-message entries. `replacement: null` omits the target from model context. A non-null `replacement` has `{ content }` and replaces only the target message content. String replacements for assistant and tool-result entries are normalized to one text block because those roles require content arrays. If several edits target the same entry, the latest edit on the active branch wins. Edits are branch-relative: navigating to a point before the edit reveals the target's original contribution again.
 
 ### BranchSummaryEntry
 
@@ -188,6 +171,8 @@ Extension state persistence. Does NOT participate in LLM context.
 ```
 
 Use `customType` to identify your extension's entries on reload. The first custom entry saves a file-backed session even before an assistant response, including earlier deferred entries; copied branches containing custom entries are saved immediately. Interactive mode can render custom entries via `pi.registerEntryRenderer(customType, renderer)`, but they still do not participate in LLM context.
+
+Pi stores [virtual model](virtual-models.md) router state as custom entries with `customType` `pi.virtual-model-state` and `data` `{ provider, modelId, state }`.
 
 ### CustomMessageEntry
 
@@ -239,37 +224,7 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 
 ## Context Building
 
-`buildContextEntries()` walks from the current leaf to the root, producing the active entry list while honoring compaction:
-
-1. Collects the full selected branch and coalesces execution snapshots by response identity, retaining final content/usage and latest admitted-call state at the original response position. Explicit `concurrentToolResultIds` then place those receipts after their response in model order, before retention cuts
-2. Selects the path starting at the latest `ContextWindowEntry`, when present, and inserts its explicitly retained tool-result entries after the marker; late checkpoints from older responses do not reintroduce their conversation
-3. Applies the latest remaining `CompactionEntry`:
-   - Includes the compaction entry first
-   - Includes non-system entries from `firstKeptEntryId` up to, but not including, the compaction entry
-   - Includes entries after the compaction entry
-4. Presents this retained set in arrival order for rendering, with the active boundary first; non-message entries remain available
-
-`buildSessionProjection()` uses the same retained set in causal model order, with `.entries` and `.messages` agreeing. For raw `[receipt, response]` with an explicit concurrent relation, model order is `[response, receipt]`; a compaction retaining that receipt does not revive the summarized response. Raw APIs, journal bytes, event timing, UI, and exports retain arrival order. This repairs delta eligibility, not provider cache-hit guarantees.
-
-Projection then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. The raw selected entries are not modified.
-
-Across compaction and context-window boundaries, projection also carries native asynchronous call items from the selected branch when they remain unresolved or have a retained result. Carried calls keep their original reasoning signatures but clear the separate thinking text, which another model would otherwise replay as old assistant prose. They preserve their original source entry, provider item, namespace, call ID, and admitted execution arguments/state. Context edits still apply: omitting a call also omits its dependent output. Results on other branches do not resolve calls on the selected branch. Reopening the journal uses the same projection.
-
-When a native result is omitted by compaction or a context edit, projection removes its completed call from retained assistant content too. Reasoning shared with surviving outputs remains in its original order; a reasoning group with no surviving output is omitted. The raw outcome still proves completion, so the call is not executed or resumed again. Other prose, unresolved calls, and retained call/result pairs remain. Projection also derives `toolExecutionFailed` from the original response's foreground failures, preserving their reset veto without restoring omitted receipts to model input.
-
-`buildSessionContext()` builds on that projection to produce the message list for the LLM:
-
-1. Extracts current model and thinking level settings from the full path
-2. Converts selected entries to messages:
-   - `message` -> stored `AgentMessage`
-   - `context_window` -> system checkpoint followed by the window marker and handoff
-   - `compaction` -> complete system checkpoint followed by `compactionSummary`
-   - `branch_summary` -> `branchSummary`
-   - `custom_message` -> `CustomMessage`
-   - `context_edit` -> no context message of its own
-   - `usage` and `custom` -> no context message
-
-The compaction summary replaces entries before `firstKeptEntryId`. Pre-compaction system messages are folded into the complete checkpoint rather than replayed from the retained range. Retained non-system entries and all entries after the compaction remain available to the LLM.
+`buildContextEntries()` walks the active tree branch, applies the latest compaction boundary, and keeps entries from `firstKeptEntryId` onward plus later entries. `buildSessionContext()` converts retained message, compaction, branch-summary, and custom-message entries into model context. Usage and custom state entries do not enter model context. `context_edit` changes a target's future context contribution without rewriting its raw journal entry. The compaction's `systemMessage`, when present, supplies the complete prompt/tool checkpoint rather than replaying pre-compaction system messages.
 
 ## Persistence failures
 
@@ -280,6 +235,12 @@ Full rewrites stage a complete sibling temporary file and rename only after writ
 `flush()` changes no entries/revisions/leaf and emits no events. It is a no-op for in-memory sessions and deferred journals with no assistant response, usage, or custom entry. Session replacement flushes failed persistence first. Retain the process after failed saving; this is not a filesystem freeze or power-loss guarantee.
 
 `getEntriesRevision()` changes on append or session replacement, not leaf-only navigation; use it for file-wide derived-data caches. Session listing methods accept optional abort signals. See the exported [`SessionManager`](../src/core/session-manager.ts) declarations for signatures.
+
+## Convert a legacy fork session
+
+Use `pi convert-session SOURCE.jsonl NEW_PATH.jsonl` for a settled v3 legacy fork journal. It writes a distinct new file and preserves the original; it does not load extensions or contact providers or execute tools. Resume with `pi --session NEW_PATH.jsonl`, which starts a fresh provider request rather than resuming an in-flight response. Existing output is never overwritten. Stop the original writer first; conversion refuses changed source bytes.
+
+Conversion refuses unsafe or uncertain work: unfinished or deferred responses, missing/mismatched tool results, unsettled steering, duplicate/colliding tool identities, unsupported causal receipt order or boundary/edit reconstruction, malformed references and unsupported entry types. Native response snapshots are coalesced only when a unique final response exists on every affected branch; legacy context windows become compaction boundaries where safe. Some removed metadata is retained in custom `legacy-conversion-*` entries for audit, not model input. Do not replay refused work. This copy conversion is separate from live [working-session checkpoints](checkpoint.md), which preserve exact accepted queues and selection.
 
 ## Parsing Example
 

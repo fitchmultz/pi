@@ -93,10 +93,9 @@ describe("early compaction lifecycle", () => {
 						if (prefixOnly && event.prompt === "finish the current task")
 							return { systemPrompt: "p".repeat(200_000) };
 					});
-					pi.on("session_before_auto_compact", async (event, ctx) => {
+					pi.on("session_before_compact", async (event, ctx) => {
 						canSummarize.push(prepareCompaction(event.branchEntries, ctx.getCompactionSettings()) !== undefined);
 						if (canSummarize.length === 1) {
-							if (cancel) ctx.newContext({ handoff: "must not survive cancellation" });
 							hookSignal = event.signal;
 							markHookStarted();
 							await hookReleased;
@@ -121,7 +120,8 @@ describe("early compaction lifecycle", () => {
 			.filter((message) => message.role === "system")
 			.reduce((total, message) => total + estimateTokens(message), 0);
 
-		const run = harness.session.prompt(prefixOnly ? "finish the current task" : "x".repeat(200_000));
+		const promptText = prefixOnly ? "finish the current task" : "x".repeat(200_000);
+		const run = harness.session.prompt(promptText);
 		let phase: string | undefined;
 		try {
 			await hookStarted;
@@ -131,8 +131,8 @@ describe("early compaction lifecycle", () => {
 			expect(tokens).toBeGreaterThan(48_000);
 			expect(tokens).toBeLessThan(64_000);
 			if (prefixOnly) {
-				// Replacing the prefix retains provider-reported framing and conversation usage.
-				expect(tokens).toBe(previousUsage - previousPrefixTokens + 50_000);
+				// Upcoming context includes the new prefix and the admitted input, not just persisted history.
+				expect(tokens).toBe(previousUsage - previousPrefixTokens + 50_000 + Math.ceil(promptText.length / 4));
 			}
 
 			await view.defaultEditor.onSubmit(queuedText);
@@ -149,7 +149,6 @@ describe("early compaction lifecycle", () => {
 			await Promise.all(events);
 		}
 
-		expect(harness.sessionManager.getBranch().some((entry) => entry.type === "context_window")).toBe(false);
 		expect(view.compactionQueuedMessages).toEqual([]);
 		expect(deliveries).toBe(1);
 		expect(view.showError).not.toHaveBeenCalled();
@@ -162,7 +161,7 @@ describe("early compaction lifecycle", () => {
 		).toHaveLength(1);
 		const completions = harness.eventsOfType("compaction_end");
 		expect(completions).toHaveLength(harness.eventsOfType("compaction_start").length);
-		expect(completions.every((event) => !event.errorMessage && !event.contextWindowStarted)).toBe(true);
+		expect(completions.every((event) => !event.errorMessage)).toBe(true);
 		if (prefixOnly) {
 			expect(canSummarize.length).toBeGreaterThanOrEqual(2);
 			expect(canSummarize.every((value) => !value)).toBe(true);

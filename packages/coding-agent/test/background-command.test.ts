@@ -1,6 +1,6 @@
 import childProcess, { ChildProcess, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire, syncBuiltinESMExports } from "node:module";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -24,6 +24,7 @@ import { createSessionManager } from "../src/main.ts";
 import { getShellEnv, killProcessTree } from "../src/utils/shell.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
+const sourceResolver = fileURLToPath(new URL("../src/experimental/source-resolver.ts", import.meta.url));
 async function until(condition: () => boolean) {
 	for (let i = 0; i < 200; i++) {
 		if (condition()) return;
@@ -137,12 +138,15 @@ describe("native background shell worker", () => {
 
 	it("launches the running source worker despite an inherited package asset override", async () => {
 		const fixture = fileURLToPath(new URL("./fixtures/background-command-launch.ts", import.meta.url));
-		const loader = createRequire(import.meta.url).resolve("tsx/esm");
-		const output = execFileSync(process.execPath, ["--import", loader, fixture, jobs, root, "printf native"], {
-			env: { ...process.env, PI_PACKAGE_DIR: root },
-			encoding: "utf8",
-			timeout: 10000,
-		});
+		const output = execFileSync(
+			process.execPath,
+			["--import", sourceResolver, fixture, jobs, root, "printf native"],
+			{
+				env: { ...process.env, PI_PACKAGE_DIR: root },
+				encoding: "utf8",
+				timeout: 10000,
+			},
+		);
 		const id = output.trim();
 		await until(() => backgroundCommandFinished(readBackgroundCommand(jobs, id)));
 		expect(readBackgroundCommand(jobs, id).status).toBe("succeeded");
@@ -266,8 +270,7 @@ describe("native background shell worker", () => {
 	it("survives the launching process exiting and never replays the command", async () => {
 		const command = `printf 'once\\n' >> ${quote(join(root, "count"))}; while [ ! -f ${quote(join(root, "release"))} ]; do sleep 0.02; done; printf 'survived\\n'`;
 		const worker = fileURLToPath(new URL("./fixtures/background-command-launch.ts", import.meta.url));
-		const loader = createRequire(import.meta.url).resolve("tsx/esm");
-		const output = execFileSync(process.execPath, ["--import", loader, worker, jobs, root, command], {
+		const output = execFileSync(process.execPath, ["--import", sourceResolver, worker, jobs, root, command], {
 			cwd: fileURLToPath(new URL("..", import.meta.url)),
 			encoding: "utf8",
 			timeout: 10000,

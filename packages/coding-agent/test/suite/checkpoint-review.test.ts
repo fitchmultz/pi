@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import dynamicTools from "../../examples/extensions/dynamic-tools.ts";
@@ -338,7 +339,10 @@ it("legacy v1 active/known names are not fabricated into an allowlist", async ()
 });
 
 it("SDK compaction failure wakes a pending settled checkpoint without a TUI callback", async () => {
-	const h = await harness();
+	const h = await harness({ settings: { compaction: { enabled: false, keepRecentTokens: 1 } } });
+	h.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer")]);
+	await h.session.prompt("first question");
+	await h.session.prompt("second question");
 	let enter!: () => void;
 	let release!: () => void;
 	const entered = new Promise<void>((resolve) => {

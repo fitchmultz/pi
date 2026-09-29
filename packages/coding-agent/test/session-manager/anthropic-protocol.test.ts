@@ -3,10 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, type Model, normalizeContext } from "@earendil-works/pi-ai";
-import { expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { stream } from "../../../ai/src/api/anthropic-messages.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
+
+beforeEach(() => vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-09-22T00:00:00Z") }));
+afterEach(() => vi.useRealTimers());
 
 const inline = "inline-tools-2026-09-15";
 const reference = "mid-conversation-tool-changes-2026-07-01";
@@ -35,7 +38,8 @@ async function capture(session: SessionManager, beta?: string) {
 			headers: beta ? { "anthropic-beta": beta } : undefined,
 			fetch: async (_url, init) => {
 				headers = new Headers(init?.headers);
-				expect(String(init?.body)).not.toContain("contextWindowId");
+				expect(String(init?.body)).not.toContain("anthropic_tool_protocol");
+				expect(String(init?.body)).not.toContain("windowTimestamp");
 				const events = [
 					{
 						type: "message_start",
@@ -59,7 +63,7 @@ async function capture(session: SessionManager, beta?: string) {
 	return { response, beta: headers.get("anthropic-beta") };
 }
 
-it("keeps checkpoint-less projection unchanged and retains the inherited protocol across requests", async () => {
+it("keeps projection without system state unchanged and retains the inherited protocol across requests", async () => {
 	const session = SessionManager.inMemory();
 	session.appendMessage({ role: "user", content: "Legacy", timestamp: 1 });
 	const inherited = {
@@ -71,7 +75,7 @@ it("keeps checkpoint-less projection unchanged and retains the inherited protoco
 			{
 				type: "anthropic_tool_protocol",
 				timestamp: 2,
-				details: { beta: reference, inline: false, windowId: "earlier-checkpoint" },
+				details: { beta: reference, inline: false, windowTimestamp: 0, baseUrl: model.baseUrl },
 			},
 		],
 	};
@@ -89,8 +93,22 @@ it("keeps checkpoint-less projection unchanged and retains the inherited protoco
 	expect(session.buildSessionContext().messages.some((message) => message.role === "system")).toBe(false);
 });
 
+it("reselects protocol when compaction retains a response from the same millisecond", async () => {
+	const session = SessionManager.inMemory();
+	session.appendMessage({ role: "system", content: "Base", timestamp: Date.now() });
+	session.appendMessage({ role: "user", content: "Hello", timestamp: Date.now() });
+	const first = await capture(session, inline);
+	expect(first.beta).toContain(inline);
+	const responseId = session.appendMessage(first.response);
+	session.appendCompaction("Rebuilt prefix", responseId, 100);
+	const next = await capture(session, reference);
+	expect(next.beta).toContain(reference);
+	session.appendMessage(next.response);
+	expect((await capture(session, inline)).beta).toContain(reference);
+});
+
 it.each(["legacy", "reference", "inline"] as const)(
-	"binds %s protocol across persisted resume/fork, and reselects at a new window",
+	"binds %s protocol across persisted resume/fork, and reselects at compaction",
 	async (mode) => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-anthropic-window-"));
 		try {
@@ -120,23 +138,24 @@ it.each(["legacy", "reference", "inline"] as const)(
 			const fork = SessionManager.forkFrom(restored.getSessionFile()!, dir, dir);
 			expect((await capture(fork, opposite)).beta).toContain(expected);
 			// Compaction retains the old response, but establishes a distinct prefix identity.
-			const compactedId = fork.appendCompaction("Summary", firstId, 100);
+			vi.setSystemTime(Date.now() + 1000);
+			fork.appendCompaction("Summary", firstId, 100);
 			const compacted = fork.buildSessionContext().messages;
 			expect(compacted.some((message) => message.role === "assistant")).toBe(true);
-			expect(compacted.find((message) => message.role === "system")).toMatchObject({ contextWindowId: compactedId });
+			expect(compacted.find((message) => message.role === "system")).toMatchObject({ timestamp: Date.now() });
 			const afterCompaction = await capture(fork);
 			expect(afterCompaction.beta).toContain(inline);
 			expect(afterCompaction.response.diagnostics).toContainEqual(
 				expect.objectContaining({
 					type: "anthropic_tool_protocol",
-					details: expect.objectContaining({ windowId: compactedId }),
+					details: expect.objectContaining({ windowTimestamp: Date.now(), baseUrl: model.baseUrl }),
 				}),
 			);
 			fork.appendMessage(afterCompaction.response);
 			const resumedWindow = SessionManager.open(fork.getSessionFile()!, dir);
 			expect((await capture(resumedWindow, reference)).beta).toContain(inline);
-			const freshId = resumedWindow.appendContextWindow("Fresh", 100);
-			expect(freshId).not.toBe(compactedId);
+			vi.setSystemTime(Date.now() + 1000);
+			resumedWindow.appendCompaction("Fresh", null, 100);
 			const fresh = await capture(resumedWindow, reference);
 			expect(fresh.beta).toContain(reference);
 			resumedWindow.appendMessage(fresh.response);

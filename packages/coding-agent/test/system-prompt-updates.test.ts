@@ -201,12 +201,13 @@ describe("system prompt updates", () => {
 			const baseLeaf = harness.sessionManager.getLeafId()!;
 			force = true;
 			await harness.session.prompt("force");
-			harness.session.newContext({ handoff: "Continue the task" });
+			harness.sessionManager.appendCompaction("Continue the task", null, 0);
+			harness.session.refreshContext();
 			const windowLeaf = harness.sessionManager.getLeafId()!;
 			expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Exact checkpoint prompt.");
 			expect(getCurrentSystemMessage(harness.session.messages)?.sections?.preamble).toBeDefined();
 			expect(getCurrentTools(harness.session.messages).map((tool) => tool.name)).toEqual(["read"]);
-			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "custom"]);
+			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "compactionSummary"]);
 			await harness.session.navigateTree(baseLeaf);
 			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "background_command", "edit", "write"]);
 			await harness.session.navigateTree(windowLeaf);
@@ -223,70 +224,7 @@ describe("system prompt updates", () => {
 		}
 	});
 
-	test("replays a saved replacement on SDK resume and resets its opaque prefix on the next run", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-replacement-resume-"));
-		const harness = await createHarness({
-			sessionManager: SessionManager.create(directory, directory),
-			settings: { compaction: { enabled: false } },
-		});
-		try {
-			harness.setResponses([fauxAssistantMessage("old answer")]);
-			await harness.session.prompt("old question");
-			const read = getCurrentTools(harness.session.messages).find((tool) => tool.name === "read")!;
-			harness.sessionManager.appendMessage({
-				role: "system",
-				content: "Saved exact prompt.",
-				replace: true,
-				toolsAdded: [read],
-				timestamp: 10,
-			});
-			harness.sessionManager.appendMessage({
-				role: "system",
-				content: "",
-				sections: { legacy: "Saved section." },
-				timestamp: 11,
-			});
-			const { session } = await createAgentSession({
-				cwd: harness.tempDir,
-				agentDir: directory,
-				model: harness.getModel(),
-				modelRuntime: harness.session.modelRuntime,
-				settingsManager: harness.settingsManager,
-				resourceLoader: harness.session.resourceLoader,
-				sessionManager: SessionManager.open(harness.session.sessionFile!),
-			});
-			try {
-				expect(session.systemPrompt).toBe("Saved exact prompt.\n\nSaved section.");
-				expect(session.getActiveToolNames()).toEqual(["read"]);
-				expect(getCurrentTools(session.messages)).toEqual([read]);
-				const requests: TranscriptContext[] = [];
-				harness.setResponses(
-					["resumed", "next"].map((text) => (context: TranscriptContext) => {
-						requests.push(context);
-						return fauxAssistantMessage(text);
-					}),
-				);
-				await session.prompt("resume");
-				await session.prompt("next");
-				for (const request of requests) {
-					expect(getCurrentSystemPrompt(request.messages)).not.toContain("Saved ");
-					expect(getCurrentSystemPrompt(request.messages)).toContain("<cwd>");
-					expect(getCurrentTools(request.messages).map((tool) => tool.name)).toEqual(["read"]);
-				}
-				const replacements = session.messages.filter((message) => message.role === "system" && message.replace);
-				expect(replacements).toHaveLength(2); // The saved record and one structured reset, not one per run.
-				expect(getCurrentSystemMessage(session.messages)?.content).toBe("");
-				expect(session.messages).toEqual(session.sessionManager.buildSessionContext().messages);
-			} finally {
-				session.dispose();
-			}
-		} finally {
-			harness.cleanup();
-			rmSync(directory, { recursive: true, force: true });
-		}
-	});
-
-	test("keeps exact forced guidance across same-run rollover and dynamic tool loading", async () => {
+	test("keeps request-only forced guidance across rollover and tool loading while allowing context decoration", async () => {
 		const harness = await createHarness({
 			tools: [],
 			settings: { compaction: { enabled: false } },
@@ -297,11 +235,13 @@ describe("system prompt updates", () => {
 						return { systemPrompt: "Exact child guidance." };
 					});
 					pi.on("context", (event) => ({
-						messages: [
-							...event.messages,
-							{ role: "system", content: "Context must not override force.", timestamp: 0 },
-						],
+						messages: [...event.messages, { role: "system", content: "Context addition.", timestamp: 0 }],
 					}));
+					pi.on("turn_end", (event) =>
+						event.toolResults.some((result) => result.toolName === "load")
+							? { entries: [{ type: "compaction", summary: "Continue here.", firstKeptEntryId: null }] }
+							: undefined,
+					);
 					pi.registerTool({
 						name: "load",
 						label: "Load",
@@ -322,7 +262,7 @@ describe("system prompt updates", () => {
 								},
 							});
 							pi.setActiveTools(["structured_output"]);
-							return { content: [], details: undefined, newContext: { handoff: "Continue here." } };
+							return { content: [], details: undefined };
 						},
 					});
 				},
@@ -344,13 +284,13 @@ describe("system prompt updates", () => {
 			expect(requests).toHaveLength(2);
 			expect(prompts).toEqual(["Exact child guidance.", "Exact child guidance."]);
 			for (const request of requests) {
-				expect(getCurrentSystemPrompt(request.messages)).toBe("Exact child guidance.");
-				expect(request.messages.filter((message) => message.role === "system")).toHaveLength(1);
+				expect(getCurrentSystemPrompt(request.messages)).toBe("Exact child guidance.\n\nContext addition.");
+				expect(request.messages.filter((message) => message.role === "system")).toHaveLength(2);
 			}
 			expect(getCurrentTools(requests[0].messages).map((tool) => tool.name)).toEqual(["load"]);
 			expect(getCurrentTools(requests[1].messages).map((tool) => tool.name)).toEqual(["structured_output"]);
 			expect(JSON.stringify(requests[1].messages)).toContain("Continue here.");
-			expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 			expect(harness.session.messages.at(-1)).toMatchObject({
 				role: "toolResult",
 				toolName: "structured_output",
@@ -493,15 +433,10 @@ describe("system prompt updates", () => {
 			harness.session.setActiveToolsByName(["second"]);
 			await harness.session.prompt("old second input");
 			const prompt = harness.session.agent.state.systemPrompt;
-			harness.session.newContext({ handoff: "continue here" });
-			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "custom"]);
+			harness.sessionManager.appendCompaction("continue here", null, 0);
+			harness.session.refreshContext();
+			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "compactionSummary"]);
 			expect(harness.session.agent.state.systemPrompt).toBe(prompt);
-			for (const type of ["message_start", "message_end"] as const) {
-				expect(harness.eventsOfType(type).at(-1)?.message).toMatchObject({
-					role: "custom",
-					customType: "context-window",
-				});
-			}
 			const { session: resumed } = await createAgentSession({
 				cwd: harness.tempDir,
 				agentDir: directory,
@@ -513,7 +448,7 @@ describe("system prompt updates", () => {
 				sessionManager: SessionManager.open(harness.session.sessionFile!),
 			});
 			try {
-				expect(resumed.messages.map((message) => message.role)).toEqual(["system", "custom"]);
+				expect(resumed.messages.map((message) => message.role)).toEqual(["system", "compactionSummary"]);
 				expect(resumed.agent.state.systemPrompt).toBe(prompt);
 				expect(resumed.systemPrompt).toBe(prompt);
 				expect(resumed.getActiveToolNames()).toEqual(["second"]);
@@ -552,7 +487,16 @@ describe("system prompt updates", () => {
 					pi.on("before_agent_start", (event) => {
 						event.systemPromptOptions.sections.policy = ++turn === 1 ? "first policy" : "second policy";
 					});
-					pi.on("session_before_auto_compact", () => ({ newContext: { handoff: "keep working" } }));
+					pi.on("session_before_compact", (event, ctx) => {
+						pi.appendEntry("posthorse-boundary", {});
+						return {
+							compaction: {
+								summary: "",
+								firstKeptEntryId: ctx.sessionManager.getLeafId()!,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
 				},
 			],
 		});
@@ -568,7 +512,7 @@ describe("system prompt updates", () => {
 			await harness.session.prompt("a".repeat(36_000));
 			await harness.session.prompt("b".repeat(28_000));
 			expect(requests).toHaveLength(1);
-			expect(harness.eventsOfType("context_window_started")).toHaveLength(1);
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 			expect(getCurrentSystemPrompt(requests[0].context.messages)).toBe(requests[0].prompt);
 			expect(requests[0].prompt).toContain("second policy");
 			expect(requests[0].prompt).toContain("<cwd>");
@@ -576,7 +520,7 @@ describe("system prompt updates", () => {
 			expect(getCurrentSystemPrompt(harness.sessionManager.buildSessionContext().messages)).toBe(requests[0].prompt);
 			expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionContext().messages);
 			const branch = harness.sessionManager.getBranch();
-			const boundary = branch.findIndex((entry) => entry.type === "context_window");
+			const boundary = branch.findIndex((entry) => entry.type === "compaction");
 			expect(
 				branch.slice(boundary + 1).filter((entry) => entry.type === "message" && entry.message.role === "system")
 					.length,

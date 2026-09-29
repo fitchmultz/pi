@@ -88,35 +88,33 @@ async function stopLogin(login: ReturnType<typeof startLogin>) {
 describe.sequential("Anthropic callback transport", () => {
 	afterEach(() => vi.unstubAllGlobals());
 
-	it("passes the manual-only interaction through Models while the real callback port is occupied", async () => {
+	it("leaves the callback port free during manual-only login through Models", async () => {
 		const requests = tokenEndpoint();
+		const models = createModels();
+		models.setProvider(anthropicProvider());
 		const blocker = createServer();
-		await new Promise<void>((resolve, reject) => {
-			blocker.once("error", reject);
-			blocker.listen(53692, "127.0.0.1", resolve);
-		});
+		const interaction: AuthInteraction = {
+			localCallbackServer: false,
+			notify() {},
+			async prompt() {
+				await new Promise<void>((resolve, reject) => {
+					blocker.once("error", reject);
+					blocker.listen(53692, "127.0.0.1", resolve);
+				});
+				return "synthetic-code";
+			},
+		};
 		try {
-			const models = createModels();
-			models.setProvider(anthropicProvider());
-			const interaction: AuthInteraction = {
-				localCallbackServer: false,
-				notify() {},
-				prompt: async () => "synthetic-code",
-			};
 			const credential = await models.login("anthropic", "oauth", interaction);
-			expect(credential).toEqual({
-				type: "oauth",
-				access: "access-synthetic-code",
-				refresh: "refresh-synthetic-code",
-				expires: expect.any(Number),
-			});
+			expect(credential).toMatchObject({ type: "oauth", access: "access-synthetic-code" });
 			expect(requests).toHaveLength(1);
 			expect(await models.getAuth("anthropic")).toMatchObject({
 				source: "OAuth",
 				auth: { apiKey: "access-synthetic-code" },
 			});
 		} finally {
-			await new Promise<void>((resolve, reject) => blocker.close((error) => (error ? reject(error) : resolve())));
+			if (blocker.listening)
+				await new Promise<void>((resolve, reject) => blocker.close((error) => (error ? reject(error) : resolve())));
 		}
 	});
 

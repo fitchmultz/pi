@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1-}" == --help || "${1-}" == -h ]]; then
+	printf '%s\n' 'Usage: ./test.sh [-- <command> [args...]]' 'Example: ./test.sh -- node --test scripts/install-fork.test.mjs' 'Runs offline in an isolated home; exits with the command status.'
+	exit 0
+fi
+
 # Resolve the actual distribution BEFORE replacing HOME. Version-manager shims
 # (notably mise) cannot discover their installation under an isolated home.
 real_node="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
@@ -83,6 +88,15 @@ for name in SystemRoot SYSTEMROOT WINDIR COMSPEC PATHEXT; do
 	value="${!name-}"
 	[[ -z "$value" ]] || test_env+=("$name=$value")
 done
+
+# Termux needs its native exec wrapper and shell even inside the isolated home.
+if [[ "$($real_node -p 'process.platform')" == android ]]; then
+	for name in PREFIX LD_PRELOAD; do
+		value="${!name-}"
+		[[ -z "$value" ]] || test_env+=("$name=$value")
+	done
+	test_env+=("npm_config_script_shell=$node_bin/bash")
+fi
 
 # Explicit test inputs only; never inherit provider keys or runtime/session state.
 for name in CI GITHUB_ACTIONS PI_TEST_CLI; do

@@ -649,20 +649,17 @@ describe("session-owned background completion", () => {
 		expect(notices(session)).toHaveLength(1);
 	});
 
-	it("uses effective settings, native cwd hooks, and current Bash metadata", async () => {
+	it("uses effective shell settings, session cwd, and current Bash metadata", async () => {
 		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-background-settings-")));
 		roots.push(root);
-		const selected = join(root, "selected");
-		mkdirSync(selected);
 		const shell = join(root, "shell");
 		writeFileSync(shell, '#!/bin/sh\nexport BACKGROUND_SHELL=effective\nexec /bin/bash "$@"\n', { mode: 0o755 });
 		const h = await harness({
-			settingsManager: SettingsManager.inMemory({
+			settings: {
 				shellPath: shell,
 				shellCommandPrefix: "export BACKGROUND_PREFIX=effective",
 				compaction: { enabled: false },
-			}),
-			extensionFactories: [(pi) => pi.registerBashCwdHook(() => selected)],
+			},
 		});
 		const session = h.session;
 		const command =
@@ -677,7 +674,7 @@ describe("session-owned background completion", () => {
 					backgroundCommandFinished(readBackgroundCommand(backgroundCommandDirectory(h.sessionManager), job.id)),
 				);
 				expect(readFileSync(job.logFile, "utf8")).toBe(
-					`${selected}\neffective effective ${session.sessionId} ${h.getModel().id}`,
+					`${realpathSync(h.tempDir)}\neffective effective ${session.sessionId} ${h.getModel().id}`,
 				);
 				return fauxAssistantMessage(fauxToolCall("background_command", { action: "status", id: job.id }), {
 					stopReason: "toolUse",

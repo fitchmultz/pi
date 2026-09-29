@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ToolSelection } from "@earendil-works/pi-ai";
 import type { RestartCheckpoint } from "../cli/restart-protocol.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { CustomMessage } from "./messages.ts";
+import { assertSessionConversionNotRequired } from "./session-conversion.ts";
 import { type SessionEntry, type SessionHeader, SessionManager } from "./session-manager.ts";
 
 export type CheckpointBoundary = "turn" | "settled";
@@ -78,8 +78,8 @@ export interface SessionCheckpoint {
 	queues: SessionCheckpointQueues;
 	/** Native registry restrictions, not inferred from the active/known tool names. Absent on older v1 artifacts. */
 	toolConfiguration?: {
-		allowedToolNames?: ToolSelection[];
-		excludedToolNames?: ToolSelection[];
+		allowedToolNames?: string[];
+		excludedToolNames?: string[];
 		noBuiltinTools?: boolean;
 	};
 	/** Exact native cycling scope, including session-only picker changes. Absent on older artifacts. */
@@ -148,7 +148,13 @@ export function prepareCheckpointExit(path: string): (checkpoint: SessionCheckpo
 /** Read trusted, owner-private native data; reject malformed selection before touching the journal. */
 export function readSessionCheckpoint(path: string): SessionCheckpoint {
 	const value = JSON.parse(readFileSync(path, "utf8")) as SessionCheckpoint;
+	validateSessionCheckpoint(value);
+	return value;
+}
+
+function validateSessionCheckpoint(value: SessionCheckpoint): void {
 	if (
+		!value ||
 		value.version !== 1 ||
 		!value.selection ||
 		!value.header ||
@@ -164,6 +170,24 @@ export function readSessionCheckpoint(path: string): SessionCheckpoint {
 		!Array.isArray(value.queues.persistOnCancel)
 	)
 		throw new Error("Invalid session checkpoint");
+	for (const selection of [
+		value.selection.activeTools,
+		value.selection.knownTools,
+		value.toolConfiguration?.allowedToolNames ?? [],
+		value.toolConfiguration?.excludedToolNames ?? [],
+	]) {
+		if (!Array.isArray(selection) || selection.some((name) => typeof name !== "string" || !name)) {
+			throw new Error("Checkpoint uses unsupported tool references; resume and settle it in its original runtime");
+		}
+	}
+	assertSessionConversionNotRequired([
+		value.header,
+		...value.entries,
+		...[...value.queues.steering, ...value.queues.followUp, ...value.queues.nextTurn].map((message) => ({
+			type: "message",
+			message,
+		})),
+	]);
 	const ids = new Set<string>();
 	for (const entry of value.entries) {
 		if (!entry.id || ids.has(entry.id) || (entry.parentId !== null && !ids.has(entry.parentId))) {
@@ -174,11 +198,11 @@ export function readSessionCheckpoint(path: string): SessionCheckpoint {
 	if (value.selection.leafId !== null && !ids.has(value.selection.leafId)) {
 		throw new Error("Checkpoint leaf is missing");
 	}
-	return value;
 }
 
 /** Restore selection BEFORE constructing AgentSession. Never overwrite a newer/different journal. */
 export function openSessionCheckpoint(checkpoint: SessionCheckpoint): SessionManager {
+	validateSessionCheckpoint(checkpoint);
 	const { selection, header, entries } = checkpoint;
 	if (existsSync(selection.sessionFile)) {
 		// SessionManager.open initializes empty files and migrates old journals. Validate bytes

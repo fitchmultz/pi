@@ -57,14 +57,22 @@ describe("AgentSession auto-compaction queue resume", () => {
 		}
 	});
 
-	it("lets an extension replace automatic compaction with a native context window", async () => {
+	it("lets an extension replace automatic compaction with summary-free rollover", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_compact", (event) =>
-						event.reason === "manual" ? undefined : { newContext: { handoff: "automatic handoff" } },
-					);
+					pi.on("session_before_compact", (event, ctx) => {
+						if (event.reason === "manual") return;
+						pi.appendEntry("posthorse-boundary", {});
+						return {
+							compaction: {
+								summary: "",
+								firstKeptEntryId: ctx.sessionManager.getLeafId()!,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
 				},
 			],
 		});
@@ -81,11 +89,15 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 			await expect(runAutoCompaction("overflow", true)).resolves.toBe(true);
 
-			expect(harness.sessionManager.getBranch().some((entry) => entry.type === "context_window")).toBe(true);
-			expect(harness.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
-			expect(harness.session.messages.map((message) => message.role)).toEqual(["custom"]);
+			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+			expect(harness.session.messages.map((message) => message.role)).toEqual(["compactionSummary"]);
+			expect(harness.faux.state.callCount).toBe(0);
 			expect(harness.eventsOfType("compaction_end")).toContainEqual(
-				expect.objectContaining({ reason: "overflow", contextWindowStarted: true, willRetry: true }),
+				expect.objectContaining({
+					reason: "overflow",
+					result: expect.objectContaining({ summary: "" }),
+					willRetry: true,
+				}),
 			);
 		} finally {
 			harness.cleanup();

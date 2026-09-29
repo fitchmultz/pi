@@ -23,7 +23,9 @@ const WORKSPACE = {
 	"@earendil-works/pi-ai": "packages/ai/src",
 	"@earendil-works/pi-durable": "packages/durable/src",
 	"@earendil-works/pi-agent-core": "packages/agent/src",
+	"@earendil-works/pi-codemode": "packages/codemode/src",
 	"@earendil-works/pi-telemetry": "packages/telemetry/src",
+	"@earendil-works/pi-mcp": "packages/mcp/src",
 	"@earendil-works/pi-tui": "packages/tui/src",
 };
 
@@ -33,13 +35,11 @@ const WORKSPACE = {
  */
 const BUDGETS = {
 	"packages/ai": {
-		// Transcript projection shares the physical-input estimator used by provider admission.
-		"./utils/*": { maxFiles: 4, forbid: ["providers/", "api/", "index.ts"] },
+		"./utils/*": { maxFiles: 3, forbid: ["providers/", "api/", "index.ts"] },
 	},
 	"packages/agent": {
 		"./harness/runtime/reducer": { maxFiles: 1 },
 		"./harness/context": { maxFiles: 6, forbid: ["harness/runtime/", "harness/execution/", "packages/ai/"] },
-		// Includes native path/queue handling, pipe decoding, and cancellation-free final output.
 		"./harness/env/nodejs": { maxFiles: 10, forbid: ["packages/ai/", "harness/runtime/"] },
 		"./harness/session": { maxFiles: 25, forbid: ["harness/runtime/", "harness/execution/", "packages/ai/src/index.ts"] },
 	},

@@ -1,8 +1,10 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { type AssistantMessage, fauxAssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
+import { createHarness } from "./suite/harness.ts";
 
 type EmitEvent = SessionShutdownEvent;
 
@@ -12,7 +14,10 @@ type FakeExtensionRunner = {
 };
 
 type FakeSession = {
-	sessionManager: { getHeader: () => object | undefined };
+	sessionManager: {
+		getHeader: () => object | undefined;
+		getBranch: () => Array<{ type: "message"; message: AgentMessage }>;
+	};
 	agent: { subscribe: ReturnType<typeof vi.fn> };
 	waitForIdle: () => Promise<void>;
 	state: { messages: AgentMessage[] };
@@ -66,12 +71,11 @@ function captureMessages(session: FakeSession): (message: AgentMessage) => void 
 	return (message) => listener?.({ type: "message_end", message });
 }
 
-const contextWindowMarker: AgentMessage = {
+const contextMarker: AgentMessage = {
 	role: "custom",
-	customType: "context-window",
-	content: "Fresh context window",
+	customType: "context",
+	content: "Fresh context",
 	display: true,
-	details: { windowId: "window-2" },
 	timestamp: Date.now(),
 };
 
@@ -84,7 +88,10 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 	const state = { messages: [assistantMessage] };
 
 	const session: FakeSession = {
-		sessionManager: { getHeader: () => undefined },
+		sessionManager: {
+			getHeader: () => undefined,
+			getBranch: () => state.messages.map((message) => ({ type: "message", message })),
+		},
 		agent: { subscribe: vi.fn(() => () => {}) },
 		waitForIdle: async () => {},
 		state,
@@ -129,37 +136,51 @@ describe("runPrintMode", () => {
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
 
-	it("prints the completed response when context follows a native reset", async () => {
-		const assistantMessage = createAssistantMessage({ text: "done" });
-		const runtimeHost = createRuntimeHost(assistantMessage);
-		const { session } = runtimeHost;
-		const emitMessage = captureMessages(session);
-		session.prompt.mockImplementation(async () => {
-			emitMessage(assistantMessage);
-			emitMessage(contextWindowMarker);
-			session.state.messages = [
-				contextWindowMarker,
+	it.each(["compaction", "custom_message"] as const)(
+		"prints the completed response after public %s adds trailing context",
+		async (type) => {
+			const harness = await createHarness({
+				tools: [],
+				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("turn_end", () => ({
+							entries:
+								type === "compaction"
+									? [{ type, summary: "", firstKeptEntryId: null }]
+									: [{ type, customType: "after-end", content: "extra context", display: false }],
+						}));
+					},
+				],
+			});
+			onTestFinished(() => harness.cleanup());
+			harness.setResponses([fauxAssistantMessage("done")]);
+			const runtime = new AgentSessionRuntime(
+				harness.session,
 				{
-					role: "custom",
-					customType: "after-end",
-					content: "extra context",
-					display: false,
-					timestamp: Date.now(),
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					modelRuntime: harness.session.modelRuntime,
+					settingsManager: harness.settingsManager,
+					resourceLoader: harness.session.resourceLoader,
+					diagnostics: [],
 				},
-			];
-		});
-		const stdout = vi.spyOn(process.stdout, "write");
+				async () => {
+					throw new Error("This prompt must not replace the session");
+				},
+			);
+			const stdout = vi.spyOn(process.stdout, "write");
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-			initialMessage: "Say done",
-		});
+			const exitCode = await runPrintMode(runtime, { mode: "text", initialMessage: "Say done" });
 
-		expect(exitCode).toBe(0);
-		expect(stdout).toHaveBeenCalledWith("done\n", expect.any(Function));
-	});
+			expect(exitCode).toBe(0);
+			expect(harness.session.messages.at(-1)?.role).toBe(type === "compaction" ? "compactionSummary" : "custom");
+			expect(stdout.mock.calls.map(([chunk]) => String(chunk)).join("")).toBe("done\n");
+			expect(harness.faux.state.callCount).toBe(1);
+		},
+	);
 
-	it("prefers the branch selected by a later print-mode prompt", async () => {
+	it.each([false, true])("prefers the selected branch with compacted=%s after a later prompt", async (compacted) => {
 		const selectedBranch = createAssistantMessage({ text: "selected branch" });
 		const laterBranch = createAssistantMessage({ text: "later branch" });
 		const runtimeHost = createRuntimeHost(selectedBranch);
@@ -171,7 +192,8 @@ describe("runPrintMode", () => {
 				emitMessage(laterBranch);
 				session.state.messages = [laterBranch];
 			} else {
-				session.state.messages = [selectedBranch];
+				session.state.messages = compacted ? [contextMarker] : [selectedBranch];
+				session.sessionManager.getBranch = () => [{ type: "message", message: selectedBranch }];
 			}
 		});
 		const stdout = vi.spyOn(process.stdout, "write");
@@ -198,7 +220,7 @@ describe("runPrintMode", () => {
 				emitMessage(earlier);
 				session.state.messages = [earlier];
 			} else {
-				session.state.messages = [contextWindowMarker];
+				session.state.messages = [contextMarker];
 			}
 		});
 		const stdout = vi.spyOn(process.stdout, "write");
@@ -213,16 +235,48 @@ describe("runPrintMode", () => {
 		expect(stdout).not.toHaveBeenCalledWith("earlier response\n", expect.any(Function));
 	});
 
-	it("does not print an intermediate assistant after a reset when a terminating tool leaves the branch tip", async () => {
+	it.each(["user", "toolResult", "toolUse"] as const)(
+		"does not recover an older answer across a later %s after compaction",
+		async (role) => {
+			const earlier = createAssistantMessage({ text: "earlier response" });
+			const latest: AgentMessage =
+				role === "toolUse"
+					? createAssistantMessage({ text: "intermediate preamble", stopReason: "toolUse" })
+					: role === "user"
+						? { role, content: "new question", timestamp: Date.now() }
+						: {
+								role,
+								toolCallId: "call-1",
+								toolName: "stop",
+								content: [{ type: "text", text: "stopped" }],
+								isError: false,
+								timestamp: Date.now(),
+							};
+			const runtimeHost = createRuntimeHost(earlier);
+			runtimeHost.session.state.messages = [contextMarker];
+			runtimeHost.session.sessionManager.getBranch = () => [
+				{ type: "message", message: earlier },
+				{ type: "message", message: latest },
+			];
+			const stdout = vi.spyOn(process.stdout, "write");
+
+			expect(
+				await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], { mode: "text" }),
+			).toBe(0);
+			expect(stdout.mock.calls.map(([chunk]) => String(chunk)).join("")).toBe("");
+		},
+	);
+
+	it("does not print an intermediate assistant when a terminating tool leaves the branch tip", async () => {
 		const intermediate = createAssistantMessage({ text: "intermediate preamble", stopReason: "toolUse" });
 		const runtimeHost = createRuntimeHost(intermediate);
 		const { session } = runtimeHost;
 		const emitMessage = captureMessages(session);
 		session.prompt.mockImplementation(async () => {
-			emitMessage(contextWindowMarker);
+			emitMessage(contextMarker);
 			emitMessage(intermediate);
 			session.state.messages = [
-				contextWindowMarker,
+				contextMarker,
 				intermediate,
 				{
 					role: "toolResult",

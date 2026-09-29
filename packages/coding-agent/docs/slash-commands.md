@@ -60,4 +60,4 @@ Review a session before exporting or sharing it. Sessions can contain prompts, t
 - Each prompt template is available under its template name.
 - Skills are available as `/skill:name` when skill commands are enabled.
 
-Use `/reload` after changing non-code resources. Extension code and dependency updates require a full process restart; see [Managed Restarts](restart.md). See [Extensions](extensions.md), [Prompt Templates](prompt-templates.md), and [Skills](skills.md) for their loading and naming rules.
+Use `/reload` after changing extension code or resources. Use [Managed Restarts](restart.md) for core changes or a clean process; already-loaded dependencies may also require a restart. See [Extensions](extensions.md), [Prompt Templates](prompt-templates.md), and [Skills](skills.md) for their loading and naming rules.

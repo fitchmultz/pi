@@ -196,12 +196,10 @@ describe("AgentSession compaction model overrides", () => {
 			},
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_auto_compact", async (_event, ctx) => {
+					pi.on("session_before_compact", async (event, ctx) => {
+						preparations.push(event);
 						await Promise.resolve();
 						await pi.setModel(ctx.modelRegistry.find("faux", "second")!);
-					});
-					pi.on("session_before_compact", (event) => {
-						preparations.push(event);
 					});
 				},
 			],

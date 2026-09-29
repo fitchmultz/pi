@@ -54,21 +54,15 @@ Thinking signatures contain provider-specific replay data. Treat them as opaque.
 ```typescript
 interface ToolCall {
   type: "toolCall";
-  kind?: "toolSearch";
   id: string;
   name: string;
   arguments: JsonObject;
   thoughtSignature?: string;
   namespace?: string;
-  async?: boolean;
-  responsesItem?: ResponseFunctionToolCall | ResponseCustomToolCall;
-  executionStarted?: boolean;
-  executionArguments?: JsonObject;
-  executionDetached?: boolean;
 }
 ```
 
-`thoughtSignature` is provider-specific. Identity is the exact `(namespace, name)` pair across registration, transport, execution, and replay. Function-only providers use collision-checked aliases without changing the saved identity. `responsesItem` retains the original provider item while `executionArguments` records validated, preflight-adjusted input. See [native asynchronous tools](sdk.md#native-asynchronous-tools-and-steering) for execution and recovery.
+`thoughtSignature` is provider-specific. `namespace` identifies an OpenAI Responses namespace for dynamically loaded or namespaced calls. Pi's callable tool references use public names. [On-demand instruction groups](instruction-groups.md) expose full extension-owned instructions without widening callable permissions.
 
 ## Usage
 
@@ -106,12 +100,11 @@ interface SystemMessage {
   sections?: Record<string, string | null>;
   toolsAdded?: Tool[];
   toolsRemoved?: ToolReference[];
-  replace?: boolean;
   timestamp: number;
 }
 ```
 
-The leading system message declares the initial prompt and tools. Later system messages can append instructions, replace or remove named prompt sections, and add or remove tools. Replaying them in order yields the current state. A message with `replace: true` discards the earlier state and establishes a complete new baseline.
+The leading system message declares the initial prompt and tools. Later system messages can append instructions, replace or remove named prompt sections, and add or remove tools. Replaying them in order yields the current state.
 
 ### UserMessage
 
@@ -141,7 +134,8 @@ interface AssistantMessage {
   deferred?: DeferredHandle;
   errorMessage?: string;
   rawStopReason?: string;
-  toolExecutionFailed?: boolean;
+  thinkingLevel?: ModelThinkingLevel;
+  webSearch?: ResponsesWebSearchMetadata;
   endTurn?: boolean;
   timestamp: number;
 }
@@ -149,9 +143,7 @@ interface AssistantMessage {
 
 `responseModel` records a concrete provider response model when it differs from the requested model. `responseId`, `providerThinkingLevel`, `diagnostics`, and `rawStopReason` preserve provider or runtime details.
 
-`toolExecutionFailed` is local execution bookkeeping derived by session projection from the original response's foreground failure receipts on the active branch. It preserves that response's fresh-window veto when those receipts leave model context. It is not provider input.
-
-`"pending"` appears during streaming and in durable assistant snapshots marked `checkpoint: true`. Completed responses use ordinary message entries with terminal stop reasons. Checkpoints are not additional billable responses; see [session snapshots](session-format.md#sessionmessageentry).
+`thinkingLevel` is the requested Pi thinking level. `webSearch` records provider-reported hosted web actions and citations, not fetched page content. `"pending"` appears during streaming; it is not a durable native execution snapshot. `"deferred"` remains a provider stop reason, but conversion refuses unfinished deferred legacy responses.
 
 A `"deferred"` response has a `DeferredHandle` with the provider data needed to retrieve it:
 
@@ -170,39 +162,24 @@ interface DeferredHandle {
 ### ToolResultMessage
 
 ```typescript
-interface ToolResultMessage<TDetails = any> {
+type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails> extends true ? {
   role: "toolResult";
   toolCallId: string;
   toolName: string;
-  namespace?: string;
-  toolCallKind?: "toolSearch";
-  toolsAdded?: Tool[];
-  elapsedMs?: number;
-  executionSkipped?: boolean;
+  nestedCalls?: NestedToolCalls;
   content: (TextContent | ImageContent)[];
-  details?: TDetails;
+  details?: JsonRepresentation<TDetails>;
   usage?: Usage;
   isError: boolean;
   timestamp: number;
-}
+} : never;
 ```
 
-`details` is tool-specific. Optional `usage` reports nested model work and contributes to full-session statistics, separately from the main model call. `elapsedMs` measures executor time only; blocked calls omit it. `toolsAdded` holds core-resolved discovery declarations, including `[]` for an empty native search result.
-
-`executionSkipped: true` identifies a foreground scheduling failure, such as truncated arguments or interrupted ordered execution. Its error vetoes a sibling fresh-window request after restore just as it does live. Native background failures, including preflight blocks, do not acquire that veto. Older results without the field retain their existing classification.
+`details` is JSON-compatible tool-specific data. `nestedCalls` has `{ calls: NestedToolCallRecord[], complete: boolean }`; each record names a nested tool and its status, but not its result. It is not model input. Optional `usage` reports nested model work and contributes to full-session statistics, separately from the main model call.
 
 ### Provider request diagnostics
 
-Codex, OpenAI Responses, and Azure Responses persist `provider_request` diagnostics on successful and failed messages. Details contain allowlisted transport, byte-count, socket/recovery, service-tier, and timing facts; they are not model input or ordinary transcript notices.
-
-- `timingOrigin: "adapter_start"` starts inside the adapter after earlier runtime preparation. Offsets use a monotonic clock; `onPayloadMs` and `connectMs` are durations, while socket/application-event ages are ages. Payload-hook time includes `before_provider_request`, not all extension work.
-- `headersMs` marks fetch/SDK response availability before `onResponse`. Event times measure adapter consumption, including reasoning/tool deltas, rather than network arrival or provider-only latency. `finishedMs` precedes later hooks/persistence.
-- Counters cover that invocation. SSE counts fetch/SDK calls, not redirects. Recovery retains first-event times and latest socket/attempt facts, which may describe different attempts. Missing fields mean unobserved boundaries.
-- OpenAI/Codex `requestShape` measures serialized UTF-8 bytes for instructions, tools and input, with allowlisted input-role/type buckets (including reasoning), tool count, and the first 128 top-level tool-definition sizes by ordinal. It stores no prompt, schema or tool-name content. Value sizes include JSON quoting/escaping but exclude enclosing keys/separators; they are not billed token counts.
-- `requestShapeScope: "full_request"` measures Codex's post-hook JSON or the OpenAI SDK's serialized SSE body. `"websocket_logical_body"` reuses OpenAI's serialized continuation components before delta selection, excluding `stream`; stateful serializers may produce different later wire values. `fullBodyBytes` follows this scope. Azure does not yet report shape measurements.
-- Codex `websocketSendBytes` counts the UTF-8 payload passed to send, including `response.create`, after delta selection; `sseSendBytes` counts the optionally compressed fetch body. Neither proves network delivery or reduced provider-billed context.
-- `requestedServiceTier` is post-hook input; `returnedServiceTier` is the recognized raw terminal tier before pricing. `fast` and `priority` stay distinct; missing/null/unrecognized tiers are `unknown`. A request for priority does not prove delivery.
-- Close code/cleanliness and local timeouts are independent evidence, not error classifications. Pi captures synchronous closes without waiting for late ones or changing retry policy. See [WebSocket diagnostics](websocket-recovery.md).
+Assistant diagnostics are redacted provider/runtime observations, not model input. A request's timing, transport, service-tier, and byte-count observations do not establish network receipt, billed tokens, or provider cache hits. Codex WebSocket transport failures can retain `provider_transport_failure` diagnostics; see [Codex WebSocket recovery](websocket-recovery.md).
 
 ## Coding-agent messages
 

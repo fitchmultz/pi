@@ -1,8 +1,8 @@
 import { type AuthCheck, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProviderConfig } from "../src/core/extensions/types.ts";
 import { findInitialModel } from "../src/core/model-resolver.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
+import type { ProviderConfigInput } from "../src/core/provider-composer.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -15,7 +15,7 @@ function deferred() {
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 const healthy: AuthCheck = { type: "oauth", source: "shared account" };
 
-type Check = NonNullable<ProviderConfig["ambientAuth"]>["check"];
+type Check = NonNullable<ProviderConfigInput["ambientAuth"]>["check"];
 
 describe("availability overlap barrier (PR #66)", () => {
 	let runtime: ModelRuntime;
@@ -208,7 +208,7 @@ describe("availability overlap barrier (PR #66)", () => {
 			entered = deferred(),
 			release = deferred();
 		const failure = new Error("actual storage failure");
-		vi.spyOn(credentials, "list").mockImplementationOnce(async () => {
+		vi.spyOn(credentials, "read").mockImplementationOnce(async () => {
 			listEntered.resolve();
 			await listRelease.promise;
 			throw failure;
@@ -226,7 +226,7 @@ describe("availability overlap barrier (PR #66)", () => {
 		listRelease.resolve();
 		await nextTurn();
 		release.resolve();
-		expect(await older).toBe(failure);
+		expect(await older).toMatchObject({ cause: failure });
 		expect((await newer).filter((model) => model.provider === "anthropic")).toEqual(runtime.getModels("anthropic"));
 		expect(runtime.hasConfiguredAuth("anthropic")).toBe(true);
 	});

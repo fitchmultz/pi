@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
 import { getModel, normalizeContext } from "../src/compat.ts";
-import type { Model, ToolCall } from "../src/types.ts";
+import type { Api, Model, ToolCall } from "../src/types.ts";
 
 function createSseResponse(events: Array<{ event: string; data: string }>): Response {
 	const body = events.map(({ event, data }) => `event: ${event}\ndata: ${data}\n`).join("\n");
@@ -110,6 +110,35 @@ function createResponseModelSseResponse(model: string, contentBlock: ResponseCon
 }
 
 describe("Anthropic raw SSE parsing", () => {
+	it("forwards parsed provider stream events in order", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const providerEvents: unknown[] = [];
+		const eventModels: Model<Api>[] = [];
+		const result = await streamAnthropic(
+			model,
+			normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
+			{
+				client: createFakeAnthropicClient(createSseResponse(minimalAnthropicEvents)),
+				onProviderStreamEvent: async (event, eventModel) => {
+					await Promise.resolve();
+					providerEvents.push(event);
+					eventModels.push(eventModel);
+				},
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(providerEvents.map((event) => (event as { type: string }).type)).toEqual([
+			"message_start",
+			"content_block_start",
+			"content_block_delta",
+			"content_block_stop",
+			"message_delta",
+			"message_stop",
+		]);
+		expect(eventModels).toEqual([model, model, model, model, model, model]);
+	});
+
 	it("keeps signed thinking replayable when a proxy relabels the model", async () => {
 		// Regression test for earendil-works/pi#9188.
 		const model = getModel("anthropic", "claude-opus-5");
@@ -253,18 +282,7 @@ describe("Anthropic raw SSE parsing", () => {
 		} as unknown as Anthropic;
 
 		await streamAnthropic(
-			{
-				id: "anthropic/claude-3-haiku",
-				name: "Claude 3 Haiku",
-				api: "anthropic-messages",
-				provider: "openrouter",
-				baseUrl: "https://openrouter.ai/api",
-				reasoning: false,
-				input: ["text", "image"],
-				cost: { input: 0.25, output: 1.25, cacheRead: 0.03, cacheWrite: 0.3 },
-				contextWindow: 200000,
-				maxTokens: 4096,
-			},
+			getModel("openrouter", "anthropic/claude-haiku-4.5"),
 			normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
 			{ client, thinkingEnabled: false },
 		).result();
@@ -312,7 +330,6 @@ describe("Anthropic raw SSE parsing", () => {
 		const delta = JSON.parse(events[4].data) as Record<string, unknown>;
 		delta.input_transformations = [
 			{ type: "thinking_dropped", path: "messages.3.content.0", reason: "model_binding_mismatch" },
-			{ type: "thinking_mismatch_allowed", path: "messages.4.content.0", reason: "prefix_binding_mismatch" },
 		];
 		events[4].data = JSON.stringify(delta);
 
@@ -322,26 +339,23 @@ describe("Anthropic raw SSE parsing", () => {
 			{ client: createFakeAnthropicClient(createSseResponse(events)) },
 		).result();
 
-		expect(result.diagnostics?.filter((entry) => entry.type === "anthropic_input_transformations")).toEqual([
-			{
-				type: "anthropic_input_transformations",
-				timestamp: expect.any(Number),
-				details: {
-					transformations: [
-						{
-							type: "thinking_dropped",
-							path: "messages.3.content.0",
-							reason: "model_binding_mismatch",
-						},
-						{
-							type: "thinking_mismatch_allowed",
-							path: "messages.4.content.0",
-							reason: "prefix_binding_mismatch",
-						},
-					],
+		expect(result.diagnostics?.filter((diagnostic) => diagnostic.type === "anthropic_input_transformations")).toEqual(
+			[
+				{
+					type: "anthropic_input_transformations",
+					timestamp: expect.any(Number),
+					details: {
+						transformations: [
+							{
+								type: "thinking_dropped",
+								path: "messages.3.content.0",
+								reason: "model_binding_mismatch",
+							},
+						],
+					},
 				},
-			},
-		]);
+			],
+		);
 	});
 	it("repairs malformed SSE JSON and malformed streamed tool JSON", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");

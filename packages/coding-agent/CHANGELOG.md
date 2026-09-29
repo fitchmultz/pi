@@ -4,26 +4,49 @@
 
 ### Added
 
-- Added opt-in provider credential isolation so account-routing extensions can bypass stored credentials without deleting or refreshing them, while preserving explicit request/CLI keys and native login/logout.
-- Added the `live_tool_result` extension event, which supplies model-only tool result content for native WebSocket continuations that bypass context hooks.
-- Added experimental provider-scoped `toolDiscovery` settings and an ordinary `discover_tools` loader for optional integrations, plus tool-owned custom prompt sections that deliver full guidance when activated. See [Tool Discovery](docs/tool-discovery.md).
-- Added transport close diagnostics (close code, redacted reason, initiator, timing, pending steering state) to persisted `response-steering` entries when a steering outcome is unknown. See [WebSocket recovery](docs/websocket-recovery.md).
+- Added opt-in provider credential isolation for account-routing extensions without deleting stored credentials.
+- Added durable `background_command` shell jobs with status, logs, and completion receipts across Pi exit.
+- Added working-session checkpoints and managed Node CLI restart with pending-input protection and one-attempt startup rollback.
+- Added `pi convert-session SOURCE NEW_PATH` for settled legacy sessions, writing a new copy without replaying uncertain work.
+- Added extension-owned on-demand instruction groups without broadening tool permissions.
+- Added JSON path and field selection before `read` output truncation, optional compact transcript view, background external usage accounting, and PTY-backed RPC TUI handoff.
+
+- Added the `fullscreenWheelScrollLines` setting and `/settings` entry for fullscreen mouse-wheel scrolling. The default `"auto"` accelerates fast wheel spins outside local macOS terminals ([#9758](https://github.com/earendil-works/pi/issues/9758)).
+- Added per-input disposition to successful RPC `prompt`, `steer`, and `follow_up` responses, `AgentSession.steer()`/`followUp()`, and `RpcClient.prompt()`/`steer()`/`followUp()`; `RpcClient.prompt()` also accepts `streamingBehavior` ([#9098](https://github.com/earendil-works/pi/issues/9098), [#9803](https://github.com/earendil-works/pi/issues/9803)).
+- Added image generation to `ModelRuntime`: `generateImages()` with runtime-resolved auth (stored credentials, OAuth, runtime API keys, `models.json` headers), plus `getModelsOfType()`, `getModelOfType()`, `getAvailableOfType()`, `getAllModels()`, and `getAllAvailable()`. OpenRouter image models are listed under the `openrouter` provider and share its credential; an upstream ID can have separate chat and image entries. `models.json` providers and extension registrations without a model list keep built-in image generation. Extension model lists can include discriminated chat, image, and classifier entries with operation implementations; when supplied, they replace the provider catalog across every operation. Chat-facing reads (`getModels()`, `getAvailableSnapshot()`, the model picker) are unchanged.
+- Added classifier support to `ModelRuntime`, including `classify()`, classifier model accessors, runtime-resolved authentication, and the built-in TypeSafe `jev-latest` model.
+- Added `types=chat,image,classifier` to pi.dev model catalog requests so remote refreshes overlay every supported model type; entries of unknown model types are ignored.
+- Added the `provider_stream_event` extension event for observing parsed provider events before normalization, with an opt-in `/debug-provider` example viewer ([#9784](https://github.com/earendil-works/pi/issues/9784)).
+- Added a show/hide toggle (`H`) in HTML exports for custom messages marked `display: false`. Messages remain hidden by default and can also be revealed from the sidebar ([#8896](https://github.com/earendil-works/pi/issues/8896)).
+- Added inherited Claude Sonnet 5.5 support for Anthropic with adaptive thinking and a 1M context window.
+- Added a Built-in section in `pi config` to disable the built-in `mcp`, `llama.cpp`, `codemode`, and `tool-search` extensions globally or per project, stored as `-builtin:<name>` in the `extensions` setting. SDK inline extensions opt in with `builtin: true`.
+- Added `+name` and `-name` entries to the `defaultTools` setting to add or remove tools without repeating the defaults, for example `"defaultTools": ["+codemode"]`. Project entries of this form apply on top of the user setting. Documented how to enable `codemode` without MCP and how to use classifier models such as Jev from codemode scripts.
 
 ### Changed
 
-- Changed the default Fireworks model to Kimi K3; Fireworks retired Kimi K2.6 from its catalog.
-- Changed the default OpenCode Go model to Kimi K3; OpenCode Go retired Kimi K2.6 from its catalog.
-- Changed `context_with_system` handling for new context windows: Pi restores its marked native system/tool declaration at index 0 with its initial tools after each handler and reports a warning when a handler removes, displaces, or reconstructs it; handlers may still edit its content and sections. See [Extensions](docs/extensions.md).
-- Changed cache miss notices and `/session` to list the changes observed between requests (model, service tier, tool definitions, instructions, older async results admitted, new connection, full resend, idle gap) plus provider-supplied reasons, and to report an actual drop in cached reads separately from tokens not read from cache. Dollar amounts are labeled estimates. See [settings](docs/settings.md).
+- Switched the build from the TypeScript native preview to TypeScript 7.0 with an ES2024 target, and replaced `tsx` with Node's built-in type stripping for running from source ([#9965](https://github.com/earendil-works/pi/issues/9965)).
+- Removed the `[Themes]` section from the startup banner. Custom themes remain available in `/settings`, and theme conflicts are still reported.
+- Built-in extensions and tools are named `builtin:<name>` (for example `builtin:mcp` and `builtin:read`) in errors, diagnostics, RPC source info, and bug reports, instead of `<inline:name>` and `<builtin:name>`. Their slash commands no longer carry a `[t]` autocomplete tag.
+- `--no-extensions` also disables the built-in extensions, including the llama.cpp provider. Load one explicitly with `-e builtin:<name>`, for example `pi -ne -e builtin:mcp`.
+- Tool calls without a custom call renderer, including direct MCP tool calls, now show their arguments: as `key=value` pairs on the title line when collapsed and one `key: value` line per argument when expanded. MCP calls are titled `server/tool` and their results collapse to 5 lines.
 
 ### Fixed
 
-- Fixed context usage and automatic rollover losing measured reasoning tokens when request transforms add messages or append content blocks.
-- Fixed empty runtime API keys falling back to stored credentials; they are now rejected before changing the active override.
-- Fixed startup extension messages (such as Ponytail's mode receipt) displacing the native system/tool declaration, which disabled deferred tool additions: on Anthropic, lazily activated tools such as `intercom` rewrote the top-level tool list, reset the prompt cache and dropped earlier thinking; on OpenAI Codex, instructions and tools moved into input. Existing sessions adopt the fix at their next context window or compaction.
-- Fixed cache miss notices comparing a response with an abandoned branch after `/tree` navigation; live and redrawn notices now follow the active branch.
-- Fixed tool loadout changes during a session (reload, extension tool activation or removal) resetting the provider prompt cache when the provider supports append-only tool changes. Withdrawn tools are denied immediately, even while a response is generating.
-- Fixed extension provider stream overrides receiving namespaced tools under their bare names, so same-named MCP tools from two servers failed Anthropic requests with "Tool names must be unique".
+- Fixed context usage losing measured reasoning tokens when request transforms append content.
+- Fixed empty runtime API keys falling back to stored credentials.
+- Fixed cache notices comparing a response with an abandoned branch after `/tree`.
+
+- Fixed X11 clipboard text being misidentified as an image when the clipboard owner accepts unadvertised image targets ([#9786](https://github.com/earendil-works/pi/issues/9786)).
+- Prevented managed git packages from automatically installing Pi peer dependencies and added warnings for extension packages that list host-provided modules in `dependencies` ([#9863](https://github.com/earendil-works/pi/issues/9863)).
+- Fixed pinned git extensions loaded with `-e` continuing to use the first downloaded commit after the ref changes ([#9982](https://github.com/earendil-works/pi/issues/9982)).
+- Fixed `RpcClient` skipping the next event listener when a listener unsubscribes while handling an event, which could make `waitForIdle()` time out after `collectEvents()` ([#9990](https://github.com/earendil-works/pi/issues/9990)).
+- Fixed full-file `read` calls rendering as `:1` when models send `null` for omitted `offset` and `limit` ([#9996](https://github.com/earendil-works/pi/issues/9996)).
+- Fixed new sessions being lost when pi exits before the first assistant response. The session file is now created when the first user message is sent ([#10000](https://github.com/earendil-works/pi/issues/10000)).
+- Fixed unloaded llama.cpp autoload presets overwriting a cached runtime context window with the GGUF training context ([#10077](https://github.com/earendil-works/pi/issues/10077)).
+- Fixed the Fireworks default model pointing at the removed Kimi K2.6 model; it now defaults to Kimi K3.
+- Fixed the OpenCode Go default model pointing at the removed Kimi K2.6 model; it now defaults to Kimi K3.
+- Fixed the Together default model pointing at the removed Kimi K2.6 model; it now defaults to Kimi K3.
+- Reduced CPU use while streaming in long sessions and when previewing themes: the footer caches session usage totals, collapsed bash results cache their preview, and `sanitizeBinaryOutput()` no longer splits output into per-character arrays.
 
 ## [0.87.1] - 2026-09-22
 

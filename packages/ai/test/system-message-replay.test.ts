@@ -11,7 +11,6 @@ import {
 	hasNonAdditiveToolChanges,
 	hasToolRedefinitions,
 	normalizeContext,
-	resolveTranscript,
 } from "../src/utils/transcript.ts";
 
 function tool(name: string, description = `${name} tool`): Tool {
@@ -25,7 +24,6 @@ const transcript = normalizeContext({
 			content: "base",
 			sections: { a: "<a>1</a>", b: "<b>1</b>" },
 			toolsAdded: [tool("first")],
-			deferredToolEntries: [{ namespace: "integration", name: "first_entry" }],
 			timestamp: 10,
 		},
 		{ role: "user", content: "hello", timestamp: 11 },
@@ -37,7 +35,6 @@ const transcript = normalizeContext({
 			sections: { a: "<a>2</a>", b: null, c: "<c>1</c>" },
 			toolsRemoved: [{ name: "first" }],
 			toolsAdded: [tool("second")],
-			deferredToolEntries: [{ namespace: "integration", name: "second_entry" }],
 			timestamp: 14,
 		},
 	],
@@ -51,7 +48,6 @@ describe("system message replay", () => {
 			content: "base\n\nalso do this",
 			sections: { a: "<a>2</a>", c: "<c>1</c>" },
 			toolsAdded: [tool("second")],
-			deferredToolEntries: [{ namespace: "integration", name: "second_entry" }],
 			timestamp: 10,
 		});
 		expect(getCurrentSystemPrompt(transcript.messages)).toBe("base\n\nalso do this\n\n<a>2</a>\n\n<c>1</c>");
@@ -61,41 +57,6 @@ describe("system message replay", () => {
 		const collapsed = collapseSystemMessages(transcript);
 		expect(collapsed.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
 		expect(collapseSystemMessages(collapsed)).toEqual(collapsed);
-	});
-
-	test("a replacement discards replayed state and collapses even for native providers", () => {
-		const replacement: Message = {
-			role: "system",
-			content: "forced",
-			toolsAdded: [tool("third")],
-			replace: true,
-			timestamp: 15,
-		};
-		const patch: Message = { role: "system", content: "", sections: { d: "<d>1</d>" }, timestamp: 16 };
-		const context = { messages: [...transcript.messages, replacement, patch] } as TranscriptContext;
-		expect(getCurrentSystemMessage(context.messages)).toEqual({
-			role: "system",
-			content: "forced",
-			sections: { d: "<d>1</d>" },
-			toolsAdded: [tool("third")],
-			timestamp: 10,
-		});
-		expect(resolveTranscript(context, true)).toEqual(collapseSystemMessages(context));
-		expect(resolveTranscript(transcript, true)).toBe(transcript);
-		const leading = { messages: [replacement, patch] } as TranscriptContext;
-		expect(resolveTranscript(leading, true)).toBe(leading);
-	});
-
-	test("an empty host entry snapshot clears prior membership while ordinary patches preserve it", () => {
-		const cleared: Message[] = [
-			...transcript.messages,
-			{ role: "system", content: "", deferredToolEntries: [], timestamp: 15 },
-			{ role: "system", content: "later guidance", timestamp: 16 },
-		];
-		expect(getCurrentSystemMessage(cleared)?.deferredToolEntries).toEqual([]);
-		expect(getCurrentSystemMessage(transcript.messages.slice(0, 4))?.deferredToolEntries).toEqual([
-			{ namespace: "integration", name: "first_entry" },
-		]);
 	});
 
 	test("replay of a transcript without system messages is empty", () => {

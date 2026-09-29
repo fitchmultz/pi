@@ -244,7 +244,7 @@ export function createRestartControl(options: {
 			});
 			pi.on("before_agent_start", (event) => {
 				const guidance =
-					'To activate changed extension or runtime code, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. This queues a restart after final idle; it does not replay completed commands.';
+					'Use /reload to apply changed extension source and resources. For core/runtime or clean-process changes, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. Restart waits for final idle and does not replay completed commands.';
 				if (event.systemPromptOptions.forceSystemPrompt !== undefined) {
 					event.systemPromptOptions.forceSystemPrompt += `\n\n${guidance}`;
 				} else {
@@ -287,7 +287,7 @@ export function createRestartControl(options: {
 						model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,
 						thinkingLevel: pi.getThinkingLevel(),
 						activeTools: pi.getActiveTools(),
-						knownTools: pi.getAllTools().map((tool) => tool.id),
+						knownTools: pi.getAllTools().map((tool) => tool.name),
 					},
 				});
 			});

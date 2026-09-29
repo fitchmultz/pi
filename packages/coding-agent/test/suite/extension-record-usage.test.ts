@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ExtensionAPI, UsageContribution } from "../../src/core/extensions/index.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
 import { getUsageCostBreakdown } from "../../src/core/usage-totals.ts";
-import { type ExtensionAPI, SessionManager, type UsageContribution } from "../../src/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function contribution(): UsageContribution {

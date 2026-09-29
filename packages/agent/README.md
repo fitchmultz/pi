@@ -51,10 +51,10 @@ Transport-neutral facet-service primitives live in `@earendil-works/chord`. The 
 ### AgentMessage vs LLM Message
 
 The agent works with `AgentMessage`, a flexible type that can include:
-- Standard LLM messages (`system`, `user`, `assistant`, `toolResult`)
+- Standard LLM messages (`user`, `assistant`, `toolResult`)
 - Custom app-specific message types via declaration merging
 
-LLMs understand `system`, `user`, `assistant`, and `toolResult`. The `convertToLlm` function bridges this gap by filtering and transforming messages before each LLM call.
+LLMs only understand `user`, `assistant`, and `toolResult`. The `convertToLlm` function bridges this gap by filtering and transforming messages before each LLM call.
 
 ### Message Flow
 
@@ -123,7 +123,7 @@ In parallel mode, tool completion events follow tool completion order, but persi
 
 The mode can be set globally via `toolExecution` in the agent config, or per-tool via `executionMode` on `AgentTool`. If any tool call in a batch targets a tool with `executionMode: "sequential"`, the entire batch executes sequentially regardless of the global setting.
 
-Per-tool sequential ordering is scoped to one assistant response. Native asynchronous work from an earlier response can continue while a later response runs a sequential tool, such as changing the directory for subsequent calls. Explicit global `toolExecution: "sequential"` still waits for earlier work to finish across responses. Admission checkpoints, cancellation and final run settlement retain their existing barriers.
+Immediately before execution, `Agent` rechecks that the tool is still in `state.tools` and that its declaration, executor, argument preparation, and execution mode have not changed during preflight. Removed or changed tools return an error without running. Low-level loops and nested `runToolCall()` callers can provide `getTools` to recheck a dynamic callable set after awaited hooks.
 
 The `beforeToolCall` hook runs after `tool_execution_start` and validated argument parsing. It can block execution and attach `terminate: true` to the blocked result. The `afterToolCall` hook runs after tool execution finishes and before `tool_execution_end` and final tool result message events are emitted.
 
@@ -141,7 +141,13 @@ agent.prepareRequest = async ({ context }) => ({
 });
 ```
 
-When the earlier steering poll returned nothing, the loop admits one steering batch queued during `prepareRequest` and prepares the request again with that input. It does not drain another message when one-at-a-time mode already selected input. Tool declarations are reconciled after preparation.
+`prepareRequest` does not poll queues. Steering queued while it runs waits for the next normal steering poll.
+
+Cancellation is checked again after asynchronous preparation and authentication, before provider dispatch. Hosts can set `agent.requestAdmissionSignal` to close new requests without aborting an already active response. Host-owned summary requests should use `agent.streamResponse(model, context, options)` to share this boundary. An admission refusal ends the run without inventing an assistant failure.
+
+After transformation and LLM conversion, the loop rejects input that exceeds the model window even with system updates collapsed. Provider adapters additionally validate their resolved wire payloads.
+
+For checkpoint and cancellation handling, `getQueuedMessages()` returns complete non-consuming steering/follow-up array snapshots (message identities are retained). `takeQueuedMessages(predicate)` removes matching messages, steering first, preserving the order of all others. `hasQueuedSteeringMessages()` excludes follow-ups. These APIs do not deliver messages to an active provider response.
 
 `finishTurn` runs after the assistant and all tool results are finalized, but before `turn_end`. It runs for normal, error, and aborted responses:
 
@@ -153,7 +159,9 @@ agent.finishTurn = async ({ message }) => {
 };
 ```
 
-Returning `undefined` preserves normal scheduling. `{ action: "end" }` stops immediately after `turn_end`, before polling steering or follow-up queues or preparing another request, unless a successful tool batch requested a fresh context window. Cancellation always stops the run. On a normal response, `{ action: "continue" }` ensures one next provider request. If tool results, steering, or a follow-up already cause that request, they satisfy the decision and no additional request is made; otherwise the loop makes one context-only request. Error and aborted responses remain hard exits, so their decisions are ignored. `finishTurn` runs again after the next request, so returning `{ action: "continue" }` unconditionally creates an endless loop.
+Returning `undefined` preserves normal scheduling. `{ action: "end" }` stops immediately after `turn_end`, before polling steering or follow-up queues or preparing another request. On a normal response, `{ action: "continue" }` ensures one next provider request. If tool results, steering, or a follow-up already cause that request, they satisfy the decision and no additional request is made; otherwise the loop makes one context-only request. Error and aborted responses remain hard exits, so their decisions are ignored. `finishTurn` runs again after the next request, so returning `{ action: "continue" }` unconditionally creates an endless loop.
+
+`agent.afterTurn = async (signal) => { ... }` runs after **all** `turn_end` listeners have finished, before continuation scheduling. Hosts use this boundary for checkpoint holds that must include late listener writes; it does not replace `finishTurn`.
 
 To migrate from the removed `shouldStopAfterTurn`, return `{ action: "end" }`. Guard error and aborted responses to preserve the old hook's normal-response-only invocation, especially when the predicate has side effects or assumes a successful response:
 
@@ -178,14 +186,14 @@ selected input events
 
 ### continue() and queued input
 
-`continue()` retains its existing queue behavior. Empty and system-only transcripts reject without consuming queues. A non-assistant tail continues from existing context: steering is polled at startup, while follow-up input waits until the response naturally stops.
+Empty and system-only transcripts reject without consuming queues. A user or tool-result tail continues from existing context: steering is polled at startup, while follow-up input waits until the response naturally stops.
 
 ```typescript
 agent.followUp({ role: "user", content: "After the retry", timestamp: Date.now() });
 await agent.continue(); // The first request retries the existing user/toolResult tail.
 ```
 
-An assistant tail cannot be sent directly, so `continue()` falls back to one queued steering batch, then one queued follow-up batch. Queue mode still controls whether that selected batch contains one message or all messages:
+For other tails, including an assistant or a host compaction summary, `continue()` first selects one queued steering batch, then one queued follow-up batch. This avoids an empty request before queued input after compaction. Without queued input, an assistant tail rejects; a custom tail continues through `convertToLlm`. Use `continue({ drainQueuedInput: false })` to request the existing custom context first, leaving follow-ups queued until that continuation stops. An assistant tail still rejects in this mode. Queue mode controls whether the selected batch contains one message or all messages:
 
 ```typescript
 agent.steer({ role: "user", content: "Continue from here", timestamp: Date.now() });
@@ -200,7 +208,7 @@ await agent.continue(); // Uses the queued message only because the tail is assi
 | `agent_end` | Final event for the run. Awaited subscribers for this event still count toward settlement |
 | `turn_start` | New turn begins (one LLM call + tool executions) |
 | `turn_end` | Turn completes with assistant message and tool results |
-| `message_start` | Any message begins (system, user, assistant, toolResult) |
+| `message_start` | Any message begins (user, assistant, toolResult) |
 | `message_update` | **Assistant only.** Includes `assistantMessageEvent` with delta |
 | `message_end` | Message completes |
 | `tool_execution_start` | Tool begins |
@@ -303,6 +311,8 @@ interface AgentState {
 ```
 
 Access state via `agent.state`.
+
+`agent.selectedModel` distinguishes an intentional empty selection from the internal placeholder model. Assign `undefined` to clear selection; real models named `"unknown"` remain selected.
 
 Assigning `agent.state.tools = [...]` or `agent.state.messages = [...]` copies the top-level array before storing it. Mutating the returned array mutates the current agent state.
 
@@ -422,14 +432,12 @@ agent.clearFollowUpQueue();
 agent.clearAllQueues();
 ```
 
-Use clearSteeringQueue, clearFollowUpQueue, or clearAllQueues to drop queued messages. `hasQueuedSteeringMessages()` inspects only pending steering; `hasQueuedMessages()` includes follow-ups. Neither query consumes messages.
+Use clearSteeringQueue, clearFollowUpQueue, or clearAllQueues to drop queued messages.
 
 When steering messages are detected after a turn completes:
-1. Synchronous tool calls have finished or received explicit not-executed errors
+1. All tool calls from the current assistant message have already finished
 2. Steering messages are injected
 3. The LLM responds on the next turn
-
-Native asynchronous calls can remain running. If steering interrupts an ordered sibling's wait for an earlier native call, the untouched suffix receives not-executed errors and can be reissued in a later response. Already-running calls retain their original results. Detecting queued input at this wait does not consume it: `finishTurn` returning `{ action: "end" }` or cancellation leaves it queued.
 
 Follow-up messages are checked only when there are no more tool calls and no steering messages. If any are queued, they are injected and another turn runs.
 
@@ -497,17 +505,9 @@ const readFileTool: AgentTool = {
 agent.state.tools = [readFileTool];
 ```
 
-### Tool search and namespaces
-
-Tools and calls may carry an optional `namespace`; dispatch matches the exact namespace/name pair. Omitting the namespace identifies only an unnamespaced tool.
-
-Set `toolSearch: true` on a discovery tool. Its result must include `tools: ToolReference[]` after the callback adds its matches to `agent.state.tools`. The runtime resolves those references against the current active tools and records only their declarations in `ToolResultMessage.toolsAdded`. Invalid references produce a tool error. Native client search calls use `ToolCall.kind: "toolSearch"` and retain that identity as `toolCallKind` on their result; unsupported routes call the same tool as an ordinary function.
-
-`Agent` refreshes the executable snapshot between turns, so newly loaded tools become callable on the next request, never retroactively in the current sibling batch. Low-level loop callers can provide `getTools()` to return their current permitted executable set after a search callback.
-
 ### Error Handling
 
-**Throw an error** when a tool fails. Do not return error messages as content.
+**Throw an error** when a tool fails, or return `isError: true` with its error content and structured details. A resolved result is not necessarily successful.
 
 ```typescript
 execute: async (toolCallId, params, signal, onUpdate) => {
@@ -522,6 +522,10 @@ execute: async (toolCallId, params, signal, onUpdate) => {
 Thrown errors are caught by the agent and reported to the LLM as tool errors with `isError: true`.
 
 Return `terminate: true` from `execute()`, a blocked `beforeToolCall`, or `afterToolCall` to hint that the agent should stop after the current tool batch. This only takes effect when every finalized tool result in the batch is terminating. The hint is runtime-only; emitted `toolResult` transcript messages remain standard LLM tool results.
+
+### MCP and Codemode
+
+`@earendil-works/pi-mcp` connects to MCP servers and `@earendil-works/pi-codemode` runs model-written JavaScript that calls tools. [examples/mcp-codemode](examples/mcp-codemode) wraps both as `AgentTool`s: one tool per MCP tool, and a `codemode` tool whose scripts call the agent's tools through `runToolCall()`, so `beforeToolCall` and `afterToolCall` apply to those calls too.
 
 ## Proxy Usage
 
@@ -554,7 +558,7 @@ const context: AgentContext = {
 
 const config: AgentLoopConfig = {
   model: getModel("openai", "gpt-4o"),
-  convertToLlm: (msgs) => msgs.filter(m => ["system", "user", "assistant", "toolResult"].includes(m.role)),
+  convertToLlm: (msgs) => msgs.filter(m => ["user", "assistant", "toolResult"].includes(m.role)),
   toolExecution: "parallel",  // overridden by per-tool executionMode if set
   beforeToolCall: async ({ toolCall, args, context }) => undefined,
   afterToolCall: async ({ toolCall, result, isError, context }) => undefined,
@@ -574,8 +578,6 @@ for await (const event of agentLoopContinue(context, config, undefined, streamFn
 ```
 
 These low-level streams are observational. They preserve event order, but they do not wait for your async event handling to settle before later producer phases continue. If you need message processing to act as a barrier before tool preflight, use the `Agent` class instead of raw `agentLoop()` or `agentLoopContinue()`.
-
-Unexpected callback failures (including a thrown or rejected `streamFn` call) end `agentLoop()` and `agentLoopContinue()` with an assistant error message, `turn_end`, and `agent_end`. Iteration finishes and `result()` resolves with the completed messages, including the failure. An aborted signal sets the failure's stop reason to `aborted`; otherwise it is `error`. Ordinary provider failures should still use the `StreamFn` error-event protocol. The direct promise runners, `runAgentLoop()` and `runAgentLoopContinue()`, reject on unexpected callback failures instead.
 
 ## License
 

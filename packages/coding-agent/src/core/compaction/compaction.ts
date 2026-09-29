@@ -38,7 +38,6 @@ import type {
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
 import {
-	buildContextEntries,
 	buildSessionProjection,
 	type CompactionEntry,
 	type ProjectedSessionEntry,
@@ -166,7 +165,7 @@ export {
 
 /** Structural changes after a response invalidate that response's reported context usage. */
 export function isContextUsageInvalidatingEntry(entry: SessionEntry): boolean {
-	return entry.type === "context_edit" || entry.type === "compaction" || entry.type === "context_window";
+	return entry.type === "context_edit" || entry.type === "compaction";
 }
 
 /** Estimate canonical context using shared token accounting and branch-local usage validity. */
@@ -672,10 +671,7 @@ export function prepareCompaction(
 	}
 
 	const projection = buildSessionProjection(pathEntries);
-	// Carried async calls retain old source IDs, but cannot reopen the raw history
-	// before the previous kept boundary. They still count in the full token estimate.
-	const retainedIds = new Set(buildContextEntries(pathEntries).map((entry) => entry.id));
-	const projectedEntries = projection.entries.filter((entry) => retainedIds.has(entry.sourceEntry.id));
+	const projectedEntries = projection.entries;
 	const sourceEntries = projectedEntries.map((entry) => entry.sourceEntry);
 	// The newest compaction is projected first. Older compaction entries can still
 	// occur in its retained raw range, but their projected contribution is empty.
@@ -728,6 +724,35 @@ export function prepareCompaction(
 		tokensBefore,
 		previousSummary,
 		fileOps,
+		settings,
+	};
+}
+
+/**
+ * Let a compaction hook handle early overflow even when no ordinary summary cut exists.
+ * Call only for hook dispatch; a declined fallback must never run the default summarizer.
+ */
+export function prepareCompactionForExtension(
+	pathEntries: SessionEntry[],
+	settings: CompactionSettings,
+): CompactionPreparation | undefined {
+	const preparation = prepareCompaction(pathEntries, settings);
+	if (preparation) return preparation;
+	const projection = buildSessionProjection(pathEntries);
+	const firstKeptEntryId = projection.entries[0]?.sourceEntry.id;
+	if (!firstKeptEntryId) return undefined;
+	const messagesToSummarize = projection.messages.filter((message) => message.role !== "system");
+	const sourceEntries = projection.entries.map((entry) => entry.sourceEntry);
+	const previousCompactionIndex = sourceEntries.findIndex((entry) => entry.type === "compaction");
+	const previousCompaction = sourceEntries[previousCompactionIndex];
+	return {
+		firstKeptEntryId,
+		messagesToSummarize,
+		turnPrefixMessages: [],
+		isSplitTurn: false,
+		tokensBefore: estimateProjectedContextTokens(projection, pathEntries).tokens,
+		previousSummary: previousCompaction?.type === "compaction" ? previousCompaction.summary : undefined,
+		fileOps: extractFileOperations(messagesToSummarize, sourceEntries, previousCompactionIndex),
 		settings,
 	};
 }

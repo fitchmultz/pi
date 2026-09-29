@@ -354,9 +354,10 @@ describe("AgentSession bash and persistence characterization", () => {
 		});
 		await harness.session.prompt("start");
 
-		const entries = harness.sessionManager.getEntries();
-		// The first request persists its declaration after the queued custom message, but the
-		// native declaration stays at the head of the projected context.
+		const entries = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message" || entry.type === "custom_message");
+		// The first request persists its declaration after the already persisted custom message.
 		expect(entries.map((entry) => entry.type)).toEqual([
 			"custom_message",
 			"message",
@@ -366,8 +367,8 @@ describe("AgentSession bash and persistence characterization", () => {
 			"message",
 		]);
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
-			"system",
 			"custom",
+			"system",
 			"user",
 			"assistant",
 			"toolResult",

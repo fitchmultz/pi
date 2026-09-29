@@ -421,8 +421,10 @@ it.each(["initial", "usage", "append"] as const)(
 	async (kind) => {
 		const actual = await vi.importActual<typeof fs>("node:fs");
 		const sm = SessionManager.create(directory, directory);
-		sm.appendMessage({ role: "user", content: "retained user", timestamp: 1 });
-		if (kind === "append") sm.appendMessage(fauxAssistantMessage("first response"));
+		if (kind === "append") {
+			sm.appendMessage({ role: "user", content: "retained user", timestamp: 1 });
+			sm.appendMessage(fauxAssistantMessage("first response"));
+		}
 		const failure = Object.assign(new Error("controlled write failure"), { code: "ENOSPC" });
 		if (kind === "initial" || kind === "usage") {
 			vi.mocked(fs.writeFileSync).mockImplementationOnce((file, data) => {
@@ -570,16 +572,18 @@ permissionTest.each(["new", "switch", "branch"] as const)(
 	},
 );
 
-it("flush defers user-only journals and never writes in-memory sessions", () => {
+it("flush persists user-only journals and never writes in-memory sessions", () => {
 	for (const sm of [SessionManager.create(directory, directory), SessionManager.inMemory(directory)]) {
 		sm.flush();
 		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
-		const user = sm.appendMessage({ role: "user", content: "deferred user", timestamp: 1 });
+		const user = sm.appendMessage({ role: "user", content: "saved user", timestamp: 1 });
 		sm.flush();
-		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
+		if (sm.isPersisted()) expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual(sm.getEntries());
+		else expect(sm.getSessionFile()).toBeUndefined();
 		sm.createBranchedSession(user);
 		sm.flush();
-		expect(sm.getSessionFile() && fs.existsSync(sm.getSessionFile()!)).toBeFalsy();
+		if (sm.isPersisted()) expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual(sm.getEntries());
+		else expect(sm.getSessionFile()).toBeUndefined();
 		sm.appendCustomEntry("saved", {});
 		sm.flush();
 		if (sm.isPersisted()) expect(SessionManager.open(sm.getSessionFile()!).getEntries()).toEqual(sm.getEntries());

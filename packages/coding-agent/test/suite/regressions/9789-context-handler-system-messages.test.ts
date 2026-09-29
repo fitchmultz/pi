@@ -86,7 +86,7 @@ describe("context handlers and system messages", () => {
 	});
 
 	it.each(["unchanged", "inserted", "cloned insertion"] as const)(
-		"keeps mid-conversation system messages in place with %s conversation",
+		"preserves prompt sections when a handler returns %s conversation",
 		async (transform) => {
 			let turn = 0;
 			const harness = await createHarness({
@@ -113,12 +113,13 @@ describe("context handlers and system messages", () => {
 			await harness.session.prompt("second");
 
 			const systemMessages = getRequest().messages.filter((message) => message.role === "system");
-			expect(systemMessages).toHaveLength(2);
-			expect(systemMessages[1]?.sections).toEqual({ plan_mode: "<plan_mode>\nPlan only.\n</plan_mode>" });
+			expect(systemMessages).toHaveLength(transform === "unchanged" ? 2 : 1);
+			expect(systemMessages.at(-1)?.sections?.plan_mode).toBe("<plan_mode>\nPlan only.\n</plan_mode>");
+			expect(toolNames(getRequest())).toEqual(harness.session.getActiveToolNames());
 			expect(getRequest().messages.map((message) => message.role)).toEqual(
 				transform === "unchanged"
 					? ["system", "user", "assistant", "system", "user"]
-					: ["system", "user", "assistant", "system", "user", "user"],
+					: ["system", "user", "assistant", "user", "user"],
 			);
 		},
 	);
@@ -177,7 +178,7 @@ describe("context_with_system handlers", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
-	it("runs after context handlers and preserves the native checkpoint tools", async () => {
+	it("runs after context handlers on the restored transcript and sends its output verbatim", async () => {
 		const seen: AgentMessage[][] = [];
 		const harness = await createHarness({
 			extensionFactories: [
@@ -211,12 +212,12 @@ describe("context_with_system handlers", () => {
 		expect(input?.[0]?.role).toBe("system");
 		expect(input?.[1]?.role).toBe("compactionSummary");
 		expect(harness.session.getActiveToolNames()).toContain("bash");
-		expect(toolNames(getRequest())).toEqual(harness.session.getActiveToolNames());
+		expect(toolNames(getRequest())).toEqual(harness.session.getActiveToolNames().filter((name) => name !== "bash"));
 	});
 
-	it.each([false, true])("reports a dropped head and restores only opted-in windows (legacy=%s)", async (legacy) => {
+	it.each([false, true])("reports a dropped head but honors the handler output (resumed=%s)", async (resumed) => {
 		const sessionManager = SessionManager.inMemory();
-		if (legacy) {
+		if (resumed) {
 			sessionManager.appendMessage({ role: "system", content: "", sections: { preamble: "OLD" }, timestamp: 1 });
 			sessionManager.appendMessage(fauxAssistantMessage("bound legacy response"));
 		}
@@ -240,15 +241,9 @@ describe("context_with_system handlers", () => {
 
 		await harness.session.prompt("hello");
 
-		expect(getRequest().messages.map((message) => message.role)).toEqual(
-			legacy ? ["assistant", "user"] : ["system", "user"],
-		);
+		expect(getRequest().messages.map((message) => message.role)).toEqual(resumed ? ["assistant", "user"] : ["user"]);
 		expect(errors).toEqual([
-			expect.stringMatching(
-				legacy
-					? /^context_with_system: Handler removed the leading system message/
-					: /^context_with_system: Restored the native initial declaration/,
-			),
+			expect.stringMatching(/^context_with_system: Handler removed the leading system message/),
 		]);
 	});
 });

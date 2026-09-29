@@ -3,13 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, type ToolCall, type ToolReference } from "@earendil-works/pi-ai";
+import { type AssistantMessage, fauxAssistantMessage, type ToolCall } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { exportSessionToHtml } from "../src/core/export-html/index.ts";
 import { createToolHtmlRenderer } from "../src/core/export-html/tool-renderer.ts";
-import { defineTool } from "../src/core/extensions/types.ts";
+import { defineTool, type ToolDefinition } from "../src/core/extensions/types.ts";
 import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -17,7 +17,7 @@ type ExportData = {
 	header?: object;
 	entries: SessionEntry[];
 	leafId?: string;
-	tools?: ToolReference[];
+	tools?: Array<Pick<ToolDefinition, "name" | "namespace">>;
 	renderedTools?: Record<string, { calls?: Record<string, string>; results?: Record<string, { expanded?: string }> }>;
 };
 
@@ -45,6 +45,7 @@ function loadTemplate(data: ExportData) {
 			return { innerHTML: "" };
 		},
 		querySelector: () => null,
+		querySelectorAll: () => [],
 		createElement: (tag: string) => {
 			if (tag === "template") {
 				const template = {
@@ -69,7 +70,7 @@ function loadTemplate(data: ExportData) {
 		`${source.slice(0, source.indexOf("      // INITIALIZATION"))}
 		function safeMarkedParse(text) { return escapeHtml(text); }
 		renderTree = () => {};
-		const attachHeaderHandlers = () => {};
+		${source.slice(source.indexOf("      // Toggle states"), source.indexOf("      const isEditableTarget"))}
 		return { getPath, renderEntry, renderToolCall, renderHeader, getTreeNodeDisplayHtml, getScrollTargetElementId, navigateTo, download: window.downloadSessionJson };
 		})();`,
 		{
@@ -104,36 +105,18 @@ function loadTemplate(data: ExportData) {
 const rawCall: ToolCall = {
 	type: "toolCall",
 	id: "lookup",
-	name: "read",
+	name: "records_read",
 	namespace: "records",
-	arguments: { query: "wire query" },
-	responsesItem: {
-		type: "function_call",
-		id: "wire-item",
-		call_id: "lookup",
-		name: "read",
-		namespace: "records",
-		arguments: '{"query":"wire query"}',
-	},
+	arguments: { query: "record query" },
 };
 
-function assistant(
-	id: string,
-	parentId: string | null,
-	content: AssistantMessage["content"],
-	checkpoint = false,
-): SessionEntry {
+function assistant(id: string, parentId: string | null, content: AssistantMessage["content"]): SessionEntry {
 	return {
 		type: "message",
 		id,
 		parentId,
 		timestamp: "2026-09-22T00:00:00Z",
-		...(checkpoint ? { checkpoint: true } : {}),
-		message: {
-			...fauxAssistantMessage(content),
-			responseId: "response",
-			stopReason: checkpoint ? "pending" : "stop",
-		},
+		message: fauxAssistantMessage(content),
 	};
 }
 
@@ -146,8 +129,7 @@ function result(id: string, parentId: string, toolCallId = "lookup"): SessionEnt
 		message: {
 			role: "toolResult",
 			toolCallId,
-			toolName: "read",
-			namespace: "records",
+			toolName: "records_read",
 			content: [{ type: "text", text: id }],
 			isError: false,
 			timestamp: 1,
@@ -155,103 +137,95 @@ function result(id: string, parentId: string, toolCallId = "lookup"): SessionEnt
 	};
 }
 
-describe("native HTML export", () => {
-	it("keeps same-leaf builtin/custom identities, admitted arguments, and namespace escaping", () => {
-		const admitted = { ...rawCall, executionStarted: true, executionArguments: { query: "admitted query" } };
+describe("HTML export tools and branches", () => {
+	it("uses tool names for rendering and escapes fallback names, arguments and nested calls", () => {
 		const bare: ToolCall = { type: "toolCall", id: "bare", name: "read", arguments: { path: "builtin.txt" } };
-		const fallback: ToolCall = { ...admitted, id: "fallback", namespace: '<records>"' };
-		const entries = [
-			assistant("a", null, [bare, admitted, fallback]),
-			result("r", "a"),
-			result("fallback-result", "r", "fallback"),
-		];
+		const fallback: ToolCall = { ...rawCall, id: "fallback", name: '<records>"', arguments: { query: "<script>" } };
+		const nested = result("nested", "r", "fallback");
+		if (nested.type !== "message" || nested.message.role !== "toolResult") throw new Error("expected result");
+		nested.message.nestedCalls = {
+			complete: false,
+			calls: [
+				{
+					id: "nested-error",
+					name: '<nested>"',
+					arguments: { text: "<script>" },
+					status: "error",
+					error: "<failed>\nsecond line",
+					durationMs: 12,
+				},
+				{ id: "nested-unfinished", name: "omitted", argumentsBytes: 2048, status: "unfinished" },
+			],
+		};
+		const entries = [assistant("a", null, [bare, rawCall, fallback]), result("r", "a"), nested];
 		const template = loadTemplate({
 			entries,
-			leafId: "fallback-result",
-			tools: [bare, admitted, fallback],
+			leafId: "nested",
+			tools: [{ name: "read" }, { name: fallback.name, namespace: { name: "records" } }],
 			renderedTools: {
 				lookup: {
-					calls: { [JSON.stringify(admitted.executionArguments)]: "records custom call" },
+					calls: { [JSON.stringify(rawCall.arguments)]: "records custom call" },
 					results: { r: { expanded: "records custom result" } },
 				},
-				fallback: { results: { "fallback-result": { expanded: "custom result without call renderer" } } },
+				fallback: { results: { nested: { expanded: "custom result without call renderer" } } },
 			},
 		});
 		expect(template.renderToolCall(bare)).toContain("builtin.txt");
-		expect(template.renderToolCall(admitted)).toContain("records custom call");
-		expect(template.renderToolCall(admitted)).toContain("records custom result");
-		const fallbackHtml = template.renderToolCall(fallback);
-		expect(fallbackHtml).toContain("&lt;records&gt;&quot;.read");
-		expect(fallbackHtml).toContain("admitted query");
-		expect(fallbackHtml).not.toContain("wire query");
-		expect(fallbackHtml).not.toContain("tool-path");
-		expect(fallbackHtml).toContain("custom result without call renderer");
-		const noRendererHtml = template.renderToolCall({ ...fallback, id: "no-renderer", namespace: "" });
-		expect(noRendererHtml).toContain(">.read</span>");
-		expect(noRendererHtml).toContain("admitted query");
-		expect(noRendererHtml).not.toContain("tool-path");
-		expect(template.renderToolCall({ ...bare, executionArguments: { path: "admitted.txt" } })).toContain(
-			"admitted.txt",
-		);
-		expect(template.getTreeNodeDisplayHtml(entries[1])).toContain("records.read");
-		expect(template.getTreeNodeDisplayHtml(entries[1])).toContain("admitted query");
-		expect(template.renderHeader()).toContain("&lt;records&gt;&quot;.read");
+		expect(template.renderToolCall(rawCall)).toContain("records custom call");
+		expect(template.renderToolCall(rawCall)).toContain("records custom result");
+		const html = template.renderToolCall(fallback);
+		for (const text of [
+			"&lt;records&gt;&quot;",
+			"&lt;script&gt;",
+			"custom result without call renderer",
+			"Nested calls: 2 (incomplete record)",
+			"&lt;nested&gt;&quot;",
+			"&lt;failed&gt;",
+			"12ms",
+			"[arguments omitted, 2048 bytes]",
+		]) {
+			expect(html).toContain(text);
+		}
+		expect(html).not.toContain("<script>");
+		expect(html).not.toContain("tool-path");
+		expect(template.renderToolCall({ ...fallback, id: "no-renderer" })).toContain("&lt;script&gt;");
+		expect(template.getTreeNodeDisplayHtml(entries[1])).toContain("records_read");
+		expect(template.getTreeNodeDisplayHtml(entries[1])).toContain("record query");
+		expect(template.renderHeader()).toContain("&lt;records&gt;&quot;");
 		expect(template.renderHeader()).toContain(">read</span>");
 		const unmatched = result("unmatched", "a", "missing");
 		if (unmatched.type === "message" && unmatched.message.role === "toolResult")
-			unmatched.message.namespace = '<unmatched>"';
-		expect(template.getTreeNodeDisplayHtml(unmatched)).toContain("&lt;unmatched&gt;&quot;.read");
+			unmatched.message.toolName = '<unmatched>"';
+		expect(template.getTreeNodeDisplayHtml(unmatched)).toContain("&lt;unmatched&gt;&quot;");
 	});
 
-	it("coalesces selected-branch snapshots, preserves late metadata and siblings, and leaves the raw download intact", async () => {
-		const sibling: ToolCall = { type: "toolCall", id: "sibling", name: "read", arguments: { path: "sibling.txt" } };
+	it("selects branch-local results on repeated navigation and leaves the raw download intact", async () => {
 		const entries = [
-			assistant("first", null, [rawCall], true),
+			assistant("first", null, [rawCall]),
 			result("result-a", "first"),
-			assistant("final-a", "result-a", [{ type: "text", text: "Final answer A" }, rawCall, sibling]),
-			assistant(
-				"late-a",
-				"final-a",
-				[{ ...rawCall, executionStarted: true, executionArguments: { query: "admitted A" } }],
-				true,
-			),
+			assistant("final-a", "result-a", [{ type: "text", text: "Final answer A" }]),
 			result("result-b", "first"),
-			assistant("final-b", "result-b", [{ type: "text", text: "Final answer B" }, rawCall]),
+			assistant("final-b", "result-b", [{ type: "text", text: "Final answer B" }]),
 		];
 		const before = JSON.stringify(entries);
 		const header = { type: "session", id: "journal" };
-		const template = loadTemplate({ header, entries, leafId: "late-a" });
-		const path = template.getPath("late-a");
-		const assistants = path.filter((entry) => entry.type === "message" && entry.message.role === "assistant");
-		expect(assistants).toHaveLength(1);
-		expect(assistants[0]).toMatchObject({
-			message: {
-				content: [
-					{ type: "text", text: "Final answer A" },
-					{ ...rawCall, executionStarted: true, executionArguments: { query: "admitted A" } },
-					sibling,
-				],
-			},
-		});
-		for (const [leaf, answer, output] of [
-			["late-a", "Final answer A", "result-a"],
-			["final-b", "Final answer B", "result-b"],
-			["first", "", ""],
-			["late-a", "Final answer A", "result-a"],
+		const template = loadTemplate({ header, entries, leafId: "final-a" });
+		for (const [leaf, answer, output, excluded] of [
+			["final-a", "Final answer A", "result-a", "result-b"],
+			["final-b", "Final answer B", "result-b", "result-a"],
+			["first", "", "", "result-a"],
+			["final-a", "Final answer A", "result-a", "result-b"],
 		]) {
 			template.navigateTo(leaf);
 			const html = template.html();
 			expect(html.match(/id="tool-call-lookup"/g)).toHaveLength(1);
-			expect(html.match(/class="assistant-message"/g)).toHaveLength(1);
-			expect(template.getTreeNodeDisplayHtml(entries[1])).toContain("admitted A");
-			expect(template.getTreeNodeDisplayHtml(entries[4])).not.toContain("admitted A");
 			expect(html).toContain(answer);
 			expect(html).toContain(output);
-			if (leaf !== "late-a") expect(html).not.toContain("admitted A");
-			if (leaf === "first") expect(html).not.toContain("result-a");
-			for (const id of leaf === "late-a" ? ["first", "final-a", "late-a", "result-a"] : [leaf]) {
-				expect(html).toContain(`id="${template.getScrollTargetElementId(id)}"`);
-			}
+			expect(html).not.toContain(excluded);
+			expect(template.getPath(leaf).map((entry) => entry.id)).toEqual(
+				leaf === "first" ? ["first"] : ["first", output, leaf],
+			);
+			if (output) expect(html).toContain(`id="${template.getScrollTargetElementId(output)}"`);
 		}
 		template.download();
 		expect(await template.downloaded()?.text()).toBe(
@@ -260,58 +234,36 @@ describe("native HTML export", () => {
 		expect(JSON.stringify(entries)).toBe(before);
 	});
 
-	it("passes exact tool references and admitted args through real export pre-rendering without changing journal bytes", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-html-native-"));
+	it("pre-renders named tools with branch-local arguments without changing journal bytes", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-html-export-"));
 		try {
 			initTheme("dark", false);
 			const manager = SessionManager.create(dir, join(dir, "sessions"));
-			const calls: unknown[] = [];
 			const custom = defineTool({
-				name: "read",
-				namespace: "records",
+				name: "records_read",
+				namespace: { name: "records", description: "Record operations" },
 				label: "Records",
 				description: "Read records",
 				parameters: Type.Object({ query: Type.String() }),
 				execute: async () => ({ content: [], details: {} }),
-				renderCall: (args) => {
-					calls.push(args);
-					return new Text(`records call ${args.query}`, 0, 0);
-				},
+				renderCall: (args) => new Text(`records call ${args.query}`, 0, 0),
 				renderResult: (result, _options, _theme, context) =>
 					new Text(`records result ${JSON.stringify(result.content)} ${JSON.stringify(context.args)}`, 0, 0),
 			});
-			const lookup = vi.fn((reference: ToolReference) =>
-				reference.name === "read" && reference.namespace === "records" ? custom : undefined,
-			);
+			const lookup = vi.fn((name: string) => (name === custom.name ? custom : undefined));
 			const renderer = createToolHtmlRenderer({ getToolDefinition: lookup, theme, cwd: dir });
-			const admitted = { ...rawCall, executionStarted: true, executionArguments: { query: "admitted query" } };
+			const root = manager.appendMessage({ role: "user", content: "lookup", timestamp: 1 });
 			const bare: ToolCall = { type: "toolCall", id: "bare", name: "read", arguments: { path: "builtin.txt" } };
-			const firstId = manager.appendMessage(
-				{ ...fauxAssistantMessage([bare, rawCall]), responseId: "export", stopReason: "pending" },
-				true,
-			);
-			manager.appendMessage(
-				{ ...fauxAssistantMessage([admitted]), responseId: "export", stopReason: "pending" },
-				true,
-			);
-			manager.appendMessage({ ...fauxAssistantMessage([bare, rawCall]), responseId: "export" });
-			const toolResult = result("result A", "a");
-			if (toolResult.type === "message" && toolResult.message.role === "toolResult")
-				manager.appendMessage(toolResult.message);
-			const branchA = manager.appendMessage(
-				{ ...fauxAssistantMessage([admitted]), responseId: "export", stopReason: "pending" },
-				true,
-			);
-			manager.branch(firstId);
-			const admittedB = { ...admitted, executionArguments: { query: "admitted B" } };
-			manager.appendMessage(
-				{ ...fauxAssistantMessage([admittedB]), responseId: "export", stopReason: "pending" },
-				true,
-			);
-			manager.appendMessage({ ...fauxAssistantMessage([bare, rawCall]), responseId: "export" });
-			const toolResultB = result("result B", "a");
-			if (toolResultB.type === "message" && toolResultB.message.role === "toolResult")
-				manager.appendMessage(toolResultB.message);
+			const branches: Array<[string, string, string]> = [];
+			for (const query of ["branch A", "branch B"]) {
+				manager.branch(root);
+				manager.appendMessage(fauxAssistantMessage([bare, { ...rawCall, arguments: { query } }]));
+				const toolResult = result(`result ${query}`, "unused");
+				if (toolResult.type !== "message" || toolResult.message.role !== "toolResult")
+					throw new Error("expected result");
+				const leaf = manager.appendMessage(toolResult.message);
+				branches.push([leaf, query, `result ${query}`]);
+			}
 			const before = readFileSync(manager.getSessionFile()!, "utf8");
 			const entriesBefore = JSON.stringify(manager.getEntries());
 			const state = new Agent({
@@ -319,7 +271,6 @@ describe("native HTML export", () => {
 					tools: [
 						{
 							name: custom.name,
-							namespace: custom.namespace,
 							label: custom.label,
 							description: custom.description,
 							parameters: custom.parameters,
@@ -339,27 +290,18 @@ describe("native HTML export", () => {
 			const encoded = html.match(/<script id="session-data" type="application\/json">([\s\S]*?)<\/script>/)?.[1];
 			expect(encoded).toBeDefined();
 			const data = JSON.parse(Buffer.from(encoded!, "base64").toString("utf8")) as ExportData;
-			expect(data.tools).toMatchObject([{ name: "read", namespace: "records" }]);
-			expect(lookup).toHaveBeenCalledWith({ name: "read", namespace: "records" });
-			expect(lookup.mock.calls.every(([reference]) => reference.namespace === "records")).toBe(true);
-			expect(calls.length).toBeGreaterThan(0);
-			expect(calls).toContainEqual(admitted.executionArguments);
+			expect(data.tools).toMatchObject([{ name: "records_read" }]);
+			expect(lookup).toHaveBeenCalledWith("records_read");
+			expect(lookup.mock.calls.every(([name]) => name === "records_read")).toBe(true);
 			const template = loadTemplate(data);
-			for (const [leaf, query, output] of [
-				[branchA, "admitted query", "result A"],
-				[manager.getLeafId()!, "admitted B", "result B"],
-				[firstId, "wire query", ""],
-			]) {
+			for (const [leaf, query, output] of [...branches, branches[0]]) {
 				template.navigateTo(leaf);
 				expect(template.html()).toContain(`records call ${query}`);
 				expect(template.html()).toContain("builtin.txt");
-				if (output) {
-					expect(template.html()).toContain(`records result`);
-					expect(template.html()).toContain(output);
-					expect(template.html()).toContain(`&quot;query&quot;:&quot;${query}&quot;`);
-				} else {
-					expect(template.html()).not.toContain("records result");
-				}
+				expect(template.html()).toContain("records result");
+				expect(template.html()).toContain(output);
+				expect(template.html()).toContain(`&quot;query&quot;:&quot;${query}&quot;`);
+				expect(template.html()).not.toContain(query === "branch A" ? "branch B" : "branch A");
 			}
 			expect(JSON.stringify(data.entries)).toBe(entriesBefore);
 			expect(JSON.stringify(manager.getEntries())).toBe(entriesBefore);

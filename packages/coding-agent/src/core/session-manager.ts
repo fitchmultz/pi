@@ -5,14 +5,12 @@ import {
 	getCurrentSystemMessage,
 	type ImageContent,
 	type Message,
-	mergeAssistantCheckpoint,
 	type SystemMessage,
 	type TextContent,
 	type ToolResultMessage,
 	type Usage,
 	type UserMessage,
 	uuidv7,
-	withoutToolSearchState,
 } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
@@ -47,6 +45,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import { assertSessionConversionNotRequired } from "./session-conversion.ts";
 export const CURRENT_SESSION_VERSION = 3;
 
 export interface SessionHeader {
@@ -73,12 +72,6 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
-	/** Non-billable completed-item snapshot saved before an early tool effect. */
-	checkpoint?: boolean;
-	/** Original result entry IDs present in this successful assistant response's request input. */
-	consumedToolResultIds?: string[];
-	/** Native receipts after the request frontier, excluded from its input, preceding its first snapshot. */
-	concurrentToolResultIds?: string[];
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -92,21 +85,9 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	modelId: string;
 }
 
-export interface ContextWindowEntry extends SessionEntryBase {
-	type: "context_window";
-	/** Optional continuation state supplied by the previous window. */
-	handoff?: string;
-	/** Original result entry IDs not yet consumed by a completed provider response. */
-	retainedToolResultIds?: string[];
-	/** Active context size immediately before the window transition, when known. */
-	tokensBefore: number | null;
-	/** Prompt and tool state retained while earlier conversation is dropped. */
-	systemMessage?: SystemMessage;
-}
-
 export interface UsageEntry extends SessionEntryBase {
 	type: "usage";
-	/** Optional journal-scoped idempotency key. Copied entries retain it when forked. */
+	/** Journal-scoped idempotency key, retained when entries are forked. */
 	contributionId?: string;
 	/** Arbitrary usage category, such as "cache_warm". */
 	kind: string;
@@ -213,7 +194,6 @@ export type SessionEntry =
 	| SessionMessageEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
-	| ContextWindowEntry
 	| UsageEntry
 	| CompactionEntry
 	| BranchSummaryEntry
@@ -489,96 +469,27 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	if (entry.type === "branch_summary" && entry.summary) {
 		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
 	}
-	if (entry.type === "context_window") {
-		const handoff = entry.handoff ? `\n\nHandoff from the previous window:\n${entry.handoff}` : "";
-		return [
-			...(entry.systemMessage ? [{ ...entry.systemMessage, contextWindowId: entry.id }] : []),
-			createCustomMessage(
-				"context-window",
-				`Context window ${entry.id} starts here. Earlier conversation is not available in this window.${handoff}`,
-				true,
-				{ windowId: entry.id, tokensBefore: entry.tokensBefore },
-				entry.timestamp,
-			),
-		];
-	}
 	if (entry.type === "compaction") {
 		const summary = createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
-		return entry.systemMessage ? [{ ...entry.systemMessage, contextWindowId: entry.id }, summary] : [summary];
+		return entry.systemMessage ? [entry.systemMessage, summary] : [summary];
 	}
 	return [];
 }
 
-function coalesceAssistantCheckpoints(path: SessionEntry[]): SessionEntry[] {
-	const positions = new Map<string, number>();
-	const entries: SessionEntry[] = [];
-	for (const entry of path) {
-		if (entry.type === "message" && entry.message.role === "assistant" && entry.message.responseId) {
-			const responseId = entry.message.responseId;
-			const index = positions.get(responseId);
-			if (index !== undefined) {
-				const previous = entries[index];
-				entries[index] =
-					previous.type === "message" && previous.message.role === "assistant"
-						? {
-								...(entry.checkpoint ? previous : entry),
-								concurrentToolResultIds: previous.concurrentToolResultIds,
-								message: mergeAssistantCheckpoint(previous.message, entry.message),
-							}
-						: entry;
-				continue;
-			}
-			positions.set(responseId, entries.length);
-		}
-		entries.push(entry);
-	}
-	return entries;
-}
-
 /**
- * Build the active session entry list for the selected leaf.
+ * Build the active, compaction-aware session entry list.
  *
- * Entries before the latest context-window boundary are omitted. Within that
- * window, the latest compaction is represented by its summary, its kept entries,
- * and everything appended afterward.
+ * This follows the current leaf path. If the path contains compaction entries,
+ * the latest compaction is represented by the compaction entry itself, followed
+ * by the kept entries starting at firstKeptEntryId and all entries after the
+ * compaction entry. Older summarized entries are omitted.
  */
-function buildModelContextEntries(
+export function buildContextEntries(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
-	retainedByBoundary = new Map<string, Set<string>>(),
 ): SessionEntry[] {
-	const fullPath = buildSessionPath(entries, leafId, byId);
-	// Late execution checkpoints update the original response, not the window
-	// in which they were saved. Coalesce before cutting away older conversation.
-	const coalescedPath = orderConcurrentToolResults(
-		coalesceAssistantCheckpoints(fullPath),
-		fullPath,
-		retainedByBoundary,
-	);
-	let contextWindowIndex = -1;
-	for (let i = coalescedPath.length - 1; i >= 0; i--) {
-		if (coalescedPath[i].type === "context_window") {
-			contextWindowIndex = i;
-			break;
-		}
-	}
-	const path = contextWindowIndex === -1 ? coalescedPath : coalescedPath.slice(contextWindowIndex);
-	const window = path[0];
-	if (window?.type === "context_window" && window.retainedToolResultIds?.length) {
-		const retainedIds = new Set(window.retainedToolResultIds);
-		// Retain the original receipts before applying compaction, so a later summary
-		// can keep or drop them like ordinary results without reopening old prose.
-		path.splice(
-			1,
-			0,
-			...coalescedPath
-				.slice(0, contextWindowIndex)
-				.filter(
-					(entry) => entry.type === "message" && entry.message.role === "toolResult" && retainedIds.has(entry.id),
-				),
-		);
-	}
+	const path = buildSessionPath(entries, leafId, byId);
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -597,102 +508,18 @@ function buildModelContextEntries(
 	}
 
 	const contextEntries: SessionEntry[] = [compaction];
-	const firstKept = fullPath.find((entry) => entry.id === compaction.firstKeptEntryId);
-	const firstKeptResponseId =
-		firstKept?.type === "message" && firstKept.message.role === "assistant"
-			? firstKept.message.responseId
-			: undefined;
-	let firstKeptIndex = path.findIndex(
-		(entry) =>
-			entry.id === compaction.firstKeptEntryId ||
-			(firstKeptResponseId &&
-				entry.type === "message" &&
-				entry.message.role === "assistant" &&
-				entry.message.responseId === firstKeptResponseId),
-	);
-	let rawKeptIds: Set<string> | undefined;
-	if (firstKeptIndex < 0 && firstKept) {
-		// A saved checkpoint anchor may have coalesced into a response before this window.
-		// Other final responses can move before that anchor too; select each entry by its raw position.
-		rawKeptIds = new Set(fullPath.slice(fullPath.indexOf(firstKept)).map((entry) => entry.id));
-		firstKeptIndex = 0;
-	}
-	for (let i = firstKeptIndex; i >= 0 && i < compactionIdx; i++) {
+	let foundFirstKept = false;
+	for (let i = 0; i < compactionIdx; i++) {
 		const entry = path[i];
-		if ((!rawKeptIds || rawKeptIds.has(entry.id)) && !(entry.type === "message" && entry.message.role === "system")) {
+		if (entry.id === compaction.firstKeptEntryId) {
+			foundFirstKept = true;
+		}
+		if (foundFirstKept && !(entry.type === "message" && entry.message.role === "system")) {
 			contextEntries.push(entry);
 		}
 	}
 	contextEntries.push(...path.slice(compactionIdx + 1));
 	return contextEntries;
-}
-
-/** Move only explicitly related earlier receipts; later responses can defer the same receipt again. */
-function orderConcurrentToolResults(
-	path: SessionEntry[],
-	fullPath: SessionEntry[],
-	retainedByBoundary: Map<string, Set<string>>,
-): SessionEntry[] {
-	const positions = new Map(path.map((entry, index) => [entry.id, index]));
-	const after = new Map<string, number>();
-	let boundary = -1;
-	let retainedAtBoundary: Set<string> | undefined;
-	for (const [index, entry] of path.entries()) {
-		if (entry.type === "compaction" || entry.type === "context_window") {
-			boundary = index;
-			retainedAtBoundary = undefined;
-		}
-		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		for (const id of entry.concurrentToolResultIds ?? []) {
-			const position = positions.get(id);
-			if (position === undefined || position >= index) continue;
-			if (position < boundary) {
-				// Resolve the strictly earlier branch at the cut, before this response can
-				// move anything. Reuse retention semantics, including prior causal cuts.
-				if (!retainedAtBoundary) {
-					const boundaryId = path[boundary].id;
-					retainedAtBoundary = retainedByBoundary.get(boundaryId);
-					if (!retainedAtBoundary) {
-						retainedAtBoundary = new Set(
-							buildModelContextEntries(fullPath, boundaryId, undefined, retainedByBoundary).map(
-								(entry) => entry.id,
-							),
-						);
-						// Invocation-local: each exact cut is resolved once, never cached across edits or branches.
-						retainedByBoundary.set(boundaryId, retainedAtBoundary);
-					}
-				}
-				if (!retainedAtBoundary.has(id)) continue;
-			}
-			const receipt = path[position];
-			if (receipt.type === "message" && receipt.message.role === "toolResult") after.set(id, index);
-		}
-	}
-	const deferred = new Map<number, SessionEntry[]>();
-	for (const entry of path) {
-		const index = after.get(entry.id);
-		if (index === undefined) continue;
-		const receipts = deferred.get(index) ?? [];
-		receipts.push(entry);
-		deferred.set(index, receipts);
-	}
-	return path.flatMap((entry, index) => [...(after.has(entry.id) ? [] : [entry]), ...(deferred.get(index) ?? [])]);
-}
-
-/** Present the causally retained set in arrival order, with its active boundary first. */
-export function buildContextEntries(
-	entries: SessionEntry[],
-	leafId?: string | null,
-	byId?: Map<string, SessionEntry>,
-): SessionEntry[] {
-	const selected = buildModelContextEntries(entries, leafId, byId);
-	const positions = new Map(
-		coalesceAssistantCheckpoints(buildSessionPath(entries, leafId, byId)).map((entry, index) => [entry.id, index]),
-	);
-	const boundary =
-		selected[0]?.type === "compaction" || selected[0]?.type === "context_window" ? selected.shift() : undefined;
-	selected.sort((a, b) => positions.get(a.id)! - positions.get(b.id)!);
-	return boundary ? [boundary, ...selected] : selected;
 }
 
 /**
@@ -723,26 +550,6 @@ function projectContextEntry(entry: SessionEntry, edit: ContextEditEntry | undef
 	});
 }
 
-/** Keep each surviving output with its reasoning group, which may also cover other outputs. */
-function filterAssistantOutputs(
-	content: AssistantMessage["content"],
-	keep: (block: AssistantMessage["content"][number]) => boolean,
-): AssistantMessage["content"] {
-	const filtered: AssistantMessage["content"] = [];
-	const reasoning: AssistantMessage["content"] = [];
-	let removed = false;
-	for (const [index, block] of content.entries()) {
-		if (block.type === "thinking") {
-			if (content[index - 1]?.type !== "thinking") reasoning.length = 0;
-			reasoning.push(block);
-		} else if (keep(block)) {
-			filtered.push(...reasoning, block);
-			reasoning.length = 0;
-		} else removed = true;
-	}
-	return removed ? filtered : content;
-}
-
 /** Build provenance-preserving, compaction-aware model context. */
 export function buildSessionProjection(
 	entries: SessionEntry[],
@@ -751,16 +558,9 @@ export function buildSessionProjection(
 ): SessionProjection {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const contextEntries = buildModelContextEntries(entries, leafId, byId);
-	const allResults = new Map(
-		path.flatMap((entry) =>
-			entry.type === "message" && entry.message.role === "toolResult"
-				? [[entry.message.toolCallId, entry.message] as const]
-				: [],
-		),
-	);
+	const contextEntries = buildContextEntries(entries, leafId, byId);
 	const edits = new Map<string, ContextEditEntry>();
-	for (const entry of path) {
+	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
 	}
 	const projectedEntries = contextEntries.map(
@@ -772,112 +572,9 @@ export function buildSessionProjection(
 			messages:
 				sourceEntry.type === "compaction" && index > 0
 					? []
-					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)).filter(
-							// A retained window marker remains visible, but the newer compaction
-							// already owns its prompt/tool checkpoint. Keep raw provenance intact.
-							(message) => !(sourceEntry.type === "context_window" && index > 0 && message.role === "system"),
-						),
+					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
 		}),
 	);
-	// Async work outlives conversation. Carry only unresolved call items and the
-	// originals needed by retained results across compactions and fresh windows.
-	if (contextEntries[0]?.type === "compaction" || contextEntries[0]?.type === "context_window") {
-		const branchEntries = coalesceAssistantCheckpoints(path);
-		const retained = projectedEntries.flatMap((entry) => entry.messages);
-		const retainedCalls = new Set(
-			retained.flatMap((message) =>
-				message.role === "assistant"
-					? message.content.flatMap((call) => (call.type === "toolCall" ? [call.id] : []))
-					: [],
-			),
-		);
-		const retainedResults = new Set(
-			retained.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
-		);
-		const carried = branchEntries.flatMap((sourceEntry): ProjectedSessionEntry[] => {
-			if (sourceEntry.type !== "message" || sourceEntry.message.role !== "assistant") return [];
-			const message = projectContextEntry(sourceEntry, edits.get(sourceEntry.id))[0];
-			if (message?.role !== "assistant") return [];
-			// Keep replay signatures without text that another model would convert back to old prose.
-			const content = filterAssistantOutputs(
-				message.content,
-				(call) =>
-					call.type === "toolCall" &&
-					!!call.async &&
-					!retainedCalls.has(call.id) &&
-					(retainedResults.has(call.id) || !allResults.has(call.id)),
-			).map((block) => (block.type === "thinking" ? { ...block, thinking: "" } : block));
-			return content.some((block) => block.type === "toolCall")
-				? [{ sourceEntry, messages: [{ ...message, content }] }]
-				: [];
-		});
-		projectedEntries.splice(1, 0, ...carried);
-		// An explicit call omission also omits its dependent output; never resurrect the removed call.
-		const omittedCalls = new Set<string>();
-		for (const source of branchEntries) {
-			if (source.type !== "message" || source.message.role !== "assistant" || !edits.has(source.id)) continue;
-			const visible = projectContextEntry(source, edits.get(source.id))[0];
-			const visibleIds = new Set(
-				visible?.role === "assistant"
-					? visible.content.flatMap((call) => (call.type === "toolCall" ? [call.id] : []))
-					: [],
-			);
-			for (const call of source.message.content)
-				if (call.type === "toolCall" && call.async && !visibleIds.has(call.id)) omittedCalls.add(call.id);
-		}
-		const retainedIds = new Set(
-			path
-				.slice(
-					0,
-					path.findIndex((entry) => entry.id === contextEntries[0].id),
-				)
-				.map((entry) => entry.id),
-		);
-		for (const entry of projectedEntries) {
-			entry.messages = entry.messages.filter(
-				(message) => message.role !== "toolResult" || !omittedCalls.has(message.toolCallId),
-			);
-			if (retainedIds.has(entry.sourceEntry.id)) entry.messages = withoutToolSearchState(entry.messages);
-		}
-	}
-	const retainedResults = new Set(
-		projectedEntries.flatMap((entry) =>
-			entry.messages.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
-		),
-	);
-	for (const entry of projectedEntries) {
-		const source = entry.sourceEntry;
-		const toolExecutionFailed =
-			(source.type === "message" &&
-				source.message.role === "assistant" &&
-				source.message.content?.some((call) => {
-					if (call.type !== "toolCall") return false;
-					const result = allResults.get(call.id);
-					return result?.isError && (result.executionSkipped || !(call.async && call.responsesItem?.async));
-				})) ||
-			undefined;
-		entry.messages = entry.messages.map((message) => {
-			if (message.role !== "assistant") return message;
-			const content = filterAssistantOutputs(
-				message.content,
-				(block) =>
-					!(
-						block.type === "toolCall" &&
-						(block.executionStarted || (block.async && block.responsesItem)) &&
-						allResults.has(block.id) &&
-						!retainedResults.has(block.id)
-					),
-			);
-			if (content === message.content && message.toolExecutionFailed === toolExecutionFailed) return message;
-			return { ...message, content, toolExecutionFailed };
-		});
-	}
-	// Keep journal arrival order; only new declarations opt into leading model context.
-	// Unmarked legacy prefixes must replay as they were originally bound.
-	const headIndex = projectedEntries.findIndex((entry) =>
-		entry.messages.some((message) => message.role === "system" && message.nativeHead),
-	);
-	if (headIndex > 0) projectedEntries.unshift(...projectedEntries.splice(headIndex, 1));
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),
@@ -979,6 +676,7 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		return [];
 	}
 
+	assertSessionConversionNotRequired(entries);
 	if (pending) appendFileSync(resolvedFilePath, "\n");
 	return entries;
 }
@@ -1057,7 +755,7 @@ function getSessionHeaderCwd(header: SessionHeader): string | undefined {
 
 function sessionCwdMatches(cwd: string | undefined, resolvedCwd: string, sessionDir: string): boolean {
 	// Legacy headers lack cwd; keep them discoverable only in the default directory.
-	if (cwd === undefined || cwd === "") return sessionDir === getDefaultSessionDirPath(resolvedCwd);
+	if (cwd === undefined || cwd === "") return resolvePath(sessionDir) === getDefaultSessionDirPath(resolvedCwd);
 	return resolvePath(cwd) === resolvedCwd;
 }
 
@@ -1150,7 +848,7 @@ async function buildSessionInfo(
 				name = entry.name?.trim() || undefined;
 			}
 
-			if (entry.type !== "message" || entry.checkpoint) continue;
+			if (entry.type !== "message") continue;
 			messageCount++;
 
 			const activityTime = getMessageActivityTime(entry);
@@ -1355,6 +1053,7 @@ export class SessionManager {
 		const explicitPath = resolvePath(sessionFile);
 		if (existsSync(explicitPath)) {
 			const entries = preloadedFileEntries ?? loadEntriesFromFile(explicitPath);
+			assertSessionConversionNotRequired(entries);
 
 			// If file was empty, initialize it with a valid session header. If it was
 			// non-empty but did not parse as a pi session, fail without modifying it.
@@ -1409,6 +1108,7 @@ export class SessionManager {
 	}
 
 	private _loadEntries(entries: FileEntry[], options?: NewSessionOptions): void {
+		assertSessionConversionNotRequired(entries);
 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 
 		if (header) {
@@ -1454,28 +1154,25 @@ export class SessionManager {
 		let destination = this.sessionFile;
 		let mode: number | undefined;
 		if (flag === "w" && existsSync(destination)) {
-			// Like append, repair writes through existing aliases instead of replacing them.
+			// Repair writes through aliases and respects the journal's write permissions.
 			destination = realpathSync(destination);
-			// Rename alone could bypass a read-only journal's write permissions.
 			accessSync(destination, constants.W_OK);
 			mode = statSync(destination).mode & 0o777;
 		}
 		const temporary = flag === "w" ? `${destination}.${randomUUID()}.tmp` : undefined;
 		const fd = openSync(temporary ?? destination, "wx", mode);
 		this.needsRewrite = flag;
-		// Only a successful exclusive creation authorizes repairing an initial file.
-		// Keep open outside cleanup so a collision never removes someone else's file.
+		// Only successful exclusive creation authorizes repairing an initial file.
 		if (!temporary) this.flushed = true;
 		try {
 			try {
-				if (mode !== undefined) fchmodSync(fd, mode); // Preserve mode despite the current umask.
+				if (mode !== undefined) fchmodSync(fd, mode);
 				for (const entry of this.fileEntries) {
 					writeFileSync(fd, `${JSON.stringify(entry)}\n`);
 				}
 			} finally {
 				closeSync(fd);
 			}
-			// Never truncate prior journal bytes when a repair write or close fails.
 			if (temporary) renameSync(temporary, destination);
 			this.flushed = true;
 			this.needsRewrite = undefined;
@@ -1484,30 +1181,18 @@ export class SessionManager {
 		}
 	}
 
-	private _hasPersistableEntries(): boolean {
-		return this.fileEntries.some(
-			(e) => e.type === "custom" || e.type === "usage" || (e.type === "message" && e.message.role === "assistant"),
-		);
-	}
-
-	/**
-	 * Persist accepted entries without appending entries or moving the leaf.
-	 * Throws while persistence still fails. In-memory sessions remain untouched;
-	 * new journals wait for an assistant response, usage entry, or custom entry.
-	 */
+	/** Retry accepted entries without appending duplicates or moving the active leaf. */
 	flush(): void {
-		// An initial save may have exposed a valid journal that another writer resumed.
-		// Recover its missing entries through the append path instead of replacing it.
-		if (this.needsRewrite === "wx" && this.sessionFile && loadEntriesFromFile(this.sessionFile).length > 0) {
+		if (!this.persist || !this.sessionFile) return;
+		// A partially saved journal may already have been resumed by another writer.
+		if (this.needsRewrite === "wx" && loadEntriesFromFile(this.sessionFile).length > 0) {
 			this.needsRewrite = undefined;
 			this.failedAppendIndex = 1;
 		}
 		if (this.needsRewrite || (!this.flushed && this._hasPersistableEntries())) {
 			this._rewriteFile(this.flushed ? "w" : "wx");
 		}
-		if (this.failedAppendIndex !== undefined && this.sessionFile) {
-			// Repair only missing appends; replacing our stale snapshot would erase other writers.
-			// Loading also terminates an incomplete final line before new entries are appended.
+		if (this.failedAppendIndex !== undefined) {
 			if (!existsSync(this.sessionFile)) {
 				this._rewriteFile("wx");
 			} else {
@@ -1548,17 +1233,30 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
+	/**
+	 * A new session file is created once it contains conversation, custom state, or usage.
+	 * Setup entries alone (model, thinking level, system prompt) stay in memory so opening and
+	 * closing pi without chatting leaves no file behind. Starting at the user message (not the
+	 * first assistant reply) keeps the prompt on disk if the first turn never completes (#10000).
+	 */
+	private _hasPersistableEntries(): boolean {
+		return this.fileEntries.some(
+			(e) =>
+				e.type === "custom" ||
+				e.type === "usage" ||
+				(e.type === "message" && (e.message.role === "user" || e.message.role === "assistant")),
+		);
+	}
+
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
 		if (!this.flushed || this.needsRewrite || this.failedAppendIndex !== undefined) {
-			// The newly accepted entry is already in fileEntries; publish or repair all entries once.
 			this.flush();
 			return;
 		}
-
 		this.failedAppendIndex = this.fileEntries.length - 1;
-		// The leading newline isolates this entry from another writer's partial record.
+		// Isolate this entry from another writer's partial record.
 		appendFileSync(this.sessionFile, `\n${JSON.stringify(entry)}\n`);
 		this.failedAppendIndex = undefined;
 	}
@@ -1577,8 +1275,7 @@ export class SessionManager {
 				this.labelTimestampsById.delete(entry.targetId);
 			}
 		}
-		// Accepted entries (including label indexes) survive I/O failure. Retry persistence,
-		// not the append, to avoid duplicating native conversation or extension state.
+		// Accepted entries and indexes survive I/O failure. Retry persistence, not append.
 		this._persist(entry);
 	}
 
@@ -1588,21 +1285,13 @@ export class SessionManager {
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(
-		message: Message | CustomMessage | BashExecutionMessage,
-		checkpoint = false,
-		consumedToolResultIds?: string[],
-		concurrentToolResultIds?: string[],
-	): string {
+	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			message,
-			...(checkpoint ? { checkpoint: true } : {}),
-			...(consumedToolResultIds?.length ? { consumedToolResultIds: [...consumedToolResultIds] } : {}),
-			...(concurrentToolResultIds?.length ? { concurrentToolResultIds: [...concurrentToolResultIds] } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1635,50 +1324,6 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Append a fresh context-window boundary as child of current leaf, then advance leaf. Returns entry id. */
-	appendContextWindow(
-		handoff: string | undefined,
-		tokensBefore: number | null,
-		retainedToolResultIds?: string[],
-	): string {
-		const timestamp = new Date().toISOString();
-		const systemMessage = getCurrentSystemMessage(this.buildSessionContext().messages);
-		const entry: ContextWindowEntry = {
-			type: "context_window",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp,
-			handoff,
-			tokensBefore,
-			...(retainedToolResultIds?.length ? { retainedToolResultIds: [...retainedToolResultIds] } : {}),
-			...(systemMessage
-				? { systemMessage: { ...systemMessage, nativeHead: true, timestamp: new Date(timestamp).getTime() } }
-				: {}),
-		};
-		this._appendEntry(entry);
-		return entry.id;
-	}
-
-	/** Publish a validated prospective window without regenerating its marker or draft IDs. */
-	appendPreparedContextWindow(preview: SessionManager, windowId: string): void {
-		const branch = preview.getBranch();
-		const index = branch.findIndex((entry) => entry.id === windowId && entry.type === "context_window");
-		if (preview.persist || preview.sessionId !== this.sessionId || index < 0)
-			throw new Error("Invalid context window preview");
-		const entries = branch.slice(index);
-		let parentId = this.leafId;
-		for (const [offset, entry] of entries.entries()) {
-			if (
-				entry.parentId !== parentId ||
-				this.byId.has(entry.id) ||
-				(offset > 0 && entry.type !== "context_edit" && entry.type !== "custom_message")
-			)
-				throw new Error("Context window preview no longer extends the active branch");
-			parentId = entry.id;
-		}
-		for (const entry of entries) this._appendEntry(entry);
-	}
-
 	/** Append model-attributed usage that does not participate in LLM context. Returns the appended entry. */
 	appendUsage(
 		kind: string,
@@ -1708,7 +1353,7 @@ export class SessionManager {
 			];
 			if (values.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0))
 				throw new Error("Usage tokens and costs must be finite non-negative numbers");
-			// Snapshot the persisted JSON shape, including omission of optional undefined fields.
+			// Snapshot persisted JSON, including omission of optional undefined fields.
 			usage = JSON.parse(JSON.stringify(usage)) as Usage;
 			const existing = this.fileEntries.find(
 				(entry) => entry.type === "usage" && entry.contributionId === contributionId,
@@ -1771,7 +1416,13 @@ export class SessionManager {
 			usage,
 			fromHook,
 			...(systemMessage
-				? { systemMessage: { ...systemMessage, nativeHead: true, timestamp: new Date(timestamp).getTime() } }
+				? {
+						systemMessage: {
+							...systemMessage,
+							// A rebuilt prefix must differ even when two compactions share a clock tick.
+							timestamp: Math.max(new Date(timestamp).getTime(), systemMessage.timestamp + 1),
+						},
+					}
 				: {}),
 		};
 		this._appendEntry(entry);
@@ -1809,7 +1460,8 @@ export class SessionManager {
 	/** Get the current session name from the latest session_info entry, if any. */
 	getSessionName(): string | undefined {
 		// Walk entries in reverse to find the latest session_info entry.
-		// Empty names explicitly clear the session title.
+		// Empty names explicitly clear the session title. Reads fileEntries directly: the footer
+		// calls this on every frame, and getEntries() copies the whole session.
 		for (let i = this.fileEntries.length - 1; i >= 0; i--) {
 			const entry = this.fileEntries[i];
 			if (entry.type === "session_info") {
@@ -1991,6 +1643,16 @@ export class SessionManager {
 		return h ? (h as SessionHeader) : null;
 	}
 
+	/** Number of session entries (excludes header), without copying them like `getEntries()`. */
+	getEntryCount(): number {
+		return this.byId.size;
+	}
+
+	/** Changes on append or replacement, not when only the active leaf moves. */
+	getEntriesRevision(): number {
+		return this.entriesRevision;
+	}
+
 	/**
 	 * Get all session entries (excludes header). Returns a shallow copy.
 	 * The session is append-only: use appendXXX() to add entries, branch() to
@@ -1998,11 +1660,6 @@ export class SessionManager {
 	 */
 	getEntries(): SessionEntry[] {
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
-	}
-
-	/** Changes when file entries are appended or replaced, not when only the active leaf moves. */
-	getEntriesRevision(): number {
-		return this.entriesRevision;
 	}
 
 	/**
@@ -2278,7 +1935,7 @@ export class SessionManager {
 		return new SessionManager(cwd, dir, undefined, true);
 	}
 
-	/** No journal persistence. sessionDir optionally locates durable artifacts such as background jobs. */
+	/** No journal persistence. sessionDir optionally locates durable background artifacts. */
 	static inMemory(
 		cwd: string = process.cwd(),
 		options?: NewSessionOptions & { sessionDir?: string },
@@ -2342,7 +1999,7 @@ export class SessionManager {
 		// Copy all non-header entries from source
 		for (const entry of sourceEntries) {
 			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `\n${JSON.stringify(entry)}\n`);
+				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
 			}
 		}
 

@@ -4,7 +4,7 @@ import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type {
-	ContextWindowEntry,
+	CompactionEntry,
 	ModelChangeEntry,
 	SessionEntry,
 	SessionMessageEntry,
@@ -333,15 +333,16 @@ describe("TreeSelectorComponent", () => {
 		});
 	});
 
-	describe("context windows", () => {
-		test("renders, searches, and copies the persisted handoff", () => {
-			const boundary: ContextWindowEntry = {
-				type: "context_window",
+	describe("compaction", () => {
+		test("renders, searches, and copies the persisted summary", () => {
+			const boundary: CompactionEntry = {
+				type: "compaction",
 				id: "window-2",
 				parentId: "user-1",
 				timestamp: new Date().toISOString(),
 				tokensBefore: 42_000,
-				handoff: "resume checkout investigation",
+				summary: "resume checkout investigation",
+				firstKeptEntryId: "user-1",
 			};
 			const tree = buildTree([
 				userMessage("user-1", null, "start"),
@@ -356,10 +357,8 @@ describe("TreeSelectorComponent", () => {
 				() => {},
 			);
 
-			expect(selector.render(100).map(stripVTControlCharacters).join("\n")).toContain(
-				"[context window: 42k tokens] resume checkout investigation",
-			);
-			selector.handleInput("checkout");
+			expect(selector.render(100).map(stripVTControlCharacters).join("\n")).toContain("[compaction: 42k tokens]");
+			selector.handleInput("compaction");
 			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("window-2");
 
 			let copied: string | undefined;
@@ -367,7 +366,7 @@ describe("TreeSelectorComponent", () => {
 				copied = text;
 			};
 			selector.getTreeList().copySelected();
-			expect(copied).toContain("Handoff: resume checkout investigation");
+			expect(copied).toBe("resume checkout investigation");
 		});
 	});
 

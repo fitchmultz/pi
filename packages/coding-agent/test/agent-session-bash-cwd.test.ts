@@ -15,6 +15,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { defineTool, type ExtensionFactory } from "../src/core/extensions/types.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
+import { createBackgroundCommandTool } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { type BashOperations, createBashToolDefinition, createLocalBashOperations } from "../src/core/tools/bash.ts";
@@ -78,6 +79,7 @@ describe.skipIf(process.platform === "win32")("AgentSession Bash cwd hooks", () 
 				},
 			}),
 			cwd: originalCwd,
+			agentDir,
 			settingsManager,
 			resourceLoader,
 			modelRuntime,
@@ -112,7 +114,7 @@ describe.skipIf(process.platform === "win32")("AgentSession Bash cwd hooks", () 
 		expect(existsSync(originalCwd)).toBe(false);
 		const updates: unknown[] = [];
 		const result = await bash.execute("after", { command }, undefined, (update) => updates.push(update));
-		expect(result).toEqual({
+		expect(result).toMatchObject({
 			content: [
 				{
 					type: "text",
@@ -365,10 +367,12 @@ describe.skipIf(process.platform === "win32")("AgentSession Bash cwd hooks", () 
 
 	it("reinitializes and removes registrations on reload without retaining old callbacks", async () => {
 		let loads = 0;
+		let register = true;
 		let firstAPI!: ExtensionAPI;
 		const calls: number[] = [];
 		const factories: ExtensionFactory[] = [
 			(pi) => {
+				if (!register) return;
 				const instance = ++loads;
 				if (instance === 1) firstAPI = pi;
 				const destination = join(root, `load-${instance}`);
@@ -388,10 +392,42 @@ describe.skipIf(process.platform === "win32")("AgentSession Bash cwd hooks", () 
 			{ type: "text", text: `${join(root, "load-2")}\n` },
 		]);
 		expect((await session.executeBash("pwd -P")).output).toBe(`${join(root, "load-2")}\n`);
-		factories.length = 0;
+		register = false;
 		await session.reload();
 		expect((await session.executeBash("pwd -P")).output).toBe(`${originalCwd}\n`);
 		expect(calls).toEqual([1, 2, 2]);
+	});
+
+	it("launches background commands in the hooked cwd and exposes them through the SDK factory", async () => {
+		const session = await createSession([(pi) => pi.registerBashCwdHook(() => selectedCwd)]);
+		session.setActiveToolsByName(["background_command"]);
+		const tool = session.agent.state.tools.find((tool) => tool.name === "background_command")!;
+		rmdirSync(originalCwd);
+		const started = await tool.execute("background", { action: "start", command: "pwd -P" });
+		const job = JSON.parse(
+			started.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join(""),
+		) as { id: string };
+		const observer = createBackgroundCommandTool(selectedCwd, {
+			sessionManager: session.sessionManager,
+			sessionDir: join(agentDir, "sessions"),
+		});
+		await vi.waitFor(
+			async () => {
+				const result = await observer.execute("status", { action: "status", id: job.id });
+				expect(
+					JSON.parse(
+						result.content
+							.filter((block) => block.type === "text")
+							.map((block) => block.text)
+							.join(""),
+					),
+				).toMatchObject({ status: "succeeded", cwd: selectedCwd, outputTail: `${selectedCwd}\n` });
+			},
+			{ timeout: 5000 },
+		);
 	});
 
 	it("uses only the replacement session's registrations", async () => {

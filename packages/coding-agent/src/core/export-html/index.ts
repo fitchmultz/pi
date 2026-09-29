@@ -1,7 +1,8 @@
 import type { AgentState } from "@earendil-works/pi-agent-core";
-import type { ToolCall, ToolReference } from "@earendil-works/pi-ai";
-import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
-import { basename, join } from "path";
+import { publishLocalFile } from "@earendil-works/pi-agent-core/node";
+import type { ToolCall } from "@earendil-works/pi-ai";
+import { existsSync, readFileSync, statSync } from "fs";
+import { basename, join, resolve } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
@@ -15,11 +16,11 @@ import { SessionManager } from "../session-manager.ts";
  */
 export interface ToolHtmlRenderer {
 	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
-	renderCall(toolCallId: string, tool: ToolReference, args: unknown): string | undefined;
+	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
 	/** Render a tool result to HTML. Returns collapsed/expanded or undefined if tool has no custom renderer. */
 	renderResult(
 		toolCallId: string,
-		tool: ToolReference,
+		toolName: string,
 		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 		details: unknown,
 		isError: boolean,
@@ -28,7 +29,7 @@ export interface ToolHtmlRenderer {
 
 /** Presentation variants for a call's snapshots and branch-specific results. */
 interface RenderedToolHtml {
-	/** Call previews keyed by serialized display arguments, including admitted execution arguments. */
+	/** Call previews keyed by serialized display arguments, including branch-specific arguments. */
 	calls?: Record<string, string>;
 	/** Results keyed by their raw journal entry ID. */
 	results?: Record<string, { collapsed?: string; expanded?: string }>;
@@ -190,25 +191,22 @@ function preRenderCustomTools(
 	const byId = new Map(entries.map((entry) => [entry.id, entry]));
 
 	const findCall = (entry: SessionEntry, toolCallId: string): ToolCall | undefined => {
-		let call: ToolCall | undefined;
 		let current: SessionEntry | undefined = entry;
 		while (current) {
 			if (current.type === "message" && current.message.role === "assistant") {
 				const block = current.message.content.find((block) => block.type === "toolCall" && block.id === toolCallId);
 				if (block?.type === "toolCall") {
-					call ??= block;
-					if (block.executionArguments !== undefined)
-						return { ...call, executionArguments: block.executionArguments };
+					return block;
 				}
 			}
 			current = current.parentId && current.parentId !== current.id ? byId.get(current.parentId) : undefined;
 		}
-		return call;
+		return undefined;
 	};
 
 	const renderCall = (call: ToolCall) => {
-		const args = call.executionArguments ?? call.arguments;
-		const callHtml = toolRenderer.renderCall(call.id, { name: call.name, namespace: call.namespace }, args);
+		const args = call.arguments;
+		const callHtml = toolRenderer.renderCall(call.id, call.name, args);
 		if (callHtml) {
 			renderedTools[call.id] ??= {};
 			const rendered = renderedTools[call.id];
@@ -224,10 +222,7 @@ function preRenderCustomTools(
 		// Find tool calls in assistant messages
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
-				if (
-					block.type === "toolCall" &&
-					(block.namespace !== undefined || !TEMPLATE_RENDERED_TOOLS.has(block.name))
-				) {
+				if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
 					renderCall(findCall(entry, block.id) ?? block);
 				}
 			}
@@ -236,13 +231,13 @@ function preRenderCustomTools(
 		// Find tool results
 		if (msg.role === "toolResult" && msg.toolCallId) {
 			const toolName = msg.toolName || "";
-			if (msg.namespace !== undefined || !TEMPLATE_RENDERED_TOOLS.has(toolName)) {
-				// Restore this branch's admitted arguments for the result renderer's context.
+			if (!TEMPLATE_RENDERED_TOOLS.has(toolName)) {
+				// Restore this branch's arguments for the result renderer's context.
 				const call = findCall(entry, msg.toolCallId);
 				if (call) renderCall(call);
 				const rendered = toolRenderer.renderResult(
 					msg.toolCallId,
-					{ name: toolName, namespace: msg.namespace },
+					toolName,
 					msg.content,
 					msg.details,
 					msg.isError || false,
@@ -306,7 +301,6 @@ export async function exportSessionToHtml(
 		systemPrompt: state?.systemPrompt,
 		tools: state?.tools?.map((t) => ({
 			name: t.name,
-			namespace: t.namespace,
 			description: t.description,
 			parameters: t.parameters,
 		})),
@@ -322,7 +316,7 @@ export async function exportSessionToHtml(
 	}
 
 	assertDistinctExportTarget(sessionFile, outputPath);
-	writeFileSync(outputPath, html, "utf8");
+	await publishLocalFile(resolve(outputPath), html);
 	return outputPath;
 }
 
@@ -357,6 +351,6 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	const html = generateHtml(sessionData, opts.themeName);
 
-	writeFileSync(outputPath, html, "utf8");
+	await publishLocalFile(resolve(outputPath), html);
 	return outputPath;
 }

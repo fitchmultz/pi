@@ -8,15 +8,10 @@ import {
 } from "../src/core/cache-stats.ts";
 import { type SessionEntry, SessionManager, type SessionMessageEntry } from "../src/core/session-manager.ts";
 
-function detectCacheMiss(
-	entries: SessionEntry[],
-	message: AssistantMessage,
-	prices: ModelPriceSource,
-	consumed?: string[],
-) {
+function detectCacheMiss(entries: SessionEntry[], message: AssistantMessage, prices: ModelPriceSource) {
 	// Live detection follows the active branch, so link the fixture entries into one.
 	const branch = entries.map((entry, index) => ({ ...entry, parentId: index ? entries[index - 1].id : null }));
-	return detectLiveCacheMiss(SessionManager.inMemory(undefined, undefined, branch), message, prices, consumed);
+	return detectLiveCacheMiss(SessionManager.inMemory(undefined, undefined, branch), message, prices);
 }
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
@@ -112,8 +107,8 @@ describe("computeCacheWaste", () => {
 		expect(totals.missedTokens).toBe(0);
 	});
 
-	it("skips the turn after a context-window reset", () => {
-		const reset = { type: "context_window", id: "w", parentId: null, timestamp: "" } as SessionEntry;
+	it("skips the turn after a branch summary", () => {
+		const reset = { type: "branch_summary", id: "w", parentId: null, timestamp: "" } as SessionEntry;
 		const afterReset = assistant({ cacheWrite: 20_000, cost: { cacheWrite: 0.075 } });
 		const totals = computeCacheWaste([entry(turn1), reset, entry(afterReset)], models);
 		expect(totals.missedTokens).toBe(0);
@@ -203,138 +198,6 @@ function withDiagnostics(message: AssistantMessage, details: JsonObject): Assist
 const fullMiss = assistant({ input: 110_000, timestamp: 120_000 });
 
 describe("incremental live cache comparisons", () => {
-	it.each(["context_window", "compaction"] as const)(
-		"bounds async provenance across repeated %s boundaries",
-		(boundary) => {
-			const manager = SessionManager.inMemory();
-			const issued = assistant({ cacheRead: 100_000 });
-			issued.content = [{ type: "toolCall", id: "tracked-0", name: "work", arguments: {}, async: true }];
-			manager.appendMessage(issued);
-			manager.appendMessage(turn2);
-			const resultId = manager.appendMessage({
-				role: "toolResult",
-				toolCallId: "tracked-0",
-				toolName: "work",
-				content: [],
-				isError: false,
-				timestamp: 1,
-			});
-			const syncId = manager.appendMessage({
-				role: "toolResult",
-				toolCallId: "sync",
-				toolName: "work",
-				content: [],
-				isError: false,
-				timestamp: 1,
-			});
-			// Observe actual retained collections without adding a production inspection API.
-			const maps: Map<unknown, unknown>[] = [];
-			let storedSync = false;
-			const originalSet = Map.prototype.set;
-			const set = vi.spyOn(Map.prototype, "set").mockImplementation(function (
-				this: Map<unknown, unknown>,
-				key: unknown,
-				value: unknown,
-			) {
-				if (key === "tracked-0" || (key === resultId && value === "tracked-0")) maps.push(this);
-				if (key === syncId && value === "sync") storedSync = true;
-				return originalSet.call(this, key, value);
-			});
-			try {
-				detectLiveCacheMiss(manager, { ...fullMiss }, models);
-			} finally {
-				set.mockRestore();
-			}
-			expect(storedSync).toBe(false);
-			expect(maps).toHaveLength(2);
-			expect(maps.map((map) => map.size)).toEqual([1, 1]);
-			const admitted = { ...fullMiss };
-			expect(detectLiveCacheMiss(manager, admitted, models, [resultId])?.observedChanges).toEqual([
-				"older async result admitted",
-			]);
-			expect(maps.map((map) => map.size)).toEqual([0, 0]);
-			expect(detectLiveCacheMiss(manager, admitted, models, [resultId])?.observedChanges).toEqual([
-				"older async result admitted",
-			]);
-			manager.appendMessage(admitted, false, [resultId]);
-			for (let index = 1; index <= 20; index++) {
-				const message = {
-					...issued,
-					content: [
-						{ type: "toolCall" as const, id: `tracked-${index}`, name: "work", arguments: {}, async: true },
-					],
-				};
-				manager.appendMessage(message);
-				const id = manager.appendMessage({
-					role: "toolResult",
-					toolCallId: `tracked-${index}`,
-					toolName: "work",
-					content: [],
-					isError: false,
-					timestamp: 1,
-				});
-				manager.appendMessage({
-					role: "toolResult",
-					toolCallId: `sync-${index}`,
-					toolName: "work",
-					content: [],
-					isError: false,
-					timestamp: 1,
-				});
-				const consumed = index % 2 ? [id] : [];
-				const response = { ...fullMiss };
-				detectLiveCacheMiss(manager, response, models, consumed);
-				manager.appendMessage(response, false, consumed);
-				if (boundary === "context_window") manager.appendContextWindow("next", 100_000);
-				else manager.appendCompaction("summary", index % 3 === 0 ? null : manager.getLeafId(), 100_000);
-				// A delayed execution checkpoint must not resurrect a retired completed call.
-				manager.appendMessage(message, true);
-				detectLiveCacheMiss(manager, { ...fullMiss }, models);
-				expect(maps.map((map) => map.size)).toEqual([0, 0]);
-			}
-		},
-	);
-
-	it.each(["context_window", "compaction"] as const)(
-		"retains pending calls and explicitly carried receipts across %s",
-		(boundary) => {
-			const manager = SessionManager.inMemory();
-			const issued = assistant({ cacheRead: 100_000 });
-			issued.content = ["pending", "carried", "discarded"].map((id) => ({
-				type: "toolCall",
-				id,
-				name: "work",
-				arguments: {},
-				async: true,
-			}));
-			manager.appendMessage(issued);
-			const receipt = (id: string) =>
-				manager.appendMessage({
-					role: "toolResult",
-					toolCallId: id,
-					toolName: "work",
-					content: [],
-					isError: false,
-					timestamp: 1,
-				});
-			const discardedId = receipt("discarded");
-			const carriedId = receipt("carried");
-			detectLiveCacheMiss(manager, { ...fullMiss }, models);
-			if (boundary === "context_window") manager.appendContextWindow("next", 100_000, [carriedId]);
-			else manager.appendCompaction("summary", carriedId, 100_000);
-			manager.appendMessage(turn2);
-			const pendingId = receipt("pending");
-			expect(detectLiveCacheMiss(manager, { ...fullMiss }, models, [discardedId])?.observedChanges).toEqual([
-				"unclassified",
-			]);
-			const message = { ...fullMiss };
-			const miss = detectLiveCacheMiss(manager, message, models, [pendingId, carriedId]);
-			expect(miss?.observedChanges).toEqual(["older async result admitted"]);
-			manager.appendMessage(message, false, [pendingId, carriedId]);
-			expect(collectCacheMisses(manager.getEntries(), models).get(message)).toEqual(miss);
-		},
-	);
-
 	it("reads only appended entries after initial hydration and matches replay", () => {
 		const manager = SessionManager.inMemory();
 		manager.appendMessage(turn2);
@@ -366,49 +229,6 @@ describe("incremental live cache comparisons", () => {
 		expect(live).toMatchObject({ missedTokens: 105_000, observedChanges: ["unclassified"] });
 		manager.appendMessage(fullMiss);
 		expect(collectCacheMisses(manager.getBranch(), models).get(fullMiss)).toEqual(live);
-	});
-
-	it.each([false, true])("retains checkpoint-only call provenance across a window boundary=%s", (boundary) => {
-		const manager = SessionManager.inMemory();
-		const checkpoint = assistant({ cacheRead: 100_000 });
-		checkpoint.responseId = "checkpoint-only";
-		checkpoint.content = [{ type: "toolCall", id: "old", name: "work", arguments: {}, async: true }];
-		manager.appendMessage(checkpoint, true);
-		if (boundary) manager.appendContextWindow("next", 100_000);
-		manager.appendMessage({ ...turn2, responseId: "previous" });
-		detectLiveCacheMiss(manager, fullMiss, models);
-		const resultId = manager.appendMessage({
-			role: "toolResult",
-			toolCallId: "old",
-			toolName: "work",
-			content: [],
-			isError: false,
-			timestamp: 1,
-		});
-		const live = detectLiveCacheMiss(manager, fullMiss, models, [resultId]);
-		expect(live?.observedChanges).toEqual(["older async result admitted"]);
-		manager.appendMessage(fullMiss, false, [resultId]);
-		expect(collectCacheMisses(manager.getEntries(), models).get(fullMiss)).toEqual(live);
-	});
-
-	it("does not treat a checkpoint of the previous response as an older call", () => {
-		const manager = SessionManager.inMemory();
-		const previous = {
-			...turn2,
-			responseId: "same-response",
-			content: [{ type: "toolCall" as const, id: "recent", name: "work", arguments: {}, async: true }],
-		};
-		manager.appendMessage(previous, true);
-		manager.appendMessage(previous);
-		const resultId = manager.appendMessage({
-			role: "toolResult",
-			toolCallId: "recent",
-			toolName: "work",
-			content: [],
-			isError: false,
-			timestamp: 1,
-		});
-		expect(detectLiveCacheMiss(manager, fullMiss, models, [resultId])?.observedChanges).toEqual(["unclassified"]);
 	});
 
 	it.each([0, 40_000])("ingests an aborted response with %s prompt tokens even when no live warning ran", (tokens) => {
@@ -454,12 +274,6 @@ describe("observed cache changes", () => {
 		).toEqual([label]);
 	});
 
-	it("does not attribute a steering successor's miss to its request's new connection", () => {
-		const committed = withDiagnostics(turn2, { socketReused: false });
-		const successor = { ...fullMiss, diagnostics: committed.diagnostics };
-		expect(detectCacheMiss([entry(committed)], successor, models)?.observedChanges).toEqual(["unclassified"]);
-	});
-
 	it("keeps the warning deficit independent of an actual cached-read decline", () => {
 		const previous = assistant({ input: 30_000, cacheRead: 70_000 });
 		const current = assistant({ input: 40_000, cacheRead: 70_000 });
@@ -489,73 +303,6 @@ describe("observed cache changes", () => {
 		expect(detectCacheMiss([longResponse], next, models)?.observedChanges).toEqual(["unclassified"]);
 		const measured = { ...longResponse, message: withDiagnostics(turn2, { terminalEventMs: 240_000 }) };
 		expect(detectCacheMiss([measured], next, models)?.observedChanges).toEqual(["idle 6m"]);
-	});
-
-	it.each([false, true])(
-		"requires a newly admitted older native async result (carried=%s), not just a completed result",
-		(carried) => {
-			const issued = assistant({ cacheRead: 100_000 });
-			issued.content = [{ type: "toolCall", id: "async-call", name: "work", arguments: {}, async: true }];
-			const result: SessionEntry = {
-				type: "message",
-				id: "result",
-				parentId: null,
-				timestamp: "",
-				message: {
-					role: "toolResult",
-					toolCallId: "async-call",
-					toolName: "work",
-					content: [],
-					isError: false,
-					timestamp: 1,
-				},
-			};
-			const entries: SessionEntry[] = [entry(issued)];
-			if (carried)
-				entries.push({
-					type: "context_window",
-					id: "window",
-					parentId: null,
-					timestamp: "",
-					handoff: "next",
-					tokensBefore: 100_000,
-				});
-			entries.push(entry(turn2), result);
-			expect(detectCacheMiss(entries, fullMiss, models)?.observedChanges).toEqual(["unclassified"]);
-			const live = detectCacheMiss(entries, fullMiss, models, ["result"]);
-			expect(live?.observedChanges).toEqual(["older async result admitted"]);
-			const persisted: SessionEntry = { ...entry(fullMiss), consumedToolResultIds: ["result"] };
-			expect(collectCacheMisses([...entries, persisted], models).get(fullMiss)).toEqual(live);
-			const alreadyConsumed: SessionEntry = { ...entry(turn2), consumedToolResultIds: ["result"] };
-			expect(
-				detectCacheMiss([entry(issued), result, alreadyConsumed], fullMiss, models, ["result"])?.observedChanges,
-			).toEqual(["unclassified"]);
-			expect(detectCacheMiss([entry(issued), result], fullMiss, models, ["result"])?.observedChanges).toEqual([
-				"unclassified",
-			]);
-		},
-	);
-
-	it("does not classify synchronous tools as older async results", () => {
-		const issued = assistant({ cacheRead: 100_000 });
-		issued.content = [{ type: "toolCall", id: "sync", name: "work", arguments: {} }];
-		const result: SessionEntry = {
-			type: "message",
-			id: "result",
-			parentId: null,
-			timestamp: "",
-			message: {
-				role: "toolResult",
-				toolCallId: "sync",
-				toolName: "work",
-				content: [],
-				isError: false,
-				timestamp: 1,
-			},
-		};
-		expect(
-			detectCacheMiss([entry(issued), entry(turn2), result], fullMiss, models, ["result"])?.observedChanges,
-		).toEqual(["unclassified"]);
 	});
 
 	it("escapes provider control characters instead of sending them to the terminal", () => {

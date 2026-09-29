@@ -91,6 +91,7 @@ describe("Footer session statistics", () => {
 		const harness = await createHarness({ tools: [] });
 		harnesses.push(harness);
 		const sm = harness.sessionManager;
+		vi.spyOn(sm, "getCwd").mockReturnValue("/project");
 		sm.appendSessionInfo("Original");
 		const leaf = sm.appendMessage(assistant());
 		harness.session.agent.state.messages = sm.buildSessionContext().messages;
@@ -130,6 +131,7 @@ describe("Footer session statistics", () => {
 		const harness = await createHarness({ tools: [] });
 		harnesses.push(harness);
 		const sm = harness.sessionManager;
+		vi.spyOn(sm, "getCwd").mockReturnValue("/project");
 		sm.appendSessionInfo("First");
 		const leaf = sm.appendMessage(assistant());
 		const original = [sm.getHeader()!, ...sm.getEntries()];

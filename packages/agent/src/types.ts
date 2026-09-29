@@ -10,11 +10,9 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 	Tool,
-	ToolReference,
 	ToolResultMessage,
 	TranscriptContext,
 	Usage,
-	UserMessage,
 } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
 
@@ -84,13 +82,17 @@ export interface BeforeToolCallResult {
  * - `isError`: if provided, replaces the tool result error flag
  * - `usage`: if provided, replaces the tool result usage
  * - `terminate`: if provided, replaces the early-termination hint
+ * - `structuredContent`: if provided, replaces the structured content. If `content` is provided
+ *   without it, the structured content is dropped, because it may no longer match the content.
+ *   Return it along with `content` to keep it.
  *
- * Omitted fields keep the original executed tool result values.
+ * Other omitted fields keep the original executed tool result values.
  * There is no deep merge for `content`, `details`, or `usage`.
  */
 export interface AfterToolCallResult {
 	content?: (TextContent | ImageContent)[];
 	details?: unknown;
+	structuredContent?: JsonValue;
 	isError?: boolean;
 	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
 	usage?: Usage;
@@ -133,22 +135,19 @@ export interface AfterToolCallContext {
 export interface AgentTurnContext {
 	/** The assistant message that completed the turn. */
 	message: AssistantMessage;
-	/** Results available at this response boundary. Native async results may arrive in a later turn. */
+	/** Tool result messages emitted for the completed turn. */
 	toolResults: ToolResultMessage[];
 	/** Current agent context after the turn's assistant message and tool results have been appended. */
 	context: AgentContext;
 	/** Messages that this loop invocation will return if it exits at this point. Prompt runs include the initial prompt messages; continuation runs do not include pre-existing context messages. */
 	newMessages: AgentMessage[];
-	/** A successful tool request to start the next turn with a fresh context window. */
-	newContext?: NewContextRequest;
 }
 
 /** Decision returned by {@link FinishTurn}. Returning undefined preserves normal scheduling. */
 export type AgentTurnDecision = { action: "continue" } | { action: "end" };
 
 /**
- * Called after a completed assistant response and its currently available tool results, before `turn_end`.
- * Native async calls may still be running; `agent_end` waits for local execution or durable detach.
+ * Called after a completed assistant turn and all of its tool-result messages, but before `turn_end`.
  * On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
  * follow-up scheduling can satisfy that request and adds no extra request; otherwise the loop continues once
  * with the current context. Error and aborted responses remain hard exits.
@@ -191,14 +190,8 @@ export type PrepareRequest = (
 
 export interface PrepareNextTurnContext extends AgentTurnContext {}
 
-/**
- * Unexpected callback failures terminate agentLoop/agentLoopContinue with an assistant
- * error message and agent_end. Direct runAgentLoop/runAgentLoopContinue callers receive a rejection.
- */
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
-	/** Current permitted executable tools, read after an awaited search callback registers/activates matches. */
-	getTools?: () => readonly AgentTool[];
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -206,6 +199,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Each AgentMessage must be converted to a SystemMessage, UserMessage, AssistantMessage, or ToolResultMessage
 	 * that the LLM can understand. AgentMessages that cannot be converted (e.g., UI-only notifications,
 	 * status messages) should be filtered out.
+	 *
+	 * Contract: must not throw or reject. Return a safe fallback value instead.
+	 * Throwing interrupts the low-level agent loop without producing a normal event sequence.
 	 *
 	 * @example
 	 * ```typescript
@@ -232,6 +228,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * - Context window management (pruning old messages)
 	 * - Injecting context from external sources
 	 *
+	 * Contract: must not throw or reject. Return the original messages or another
+	 * safe fallback value instead.
+	 *
 	 * @example
 	 * ```typescript
 	 * transformContext: async (messages) => {
@@ -250,34 +249,30 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Useful for short-lived OAuth tokens (e.g., GitHub Copilot) that may expire
 	 * during long-running tool execution phases.
 	 *
-	 * Return undefined when no key is available.
+	 * Contract: must not throw or reject. Return undefined when no key is available.
 	 */
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 
 	/**
-	 * Called after the assistant message and available tool-result messages have been emitted, immediately before `turn_end`.
-	 * Native async results may arrive later; ordinary tool batches still complete before this boundary.
-	 * `{ action: "end" }` ends the run without polling queues or preparing another request, unless a successful
-	 * tool batch requested a fresh context window. Cancellation always ends the run.
+	 * Called after the assistant message and all tool-result messages have been emitted, immediately before `turn_end`.
+	 * `{ action: "end" }` ends the run without polling queues or preparing another request.
 	 * On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
 	 * follow-up scheduling can satisfy that request and adds no extra request; otherwise the loop continues once
-	 * with the current context. Returning undefined preserves normal scheduling. Aborted responses remain hard exits,
-	 * as do error responses unless steering must still be delivered or native work is still running.
+	 * with the current context. Returning undefined preserves normal scheduling. Error and aborted responses remain
+	 * hard exits.
 	 */
 	finishTurn?: FinishTurn;
 
 	/**
 	 * Called immediately before every conversational provider request, including the first.
 	 * Pending messages have already been appended. The returned context, model, and thinking level
-	 * replace the runtime values for this and later requests in the run. Tool results that arrive while it runs
-	 * are appended to a returned context that lacks them. This hook does not poll queues.
+	 * replace the runtime values for this and later requests in the run. This hook does not poll queues.
 	 */
 	prepareRequest?: PrepareRequest;
 
 	/**
 	 * Called after `turn_end` when the loop will continue, immediately before the next turn starts.
 	 * Return replacement context/model/thinking state or messages to append to affect that turn.
-	 * Tool results that arrive while it runs are appended to a returned context that lacks them.
 	 * Return undefined to keep using the current context/config.
 	 */
 	prepareNextTurn?: (
@@ -287,27 +282,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *
-	 * Polled before requests and after turns, unless `finishTurn` or cancellation ends the run.
+	 * Called after the current assistant turn finishes executing its tool calls, unless `finishTurn` ends the run.
 	 * If messages are returned, they are added to the context before the next LLM call.
-	 * Native async work may still be running. Steering can interrupt an ordered sibling wait;
-	 * untouched calls then receive not-executed errors.
+	 * Tool calls from the current assistant message are not skipped.
 	 *
 	 * Use this for "steering" the agent while it's working.
 	 *
-	 * Return [] when no steering messages are available.
+	 * Contract: must not throw or reject. Return [] when no steering messages are available.
 	 */
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
-	/**
-	 * Wake pending-tool waits without consuming input. Notify immediately if steering is already
-	 * queued, then whenever new input arrives. Return a function that removes the listener.
-	 */
-	subscribeSteering?: (listener: () => void) => () => void;
-
-	/**
-	 * Model-only content for a saved tool result delivered on a live response continuation.
-	 * Those frames bypass `transformContext`; ordinary requests use it instead. Return undefined to send the saved content.
-	 */
-	toolResultModelContent?: (result: ToolResultMessage) => ToolResultMessage["content"] | undefined;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -318,7 +301,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Use this for follow-up messages that should wait until the agent finishes.
 	 *
-	 * Return [] when no follow-up messages are available.
+	 * Contract: must not throw or reject. Return [] when no follow-up messages are available.
 	 */
 	getFollowUpMessages?: () => Promise<AgentMessage[]>;
 
@@ -332,6 +315,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Default: "parallel"
 	 */
 	toolExecution?: ToolExecutionMode;
+
+	/** Current callable tools, rechecked immediately before execution to honor revocation during hooks. */
+	getTools?: () => readonly AgentTool[];
 
 	/**
 	 * Called before a tool is executed, after arguments have been validated.
@@ -437,31 +423,36 @@ export interface AgentState {
 	readonly errorMessage?: string;
 }
 
-/** Request carried by a successful tool result to start a fresh context window. */
-export interface NewContextRequest {
-	/** Optional continuation state injected into the new window. */
-	handoff?: string;
-}
-
 /** Final or partial result produced by a tool. */
 export interface AgentToolResult<T = JsonValue | undefined> {
-	/** Search matches. The runtime resolves these against active registered tools, never caller-supplied schemas. */
-	tools?: ToolReference[];
-	/** Only on aborted native async execution: durable external work remains pending, without a final result. */
-	pending?: boolean;
 	/** Text or image content returned to the model. */
 	content: (TextContent | ImageContent)[];
 	/** Arbitrary structured details for logs or UI rendering. */
 	details: T;
+	/**
+	 * Machine-readable result matching the tool's `outputSchema`, for programmatic callers. Not sent
+	 * to the model; `content` remains the model-facing result.
+	 */
+	structuredContent?: JsonValue;
 	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
 	usage?: Usage;
-	/** Start the next turn in a fresh context window after ordinary tool siblings succeed; native async work can continue. */
-	newContext?: NewContextRequest;
+	/**
+	 * Report a failure without throwing. The model sees `content` as an error result, like a thrown
+	 * error, but `details` and `structuredContent` are kept for the UI and programmatic callers.
+	 */
+	isError?: boolean;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
 	 */
 	terminate?: boolean;
+}
+
+/** Final outcome of a tool call after hooks ran. */
+export interface AgentToolCallOutcome {
+	toolCall: AgentToolCall;
+	result: AgentToolResult<any>;
+	isError: boolean;
 }
 
 /**
@@ -481,26 +472,26 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * Must return an object that matches `TParameters`.
 	 */
 	prepareArguments?: (args: unknown) => Static<TParameters>;
-	/** Execute the tool call. Throw on failure instead of encoding errors in `content`. */
+	/**
+	 * JSON Schema of `structuredContent` in successful results. Tools that declare it should always
+	 * set `structuredContent`.
+	 */
+	outputSchema?: TSchema;
+	/**
+	 * Execute the tool call. Throw on failure, or return a result with `isError: true`; do not only
+	 * describe the failure in `content`.
+	 */
 	execute: (
 		toolCallId: string,
 		params: Static<TParameters>,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
 	) => Promise<AgentToolResult<TDetails>>;
-	/** Reattach a journaled started call. Undefined means its outcome cannot be recovered; execute is never retried. */
-	resume?(
-		toolCallId: string,
-		params: Static<TParameters>,
-		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<TDetails>,
-	): Promise<AgentToolResult<TDetails> | undefined>;
 	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
 	replay?: "never" | "safe";
 	/**
 	 * Per-tool execution mode override.
-	 * - "sequential": this tool executes one at a time with other calls in the same response.
-	 *   Earlier responses' native async work does not block it unless the global mode is sequential.
+	 * - "sequential": this tool must execute one at a time with other tool calls.
 	 * - "parallel": this tool can execute concurrently with other tool calls.
 	 *
 	 * If omitted, the default execution mode applies.
@@ -531,37 +522,11 @@ export type AgentEvent =
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
 	// Message lifecycle - emitted for system, user, assistant, and toolResult messages
-	| {
-			type: "message_start";
-			message: AgentMessage;
-			/** Initial native payload's result call IDs; [] is known empty, absent is unknown. */
-			inputToolCallIds?: readonly string[];
-			/** Provider-captured input delta for an automatic successor. */
-			continuationInput?: readonly (UserMessage | ToolResultMessage)[];
-	  }
+	| { type: "message_start"; message: AgentMessage }
 	// Only emitted for assistant messages during streaming
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
-	/** Awaited durable snapshot of completed assistant items before an early tool side effect. */
-	| { type: "message_checkpoint"; message: AssistantMessage }
-	| Extract<AssistantMessageEvent, { type: "steering" }>
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; namespace?: string; args: any }
-	| { type: "tool_execution_prepared"; toolCallId: string; toolName: string; namespace?: string; args: unknown }
-	| { type: "tool_execution_detached"; toolCallId: string; toolName: string; namespace?: string }
-	| {
-			type: "tool_execution_update";
-			toolCallId: string;
-			toolName: string;
-			namespace?: string;
-			args: any;
-			partialResult: any;
-	  }
-	| {
-			type: "tool_execution_end";
-			toolCallId: string;
-			toolName: string;
-			namespace?: string;
-			result: any;
-			isError: boolean;
-	  };
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
+	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };

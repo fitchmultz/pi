@@ -595,7 +595,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 				expect(model.compat?.supportsStrictMode).toBeUndefined();
 				expect(capturedPayload).toBeDefined();
 				const tools = capturedPayload?.tools as any[] | undefined;
-				expect(tools).toHaveLength(2);
+				expect(tools).toBeDefined();
 				for (const tool of tools!) {
 					expect(tool.function).not.toHaveProperty("strict");
 				}

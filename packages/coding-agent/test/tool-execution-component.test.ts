@@ -115,7 +115,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("custom result");
 	});
 
-	test("refreshes the renderer when authoritative identity arrives and distinguishes detached work", () => {
+	test("refreshes the renderer when authoritative identity arrives", () => {
 		const component = new ToolExecutionComponent(
 			"work",
 			"call",
@@ -129,13 +129,9 @@ describe("ToolExecutionComponent parity", () => {
 			renderShell: "self",
 			renderCall: () => new Text("completed identity renderer", 0, 0),
 		});
-		component.markDetached();
-		const detached = stripAnsi(component.render(120).join("\n"));
-		expect(detached).toContain("completed identity renderer");
-		expect(detached).not.toContain("initial renderer");
-		expect(detached).toContain("external work remains pending");
-		component.updateResult({ content: [{ type: "text", text: "actual result" }], isError: false });
-		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("external work remains pending");
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("completed identity renderer");
+		expect(rendered).not.toContain("initial renderer");
 	});
 
 	test("self-rendered empty tool rows take no layout space", () => {
@@ -318,6 +314,22 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered.match(/\bread\b/g)?.length ?? 0).toBe(1);
 	});
 
+	// Issue #9996: strict tool schemas make models send null for omitted optional fields.
+	test("renders read calls with null offset and limit as full-file reads", () => {
+		const component = new ToolExecutionComponent(
+			"read",
+			"tool-read-null-range",
+			{ path: "src/example.ts", offset: null, limit: null },
+			{},
+			createReadToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("read src/example.ts");
+		expect(rendered).not.toContain("src/example.ts:");
+	});
+
 	test("inherits missing built-in result renderer slot from the built-in tool", () => {
 		const overrideDefinition: ToolDefinition = {
 			...createBaseToolDefinition("read"),
@@ -454,6 +466,33 @@ describe("ToolExecutionComponent parity", () => {
 		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("arg:bar");
+	});
+
+	test("shows arguments in the fallback call header", () => {
+		const longValue = "x".repeat(200);
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-args",
+			{ query: "pi", long: longValue, text: "line one\nline two" },
+			{},
+			createBaseToolDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const collapsed = stripAnsi(component.render(300).join("\n"));
+		expect(collapsed).toContain('custom_tool query="pi" long="xxx');
+		expect(collapsed).toContain("...");
+		expect(collapsed).not.toContain(longValue);
+
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(300).join("\n"));
+		expect(expanded).toContain("  query: pi");
+		expect(expanded).toContain(longValue);
+		const expandedLines = expanded.split("\n").map((line) => line.trimEnd());
+		const textLine = expandedLines.findIndex((line) => line.endsWith("  text: line one"));
+		expect(textLine).toBeGreaterThan(-1);
+		expect(expandedLines[textLine + 1]).toMatch(/^\s+ {4}line two$/);
 	});
 
 	test("collapses fallback results until expanded", () => {
@@ -708,7 +747,7 @@ describe("ToolExecutionComponent parity", () => {
 				false,
 			);
 
-			const collapsed = stripAnsi(component.render(120).join("\n"));
+			const collapsed = stripAnsi(component.render(Math.max(120, scenario.compact.length + 30)).join("\n"));
 			expect(collapsed).toContain(scenario.compact);
 			expect(collapsed).not.toContain(scenario.hidden);
 			if (scenario.absent) {
@@ -736,7 +775,7 @@ describe("ToolExecutionComponent parity", () => {
 				process.cwd(),
 			);
 
-			const collapsed = stripAnsi(component.render(120).join("\n"));
+			const collapsed = stripAnsi(component.render(Math.max(120, scenario.compact.length + 30)).join("\n"));
 			expect(collapsed).toContain(scenario.compact);
 			expect(collapsed.indexOf(":120-329")).toBeLessThan(collapsed.indexOf("to expand"));
 		});

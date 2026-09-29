@@ -372,64 +372,94 @@ describe("native pending input visibility", () => {
 		}
 	});
 
-	it("keeps TUI input order when pre-prompt compaction reenters the flush", async () => {
-		const entered = createDeferred();
-		const released = createDeferred();
-		const inputs: string[] = [];
-		const harness = await createHarness({
-			tools: [],
-			models: [{ id: "faux-1", contextWindow: 2000 }],
-			settings: { compaction: { enabled: true, reserveTokens: 0, keepRecentTokens: 1 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("input", (event) => {
-						inputs.push(event.text);
-					});
-					pi.on("session_before_auto_compact", async () => {
-						entered.resolve();
-						await released.promise;
-						return { newContext: { handoff: "short handoff" } };
-					});
-					pi.on("before_agent_start", () => ({ systemPrompt: "short instructions" }));
+	it.each([
+		{ compactView: false, requestBoundary: false },
+		{ compactView: true, requestBoundary: false },
+		{ compactView: false, requestBoundary: true },
+		{ compactView: true, requestBoundary: true },
+	])(
+		"keeps input order and renders once (compact=$compactView, request boundary=$requestBoundary)",
+		async ({ compactView, requestBoundary }) => {
+			const entered = createDeferred();
+			const released = createDeferred();
+			const inputs: string[] = [];
+			const firstInput = requestBoundary ? `first input ${"x".repeat(200_000)}` : "first input";
+			const harness = await createHarness({
+				tools: [],
+				models: [{ id: "faux-1", contextWindow: requestBoundary ? 64_000 : 2000, maxTokens: 2048 }],
+				settings: {
+					compactView,
+					compaction: { enabled: true, reserveTokens: requestBoundary ? 16_000 : 0, keepRecentTokens: 1 },
 				},
-			],
-		});
-		onTestFinished(() => harness.cleanup());
-		const model = harness.getModel();
-		harness.sessionManager.appendMessage({ ...userMsg("previous input ".repeat(800)), timestamp: Date.now() - 1000 });
-		harness.sessionManager.appendMessage({
-			...fauxAssistantMessage("previous response", { stopReason: "aborted", timestamp: Date.now() - 500 }),
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-		});
-		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-		harness.setResponses([fauxAssistantMessage("first done"), fauxAssistantMessage("tail done")]);
-		const { view, ctx } = await createInputView(harness);
-		view.subscribeToAgent();
-		view.queueCompactionMessage("first input", "steer");
-		view.queueCompactionMessage("tail input", "followUp");
-		const flush = view.flushCompactionQueue();
-		try {
-			await entered.promise;
-			expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
-			expect(harness.eventsOfType("compaction_end")).toHaveLength(0);
-			expect(inputs).toEqual(["first input"]);
-			expect(ctx.getPendingInputCount()).toBe(2);
-			released.resolve();
-			await flush;
-			await harness.session.waitForIdle();
-			expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
-			expect(inputs).toEqual(["first input", "tail input"]);
-			expect(getUserTexts(harness).slice(-2)).toEqual(["first input", "tail input"]);
-			expect(harness.faux.state.callCount).toBe(2);
-			expect(ctx.getPendingInputCount()).toBe(0);
-		} finally {
-			released.resolve();
-			await flush;
-			await harness.session.waitForIdle();
-		}
-	});
+				extensionFactories: [
+					(pi) => {
+						pi.on("input", (event) => {
+							inputs.push(event.text);
+						});
+						pi.on("session_before_compact", async (event) => {
+							entered.resolve();
+							await released.promise;
+							// A later rebuild must not mask input lost at this boundary.
+							if (requestBoundary) harness.session.setAutoCompactionEnabled(false);
+							return {
+								compaction: {
+									summary: "short summary",
+									firstKeptEntryId: event.preparation.firstKeptEntryId,
+									tokensBefore: event.preparation.tokensBefore,
+								},
+							};
+						});
+						pi.on("before_agent_start", () => ({ systemPrompt: "short instructions" }));
+					},
+				],
+			});
+			onTestFinished(() => harness.cleanup());
+			const model = harness.getModel();
+			harness.sessionManager.appendMessage({
+				...userMsg(requestBoundary ? "previous input" : "previous input ".repeat(800)),
+				timestamp: Date.now() - 1000,
+			});
+			harness.sessionManager.appendMessage({
+				...fauxAssistantMessage("previous response", { stopReason: "aborted", timestamp: Date.now() - 500 }),
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+			});
+			harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+			harness.setResponses([fauxAssistantMessage("first done"), fauxAssistantMessage("tail done")]);
+			const { view, ctx } = await createInputView(harness);
+			view.subscribeToAgent();
+			view.queueCompactionMessage(firstInput, "steer");
+			view.queueCompactionMessage("tail input", "followUp");
+			const flush = view.flushCompactionQueue();
+			try {
+				await entered.promise;
+				expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
+				expect(harness.eventsOfType("compaction_end")).toHaveLength(0);
+				expect(inputs).toEqual(requestBoundary ? [firstInput, "tail input"] : [firstInput]);
+				expect(ctx.getPendingInputCount()).toBe(requestBoundary ? 0 : 2);
+				released.resolve();
+				await flush;
+				await harness.session.waitForIdle();
+				expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+				expect(inputs).toEqual([firstInput, "tail input"]);
+				expect(getUserTexts(harness).slice(-2)).toEqual([firstInput, "tail input"]);
+				expect(harness.faux.state.callCount).toBe(2);
+				const transcript = view.chatContainer.render(120).join("\n");
+				const compactionLabel = compactView ? "Activity" : "[compaction]";
+				expect(transcript).toContain(compactionLabel);
+				expect(transcript.indexOf(compactionLabel)).toBeLessThan(transcript.indexOf("first input"));
+				expect(transcript.indexOf("first input")).toBeLessThan(transcript.indexOf("tail input"));
+				expect(transcript.match(/first input/g)).toHaveLength(1);
+				expect(transcript.match(/tail input/g)).toHaveLength(1);
+				expect(ctx.getPendingInputCount()).toBe(0);
+			} finally {
+				released.resolve();
+				await flush;
+				await harness.session.waitForIdle();
+			}
+		},
+	);
 
 	it.each(["steer", "followUp", "settlement"] as const)(
 		"reports %s observer failure without replaying accepted input",

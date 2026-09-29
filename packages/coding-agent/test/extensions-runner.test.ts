@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { DEFAULT_COMPACTION_SETTINGS } from "../src/core/compaction/index.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
 import {
 	createExtensionRuntime,
@@ -80,15 +81,16 @@ describe("ExtensionRunner", () => {
 	};
 
 	const extensionActions: ExtensionActions = {
+		recordUsage: () => {},
 		sendMessage: () => {},
 		sendUserMessage: () => {},
 		appendEntry: () => {},
-		recordUsage: () => {},
 		setSessionName: () => {},
 		getSessionName: () => undefined,
 		setLabel: () => {},
 		getActiveTools: () => [],
 		getAllTools: () => [],
+		getSettings: () => ({}),
 		setActiveTools: () => {},
 		refreshTools: () => {},
 		getCommands: () => [],
@@ -100,17 +102,13 @@ describe("ExtensionRunner", () => {
 	const extensionContextActions: ExtensionContextActions = {
 		getModel: () => undefined,
 		isIdle: () => true,
-		isBashRunning: () => false,
 		isProjectTrusted: () => true,
 		getSignal: () => undefined,
 		abort: () => {},
 		hasPendingMessages: () => false,
-		hasPendingSteeringMessages: () => false,
-		getPendingNextTurnCount: () => 0,
-		getPendingInputCount: () => 0,
 		shutdown: () => {},
 		getContextUsage: () => undefined,
-		getCompactionSettings: () => ({ enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 }),
+		getCompactionSettings: () => ({ ...DEFAULT_COMPACTION_SETTINGS }),
 		compact: () => {},
 		getSystemPrompt: () => "",
 		getScopedModels: () => [],
@@ -1232,104 +1230,6 @@ describe("ExtensionRunner", () => {
 			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
 			return { extension, runner };
 		}
-
-		it("snapshots fork preflight handlers across extensions before awaiting dispatch", async () => {
-			const runtime = createExtensionRuntime();
-			const calls: string[] = [];
-			let stopSecond!: () => void;
-			let release!: () => void;
-			const gate = new Promise<void>((resolve) => {
-				release = resolve;
-			});
-			const first = await loadExtensionFromFactory(
-				(pi) => {
-					pi.on("session_before_auto_compact", async () => {
-						calls.push("first");
-						await gate;
-						stopSecond();
-					});
-				},
-				tempDir,
-				createEventBus(),
-				runtime,
-			);
-			const second = await loadExtensionFromFactory(
-				(pi) => {
-					stopSecond = pi.on("session_before_auto_compact", () => {
-						calls.push("second");
-						return { newContext: { handoff: "native handoff" } };
-					});
-				},
-				tempDir,
-				createEventBus(),
-				runtime,
-			);
-			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
-			const event = {
-				type: "session_before_auto_compact" as const,
-				branchEntries: [],
-				pendingMessages: [],
-				retainedToolResultIds: [],
-				reason: "threshold" as const,
-				willRetry: false,
-				signal: new AbortController().signal,
-			};
-			const pending = runner.emit(event);
-			expect(calls).toEqual(["first"]);
-			release();
-			expect(await pending).toEqual({ newContext: { handoff: "native handoff" } });
-			expect(calls).toEqual(["first", "second"]);
-			expect(await runner.emit(event)).toBeUndefined();
-			expect(calls).toEqual(["first", "second", "first"]);
-			runtime.invalidate();
-			expect(() => {
-				stopSecond();
-				stopSecond();
-			}).not.toThrow();
-		});
-
-		it("keeps a removed cross-extension tool gate in the current interception", async () => {
-			const runtime = createExtensionRuntime();
-			let stopGate!: () => void;
-			const first = await loadExtensionFromFactory(
-				(pi) => {
-					pi.on("tool_call", () => {
-						stopGate();
-					});
-				},
-				tempDir,
-				createEventBus(),
-				runtime,
-			);
-			const second = await loadExtensionFromFactory(
-				(pi) => {
-					stopGate = pi.on("tool_call", () => ({ block: true, reason: "policy" }));
-				},
-				tempDir,
-				createEventBus(),
-				runtime,
-			);
-			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
-			const event = { type: "tool_call" as const, toolCallId: "call", toolName: "custom", input: {} };
-			expect(await runner.emitToolCall(event)).toEqual({ block: true, reason: "policy" });
-			expect(await runner.emitToolCall(event)).toBeUndefined();
-		});
-
-		it("returns idempotent disposers for every fork retry hook", async () => {
-			const stops: Array<() => void> = [];
-			const { extension } = await loadSubscriptionExtension((pi) => {
-				stops.push(pi.on("auto_retry_start", () => {}));
-				stops.push(pi.on("auto_retry_end", () => {}));
-				stops.push(pi.on("summarization_retry_scheduled", () => {}));
-				stops.push(pi.on("summarization_retry_attempt_start", () => {}));
-				stops.push(pi.on("summarization_retry_finished", () => {}));
-			});
-			for (const stop of stops) {
-				stop();
-				stop();
-			}
-			expect([...extension.handlers.keys()]).toEqual([]);
-		});
 
 		it("allows self-removal without skipping neighboring handlers", async () => {
 			const calls: string[] = [];

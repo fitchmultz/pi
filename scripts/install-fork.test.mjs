@@ -321,14 +321,14 @@ test("isolated npm scripts can invoke npm and package executables on Termux", { 
 
 test("Termux compiler installation preserves the source lock and uses its pinned artifact without scripts", { skip: process.platform === "win32" }, (t) => {
 	const f = fixture(t);
-	const name = `@typescript/native-preview-linux-${process.arch}`;
+	const name = `@typescript/typescript-linux-${process.arch}`;
 	const directory = join(f.root, "compiler");
 	mkdirSync(join(directory, "lib"), { recursive: true });
 	writeFileSync(join(directory, "package.json"), JSON.stringify({
 		name, version: "1.2.3", os: ["linux"], cpu: [process.arch],
 		scripts: { postinstall: "node -e 'process.exit(27)'" },
 	}));
-	writeFileSync(join(directory, "lib/tsgo"), '#!/usr/bin/env node\nconsole.log("Version 1.2.3");\n', { mode: 0o755 });
+	writeFileSync(join(directory, "lib/tsc"), '#!/usr/bin/env node\nconsole.log("Version 1.2.3");\n', { mode: 0o755 });
 	const tarball = packReleasePackages([{ name, directory }], join(f.root, "tarballs"), { npm: tools.npm, env: f.env }).get(name);
 	const lock = JSON.stringify({
 		lockfileVersion: 3,
@@ -341,8 +341,8 @@ test("Termux compiler installation preserves the source lock and uses its pinned
 	});
 	writeFileSync(join(f.root, "package-lock.json"), lock);
 	mkdirSync(join(f.root, "node_modules/.bin"), { recursive: true });
-	symlinkSync(join(f.root, "unusable-android-wrapper"), join(f.root, "node_modules/.bin/tsgo"));
+	symlinkSync(join(f.root, "unusable-android-wrapper"), join(f.root, "node_modules/.bin/tsc"));
 	prepareTermuxCompiler(f.root, tools, { ...f.env, npm_config_offline: "true" });
 	assert.equal(readFileSync(join(f.root, "package-lock.json"), "utf8"), lock);
-	assert.equal(execFileSync(join(f.root, "node_modules/.bin/tsgo"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
+	assert.equal(execFileSync(join(f.root, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
 });

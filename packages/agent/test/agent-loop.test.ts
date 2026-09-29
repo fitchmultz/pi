@@ -2,16 +2,22 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	EventStream,
-	getCurrentTools,
 	type Message,
 	type Model,
 	type UserMessage,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { agentLoop, agentLoopContinue, runAgentLoop, runAgentLoopContinue } from "../src/agent-loop.ts";
+import { agentLoop, agentLoopContinue, runAgentLoop, runToolCall } from "../src/agent-loop.ts";
 import { setDefaultStreamFn } from "../src/index.ts";
-import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
+import type {
+	AgentContext,
+	AgentEvent,
+	AgentLoopConfig,
+	AgentMessage,
+	AgentTool,
+	AgentToolCall,
+} from "../src/types.ts";
 
 // Mock stream for testing - mimics MockAssistantStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -115,313 +121,6 @@ describe("default stream function compatibility", () => {
 		} finally {
 			setDefaultStreamFn(undefined);
 		}
-	});
-});
-
-describe.each(["prompt", "continue"] as const)("%s stream failure settlement", (mode) => {
-	it.each(["prepareRequest", "transformContext", "getApiKey", "streamFn"] as const)(
-		"settles iteration and result when %s throws",
-		async (callback) => {
-			const prompt = createUserMessage("Hello");
-			const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
-			const failure = new Error(`${callback} failed`);
-			const fail = () => {
-				throw failure;
-			};
-			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
-			if (callback === "prepareRequest") config.prepareRequest = async () => fail();
-			if (callback === "transformContext") config.transformContext = async () => fail();
-			if (callback === "getApiKey") config.getApiKey = async () => fail();
-			const streamFn = () => {
-				if (callback === "streamFn") fail();
-				throw new Error("Provider must not be reached");
-			};
-			const stream =
-				mode === "prompt"
-					? agentLoop([prompt], context, config, undefined, streamFn)
-					: agentLoopContinue(context, config, undefined, streamFn);
-			const events: AgentEvent[] = [];
-			for await (const event of stream) events.push(event);
-			const messages = await stream.result();
-			const errorMessage = messages.at(-1);
-			expect(errorMessage).toMatchObject({
-				role: "assistant",
-				content: [{ type: "text", text: "" }],
-				api: "openai-responses",
-				provider: "openai",
-				model: "mock",
-				usage: createUsage(),
-				stopReason: "error",
-				errorMessage: failure.message,
-			});
-			expect(messages).toEqual(mode === "prompt" ? [prompt, errorMessage] : [errorMessage]);
-			expect(events.map((event) => event.type)).toEqual([
-				"agent_start",
-				"turn_start",
-				...(mode === "prompt" ? ["message_start", "message_end"] : []),
-				"message_start",
-				"message_end",
-				"turn_end",
-				"agent_end",
-			]);
-			expect(events.at(-1)).toEqual({ type: "agent_end", messages });
-			expect(events.at(-2)).toEqual({ type: "turn_end", message: errorMessage, toolResults: [] });
-		},
-	);
-
-	it("settles the full aborted lifecycle when provider preparation is cancelled", async () => {
-		const controller = new AbortController();
-		const prompt = createUserMessage("Hello");
-		const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
-		const config: AgentLoopConfig = {
-			model: createModel(),
-			convertToLlm: identityConverter,
-			prepareRequest: async ({ context }) => {
-				await Promise.resolve();
-				controller.abort();
-				return { context };
-			},
-		};
-		let requests = 0;
-		const streamFn = () => {
-			requests++;
-			throw new Error("Provider must not be reached");
-		};
-		const stream =
-			mode === "prompt"
-				? agentLoop([prompt], context, config, controller.signal, streamFn)
-				: agentLoopContinue(context, config, controller.signal, streamFn);
-		const events: AgentEvent[] = [];
-		for await (const event of stream) events.push(event);
-		const messages = await stream.result();
-		const aborted = messages.at(-1);
-		expect(aborted).toMatchObject({ role: "assistant", stopReason: "aborted" });
-		expect(messages).toEqual(mode === "prompt" ? [prompt, aborted] : [aborted]);
-		expect(requests).toBe(0);
-		expect(events.map((event) => event.type)).toEqual([
-			"agent_start",
-			"turn_start",
-			...(mode === "prompt" ? ["message_start", "message_end"] : []),
-			"message_start",
-			"message_end",
-			"turn_end",
-			"agent_end",
-		]);
-		expect(events.at(-2)).toEqual({ type: "turn_end", message: aborted, toolResults: [] });
-		expect(events.at(-1)).toEqual({ type: "agent_end", messages });
-	});
-
-	it("reports the active model after a turn switches providers without changing caller config", async () => {
-		const prompt = createUserMessage("Hello");
-		const reply = createAssistantMessage([{ type: "text", text: "First reply" }]);
-		const followUp = createUserMessage("Continue");
-		const model = createModel();
-		const nextModel = { ...model, api: "anthropic-messages" as const, provider: "anthropic", id: "other-model" };
-		const providers: string[] = [];
-		const prepareNextTurn = () => ({ model: nextModel });
-		const config: AgentLoopConfig = Object.freeze({
-			model,
-			convertToLlm: identityConverter,
-			prepareNextTurn,
-			getFollowUpMessages: async () => [followUp],
-			getApiKey: (provider: string) => {
-				providers.push(provider);
-				if (provider === nextModel.provider) throw new Error("new provider key failed");
-				return undefined;
-			},
-		});
-		const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
-		const streamFn = () => {
-			const response = new MockAssistantStream();
-			response.push({ type: "done", reason: "stop", message: reply });
-			return response;
-		};
-		const stream =
-			mode === "prompt"
-				? agentLoop([prompt], context, config, undefined, streamFn)
-				: agentLoopContinue(context, config, undefined, streamFn);
-		const events: AgentEvent[] = [];
-		for await (const event of stream) events.push(event);
-		const messages = await stream.result();
-		expect(providers).toEqual([model.provider, nextModel.provider]);
-		expect(messages.at(-1)).toMatchObject({
-			api: nextModel.api,
-			provider: nextModel.provider,
-			model: nextModel.id,
-			stopReason: "error",
-			errorMessage: "new provider key failed",
-		});
-		expect(messages.slice(0, -1)).toEqual(mode === "prompt" ? [prompt, reply, followUp] : [reply, followUp]);
-		expect(events.filter((event) => event.type === "agent_end")).toEqual([{ type: "agent_end", messages }]);
-		expect(config.model).toBe(model);
-		expect(config.prepareNextTurn).toBe(prepareNextTurn);
-	});
-
-	it.each(["transformContext", "getApiKey", "streamFn"] as const)(
-		"reports the prepared model when %s fails without changing caller config",
-		async (callback) => {
-			const prompt = createUserMessage("Hello");
-			const model = createModel();
-			const nextModel = {
-				...model,
-				api: "anthropic-messages" as const,
-				provider: "anthropic",
-				id: "prepared-model",
-			};
-			const failure = new Error(`${callback} failed after preparation`);
-			const fail = () => {
-				throw failure;
-			};
-			let preparations = 0;
-			const prepareRequest: NonNullable<AgentLoopConfig["prepareRequest"]> = async (request) => {
-				preparations++;
-				expect(request.model).toBe(model);
-				return { model: nextModel };
-			};
-			const config: AgentLoopConfig = { model, convertToLlm: identityConverter, prepareRequest };
-			if (callback === "transformContext") config.transformContext = async () => fail();
-			if (callback === "getApiKey") {
-				config.getApiKey = (provider) => {
-					expect(provider).toBe(nextModel.provider);
-					return fail();
-				};
-			}
-			Object.freeze(config);
-			const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
-			const streamFn = (requestedModel: AgentLoopConfig["model"]) => {
-				expect(requestedModel).toBe(nextModel);
-				if (callback === "streamFn") fail();
-				throw new Error("Provider must not be reached");
-			};
-			const stream =
-				mode === "prompt"
-					? agentLoop([prompt], context, config, undefined, streamFn)
-					: agentLoopContinue(context, config, undefined, streamFn);
-			const events: AgentEvent[] = [];
-			for await (const event of stream) events.push(event);
-			const messages = await stream.result();
-			const errorMessage = messages.at(-1);
-			expect(preparations).toBe(1);
-			expect(errorMessage).toMatchObject({
-				role: "assistant",
-				api: nextModel.api,
-				provider: nextModel.provider,
-				model: nextModel.id,
-				stopReason: "error",
-				errorMessage: failure.message,
-			});
-			expect(messages).toEqual(mode === "prompt" ? [prompt, errorMessage] : [errorMessage]);
-			expect(events.filter((event) => event.type === "turn_end")).toEqual([
-				{ type: "turn_end", message: errorMessage, toolResults: [] },
-			]);
-			expect(events.filter((event) => event.type === "agent_end")).toEqual([{ type: "agent_end", messages }]);
-			expect(config.model).toBe(model);
-			expect(config.prepareRequest).toBe(prepareRequest);
-		},
-	);
-
-	it("leaves direct runner rejection catchable", async () => {
-		const prompt = createUserMessage("Hello");
-		const context: AgentContext = { messages: mode === "continue" ? [prompt] : [] };
-		const failure = new Error("key resolution failed");
-		const config: AgentLoopConfig = {
-			model: createModel(),
-			convertToLlm: identityConverter,
-			getApiKey: () => {
-				throw failure;
-			},
-		};
-		const streamFn = () => {
-			throw new Error("Provider must not be reached");
-		};
-		const events: AgentEvent[] = [];
-		const emit = (event: AgentEvent) => {
-			events.push(event);
-		};
-		const result =
-			mode === "prompt"
-				? runAgentLoop([prompt], context, config, emit, undefined, streamFn)
-				: runAgentLoopContinue(context, config, emit, undefined, streamFn);
-		await expect(result).rejects.toBe(failure);
-		expect(events.some((event) => event.type === "agent_end")).toBe(false);
-	});
-});
-
-describe("stream failure lifecycle", () => {
-	it("classifies callback failure after cancellation as aborted", async () => {
-		const controller = new AbortController();
-		const config: AgentLoopConfig = {
-			model: createModel(),
-			convertToLlm: identityConverter,
-			getApiKey: () => {
-				controller.abort();
-				throw new Error("cancelled key lookup");
-			},
-		};
-		const stream = agentLoop([createUserMessage("Hello")], { messages: [] }, config, controller.signal, () => {
-			throw new Error("Provider must not be reached");
-		});
-		for await (const _event of stream) {
-			/* consume */
-		}
-		expect((await stream.result()).at(-1)).toMatchObject({
-			stopReason: "aborted",
-			errorMessage: "cancelled key lookup",
-		});
-	});
-
-	it("retains earlier completed messages and balances turns when a later callback fails", async () => {
-		const prompt = createUserMessage("Hello");
-		const reply = createAssistantMessage([{ type: "text", text: "Done" }]);
-		const config: AgentLoopConfig = {
-			model: createModel(),
-			convertToLlm: identityConverter,
-			getFollowUpMessages: async () => {
-				throw new Error("follow-up failed");
-			},
-		};
-		const stream = agentLoop([prompt], { messages: [] }, config, undefined, () => {
-			const response = new MockAssistantStream();
-			response.push({ type: "done", reason: "stop", message: reply });
-			return response;
-		});
-		const events: AgentEvent[] = [];
-		for await (const event of stream) events.push(event);
-		const messages = await stream.result();
-		expect(messages.slice(0, 2)).toEqual([prompt, reply]);
-		expect(messages).toHaveLength(3);
-		expect(messages[2]).toMatchObject({ stopReason: "error", errorMessage: "follow-up failed" });
-		expect(
-			events
-				.filter((event) => ["turn_start", "turn_end", "agent_end"].includes(event.type))
-				.map((event) => event.type),
-		).toEqual(["turn_start", "turn_end", "turn_start", "turn_end", "agent_end"]);
-		expect(events.at(-1)).toEqual({ type: "agent_end", messages });
-	});
-
-	it("does not duplicate terminal events for a provider protocol error", async () => {
-		const failure = { ...createAssistantMessage([], "error"), errorMessage: "provider failed" };
-		const stream = agentLoopContinue(
-			{ messages: [createUserMessage("Hello")] },
-			{ model: createModel(), convertToLlm: identityConverter },
-			undefined,
-			() => {
-				const response = new MockAssistantStream();
-				response.push({ type: "error", reason: "error", error: failure });
-				return response;
-			},
-		);
-		const events: AgentEvent[] = [];
-		for await (const event of stream) events.push(event);
-		expect(await stream.result()).toEqual([failure]);
-		expect(events.map((event) => event.type)).toEqual([
-			"agent_start",
-			"turn_start",
-			"message_start",
-			"message_end",
-			"turn_end",
-			"agent_end",
-		]);
 	});
 });
 
@@ -1715,11 +1414,10 @@ describe("agentLoop with AgentMessage", () => {
 		expect(prepareCalls).toBe(1);
 	});
 
-	it("admits steering queued during prepareRequest and prepares it before the request", async () => {
+	it("does not poll steering after prepareRequest", async () => {
 		const queued: AgentMessage[] = [];
 		const lateSteering = createUserMessage("late steering");
 		const requestIncludedSteering: boolean[] = [];
-		const preparedMessages: AgentMessage[][] = [];
 		let requestPreparations = 0;
 		let steeringPolls = 0;
 		const config: AgentLoopConfig = {
@@ -1729,8 +1427,7 @@ describe("agentLoop with AgentMessage", () => {
 				steeringPolls++;
 				return queued.splice(0);
 			},
-			prepareRequest: ({ context }) => {
-				preparedMessages.push(context.messages.slice());
+			prepareRequest: () => {
 				requestPreparations++;
 				if (requestPreparations === 1) queued.push(lateSteering);
 			},
@@ -1756,11 +1453,9 @@ describe("agentLoop with AgentMessage", () => {
 		);
 		await stream.result();
 
-		expect(requestIncludedSteering).toEqual([true]);
+		expect(requestIncludedSteering).toEqual([false, true]);
 		expect(requestPreparations).toBe(2);
-		expect(preparedMessages[0]).not.toContain(lateSteering);
-		expect(preparedMessages[1]).toContain(lateSteering);
-		// Startup, late admission after preparation, then the final natural-stop check.
+		// Startup, post-turn delivery, then the final natural-stop check.
 		expect(steeringPolls).toBe(3);
 	});
 
@@ -1839,179 +1534,6 @@ describe("agentLoop with AgentMessage", () => {
 		expect(llmCalls).toBe(2);
 		expect(prepareCalls).toBe(1);
 		expect(convertedSecondTurnHasUpdate).toBe(true);
-	});
-
-	it("forwards a successful new-context request after the full tool batch despite action:end", async () => {
-		const toolSchema = Type.Object({ value: Type.String() });
-		const completed: string[] = [];
-		const tool: AgentTool<typeof toolSchema, { value: string }> = {
-			name: "work",
-			label: "Work",
-			description: "Work tool",
-			parameters: toolSchema,
-			async execute(_toolCallId, params) {
-				await new Promise((resolve) => setTimeout(resolve, params.value === "slow" ? 20 : 0));
-				completed.push(params.value);
-				return {
-					content: [{ type: "text", text: params.value }],
-					details: { value: params.value },
-					newContext: params.value === "reset" ? { handoff: "continue here" } : undefined,
-					terminate: true,
-				};
-			},
-		};
-		let receivedHandoff: string | undefined;
-		const config: AgentLoopConfig = {
-			model: createModel(),
-			convertToLlm: identityConverter,
-			prepareNextTurn: ({ newContext }) => {
-				expect(completed).toEqual(["reset", "slow"]);
-				receivedHandoff = newContext?.handoff;
-				return undefined;
-			},
-			finishTurn: () => ({ action: "end" }),
-		};
-
-		let llmCalls = 0;
-		const stream = agentLoop([createUserMessage("work")], { messages: [], tools: [tool] }, config, undefined, () => {
-			llmCalls++;
-			const mockStream = new MockAssistantStream();
-			queueMicrotask(() => {
-				mockStream.push({
-					type: "done",
-					reason: llmCalls === 1 ? "toolUse" : "stop",
-					message:
-						llmCalls === 1
-							? createAssistantMessage(
-									[
-										{ type: "toolCall", id: "reset", name: "work", arguments: { value: "reset" } },
-										{ type: "toolCall", id: "slow", name: "work", arguments: { value: "slow" } },
-									],
-									"toolUse",
-								)
-							: createAssistantMessage([{ type: "text", text: "done" }]),
-				});
-			});
-			return mockStream;
-		});
-
-		for await (const _event of stream) {
-			// consume
-		}
-		expect(receivedHandoff).toBe("continue here");
-		expect(llmCalls).toBe(2);
-	});
-
-	it("does not forward a new-context request from an aborted partial batch", async () => {
-		const controller = new AbortController();
-		const executed: string[] = [];
-		const toolSchema = Type.Object({ value: Type.String() });
-		const tool: AgentTool<typeof toolSchema> = {
-			name: "work",
-			label: "Work",
-			description: "Work tool",
-			parameters: toolSchema,
-			executionMode: "sequential",
-			async execute(_toolCallId, params) {
-				executed.push(params.value);
-				controller.abort();
-				return {
-					content: [{ type: "text", text: params.value }],
-					details: {},
-					newContext: {},
-				};
-			},
-		};
-		let requestSeen = false;
-		const config: AgentLoopConfig = {
-			model: createModel(),
-			convertToLlm: identityConverter,
-			finishTurn: ({ newContext }) => {
-				requestSeen = newContext !== undefined;
-				return { action: "end" };
-			},
-		};
-		const stream = agentLoop(
-			[createUserMessage("work")],
-			{ messages: [], tools: [tool] },
-			config,
-			controller.signal,
-			() => {
-				const mockStream = new MockAssistantStream();
-				queueMicrotask(() => {
-					mockStream.push({
-						type: "done",
-						reason: "toolUse",
-						message: createAssistantMessage(
-							[
-								{ type: "toolCall", id: "reset", name: "work", arguments: { value: "reset" } },
-								{ type: "toolCall", id: "skipped", name: "work", arguments: { value: "skipped" } },
-							],
-							"toolUse",
-						),
-					});
-				});
-				return mockStream;
-			},
-		);
-
-		for await (const _event of stream) {
-			// consume
-		}
-		expect(executed).toEqual(["reset"]);
-		expect(requestSeen).toBe(false);
-	});
-
-	it("does not forward a new-context request when another tool in the batch errors", async () => {
-		const toolSchema = Type.Object({ reset: Type.Boolean() });
-		const tool: AgentTool<typeof toolSchema> = {
-			name: "work",
-			label: "Work",
-			description: "Work tool",
-			parameters: toolSchema,
-			async execute(_toolCallId, params) {
-				return {
-					content: [{ type: "text", text: params.reset ? "reset" : "failed" }],
-					details: {},
-					newContext: params.reset ? {} : undefined,
-				};
-			},
-		};
-		let requestSeen = false;
-		const config: AgentLoopConfig = {
-			model: createModel(),
-			convertToLlm: identityConverter,
-			afterToolCall: async ({ args }) => ({ isError: !(args as { reset: boolean }).reset }),
-			prepareNextTurn: ({ newContext }) => {
-				requestSeen = newContext !== undefined;
-				return undefined;
-			},
-		};
-
-		let llmCalls = 0;
-		const stream = agentLoop([createUserMessage("work")], { messages: [], tools: [tool] }, config, undefined, () => {
-			llmCalls++;
-			const mockStream = new MockAssistantStream();
-			queueMicrotask(() => {
-				const message =
-					llmCalls === 1
-						? createAssistantMessage(
-								[
-									{ type: "toolCall", id: "reset", name: "work", arguments: { reset: true } },
-									{ type: "toolCall", id: "fail", name: "work", arguments: { reset: false } },
-								],
-								"toolUse",
-							)
-						: createAssistantMessage([{ type: "text", text: "done" }]);
-				mockStream.push({ type: "done", reason: llmCalls === 1 ? "toolUse" : "stop", message });
-			});
-			return mockStream;
-		});
-
-		for await (const _event of stream) {
-			// consume
-		}
-		expect(requestSeen).toBe(false);
 	});
 
 	it("picks up steering queued during prepareNextTurn before the next request", async () => {
@@ -2158,7 +1680,6 @@ describe("agentLoop with AgentMessage", () => {
 			"message_start",
 			"message_end",
 			"tool_execution_start",
-			"tool_execution_prepared",
 			"tool_execution_end",
 			"message_start",
 			"message_end",
@@ -2447,47 +1968,6 @@ describe("agentLoop with AgentMessage", () => {
 	});
 });
 
-describe("transcript request preparation", () => {
-	it.each([false, true])("reconciles tools after request preparation (replace context: %s)", async (replace) => {
-		const tool: AgentTool = {
-			name: "prepared",
-			label: "Prepared",
-			description: "Prepared tool",
-			parameters: Type.Object({}),
-			execute: async () => ({ content: [], details: {} }),
-		};
-		const events: AgentEvent[] = [];
-		let requestedTools: string[] = [];
-		const messages = await runAgentLoop(
-			[createUserMessage("start")],
-			{ messages: [] },
-			{
-				model: createModel(),
-				convertToLlm: identityConverter,
-				prepareRequest: async ({ context }) => {
-					if (replace) return { context: { messages: context.messages.slice(), tools: [tool] } };
-					context.tools = [tool];
-					return undefined;
-				},
-			},
-			(event) => {
-				events.push(event);
-			},
-			undefined,
-			(_model, context) => {
-				requestedTools = getCurrentTools(context.messages).map((tool) => tool.name);
-				const stream = new MockAssistantStream();
-				stream.push({ type: "done", reason: "stop", message: createAssistantMessage([]) });
-				return stream;
-			},
-		);
-		expect(requestedTools).toEqual(["prepared"]);
-		expect(messages.map((message) => message.role)).toEqual(["user", "system", "assistant"]);
-		expect(events.filter((event) => event.type === "message_end").map((event) => event.message)).toEqual(messages);
-		expect(messages[1]).toMatchObject({ toolsAdded: [{ name: "prepared" }] });
-	});
-});
-
 describe("agentLoopContinue with AgentMessage", () => {
 	it("should throw when context has no messages", () => {
 		const context: AgentContext = {
@@ -2606,5 +2086,108 @@ describe("agentLoopContinue with AgentMessage", () => {
 		const messages = await stream.result();
 		expect(messages.length).toBe(1);
 		expect(messages[0].role).toBe("assistant");
+	});
+});
+
+describe("runToolCall", () => {
+	const echoSchema = Type.Object({ value: Type.String() });
+	const echo: AgentTool<typeof echoSchema> = {
+		name: "echo",
+		label: "Echo",
+		description: "Echo tool",
+		parameters: echoSchema,
+		outputSchema: Type.Object({ value: Type.String() }),
+		async execute(_toolCallId, params, _signal, onUpdate) {
+			onUpdate?.({ content: [{ type: "text", text: "partial" }], details: {} });
+			return {
+				content: [{ type: "text", text: params.value }],
+				details: {},
+				structuredContent: { value: params.value },
+			};
+		},
+	};
+	const failing: AgentTool = {
+		name: "failing",
+		label: "Failing",
+		description: "Returns an error result",
+		parameters: Type.Object({}),
+		async execute() {
+			return { content: [{ type: "text", text: "bad" }], details: { partial: true }, isError: true };
+		},
+	};
+	const assistantMessage = createAssistantMessage([]);
+	const call = (id: string, name: string, args: AgentToolCall["arguments"]): AgentToolCall => ({
+		type: "toolCall",
+		id,
+		name,
+		arguments: args,
+	});
+
+	it("validates, runs the hooks, and reports failures as error outcomes", async () => {
+		const hookCalls: string[] = [];
+		const updates: unknown[] = [];
+		const options = {
+			tools: [echo, failing],
+			assistantMessage,
+			context: { messages: [] },
+			beforeToolCall: async ({ toolCall, args }: { toolCall: { id: string }; args: unknown }) => {
+				hookCalls.push(`before ${toolCall.id}`);
+				if ((args as { value?: string }).value === "blocked") return { block: true, reason: "nope" };
+				return undefined;
+			},
+			afterToolCall: async ({ toolCall }: { toolCall: { id: string } }) => {
+				hookCalls.push(`after ${toolCall.id}`);
+				return undefined;
+			},
+			onUpdate: (partial: unknown) => {
+				updates.push(partial);
+			},
+		};
+
+		expect(await runToolCall(call("a", "echo", { value: "a" }), options)).toMatchObject({
+			toolCall: { id: "a" },
+			result: { structuredContent: { value: "a" } },
+			isError: false,
+		});
+		expect(await runToolCall(call("b", "echo", { value: { nested: true } }), options)).toMatchObject({
+			isError: true,
+		});
+		expect(await runToolCall(call("c", "echo", { value: "blocked" }), options)).toMatchObject({
+			result: { content: [{ type: "text", text: "nope" }] },
+			isError: true,
+		});
+		expect(await runToolCall(call("d", "missing", {}), options)).toMatchObject({
+			result: { content: [{ type: "text", text: "Tool missing not found" }] },
+			isError: true,
+		});
+		// Error results keep their details.
+		expect(await runToolCall(call("e", "failing", {}), options)).toMatchObject({
+			result: { details: { partial: true } },
+			isError: true,
+		});
+		expect(updates).toEqual([{ content: [{ type: "text", text: "partial" }], details: {} }]);
+		// Validation failures and unknown tools never reach the hooks; blocked calls skip afterToolCall.
+		expect(hookCalls).toEqual(["before a", "after a", "before c", "before e", "after e"]);
+	});
+
+	it("lets afterToolCall replace structured content and drops it when only content is replaced", async () => {
+		const redacted = [{ type: "text" as const, text: "redacted" }];
+		const results = [
+			{ content: redacted },
+			{ structuredContent: { value: "replaced" } },
+			{ content: redacted, structuredContent: { value: "both" } },
+			{ details: { note: "kept" } },
+		];
+		const seen: unknown[] = [];
+		for (const afterResult of results) {
+			const outcome = await runToolCall(call("x", "echo", { value: "original" }), {
+				tools: [echo],
+				assistantMessage,
+				context: { messages: [] },
+				afterToolCall: async () => afterResult,
+			});
+			seen.push(outcome.result.structuredContent);
+		}
+		expect(seen).toEqual([undefined, { value: "replaced" }, { value: "both" }, { value: "original" }]);
 	});
 });

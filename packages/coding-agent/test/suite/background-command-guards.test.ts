@@ -56,12 +56,11 @@ describe("background shell guards in shipped examples", () => {
 					}),
 				).toBeUndefined();
 			}
-			// Built-in guards must not confuse a namespaced tool with the native shell.
+			// Display namespaces do not change name-based tool identity.
 			expect(
 				await h.session.extensionRunner.emitToolCall({
 					type: "tool_call",
-					toolName: "background_command",
-					namespace: "other",
+					toolName: "other_background_command",
 					toolCallId: "other",
 					input: { action: "start", command: "sudo true" },
 				}),

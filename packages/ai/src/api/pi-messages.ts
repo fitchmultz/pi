@@ -376,16 +376,7 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 
 			let payload: unknown = {
 				model: model.id,
-				context: {
-					...context,
-					messages: context.messages.map((message) => {
-						if (message.role !== "system" || (message.contextWindowId === undefined && !message.nativeHead))
-							return message;
-						// Host-only anchors never reach the server.
-						const { contextWindowId: _contextWindowId, nativeHead: _nativeHead, ...wireMessage } = message;
-						return wireMessage;
-					}),
-				},
+				context,
 				options: {
 					temperature: options?.temperature,
 					maxTokens: options?.maxTokens,
@@ -423,6 +414,7 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 			}
 
 			for await (const piEvent of readPiMessagesEvents(response.body)) {
+				await options?.onProviderStreamEvent?.(piEvent, model);
 				const event = convertEvent(piEvent);
 				eventStream.push(event);
 				if (event.type === "done" || event.type === "error") {

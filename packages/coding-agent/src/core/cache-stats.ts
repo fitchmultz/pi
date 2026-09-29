@@ -42,9 +42,6 @@ interface PreviousRequest {
 	endedAt: number;
 	ttlMs: number;
 	reportedCache: boolean;
-	requestIndex: number;
-	responseId?: string;
-	requestStart?: number;
 	details: JsonObject;
 }
 
@@ -136,7 +133,6 @@ function detectMiss(
 	prev: PreviousRequest | undefined,
 	message: AssistantMessage,
 	models: ModelPriceSource,
-	olderAsyncAdmitted: boolean,
 ): CacheMiss | undefined {
 	const usage = message.usage;
 	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
@@ -157,7 +153,6 @@ function detectMiss(
 	const observedChanges: string[] = [];
 	const modelChanged = `${message.provider}/${message.model}` !== prev.modelKey;
 	if (modelChanged) observedChanges.push("model changed");
-	if (olderAsyncAdmitted) observedChanges.push("older async result admitted");
 	if (
 		["requestedServiceTier", "returnedServiceTier"].some(
 			(key) =>
@@ -186,9 +181,7 @@ function detectMiss(
 		before.instructionsBytes !== after.instructionsBytes
 	)
 		observedChanges.push("instructions changed");
-	// A steering successor continues the previous response's request and connection.
-	if (details.socketReused === false && requestStart(message) !== prev.requestStart)
-		observedChanges.push("new connection");
+	if (details.socketReused === false) observedChanges.push("new connection");
 	if (details.websocketRequestMode === "full" && prev.details.websocketRequestMode === "delta")
 		observedChanges.push("full resend");
 	const idleMs = Math.max(0, requestStart(message) - prev.endedAt);
@@ -210,63 +203,14 @@ function detectMiss(
 
 class CacheMissTracker {
 	private prev: PreviousRequest | undefined;
-	private requestIndex = 0;
-	private window = 0;
-	private calls = new Map<string, { requestIndex: number; window: number; responseId?: string; resultId?: string }>();
-	private results = new Map<string, string>();
-	private getEntry: (id: string) => SessionEntry | undefined;
 
-	constructor(getEntry: (id: string) => SessionEntry | undefined) {
-		this.getEntry = getEntry;
-	}
-
-	detect(
-		message: AssistantMessage,
-		models: ModelPriceSource,
-		consumedToolResultIds: string[] = [],
-	): CacheMiss | undefined {
-		const olderAsyncAdmitted = consumedToolResultIds.some((id) => {
-			const call = this.calls.get(this.results.get(id) ?? "");
-			return (
-				call &&
-				this.prev &&
-				(call.window < this.window ||
-					(call.requestIndex < this.prev.requestIndex &&
-						(!call.responseId || call.responseId !== this.prev.responseId)))
-			);
-		});
-		const miss = detectMiss(this.prev, message, models, olderAsyncAdmitted);
-		for (const id of consumedToolResultIds) {
-			const callId = this.results.get(id);
-			if (callId) this.calls.delete(callId);
-			this.results.delete(id);
-		}
-		return miss;
+	detect(message: AssistantMessage, models: ModelPriceSource): CacheMiss | undefined {
+		return detectMiss(this.prev, message, models);
 	}
 
 	observe(entry: SessionEntry, models: ModelPriceSource): CacheMiss | undefined {
-		if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "context_window") {
-			const retained = new Set(entry.type === "context_window" ? entry.retainedToolResultIds : []);
-			if (entry.type === "compaction" && entry.firstKeptEntryId !== entry.id) {
-				// Resolve the kept range from the journal only at a replay boundary.
-				let id = entry.parentId;
-				while (id) {
-					if (this.results.has(id)) retained.add(id);
-					if (id === entry.firstKeptEntryId) break;
-					id = this.getEntry(id)?.parentId ?? null;
-				}
-				if (id !== entry.firstKeptEntryId) retained.clear();
-			}
-			for (const [id, call] of this.calls) {
-				// Unresolved native calls are carried by the session projection. Completed
-				// receipts survive only when the boundary explicitly retains their context.
-				if (call.resultId && !retained.has(call.resultId)) {
-					this.results.delete(call.resultId);
-					this.calls.delete(id);
-				}
-			}
+		if (entry.type === "compaction" || entry.type === "branch_summary") {
 			this.prev = undefined;
-			this.window++;
 			return;
 		}
 		if (entry.type === "usage" && entry.kind === "cache_warm") {
@@ -279,57 +223,13 @@ class CacheMissTracker {
 					endedAt: Date.parse(entry.timestamp),
 					ttlMs: this.prev?.ttlMs ?? CACHE_TTL_MS,
 					reportedCache: true,
-					requestIndex: this.prev?.requestIndex ?? this.requestIndex,
-					responseId: this.prev?.responseId,
 					details: this.prev?.details ?? {},
 				};
 			}
 		}
-		if (entry.type !== "message") return;
-		if (entry.message.role === "toolResult") {
-			const call = this.calls.get(entry.message.toolCallId);
-			if (call) {
-				if (call.resultId) this.results.delete(call.resultId);
-				call.resultId = entry.id;
-				this.results.set(entry.id, entry.message.toolCallId);
-			}
-		}
-		if (entry.message.role !== "assistant") return;
+		if (entry.type !== "message" || entry.message.role !== "assistant") return;
 		const message = entry.message;
-		// Checkpoints can be the only surviving record of a carried native call.
-		for (const block of message.content) {
-			if (block.type !== "toolCall" || !block.async || this.calls.has(block.id)) continue;
-			if (entry.checkpoint) {
-				// Late execution checkpoints can repeat already retired calls. Consult
-				// their ancestry instead of retaining an ever-growing set of retired IDs.
-				let id = entry.parentId;
-				let completed = false;
-				while (id) {
-					const ancestor = this.getEntry(id);
-					if (!ancestor) break;
-					if (
-						ancestor.type === "message" &&
-						ancestor.message.role === "toolResult" &&
-						ancestor.message.toolCallId === block.id
-					) {
-						completed = true;
-						break;
-					}
-					id = ancestor.parentId;
-				}
-				if (completed) continue;
-			}
-			this.calls.set(block.id, {
-				requestIndex: this.requestIndex,
-				window: this.window,
-				responseId: message.responseId,
-			});
-		}
-		if (entry.checkpoint) {
-			this.requestIndex++;
-			return;
-		}
-		const miss = this.detect(message, models, entry.consumedToolResultIds);
+		const miss = this.detect(message, models);
 		const usage = message.usage;
 		const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 		if (promptTokens > 0) {
@@ -347,13 +247,9 @@ class CacheMissTracker {
 				// ponytail: journals omit retention overrides; use the configured lifetime until requests record their TTL.
 				ttlMs: (model && getPromptCacheTtlMs(model, undefined)) ?? CACHE_TTL_MS,
 				reportedCache: (this.prev?.reportedCache ?? false) || usage.cacheRead + usage.cacheWrite > 0,
-				requestIndex: this.requestIndex,
-				responseId: message.responseId,
-				requestStart: requestStart(message),
 				details,
 			};
 		}
-		this.requestIndex++;
 		return miss;
 	}
 }
@@ -362,8 +258,7 @@ function scan(
 	entries: SessionEntry[],
 	models: ModelPriceSource,
 ): { totals: CacheWasteTotals; misses: Map<AssistantMessage, CacheMiss> } {
-	const byId = new Map(entries.map((entry) => [entry.id, entry]));
-	const tracker = new CacheMissTracker((id) => byId.get(id));
+	const tracker = new CacheMissTracker();
 	const totals: CacheWasteTotals = {
 		missedTokens: 0,
 		missedCost: 0,
@@ -413,7 +308,6 @@ export function detectCacheMiss(
 	manager: SessionManager,
 	message: AssistantMessage,
 	models: ModelPriceSource,
-	consumedToolResultIds?: string[],
 ): CacheMiss | undefined {
 	let state = liveCacheStates.get(manager);
 	const revision = manager.getEntriesRevision();
@@ -426,7 +320,7 @@ export function detectCacheMiss(
 		(state.lastEntry && manager.getEntry(state.lastEntry.id) !== state.lastEntry)
 	) {
 		state = {
-			tracker: new CacheMissTracker((id) => manager.getEntry(id)),
+			tracker: new CacheMissTracker(),
 			sessionId,
 			revision: -1,
 			leafId: null,
@@ -449,7 +343,7 @@ export function detectCacheMiss(
 			id !== (state.lastEntry?.id ?? null) ||
 			pending.length !== revision - state.revision
 		) {
-			state.tracker = new CacheMissTracker((id) => manager.getEntry(id));
+			state.tracker = new CacheMissTracker();
 			const branch = manager.getBranch();
 			for (const entry of branch) state.tracker.observe(entry, models);
 			state.lastEntry = branch.at(-1);
@@ -462,7 +356,7 @@ export function detectCacheMiss(
 		state.lastComparison = undefined;
 	}
 	if (state.lastComparison?.message === message) return state.lastComparison.miss;
-	const miss = state.tracker.detect(message, models, consumedToolResultIds);
+	const miss = state.tracker.detect(message, models);
 	state.lastComparison = { message, miss };
 	return miss;
 }

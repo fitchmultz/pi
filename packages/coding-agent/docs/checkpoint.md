@@ -1,6 +1,6 @@
 # Working-session checkpoints
 
-Checkpoints save native selection and accepted queues, not just a transcript. They are optional and do not replace native authentication, extensions, or the TUI.
+Working-session checkpoints save exact selection and accepted queues, not just a transcript. They remain independent of one-time legacy journal conversion. They are optional and do not replace native authentication, extensions, or the TUI.
 
 The native TUI reports `sleepReady: true` for a fully settled, resumable working session with ingress held. A completed task or an assistant's textual question qualifies; a live question-tool dialog does not. **This is Pi's boundary, not a filesystem freeze:** the archive owner must separately quiesce services, freeze namespace writers, capture and verify the private archive, and commit it before stopping compute.
 
@@ -41,11 +41,11 @@ Capture does not consume queues. Release is idempotent. A capture/upload failure
 
 Version 1 JSON contains:
 
-- `selection`: native restart selection (`sessionFile`, `sessionId`, `cwd`, exact `leafId`, model, thinking level, active/known tools).
+- `selection`: restart selection (`sessionFile`, `sessionId`, `cwd`, exact `leafId`, model, thinking level, active/known public tool names).
 - `header` and all native `entries`, including initialized sessions before the first assistant response creates their journal.
 - `queues`: full native steering/follow-up messages, including images/custom details; queue modes; next-turn context; cancellation-persistence ownership.
 - `scopedModels`: session-only model cycling selection, including order and thinking levels (optional in older v1 artifacts).
-- `toolConfiguration`: native `allowedToolNames` / `excludedToolNames` registry restrictions and `noBuiltinTools` initial-default suppression. Empty allowlists retain `--no-tools`; an empty object means unrestricted. Older v1 artifacts may omit this field; their active/known names are **not** treated as a guessed allowlist.
+- `toolConfiguration`: `allowedToolNames` / `excludedToolNames` restrictions and `noBuiltinTools` initial-default suppression. Empty allowlists retain `--no-tools`; an empty object means unrestricted. Older v1 artifacts may omit this field; their active/known names are **not** treated as a guessed allowlist.
 - `createdAt`, `boundary`, and `settled`.
 - `completedExit: { pid }` only on the opted-in deliberate clean-exit path below. This marker alone is not proof that a process exited.
 
@@ -63,9 +63,9 @@ Restore applies the exact branch (including null) **before** constructing contex
 
 An absent `selection.model` explicitly preserves no selected model, including pre-login state. Restore does not substitute a catalog default even if models are now available. Real selected models and scoped models must still exist.
 
-Ordinary `session_start` and resource discovery can reconstruct dynamic tools (including the shipped `dynamic-tools.ts` example). Saved active tools are validated and reapplied **after** that initialization, before native input/run admission; missing tools then fail explicitly. SDK hosts must bind extensions before prompting or acquiring another checkpoint when startup handlers are present. Registry restrictions survive startup, later registration/reload, and native CLI session replacement. `--no-builtin-tools` only affects initial defaults, not the registry; the saved active selection and explicit `noBuiltinTools` flag retain both the current selection and defaults for later native CLI session replacements. Older artifacts without configuration restore selection but cannot recover restrictions they never recorded.
+Ordinary `session_start` and extension registration can reconstruct dynamic tools (including the shipped `dynamic-tools.ts` example). Saved active tools are validated and reapplied **after** that initialization, before native input/run admission; missing tools then fail explicitly. SDK hosts must bind extensions before prompting or acquiring another checkpoint when startup handlers are present. Registry restrictions survive startup, later registration/reload, and native CLI session replacement. `--no-builtin-tools` only affects initial defaults, not the registry; the saved active selection and explicit `noBuiltinTools` flag retain both the current selection and defaults for later native CLI session replacements. Older artifacts without configuration restore selection but cannot recover restrictions they never recorded.
 
-Queues are installed once without rerunning input handlers, prompt expansion, model calls, or tools. Startup waits for explicit user input; this avoids silently replaying uncertain external effects after unexpected failure. Steering/follow-up user texts appear in the native pending display; custom/next-turn payloads remain in native queues. `getCheckpointQueues()` provides a non-consuming snapshot; `restoreCheckpointQueues()` rejects duplicate installation or nonempty/busy destinations.
+Queues are installed once without rerunning input handlers, prompt expansion, model calls, or tools. Startup waits for explicit user input; this avoids silently replaying uncertain external effects after unexpected failure. Steering/follow-up user texts appear in the native pending display; custom/next-turn payloads remain in native queues. `getCheckpointQueues()` provides a non-consuming snapshot; `restoreCheckpointQueues()` rejects duplicate installation or nonempty/busy destinations. Legacy journals requiring conversion cannot be loaded as checkpoint entries; conversion does not itself restore accepted live queues.
 
 Lower-level hosts can use `openSessionCheckpoint()` before session creation and `restoreSessionCheckpoint()` afterward. Prefer the `checkpoint` factory option to avoid ordinary new-session metadata changing a null leaf.
 
@@ -73,7 +73,7 @@ Lower-level hosts can use `openSessionCheckpoint()` before session creation and 
 
 Existing extensions that await their work and reconstruct from native entries/tool details or persisted files need no new hook. There is no extension install allowlist. Arbitrary memory-only tasks, detached promises, sockets, timers, or shutdown-only state are not serialized. Such extensions must keep compute alive, or explicitly implement a persistence barrier. A registered `session_shutdown` handler without a checkpoint barrier conservatively produces `sleepReady: false` (and a named `sleepBlockers` reason), without disabling the extension or running shutdown during save.
 
-The optional additive `session_checkpoint` event runs while ingress and the native loop are held, before settings/catalog flush and artifact publication. Await file persistence and use `pi.appendEntry()` for native state. Return `{ sleepReady: true }` only when all extension state is reconstructible and owned background callbacks remain quiescent until `event.signal` aborts. Return `{ sleepReady: false, reason: "..." }` for unsupported live memory. A thrown error rejects acquisition. Do not start prompts, tools, dialogs, or acquire another checkpoint from the hook.
+The optional `session_checkpoint` event runs while ingress and the native loop are held, before settings/catalog flush and artifact publication. Await file persistence and use `pi.appendEntry()` for native state. Return `{ sleepReady: true }` only when all extension state is reconstructible and owned background callbacks remain quiescent until `event.signal` aborts. Return `{ sleepReady: false, reason: "..." }` for unsupported live memory. A thrown error rejects acquisition. Do not start prompts, tools, dialogs, or acquire another checkpoint from the hook.
 
 ```typescript
 pi.on("session_checkpoint", async (event) => {

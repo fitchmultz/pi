@@ -12,6 +12,13 @@
 - When the user asks a question, answer it first before making edits or running implementation commands.
 - When responding to user feedback or an analysis, explicitly say whether you agree or disagree before saying what you changed.
 
+## Upstream Integration
+
+- Follow [FORK.md](FORK.md) for canonical fork policy, approved integration decisions, and verification.
+- Default to upstream public APIs and architecture. Preserve approved outcomes, not old fork mechanisms: replace equivalent behavior and delete the redundant path.
+- Adapt only approved differences that upstream does not cover; do not disable upstream capabilities to preserve fork internals.
+- Behavior, cache stability, and safety requirements take precedence over old API or test shapes. Ask only about material unresolved behavior differences; do not reopen settled decisions without new evidence.
+
 ## Code Quality
 
 - For investigations, read relevant sections and complete functions first. Expand to full files when needed to resolve uncertainty. Read files in full before editing them.

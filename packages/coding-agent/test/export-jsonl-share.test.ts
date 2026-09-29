@@ -30,7 +30,7 @@ describe("JSONL share export", () => {
 		const firstId = sessionManager.appendMessage(userMsg("before the boundary: 雪 🌲\nsecond line"));
 		sessionManager.appendMessage(userMsg("excluded sibling"));
 		sessionManager.branch(firstId);
-		sessionManager.appendContextWindow("fresh context", 123);
+		sessionManager.appendCompaction("fresh context", null, 123);
 		const leafId = sessionManager.appendMessage(userMsg("current branch"));
 		const branch = sessionManager.getBranch();
 		const outputPath = join(tempDir, "nested", "export.jsonl");

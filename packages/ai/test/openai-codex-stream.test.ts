@@ -11,8 +11,7 @@ import {
 	stream as streamOpenAICodexResponses,
 	streamSimple as streamSimpleOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
-import { cleanupSessionResources } from "../src/session-resources.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { Api, Context, Model } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -98,42 +97,8 @@ function buildSSEPayload({
 	return `${events.join("\n\n")}\n\n`;
 }
 
-function completeWebSocket(socket: EventTarget): void {
-	for (const frame of buildSSEPayload({ status: "completed" }).trim().split("\n\n")) {
-		socket.dispatchEvent(new MessageEvent("message", { data: frame.slice("data: ".length) }));
-	}
-}
-
-function mockWebSocketTransport(onSend: (socket: EventTarget) => void) {
-	const sockets: MockWebSocket[] = [];
-	const sentBodies: Record<string, unknown>[] = [];
-	class MockWebSocket extends EventTarget {
-		readyState = 1;
-
-		constructor() {
-			super();
-			sockets.push(this);
-			queueMicrotask(() => this.dispatchEvent(new Event("open")));
-		}
-
-		send(data: string): void {
-			const body = JSON.parse(data) as Record<string, unknown>;
-			sentBodies.push(body);
-			queueMicrotask(() => onSend(this));
-		}
-
-		close(): void {
-			this.readyState = 3;
-		}
-	}
-	const fetchMock = vi.fn(async () => new Response(buildSSEPayload({ status: "completed" })));
-	vi.stubGlobal("WebSocket", MockWebSocket);
-	vi.stubGlobal("fetch", fetchMock);
-	return { sockets, sentBodies, fetchMock };
-}
-
 describe("openai-codex streaming", () => {
-	it("streams SSE responses into AssistantMessageEventStream", async () => {
+	it("streams SSE responses and forwards raw provider events", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
 		process.env.PI_CODING_AGENT_DIR = tempDir;
 
@@ -227,9 +192,15 @@ describe("openai-codex streaming", () => {
 			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
 		});
 
+		const providerEvents: unknown[] = [];
+		const providerEventModels: Model<Api>[] = [];
 		const streamResult = streamOpenAICodexResponses(model, context, {
 			apiKey: token,
 			transport: "sse",
+			onProviderStreamEvent: (event, eventModel) => {
+				providerEvents.push(event);
+				providerEventModels.push(eventModel);
+			},
 		});
 		let sawTextDelta = false;
 		let sawDone = false;
@@ -246,6 +217,14 @@ describe("openai-codex streaming", () => {
 
 		expect(sawTextDelta).toBe(true);
 		expect(sawDone).toBe(true);
+		expect(providerEvents.map((event) => (event as { type?: string }).type)).toEqual([
+			"response.output_item.added",
+			"response.content_part.added",
+			"response.output_text.delta",
+			"response.output_item.done",
+			"response.completed",
+		]);
+		expect(providerEventModels).toEqual([model, model, model, model, model]);
 	});
 
 	// Regression test for https://github.com/earendil-works/pi/issues/9047
@@ -454,12 +433,6 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("Codex SSE response headers timed out after 10ms");
-		expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
-			transport: "sse",
-			sseAttempts: 1,
-			localTimeout: "sse_headers",
-			localTimeoutMs: 10,
-		});
 	});
 
 	it("aborts SSE body reads after response headers arrive", async () => {
@@ -1307,9 +1280,11 @@ describe("openai-codex streaming", () => {
 		});
 		await streamResult.result();
 	});
-	it("forwards auto transport from streamSimple options and uses cached websocket context", async () => {
+	it("forwards auto transport and raw provider events from streamSimple", async () => {
 		const token = mockToken();
 		const sentBodies: unknown[] = [];
+		const providerEvents: unknown[] = [];
+		const providerEventModels: Model<Api>[] = [];
 		let capturedWebSocketHeaders: Record<string, string> | undefined;
 
 		const fetchMock = vi.fn(async () => new Response("unexpected fetch", { status: 500 }));
@@ -1358,7 +1333,7 @@ describe("openai-codex streaming", () => {
 						},
 					},
 					{
-						type: "response.completed",
+						type: "response.done",
 						response: {
 							status: "completed",
 							end_turn: false,
@@ -1410,10 +1385,22 @@ describe("openai-codex streaming", () => {
 			apiKey: token,
 			sessionId: "session-auto",
 			transport: "auto",
+			onProviderStreamEvent: (event, eventModel) => {
+				providerEvents.push(event);
+				providerEventModels.push(eventModel);
+			},
 		}).result();
 
 		expect(result.endTurn).toBe(false);
 		expect(sentBodies).toHaveLength(1);
+		expect(providerEvents.map((event) => (event as { type?: string }).type)).toEqual([
+			"response.output_item.added",
+			"response.content_part.added",
+			"response.output_text.delta",
+			"response.output_item.done",
+			"response.done",
+		]);
+		expect(providerEventModels).toEqual([model, model, model, model, model]);
 		expect(capturedWebSocketHeaders?.["session-id"]).toBe("session-auto");
 		expect(capturedWebSocketHeaders?.session_id).toBeUndefined();
 		expect(capturedWebSocketHeaders?.["x-client-request-id"]).toBe("session-auto");
@@ -1618,8 +1605,7 @@ describe("openai-codex streaming", () => {
 		expect(global.fetch).not.toHaveBeenCalled();
 	});
 
-	// Regression for #8125: a transient timeout must not pin later requests to SSE.
-	it("falls back for a websocket connect timeout and retries websocket on the next request", async () => {
+	it("falls back to SSE when websocket connect does not open before the connect timeout", async () => {
 		vi.useFakeTimers();
 		const token = mockToken();
 		const encoder = new TextEncoder();
@@ -1643,15 +1629,24 @@ describe("openai-codex streaming", () => {
 		});
 		vi.stubGlobal("fetch", fetchMock);
 
-		let connections = 0;
-		class MockWebSocket extends EventTarget {
-			constructor() {
-				super();
-				if (++connections > 1) queueMicrotask(() => this.dispatchEvent(new Event("open")));
+		class MockWebSocket {
+			private listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				let listeners = this.listeners.get(type);
+				if (!listeners) {
+					listeners = new Set();
+					this.listeners.set(type, listeners);
+				}
+				listeners.add(listener);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
 			}
 
 			send(): void {
-				queueMicrotask(() => completeWebSocket(this));
+				throw new Error("send should not be called before websocket open");
 			}
 
 			close(): void {}
@@ -1675,306 +1670,25 @@ describe("openai-codex streaming", () => {
 			systemPrompt: "You are a helpful assistant.",
 			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
 		});
-		const options = {
+
+		const resultPromise = streamOpenAICodexResponses(model, context, {
 			apiKey: token,
 			sessionId: "ws-connect-timeout",
-			transport: "auto" as const,
+			transport: "auto",
 			timeoutMs: 300_000,
 			websocketConnectTimeoutMs: 50,
-		};
-		const resultPromise = streamOpenAICodexResponses(model, context, options).result();
+		}).result();
 
 		await vi.advanceTimersByTimeAsync(50);
 
 		const result = await resultPromise;
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(fetchMock).toHaveBeenCalledTimes(1);
-		const recovered = await streamOpenAICodexResponses(model, context, options).result();
-		expect(recovered.stopReason).toBe("stop");
-		expect(connections).toBe(2);
-		expect(fetchMock).toHaveBeenCalledTimes(1);
-		expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
-			transport: "sse",
-			websocketAttempts: 1,
-			sseAttempts: 1,
-			localTimeout: "websocket_connect",
-			localTimeoutMs: 50,
-			fallbackReason: "before_stream_start",
-			connectMs: expect.any(Number),
-		});
-		expect(recovered.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
-			transport: "websocket",
-			websocketAttempts: 1,
-			sseAttempts: 0,
-		});
 		expect(getOpenAICodexWebSocketDebugStats("ws-connect-timeout")).toMatchObject({
 			websocketFailures: 1,
 			sseFallbacks: 1,
-			websocketFallbackActive: false,
+			websocketFallbackActive: true,
 			lastWebSocketError: "WebSocket connect timeout after 50ms",
-		});
-	});
-
-	describe("websocket recovery (#8125)", () => {
-		const model: Model<"openai-codex-responses"> = {
-			id: "gpt-5.1-codex",
-			name: "GPT-5.1 Codex",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: "https://chatgpt.com/backend-api",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 400000,
-			maxTokens: 128000,
-		};
-		const context = normalizeContext({ messages: [{ role: "user", content: "Say hello", timestamp: 1 }] });
-		const options = {
-			apiKey: mockToken(),
-			sessionId: "ws-recovery",
-			transport: "auto" as const,
-			reasoningEffort: "low" as const,
-		};
-
-		// Regression for #8125: retry the preferred transport without replaying a started response.
-		it.each(["before-start", "after-start", "close-1000"] as const)(
-			"retries a healthy websocket after a %s failure",
-			async (failure) => {
-				let sends = 0;
-				const { sockets, sentBodies, fetchMock } = mockWebSocketTransport((socket) => {
-					if (++sends > 1) {
-						completeWebSocket(socket);
-					} else if (failure === "after-start") {
-						socket.dispatchEvent(
-							new MessageEvent("message", {
-								data: JSON.stringify({
-									type: "response.output_item.added",
-									item: { type: "message", id: "msg_failed", role: "assistant", content: [] },
-								}),
-							}),
-						);
-					} else if (failure === "close-1000") {
-						socket.dispatchEvent(Object.assign(new Event("close"), { code: 1000, wasClean: true }));
-					} else {
-						socket.dispatchEvent(Object.assign(new Event("error"), { message: "WebSocket error" }));
-					}
-				});
-				const events: string[] = [];
-				const firstStream = streamOpenAICodexResponses(model, context, options);
-				for await (const event of firstStream) {
-					events.push(event.type);
-					if (failure === "after-start" && event.type === "start") {
-						sockets[0].dispatchEvent(Object.assign(new Event("error"), { message: "WebSocket error" }));
-					}
-				}
-				const first = await firstStream.result();
-				const afterStart = failure === "after-start";
-				expect(first.stopReason).toBe(afterStart ? "error" : "stop");
-				expect(events.filter((type) => type === "start")).toHaveLength(1);
-				expect(first.diagnostics?.filter((entry) => entry.type === "provider_transport_failure")).toEqual([
-					expect.objectContaining({
-						type: "provider_transport_failure",
-						details: expect.objectContaining({
-							eventsEmitted: afterStart,
-							phase: afterStart ? "after_message_stream_start" : "before_message_stream_start",
-						}),
-					}),
-				]);
-				const failureDetails = first.diagnostics?.find(
-					(entry) => entry.type === "provider_transport_failure",
-				)?.details;
-				expect(failureDetails).not.toHaveProperty("fallbackTransport");
-				expect(failureDetails).not.toHaveProperty("responseId");
-				expect(failureDetails).not.toHaveProperty("socket");
-				expect(fetchMock).not.toHaveBeenCalled();
-				expect(sockets[0].readyState).toBe(3);
-
-				for (let request = 0; request < 2; request++) {
-					const result = await streamOpenAICodexResponses(model, context, options).result();
-					expect(result.stopReason).toBe("stop");
-					expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
-				}
-				expect(sockets).toHaveLength(2);
-				expect(sentBodies).toHaveLength(afterStart ? 3 : 4);
-				expect(sentBodies.every((body) => (body.reasoning as { effort: string }).effort === "low")).toBe(true);
-				expect(fetchMock).not.toHaveBeenCalled();
-				expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toMatchObject({
-					connectionsCreated: 2,
-					connectionsReused: afterStart ? 1 : 2,
-					websocketFailures: 1,
-					sseFallbacks: 0,
-					websocketFallbackActive: false,
-				});
-			},
-		);
-
-		it.each([1006, 1009, undefined])(
-			"observes synchronous close %s after a generic error without changing failure policy or waiting",
-			async (closeCode) => {
-				let sends = 0;
-				const { sockets, fetchMock } = mockWebSocketTransport((socket) => {
-					if (++sends > 1) completeWebSocket(socket);
-					else
-						socket.dispatchEvent(
-							new MessageEvent("message", {
-								data: JSON.stringify({
-									type: "response.output_item.added",
-									item: { type: "message", id: "msg_failed", role: "assistant", content: [] },
-								}),
-							}),
-						);
-				});
-				const resultStream = streamOpenAICodexResponses(model, context, options);
-				for await (const event of resultStream) {
-					if (event.type === "start") {
-						sockets[0].dispatchEvent(Object.assign(new Event("error"), { error: new TypeError("") }));
-						if (closeCode !== undefined)
-							sockets[0].dispatchEvent(
-								Object.assign(new Event("close"), {
-									code: closeCode,
-									wasClean: false,
-									reason: "private-close-reason",
-								}),
-							);
-					}
-				}
-				const result = await resultStream.result();
-				expect(result.stopReason).toBe("error");
-				expect(result.errorMessage).toBe(
-					closeCode === undefined ? "WebSocket error" : `WebSocket closed ${closeCode} private-close-reason`,
-				);
-				const details = result.diagnostics?.find((entry) => entry.type === "provider_request")?.details;
-				expect(details).toMatchObject({ transport: "websocket", websocketAttempts: 1, sseAttempts: 0 });
-				expect(details?.closeCode).toBe(closeCode);
-				expect(details?.closeWasClean).toBe(closeCode === undefined ? undefined : false);
-				expect(JSON.stringify(details)).not.toContain("private-close-reason");
-				if (closeCode === undefined) {
-					sockets[0].dispatchEvent(Object.assign(new Event("close"), { code: 1009, wasClean: false }));
-					expect(details?.closeCode).toBeUndefined();
-				}
-				expect(fetchMock).not.toHaveBeenCalled();
-				expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
-				expect(sockets).toHaveLength(closeCode === 1009 ? 1 : 2);
-				expect(getOpenAICodexWebSocketDebugStats(options.sessionId)?.websocketFallbackActive).toBe(
-					closeCode === 1009,
-				);
-			},
-		);
-
-		it("observes a synchronous close after a connection error before SSE fallback", async () => {
-			class FailedWebSocket extends EventTarget {
-				constructor() {
-					super();
-					queueMicrotask(() => {
-						this.dispatchEvent(Object.assign(new Event("error"), { error: new TypeError("") }));
-						this.dispatchEvent(Object.assign(new Event("close"), { code: 1006, wasClean: false }));
-					});
-				}
-				send(): void {
-					throw new Error("must not send on a failed connection");
-				}
-				close(): void {}
-			}
-			vi.stubGlobal("WebSocket", FailedWebSocket);
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async () => new Response(buildSSEPayload({ status: "completed" }))),
-			);
-			const result = await streamOpenAICodexResponses(model, context, options).result();
-			expect(result.stopReason).toBe("stop");
-			expect(result.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
-				transport: "sse",
-				websocketAttempts: 2,
-				sseAttempts: 1,
-				closeCode: 1006,
-				closeWasClean: false,
-				fallbackReason: "before_stream_start",
-			});
-		});
-
-		it("keeps oversized websocket frames on SSE, including after a debug close", async () => {
-			const { sockets, sentBodies, fetchMock } = mockWebSocketTransport((socket) => {
-				socket.dispatchEvent(Object.assign(new Event("close"), { code: 1009, wasClean: true }));
-			});
-			for (let request = 0; request < 2; request++) {
-				expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
-			}
-			closeOpenAICodexWebSocketSessions(options.sessionId);
-			expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
-			expect(sockets).toHaveLength(1);
-			expect(sentBodies).toHaveLength(1);
-			expect(fetchMock).toHaveBeenCalledTimes(3);
-			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toMatchObject({
-				websocketFailures: 1,
-				sseFallbacks: 3,
-				websocketFallbackActive: true,
-				lastWebSocketError: "WebSocket closed 1009 message too big",
-			});
-		});
-
-		it("cleans only the requested session's sockets and fallback state", async () => {
-			let oversized = false;
-			const { sockets, fetchMock } = mockWebSocketTransport((socket) => {
-				if (oversized) socket.dispatchEvent(Object.assign(new Event("close"), { code: 1009 }));
-				else completeWebSocket(socket);
-			});
-			await streamOpenAICodexResponses(model, context, options).result();
-			const otherOptions = { ...options, sessionId: "other-session" };
-			await streamOpenAICodexResponses(model, context, otherOptions).result();
-			// A second account can fail while the target session still has a cached socket for its first account.
-			oversized = true;
-			const rotatedOptions = { ...options, apiKey: mockToken("another-account") };
-			await streamOpenAICodexResponses(model, context, rotatedOptions).result();
-			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)?.websocketFallbackActive).toBe(true);
-			const otherStats = getOpenAICodexWebSocketDebugStats(otherOptions.sessionId);
-
-			cleanupSessionResources(options.sessionId);
-			expect(sockets[0].readyState).toBe(3);
-			expect(sockets[1].readyState).toBe(1);
-			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toBeUndefined();
-			expect(getOpenAICodexWebSocketDebugStats(otherOptions.sessionId)).toEqual(otherStats);
-			oversized = false;
-			expect((await streamOpenAICodexResponses(model, context, rotatedOptions).result()).stopReason).toBe("stop");
-			expect((await streamOpenAICodexResponses(model, context, otherOptions).result()).stopReason).toBe("stop");
-			expect(sockets).toHaveLength(4);
-			expect(fetchMock).toHaveBeenCalledTimes(1);
-			expect(getOpenAICodexWebSocketDebugStats(otherOptions.sessionId)?.connectionsReused).toBe(1);
-
-			cleanupSessionResources();
-			expect(sockets.every((socket) => socket.readyState === 3)).toBe(true);
-			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toBeUndefined();
-			expect(getOpenAICodexWebSocketDebugStats(otherOptions.sessionId)).toBeUndefined();
-		});
-
-		it("does not fall back or record a transport failure when a websocket request is aborted", async () => {
-			let sends = 0;
-			const { sockets, fetchMock } = mockWebSocketTransport((socket) => {
-				if (++sends > 1) completeWebSocket(socket);
-				else
-					socket.dispatchEvent(
-						new MessageEvent("message", {
-							data: JSON.stringify({
-								type: "response.output_item.added",
-								item: { type: "message", id: "msg_aborted", role: "assistant", content: [] },
-							}),
-						}),
-					);
-			});
-			const controller = new AbortController();
-			const resultStream = streamOpenAICodexResponses(model, context, { ...options, signal: controller.signal });
-			for await (const event of resultStream) {
-				if (event.type === "start") controller.abort();
-			}
-			const aborted = await resultStream.result();
-			expect(aborted.stopReason).toBe("aborted");
-			expect(aborted.diagnostics?.some((entry) => entry.type === "provider_transport_failure")).not.toBe(true);
-			expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
-			expect(sockets).toHaveLength(2);
-			expect(fetchMock).not.toHaveBeenCalled();
-			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)).toMatchObject({
-				websocketFailures: 0,
-				sseFallbacks: 0,
-			});
 		});
 	});
 
@@ -2134,7 +1848,7 @@ describe("openai-codex streaming", () => {
 		expect(getOpenAICodexWebSocketDebugStats("ws-idle-before-start")).toMatchObject({
 			websocketFailures: 1,
 			sseFallbacks: 1,
-			websocketFallbackActive: false,
+			websocketFallbackActive: true,
 		});
 	});
 
@@ -2220,14 +1934,6 @@ describe("openai-codex streaming", () => {
 		const result = await resultPromise;
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("WebSocket idle timeout after 50ms");
-		const details = result.diagnostics?.find((entry) => entry.type === "provider_request")?.details;
-		expect(details).toMatchObject({
-			transport: "websocket",
-			localTimeout: "websocket_idle",
-			localTimeoutMs: 50,
-			applicationEvents: 1,
-		});
-		expect(details?.lastApplicationEventAgeMs).toBeGreaterThanOrEqual(50);
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
@@ -2338,11 +2044,6 @@ describe("openai-codex streaming", () => {
 	it("sends only response input deltas in websocket-cached mode", async () => {
 		const token = mockToken();
 		const sentBodies: unknown[] = [];
-		const sentBytes: number[] = [];
-		const fullBodyBytes: number[] = [];
-		const onPayload = (payload: unknown) => {
-			fullBodyBytes.push(Buffer.byteLength(JSON.stringify(payload)));
-		};
 
 		class MockWebSocket {
 			static OPEN = 1;
@@ -2368,7 +2069,6 @@ describe("openai-codex streaming", () => {
 
 			send(data: string): void {
 				sentBodies.push(JSON.parse(data));
-				sentBytes.push(Buffer.byteLength(data));
 				const responseId = `resp_${sentBodies.length}`;
 				const outputEvents =
 					sentBodies.length === 1
@@ -2449,7 +2149,7 @@ describe("openai-codex streaming", () => {
 		};
 		const firstContext: Context = {
 			systemPrompt: "You are a helpful assistant.",
-			messages: [{ role: "user", content: "Use the tool 雪", timestamp: 1 }],
+			messages: [{ role: "user", content: "Use the tool", timestamp: 1 }],
 			tools: [
 				{
 					name: "sample_tool",
@@ -2464,7 +2164,6 @@ describe("openai-codex streaming", () => {
 			apiKey: token,
 			sessionId: "session-1",
 			transport: "websocket-cached",
-			onPayload,
 		}).result();
 
 		const secondContext = normalizeContext({
@@ -2483,42 +2182,18 @@ describe("openai-codex streaming", () => {
 				{ role: "user", content: "Now finish", timestamp: 3 },
 			],
 		});
-		const second = await streamOpenAICodexResponses(model, secondContext, {
+		await streamOpenAICodexResponses(model, secondContext, {
 			apiKey: token,
 			sessionId: "session-1",
 			transport: "websocket-cached",
-			onPayload,
 		}).result();
-
-		expect(first.diagnostics?.find((entry) => entry.type === "provider_request")?.details).toMatchObject({
-			transport: "websocket",
-			websocketSendBytes: sentBytes[0],
-			fullBodyBytes: fullBodyBytes[0],
-			websocketRequestMode: "full",
-			socketReused: false,
-			socketAgeMs: 0,
-			websocketAttempts: 1,
-			sseAttempts: 0,
-		});
-		const details = second.diagnostics?.find((entry) => entry.type === "provider_request")?.details;
-		expect(details).toMatchObject({
-			transport: "websocket",
-			websocketSendBytes: sentBytes[1],
-			fullBodyBytes: fullBodyBytes[1],
-			websocketRequestMode: "delta",
-			socketReused: true,
-			websocketAttempts: 1,
-			sseAttempts: 0,
-		});
-		expect(details?.socketAgeMs).toBeGreaterThanOrEqual(0);
-		expect(sentBytes[1]).toBeLessThan(fullBodyBytes[1]);
 
 		expect(sentBodies).toHaveLength(2);
 		const firstBody = sentBodies[0] as { input: unknown[]; previous_response_id?: string; store?: boolean };
 		const secondBody = sentBodies[1] as { input: unknown[]; previous_response_id?: string; store?: boolean };
 		expect(firstBody.store).toBe(false);
 		expect(firstBody.previous_response_id).toBeUndefined();
-		expect(firstBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Use the tool 雪" }] }]);
+		expect(firstBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Use the tool" }] }]);
 		expect(secondBody.store).toBe(false);
 		expect(secondBody.previous_response_id).toBe("resp_1");
 		expect(secondBody.input).toEqual([
@@ -2536,76 +2211,6 @@ describe("openai-codex streaming", () => {
 			lastDeltaInputItems: 2,
 			lastPreviousResponseId: "resp_1",
 		});
-	});
-
-	it("continues a client tool search with only its output in websocket-cached mode", async () => {
-		const search = {
-			type: "tool_search_call",
-			id: "tsc_1",
-			call_id: "search_1",
-			execution: "client",
-			status: "completed",
-			arguments: { query: "records" },
-		};
-		const { sentBodies } = mockWebSocketTransport((socket) => {
-			const id = `resp_${sentBodies.length}`;
-			const events = [
-				{ type: "response.created", response: { id } },
-				...(sentBodies.length === 1 ? [{ type: "response.output_item.done", item: search }] : []),
-				{ type: "response.completed", response: { id, status: "completed" } },
-			];
-			for (const event of events) socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
-		});
-		const model: Model<"openai-codex-responses"> = {
-			id: "gpt-5.1-codex",
-			name: "GPT-5.1 Codex",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: "https://chatgpt.com/backend-api",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 400000,
-			maxTokens: 128000,
-			compat: { supportsToolSearch: true },
-		};
-		const context: Context = {
-			systemPrompt: "You are a helpful assistant.",
-			messages: [{ role: "user", content: "Find records", timestamp: 1 }],
-			tools: [
-				{
-					name: "discover",
-					description: "Discover tools",
-					parameters: Type.Object({ query: Type.String() }),
-					toolSearch: true,
-				},
-			],
-		};
-		const options = { apiKey: mockToken(), sessionId: "tool-search-session", transport: "websocket-cached" as const };
-
-		context.messages.push(await streamOpenAICodexResponses(model, normalizeContext(context), options).result(), {
-			role: "toolResult",
-			toolCallId: "search_1|tsc_1",
-			toolName: "discover",
-			toolCallKind: "toolSearch",
-			toolsAdded: [
-				{
-					name: "lookup",
-					namespace: "records",
-					description: "Find a record",
-					parameters: Type.Object({ id: Type.String() }),
-				},
-			],
-			content: [{ type: "text", text: "Loaded records.lookup" }],
-			isError: false,
-			timestamp: 2,
-		});
-		await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
-
-		expect(sentBodies[1]).toMatchObject({ previous_response_id: "resp_1" });
-		expect((sentBodies[1].input as { type?: string; role?: string }[]).map((item) => item.type ?? item.role)).toEqual(
-			["tool_search_output", "user"],
-		);
 	});
 
 	it.each(["websocket", "sse"] as const)(

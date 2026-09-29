@@ -1,5 +1,4 @@
 import type { Tool } from "../types.ts";
-import { toolKey } from "../utils/tool-identity.ts";
 
 interface JsonSchemaObject {
 	[key: string]: unknown;
@@ -107,9 +106,7 @@ export function makeStrictJsonSchema(schema: Tool["parameters"]): Record<string,
 	if (!isJsonSchemaObject(cloned)) {
 		throw new UnsupportedStrictJsonSchemaError("root schema must have type object");
 	}
-	if (cloned.anyOf !== undefined) {
-		throw new UnsupportedStrictJsonSchemaError("root anyOf schemas are unsupported");
-	}
+	if (cloned.anyOf !== undefined) throw new UnsupportedStrictJsonSchemaError("root anyOf schemas are unsupported");
 	makeJsonSchemaNodeStrict(cloned);
 	if (cloned.type !== "object") {
 		throw new UnsupportedStrictJsonSchemaError("root schema must have type object");
@@ -256,12 +253,12 @@ export function resolveGrammarConstrainedSampling(
 export function createGrammarToolInputProperties(
 	tools: Tool[] | undefined,
 	supportsOpenAIGrammarTools: boolean,
-): Map<string, string> {
+): ReadonlyMap<string, string> {
 	const properties = new Map<string, string>();
 	for (const tool of tools ?? []) {
 		const grammar = resolveGrammarConstrainedSampling(tool, supportsOpenAIGrammarTools);
 		if (grammar) {
-			properties.set(toolKey(tool), grammar.inputProperty);
+			properties.set(tool.name, grammar.inputProperty);
 		}
 	}
 	return properties;

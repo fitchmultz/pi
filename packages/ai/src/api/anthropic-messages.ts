@@ -40,7 +40,6 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
-import { toolKey } from "../utils/tool-identity.ts";
 import {
 	collapseSystemMessages,
 	declarationsEqual,
@@ -197,28 +196,29 @@ function getBoundToolProtocol(
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
 ): ToolChangeProtocol | undefined {
-	const initial = getInitialSystemMessage(context.messages);
-	const windowId = initial?.contextWindowId ?? null;
+	const windowTimestamp = getInitialSystemMessage(context.messages)?.timestamp ?? 0;
 	for (const message of context.messages) {
-		if (message.role !== "assistant" || message.api !== model.api || message.provider !== model.provider) continue;
-		const binding = message.diagnostics?.find((entry) => entry.type === "anthropic_tool_protocol")?.details;
-		// ponytail: checkpoint-less legacy windows retain transcript-wide binding; a
-		// later checkpoint supplies an ID and permits independent protocol selection.
 		if (
-			windowId !== null &&
-			(binding?.windowId !== undefined
-				? binding.windowId !== windowId
-				: message.timestamp < (initial?.timestamp ?? 0))
+			message.role !== "assistant" ||
+			message.api !== model.api ||
+			message.provider !== model.provider ||
+			message.model !== model.id
 		)
 			continue;
-		if (
-			binding?.beta === null ||
-			binding?.beta === INLINE_TOOLS_BETA ||
-			binding?.beta === MID_CONVERSATION_TOOL_CHANGES_BETA
-		)
-			return binding.beta;
-		// Historical unmarked responses used the reference protocol, not inline definitions.
-		if (binding?.inline === true) return INLINE_TOOLS_BETA;
+		const binding = message.diagnostics?.find((entry) => entry.type === "anthropic_tool_protocol")?.details;
+		if (binding) {
+			if (binding.windowTimestamp !== windowTimestamp || binding.baseUrl !== model.baseUrl) continue;
+			if (
+				binding.beta === null ||
+				binding.beta === INLINE_TOOLS_BETA ||
+				binding.beta === MID_CONVERSATION_TOOL_CHANGES_BETA
+			)
+				return binding.beta;
+			continue;
+		}
+		// Unmarked historical requests used the reference protocol, never inline definitions.
+		// Explicit bindings above remain valid when a monotonic prefix timestamp leads wall time.
+		if (message.timestamp < windowTimestamp) continue;
 		return model.compat?.supportsMidConvoToolChanges && model.compat.supportsMidConvoSystemMessages
 			? MID_CONVERSATION_TOOL_CHANGES_BETA
 			: null;
@@ -607,7 +607,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 		},
 	);
 	const currentTools = getCurrentTools(normalizedContext.messages);
-	const windowId = getInitialSystemMessage(context.messages)?.contextWindowId ?? null;
+	const windowTimestamp = getInitialSystemMessage(context.messages)?.timestamp ?? 0;
 	let strictToolsFallback = context.messages.some(
 		(message) =>
 			message.role === "assistant" &&
@@ -617,7 +617,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			message.diagnostics?.some(
 				(entry) =>
 					entry.type === "anthropic_strict_tool_fallback" &&
-					entry.details?.windowId === windowId &&
+					entry.details?.windowTimestamp === windowTimestamp &&
 					entry.details?.baseUrl === model.baseUrl,
 			),
 	);
@@ -681,7 +681,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			}
 			const originalParams = buildParams(model, normalizedContext, isOAuth, toolProtocol, options);
 			const declarations = normalizedContext.messages.flatMap((message) =>
-				message.role === "system" || message.role === "toolResult" ? (message.toolsAdded ?? []) : [],
+				message.role === "system" ? (message.toolsAdded ?? []) : [],
 			);
 			const preferredNames = new Set(
 				declarations
@@ -714,7 +714,8 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				details: {
 					inline: toolProtocol === INLINE_TOOLS_BETA,
 					beta: toolProtocol,
-					windowId: getInitialSystemMessage(context.messages)?.contextWindowId ?? null,
+					windowTimestamp,
+					baseUrl: model.baseUrl,
 				},
 			});
 			const configuredProtocols = configuredBetas?.filter(
@@ -774,7 +775,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				appendAssistantMessageDiagnostic(output, {
 					type: "anthropic_strict_tool_fallback",
 					timestamp: Date.now(),
-					details: { windowId, baseUrl: model.baseUrl },
+					details: { windowTimestamp, baseUrl: model.baseUrl },
 				});
 			}
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
@@ -784,6 +785,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			const blocks = output.content as Block[];
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
+				await options?.onProviderStreamEvent?.(event, model);
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
 					const transformations = event.message.input_transformations;
@@ -959,6 +961,13 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						}
 						if (event.usage.cache_creation_input_tokens != null) {
 							output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
+						}
+						// Vercel AI Gateway includes the TTL breakdown in deltas, though the SDK only types it on message_start.
+						const cacheCreation = (
+							event.usage as typeof event.usage & { cache_creation?: { ephemeral_1h_input_tokens?: number } }
+						).cache_creation;
+						if (cacheCreation?.ephemeral_1h_input_tokens != null) {
+							output.usage.cacheWrite1h = cacheCreation.ephemeral_1h_input_tokens;
 						}
 						// Anthropic reports reasoning tokens as a subset of output tokens.
 						const thinkingTokens = event.usage.output_tokens_details?.thinking_tokens;
@@ -1261,9 +1270,7 @@ function buildParams(
 	// Inline definitions also carry redefinitions, so every declaration may reach the wire.
 	const strictTools = selectStrictTools(
 		inlineToolDefinitions && nativeToolChanges
-			? context.messages.flatMap((message) =>
-					message.role === "system" || message.role === "toolResult" ? (message.toolsAdded ?? []) : [],
-				)
+			? context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []) : []))
 			: requestTools,
 		compat.supportsStrictTools,
 	);
@@ -1736,13 +1743,13 @@ function selectStrictTools(tools: readonly Tool[], supportsStrictTools: boolean)
 	let count = 0;
 	let unions = 0;
 	for (const tool of tools) {
-		const previous = declared.get(toolKey(tool));
+		const previous = declared.get(tool.name);
 		// An identical re-declaration reaches the wire at most once, so it shares the first decision.
 		if (previous && declarationsEqual(previous, tool)) {
 			if (selected.has(previous)) selected.add(tool);
 			continue;
 		}
-		declared.set(toolKey(tool), tool);
+		declared.set(tool.name, tool);
 		if (resolveJsonSchemaStrictSampling(tool, supportsStrictTools) !== true) continue;
 		const cost = countUnionParameters(getJsonSchemaToolParameters(tool, true));
 		if (count < MAX_STRICT_TOOLS && unions + cost <= MAX_STRICT_UNION_PARAMETERS) {

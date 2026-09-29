@@ -47,7 +47,7 @@ describe("AgentSession context usage estimate", () => {
 	});
 
 	it.each(["reported", "pending tools"] as const)(
-		"reuses unchanged %s usage without rebuilding conversation or tool declarations",
+		"keeps repeated %s usage reads stable without mutating session state",
 		async (mode) => {
 			const harness = await createHarness({
 				tools: [
@@ -69,14 +69,9 @@ describe("AgentSession context usage estimate", () => {
 				session.state.tools[0] = { ...session.state.tools[0], description: "Pending changed declaration" };
 			const expected = session.getContextUsage();
 			expect(expected?.source).toBe(mode === "reported" ? "reported" : "estimated");
-			const user = session.messages.find((message) => message.role === "user")!;
-			if (typeof user.content === "string") throw new Error("Expected normalized input blocks");
-			const entries = vi.spyOn(Object, "entries");
-			const serialize = vi.spyOn(JSON, "stringify");
+			const state = structuredClone(session.messages);
 			for (let i = 0; i < 10; i++) expect(session.getContextUsage()).toEqual(expected);
-			expect(entries.mock.calls.filter(([value]) => value === user.content[0])).toHaveLength(0);
-			// Native tuple keys are cheap; declarations and schemas must not be serialized again.
-			expect(serialize.mock.calls.filter(([value]) => !Array.isArray(value))).toHaveLength(0);
+			expect(session.messages).toEqual(state);
 		},
 	);
 
@@ -117,41 +112,6 @@ describe("AgentSession context usage estimate", () => {
 		session.state.tools[0].parameters.description = "new schema ".repeat(400);
 		expect(session.getContextUsage()!.tokens).toBeGreaterThan(beforeSchema);
 	});
-
-	it.each(["root", "window", "compaction", "response"])(
-		"avoids historical arrays when checking current usage after %s",
-		async (boundary) => {
-			const harness = await createHarness({ tools: [] });
-			harnesses.push(harness);
-			const sm = harness.sessionManager;
-			for (let i = 0; i < 100; i++) sm.appendCustomEntry("old", i);
-			const kept = sm.appendMessage({
-				...fauxAssistantMessage("old"),
-				api: harness.getModel().api,
-				usage: usage(60_000),
-			});
-			if (boundary !== "root") sm.appendCompaction("summary", kept, 60_000);
-			if (boundary === "window") sm.appendContextWindow("fresh", 60_000);
-			if (boundary === "response")
-				sm.appendMessage({ ...fauxAssistantMessage("new"), api: harness.getModel().api, usage: usage(1234) });
-			sm.appendCustomEntry("metadata");
-			harness.session.agent.state.messages = sm.buildSessionContext().messages;
-			const scans = [vi.spyOn(sm, "getEntries"), vi.spyOn(sm, "getBranch"), vi.spyOn(sm, "buildContextEntries")];
-			const parents = vi.spyOn(sm, "getEntry");
-			const state = harness.session.agent.state;
-			const options = { model: harness.getModel(), systemPrompt: harness.session.systemPrompt, tools: state.tools };
-			const expected =
-				boundary === "compaction"
-					? null
-					: Math.max(
-							estimateContextTokens(state.messages, options).tokens,
-							estimateContextTokens(state.messages, { ...options, useReportedUsage: false }).tokens,
-						);
-			for (let i = 0; i < 3; i++) expect(harness.session.getContextUsage()?.tokens).toBe(expected);
-			for (const scan of scans) expect(scan).not.toHaveBeenCalled();
-			expect(parents.mock.calls.length).toBeLessThanOrEqual(6);
-		},
-	);
 
 	it("keeps retained usage unknown until a valid matching-model response follows the latest active compaction", async () => {
 		const harness = await createHarness({ tools: [], models: [{ id: "faux-1" }, { id: "other" }] });
@@ -197,77 +157,12 @@ describe("AgentSession context usage estimate", () => {
 		sm.appendCompaction("second summary", kept, 1234);
 		sync();
 		expect(harness.session.getContextUsage()?.tokens).toBeNull();
-		sm.appendContextWindow(undefined, 1234);
+		sm.appendCompaction("", null, 1234);
 		sync();
-		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThan(0);
+		expect(harness.session.getContextUsage()?.tokens).toBeNull();
 		sm.resetLeaf();
 		sync();
 		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThan(0);
-	});
-
-	it("does not revive old measured usage from a late native checkpoint after reopening a fresh window", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-late-checkpoint-usage-"));
-		const harness = await createHarness({
-			tools: [],
-			sessionManager: SessionManager.create(directory, directory),
-			settings: { compaction: { enabled: false } },
-		});
-		harnesses.push(harness);
-		try {
-			const response: AssistantMessage = {
-				...fauxAssistantMessage(
-					[
-						{
-							type: "toolCall",
-							id: "call|fc_call",
-							name: "work",
-							arguments: {},
-							async: true,
-							responsesItem: {
-								type: "function_call",
-								id: "fc_call",
-								call_id: "call",
-								name: "work",
-								arguments: "{}",
-								async: true,
-								status: "completed",
-							},
-						},
-					],
-					{ responseId: "old-response", stopReason: "toolUse" },
-				),
-				api: harness.getModel().api,
-				usage: { ...usage(500_000), cost: { input: 2, output: 0, cacheRead: 0, cacheWrite: 0, total: 2 } },
-			};
-			const manager = harness.sessionManager;
-			manager.appendMessage(response);
-			manager.appendContextWindow("continue the pending work", 500_000);
-			manager.appendMessage({ ...structuredClone(response), stopReason: "pending" }, true);
-			const { session } = await createAgentSession({
-				cwd: harness.tempDir,
-				agentDir: directory,
-				model: harness.getModel(),
-				modelRuntime: harness.session.modelRuntime,
-				settingsManager: harness.settingsManager,
-				resourceLoader: createTestResourceLoader(),
-				sessionManager: SessionManager.open(manager.getSessionFile()!),
-				tools: [],
-			});
-			try {
-				expect(session.getPendingToolCalls()).toMatchObject([{ toolCallId: "call|fc_call" }]);
-				expect(session.getContextUsage()).toMatchObject({ source: "estimated" });
-				expect(session.getContextUsage()!.tokens!).toBeLessThan(10_000);
-				expect(session.getSessionStats()).toMatchObject({
-					assistantMessages: 1,
-					tokens: { total: 500_000 },
-					cost: 2,
-				});
-			} finally {
-				session.dispose();
-			}
-		} finally {
-			rmSync(directory, { recursive: true, force: true });
-		}
 	});
 
 	it("counts the system prompt and tool definitions before the model reports usage", async () => {
@@ -332,11 +227,9 @@ describe("AgentSession context usage estimate", () => {
 			expect(harness.getPendingResponseCount()).toBe(1);
 			const lastReported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
 			expect(harness.session.getContextUsage()?.tokens).toBe(lastReported);
-			harness.session.newContext();
-			expect(harness.sessionManager.getLeafEntry()).toMatchObject({
-				type: "context_window",
-				tokensBefore: lastReported,
-			});
+			harness.sessionManager.appendCompaction("", null, lastReported);
+			harness.session.refreshContext();
+			expect(harness.session.getContextUsage()?.tokens).toBeNull();
 		},
 	);
 
@@ -805,7 +698,9 @@ describe("AgentSession context usage estimate", () => {
 						event.systemPromptOptions.sections.hidden = "Hidden guidance. ".repeat(3000);
 						return { systemPrompt: "Short request-only instructions." };
 					});
-					pi.on("session_before_auto_compact", () => ({ newContext: { handoff: "Unexpected rollover" } }));
+					pi.on("session_before_compact", () => {
+						throw new Error("Unexpected rollover");
+					});
 				},
 			],
 		});
@@ -818,7 +713,6 @@ describe("AgentSession context usage estimate", () => {
 		await harness.session.prompt("two");
 		expect(starts).toBe(2);
 		expect(harness.eventsOfType("compaction_start")).toEqual([]);
-		expect(harness.eventsOfType("context_window_started")).toEqual([]);
 		expect(harness.session.messages.filter((message) => message.role === "user")).toHaveLength(2);
 		expect(harness.getPendingResponseCount()).toBe(0);
 		// A direct SDK prefix edit keeps the measured conversation and estimates the changed prompt.
@@ -950,10 +844,7 @@ describe("AgentSession context usage estimate", () => {
 		if (change === "identical") expect(JSON.stringify(harness.session.agent.state)).toBe(stateBefore);
 		if (["identical", "handler", "label", "sampling disabled"].includes(change)) {
 			expect(harness.session.getContextUsage()?.tokens).toBe(before);
-			const serialize = vi.spyOn(JSON, "stringify");
 			for (let i = 0; i < 10; i++) expect(harness.session.getContextUsage()?.tokens).toBe(before);
-			// Tuple keys may serialize; unchanged tool schemas must stay cached.
-			for (const [value] of serialize.mock.calls) expect(value).toEqual([null, "lookup"]);
 		} else {
 			const state = harness.session.agent.state;
 			expect(harness.session.getContextUsage()?.tokens).toBe(
@@ -1058,43 +949,6 @@ describe("AgentSession context usage estimate", () => {
 		},
 	);
 
-	it("adjusts only the effective prefix after a persisted replacement", async () => {
-		const harness = await createHarness({
-			tools: [],
-			models: [{ id: "faux-1", contextWindow: 20_000 }],
-			settings: { compaction: { enabled: false } },
-		});
-		harnesses.push(harness);
-		harness.sessionManager.appendMessage({
-			role: "system",
-			content: "obsolete ".repeat(10_000),
-			timestamp: 0,
-		});
-		harness.session.refreshContext();
-		harness.setResponses([
-			fauxAssistantMessage([
-				{ type: "thinking", thinking: "", thinkingSignature: "opaque-test" },
-				{ type: "text", text: "answer" },
-			]),
-		]);
-		await harness.session.prompt("hello");
-		const session = harness.session;
-		const response = session.messages.at(-1) as AssistantMessage;
-		response.usage = { ...usage(500_000), input: 400_000, output: 100_000 };
-		expect(session.getContextUsage()).toMatchObject({ tokens: 500_000, source: "reported" });
-		const systemMessages = session.messages.filter((message) => message.role === "system");
-		expect(systemMessages).toHaveLength(2);
-		expect(systemMessages[1].replace).toBe(true);
-		expect(estimateTokens(systemMessages[0])).toBe(22_500);
-		// Native transcript replay discards the obsolete prefix before the measured request.
-		const oldPrefix = estimateTokens(getCurrentSystemMessage(session.messages)!);
-		session.extensionRunner.createCommandContext().getSystemPromptOptions().forceSystemPrompt = "new";
-		expect(session.getContextUsage()).toMatchObject({
-			tokens: 500_000 + 1 - oldPrefix,
-			source: "estimated",
-		});
-	});
-
 	it("keeps the measured conversation through custom-message projection and structured prompt edits", async () => {
 		const harness = await createHarness({
 			tools: [],
@@ -1131,19 +985,14 @@ describe("AgentSession context usage estimate", () => {
 	it.each([
 		"tool-result block",
 		"whole message",
-		"whole message with tool search",
-		"whole message with cloned tool search",
-		"whole message and block with cloned tool search",
-		"tool search call kind removal",
-		"tool search result kind removal",
-		"tool search declarations rewrite",
+		"whole message with cloned results",
+		"whole message and block with cloned results",
 		"block rewrite",
 		"block truncation",
 		"block reorder",
 		"message reorder",
 		"field edit",
 	] as const)("checks preservation of opaque reported usage with a %s request decoration", async (decoration) => {
-		const toolSearch = decoration.includes("tool search");
 		let transformed = "";
 		const harness = await createHarness({
 			tools: [
@@ -1152,14 +1001,12 @@ describe("AgentSession context usage estimate", () => {
 					label: "Lookup",
 					description: "Lookup",
 					parameters: Type.Object({}),
-					...(toolSearch ? { toolSearch: true as const } : {}),
 					execute: async () => ({
 						content: [
 							{ type: "text", text: "original result" },
 							{ type: "text", text: "second block" },
 						],
 						details: {},
-						...(toolSearch ? { tools: [{ name: "lookup" }] } : {}),
 					}),
 				},
 			],
@@ -1195,17 +1042,6 @@ describe("AgentSession context usage estimate", () => {
 						};
 					});
 					pi.on("context_with_system", (event) => {
-						for (const message of event.messages) {
-							if (decoration === "tool search call kind removal" && message.role === "assistant") {
-								for (const block of message.content) {
-									if (block.type === "toolCall") delete block.kind;
-								}
-							}
-							if (message.role !== "toolResult") continue;
-							if (decoration === "tool search result kind removal") delete message.toolCallKind;
-							if (decoration === "tool search declarations rewrite" && message.toolsAdded?.[0])
-								message.toolsAdded[0].description = "Changed declaration";
-						}
 						transformed = JSON.stringify(event.messages);
 					});
 					pi.on("message_end", (event) => {
@@ -1217,13 +1053,7 @@ describe("AgentSession context usage estimate", () => {
 		harnesses.push(harness);
 		let sent = "";
 		harness.setResponses([
-			fauxAssistantMessage(
-				{
-					...fauxToolCall("lookup", {}),
-					...(toolSearch ? { kind: "toolSearch" as const } : {}),
-				},
-				{ stopReason: "toolUse" },
-			),
+			fauxAssistantMessage(fauxToolCall("lookup", {}), { stopReason: "toolUse" }),
 			(context) => {
 				sent = JSON.stringify(context.messages);
 				return fauxAssistantMessage([
@@ -1234,21 +1064,7 @@ describe("AgentSession context usage estimate", () => {
 		]);
 		await harness.session.prompt("look up the result");
 		expect(sent).toContain("original result");
-		if (toolSearch && decoration.startsWith("whole message")) {
-			expect(JSON.parse(transformed)).toContainEqual(
-				expect.objectContaining({
-					role: "toolResult",
-					toolCallKind: "toolSearch",
-					toolsAdded: [expect.objectContaining({ name: "lookup", description: "Lookup" })],
-				}),
-			);
-			expect(JSON.parse(transformed)).toContainEqual(
-				expect.objectContaining({
-					role: "assistant",
-					content: [expect.objectContaining({ type: "toolCall", kind: "toolSearch" })],
-				}),
-			);
-		}
+		expect(transformed).toContain("original result");
 		if (decoration !== "tool-result block" && !decoration.startsWith("whole message")) {
 			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
 			expect(harness.session.getContextUsage()!.tokens!).toBeLessThan(500_000);
@@ -1261,13 +1077,6 @@ describe("AgentSession context usage estimate", () => {
 		expect(JSON.stringify(harness.session.messages)).not.toContain(
 			decoration === "tool-result block" ? "Duration: 1s" : "Session name: context-usage",
 		);
-		if (decoration === "whole message with tool search") {
-			const result = harness.session.messages.find((message) => message.role === "toolResult");
-			if (result?.role !== "toolResult" || !result.toolsAdded?.[0]) throw new Error("Expected tool search result");
-			result.toolsAdded[0].description = "Edited after response";
-			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
-			expect(harness.session.getContextUsage()!.tokens!).toBeLessThan(500_000);
-		}
 	});
 
 	it.each(["context", "message_end"])(
@@ -1308,7 +1117,7 @@ describe("AgentSession context usage estimate", () => {
 		"SDK deletion",
 		"SDK replacement",
 		"SDK reasoning deletion",
-		"new context",
+		"summary-free compaction",
 		"branch",
 	])("does not reuse an opaque usage anchor after %s", async (change) => {
 		const harness = await createHarness({ tools: [], settings: { compaction: { enabled: false } } });
@@ -1337,7 +1146,12 @@ describe("AgentSession context usage estimate", () => {
 			user.content = "replacement";
 		}
 		if (change === "SDK reasoning deletion") (session.messages.at(-1) as AssistantMessage).content = [];
-		if (change === "new context") session.newContext();
+		if (change === "summary-free compaction") {
+			harness.sessionManager.appendCompaction("", null, 500_000);
+			session.refreshContext();
+			expect(session.getContextUsage()).toMatchObject({ tokens: null, percent: null });
+			return;
+		}
 		if (change === "branch") await session.navigateTree(root);
 		expect(session.getContextUsage()?.tokens).toBeLessThan(500_000);
 		expect(session.getContextUsage()).toMatchObject({ source: "estimated" });
@@ -1352,9 +1166,9 @@ describe("AgentSession context usage estimate", () => {
 			],
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_auto_compact", (event) => {
+					pi.on("session_before_compact", (event) => {
 						autoCompactionReasons.push(event.reason);
-						return { newContext: { handoff: "unexpected rollover" } };
+						return { cancel: true };
 					});
 				},
 			],
@@ -1376,7 +1190,7 @@ describe("AgentSession context usage estimate", () => {
 		await harness.session.prompt("again");
 
 		expect(autoCompactionReasons).toEqual([]);
-		expect(harness.sessionManager.getBranch().some((entry) => entry.type === "context_window")).toBe(false);
+		expect(harness.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
 		const reported = (harness.session.messages.at(-1) as AssistantMessage).usage.totalTokens;
 		expect(harness.session.getContextUsage()?.tokens).toBe(reported);
 	});

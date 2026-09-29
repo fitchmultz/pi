@@ -261,7 +261,9 @@ describe("ambient auth composition", () => {
 				.mockResolvedValueOnce(new Response(null, { status: 304 }));
 			const result = await runtime.refresh({ providers: [id], allowNetwork: true, force: true });
 			expect(result.errors.size).toBe(0);
-			expect(String(vi.mocked(globalThis.fetch).mock.calls[0][0])).toBe(`https://pi.dev/api/models/providers/${id}`);
+			expect(String(vi.mocked(globalThis.fetch).mock.calls[0][0])).toBe(
+				`https://pi.dev/api/models/providers/${id}?types=chat%2Cimage%2Cclassifier`,
+			);
 			expect(runtime.getModel(id, fetched.id)).toEqual(fetched);
 			expect(await modelsStore.read(id)).toMatchObject({ models: [fetched], etag: '"fetched"' });
 			await runtime.refresh({ providers: [id], allowNetwork: true, force: true });
@@ -931,6 +933,5 @@ export default async function(pi) {
 		expect(existsSync(sentinel)).toBe(false);
 		const authPath = join(agentDir, "auth.json");
 		expect(existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : {}).toEqual({});
-		console.log(result.stdout.trim());
 	});
 });
