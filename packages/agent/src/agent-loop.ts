@@ -716,6 +716,11 @@ type ToolUpdateSink = (partialResult: AgentToolResult<any>) => Promise<void> | v
 
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
+function toolExecutionSignature(tool: AgentTool<any>): string {
+	const { description: _description, ...declaration } = toToolDeclaration(tool);
+	return JSON.stringify(declaration);
+}
+
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
 }
@@ -752,7 +757,7 @@ async function prepareToolCall(
 	}
 
 	try {
-		const declaration = JSON.stringify(toToolDeclaration(tool));
+		const declaration = toolExecutionSignature(tool);
 		const { execute, prepareArguments, executionMode } = tool;
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
 		const validatedArgs = validateToolArguments(tool, preparedToolCall);
@@ -868,14 +873,18 @@ async function executePreparedToolCall(
 	let acceptingUpdates = true;
 
 	try {
-		if (getTools && !getTools().includes(prepared.tool)) {
+		const currentTool = getTools ? getTools().find((tool) => tool.name === prepared.toolCall.name) : prepared.tool;
+		if (!currentTool) {
 			throw new Error(`Tool ${prepared.toolCall.name} is no longer available`);
 		}
 		if (
-			prepared.execute !== prepared.tool.execute ||
-			prepared.prepareArguments !== prepared.tool.prepareArguments ||
-			prepared.executionMode !== prepared.tool.executionMode ||
-			prepared.declaration !== JSON.stringify(toToolDeclaration(prepared.tool))
+			[prepared.tool, currentTool].some(
+				(tool) =>
+					prepared.execute !== tool.execute ||
+					prepared.prepareArguments !== tool.prepareArguments ||
+					prepared.executionMode !== tool.executionMode ||
+					prepared.declaration !== toolExecutionSignature(tool),
+			)
 		) {
 			throw new Error(`Tool ${prepared.toolCall.name} changed before execution`);
 		}

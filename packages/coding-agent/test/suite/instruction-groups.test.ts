@@ -30,6 +30,13 @@ function owner(pi: ExtensionAPI) {
 			execute: async () => ({ content: [{ type: "text", text: "acted" }], details: {} }),
 		});
 	pi.registerTool({
+		name: "plain",
+		label: "plain",
+		description: "Unrelated action",
+		parameters: Type.Object({}),
+		execute: async () => ({ content: [{ type: "text", text: "plain ran" }], details: {} }),
+	});
+	pi.registerTool({
 		name: "nested",
 		label: "nested",
 		description: "Nested call",
@@ -130,7 +137,7 @@ describe("grouped instructions through the public lifecycle", () => {
 			}),
 			() => {
 				expect(getToolResult(harness, "codemode").isError).toBe(true);
-				expect(JSON.stringify(getToolResult(harness, "codemode").content)).not.toContain("acted");
+				expect(JSON.stringify(getToolResult(harness, "codemode").content)).toContain("prior turn");
 				return fauxAssistantMessage([code()], { stopReason: "toolUse" });
 			},
 			fauxAssistantMessage("done"),
@@ -138,6 +145,37 @@ describe("grouped instructions through the public lifecycle", () => {
 		await harness.session.prompt("discover and use codemode");
 		expect(JSON.stringify(getToolResult(harness, "codemode").content)).toContain("acted");
 	});
+
+	it.each(["parallel", "sequential"] as const)(
+		"runs unchanged plain and codemode siblings after discovery in %s mode",
+		async (toolExecution) => {
+			const harness = await setup({
+				initialActiveToolNames: ["plain", "codemode"],
+				extensionFactories: [instructionGroups, owner, createCodemodeExtension()],
+			});
+			harness.session.agent.toolExecution = toolExecution;
+			harness.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("discover_tools", { enable: ["browser"] }),
+						fauxToolCall("plain", {}),
+						fauxToolCall("codemode", { code: "return 1;" }),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("done"),
+			]);
+			await harness.session.prompt("discover and run unrelated tools");
+			expect(getToolResult(harness, "plain")).toMatchObject({
+				isError: false,
+				content: [{ type: "text", text: "plain ran" }],
+			});
+			expect(getToolResult(harness, "codemode")).toMatchObject({
+				isError: false,
+				content: expect.arrayContaining([{ type: "text", text: "1" }]),
+			});
+		},
+	);
 
 	it("does not authorize from instructions removed by forced prompt projection", async () => {
 		let prune = false;

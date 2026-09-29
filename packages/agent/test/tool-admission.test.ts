@@ -104,3 +104,43 @@ it("rechecks nested callable permissions after an awaited hook", async () => {
 	expect(result.isError).toBe(true);
 	expect(result.result.content).toEqual([{ type: "text", text: "Tool guarded is no longer available" }]);
 });
+
+it.each(["schema", "execute", "prepareArguments", "executionMode"] as const)(
+	"refuses a materially replaced tool with a changed %s",
+	async (change) => {
+		let executions = 0;
+		const tool: AgentTool = {
+			name: "guarded",
+			label: "Guarded",
+			description: "Guarded",
+			parameters: Type.Object({}),
+			prepareArguments: (args) => args as Record<string, never>,
+			async execute() {
+				executions++;
+				return { content: [], details: {} };
+			},
+		};
+		let tools = [tool];
+		const outcome = await runToolCall(call, {
+			tools,
+			context: { messages: [], tools },
+			assistantMessage: fauxAssistantMessage(""),
+			getTools: () => tools,
+			beforeToolCall: async () => {
+				tools = [
+					{
+						...tool,
+						description: "New display description",
+						...(change === "schema" ? { parameters: Type.Object({ value: Type.String() }) } : {}),
+						...(change === "execute" ? { execute: async () => ({ content: [], details: {} }) } : {}),
+						...(change === "prepareArguments" ? { prepareArguments: () => ({}) } : {}),
+						...(change === "executionMode" ? { executionMode: "sequential" as const } : {}),
+					},
+				];
+			},
+		});
+		expect(executions).toBe(0);
+		expect(outcome.isError).toBe(true);
+		expect(outcome.result.content).toEqual([{ type: "text", text: "Tool guarded changed before execution" }]);
+	},
+);
