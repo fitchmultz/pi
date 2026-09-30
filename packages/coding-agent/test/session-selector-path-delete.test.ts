@@ -105,6 +105,32 @@ describe("session selector path/delete interactions", () => {
 		// session selector uses the global theme instance
 		initTheme("dark");
 	});
+	it("shows a full-text search failure and lets the user clear the query", async () => {
+		const session = makeSession({ id: "oversized", firstMessage: "preview" });
+		Object.defineProperty(session, "allMessagesText", {
+			get: () => {
+				throw new RangeError("Invalid string length");
+			},
+		});
+		const selector = new SessionSelectorComponent(
+			async () => [session],
+			async () => [],
+			() => {},
+			() => {},
+			() => {},
+			() => {},
+			{ keybindings },
+		);
+		await flushPromises();
+		expect(selector.getSessionList().getSelectedSessionPath()).toBe(session.path);
+		expect(() => selector.handleInput("re:needle")).not.toThrow();
+		expect(stripAnsi(selector.render(160).join("\n"))).toContain(
+			"Cannot search full session text: Invalid string length",
+		);
+		selector.handleInput("\x15");
+		expect(selector.getSessionList().getSelectedSessionPath()).toBe(session.path);
+	});
+
 	it("does not treat Ctrl+Backspace as delete when search query is non-empty", async () => {
 		const sessions = [makeSession({ id: "a" }), makeSession({ id: "b" })];
 

@@ -383,13 +383,20 @@ class SessionList implements Component, Focusable {
 			this.filteredSessions = flattenSessionTree(roots);
 		} else {
 			// Other modes or with search: flat list
-			const filtered = filterAndSortSessions(nameFiltered, query, this.sortMode, "all");
-			this.filteredSessions = filtered.map((session) => ({
-				session,
-				depth: 0,
-				isLast: true,
-				ancestorContinues: [],
-			}));
+			try {
+				const filtered = filterAndSortSessions(nameFiltered, query, this.sortMode, "all");
+				this.filteredSessions = filtered.map((session) => ({
+					session,
+					depth: 0,
+					isLast: true,
+					ancestorContinues: [],
+				}));
+			} catch (error) {
+				this.filteredSessions = [];
+				this.onError?.(
+					`Cannot search full session text: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredSessions.length - 1));
 	}
@@ -466,7 +473,7 @@ class SessionList implements Component, Focusable {
 
 			// Session display text (name or first message)
 			const hasName = !!session.name;
-			const displayText = session.name ?? session.firstMessage;
+			const displayText = session.name ?? session.firstMessagePreview ?? session.firstMessage;
 			const normalizedMessage = displayText.replace(/[\x00-\x1f\x7f]/g, " ").trim();
 
 			// Right side: message count and age

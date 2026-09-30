@@ -16,6 +16,7 @@ import { setImmediate } from "node:timers/promises";
 import type { AgentState } from "@earendil-works/pi-agent-core";
 import { resolveLocalFileTarget } from "@earendil-works/pi-agent-core/node";
 import type { ToolCall } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai/utils/text";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
@@ -238,7 +239,59 @@ function assertDistinctExportTarget(sourceFile: string, outputPath: string): voi
 	}
 }
 
-/** Structural browsing facts; arbitrary bodies remain in the individual encoded records. */
+function treePreview(text: string): string {
+	const normalized = text.replace(/[\n\t]/g, " ").trim();
+	return normalized.length > 100 ? `${normalized.slice(0, 100)}...` : normalized;
+}
+
+function shortenToolPath(path: string): string {
+	if (path.startsWith("/Users/") || path.startsWith("/home/")) {
+		const parts = path.split("/");
+		if (parts.length > 2) return `~${path.slice(`/${parts[1]}/${parts[2]}`.length)}`;
+	}
+	return path;
+}
+
+function toolPreview(tool: ToolCall): string {
+	const args = tool.arguments ?? {};
+	switch (tool.name) {
+		case "read": {
+			let display = shortenToolPath(String(args.path || args.file_path || ""));
+			const offset = args.offset as number | undefined;
+			const limit = args.limit as number | undefined;
+			if (args.json !== undefined) display += ` json=${JSON.stringify(args.json)}`;
+			if (offset !== undefined || limit !== undefined) {
+				const start = offset ?? 1;
+				const end = limit !== undefined ? start + limit - 1 : "";
+				display += `:${start}${end ? `-${end}` : ""}`;
+			}
+			return `[read: ${display}]`;
+		}
+		case "write":
+		case "edit":
+			return `[${tool.name}: ${shortenToolPath(String(args.path || args.file_path || ""))}]`;
+		case "bash": {
+			const raw = String(args.command || "");
+			const command = raw
+				.replace(/[\n\t]/g, " ")
+				.trim()
+				.slice(0, 50);
+			return `[bash: ${command}${raw.length > 50 ? "..." : ""}]`;
+		}
+		case "grep":
+			return `[grep: /${args.pattern || ""}/ in ${shortenToolPath(String(args.path || "."))}]`;
+		case "find":
+			return `[find: ${args.pattern || ""} in ${shortenToolPath(String(args.path || "."))}]`;
+		case "ls":
+			return `[ls: ${shortenToolPath(String(args.path || "."))}]`;
+		default: {
+			const serialized = JSON.stringify(args);
+			return `[${tool.name}: ${serialized.slice(0, 40)}${serialized.length > 40 ? "..." : ""}]`;
+		}
+	}
+}
+
+/** Structural and display facts; arbitrary bodies remain in the individual encoded records. */
 function entryIndex(entry: SessionEntry, record: number): object {
 	const index: Record<string, unknown> = {
 		id: entry.id,
@@ -249,7 +302,8 @@ function entryIndex(entry: SessionEntry, record: number): object {
 	};
 	if (entry.type === "message") {
 		const message = entry.message;
-		index.message = {
+		const calls = message.role === "assistant" ? message.content.filter((part) => part.type === "toolCall") : [];
+		const messageIndex: Record<string, unknown> = {
 			role: message.role,
 			...(message.role === "assistant"
 				? {
@@ -257,12 +311,27 @@ function entryIndex(entry: SessionEntry, record: number): object {
 						provider: message.provider,
 						usage: message.usage,
 						stopReason: message.stopReason,
-						toolCalls: message.content.filter((part) => part.type === "toolCall").length,
+						errorMessage: message.errorMessage
+							? `${message.errorMessage.slice(0, 100)}${message.errorMessage.length > 100 ? "..." : ""}`
+							: undefined,
+						preview: treePreview(contentText(message.content, "")),
+						toolCalls: calls.length,
+						toolPreviews: calls.map((call) => ({ id: call.id, preview: toolPreview(call) })),
 						hasText: message.content.some((part) => part.type === "text" && part.text.trim().length > 0),
 					}
 				: {}),
 			...(message.role === "toolResult" ? { toolCallId: message.toolCallId, toolName: message.toolName } : {}),
+			...(message.role === "bashExecution" ? { command: treePreview(message.command || "") } : {}),
 		};
+		if (message.role === "user") {
+			const text = contentText(message.content, "");
+			const skill = text.match(
+				/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/,
+			);
+			if (skill) messageIndex.skill = { name: skill[1], userMessage: skill[4] ? treePreview(skill[4]) : undefined };
+			else messageIndex.preview = treePreview(text);
+		}
+		index.message = messageIndex;
 	} else if (entry.type === "label") {
 		index.targetId = entry.targetId;
 		index.label = entry.label;
@@ -270,12 +339,14 @@ function entryIndex(entry: SessionEntry, record: number): object {
 		index.customType = entry.customType;
 		if (entry.type === "custom_message") {
 			index.display = entry.display;
+			index.preview = treePreview(contentText(entry.content, ""));
 		}
 	} else if (entry.type === "model_change") {
 		index.provider = entry.provider;
 		index.modelId = entry.modelId;
 	} else if (entry.type === "thinking_level_change") index.thinkingLevel = entry.thinkingLevel;
 	else if (entry.type === "compaction") index.tokensBefore = entry.tokensBefore;
+	else if (entry.type === "branch_summary") index.preview = treePreview(entry.summary || "");
 	else if (entry.type === "context_edit") {
 		index.targetId = entry.targetId;
 		index.replacement = entry.replacement === null ? null : {};

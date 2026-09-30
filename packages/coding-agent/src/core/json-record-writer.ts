@@ -38,17 +38,14 @@ type ObjectFrame = {
 };
 type ArrayFrame = {
 	kind: "array";
-	value: object;
-	array?: unknown[];
+	value: unknown[];
 	length: number;
-	iterator?: Iterator<unknown>;
 	index: number;
 	layout: JsonRecordLayout;
 };
 
 /**
  * Write a native JSON value without constructing aggregate strings.
- * `items` also accepts an explicitly supplied iterable for file entry traversal.
  * The sink must be private until this function succeeds: a late leaf can throw.
  */
 export function writeJsonValue(
@@ -91,12 +88,7 @@ export function writeJsonValue(
 			continue;
 		}
 		if (frame.kind === "array") {
-			const next = frame.array
-				? frame.index >= frame.length
-					? { done: true, value: undefined }
-					: { done: false, value: frame.array[frame.index] }
-				: frame.iterator!.next();
-			if (next.done) {
+			if (frame.index >= frame.length) {
 				write("]");
 				ancestors.delete(frame.value);
 				continue;
@@ -104,7 +96,7 @@ export function writeJsonValue(
 			const index = frame.index++;
 			stack.push(frame, {
 				kind: "value",
-				value: next.value,
+				value: frame.value[index],
 				key: String(index),
 				layout: frame.layout.items,
 				arrayMember: true,
@@ -119,7 +111,7 @@ export function writeJsonValue(
 		const split =
 			member !== null &&
 			typeof member === "object" &&
-			((frame.layout?.items !== undefined && (Array.isArray(member) || Symbol.iterator in member)) ||
+			((frame.layout?.items !== undefined && Array.isArray(member)) ||
 				(frame.layout?.fields !== undefined &&
 					!Array.isArray(member) &&
 					(Object.getPrototypeOf(member) === Object.prototype || Object.getPrototypeOf(member) === null)));
@@ -150,14 +142,12 @@ export function writeJsonValue(
 		if (ancestors.has(container)) throw new TypeError("Converting circular structure to JSON");
 		ancestors.add(container);
 		frame.prefix();
-		if (frame.layout?.items !== undefined) {
+		if (frame.layout?.items !== undefined && Array.isArray(member)) {
 			write("[");
 			stack.push({
 				kind: "array",
-				value: container,
-				array: Array.isArray(member) ? member : undefined,
-				length: Array.isArray(member) ? member.length : 0,
-				iterator: Array.isArray(member) ? undefined : (member as Iterable<unknown>)[Symbol.iterator](),
+				value: member,
+				length: member.length,
 				index: 0,
 				layout: frame.layout,
 			});

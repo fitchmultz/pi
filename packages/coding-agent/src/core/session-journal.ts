@@ -280,6 +280,8 @@ export interface JournalScan {
 }
 export interface JournalScanOptions extends JsonProjectionOptions {
 	policy?: "tolerant" | "strict" | "live";
+	/** Require LF publication while retaining the selected parse/error policy. */
+	requireFinalLf?: boolean;
 	signal?: AbortSignal;
 	end?: number;
 	chunkSize?: number;
@@ -288,6 +290,7 @@ export interface JournalScanOptions extends JsonProjectionOptions {
 
 export interface JsonlDecoderOptions extends JsonProjectionOptions {
 	policy?: "tolerant" | "strict" | "live";
+	requireFinalLf?: boolean;
 	onRecord: (record: JournalRecord) => void;
 	onError?: (error: Error, line: number) => void;
 	start?: number;
@@ -334,7 +337,7 @@ export class JsonlRecordDecoder {
 		this.position += bytes.length;
 	}
 
-	/** live excludes any unterminated tail; strict/tolerant accept a valid sealed EOF object. */
+	/** Live/LF-required readers exclude any unterminated tail; sealed readers accept a valid EOF object. */
 	finish(): { committedEnd: number; pendingTail: boolean } {
 		const pendingTail = this.start < this.position;
 		if (pendingTail) this.endRecord(this.position, false);
@@ -360,7 +363,7 @@ export class JsonlRecordDecoder {
 	}
 
 	private endRecord(end: number, terminated: boolean): void {
-		const pending = this.options.policy === "live" && !terminated;
+		const pending = !terminated && (this.options.policy === "live" || this.options.requireFinalLf);
 		if (!pending && !this.error) {
 			try {
 				const text = this.decoder.decode();
@@ -394,7 +397,7 @@ export class JsonlRecordDecoder {
 					digest: this.hash.digest("hex"),
 				});
 		}
-		if (terminated || this.options.policy !== "live") this.committedEnd = end + (terminated ? 1 : 0);
+		if (!pending) this.committedEnd = end + (terminated ? 1 : 0);
 		this.start = end + 1;
 		this.line++;
 		this.projection = new JsonTokenProjection(this.options);
@@ -625,9 +628,10 @@ function tokenWriter(
 			"falseValue",
 		].includes(token.name);
 		if (starts) {
+			const key = String(path.at(-1));
 			const changed =
-				path.length === root.length + 1
-					? (rewrite.overrides?.[String(path.at(-1))] ?? rewrite.replace?.(path))
+				path.length === root.length + 1 && rewrite.overrides && Object.hasOwn(rewrite.overrides, key)
+					? rewrite.overrides[key]
 					: rewrite.replace?.(path);
 			if (!omitValue && frames.at(-1)?.array) {
 				if (!frames.at(-1)!.first) sink(",");

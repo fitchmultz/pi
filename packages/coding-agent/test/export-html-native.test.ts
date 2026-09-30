@@ -54,13 +54,44 @@ type ExportData = {
 	records?: Array<{ entry: SessionEntry; renderedTools?: ExportData["renderedTools"] }>;
 };
 
-function loadTemplate(
+async function loadTemplate(
 	data: ExportData,
 	options: {
 		indexes?: object[];
 		readRecord?: (index: number) => NonNullable<ExportData["records"]>[number];
 	} = {},
 ) {
+	let indexes = options.indexes;
+	if (!indexes) {
+		const directory = mkdtempSync(join(tmpdir(), "pi-viewer-index-"));
+		try {
+			const journal = join(directory, "session.jsonl");
+			const fd = openSync(journal, "wx", 0o600);
+			try {
+				writeFileSync(
+					fd,
+					`${JSON.stringify({
+						type: "session",
+						version: CURRENT_SESSION_VERSION,
+						id: randomUUID(),
+						timestamp: "2026-09-22T00:00:00Z",
+						cwd: directory,
+					})}\n`,
+				);
+				for (const entry of data.entries) writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+			} finally {
+				closeSync(fd);
+			}
+			const html = await exportSessionToHtml(SessionManager.open(journal), undefined, {
+				outputPath: join(directory, "history.html"),
+			});
+			indexes = [
+				...readFileSync(html, "utf8").matchAll(/<script id="session-index-\d+"[^>]*>([^<]+)<\/script>/g),
+			].map((match) => JSON.parse(Buffer.from(match[1], "base64").toString("utf8")) as object);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	}
 	const source = readFileSync(new URL("../src/core/export-html/template.js", import.meta.url), "utf8");
 	const base64 = Buffer.from(JSON.stringify({ header: data.header, leafId: data.leafId, tools: data.tools })).toString(
 		"base64",
@@ -68,51 +99,76 @@ function loadTemplate(
 	const records = options.readRecord
 		? undefined
 		: (data.records ?? data.entries.map((entry) => ({ entry, renderedTools: data.renderedTools })));
-	const indexes =
-		options.indexes ??
-		data.entries.map((entry, record) => {
-			const index: Record<string, unknown> = {
-				id: entry.id,
-				parentId: entry.parentId,
-				timestamp: entry.timestamp,
-				type: entry.type,
-				record,
-			};
-			if (entry.type === "message") {
-				index.message = {
-					role: entry.message.role,
-					...(entry.message.role === "toolResult"
-						? { toolCallId: entry.message.toolCallId, toolName: entry.message.toolName }
-						: {}),
-					...(entry.message.role === "assistant"
-						? {
-								model: entry.message.model,
-								usage: entry.message.usage,
-								stopReason: entry.message.stopReason,
-								hasText: entry.message.content.some((part) => part.type === "text" && part.text.trim()),
-								toolCalls: entry.message.content.filter((part) => part.type === "toolCall").length,
-							}
-						: {}),
-				};
-			} else if (entry.type === "custom") index.customType = entry.customType;
-			return index;
-		});
 	let downloaded: Blob | undefined;
 	const decoded: number[] = [];
-	const buttons: Array<{ textContent: string; click: () => void }> = [];
-	const nodes: Array<{ html: string }> = [];
-	const messages = {
-		set innerHTML(_html: string) {
-			nodes.length = 0;
-		},
-		appendChild(fragment: { children: Array<{ html: string }> }) {
-			nodes.push(...fragment.children);
-		},
-		querySelectorAll: () => [],
-	};
-	function htmlNode(html: string) {
-		return { html, cloneNode: () => htmlNode(html) };
+	class Element {
+		tag: string;
+		children: Element[] = [];
+		className = "";
+		textContent = "";
+		dataset: Record<string, string> = {};
+		style: Record<string, string> = {};
+		content = { firstElementChild: undefined as Element | undefined };
+		private markup = "";
+		private events = new Map<string, (event: { stopPropagation(): void }) => void>();
+
+		constructor(tag: string) {
+			this.tag = tag;
+		}
+		get innerHTML(): string {
+			return this.markup + this.textContent + this.children.map((child) => child.innerHTML).join("");
+		}
+		set innerHTML(html: string) {
+			this.markup = html;
+			this.children = [];
+			if (this.tag === "template") {
+				const child = new Element("rendered");
+				child.innerHTML = html;
+				this.content.firstElementChild = child;
+			}
+		}
+		get classList() {
+			return {
+				add: (name: string) => this.classList.toggle(name, true),
+				remove: (name: string) => this.classList.toggle(name, false),
+				toggle: (name: string, enabled?: boolean) => {
+					const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+					if (enabled ?? !classes.has(name)) classes.add(name);
+					else classes.delete(name);
+					this.className = [...classes].join(" ");
+				},
+			};
+		}
+		appendChild(child: Element) {
+			if (child.tag === "fragment") this.children.push(...child.children);
+			else this.children.push(child);
+		}
+		querySelectorAll(selector: string): Element[] {
+			const classes = selector.split(".").filter(Boolean);
+			const matches: Element[] = [];
+			const stack = [...this.children].reverse();
+			while (stack.length) {
+				const child = stack.pop()!;
+				if (classes.every((name) => child.className.split(/\s+/).includes(name))) matches.push(child);
+				stack.push(...[...child.children].reverse());
+			}
+			return matches;
+		}
+		querySelector(selector: string): Element | null {
+			return this.querySelectorAll(selector)[0] ?? null;
+		}
+		addEventListener(event: string, callback: (event: { stopPropagation(): void }) => void) {
+			this.events.set(event, callback);
+		}
+		click() {
+			this.events.get("click")?.({ stopPropagation() {} });
+		}
 	}
+	const elements = new Map<string, Element>();
+	const element = (id: string) => {
+		if (!elements.has(id)) elements.set(id, new Element("div"));
+		return elements.get(id)!;
+	};
 	const document = {
 		getElementById: (id: string) => {
 			if (id === "session-data") return { textContent: base64 };
@@ -127,60 +183,39 @@ function loadTemplate(
 					},
 				};
 			}
-			if (id === "messages") return messages;
-			return { innerHTML: "" };
+			return element(id);
 		},
 		querySelector: () => null,
 		querySelectorAll: (selector: string) =>
 			selector === ".session-index"
 				? indexes.map((entry) => ({ textContent: Buffer.from(JSON.stringify(entry)).toString("base64") }))
 				: [],
-		createElement: (tag: string) => {
-			if (tag === "button") {
-				const button = {
-					textContent: "",
-					click: () => {},
-					addEventListener: (_event: string, callback: () => void) => {
-						button.click = callback;
-					},
-				};
-				buttons.push(button);
-				return button;
-			}
-			if (tag === "template") {
-				const template = {
-					content: { firstElementChild: htmlNode("") },
-					set innerHTML(html: string) {
-						this.content.firstElementChild = htmlNode(html);
-					},
-				};
-				return template;
-			}
-			return { click: () => {}, addEventListener: () => {} };
-		},
-		createDocumentFragment: () => ({
-			children: [] as Array<{ html: string }>,
-			appendChild(node: { html: string }) {
-				this.children.push(node);
-			},
-		}),
-		body: { appendChild: () => {}, removeChild: () => {} },
+		createElement: (tag: string) => new Element(tag),
+		createDocumentFragment: () => new Element("fragment"),
+		addEventListener() {},
+		body: { classList: new Element("body").classList, appendChild() {}, removeChild() {} },
 	};
 	const api = runInNewContext(
-		`${source.slice(0, source.indexOf("      // INITIALIZATION"))}
-		function safeMarkedParse(text) { return escapeHtml(text); }
-		renderTree = () => {};
-		${source.slice(source.indexOf("      // Toggle states"), source.indexOf("      const isEditableTarget"))}
-		return { getPath, renderEntry, renderToolCall, renderHeader, getTreeNodeDisplayHtml, getScrollTargetElementId, navigateTo, download: window.downloadSessionJson,
+		`${readFileSync(new URL("../src/core/export-html/vendor/marked.min.js", import.meta.url), "utf8")}
+		${readFileSync(new URL("../src/core/export-html/vendor/highlight.min.js", import.meta.url), "utf8")}
+		${source.slice(0, source.lastIndexOf("    })();"))}
+		return { getPath, renderEntry, renderToolCall, renderHeader, getScrollTargetElementId, navigateTo, download: window.downloadSessionJson,
 			search: (query, mode = 'default') => {
 				searchQuery = query; filterMode = mode;
-				return filterNodes(flattenTree(buildTree(), buildActivePathIds(currentLeafId)), currentLeafId).map(node => node.node.entry.id);
+				forceTreeRerender();
+				return document.getElementById('tree-container').querySelectorAll('.tree-node').map(node => node.dataset.id);
 			}
 		};
 		})();`,
 		{
 			document,
-			window: { location: { search: "", href: "https://example.invalid" } },
+			window: {
+				location: { search: "", href: "https://example.invalid" },
+				matchMedia: () => ({ matches: false }),
+				getSelection: () => ({ toString: () => "" }),
+				addEventListener() {},
+			},
+			localStorage: { getItem: () => null },
 			atob,
 			TextDecoder,
 			URLSearchParams,
@@ -190,16 +225,15 @@ function loadTemplate(
 					downloaded = blob;
 					return "blob:test";
 				},
-				revokeObjectURL: () => {},
+				revokeObjectURL() {},
 			},
-			setTimeout: () => {},
+			setTimeout() {},
 		},
 	) as {
 		getPath(id: string): SessionEntry[];
 		renderEntry(entry: SessionEntry): string;
 		renderToolCall(call: ToolCall): string;
 		renderHeader(): string;
-		getTreeNodeDisplayHtml(entry: SessionEntry): string;
 		getScrollTargetElementId(id: string): string;
 		navigateTo(id: string, scrollMode?: string, scrollToEntryId?: string): void;
 		download(): void;
@@ -207,10 +241,14 @@ function loadTemplate(
 	};
 	return {
 		...api,
-		html: () => nodes.map((node) => node.html ?? "").join(""),
+		html: () => element("messages").innerHTML,
+		treeNodes: () => element("tree-container").querySelectorAll(".tree-node"),
+		treeHtml: (id: string) => element("tree-container").children.find((node) => node.dataset.id === id)?.innerHTML,
 		downloaded: () => downloaded,
 		decoded,
-		buttons,
+		get buttons() {
+			return element("messages").children.filter((child) => child.tag === "button");
+		},
 	};
 }
 
@@ -251,6 +289,11 @@ function result(id: string, parentId: string, toolCallId = "lookup"): SessionEnt
 
 describe("HTML export tools and branches", () => {
 	it("captures, cold-restores and exports more than 512MiB without an aggregate history string", async () => {
+		const stageReceipt = (phase: string) =>
+			console.log(
+				"LARGE_STAGE",
+				JSON.stringify({ phase, heapUsed: process.memoryUsage().heapUsed, rss: process.memoryUsage().rss }),
+			);
 		const directory = mkdtempSync(join(tmpdir(), "pi-large-file-flows-"));
 		const journal = join(directory, "session.jsonl");
 		const timestamp = "2026-09-22T00:00:00Z";
@@ -285,12 +328,14 @@ describe("HTML export tools and branches", () => {
 		} finally {
 			closeSync(fd);
 		}
+		stageReceipt("journal-written");
 		async function digest(path: string): Promise<string> {
 			const hash = createHash("sha256");
 			for await (const chunk of createReadStream(path)) hash.update(chunk);
 			return hash.digest("hex");
 		}
 		const h = await createHarness({ sessionManager: SessionManager.open(journal) });
+		stageReceipt("harness-ready");
 		const provider = h.session.modelRuntime.getProvider(h.getModel().provider)!;
 		let restored: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		try {
@@ -300,6 +345,7 @@ describe("HTML export tools and branches", () => {
 			expect(statSync(journal).size).toBeGreaterThan(512 * 1024 * 1024);
 			const path = join(directory, "checkpoint.json");
 			const hold = await h.session.acquireCheckpointFile(path, { quiesce: () => () => {} });
+			stageReceipt("checkpoint-captured");
 			expect(hold.checkpoint.selection.leafId).toBe("last");
 			expect(hold.checkpoint).not.toHaveProperty("entries");
 			hold.release();
@@ -315,12 +361,14 @@ describe("HTML export tools and branches", () => {
 				modelsPath: null,
 				refreshOnCreate: false,
 			});
+			stageReceipt("cold-runtime-ready");
 			restored = await createAgentSession({
 				checkpointFile: path,
 				modelRuntime,
 				resourceLoader: createTestResourceLoader(),
 				settingsManager: SettingsManager.inMemory(),
 			});
+			stageReceipt("cold-restored");
 			const manager = restored.session.sessionManager;
 			expect(manager.getLeafId()).toBe("last");
 			expect(manager.getEntryCount()).toBe(count + 3);
@@ -332,6 +380,7 @@ describe("HTML export tools and branches", () => {
 			expect(readSessionCheckpointState(path).selection.sessionId).toBe(header.id);
 			expect(await digest(path)).toBe(captured);
 			const jsonl = exportSessionToJsonl(manager, join(directory, "branch.jsonl"));
+			stageReceipt("jsonl-exported");
 			expect(statSync(jsonl).size).toBeGreaterThan(512 * 1024 * 1024);
 			const exported = scanJournal(jsonl, {
 				policy: "strict",
@@ -346,6 +395,7 @@ describe("HTML export tools and branches", () => {
 			expect(exported.records.at(-1)?.value.parentId).toBe(`state-${count - 1}`);
 			closeJournalSource(exported.source);
 			const html = await exportSessionToHtml(manager, undefined, { outputPath: join(directory, "history.html") });
+			stageReceipt("html-exported");
 			expect(statSync(html).size).toBeGreaterThan(512 * 1024 * 1024);
 			const indexes: object[] = [];
 			const bodies = new Map<number, { start: number; length: number }>();
@@ -361,13 +411,16 @@ describe("HTML export tools and branches", () => {
 					bodies.set(Number(body[2]), { start: offset + Buffer.byteLength(body[1]), length: body[3].length });
 				offset += Buffer.byteLength(line) + 1;
 			}
+			stageReceipt("html-indexed");
 			expect(indexes).toHaveLength(count + 3);
 			expect(bodies.size).toBe(count + 3);
 			expect(metadata).toMatchObject({ header: { id: header.id }, leafId: "last" });
 			expect(metadata).not.toHaveProperty("entries");
 			const input = openSync(html, "r");
+			let decodedRecords = 0;
+			let initialDecodedRecords = 0;
 			try {
-				const viewer = loadTemplate(
+				const viewer = await loadTemplate(
 					{ ...metadata, entries: [] },
 					{
 						indexes,
@@ -381,6 +434,10 @@ describe("HTML export tools and branches", () => {
 						},
 					},
 				);
+				stageReceipt("viewer-ready");
+				expect(viewer.treeNodes().map((node) => node.dataset.id)).toEqual(["first", "last", "alternate"]);
+				expect(new Set(viewer.decoded)).toEqual(new Set([0]));
+				initialDecodedRecords = new Set(viewer.decoded).size;
 				for (const [id, text] of [
 					["first", "first history"],
 					["last", "last history"],
@@ -391,6 +448,7 @@ describe("HTML export tools and branches", () => {
 				}
 				expect(viewer.search("alternate history")).toContain("alternate");
 				expect(new Set(viewer.decoded)).toEqual(new Set([0, count + 1, count + 2]));
+				decodedRecords = new Set(viewer.decoded).size;
 			} finally {
 				closeSync(input);
 			}
@@ -450,11 +508,15 @@ describe("HTML export tools and branches", () => {
 					jsonlBytes: statSync(jsonl).size,
 					htmlBytes: statSync(html).size,
 					entries: count + 3,
-					decodedRecords: 3,
+					decodedRecords,
+					initialDecodedRecords,
+					productionTree: true,
 					uploadedBytes,
 					largestUploadChunk,
 					heapLimit: getHeapStatistics().heap_size_limit,
 					heapUsed: process.memoryUsage().heapUsed,
+					rss: process.memoryUsage().rss,
+					maxRssKiB: process.resourceUsage().maxRSS,
 				}),
 			);
 		} finally {
@@ -464,7 +526,7 @@ describe("HTML export tools and branches", () => {
 		}
 	}, 240_000);
 
-	it("pages first and last history, keeps alternate branches searchable, and never decodes hidden custom state", () => {
+	it("pages first and last history, keeps alternate branches searchable, and never decodes hidden custom state", async () => {
 		const entries: SessionEntry[] = [
 			{
 				type: "custom",
@@ -476,13 +538,27 @@ describe("HTML export tools and branches", () => {
 			},
 		];
 		for (let index = 0; index < 125; index++) {
-			entries.push(assistant(`message-${index}`, entries.at(-1)!.id, [{ type: "text", text: `history ${index}` }]));
+			entries.push(
+				assistant(`message-${index}`, entries.at(-1)!.id, [
+					{ type: "text", text: `history ${index}` },
+					...(index === 124 ? [{ ...rawCall, id: "last-call", arguments: { query: "last query" } }] : []),
+				]),
+			);
 		}
 		entries.push(
 			assistant("alternate", "message-0", [{ type: "text", text: `${"prefix ".repeat(50)}deep alternate needle` }]),
 		);
-		const template = loadTemplate({ entries, leafId: "message-124" });
-		expect(template.decoded).toEqual([]);
+		const template = await loadTemplate({ entries, leafId: "message-124" });
+		console.log(
+			"HTML_TREE_RECEIPT",
+			JSON.stringify({ historyMessages: 125, initialDecoded: new Set(template.decoded).size }),
+		);
+		expect(new Set(template.decoded)).toEqual(new Set(Array.from({ length: 49 }, (_, index) => index + 1)));
+		expect(template.treeNodes()).toHaveLength(126);
+		expect(template.treeHtml("message-0")).toContain("history 0");
+		expect(template.treeHtml("message-124")).toContain("history 124");
+		expect(template.treeHtml("alternate")).not.toContain("deep alternate needle");
+		template.decoded.length = 0;
 		template.navigateTo("message-124");
 		expect(template.html()).toContain("history 124");
 		expect(template.html()).not.toContain("history 0<");
@@ -493,7 +569,10 @@ describe("HTML export tools and branches", () => {
 		expect(template.html()).not.toContain("history 124");
 		template.buttons.findLast((button) => button.textContent === "Later messages")!.click();
 		expect(template.html()).toContain("history 49");
-		template.navigateTo("alternate");
+		template
+			.treeNodes()
+			.find((node) => node.dataset.id === "alternate")!
+			.click();
 		expect(template.html()).toContain("deep alternate needle");
 		expect(template.html()).not.toContain("history 124");
 		template.navigateTo("message-124");
@@ -502,7 +581,155 @@ describe("HTML export tools and branches", () => {
 		expect(template.decoded).not.toContain(0);
 	});
 
-	it("uses tool names for rendering and escapes fallback names, arguments and nested calls", () => {
+	it.each([500, 17_728])("renders and navigates a %i-entry tree without decoding hidden state", async (count) => {
+		const entries: SessionEntry[] = Array.from({ length: count }, (_, index) => ({
+			type: "custom",
+			id: `state-${index}`,
+			parentId: index ? `state-${index - 1}` : null,
+			timestamp: "2026-09-22T00:00:00Z",
+			customType: "hidden-state",
+			data: { untouched: `body ${index}` },
+		}));
+		const template = await loadTemplate({ entries, leafId: `state-${count - 1}` });
+		expect(template.decoded).toEqual([]);
+		expect(template.search("", "all")).toEqual(Array.from({ length: count }, (_, index) => `state-${index}`));
+		expect(template.treeNodes()).toHaveLength(count);
+		expect(template.treeHtml("state-0")).toContain("[custom]");
+		template.treeNodes()[0].click();
+		expect(template.treeNodes()[0].className).toContain("active");
+		expect(template.getPath(`state-${count - 1}`)).toHaveLength(count);
+		expect(template.decoded).toEqual([]);
+	});
+
+	it("keeps tree previews and branch-local tool facts without loading bodies, then exposes requested full content", async () => {
+		const timestamp = "2026-09-22T00:00:00Z";
+		const entries: SessionEntry[] = [
+			{ type: "custom", id: "state", parentId: null, timestamp, customType: "state", data: { private: "retained" } },
+			{
+				type: "message",
+				id: "skill",
+				parentId: "state",
+				timestamp,
+				message: {
+					role: "user",
+					content: [
+						{
+							type: "text",
+							text: '<skill name="deploy" location="/skills/deploy.md">\n# Skill-only needle\n</skill>\n\nship\t<release>',
+						},
+						{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+					],
+					timestamp: 1,
+				},
+			},
+			{ type: "label", id: "label", parentId: "skill", timestamp, targetId: "skill", label: "ship <bookmark>" },
+			{
+				type: "message",
+				id: "aborted",
+				parentId: "state",
+				timestamp,
+				message: { ...fauxAssistantMessage([]), stopReason: "aborted" },
+			},
+			{
+				type: "message",
+				id: "error",
+				parentId: "state",
+				timestamp,
+				message: { ...fauxAssistantMessage([]), stopReason: "error", errorMessage: "<failure>\nsecond line" },
+			},
+			{
+				type: "message",
+				id: "bash",
+				parentId: "state",
+				timestamp,
+				message: {
+					role: "bashExecution",
+					command: "printf\t<value>\nnext",
+					output: "complete bash output",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 1,
+				},
+			},
+			{
+				type: "custom_message",
+				id: "custom",
+				parentId: "state",
+				timestamp,
+				customType: "notice",
+				content: `${"c".repeat(120)} custom-tail-needle`,
+				display: false,
+			},
+			{
+				type: "branch_summary",
+				id: "summary",
+				parentId: "state",
+				timestamp,
+				fromId: "skill",
+				summary: `${"s".repeat(120)} summary-tail-needle`,
+			},
+			assistant("call-a", "state", [{ ...rawCall, arguments: { query: "branch A" } }]),
+			result("result-a", "call-a"),
+			assistant("call-b", "state", [{ ...rawCall, arguments: { query: "branch B" } }]),
+			result("result-b", "call-b"),
+			assistant("read-call", "state", [
+				{
+					type: "toolCall",
+					id: "read",
+					name: "read",
+					arguments: { path: "/home/user/file.ts", offset: 2, limit: 3, json: { path: "/items" } },
+				},
+			]),
+			result("read-result", "read-call", "read"),
+		];
+		const header = { type: "session", id: "tree-facts" };
+		const template = await loadTemplate({ header, entries, leafId: "state" });
+		expect(template.decoded).toEqual([]);
+		for (const [id, text] of [
+			["skill", "[ship &lt;bookmark&gt;]"],
+			["skill", "deploy"],
+			["skill", "ship &lt;release&gt;"],
+			["aborted", "(aborted)"],
+			["error", "&lt;failure&gt;\nsecond line"],
+			["bash", "printf &lt;value&gt; next"],
+			["custom", `${"c".repeat(100)}...`],
+			["summary", `${"s".repeat(100)}...`],
+			["result-a", "{&quot;query&quot;:&quot;branch A&quot;}"],
+			["result-b", "{&quot;query&quot;:&quot;branch B&quot;}"],
+			["read-result", "[read: ~/file.ts json={&quot;path&quot;:&quot;/items&quot;}:2-4]"],
+		]) {
+			expect(template.treeHtml(id)).toContain(text);
+		}
+		expect(template.treeHtml("custom")).not.toContain("custom-tail-needle");
+		expect(template.treeHtml("summary")).not.toContain("summary-tail-needle");
+		expect(template.decoded).toEqual([]);
+		template
+			.treeNodes()
+			.find((node) => node.dataset.id === "result-a")!
+			.click();
+		expect(template.html()).toContain("branch A");
+		expect(template.html()).not.toContain("branch B");
+		expect(new Set(template.decoded)).toEqual(new Set([8, 9]));
+		template
+			.treeNodes()
+			.find((node) => node.dataset.id === "skill")!
+			.click();
+		expect(template.html()).toContain("Skill-only needle");
+		expect(template.html()).toContain("data:image/png;base64,aW1hZ2U=");
+		expect(template.search("custom-tail-needle")).toContain("custom");
+		expect(template.search("summary-tail-needle")).toContain("summary");
+		template.navigateTo("custom");
+		expect(template.html()).toContain("custom-tail-needle");
+		template.navigateTo("summary");
+		expect(template.html()).toContain("summary-tail-needle");
+		template.download();
+		expect(await template.downloaded()?.text()).toBe(
+			[JSON.stringify(header), ...entries.map((entry) => JSON.stringify(entry))].join("\n"),
+		);
+	});
+
+	it("uses tool names for rendering and escapes fallback names, arguments and nested calls", async () => {
 		const bare: ToolCall = { type: "toolCall", id: "bare", name: "read", arguments: { path: "builtin.txt" } };
 		const fallback: ToolCall = { ...rawCall, id: "fallback", name: '<records>"', arguments: { query: "<script>" } };
 		const nested = result("nested", "r", "fallback");
@@ -521,8 +748,11 @@ describe("HTML export tools and branches", () => {
 				{ id: "nested-unfinished", name: "omitted", argumentsBytes: 2048, status: "unfinished" },
 			],
 		};
-		const entries = [assistant("a", null, [bare, rawCall, fallback]), result("r", "a"), nested];
-		const template = loadTemplate({
+		const unmatched = result("unmatched", "a", "missing");
+		if (unmatched.type === "message" && unmatched.message.role === "toolResult")
+			unmatched.message.toolName = '<unmatched>"';
+		const entries = [assistant("a", null, [bare, rawCall, fallback]), result("r", "a"), nested, unmatched];
+		const template = await loadTemplate({
 			entries,
 			leafId: "nested",
 			tools: [{ name: "read" }, { name: fallback.name, namespace: { name: "records" } }],
@@ -553,14 +783,11 @@ describe("HTML export tools and branches", () => {
 		expect(html).not.toContain("<script>");
 		expect(html).not.toContain("tool-path");
 		expect(template.renderToolCall({ ...fallback, id: "no-renderer" })).toContain("&lt;script&gt;");
-		expect(template.getTreeNodeDisplayHtml(entries[1])).toContain("records_read");
-		expect(template.getTreeNodeDisplayHtml(entries[1])).toContain("record query");
+		expect(template.treeHtml("r")).toContain("records_read");
+		expect(template.treeHtml("r")).toContain("record query");
 		expect(template.renderHeader()).toContain("&lt;records&gt;&quot;");
 		expect(template.renderHeader()).toContain(">read</span>");
-		const unmatched = result("unmatched", "a", "missing");
-		if (unmatched.type === "message" && unmatched.message.role === "toolResult")
-			unmatched.message.toolName = '<unmatched>"';
-		expect(template.getTreeNodeDisplayHtml(unmatched)).toContain("&lt;unmatched&gt;&quot;");
+		expect(template.treeHtml("unmatched")).toContain("&lt;unmatched&gt;&quot;");
 	});
 
 	it("selects branch-local results on repeated navigation and leaves the raw download intact", async () => {
@@ -573,7 +800,7 @@ describe("HTML export tools and branches", () => {
 		];
 		const before = JSON.stringify(entries);
 		const header = { type: "session", id: "journal" };
-		const template = loadTemplate({ header, entries, leafId: "final-a" });
+		const template = await loadTemplate({ header, entries, leafId: "final-a" });
 		for (const [leaf, answer, output, excluded] of [
 			["final-a", "Final answer A", "result-a", "result-b"],
 			["final-b", "Final answer B", "result-b", "result-a"],
@@ -666,7 +893,7 @@ describe("HTML export tools and branches", () => {
 			expect(data.tools).toMatchObject([{ name: "records_read" }]);
 			expect(lookup).toHaveBeenCalledWith("records_read");
 			expect(lookup.mock.calls.every(([name]) => name === "records_read")).toBe(true);
-			const template = loadTemplate(data);
+			const template = await loadTemplate(data);
 			for (const [leaf, query, output] of [...branches, branches[0]]) {
 				template.navigateTo(leaf);
 				expect(template.html()).toContain(`records call ${query}`);

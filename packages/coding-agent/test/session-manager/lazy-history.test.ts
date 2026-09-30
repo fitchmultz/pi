@@ -44,6 +44,25 @@ it("inspects and copies >512 MiB history under a 96 MiB heap without hydrating i
 	expect(receipt.retainedHeap).toBeLessThan(96 * 1024 * 1024);
 }, 200000);
 
+it.each(["toString", "constructor", "__proto__"])("preserves an own %s field when branching", (key) => {
+	const { directory, source, manager, id } = fixture();
+	const expected = {
+		...JSON.parse(JSON.stringify(manager.getEntry(id))),
+		[key]: { exact: [false, null, 0] },
+	};
+	writeFileSync(source, `${JSON.stringify(manager.getHeader())}\n${JSON.stringify(expected)}\n`);
+	const before = readFileSync(source);
+	const reopened = SessionManager.open(source);
+	const branch = reopened.createBranchedSession(id)!;
+	expect(reopened.getSessionFile()).toBe(branch);
+	expect(reopened.getSessionId()).not.toBe(manager.getSessionId());
+	const copied = JSON.parse(JSON.stringify(reopened.getEntry(id)));
+	expect(Object.hasOwn(copied, key)).toBe(true);
+	expect(copied).toEqual(expected);
+	expect(readFileSync(source)).toEqual(before);
+	expect(SessionManager.open(branch, directory).getEntry(id)).toEqual(expected);
+});
+
 it("keeps branch payloads independent of the original journal after publication", () => {
 	const { directory, source, manager, id } = fixture();
 	const branch = manager.createBranchedSession(id)!;
@@ -78,6 +97,40 @@ it("refreshes an appended or replaced identical generation read-only and rejects
 	truncateSync(source, 10);
 	expect(() => manager.getEntry(id)).toThrow("Journal source generation changed");
 	expect(readFileSync(source)).toHaveLength(10);
+});
+
+it("waits for LF before refreshing a valid external tail while retaining tolerant native history", () => {
+	const { source, manager, id } = fixture();
+	const revision = manager.getEntriesRevision();
+	const added = {
+		type: "session_info",
+		id: "external-tail",
+		parentId: id,
+		timestamp: new Date(0).toISOString(),
+		name: "published after LF",
+	};
+	appendFileSync(
+		source,
+		Buffer.concat([
+			Buffer.from('not JSON\n{"type":"custom","id":"native-utf8","parentId":null,"customType":"native","data":"'),
+			Buffer.from([0xff]),
+			Buffer.from(`"}\n${JSON.stringify(added)}`),
+		]),
+	);
+	const pending = readFileSync(source);
+	expect(manager.getEntryMetadata(added.id)).toBeUndefined();
+	expect(manager.getEntries().map((entry) => entry.id)).toEqual([id, "native-utf8"]);
+	expect(manager.getEntry("native-utf8")).toMatchObject({ data: "\uFFFD" });
+	expect(manager.getLeafId()).toBe(id);
+	expect(manager.getEntriesRevision()).toBe(revision + 1);
+	expect(readFileSync(source)).toEqual(pending);
+	appendFileSync(source, "\n");
+	expect(manager.getEntryMetadata(added.id)).toMatchObject({ name: added.name });
+	expect(manager.getEntries().map((entry) => entry.id)).toEqual([id, "native-utf8", added.id]);
+	expect(manager.getEntry(id)).toMatchObject({ data: { exact: [false, null, 0] } });
+	expect(manager.getLeafId()).toBe(id);
+	expect(manager.getEntriesRevision()).toBe(revision + 2);
+	expect(readFileSync(source)).toEqual(Buffer.concat([pending, Buffer.from("\n")]));
 });
 
 it("uses byte framing and JSON.parse duplicate-key semantics without repairing sealed or live input", () => {

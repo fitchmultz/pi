@@ -56,7 +56,11 @@ describe("native JSON record writer", () => {
 		const value = {
 			type: "agent_end",
 			omitted: undefined,
-			messages,
+			messages: new Proxy(messages, {
+				get: (target, key, receiver) =>
+					key === "length" ? String(target.length) : Reflect.get(target, key, receiver),
+			}),
+			toolResults: new Set([1, 2]),
 			steering: [keyed()],
 			followUp: [],
 			extra: { date: new Date("2020-01-01"), unicode: "a\u2028b\u2029c🙂", keyed: keyed() },

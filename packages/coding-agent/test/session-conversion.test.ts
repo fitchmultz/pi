@@ -168,14 +168,26 @@ describe("one-time session conversion", () => {
 		]);
 	});
 
-	it("preserves supported hosted web-search metadata on assistant responses", () => {
-		const input = settled();
-		const webSearch = { calls: [], citations: [] };
-		(input[3].message as Entry).webSearch = webSearch;
-		const { source, output } = fixture(input);
-		convertSessionFile(source, output);
-		expect(buildSessionContext(convertedEntries(output)).messages[1]).toMatchObject({ webSearch });
-	});
+	it.each(["toString", "constructor", "__proto__"])(
+		"preserves web-search metadata and own %s fields on entries and messages",
+		(key) => {
+			const input = settled();
+			const webSearch = { calls: [], citations: [] };
+			const extra = { [key]: { exact: [false, null, 0] } };
+			input[1] = { ...input[1], ...extra };
+			input[3].message = { ...(input[3].message as Entry), webSearch, ...extra };
+			const { source, output, bytes } = fixture(input);
+			convertSessionFile(source, output);
+			const entries = convertedEntries(output);
+			const copied = entries.find((entry) => entry.id === "snapshot")!;
+			const message = buildSessionContext(entries).messages[1];
+			expect(Object.hasOwn(copied, key)).toBe(true);
+			expect(copied).toMatchObject(extra);
+			expect(Object.hasOwn(message, key)).toBe(true);
+			expect(message).toMatchObject({ webSearch, ...extra });
+			expect(readFileSync(source, "utf8")).toBe(bytes);
+		},
+	);
 
 	it("normalizes legacy string tool removals into upstream references", () => {
 		const input = settled();

@@ -266,3 +266,5 @@ function inspectSession(manager: ReadonlySessionManager) {
 ```
 
 `getEntry()` and shallow entry collections preserve enumerable optional fields and complete serialization. Reading a payload or serializing an entry requests its full value; that individual value must fit the caller's memory.
+
+`SessionManager.list()` and `listAll()` return metadata and a bounded `firstMessagePreview` for ordinary picker rendering and ID lookup. Their enumerable `firstMessage` and `allMessagesText` fields load the complete requested text on access; enumerating or serializing those values is an explicit full-text request. Picker searches retain the complete existing fuzzy, quoted-phrase, and JavaScript regular-expression behavior, including matches across messages. Full-text access and search require enough consumer memory and remain subject to JavaScript's string-size limit. They never substitute cropped text; catchable search failures appear in the picker so the query can be cleared.

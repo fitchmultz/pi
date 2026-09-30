@@ -91,14 +91,12 @@
           }
         }
 
-        // Sort children by timestamp
-        function sortChildren(node) {
+        // Sort each node directly; long single-child histories do not need recursive walks.
+        for (const node of nodeMap.values()) {
           node.children.sort((a, b) =>
             new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime()
           );
-          node.children.forEach(sortChildren);
         }
-        roots.forEach(sortChildren);
 
         return roots;
       }
@@ -127,14 +125,14 @@
         const path = [];
         let current = byId.get(targetId);
         while (current) {
-          path.unshift(current);
+          path.push(current);
           // Stop if no parent or self-referencing (root)
           if (!current.parentId || current.parentId === current.id) {
             break;
           }
           current = byId.get(current.parentId);
         }
-        return path;
+        return path.reverse();
       }
 
       // Tree node lookup for finding leaves
@@ -149,12 +147,12 @@
         // Build tree node map lazily
         if (!treeNodeMap) {
           treeNodeMap = new Map();
-          const tree = buildTree();
-          function mapNodes(node) {
+          const stack = buildTree();
+          while (stack.length) {
+            const node = stack.pop();
             treeNodeMap.set(node.entry.id, node);
-            node.children.forEach(mapNodes);
+            for (const child of node.children) stack.push(child);
           }
-          tree.forEach(mapNodes);
         }
 
         const node = treeNodeMap.get(nodeId);
@@ -177,24 +175,13 @@
         const result = [];
         const multipleRoots = roots.length > 1;
 
-        // Mark which subtrees contain the active leaf
-        const containsActive = new Map();
-        function markActive(node) {
-          let has = activePathIds.has(node.entry.id);
-          for (const child of node.children) {
-            if (markActive(child)) has = true;
-          }
-          containsActive.set(node, has);
-          return has;
-        }
-        roots.forEach(markActive);
-
+        // The active path already includes every ancestor of the selected leaf.
         // Stack: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
         const stack = [];
 
         // Add roots (prioritize branch containing active leaf)
         const orderedRoots = [...roots].sort((a, b) =>
-          Number(containsActive.get(b)) - Number(containsActive.get(a))
+          Number(activePathIds.has(b.entry.id)) - Number(activePathIds.has(a.entry.id))
         );
         for (let i = orderedRoots.length - 1; i >= 0; i--) {
           const isLast = i === orderedRoots.length - 1;
@@ -211,7 +198,7 @@
 
           // Order children (active branch first)
           const orderedChildren = [...children].sort((a, b) =>
-            Number(containsActive.get(b)) - Number(containsActive.get(a))
+            Number(activePathIds.has(b.entry.id)) - Number(activePathIds.has(a.entry.id))
           );
 
           // Calculate child indent (matches tree-selector.ts)
@@ -569,44 +556,6 @@
         return tool.name;
       }
 
-      function formatToolCall(tool) {
-        const args = tool.arguments ?? {};
-        switch (tool.name) {
-          case 'read': {
-            const path = shortenPath(String(args.path || args.file_path || ''));
-            const offset = args.offset;
-            const limit = args.limit;
-            let display = path;
-            if (args.json !== undefined) display += ` json=${JSON.stringify(args.json)}`;
-            if (offset !== undefined || limit !== undefined) {
-              const start = offset ?? 1;
-              const end = limit !== undefined ? start + limit - 1 : '';
-              display += `:${start}${end ? `-${end}` : ''}`;
-            }
-            return `[read: ${display}]`;
-          }
-          case 'write':
-            return `[write: ${shortenPath(String(args.path || args.file_path || ''))}]`;
-          case 'edit':
-            return `[edit: ${shortenPath(String(args.path || args.file_path || ''))}]`;
-          case 'bash': {
-            const rawCmd = String(args.command || '');
-            const cmd = rawCmd.replace(/[\n\t]/g, ' ').trim().slice(0, 50);
-            return `[bash: ${cmd}${rawCmd.length > 50 ? '...' : ''}]`;
-          }
-          case 'grep':
-            return `[grep: /${args.pattern || ''}/ in ${shortenPath(String(args.path || '.'))}]`;
-          case 'find':
-            return `[find: ${args.pattern || ''} in ${shortenPath(String(args.path || '.'))}]`;
-          case 'ls':
-            return `[ls: ${shortenPath(String(args.path || '.'))}]`;
-          default: {
-            const argsStr = JSON.stringify(args).slice(0, 40);
-            return `[${toolDisplayName(tool)}: ${argsStr}${JSON.stringify(args).length > 40 ? '...' : ''}]`;
-          }
-        }
-      }
-
       function escapeHtml(text) {
         return String(text)
           .replace(/&/g, '&amp;')
@@ -629,48 +578,33 @@
       }
 
       /**
-       * Truncate string to maxLen chars, append "..." if truncated.
-       */
-      function truncate(s, maxLen = 100) {
-        if (s.length <= maxLen) return s;
-        return s.slice(0, maxLen) + '...';
-      }
-
-      /**
        * Get display text for tree node (returns HTML string).
        */
       function getTreeNodeDisplayHtml(entry, label) {
-        if (entry.record !== undefined && (entry.type === 'custom_message' || entry.type === 'branch_summary' ||
-          (entry.type === 'message' && entry.message.role !== 'toolResult'))) entry = fullEntry(entry);
-        const normalize = s => s.replace(/[\n\t]/g, ' ').trim();
         const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : '';
 
         switch (entry.type) {
           case 'message': {
             const msg = entry.message;
             if (msg.role === 'user') {
-              const rawContent = extractContent(msg.content);
-              const skillBlock = parseSkillBlock(rawContent);
-              if (skillBlock) {
-                let treeHtml = labelHtml + `<span class="tree-role-skill">skill:</span> ${escapeHtml(skillBlock.name)}`;
-                if (skillBlock.userMessage) {
-                  treeHtml += ` · <span class="tree-role-user">user:</span> ${escapeHtml(truncate(normalize(skillBlock.userMessage)))}`;
+              if (msg.skill) {
+                let treeHtml = labelHtml + `<span class="tree-role-skill">skill:</span> ${escapeHtml(msg.skill.name)}`;
+                if (msg.skill.userMessage) {
+                  treeHtml += ` · <span class="tree-role-user">user:</span> ${escapeHtml(msg.skill.userMessage)}`;
                 }
                 return treeHtml;
               }
-              const content = truncate(normalize(rawContent));
-              return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(content)}`;
+              return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(msg.preview)}`;
             }
             if (msg.role === 'assistant') {
-              const textContent = truncate(normalize(extractContent(msg.content)));
-              if (textContent) {
-                return labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(textContent)}`;
+              if (msg.preview) {
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(msg.preview)}`;
               }
               if (msg.stopReason === 'aborted') {
                 return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(aborted)</span>`;
               }
               if (msg.errorMessage) {
-                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(truncate(msg.errorMessage))}</span>`;
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(msg.errorMessage)}</span>`;
               }
               return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(no text)</span>`;
             }
@@ -679,31 +613,25 @@
               let toolCall;
               for (const candidate of path) {
                 if (candidate.type !== 'message' || candidate.message.role !== 'assistant') continue;
-                const message = fullEntry(candidate).message;
-                toolCall = message.content.find(block => block.type === 'toolCall' && block.id === msg.toolCallId);
+                toolCall = candidate.message.toolPreviews.find(call => call.id === msg.toolCallId);
                 if (toolCall) break;
               }
               if (toolCall) {
-                return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall))}</span>`;
+                return labelHtml + `<span class="tree-role-tool">${escapeHtml(toolCall.preview)}</span>`;
               }
               return labelHtml + `<span class="tree-role-tool">[${escapeHtml(toolDisplayName({ name: msg.toolName || 'tool' }))}]</span>`;
             }
             if (msg.role === 'bashExecution') {
-              const cmd = truncate(normalize(msg.command || ''));
-              return labelHtml + `<span class="tree-role-tool">[bash]:</span> ${escapeHtml(cmd)}`;
+              return labelHtml + `<span class="tree-role-tool">[bash]:</span> ${escapeHtml(msg.command)}`;
             }
             return labelHtml + `<span class="tree-muted">[${escapeHtml(msg.role)}]</span>`;
           }
           case 'compaction':
             return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
-          case 'branch_summary': {
-            const summary = truncate(normalize(entry.summary || ''));
-            return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
-          }
-          case 'custom_message': {
-            const content = typeof entry.content === 'string' ? entry.content : extractContent(entry.content);
-            return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalize(content)))}`;
-          }
+          case 'branch_summary':
+            return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(entry.preview)}`;
+          case 'custom_message':
+            return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(entry.preview)}`;
           case 'model_change':
             return labelHtml + `<span class="tree-muted">[model: ${escapeHtml(entry.modelId)}]</span>`;
           case 'thinking_level_change':
@@ -1056,7 +984,7 @@
           default: {
             // Check for pre-rendered custom tool HTML
             const callEntry = currentPath.find(entry => entry.type === 'message' && entry.message.role === 'assistant' &&
-              fullEntry(entry).message.content.some(block => block.type === 'toolCall' && block.id === call.id));
+              entry.message.toolPreviews.some(preview => preview.id === call.id));
             const renderedCall = callEntry ? recordFor(callEntry).renderedTools?.[call.id] : undefined;
             const resultIndex = resultEntry ? byId.get(resultEntry.id) : undefined;
             const renderedResult = resultIndex ? recordFor(resultIndex).renderedTools?.[call.id] : undefined;

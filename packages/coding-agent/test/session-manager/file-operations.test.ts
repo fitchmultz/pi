@@ -18,14 +18,13 @@ import {
 	CURRENT_SESSION_VERSION,
 	findMostRecentSession,
 	getDefaultSessionDir,
-	loadEntriesFromFile,
 	SessionManager,
 } from "../../src/core/session-manager.ts";
 import { assistantMsg, readSessionFileRoles, userMsg } from "../utilities.ts";
 
 const HEADER_SCAN_LIMIT_BYTES = 1024 * 1024;
 
-describe("loadEntriesFromFile", () => {
+describe("SessionManager.open", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
@@ -50,72 +49,45 @@ describe("loadEntriesFromFile", () => {
 		);
 	}
 
-	it("returns empty array for non-existent file", () => {
-		const entries = loadEntriesFromFile(join(tempDir, "nonexistent.jsonl"));
-		expect(entries).toEqual([]);
-	});
-
-	it("returns empty array for empty file", () => {
-		const file = join(tempDir, "empty.jsonl");
-		writeFileSync(file, "");
-		expect(loadEntriesFromFile(file)).toEqual([]);
-	});
-
-	it("returns empty array for file without valid session header", () => {
-		const file = join(tempDir, "no-header.jsonl");
-		writeFileSync(file, '{"type":"message","id":"1"}\n');
-		expect(loadEntriesFromFile(file)).toEqual([]);
-	});
-
-	it("returns empty array for malformed JSON", () => {
+	it("refuses wholly malformed input without changing its bytes", () => {
 		const file = join(tempDir, "malformed.jsonl");
 		writeFileSync(file, "not json\n");
-		expect(loadEntriesFromFile(file)).toEqual([]);
+		expect(() => SessionManager.open(file)).toThrow("not a valid pi session");
+		expect(readFileSync(file, "utf8")).toBe("not json\n");
 	});
 
-	it("loads valid session file", () => {
-		const file = join(tempDir, "valid.jsonl");
-		writeFileSync(
-			file,
-			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
-				'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}\n',
-		);
-		const entries = loadEntriesFromFile(file);
-		expect(entries).toHaveLength(2);
-		expect(entries[0].type).toBe("session");
-		expect(entries[1].type).toBe("message");
-	});
-
-	it("skips malformed lines but keeps valid ones", () => {
+	it("skips malformed lines but keeps valid ones without rewriting current-version history", () => {
 		const file = join(tempDir, "mixed.jsonl");
-		writeFileSync(
-			file,
-			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
-				"not valid json\n" +
-				'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}\n',
-		);
-		const entries = loadEntriesFromFile(file);
-		expect(entries).toHaveLength(2);
+		const content =
+			'{"type":"session","version":3,"id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
+			"not valid json\n" +
+			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}\n';
+		writeFileSync(file, content);
+		const manager = SessionManager.open(file);
+		expect(manager.getEntries()).toHaveLength(1);
+		expect(manager.buildSessionContext().messages).toEqual([{ role: "user", content: "hi", timestamp: 1 }]);
+		expect(readFileSync(file, "utf8")).toBe(content);
 	});
 
 	it("adds a newline after an unterminated valid record", () => {
 		const file = join(tempDir, "unterminated.jsonl");
 		const content =
-			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
+			'{"type":"session","version":3,"id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
 			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}';
 		writeFileSync(file, content);
 
-		expect(loadEntriesFromFile(file)).toHaveLength(2);
+		expect(SessionManager.open(file).getEntries()).toHaveLength(1);
 		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
 	});
 
 	it("adds a newline after an unterminated malformed final fragment", () => {
 		const file = join(tempDir, "malformed-tail.jsonl");
 		const content =
-			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' + '{"type":"message"';
+			'{"type":"session","version":3,"id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
+			'{"type":"message"';
 		writeFileSync(file, content);
 
-		expect(loadEntriesFromFile(file)).toHaveLength(1);
+		expect(SessionManager.open(file).getEntries()).toHaveLength(0);
 		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
 	});
 
@@ -124,7 +96,7 @@ describe("loadEntriesFromFile", () => {
 		const content = '{"type":"message","id":"1"}';
 		writeFileSync(file, content);
 
-		expect(loadEntriesFromFile(file)).toEqual([]);
+		expect(() => SessionManager.open(file)).toThrow("not a valid pi session");
 		expect(readFileSync(file, "utf8")).toBe(content);
 	});
 

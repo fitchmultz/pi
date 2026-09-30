@@ -607,7 +607,11 @@ export interface SessionInfo {
 	created: Date;
 	modified: Date;
 	messageCount: number;
+	/** Complete first user text, loaded on explicit access. */
 	firstMessage: string;
+	/** Bounded display text; ordinary selectors do not load firstMessage. */
+	firstMessagePreview?: string;
+	/** Complete user/assistant text, loaded on explicit access; subject to consumer heap/string limits. */
 	allMessagesText: string;
 }
 
@@ -996,26 +1000,9 @@ function parseSessionEntryLine(line: string): FileEntry | null {
 	}
 }
 
-/** Explicit full-array reader. Ordinary session loading uses the selective index instead. */
-export function loadEntriesFromFile(filePath: string): FileEntry[] {
-	const resolvedFilePath = normalizePath(filePath);
-	if (!existsSync(resolvedFilePath)) return [];
-	// ponytail: this API intentionally returns every requested body; use metadata inspection for bounded history.
-	const scan = scanJournal(resolvedFilePath, { policy: "tolerant" });
-	const entries = scan.records.map((record) => record.value as unknown as FileEntry);
-	if (!entries.length || entries[0]?.type !== "session" || typeof entries[0].id !== "string") return [];
-	try {
-		assertSessionConversionNotRequired(entries);
-		if (scan.pendingTail) appendFileSync(resolvedFilePath, "\n");
-		return entries;
-	} finally {
-		closeJournalSource(scan.source);
-	}
-}
-
 /**
  * Inspect a physical line while searching for the first parsed session entry.
- * Blank and malformed lines are skipped to match loadEntriesFromFile().
+ * Blank and malformed lines are skipped under native tolerant parsing.
  * Returns undefined to keep scanning, null for a parsed non-header entry, or the header.
  */
 function parseSessionHeaderCandidate(line: string): SessionHeader | null | undefined {
@@ -1155,12 +1142,38 @@ async function buildSessionInfo(
 		const stats = fileStats ?? (await stat(filePath));
 		let header: SessionHeader | null = null;
 		let messageCount = 0;
-		let firstMessage = "";
-		const allMessages: string[] = [];
+		let firstMessageRecord: JournalRecord | undefined;
+		let firstMessagePreview = "(no messages)";
+		const messages: JournalRecord[] = [];
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
 
 		const scan = await scanJournalAsync(filePath, { ...metadataProjection(), policy: "tolerant", signal });
+		const readMessagesText = (records: JournalRecord[]): string => {
+			if (!records.length) return "";
+			const source: JournalSource = {
+				...scan.source,
+				handle: { fd: openSync(filePath, "r"), closed: false },
+			};
+			try {
+				return records
+					.map((record) => {
+						const full = readJournalRecord(source, record, (path) => {
+							if (
+								path.length === 0 ||
+								(path[0] === "message" &&
+									(path.length === 1 || path.at(-1) === "content" || typeof path.at(-1) === "number"))
+							)
+								return "descend";
+							return ["role", "text", "type", "timestamp"].includes(String(path.at(-1))) ? "keep" : "skip";
+						});
+						return extractTextContent(full.message as Message);
+					})
+					.join(" ");
+			} finally {
+				closeJournalSource(source);
+			}
+		};
 		try {
 			for (const record of scan.records) {
 				const entry = record.value as unknown as FileEntry;
@@ -1185,23 +1198,14 @@ async function buildSessionInfo(
 				}
 
 				if (entry.message.role !== "user" && entry.message.role !== "assistant") continue;
-				const full = readJournalRecord(scan.source, record, (path) => {
-					if (
-						path.length === 0 ||
-						(path[0] === "message" &&
-							(path.length === 1 || path.at(-1) === "content" || typeof path.at(-1) === "number"))
-					)
-						return "descend";
-					return ["role", "text", "type", "timestamp"].includes(String(path.at(-1))) ? "keep" : "skip";
-				});
-				const message = full.message as Message;
-				if (!isMessageWithContent(message)) continue;
-				const textContent = extractTextContent(message);
+				if (!isMessageWithContent(entry.message)) continue;
+				const textContent = extractTextContent(entry.message);
 				if (!textContent) continue;
 
-				allMessages.push(textContent);
-				if (!firstMessage && message.role === "user") {
-					firstMessage = textContent;
+				messages.push(record);
+				if (!firstMessageRecord && entry.message.role === "user") {
+					firstMessageRecord = record;
+					firstMessagePreview = textContent.slice(0, 256);
 				}
 			}
 
@@ -1226,8 +1230,15 @@ async function buildSessionInfo(
 				created: new Date(header.timestamp),
 				modified,
 				messageCount,
-				firstMessage: firstMessage || "(no messages)",
-				allMessagesText: allMessages.join(" "),
+				firstMessagePreview,
+				get firstMessage() {
+					return firstMessageRecord ? readMessagesText([firstMessageRecord]) : "(no messages)";
+				},
+				get allMessagesText() {
+					// ponytail: explicit full-text access/search needs the consumer's aggregate heap and string capacity.
+					// Add a streaming matcher only if that explicit consumer boundary must become bounded.
+					return readMessagesText(messages);
+				},
 			};
 		} finally {
 			closeJournalSource(scan.source);
@@ -1602,7 +1613,7 @@ export class SessionManager {
 			stats.ctimeMs === source.ctimeMs
 		)
 			return;
-		const scan = scanJournal(source.path, { ...metadataProjection(), policy: "tolerant" });
+		const scan = scanJournal(source.path, { ...metadataProjection(), policy: "tolerant", requireFinalLf: true });
 		const saved = new Map(scan.records.map((record) => [record.value.id, record]));
 		const savedDigests = new Set(scan.records.map((record) => record.digest));
 		try {
@@ -1664,7 +1675,7 @@ export class SessionManager {
 	/** Persistence confirmation releases only saved bodies; dirty entries remain ordinary objects. */
 	private _dropPersistedBodies(): void {
 		if (!this.sessionFile || !existsSync(this.sessionFile)) return;
-		const scan = scanJournal(this.sessionFile, { ...metadataProjection(), policy: "tolerant" });
+		const scan = scanJournal(this.sessionFile, { ...metadataProjection(), policy: "tolerant", requireFinalLf: true });
 		const saved = new Map(scan.records.map((record) => [record.value.id, record]));
 		const leaf = this.leafId;
 		this.journalSource = scan.source;
@@ -1752,12 +1763,20 @@ export class SessionManager {
 	flush(): void {
 		if (!this.persist || !this.sessionFile) return;
 		// A partially saved journal may already have been resumed by another writer.
-		if (
-			this.needsRewrite === "wx" &&
-			scanJournal(this.sessionFile, { ...metadataProjection(), policy: "tolerant" }).records.length > 0
-		) {
-			this.needsRewrite = undefined;
-			this.failedAppendIndex = 1;
+		if (this.needsRewrite === "wx") {
+			const scan = scanJournal(this.sessionFile, {
+				...metadataProjection(),
+				policy: "tolerant",
+				requireFinalLf: true,
+			});
+			try {
+				if (scan.records.length > 0) {
+					this.needsRewrite = undefined;
+					this.failedAppendIndex = 1;
+				}
+			} finally {
+				closeJournalSource(scan.source);
+			}
 		}
 		if (this.needsRewrite || (!this.flushed && this._hasPersistableEntries())) {
 			this._rewriteFile(this.needsRewrite === "exclusive" ? "exclusive" : this.flushed ? "w" : "wx");
@@ -1779,6 +1798,8 @@ export class SessionManager {
 							createHash("sha256").update(JSON.stringify(entry)).digest("hex");
 						if (record && record.digest !== expected) throw new Error(`Conflicting persisted entry: ${entry.id}`);
 					}
+					// A matching sealed tail is not persisted until its LF is published.
+					if (scan.pendingTail) appendFileSync(this.sessionFile, "\n");
 					for (const entry of pending) {
 						if (saved.has(entry.id)) continue;
 						const json = JSON.stringify(entry);
