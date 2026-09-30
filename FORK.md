@@ -249,23 +249,25 @@ history; session research notes are supporting evidence, not another policy.
 
 ### Integration policy
 
-This integration merges all 93 outstanding upstream commits through
+The previous integration merged all 93 outstanding upstream commits through
 `6a4af07d6145c88dad4e3472acebe75cc57af88f` (0.99.1) into fork baseline
 `9430ac72ae93952e211afbf95265b607e570cf93`, preserving both ancestries.
 The following approved outcomes govern implementation and review. Source integration
 does not select a runtime: merging, installation, and paid tests retain separate
 authorization and verification gates.
 
-The next integration merges all 12 upstream commits after that target through
+The current integration merged all 12 upstream commits after that target through
 `1b347794e2a630e4359f2584f4eea388145d0ddf` into fork baseline
 `dfbb1d48cfd8951b3589fc6bb43b57757c369575`, preserving both ancestries.
 It includes upstream durable Packages 16–18, the lightweight `pi-ai/models`
 entry, and immediate stored-credential availability for native providers.
 Experimental durable conversations retain upstream's pinned-turn execution
 semantics; ordinary AgentSession tools retain the fork's strict admission guard.
-Unchanged registered-tool refreshes preserve execution identity, while changes
-to the executor, owner, arguments, schema, or execution mode revoke prepared
-calls. Reload aborts active work and replaces its runner. Native extension
+Refreshes of the same definition object with the same executor and owner preserve
+execution identity. A fresh definition object/receiver or changes to the executor,
+owner, arguments, schema, sampling, or execution mode revoke prepared calls.
+Description overrides retain live bindings, including caller-supplied base tools.
+Reload aborts active work and replaces its runner. Native extension
 resolution accepts iterable conditions on the declared Node floor.
 The durable root graph budget accounts for the one extra `pi-ai/utils/estimate`
 module used by the fork's bounded declaration retention; upstream's forbidden
