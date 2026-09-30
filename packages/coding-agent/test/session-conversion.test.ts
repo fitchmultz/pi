@@ -16,6 +16,11 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { getCurrentTools } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { convertResponsesMessages } from "../../ai/src/api/openai-responses-shared.ts";
+import { transformMessages } from "../../ai/src/api/transform-messages.ts";
+import { normalizeContext } from "../../ai/src/compat.ts";
+import type { Model } from "../../ai/src/types.ts";
+import { convertToLlm } from "../src/core/messages.ts";
 import { assertSessionConversionNotRequired, convertSessionFile } from "../src/core/session-conversion.ts";
 import { buildSessionContext, type SessionEntry } from "../src/core/session-manager.ts";
 
@@ -112,11 +117,50 @@ function fixture(entries: Entry[]) {
 	return { directory, source, output, bytes };
 }
 function convertedEntries(path: string): SessionEntry[] {
-	return readFileSync(path, "utf8")
+	const entries = readFileSync(path, "utf8")
 		.trimEnd()
 		.split("\n")
 		.slice(1)
 		.map((line) => JSON.parse(line) as SessionEntry);
+	const seen = new Set<string>();
+	for (const item of entries) {
+		expect(item.parentId === null || seen.has(item.parentId)).toBe(true);
+		expect(seen.has(item.id)).toBe(false);
+		seen.add(item.id);
+	}
+	return entries;
+}
+const model: Model<"openai-responses"> = {
+	id: "test",
+	name: "test",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://invalid.local",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 100_000,
+	maxTokens: 1_000,
+};
+function providerReplay(entries: SessionEntry[], expectedIds: string[], leaf?: string) {
+	const messages = transformMessages(convertToLlm(buildSessionContext(entries, leaf).messages), model);
+	expect(messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId)).toEqual(
+		expectedIds,
+	);
+	let pending = new Set<string>();
+	for (const message of messages) {
+		if (message.role === "assistant" || message.role === "user") {
+			expect([...pending]).toEqual([]);
+			pending = new Set(
+				message.role === "assistant"
+					? message.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : []))
+					: [],
+			);
+		}
+		if (message.role === "toolResult") expect(pending.delete(message.toolCallId)).toBe(true);
+	}
+	expect([...pending]).toEqual([]);
+	return messages;
 }
 afterEach(() => {
 	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -175,6 +219,157 @@ describe("one-time session conversion", () => {
 		expect(buildSessionContext(convertedEntries(output)).messages[1]).toMatchObject({ webSearch });
 	});
 
+	it("keeps differing API response identities separate with their original billing", () => {
+		const input = [
+			entry("responses", null, {
+				type: "message",
+				message: assistant([{ type: "text", text: "responses output" }], { stopReason: "stop" }),
+			}),
+			entry("completions", "responses", {
+				type: "message",
+				message: assistant([{ type: "text", text: "completions output" }], {
+					api: "openai-completions",
+					stopReason: "stop",
+				}),
+			}),
+		];
+		const { source, output, bytes } = fixture(input);
+		convertSessionFile(source, output);
+		const entries = convertedEntries(output);
+		expect(providerReplay(entries, []).map((message) => message.content)).toEqual([
+			[{ type: "text", text: "responses output" }],
+			[{ type: "text", text: "completions output" }],
+		]);
+		expect(entries.filter((item) => item.type === "message").map((item) => item.message)).toEqual(
+			input.map((item) => item.message),
+		);
+		expect(readFileSync(source, "utf8")).toBe(bytes);
+	});
+
+	it.each(["error", "aborted"])(
+		"replays only committed signed output from an %s response without changing its failure or billing",
+		(stopReason) => {
+			const reasoning = {
+				type: "thinking",
+				thinking: "completed reasoning",
+				thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_done", summary: [], status: "completed" }),
+			};
+			const committedCall = {
+				...call,
+				id: "call|fc_done",
+				executionStarted: undefined,
+				executionArguments: { query: "preflight-adjusted arguments" },
+				responsesItem: {
+					type: "function_call",
+					id: "fc_done",
+					call_id: "call",
+					name: "lookup",
+					namespace: "docs",
+					arguments: JSON.stringify(call.arguments),
+					status: "completed",
+				},
+			};
+			const original = assistant(
+				[
+					reasoning,
+					{ type: "text", text: "completed text", textSignature: "msg_done" },
+					committedCall,
+					{
+						type: "thinking",
+						thinking: "interrupted suffix",
+						thinkingSignature: JSON.stringify({
+							type: "reasoning",
+							id: "rs_tail",
+							summary: [],
+							status: "in_progress",
+						}),
+					},
+					{ type: "text", text: "unsigned partial" },
+				],
+				{ stopReason, errorMessage: "original failure", toolExecutionFailed: true },
+			);
+			const input = [
+				entry("failed", null, { type: "message", message: original }),
+				entry("result", "failed", {
+					type: "message",
+					message: { ...(settled()[2].message as Entry), toolCallId: "call|fc_done", usage },
+				}),
+			];
+			const { source, output, bytes } = fixture(input);
+			convertSessionFile(source, output);
+			const entries = convertedEntries(output);
+			expect(entries.find((item) => item.id === "failed")).toMatchObject({
+				message: { stopReason, errorMessage: "original failure", usage },
+			});
+			expect(entries).toContainEqual(
+				expect.objectContaining({
+					customType: "legacy-conversion-metadata",
+					data: expect.objectContaining({ sourceEntryId: "failed", originalSnapshot: input[0] }),
+				}),
+			);
+			const replay = providerReplay(entries, ["call|fc_done"]);
+			expect(replay[0]).toMatchObject({
+				stopReason: "toolUse",
+				usage: { totalTokens: 0, cost: { total: 0 } },
+			});
+			expect(replay[0]).not.toHaveProperty("errorMessage");
+			const wire = convertResponsesMessages(
+				model,
+				normalizeContext({ messages: convertToLlm(buildSessionContext(entries).messages) }),
+				new Set(["openai"]),
+			);
+			expect(wire.map((item) => item.type)).toEqual([
+				"reasoning",
+				"message",
+				"function_call",
+				"function_call_output",
+			]);
+			expect(wire[0]).toEqual(JSON.parse(reasoning.thinkingSignature));
+			expect(wire[1]).toMatchObject({ id: "msg_done", content: [{ text: "completed text" }] });
+			expect(wire[2]).toMatchObject({ id: "fc_done", call_id: "call", arguments: JSON.stringify(call.arguments) });
+			expect(wire[3]).toMatchObject({ call_id: "call", output: "final result" });
+			expect(
+				entries.reduce(
+					(total, item) =>
+						total +
+						(item.type === "message" && item.message.role === "assistant" ? item.message.usage.totalTokens : 0),
+					0,
+				),
+			).toBe(7);
+			expect(readFileSync(source, "utf8")).toBe(bytes);
+		},
+	);
+
+	it.each(["error", "aborted"])("keeps native skip behavior for a call-free %s response", (stopReason) => {
+		const original = assistant([{ type: "text", text: "partial output" }], {
+			stopReason,
+			errorMessage: "original failure",
+		});
+		const { source, output, bytes } = fixture([entry("failed", null, { type: "message", message: original })]);
+		convertSessionFile(source, output);
+		const entries = convertedEntries(output);
+		expect(entries).toHaveLength(1);
+		expect(entries[0]).toMatchObject({ id: "failed", message: original });
+		expect(providerReplay(entries, [])).toEqual([]);
+		expect(readFileSync(source, "utf8")).toBe(bytes);
+	});
+
+	it.each(["uncommitted", "malformed item"])("refuses interrupted calls with %s proof before publication", (kind) => {
+		const input = settled();
+		const interruptedCall = {
+			...call,
+			executionStarted: false,
+			...(kind === "malformed item" ? { responsesItem: { type: "function_call", call_id: "wrong" } } : {}),
+		};
+		(input[1].message as Entry).content = [interruptedCall];
+		(input[3].message as Entry).content = [interruptedCall];
+		(input[3].message as Entry).stopReason = "aborted";
+		const { source, output, bytes } = fixture(input);
+		expect(() => convertSessionFile(source, output)).toThrow(/committed/);
+		expect(existsSync(output)).toBe(false);
+		expect(readFileSync(source, "utf8")).toBe(bytes);
+	});
+
 	it("normalizes legacy string tool removals into upstream references", () => {
 		const input = settled();
 		(input[0].message as Entry).toolsRemoved = ["retired"];
@@ -200,6 +395,36 @@ describe("one-time session conversion", () => {
 		expect(
 			buildSessionContext(convertedEntries(output), "root-user").messages.map((message) => message.role),
 		).toEqual(["branchSummary", "user"]);
+	});
+
+	it.each(["adjacent", "late"])("keeps branch-local receipts distinct when %s", (arrival) => {
+		const input = [entry("calling", null, { type: "message", message: assistant([call]) })];
+		for (const branch of ["a", "b"]) {
+			const user = entry(`${branch}-user`, arrival === "adjacent" ? `${branch}-result` : "calling", {
+				type: "message",
+				message: { role: "user", content: `input ${branch}`, timestamp: 2 },
+			});
+			const result = entry(`${branch}-result`, arrival === "adjacent" ? "calling" : `${branch}-user`, {
+				type: "message",
+				message: { ...(settled()[2].message as Entry), content: [{ type: "text", text: `receipt ${branch}` }] },
+			});
+			input.push(...(arrival === "adjacent" ? [result, user] : [user, result]));
+		}
+		const { source, output, bytes } = fixture(input);
+		if (arrival === "late") {
+			expect(() => convertSessionFile(source, output)).toThrow(/branch-dependent native receipt relocation/);
+			expect(existsSync(output)).toBe(false);
+		} else {
+			convertSessionFile(source, output);
+			const entries = convertedEntries(output);
+			for (const branch of ["a", "b"]) {
+				const replay = providerReplay(entries, ["call"], `${branch}-user`);
+				expect(replay[1]).toMatchObject({ content: [{ type: "text", text: `receipt ${branch}` }] });
+				expect(replay[2]).toMatchObject({ role: "user", content: `input ${branch}` });
+			}
+			expect(entries.map((item) => item.id)).toEqual(expect.arrayContaining(input.map((item) => item.id)));
+		}
+		expect(readFileSync(source, "utf8")).toBe(bytes);
 	});
 
 	it.each(["before", "after"])(
@@ -238,6 +463,7 @@ describe("one-time session conversion", () => {
 			]);
 			expect(context.messages[1]).toMatchObject({ content: [{ type: "toolCall", id: "call", name: "lookup" }] });
 			expect(context.messages[2]).toMatchObject({ content: [{ type: "text", text: "final result" }] });
+			providerReplay(entries, ["call"]);
 			expect(JSON.stringify(context.messages)).not.toContain("completed response");
 			const total = entries.reduce(
 				(sum, item) =>
@@ -247,6 +473,74 @@ describe("one-time session conversion", () => {
 			);
 			expect(total).toBe(7);
 			expect(() => assertSessionConversionNotRequired(entries)).not.toThrow();
+		},
+	);
+
+	it.each(["before", "after"])(
+		"pairs multiple carried response groups with receipts arriving %s a window",
+		(arrival) => {
+			const first = assistant([call], { responseId: "first" });
+			const second = assistant([{ ...call, id: "second-call" }], {
+				responseId: "second",
+				stopReason: "error",
+				errorMessage: "interrupted",
+			});
+			const input = [
+				entry("first", null, { type: "message", message: first }),
+				entry("second", "first", { type: "message", message: second }),
+				entry("first-result", "second", {
+					type: "message",
+					message: { ...(settled()[2].message as Entry), usage },
+				}),
+				entry("second-result", "first-result", {
+					type: "message",
+					message: {
+						...(settled()[2].message as Entry),
+						toolCallId: "second-call",
+						usage,
+						content: [{ type: "text", text: "second receipt" }],
+					},
+				}),
+			];
+			if (arrival === "before")
+				input.push(
+					entry("window", "second-result", {
+						type: "context_window",
+						tokensBefore: 20,
+						retainedToolResultIds: ["first-result", "second-result"],
+					}),
+				);
+			else {
+				input.splice(2, 0, entry("window", "second", { type: "context_window", tokensBefore: 20 }));
+				input[3].parentId = "window";
+			}
+			const { source, output, bytes } = fixture(input);
+			convertSessionFile(source, output);
+			const entries = convertedEntries(output);
+			const replay = providerReplay(entries, ["call", "second-call"]);
+			expect(replay.map((message) => message.role)).toEqual([
+				"user",
+				"assistant",
+				"toolResult",
+				"assistant",
+				"toolResult",
+			]);
+			expect(replay[2]).toMatchObject({ content: [{ type: "text", text: "final result" }] });
+			expect(replay[4]).toMatchObject({ content: [{ type: "text", text: "second receipt" }] });
+			expect(entries.find((item) => item.id === "second")).toMatchObject({
+				message: { stopReason: "error", errorMessage: "interrupted", usage },
+			});
+			expect(
+				entries.reduce(
+					(total, item) =>
+						total +
+						(item.type === "message" && (item.message.role === "assistant" || item.message.role === "toolResult")
+							? (item.message.usage?.totalTokens ?? 0)
+							: 0),
+					0,
+				),
+			).toBe(28);
+			expect(readFileSync(source, "utf8")).toBe(bytes);
 		},
 	);
 
@@ -265,6 +559,68 @@ describe("one-time session conversion", () => {
 		const context = buildSessionContext(convertedEntries(output));
 		expect(context.messages.map((message) => message.role)).toEqual(["compactionSummary", "assistant", "toolResult"]);
 		expect(context.messages[2]).toMatchObject({ content: [{ type: "text", text: "final result" }] });
+	});
+
+	it("retains calls and later context across compaction at the chronological receipt leaf", () => {
+		const input = settled();
+		input.splice(
+			2,
+			0,
+			entry("compact", "snapshot", {
+				type: "compaction",
+				summary: "earlier summary",
+				tokensBefore: 20,
+				firstKeptEntryId: "snapshot",
+			}),
+		);
+		input[3].parentId = "compact";
+		input.push(
+			entry("later", "final", {
+				type: "message",
+				concurrentToolResultIds: ["result"],
+				message: assistant([{ type: "text", text: "later response" }], { responseId: "later", stopReason: "stop" }),
+			}),
+		);
+		const { source, output, bytes } = fixture(input);
+		convertSessionFile(source, output);
+		const entries = convertedEntries(output);
+		const replay = providerReplay(entries, ["call"]);
+		const context = buildSessionContext(entries);
+		expect(context.messages.map((message) => message.role)).toEqual([
+			"compactionSummary",
+			"assistant",
+			"toolResult",
+			"assistant",
+		]);
+		expect(context.messages[1]).toMatchObject({
+			content: [
+				{ type: "toolCall", id: "call", name: "lookup", arguments: { query: "example" } },
+				{ type: "text", text: "completed response" },
+			],
+		});
+		expect(context.messages[3]).toMatchObject({ content: [{ type: "text", text: "later response" }] });
+		expect(context.messages[2]).toMatchObject({
+			toolCallId: "call",
+			content: [{ type: "text", text: "final result" }],
+		});
+		expect(entries.at(-1)).toMatchObject({
+			type: "custom",
+			customType: "legacy-conversion-metadata",
+			data: expect.objectContaining({ sourceEntryId: "result", originalParentId: "compact" }),
+		});
+		expect(replay.at(-1)).toMatchObject({
+			content: [{ type: "text", text: "later response" }],
+		});
+		expect(entries.map((item) => item.id)).toEqual(expect.arrayContaining(input.map((item) => item.id)));
+		expect(
+			entries.reduce(
+				(sum, item) =>
+					sum +
+					(item.type === "message" && item.message.role === "assistant" ? item.message.usage.totalTokens : 0),
+				0,
+			),
+		).toBe(14);
+		expect(readFileSync(source, "utf8")).toBe(bytes);
 	});
 
 	it("converts windows on both branches without reviving old conversation and retains handoff and prompt", () => {
@@ -328,7 +684,7 @@ describe("one-time session conversion", () => {
 		]);
 	});
 
-	it("orders concurrent receipts after coalesced responses, then retains only the requested window receipt", () => {
+	it("pairs concurrent receipts before intervening turns, then retains only the requested window receipt", () => {
 		const secondCall = { ...call, id: "second-call" };
 		const input = settled();
 		(input[1].message as Entry).content = [call, secondCall];
@@ -367,6 +723,15 @@ describe("one-time session conversion", () => {
 			}),
 		);
 		input[7].parentId = "third";
+		input.splice(
+			4,
+			0,
+			entry("interruption", "second-result", {
+				type: "message",
+				message: { role: "user", content: "intervening input", timestamp: 2 },
+			}),
+		);
+		input[5].parentId = "interruption";
 		input.push(entry("before-window", "final", { type: "session_info", name: "preserved name" }));
 		input.push(
 			entry("window", "before-window", {
@@ -379,14 +744,16 @@ describe("one-time session conversion", () => {
 		const { source, output, bytes } = fixture(input);
 		convertSessionFile(source, output);
 		const entries = convertedEntries(output);
+		providerReplay(entries, ["call", "second-call"], "before-window");
 		const before = buildSessionContext(entries, "before-window");
 		expect(before.messages.map((message) => message.role)).toEqual([
 			"system",
 			"assistant",
-			"assistant",
 			"toolResult",
-			"assistant",
 			"toolResult",
+			"user",
+			"assistant",
+			"assistant",
 		]);
 		expect(before.messages[1]).toMatchObject({
 			content: [
@@ -395,10 +762,14 @@ describe("one-time session conversion", () => {
 				{ type: "text", text: "final first response" },
 			],
 		});
-		expect(before.messages[2]).toMatchObject({ content: [{ type: "text", text: "second response" }] });
+		expect(before.messages[2]).toMatchObject({
+			toolCallId: "call",
+			content: [{ type: "text", text: "final result" }],
+		});
 		expect(before.messages[3]).toMatchObject({ toolCallId: "second-call", details: { preserved: true }, usage });
-		expect(before.messages[4]).toMatchObject({ content: [{ type: "text", text: "third response" }] });
-		expect(before.messages[5]).toMatchObject({ toolCallId: "call" });
+		expect(before.messages[4]).toMatchObject({ role: "user", content: "intervening input" });
+		expect(before.messages[5]).toMatchObject({ content: [{ type: "text", text: "second response" }] });
+		expect(before.messages[6]).toMatchObject({ content: [{ type: "text", text: "third response" }] });
 		const after = buildSessionContext(entries);
 		expect(after.messages.map((message) => message.role)).toEqual(["compactionSummary", "assistant", "toolResult"]);
 		expect(after.messages[1]).toMatchObject({
@@ -406,6 +777,7 @@ describe("one-time session conversion", () => {
 		});
 		expect(after.messages[2]).toMatchObject({ toolCallId: "second-call", details: { preserved: true } });
 		expect(after.messages[2]).not.toHaveProperty("usage");
+		providerReplay(entries, ["second-call"]);
 		expect(
 			entries.reduce(
 				(sum, item) =>
@@ -416,7 +788,7 @@ describe("one-time session conversion", () => {
 		).toBe(21);
 		expect(entries.map((item) => item.id)).toEqual(expect.arrayContaining(input.map((item) => item.id)));
 		expect(entries).toContainEqual(
-			expect.objectContaining({ customType: "legacy-conversion-snapshot", data: { original: input[5] } }),
+			expect.objectContaining({ customType: "legacy-conversion-snapshot", data: { original: input[6] } }),
 		);
 		expect(readFileSync(source, "utf8")).toBe(bytes);
 	});
@@ -500,6 +872,79 @@ describe("one-time session conversion", () => {
 				data: expect.objectContaining({ sourceEntryId: "result", toolsAdded: [declaration] }),
 			}),
 		);
+	});
+
+	it("keeps declaration removal and addition stationary when relocating receipts before ordinary branches", () => {
+		const declaration = {
+			name: "found",
+			namespace: "docs",
+			description: "Discovered",
+			parameters: { type: "object" },
+		};
+		const input = [
+			settled()[0],
+			entry("calling", "system", { type: "message", message: assistant([call]) }),
+			entry("remove", "calling", {
+				type: "message",
+				message: {
+					role: "system",
+					content: "",
+					timestamp: 1,
+					toolsRemoved: [{ name: "found", namespace: "docs" }],
+				},
+			}),
+			entry("user", "remove", {
+				type: "message",
+				message: { role: "user", content: "keep this input", timestamp: 2 },
+			}),
+			entry("later", "user", {
+				type: "message",
+				message: assistant([{ type: "text", text: "later response" }], { responseId: "later", stopReason: "stop" }),
+			}),
+			entry("result", "later", {
+				type: "message",
+				message: {
+					...(settled()[2].message as Entry),
+					toolsAdded: [declaration],
+					details: { preserved: true },
+					usage,
+				},
+			}),
+			entry("label", "result", { type: "label", targetId: "result", label: "receipt" }),
+			entry("summary", "result", { type: "branch_summary", fromId: "result", summary: "left branch context" }),
+		];
+		const { source, output, bytes } = fixture(input);
+		convertSessionFile(source, output);
+		const entries = convertedEntries(output);
+		for (const leaf of ["label", "summary"]) {
+			const messages = providerReplay(entries, ["call"], leaf);
+			expect(messages[2]).toMatchObject({ toolCallId: "call", details: { preserved: true }, usage });
+			const context = buildSessionContext(entries, leaf);
+			expect(getCurrentTools(context.messages).map((tool) => tool.name)).toEqual(["lookup", "found"]);
+			expect(context.messages.filter((message) => message.role === "user")).toEqual([
+				{ role: "user", content: "keep this input", timestamp: 2 },
+			]);
+			expect(context.messages.filter((message) => message.role === "assistant").at(-1)).toMatchObject({
+				content: [{ type: "text", text: "later response" }],
+			});
+		}
+		const summary = entries.find((item) => item.id === "summary");
+		expect(summary).toMatchObject({
+			fromId: entries.find(
+				(item) =>
+					item.type === "message" &&
+					item.message.role === "system" &&
+					item.message.toolsAdded?.[0]?.name === "found",
+			)?.id,
+		});
+		expect(entries.find((item) => item.id === "label")).toMatchObject({ targetId: "result" });
+		expect(entries).toContainEqual(
+			expect.objectContaining({
+				customType: "legacy-conversion-metadata",
+				data: expect.objectContaining({ sourceEntryId: "summary", originalFromId: "result" }),
+			}),
+		);
+		expect(readFileSync(source, "utf8")).toBe(bytes);
 	});
 
 	it("reversibly aliases colliding identities in declarations, calls, results and removals without renaming other tools", () => {
@@ -626,47 +1071,62 @@ describe("one-time session conversion", () => {
 		},
 	);
 
-	it.each(["causal branch", "causal cut", "mismatched receipt", "nonunique final", "malformed declaration"])(
-		"refuses unsupported or unsafe reconstruction: %s",
-		(kind) => {
-			const input = settled();
-			if (kind.startsWith("causal")) {
+	it.each([
+		"causal branch",
+		"causal cut",
+		"causal compaction carry",
+		"mismatched receipt",
+		"nonunique final",
+		"malformed declaration",
+	])("refuses unsupported or unsafe reconstruction: %s", (kind) => {
+		const input = settled();
+		if (kind.startsWith("causal")) {
+			input.push(
+				entry("later", "final", {
+					type: "message",
+					concurrentToolResultIds: ["result"],
+					message: assistant([], { responseId: "later", stopReason: "stop" }),
+				}),
+			);
+			if (kind === "causal branch") input.push(entry("other", "final", { type: "session_info", name: "other" }));
+			else if (kind === "causal compaction carry")
 				input.push(
-					entry("later", "final", {
-						type: "message",
-						concurrentToolResultIds: ["result"],
-						message: assistant([], { responseId: "later", stopReason: "stop" }),
+					entry("compact", "later", {
+						type: "compaction",
+						summary: "cut",
+						firstKeptEntryId: "later",
+						tokensBefore: 1,
 					}),
 				);
-				if (kind === "causal branch") input.push(entry("other", "final", { type: "session_info", name: "other" }));
-				else {
-					input.splice(
-						4,
-						0,
-						entry("cut", "final", { type: "context_window", tokensBefore: 1, retainedToolResultIds: ["result"] }),
-					);
-					input[5].parentId = "cut";
-				}
-			} else if (kind === "mismatched receipt") (input[2].message as Entry).namespace = "wrong";
-			else if (kind === "nonunique final")
-				input.push(entry("duplicate-final", "final", { type: "message", message: input[3].message }));
-			else (input[2].message as Entry).toolsAdded = [{ name: "bad", description: 1, parameters: {} }];
-			const { source, output, bytes } = fixture(input);
-			const reason =
-				kind === "causal branch"
-					? /causal.*branch/
-					: kind === "causal cut"
-						? /causal.*boundary/
+			else {
+				input.splice(
+					4,
+					0,
+					entry("cut", "final", { type: "context_window", tokensBefore: 1, retainedToolResultIds: ["result"] }),
+				);
+				input[5].parentId = "cut";
+			}
+		} else if (kind === "mismatched receipt") (input[2].message as Entry).namespace = "wrong";
+		else if (kind === "nonunique final")
+			input.push(entry("duplicate-final", "final", { type: "message", message: input[3].message }));
+		else (input[2].message as Entry).toolsAdded = [{ name: "bad", description: 1, parameters: {} }];
+		const { source, output, bytes } = fixture(input);
+		const reason =
+			kind === "causal branch"
+				? /causal.*branch/
+				: kind === "causal cut"
+					? /causal.*boundary/
+					: kind === "causal compaction carry"
+						? /boundary compact carries result call without its original call/
 						: kind === "mismatched receipt"
 							? /mismatched result/
 							: kind === "nonunique final"
 								? /unique final/
 								: /tool description/;
-			expect(() => convertSessionFile(source, output)).toThrow(reason);
-			expect(existsSync(output)).toBe(false);
-			expect(readFileSync(source, "utf8")).toBe(bytes);
-		},
-	);
+		expect(() => convertSessionFile(source, output)).toThrow(reason);
+		expect(existsSync(output)).toBe(false);
+		expect(readFileSync(source, "utf8")).toBe(bytes);
+	});
 
 	it.each([
 		"same path",

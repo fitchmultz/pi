@@ -13,7 +13,7 @@
 
 ### Fixed
 
-- Fixed settled legacy session conversion for concurrent receipt ordering, durable steering, result-carried tool declarations, and colliding namespaced tool identities.
+- Fixed settled legacy session conversion to group genuine receipts for synchronous provider input, preserve committed interrupted output and billing, and retain branch state, declaration order, durable steering, and distinct API/tool identities.
 - Fixed context usage losing measured reasoning tokens when request transforms append content.
 - Fixed empty runtime API keys falling back to stored credentials.
 - Fixed cache notices comparing a response with an abandoned branch after `/tree`.
