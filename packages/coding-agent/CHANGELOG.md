@@ -23,6 +23,7 @@
 
 - Fixed lazy tool registration losing permitted saved selections across resume or unrelated tool activation, while preserving deselection and configured restrictions.
 - Fixed MCP account changes and changed live definitions retaining stale callable bindings; uncertain tool-call failures now explain that the operation may have run.
+- Fixed settled legacy session conversion to group genuine receipts for synchronous provider input, preserve committed interrupted output and billing, and retain branch state, declaration order, durable steering, and distinct API/tool identities.
 - Fixed context usage losing measured reasoning tokens when request transforms append content.
 - Fixed empty runtime API keys falling back to stored credentials.
 - Fixed cache notices comparing a response with an abandoned branch after `/tree`.
