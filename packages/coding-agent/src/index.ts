@@ -45,6 +45,8 @@ export {
 	type SessionCheckpointState,
 	type ShutdownCheckpoint,
 	type ShutdownCheckpointFile,
+	validateSessionCheckpointFile,
+	writeCheckpointFile,
 	writeSessionCheckpoint,
 } from "./core/checkpoint.ts";
 // Compaction

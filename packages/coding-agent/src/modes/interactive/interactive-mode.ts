@@ -54,6 +54,7 @@ import {
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { spawn } from "child_process";
+import type { RestartCheckpointWriter } from "../../cli/restart-worker.ts";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -448,6 +449,8 @@ export interface InteractiveModeOptions {
 	initialThemeSetting?: string;
 	/** Synchronous host notification before shutdown can yield or re-enter. */
 	onShutdownRequested?: (source: "user" | "extension" | "signal") => void;
+	/** Managed CLI final file owner; never publishes deliberate clean-exit proof. */
+	prepareRestartCheckpoint?: () => RestartCheckpointWriter | undefined;
 	/** CLI-owned final artifact writer, called only immediately before a deliberate successful user exit. */
 	writeExitCheckpoint?: CheckpointExitWriter;
 	/** Terminal implementation. Defaults to the current process terminal. */
@@ -489,6 +492,7 @@ export class InteractiveMode {
 	private pendingUserInputs: string[] = [];
 	private readonly checkpointUIActivity = new CheckpointActivity();
 	private checkpointExitInterrupted = false;
+	private shutdownCheckpointController: AbortController | undefined;
 	private checkpointExitSealed = false;
 	private pendingInitialMessages: number;
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
@@ -2656,7 +2660,10 @@ export class InteractiveMode {
 	): (...args: Args) => Promise<Result> {
 		return (...args) =>
 			this.checkpointUIActivity.run(() => {
-				if (this.checkpointExitSealed) this.checkpointExitInterrupted = true;
+				if (this.checkpointExitSealed) {
+					this.checkpointExitInterrupted = true;
+					this.shutdownCheckpointController?.abort(new Error("Late native UI callback invalidated final capture"));
+				}
 				if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
 				return callback(...args);
 			});
@@ -2760,7 +2767,10 @@ export class InteractiveMode {
 		const mutate =
 			<Args extends unknown[], Result>(callback: (...args: Args) => Result) =>
 			(...args: Args): Result => {
-				if (this.checkpointExitSealed) this.checkpointExitInterrupted = true;
+				if (this.checkpointExitSealed) {
+					this.checkpointExitInterrupted = true;
+					this.shutdownCheckpointController?.abort(new Error("Late native UI write invalidated final capture"));
+				}
 				if (this.session.isCheckpointHeld) this.session.cancelCheckpoint();
 				try {
 					return callback(...args);
@@ -4632,7 +4642,11 @@ export class InteractiveMode {
 		this.options.onShutdownRequested?.(
 			options?.fromSignal ? "signal" : options?.fromExtension ? "extension" : "user",
 		);
-		if (this.isShuttingDown) return;
+		if (this.isShuttingDown) {
+			if (!options?.fromExtension)
+				this.shutdownCheckpointController?.abort(new Error("Final checkpoint interrupted during shutdown"));
+			return;
+		}
 		this.isShuttingDown = true;
 		this.session.beginShutdown();
 		// Keep signal handlers registered until terminal cleanup has completed.
@@ -4651,6 +4665,7 @@ export class InteractiveMode {
 			this.themeController.disableAutoSync();
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
+			this.unregisterSignalHandlers();
 			return process.exit(0);
 		}
 
@@ -4660,9 +4675,13 @@ export class InteractiveMode {
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		const writeExitCheckpoint = options?.fromExtension ? undefined : this.options.writeExitCheckpoint;
+		const restartCheckpoint = options?.fromExtension ? this.options.prepareRestartCheckpoint?.() : undefined;
+		const finalWriter = restartCheckpoint ?? writeExitCheckpoint;
+		const controller = finalWriter ? new AbortController() : undefined;
+		this.shutdownCheckpointController = controller;
 		// Do not hide unsaved UI state during teardown and then mistake it for resumable state.
 		const unsupportedInput =
-			writeExitCheckpoint &&
+			finalWriter &&
 			(this.getQueuedInputCount() ||
 				this.editor !== this.defaultEditor ||
 				this.renderer.getFocusedComponent() !== this.editor ||
@@ -4677,16 +4696,16 @@ export class InteractiveMode {
 			this.themeController.disableAutoSync();
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
-			if (writeExitCheckpoint) {
-				const controller = new AbortController();
+			if (finalWriter && controller) {
 				// A ref'ed budget also prevents an unresolved memory-only callback from causing implicit exit(0).
 				const timeout = setTimeout(
-					() => controller.abort(new Error("Native clean-exit cleanup timed out")),
+					() => controller.abort(new Error("Native final checkpoint cleanup timed out")),
 					30_000,
 				);
 				try {
-					checkpoint = await this.runtimeHost.disposeWithCheckpointFile(writeExitCheckpoint.path, {
+					checkpoint = await this.runtimeHost.disposeWithCheckpointFile(finalWriter.path, {
 						signal: controller.signal,
+						retainedRuntimeProvider: restartCheckpoint?.retainedRuntimeProvider,
 						waitForHost: async () => {
 							await this.checkpointUIActivity.flush();
 							if (
@@ -4694,28 +4713,36 @@ export class InteractiveMode {
 								this.getQueuedInputCount() ||
 								(this.editor.getExpandedText?.() ?? this.editor.getText()).length > 0
 							)
-								throw new Error("Unpersisted native UI or input prevents a clean-exit checkpoint");
+								throw new Error("Unpersisted native UI or input prevents a final checkpoint");
 							this.checkpointExitSealed = true;
 						},
 					});
+					const resumeCommand = formatResumeCommand(this.sessionManager);
+					if (resumeCommand) process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
+					if (this.checkpointExitInterrupted)
+						throw new Error("Final checkpoint interrupted by signal or late native callback");
+					const signal = AbortSignal.any([controller.signal, checkpoint.signal]);
+					signal.throwIfAborted();
+					if (restartCheckpoint) await restartCheckpoint.publish(checkpoint.checkpoint, signal);
+					else writeExitCheckpoint!(checkpoint.checkpoint);
 				} finally {
 					clearTimeout(timeout);
 				}
-			} else await this.runtimeHost.dispose();
-			const resumeCommand = formatResumeCommand(this.sessionManager);
-			if (resumeCommand) process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
-			if (checkpoint) {
-				if (this.checkpointExitInterrupted)
-					throw new Error("Clean exit interrupted by signal or late native callback");
-				checkpoint.signal.throwIfAborted();
-				writeExitCheckpoint!(checkpoint.checkpoint);
+			} else {
+				await this.runtimeHost.dispose();
+				const resumeCommand = formatResumeCommand(this.sessionManager);
+				if (resumeCommand) process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
 			}
 		} catch (error) {
-			if (!writeExitCheckpoint) throw error;
-			console.error(`Clean-exit checkpoint failed: ${error instanceof Error ? error.message : String(error)}`);
+			if (!finalWriter) throw error;
+			console.error(
+				`${restartCheckpoint ? "Managed restart" : "Clean-exit"} checkpoint failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
 			return process.exit(1);
 		} finally {
+			this.shutdownCheckpointController = undefined;
 			checkpoint?.release();
+			this.unregisterSignalHandlers();
 		}
 		process.exit(0);
 	}
@@ -7410,6 +7437,6 @@ export class InteractiveMode {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
 		}
-		this.unregisterSignalHandlers();
+		if (!this.isShuttingDown) this.unregisterSignalHandlers();
 	}
 }

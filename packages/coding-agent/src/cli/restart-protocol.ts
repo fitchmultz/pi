@@ -15,6 +15,8 @@ export interface RestartRequest {
 	/** Replace the explicit CLI extension list. Omitted means preserve it. */
 	extensions?: string[];
 	sessionId?: string;
+	/** Trusted offline Node program, invoked once after final native capture. */
+	checkpointTransform?: string;
 }
 
 export interface RestartCheckpoint {
@@ -26,6 +28,13 @@ export interface RestartCheckpoint {
 	thinkingLevel: ThinkingLevel;
 	activeTools: string[];
 	knownTools: string[];
+	/** Nested here because already-loaded launchers forward the complete checkpoint object. */
+	files?: {
+		original: { path: string; sha256: string };
+		candidate?: { path: string; sha256: string };
+		/** The same trusted program, used only to restore prepared prior extension artifacts. */
+		rollback?: string;
+	};
 }
 
 export interface RestartHandoff {
@@ -53,17 +62,20 @@ export function parseRestartRequest(value: unknown): RestartRequest {
 	}
 	const request = value as Record<string, unknown>;
 	for (const key of Object.keys(request)) {
-		if (!["message", "runtime", "extensions", "sessionId"].includes(key)) {
+		if (!["message", "runtime", "extensions", "sessionId", "checkpointTransform"].includes(key)) {
 			throw new Error(`Unknown restart option: ${key}`);
 		}
 	}
-	for (const key of ["message", "runtime", "sessionId"] as const) {
+	for (const key of ["message", "runtime", "sessionId", "checkpointTransform"] as const) {
 		if (request[key] !== undefined && (typeof request[key] !== "string" || request[key].length > 8192)) {
 			throw new Error(`Restart ${key} must be a string of at most 8192 characters`);
 		}
 	}
 	if (request.runtime !== undefined && (typeof request.runtime !== "string" || !isAbsolute(request.runtime))) {
 		throw new Error("Restart runtime must be an absolute package directory");
+	}
+	if (request.checkpointTransform !== undefined && !isAbsolute(request.checkpointTransform as string)) {
+		throw new Error("Restart checkpoint transform must be an absolute Node program");
 	}
 	if (
 		request.extensions !== undefined &&
@@ -85,6 +97,7 @@ export function parseRestartCommand(args: string[], cwd: string): RestartRequest
 		if (value === undefined) throw new Error(`Missing value for ${flag}`);
 		if (flag === "--message") request.message = value;
 		else if (flag === "--runtime") request.runtime = resolve(cwd, value);
+		else if (flag === "--checkpoint-transform") request.checkpointTransform = value;
 		else if (flag === "--extension" || flag === "-e") {
 			request.extensions ??= [];
 			request.extensions.push(resolve(cwd, value));

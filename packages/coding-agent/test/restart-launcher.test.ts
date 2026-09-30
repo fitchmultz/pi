@@ -62,6 +62,11 @@ function fixture(
 		thinkingLevel: "off",
 		activeTools: ["bash"],
 		knownTools: ["bash", "read"],
+		files: {
+			original: { path: join(root, "original.json"), sha256: "a".repeat(64) },
+			candidate: { path: join(root, "candidate.json"), sha256: "b".repeat(64) },
+			rollback: join(root, "prepared-artifacts.mjs"),
+		},
 	};
 	const log = (name: string) => `
 import { appendFileSync } from 'node:fs';
@@ -300,13 +305,25 @@ describe("restart arguments and validation", () => {
 		const cwd = process.cwd();
 		expect(
 			parseRestartCommand(
-				["--message", "continue; $(not-a-command)", "--runtime", "next", "-e", "tools.ts", "-e", "other.ts"],
+				[
+					"--message",
+					"continue; $(not-a-command)",
+					"--runtime",
+					"next",
+					"-e",
+					"tools.ts",
+					"-e",
+					"other.ts",
+					"--checkpoint-transform",
+					"/private/offline;literal.mjs",
+				],
 				cwd,
 			),
 		).toEqual({
 			message: "continue; $(not-a-command)",
 			runtime: join(cwd, "next"),
 			extensions: [join(cwd, "tools.ts"), join(cwd, "other.ts")],
+			checkpointTransform: "/private/offline;literal.mjs",
 		});
 		expect(parseRestartCommand([], cwd)).toEqual({});
 		expect(() => parseRestartCommand(["--message"], cwd)).toThrow("Missing value");
@@ -317,6 +334,8 @@ describe("restart arguments and validation", () => {
 		null,
 		[],
 		{ runtime: "relative" },
+		{ checkpointTransform: "relative" },
+		{ checkpointTransform: 42 },
 		{ message: 42 },
 		{ message: "x".repeat(8193) },
 		{ extensions: ["relative"] },

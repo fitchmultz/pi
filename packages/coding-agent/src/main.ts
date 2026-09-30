@@ -33,7 +33,7 @@ import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
-import { createManagedRestart, restoreRestartSession } from "./cli/restart-worker.ts";
+import { createManagedRestart, prepareRestartCheckpoint, restoreRestartSession } from "./cli/restart-worker.ts";
 import { runSessionConversionCommand } from "./cli/session-conversion-command.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
@@ -745,7 +745,14 @@ export async function main(args: string[], options?: MainOptions) {
 			"--checkpoint requires interactive mode without startup prompts or session/model/tool selection overrides",
 		);
 	}
-	const checkpointFile = parsed.checkpoint ? resolvePath(parsed.checkpoint, cwd) : undefined;
+	if (restart?.handoff?.checkpoint.files && appMode !== "interactive")
+		throw new Error("Managed restart checkpoint requires interactive mode");
+	const checkpointFile = restart?.handoff
+		? ((await prepareRestartCheckpoint(restart.handoff, parsed)) ??
+			(parsed.checkpoint ? resolvePath(parsed.checkpoint, cwd) : undefined))
+		: parsed.checkpoint
+			? resolvePath(parsed.checkpoint, cwd)
+			: undefined;
 	const checkpoint =
 		exitRestoreCheckpoint ?? (checkpointFile ? readSessionCheckpointState(checkpointFile) : undefined);
 
@@ -905,6 +912,13 @@ export async function main(args: string[], options?: MainOptions) {
 				message: `Extension package "${path}": ${warning}`,
 			})),
 		];
+		// A failed provider extension cannot supply the cold model. Report its actual
+		// startup error before checkpoint construction would mask it as a missing model.
+		if (checkpoint && resourceLoader.getExtensions().errors.length > 0) {
+			reportDiagnostics(deduplicateDiagnostics(diagnostics));
+			console.error(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT));
+			process.exit(1);
+		}
 
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
@@ -1103,6 +1117,7 @@ export async function main(args: string[], options?: MainOptions) {
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
 			onShutdownRequested: restart?.shutdownRequested,
+			prepareRestartCheckpoint: restart?.prepareShutdownCheckpoint,
 			writeExitCheckpoint,
 		});
 		await interactiveMode.init();

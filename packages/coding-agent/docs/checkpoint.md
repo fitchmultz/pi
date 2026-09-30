@@ -72,6 +72,56 @@ Queues are installed once without rerunning input handlers, prompt expansion, mo
 
 Lower-level hosts can use `openSessionCheckpointFile(path)` to obtain `{ checkpoint, sessionManager }`, or `openSessionCheckpoint(checkpoint)` for an explicit object, before session creation and `restoreSessionCheckpoint()` afterward. Prefer the factory options to avoid ordinary new-session metadata changing a null leaf.
 
+## Offline file consumers
+
+The public `readSessionCheckpointState(path)` validates the complete v1 artifact while returning only non-entry state. `validateSessionCheckpointFile(path)` additionally compares its complete archived header/entries against the **existing** journal, per strict normalized record. It never opens a writable manager, repairs a tail, or publishes a missing journal. A missing, malformed, changed or differing source rejects.
+
+`writeCheckpointFile(path, state, entries, signal)` is the same native record-wise writer used by live and shutdown capture. `entries` accepts `Iterable<SessionEntry> | AsyncIterable<SessionEntry>`; it does not collect them. The caller must own source quiescence and cancellation and retain the original capture. A complete individual entry still has its consumer-memory ceiling.
+
+After the owner's existing offline converter has produced a distinct native journal, a trusted managed-restart helper can construct its matching candidate without decoding the full checkpoint:
+
+```typescript
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+import {
+  validateSessionCheckpointFile,
+  writeCheckpointFile,
+  type SessionEntry,
+  type SessionHeader,
+} from "@earendil-works/pi-coding-agent";
+
+async function writeConvertedCheckpoint(
+  original: string, candidate: string, convertedJournal: string, signal: AbortSignal,
+) {
+  const state = validateSessionCheckpointFile(original);
+  const input = createReadStream(convertedJournal, { signal });
+  const lines = createInterface({
+    input, crlfDelay: Infinity,
+  });
+  try {
+    const records = lines[Symbol.asyncIterator]();
+    const first = await records.next();
+    if (first.done) throw new Error("Converted journal is empty");
+    const header = JSON.parse(first.value) as SessionHeader;
+    async function* entries(): AsyncIterable<SessionEntry> {
+      for await (const line of records) {
+        signal.throwIfAborted();
+        if (line.trim()) yield JSON.parse(line) as SessionEntry;
+      }
+    }
+    await writeCheckpointFile(candidate, {
+      ...state, header, selection: { ...state.selection, sessionFile: convertedJournal },
+    }, entries(), signal);
+    validateSessionCheckpointFile(candidate);
+  } finally {
+    lines.close();
+    input.destroy();
+  }
+}
+```
+
+This example only consumes an already validated, privately converted journal; it is not a converter or a live-writer freeze. Managed restart independently checks original integrity and non-entry equality. See [Managed Restarts](restart.md#explicit-offline-transformation) for the fixed transform/rollback program contract and older-worker bootstrap limit.
+
 ## Supported extension persistence
 
 Existing extensions that await their work and reconstruct from native entries/tool details or persisted files need no new hook. There is no extension install allowlist. Arbitrary memory-only tasks, detached promises, sockets, timers, or shutdown-only state are not serialized. Such extensions must keep compute alive, or explicitly implement a persistence barrier. A registered `session_shutdown` handler without a checkpoint barrier conservatively produces `sleepReady: false` (and a named `sleepBlockers` reason), without disabling the extension or running shutdown during save.

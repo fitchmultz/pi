@@ -217,7 +217,7 @@ export function writeSessionCheckpoint(path: string, checkpoint: SessionCheckpoi
 export async function writeCheckpointFile(
 	path: string,
 	state: SessionCheckpointState,
-	entries: Iterable<SessionEntry>,
+	entries: Iterable<SessionEntry> | AsyncIterable<SessionEntry>,
 	signal: AbortSignal,
 ): Promise<CheckpointFile> {
 	assertCheckpointTarget(path, state.selection.sessionFile);
@@ -236,7 +236,7 @@ export async function writeCheckpointFile(
 			if (key === "entries") {
 				writeFileSync(fd, "[");
 				let index = 0;
-				for (const entry of entries) {
+				for await (const entry of entries) {
 					signal.throwIfAborted();
 					if (index) writeFileSync(fd, ",");
 					// Native wrapper preserves the entry's array-index toJSON key without an aggregate clone.
@@ -466,39 +466,43 @@ export function readSessionCheckpoint(path: string): SessionCheckpoint {
 	return { ...state, entries };
 }
 
+function compareCheckpointJournal(journal: string, stage: string): void {
+	const select = (path: readonly (string | number)[]) =>
+		path.length === 0 ? ("descend" as const) : ("skip" as const);
+	const existing = scanJournal(journal, { policy: "strict", select });
+	try {
+		const archived = scanJournal(stage, { policy: "strict", select });
+		try {
+			if (
+				existing.records.length !== archived.records.length ||
+				existing.records.some(
+					(record, index) =>
+						JSON.stringify(readJournalRecord(existing.source, record)) !==
+						JSON.stringify(readJournalRecord(archived.source, archived.records[index])),
+				)
+			)
+				throw new Error("Checkpoint journal differs from saved state; restore its filesystem archive first");
+			const current = statSync(journal);
+			if (
+				current.dev !== existing.source.dev ||
+				current.ino !== existing.source.ino ||
+				current.size !== existing.source.size ||
+				current.mtimeMs !== existing.source.mtimeMs ||
+				current.ctimeMs !== existing.source.ctimeMs
+			)
+				throw new Error("Checkpoint journal changed during comparison; restore its filesystem archive first");
+		} finally {
+			closeJournalSource(archived.source);
+		}
+	} finally {
+		closeJournalSource(existing.source);
+	}
+}
+
 function openStagedCheckpoint(state: SessionCheckpointState, stage: string): SessionManager {
 	const journal = state.selection.sessionFile;
 	if (existsSync(journal)) {
-		const select = (path: readonly (string | number)[]) =>
-			path.length === 0 ? ("descend" as const) : ("skip" as const);
-		const existing = scanJournal(journal, { policy: "strict", select });
-		try {
-			const archived = scanJournal(stage, { policy: "strict", select });
-			try {
-				if (
-					existing.records.length !== archived.records.length ||
-					existing.records.some(
-						(record, index) =>
-							JSON.stringify(readJournalRecord(existing.source, record)) !==
-							JSON.stringify(readJournalRecord(archived.source, archived.records[index])),
-					)
-				)
-					throw new Error("Checkpoint journal differs from saved state; restore its filesystem archive first");
-				const current = statSync(journal);
-				if (
-					current.dev !== existing.source.dev ||
-					current.ino !== existing.source.ino ||
-					current.size !== existing.source.size ||
-					current.mtimeMs !== existing.source.mtimeMs ||
-					current.ctimeMs !== existing.source.ctimeMs
-				)
-					throw new Error("Checkpoint journal changed during comparison; restore its filesystem archive first");
-			} finally {
-				closeJournalSource(archived.source);
-			}
-		} finally {
-			closeJournalSource(existing.source);
-		}
+		compareCheckpointJournal(journal, stage);
 	} else {
 		mkdirSync(dirname(journal), { recursive: true });
 		// Stage beside the journal for atomic exclusive publication on the same filesystem.
@@ -523,10 +527,10 @@ function openStagedCheckpoint(state: SessionCheckpointState, stage: string): Ses
 }
 
 /** Complete validation and native JSONL staging precede any journal mutation. */
-export function openSessionCheckpointFile(path: string): {
-	checkpoint: SessionCheckpointState;
-	sessionManager: SessionManager;
-} {
+function withStagedCheckpointFile<T>(
+	path: string,
+	use: (checkpoint: SessionCheckpointState, journalStage: string) => T,
+): T {
 	const directory = mkdtempSync(join(tmpdir(), "pi-checkpoint-"));
 	const stage = join(directory, "entries.jsonl");
 	let entries = openSync(stage, "wx", 0o600);
@@ -564,11 +568,29 @@ export function openSessionCheckpointFile(path: string): {
 		} finally {
 			closeSync(fd);
 		}
-		return { checkpoint, sessionManager: openStagedCheckpoint(checkpoint, journalStage) };
+		return use(checkpoint, journalStage);
 	} finally {
 		if (!entriesClosed) closeSync(entries);
 		rmSync(directory, { recursive: true, force: true });
 	}
+}
+
+/** Complete strict read-only comparison with the existing journal; never repairs or creates it. */
+export function validateSessionCheckpointFile(path: string): SessionCheckpointState {
+	return withStagedCheckpointFile(path, (checkpoint, stage) => {
+		compareCheckpointJournal(checkpoint.selection.sessionFile, stage);
+		return checkpoint;
+	});
+}
+
+export function openSessionCheckpointFile(path: string): {
+	checkpoint: SessionCheckpointState;
+	sessionManager: SessionManager;
+} {
+	return withStagedCheckpointFile(path, (checkpoint, stage) => ({
+		checkpoint,
+		sessionManager: openStagedCheckpoint(checkpoint, stage),
+	}));
 }
 
 /** Restore selection BEFORE context construction. Object callers explicitly retain the full-object ceiling. */

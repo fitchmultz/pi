@@ -467,10 +467,12 @@ export class AgentSessionRuntime {
 		options: {
 			signal: AbortSignal;
 			waitForHost: () => Promise<void>;
+			/** Managed CLI only: the original same-provider --api-key is retained in restart argv. */
+			retainedRuntimeProvider?: string;
 		},
 	): Promise<ShutdownCheckpointFile> {
 		return this._disposeWithCheckpoint(options, () =>
-			this.session.captureShutdownCheckpointFile(path, options.signal),
+			this.session.captureShutdownCheckpointFile(path, options.signal, options.retainedRuntimeProvider),
 		);
 	}
 

@@ -3057,14 +3057,22 @@ export class AgentSession {
 		return this._captureShutdownCheckpoint(() => this._captureCheckpoint("settled"));
 	}
 
-	async captureShutdownCheckpointFile(path: string, signal?: AbortSignal): Promise<ShutdownCheckpointFile> {
+	async captureShutdownCheckpointFile(
+		path: string,
+		signal?: AbortSignal,
+		retainedRuntimeProvider?: string,
+	): Promise<ShutdownCheckpointFile> {
 		const temporary = `${path}.${randomUUID()}.tmp`;
 		try {
-			const candidate = await this._captureShutdownCheckpoint((held) => {
-				const state = this._captureCheckpointState("settled");
-				assertCheckpointTarget(path, state.selection.sessionFile);
-				return writeCheckpointFile(temporary, state, this._checkpointEntries(), held);
-			}, signal);
+			const candidate = await this._captureShutdownCheckpoint(
+				(held) => {
+					const state = this._captureCheckpointState("settled");
+					assertCheckpointTarget(path, state.selection.sessionFile);
+					return writeCheckpointFile(temporary, state, this._checkpointEntries(), held);
+				},
+				signal,
+				retainedRuntimeProvider,
+			);
 			return {
 				...candidate,
 				release: () => {
@@ -3081,6 +3089,7 @@ export class AgentSession {
 	private async _captureShutdownCheckpoint<T extends SessionCheckpointState>(
 		capture: (signal: AbortSignal) => T | Promise<T>,
 		signal?: AbortSignal,
+		retainedRuntimeProvider?: string,
 	): Promise<{ checkpoint: T; signal: AbortSignal; release(): void }> {
 		if (!this._shutdownAbortController.signal.aborted) throw new Error("Session shutdown has not begun");
 		this._flushPendingBashMessages();
@@ -3100,7 +3109,11 @@ export class AgentSession {
 			controller.signal.throwIfAborted();
 			if (!this._isShutdownCheckpointSettled() || this.pendingInputCount)
 				throw new Error("Unfinished native callbacks or input prevent a clean-exit checkpoint");
-			if (this.model && this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime")
+			if (
+				this.model &&
+				this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime" &&
+				this.model.provider !== retainedRuntimeProvider
+			)
 				throw new Error("Runtime-only API key cannot be restored from a clean-exit checkpoint");
 			const held = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
 			const checkpoint = await capture(held);

@@ -1408,6 +1408,7 @@ export class SessionManager {
 
 	private _setSessionFile(sessionFile: string): void {
 		const explicitPath = resolvePath(sessionFile);
+		const previousSource = this.journalSource;
 		if (existsSync(explicitPath)) {
 			const scan = scanJournal(explicitPath, { ...metadataProjection(), policy: "tolerant" });
 			let retained = false;
@@ -1433,6 +1434,7 @@ export class SessionManager {
 				this.sessionFile = explicitPath;
 				this._loadJournal(scan);
 				retained = true;
+				this._reuseJournalHandle(previousSource, scan.source);
 				if (this._migrateIndexedJournal()) this._rewriteFile();
 				else if (scan.pendingTail) {
 					// Preserve writable load repair; read-only inspection never terminates a tail.
@@ -1610,6 +1612,14 @@ export class SessionManager {
 		return value;
 	}
 
+	/** Accepted scans keep their captured metadata while sharing an open handle for the same inode. */
+	private _reuseJournalHandle(previous: JournalSource | undefined, source: JournalSource): void {
+		if (!previous || previous.handle.closed || previous.dev !== source.dev || previous.ino !== source.ino) return;
+		const redundant = { ...source };
+		source.handle = previous.handle;
+		closeJournalSource(redundant);
+	}
+
 	/** Reconstruct a stale derived index without repairing or rewriting the source. */
 	private _refreshJournal(): void {
 		const source = this.journalSource;
@@ -1680,11 +1690,13 @@ export class SessionManager {
 		this._buildIndex();
 		this.entriesRevision = revision + (changed ? 1 : 0);
 		this.leafId = leaf;
+		this._reuseJournalHandle(source, scan.source);
 	}
 
 	/** Persistence confirmation releases only saved bodies; dirty entries remain ordinary objects. */
 	private _dropPersistedBodies(): void {
 		if (!this.sessionFile || !existsSync(this.sessionFile)) return;
+		const previousSource = this.journalSource;
 		const scan = scanJournal(this.sessionFile, { ...metadataProjection(), policy: "tolerant", requireFinalLf: true });
 		const saved = new Map(scan.records.map((record) => [record.value.id, record]));
 		const leaf = this.leafId;
@@ -1707,6 +1719,7 @@ export class SessionManager {
 			if (view.type !== "session") this.byId.set(view.id, view);
 		}
 		this.leafId = leaf;
+		this._reuseJournalHandle(previousSource, scan.source);
 	}
 
 	private _buildIndex(): void {

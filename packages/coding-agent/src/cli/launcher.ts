@@ -231,7 +231,7 @@ export async function runCliLauncher(args: string[], launcherPath: string): Prom
 	if (args[0] === "restart") {
 		if (args.length === 2 && (args[1] === "--help" || args[1] === "-h")) {
 			console.log(
-				"Usage: pi restart [--message <continuation>] [--runtime <built-package-dir>] [-e <extension> ...]\nWithout --runtime, Pi follows the original installation selector or keeps the last explicit runtime. --runtime pins a built package for later restarts. Omit -e to keep the current explicit extensions; supplying -e replaces that list. Run inside a managed Pi shell tool.",
+				"Usage: pi restart [--message <continuation>] [--runtime <built-package-dir>] [-e <extension> ...] [--checkpoint-transform <absolute-node-program>]\nWithout --runtime, Pi follows the original installation selector or keeps the last explicit runtime. --runtime pins a built package for later restarts. Omit -e to keep the current explicit extensions; supplying -e replaces that list. --checkpoint-transform explicitly runs one trusted offline transform after final shutdown capture. Run inside a managed Pi shell tool.",
 			);
 			return 0;
 		}
