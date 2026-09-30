@@ -90,7 +90,7 @@ export function prepareTermuxCompiler(source, tools, env) {
 		const goEnv = { ...env, GOOS: process.platform === "android" ? "android" : "linux",
 			GOARCH: process.arch === "x64" ? "amd64" : process.arch,
 			CGO_ENABLED: process.platform === "android" && process.arch === "x64" ? "1" : "0",
-			GOTOOLCHAIN: "local", GOWORK: "off",
+			GOTOOLCHAIN: "local", GOWORK: "off", GOFLAGS: "-modcacherw",
 			GOPATH: join(directory, "go"), GOCACHE: join(directory, "go-cache") };
 		const downloaded = JSON.parse(run("go", ["mod", "download", "-json", `github.com/microsoft/typescript-go@${gitHead}`], {
 			cwd: directory, env: goEnv, stdio: "pipe",
