@@ -225,3 +225,89 @@ writeFileSync(${JSON.stringify(rollbackReceipt)}, "prior artifacts restored");
 		}
 	},
 );
+
+it.each(["journal", "checkpoint"] as const)(
+	"later session replacement reports extension errors without exiting after %s startup",
+	async (mode) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-checkpoint-replacement-"));
+		directories.push(directory);
+		vi.stubEnv("PI_CODING_AGENT_DIR", directory);
+		for (const name of ["PI_CHECKPOINT_SOCKET", "PI_CHECKPOINT_EXIT_PATH", "PI_MANAGED_CLI", "PI_EXPERIMENTAL"])
+			vi.stubEnv(name, "");
+		vi.stubEnv("PI_OFFLINE", "1");
+		const h = await createHarness({ sessionManager: SessionManager.create(directory, join(directory, "sessions")) });
+		harnesses.push(h);
+		h.sessionManager.appendMessage(fauxAssistantMessage("existing history"));
+		const hold = await h.session.acquireCheckpoint();
+		const artifact = join(directory, "checkpoint.json");
+		writeSessionCheckpoint(artifact, hold.checkpoint);
+		hold.release();
+		h.session.dispose();
+
+		const inputDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+		const outputDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		vi.spyOn(process.stdin, "isPaused").mockReturnValue(false);
+		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
+		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
+		const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+			throw new Error("Session replacement must not exit the application");
+		});
+		let extensionLoads = 0;
+		let replaced = false;
+		vi.spyOn(InteractiveMode.prototype, "run").mockImplementation(async function (this: InteractiveMode) {
+			const runtime = (this as unknown as { runtimeHost: AgentSessionRuntime }).runtimeHost;
+			runtime.setRebindSession(undefined);
+			try {
+				await runtime.newSession();
+				expect(runtime.diagnostics).toContainEqual(
+					expect.objectContaining({
+						type: "error",
+						message: expect.stringContaining("unrelated extension reload error"),
+					}),
+				);
+				expect(exit).not.toHaveBeenCalled();
+				replaced = true;
+			} finally {
+				this.stop("resume-hint");
+				await runtime.dispose();
+			}
+		});
+		try {
+			await main(
+				[
+					...(mode === "checkpoint"
+						? ["--checkpoint", artifact]
+						: ["--session", h.sessionManager.getSessionFile()!]),
+					"--offline",
+					"-ne",
+					"-ns",
+					"-np",
+					"--no-themes",
+					"--no-approve",
+				],
+				{
+					extensionFactories: [
+						(pi) =>
+							pi.registerProvider(h.getModel().provider, {
+								baseUrl: h.getModel().baseUrl,
+								apiKey: "faux-only",
+								api: h.faux.api,
+								models: h.models.map((model) => ({ ...model })),
+							}),
+						() => {
+							if (++extensionLoads > 1) throw new Error("unrelated extension reload error");
+						},
+					],
+				},
+			);
+			expect(replaced).toBe(true);
+		} finally {
+			if (inputDescriptor) Object.defineProperty(process.stdin, "isTTY", inputDescriptor);
+			else Reflect.deleteProperty(process.stdin, "isTTY");
+			if (outputDescriptor) Object.defineProperty(process.stdout, "isTTY", outputDescriptor);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+		}
+	},
+);

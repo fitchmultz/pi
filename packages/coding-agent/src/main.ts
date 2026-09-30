@@ -914,7 +914,7 @@ export async function main(args: string[], options?: MainOptions) {
 		];
 		// A failed provider extension cannot supply the cold model. Report its actual
 		// startup error before checkpoint construction would mask it as a missing model.
-		if (checkpoint && resourceLoader.getExtensions().errors.length > 0) {
+		if (isInitialRuntime && checkpoint && resourceLoader.getExtensions().errors.length > 0) {
 			reportDiagnostics(deduplicateDiagnostics(diagnostics));
 			console.error(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT));
 			process.exit(1);

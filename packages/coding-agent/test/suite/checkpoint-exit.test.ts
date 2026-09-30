@@ -659,6 +659,47 @@ copyFileSync(process.argv[3], process.argv[4]);
 		expect(sent.map((message) => message.type)).toEqual(["pi:ready"]);
 	});
 
+	it.each(["UI", "signal", "user"] as const)(
+		"late native %s during restart IPC prevents a successful worker exit",
+		async (kind) => {
+			const sent: RestartWorkerMessage[] = [];
+			const entered = deferred();
+			const finish = deferred();
+			const control = createRestartControl({
+				args: [],
+				send: async (message) => {
+					sent.push(message);
+					if (message.type !== "pi:restart") return;
+					directories.push(join(message.checkpoint.files!.original.path, ".."));
+					entered.resolve();
+					await finish.promise;
+				},
+			});
+			const f = await setup({
+				extensions: [control.extension],
+				onShutdownRequested: control.shutdownRequested,
+				prepareRestartCheckpoint: control.prepareShutdownCheckpoint,
+			});
+			f.h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+			await control.ready();
+			await requestRestart(process.env[RESTART_SOCKET_ENV]!, {});
+			await entered.promise;
+			try {
+				if (kind === "UI") f.mode.getExtensionUIContext().setEditorText("late unsaved text");
+				else await f.view.shutdown(kind === "signal" ? { fromSignal: true } : undefined);
+			} finally {
+				finish.resolve();
+			}
+			await vi.waitFor(() => expect(f.exits).toEqual([1]));
+			// The launcher requires exit0 as well as IPC before it can replace the worker.
+			expect(sent.map((message) => message.type)).toEqual(["pi:ready", "pi:restart"]);
+			expect(f.errors).toHaveBeenCalledWith(expect.stringContaining("original restart checkpoint retained at"));
+			const restart = sent.find((message) => message.type === "pi:restart");
+			if (restart?.type !== "pi:restart") throw new Error("Missing retained restart artifact");
+			expect(readSessionCheckpoint(restart.checkpoint.files!.original.path).completedExit).toBeUndefined();
+		},
+	);
+
 	it("clears stale proof even if a different cold restore input fails", async () => {
 		const f = await setup();
 		const hold = await f.h.session.acquireCheckpoint();

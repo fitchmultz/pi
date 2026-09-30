@@ -205,7 +205,7 @@ export function createRestartControl(options: {
 	let committed: RestartRequest | undefined;
 	let restoreTools: (() => void) | undefined;
 	let attempt: (() => void) | undefined;
-	let cancelRestart: ((source: "user" | "extension" | "signal") => void) | undefined;
+	let cancelRestart: (() => void) | undefined;
 	const extension: InlineExtension = {
 		name: "restart",
 		hidden: true,
@@ -290,10 +290,9 @@ export function createRestartControl(options: {
 				if (ctx.mode !== "tui") return;
 				currentContext = ctx;
 				attempt = tryRestart;
-				cancelRestart = (source) => {
+				cancelRestart = () => {
 					clearTimeout(timer);
 					pending = undefined;
-					if (source !== "extension") committed = undefined;
 				};
 				if (!restored && options.handoff) {
 					restored = true;
@@ -432,7 +431,7 @@ export function createRestartControl(options: {
 		shutdownRequested(source: "user" | "extension" | "signal") {
 			closing = true;
 			if (source !== "extension") committed = undefined;
-			cancelRestart?.(source);
+			cancelRestart?.();
 		},
 		prepareShutdownCheckpoint(): RestartCheckpointWriter | undefined {
 			const request = committed;
@@ -493,6 +492,8 @@ export function createRestartControl(options: {
 							toolConfiguration: original.toolConfiguration ?? toolConfiguration,
 							checkpoint: { ...original.selection, files },
 						});
+						signal.throwIfAborted();
+						if (committed !== request) throw new Error("Restart cancelled during final cleanup");
 					} catch (error) {
 						throw new Error(
 							`${error instanceof Error ? error.message : String(error)}${existsSync(originalPath) ? `; original restart checkpoint retained at ${originalPath}` : ""}`,
