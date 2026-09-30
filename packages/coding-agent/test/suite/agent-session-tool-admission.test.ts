@@ -1,6 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI, ToolDefinition } from "../../src/core/extensions/types.ts";
@@ -18,6 +19,7 @@ describe("AgentSession queued tool admission", () => {
 			"identical registration",
 			"active refresh",
 			"description refresh",
+			"loadout description",
 		] as const) {
 			it(`executes an unchanged queued tool once after ${change} (${execution})`, async () => {
 				let effects = 0;
@@ -27,6 +29,10 @@ describe("AgentSession queued tool admission", () => {
 					label: "stable",
 					description: "A stable tool",
 					parameters: Type.Object({}),
+					prepareLoadout:
+						change === "loadout description"
+							? () => ({ descriptions: { stable: "Presented description" } })
+							: undefined,
 					async execute(_id, _args, signal, _update, ctx) {
 						expect(this).toBe(stable);
 						expect(signal).toBeInstanceOf(AbortSignal);
@@ -68,9 +74,14 @@ describe("AgentSession queued tool admission", () => {
 				harnesses.push(harness);
 				await harness.session.bindExtensions({});
 				harness.setResponses([
-					fauxAssistantMessage([fauxToolCall("writer", {}), fauxToolCall("stable", {})], {
-						stopReason: "toolUse",
-					}),
+					(context: TranscriptContext) => {
+						expect(getCurrentTools(context.messages).find((tool) => tool.name === "stable")?.description).toBe(
+							change === "loadout description" ? "Presented description" : "A stable tool",
+						);
+						return fauxAssistantMessage([fauxToolCall("writer", {}), fauxToolCall("stable", {})], {
+							stopReason: "toolUse",
+						});
+					},
 					fauxAssistantMessage("done"),
 				]);
 				await harness.session.prompt("go");
@@ -127,52 +138,144 @@ describe("AgentSession queued tool admission", () => {
 		expect(harness.eventsOfType("tool_execution_end").filter((event) => event.toolName === "read")).toHaveLength(1);
 	});
 
-	for (const change of ["executor", "schema", "arguments", "execution mode", "owner", "withdrawal"] as const) {
+	for (const presentation of [false, true]) {
+		for (const change of [
+			"executor",
+			"schema",
+			"sampling",
+			"arguments",
+			"execution mode",
+			"owner",
+			"withdrawal",
+		] as const) {
+			for (const refresh of [false, true]) {
+				if (!refresh && (change === "owner" || change === "withdrawal")) continue;
+				it(`refuses a prepared call after a genuine ${change} change (refresh: ${refresh}, presentation: ${presentation})`, async () => {
+					let effects = 0;
+					let replacementEffects = 0;
+					let otherApi: ExtensionAPI;
+					const replacement: ToolDefinition["execute"] = async () => {
+						replacementEffects++;
+						return { content: [{ type: "text", text: "replacement" }], details: {} };
+					};
+					const stable: ToolDefinition = {
+						name: "stable",
+						label: "stable",
+						description: "A stable tool",
+						parameters: Type.Object({}),
+						prepareLoadout: presentation
+							? () => ({ descriptions: { stable: "Presented description" } })
+							: undefined,
+						execute: async () => {
+							effects++;
+							return { content: [{ type: "text", text: "effect" }], details: {} };
+						},
+					};
+					const harness = await createHarness({
+						initialActiveToolNames: [],
+						extensionFactories: [
+							{
+								path: "<inline:new-owner>",
+								factory: (pi) => {
+									otherApi = pi;
+								},
+							},
+							{
+								path: "<inline:original-owner>",
+								factory: (pi) => {
+									pi.registerTool(stable);
+									pi.on("tool_call", () => {
+										if (change === "owner") otherApi.registerTool(stable);
+										else if (change === "withdrawal") pi.setActiveTools([]);
+										else {
+											if (change === "executor") stable.execute = replacement;
+											if (change === "schema") stable.parameters = Type.Object({ required: Type.String() });
+											if (change === "sampling")
+												stable.constrainedSampling = { type: "json_schema", strict: "require" };
+											if (change === "arguments") stable.prepareArguments = () => ({});
+											if (change === "execution mode") stable.executionMode = "sequential";
+											if (refresh) pi.registerTool(stable);
+										}
+									});
+								},
+							},
+						],
+					});
+					harnesses.push(harness);
+					await harness.session.bindExtensions({});
+					harness.setResponses([
+						(context: TranscriptContext) => {
+							expect(getCurrentTools(context.messages).find((tool) => tool.name === "stable")?.description).toBe(
+								presentation ? "Presented description" : "A stable tool",
+							);
+							return fauxAssistantMessage([fauxToolCall("stable", {})], { stopReason: "toolUse" });
+						},
+						fauxAssistantMessage("done"),
+					]);
+					await harness.session.prompt("go");
+					expect(effects).toBe(0);
+					expect(replacementEffects).toBe(0);
+					expect(getToolResult(harness, "stable")).toMatchObject({
+						isError: true,
+						content: [
+							{
+								type: "text",
+								text:
+									change === "withdrawal"
+										? "Tool stable is no longer available"
+										: "Tool stable changed before execution",
+							},
+						],
+					});
+				});
+			}
+		}
+	}
+
+	for (const change of ["unchanged", "executor", "schema", "sampling", "arguments", "execution mode"] as const) {
 		for (const refresh of [false, true]) {
-			if (!refresh && (change === "owner" || change === "withdrawal")) continue;
-			it(`refuses a prepared call after a genuine ${change} change (refresh: ${refresh})`, async () => {
+			it(`rechecks a caller-supplied base tool after ${change} (refresh: ${refresh})`, async () => {
 				let effects = 0;
 				let replacementEffects = 0;
-				let otherApi: ExtensionAPI;
-				const replacement: ToolDefinition["execute"] = async () => {
-					replacementEffects++;
-					return { content: [{ type: "text", text: "replacement" }], details: {} };
-				};
-				const stable: ToolDefinition = {
+				const stable: AgentTool = {
 					name: "stable",
 					label: "stable",
 					description: "A stable tool",
 					parameters: Type.Object({}),
-					execute: async () => {
+					async execute(_id, _args, signal) {
+						expect(this).toBe(stable);
+						expect(signal).toBeInstanceOf(AbortSignal);
 						effects++;
-						return { content: [{ type: "text", text: "effect" }], details: {} };
+						return { content: [{ type: "text", text: "original" }], details: {} };
 					},
 				};
 				const harness = await createHarness({
-					initialActiveToolNames: [],
+					tools: [stable],
 					extensionFactories: [
-						{
-							path: "<inline:new-owner>",
-							factory: (pi) => {
-								otherApi = pi;
-							},
-						},
-						{
-							path: "<inline:original-owner>",
-							factory: (pi) => {
-								pi.registerTool(stable);
-								pi.on("tool_call", () => {
-									if (change === "owner") otherApi.registerTool(stable);
-									else if (change === "withdrawal") pi.setActiveTools([]);
-									else {
-										if (change === "executor") stable.execute = replacement;
-										if (change === "schema") stable.parameters = Type.Object({ required: Type.String() });
-										if (change === "arguments") stable.prepareArguments = () => ({});
-										if (change === "execution mode") stable.executionMode = "sequential";
-										if (refresh) pi.registerTool(stable);
-									}
-								});
-							},
+						(pi) => {
+							pi.on("tool_call", () => {
+								if (change === "executor") {
+									stable.execute = async () => {
+										replacementEffects++;
+										return { content: [], details: {} };
+									};
+								}
+								if (change === "schema") stable.parameters = Type.Object({ required: Type.String() });
+								if (change === "sampling")
+									stable.constrainedSampling = { type: "json_schema", strict: "require" };
+								if (change === "arguments") stable.prepareArguments = () => ({});
+								if (change === "execution mode") stable.executionMode = "sequential";
+								if (refresh) {
+									pi.registerTool({
+										name: "inactive",
+										label: "inactive",
+										description: "inactive",
+										parameters: Type.Object({}),
+										defaultActive: false,
+										execute: async () => ({ content: [], details: {} }),
+									});
+								}
+							});
 						},
 					],
 				});
@@ -183,18 +286,12 @@ describe("AgentSession queued tool admission", () => {
 					fauxAssistantMessage("done"),
 				]);
 				await harness.session.prompt("go");
-				expect(effects).toBe(0);
+				expect(effects).toBe(change === "unchanged" ? 1 : 0);
 				expect(replacementEffects).toBe(0);
 				expect(getToolResult(harness, "stable")).toMatchObject({
-					isError: true,
+					isError: change !== "unchanged",
 					content: [
-						{
-							type: "text",
-							text:
-								change === "withdrawal"
-									? "Tool stable is no longer available"
-									: "Tool stable changed before execution",
-						},
+						{ type: "text", text: change === "unchanged" ? "original" : "Tool stable changed before execution" },
 					],
 				});
 			});

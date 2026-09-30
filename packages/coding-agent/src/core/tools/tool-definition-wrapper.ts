@@ -40,21 +40,11 @@ export function wrapToolDefinitions(
 }
 
 /**
- * Synthesize a minimal ToolDefinition from an AgentTool.
+ * Use an AgentTool as a minimal ToolDefinition, preserving its live execution fields.
  *
  * This keeps AgentSession's internal registry definition-first even when a caller
  * provides plain AgentTool overrides that do not include prompt metadata or renderers.
  */
 export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDefinition<any, unknown> {
-	return {
-		name: tool.name,
-		label: tool.label,
-		description: tool.description,
-		parameters: tool.parameters as any,
-		outputSchema: tool.outputSchema,
-		constrainedSampling: tool.constrainedSampling,
-		prepareArguments: tool.prepareArguments,
-		executionMode: tool.executionMode,
-		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
-	};
+	return tool;
 }

@@ -1956,7 +1956,13 @@ export class AgentSession {
 			}
 			declared = tools.map((tool) => {
 				const description = descriptions.get(tool.name);
-				return description === undefined ? tool : { ...tool, description };
+				if (description === undefined) return tool;
+				const presented: AgentTool = Object.create(
+					Object.getPrototypeOf(tool),
+					Object.getOwnPropertyDescriptors(tool),
+				);
+				presented.description = description;
+				return presented;
 			});
 		}
 		this._hiddenDeclarations = hidden;
