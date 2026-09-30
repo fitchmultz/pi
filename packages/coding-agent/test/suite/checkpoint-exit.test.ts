@@ -1,8 +1,9 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import { RESTART_SOCKET_ENV, type RestartWorkerMessage, requestRestart } from "../../src/cli/restart-protocol.ts";
 import { createRestartControl } from "../../src/cli/restart-worker.ts";
@@ -14,6 +15,7 @@ import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { main } from "../../src/main.ts";
 import { InteractiveMode, type InteractiveModeOptions } from "../../src/modes/interactive/interactive-mode.ts";
 import type * as TuiRenderer from "../../src/modes/interactive/tui-renderer.ts";
+import { waitForChildProcess } from "../../src/utils/child-process.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 vi.mock("../../src/utils/tools-manager.ts", () => ({ ensureTool: async () => undefined }));
@@ -443,6 +445,66 @@ describe("native deliberate clean-exit checkpoint", () => {
 		expect(f.exits).toEqual([0]);
 		expect(existsSync(f.path)).toBe(false);
 	});
+
+	it.skipIf(process.platform === "win32").each(["SIGTERM", "SIGHUP"] as const)(
+		"ordinary quit permits %s termination during a held shutdown handler",
+		async (signal) => {
+			const directory = mkdtempSync(join(tmpdir(), "pi-quit-signal-"));
+			directories.push(directory);
+			const program = join(directory, "quit.mjs");
+			const entered = join(directory, "shutdown-entered");
+			writeFileSync(
+				program,
+				`
+import { writeFileSync } from "node:fs";
+import { createHarness } from ${JSON.stringify(resolve("test/suite/harness.ts"))};
+import { AgentSessionRuntime } from ${JSON.stringify(resolve("src/core/agent-session-runtime.ts"))};
+import { InteractiveMode } from ${JSON.stringify(resolve("src/modes/interactive/interactive-mode.ts"))};
+import { VirtualTerminal } from ${JSON.stringify(resolve("../tui/test/virtual-terminal.ts"))};
+const h = await createHarness({
+  settings: { quietStartup: true, compaction: { enabled: false }, retry: { enabled: false } },
+  extensionFactories: [pi => pi.on("session_shutdown", () => {
+    writeFileSync(${JSON.stringify(entered)}, "entered");
+    setTimeout(() => process.exit(7), 1000);
+    process.kill(process.pid, ${JSON.stringify(signal)});
+    return new Promise(() => {});
+  })],
+});
+const runtime = new AgentSessionRuntime(h.session, {
+  cwd: h.tempDir, agentDir: ${JSON.stringify(directory)}, modelRuntime: h.session.modelRuntime,
+  settingsManager: h.settingsManager, resourceLoader: h.session.resourceLoader, diagnostics: [],
+}, async () => { throw new Error("No replacement during quit"); });
+const terminal = new VirtualTerminal(120, 40);
+const mode = new InteractiveMode(runtime, { terminal });
+await mode.init();
+terminal.sendInput("/quit");
+terminal.sendInput("\\r");
+`,
+			);
+			const child = spawn(process.execPath, ["--import", resolve("src/experimental/source-resolver.ts"), program], {
+				env: {
+					...process.env,
+					PI_CODING_AGENT_DIR: directory,
+					PI_OFFLINE: "1",
+					PI_CHECKPOINT_SOCKET: "",
+					PI_CHECKPOINT_EXIT_PATH: "",
+					PI_MANAGED_CLI: "",
+					PI_EXPERIMENTAL: "",
+				},
+				stdio: ["ignore", "ignore", "pipe"],
+			});
+			onTestFinished(() => {
+				if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+			});
+			let stderr = "";
+			child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+				stderr += chunk;
+			});
+			const code = await waitForChildProcess(child);
+			expect(existsSync(entered), stderr).toBe(true);
+			expect({ code, signal: child.signalCode }, stderr).toEqual({ code: null, signal });
+		},
+	);
 
 	it.skipIf(process.platform === "win32").each(["off-tip", "null"] as const)(
 		"publishes only final unmarked state after every managed-restart shutdown handler (%s leaf)",

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -19,6 +19,7 @@ import {
 	verifyJournalSource,
 	writeJournalValue,
 } from "./session-journal.ts";
+import { buildSessionProjection, type SessionEntry } from "./session-manager.ts";
 
 type RecordValue = Record<string, unknown>;
 
@@ -47,6 +48,14 @@ const entryFields = ["checkpoint", "consumedToolResultIds", "concurrentToolResul
 const systemFields = ["contextWindowId", "nativeHead", "replace", "deferredToolEntries"];
 const callFields = ["async", "responsesItem", "executionStarted", "executionArguments", "executionDetached", "kind"];
 const resultFields = ["namespace", "toolCallKind", "toolsAdded", "executionSkipped", "elapsedMs"];
+const zeroUsage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
 function conversionProjection(): JsonProjectionOptions {
 	const roots = new Set([
@@ -126,6 +135,8 @@ function conversionProjection(): JsonProjectionOptions {
 		"description",
 		"text",
 		"thinking",
+		"textSignature",
+		"thinkingSignature",
 		"input",
 		"output",
 		"cacheRead",
@@ -159,17 +170,25 @@ function conversionProjection(): JsonProjectionOptions {
 			[
 				"content",
 				"description",
-				"summary",
 				"text",
 				"thinking",
+				"textSignature",
+				"thinkingSignature",
 				"arguments",
 				"parameters",
 				"executionArguments",
 			].includes(String(path.at(-1)))
 				? 0
-				: ["nativeHead", "replace", "async", "executionStarted", "executionDetached", "checkpoint"].includes(
-							String(path.at(-1)),
-						)
+				: [
+							"summary",
+							"handoff",
+							"nativeHead",
+							"replace",
+							"async",
+							"executionStarted",
+							"executionDetached",
+							"checkpoint",
+						].includes(String(path.at(-1)))
 					? 1
 					: Infinity,
 	};
@@ -274,7 +293,6 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		};
 		const fullMessage = (id: string): RecordValue => object(field(recordById.get(id)!, ["message"]));
 		const callLocations = new WeakMap<object, { record: JournalRecord; index: number }>();
-		const steeringLocations = new WeakMap<object, JournalRecord>();
 		for (const record of scan.records) {
 			const message = record.value.message;
 			if (message && typeof message === "object" && !Array.isArray(message)) {
@@ -289,13 +307,13 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 					select: (at) =>
 						!at.length || (at.length === 1 && at[0] === "data") || (at.length === 2 && at[1] === "message")
 							? "descend"
-							: at[0] === "data" && ["steeringId", "status", "role", "timestamp"].includes(String(at.at(-1)))
+							: at[0] === "data" &&
+									["steeringId", "status", "responseId", "role", "timestamp"].includes(String(at.at(-1)))
 								? "keep"
 								: "skip",
 					stringLimit: (at) => (at.at(-1) === "status" ? 16 : at.at(-1) === "message" ? 0 : Infinity),
 				});
 				record.value.data = projected.data;
-				if (projected.data && typeof projected.data === "object") steeringLocations.set(projected.data, record);
 			}
 		}
 		const callArguments = (call: RecordValue): unknown => {
@@ -376,12 +394,13 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 			entries.set(id, entry);
 			if (entry.parentId !== null) parents.add(text(entry.parentId));
 		}
+		let replayEntries = entries;
 		function pathTo(id: string): RecordValue[] {
 			const path: RecordValue[] = [];
-			let entry = entries.get(id);
+			let entry = replayEntries.get(id);
 			while (entry) {
 				path.push(entry);
-				entry = entry.parentId === null ? undefined : entries.get(text(entry.parentId));
+				entry = entry.parentId === null ? undefined : replayEntries.get(text(entry.parentId));
 			}
 			return path.reverse();
 		}
@@ -414,15 +433,16 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 			}
 			for (const key of ["retainedToolResultIds", "consumedToolResultIds", "concurrentToolResultIds"]) {
 				if (entry[key] === undefined) continue;
+				if (
+					key !== "retainedToolResultIds" &&
+					(entry.type !== "message" || object(entry.message).role !== "assistant")
+				)
+					refuse(`invalid ${key} at ${entry.id}`);
 				for (const reference of array(entry[key])) {
 					const target = path.find((item) => item.id === reference);
 					if (!target || target.type !== "message" || object(target.message).role !== "toolResult")
 						refuse(`invalid ${key} at ${entry.id}`);
 				}
-				if (key === "concurrentToolResultIds" && array(entry[key]).length)
-					refuse(
-						`${key} at ${entry.id} requires causal context reconstruction; cannot safely flatten this journal`,
-					);
 			}
 		}
 
@@ -443,7 +463,27 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 			for (const entry of path) {
 				if (entry.type === "custom" && entry.customType === "response-steering") {
 					const data = object(entry.data);
-					steering.set(text(data.steeringId), data);
+					if (!["queued", "accepted", "applied", "failed", "unknown"].includes(text(data.status)))
+						refuse(`invalid steering status at ${entry.id}`);
+					if (data.steeringId === undefined && data.status !== "queued")
+						refuse(`missing steering identity at ${entry.id}`);
+					const key = JSON.stringify([data.steeringId === undefined, data.steeringId ?? entry.id]);
+					if (data.steeringId !== undefined) text(data.steeringId);
+					const previous = steering.get(key);
+					if (previous) {
+						const prior = object(previous.data);
+						for (const key of ["message", "responseId"])
+							if (
+								prior[key] !== undefined &&
+								data[key] !== undefined &&
+								!isDeepStrictEqual(
+									field(recordById.get(previous.id)!, ["data", key]),
+									field(recordById.get(entry.id)!, ["data", key]),
+								)
+							)
+								refuse(`conflicting steering ${key} at ${entry.id}`);
+					}
+					steering.set(key, entry);
 				}
 				if (entry.type !== "message") continue;
 				const message = object(entry.message);
@@ -452,7 +492,7 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 					if (message.deferred !== undefined || message.stopReason === "deferred")
 						refuse(`deferred response at ${entry.id}`);
 					if (message.responseId !== undefined) {
-						const key = JSON.stringify([message.provider, message.model, text(message.responseId)]);
+						const key = JSON.stringify([message.provider, message.api, message.model, text(message.responseId)]);
 						const frames = responses.get(key) ?? [];
 						frames.push(entry);
 						responses.set(key, frames);
@@ -465,21 +505,34 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 					results.set(id, message);
 				}
 			}
-			for (const data of steering.values()) {
-				if (!["applied", "failed"].includes(text(data.status))) refuse(`unsettled steering on branch ${leaf}`);
+			for (const event of steering.values()) {
+				const data = object(event.data);
+				if (data.status === "failed") continue;
+				const deliveries = path.filter(
+					(entry) =>
+						entry.type === "message" &&
+						object(entry.message).role === "user" &&
+						isDeepStrictEqual(fullMessage(text(entry.id)), field(recordById.get(event.id)!, ["data", "message"])),
+				);
+				if (deliveries.length !== 1) refuse(`steering input is not journaled exactly once on branch ${leaf}`);
+				if (data.status === "applied") continue;
+				const position = path.indexOf(deliveries[0]);
 				if (
-					data.status === "applied" &&
-					!path.some(
-						(entry) =>
-							entry.type === "message" &&
-							object(entry.message).role === "user" &&
-							isDeepStrictEqual(
-								fullMessage(text(entry.id)),
-								field(steeringLocations.get(data)!, ["data", "message"]),
-							),
-					)
+					typeof data.responseId !== "string" ||
+					!data.responseId ||
+					position <= path.indexOf(event) ||
+					!path.slice(position + 1).some((entry) => {
+						if (entry.type !== "message" || entry.checkpoint) return false;
+						const message = object(entry.message);
+						return (
+							message.role === "assistant" &&
+							typeof message.responseId === "string" &&
+							message.responseId !== data.responseId &&
+							["stop", "length", "toolUse", "error", "aborted"].includes(String(message.stopReason))
+						);
+					})
 				)
-					refuse(`applied steering input is not journaled on branch ${leaf}`);
+					refuse(`unsettled steering on branch ${leaf}`);
 			}
 			for (const frames of responses.values()) {
 				const finals = frames.filter(
@@ -532,9 +585,73 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 					const result = results.get(id);
 					if (!result || result.toolName !== call.name || result.namespace !== call.namespace)
 						refuse(`missing or mismatched result for ${id} on branch ${leaf}`);
-					const callPosition = path.indexOf(entry);
-					const resultPosition = path.findIndex((item) => item.type === "message" && item.message === result);
-					if (resultPosition <= callPosition) refuse(`result ${id} precedes its call`);
+					if (path.findIndex((item) => item.type === "message" && item.message === result) <= path.indexOf(entry))
+						refuse(`result ${id} precedes its call`);
+				}
+			}
+			for (const id of results.keys()) if (!calls.has(id)) refuse(`orphan result ${id} on branch ${leaf}`);
+		}
+
+		let ordered = records;
+		if (
+			records.some(
+				(entry) => entry.concurrentToolResultIds !== undefined && array(entry.concurrentToolResultIds).length,
+			)
+		) {
+			// ponytail: causal reparenting supports one linear history, within each boundary.
+			// Branch-dependent or cross-boundary ordering needs a separate representability proof.
+			if (records.some((entry, index) => entry.parentId !== (index === 0 ? null : records[index - 1].id)))
+				refuse("causal receipt ordering on a branched journal requires context reconstruction");
+			const positions = new Map(records.map((entry, index) => [entry.id, index]));
+			const after = new Map<string, number>();
+			let boundary = -1;
+			for (const [index, entry] of records.entries()) {
+				if (entry.type === "compaction" || entry.type === "context_window" || entry.type === "context_edit")
+					boundary = index;
+				if (entry.type !== "message" || object(entry.message).role !== "assistant" || redundant.has(text(entry.id)))
+					continue;
+				// Legacy coalescing keeps the first frame's concurrent receipts, not later checkpoints' lists.
+				for (const id of entry.concurrentToolResultIds === undefined ? [] : array(entry.concurrentToolResultIds)) {
+					const position = positions.get(text(id))!;
+					if (position >= index) continue;
+					if (position < boundary) refuse(`causal receipt ${id} crosses a boundary at ${entry.id}`);
+					after.set(text(id), index);
+				}
+			}
+			const deferred = new Map<number, RecordValue[]>();
+			for (const entry of records) {
+				const index = after.get(text(entry.id));
+				if (index === undefined) continue;
+				const receipts = deferred.get(index) ?? [];
+				receipts.push(entry);
+				deferred.set(index, receipts);
+			}
+			ordered = [];
+			for (const [index, entry] of records.entries()) {
+				if (!after.has(text(entry.id))) ordered.push(entry);
+				ordered.push(...(deferred.get(index) ?? []));
+			}
+			ordered = ordered.map((entry, index) => ({ ...entry, parentId: index === 0 ? null : ordered[index - 1].id }));
+			replayEntries = new Map(ordered.map((entry) => [text(entry.id), entry]));
+		}
+
+		// Receipt moves can change both compaction retention and the final leaf.
+		const replayParents = new Set(ordered.map((entry) => entry.parentId));
+		for (const leaf of replayEntries.keys()) {
+			if (replayParents.has(leaf)) continue;
+			const path = pathTo(leaf);
+			const resultPositions = new Map<string, number>();
+			for (const [index, entry] of path.entries())
+				if (entry.type === "message" && object(entry.message).role === "toolResult")
+					resultPositions.set(text(object(entry.message).toolCallId), index);
+			for (const [callPosition, entry] of path.entries()) {
+				if (entry.type !== "message" || redundant.has(text(entry.id))) continue;
+				const message = selectedMessage(entry);
+				if (message.role !== "assistant") continue;
+				for (const call of array(message.content).map(object)) {
+					if (call.type !== "toolCall") continue;
+					const id = text(call.id);
+					const resultPosition = resultPositions.get(id)!;
 					for (const boundary of path.slice(callPosition + 1)) {
 						if (boundary.type !== "context_window" && boundary.type !== "compaction") continue;
 						const position = path.indexOf(boundary);
@@ -552,7 +669,6 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 					}
 				}
 			}
-			for (const id of results.keys()) if (!calls.has(id)) refuse(`orphan result ${id} on branch ${leaf}`);
 		}
 
 		const blockSources = new WeakMap<
@@ -563,21 +679,123 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 			RecordValue,
 			{ record: JournalRecord; content?: RecordValue[]; receipt?: boolean }
 		>();
-		const identities = new Map<string, string>();
-		function tool(value: unknown, result = false): RecordValue {
+		const declarationSources = new WeakMap<RecordValue, JournalRecord>();
+		const identities = new Map<string, { namespace: string | null; name: string }>();
+		const names = new Map<string, Set<string>>();
+		function identity(value: unknown, result = false): void {
 			const item = object(value);
 			const name = text(item[result ? "toolName" : "name"]);
 			const namespace = item.namespace;
 			if (namespace !== undefined && typeof namespace !== "string") refuse(`invalid legacy namespace for ${name}`);
-			const identity = JSON.stringify([namespace ?? null, name]);
-			if (identities.has(name) && identities.get(name) !== identity)
-				refuse(`legacy tool identities collide on upstream name ${name}`);
-			identities.set(name, identity);
+			const key = JSON.stringify([namespace ?? null, name]);
+			identities.set(key, { namespace: namespace ?? null, name });
+			const keys = names.get(name) ?? new Set<string>();
+			keys.add(key);
+			names.set(name, keys);
+		}
+		for (const entry of records) {
+			const message = entry.type === "message" ? object(entry.message) : undefined;
+			for (const state of [
+				message?.role === "system" || message?.role === "toolResult" ? message : undefined,
+				entry.systemMessage,
+			]) {
+				if (!state) continue;
+				for (const key of ["toolsAdded", "toolsRemoved", "deferredToolEntries"])
+					if (object(state)[key] !== undefined)
+						for (const item of array(object(state)[key]))
+							identity(typeof item === "string" ? { name: item } : item);
+			}
+			if (message?.role === "assistant")
+				for (const block of array(message.content).map(object)) if (block.type === "toolCall") identity(block);
+			if (message?.role === "toolResult") identity(message, true);
+		}
+		const aliases = new Map<string, string>();
+		const usedNames = new Set(names.keys());
+		const aliasMetadata: RecordValue[] = [];
+		for (const key of [...identities.keys()].sort()) {
+			const item = identities.get(key)!;
+			let name = item.name;
+			if (names.get(name)!.size > 1) {
+				const base = `legacy_${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
+				name = base;
+				for (let suffix = 1; usedNames.has(name); suffix++) name = `${base}_${suffix}`;
+				usedNames.add(name);
+				aliasMetadata.push({ ...item, convertedName: name });
+			}
+			aliases.set(key, name);
+		}
+		function tool(value: unknown, result = false): RecordValue {
+			const item = object(value);
 			const converted = { ...item };
+			converted[result ? "toolName" : "name"] = aliases.get(
+				JSON.stringify([item.namespace ?? null, item[result ? "toolName" : "name"]]),
+			)!;
 			for (const key of [...callFields, ...resultFields, "toolSearch"]) delete converted[key];
 			const source = callLocations.get(item);
 			if (source) blockSources.set(converted, source);
 			return converted;
+		}
+		function committedContent(message: RecordValue): RecordValue[] {
+			const content = array(message.content)
+				.map(object)
+				.filter(
+					(block) =>
+						block.type === "toolCall" ||
+						(block.type === "text" && block.textSignature !== undefined) ||
+						(block.type === "thinking" && block.thinkingSignature !== undefined),
+				);
+			while (content.at(-1)?.type === "thinking") content.pop();
+			for (const block of content) {
+				const location = callLocations.get(block)!;
+				const root: JsonPath = ["message", "content", location.index];
+				if (block.type !== "toolCall") {
+					const signature = text(
+						field(location.record, [...root, block.type === "text" ? "textSignature" : "thinkingSignature"]),
+					);
+					if (block.type === "thinking" && String(message.api).endsWith("responses")) {
+						let item: RecordValue;
+						try {
+							item = object(JSON.parse(signature));
+						} catch {
+							refuse("invalid committed reasoning signature");
+						}
+						if (
+							item.type !== "reasoning" ||
+							!Array.isArray(item.summary) ||
+							(item.status !== undefined && item.status !== "completed")
+						)
+							refuse("invalid committed reasoning signature");
+						text(item.id);
+					}
+					continue;
+				}
+				if (block.responsesItem !== undefined) {
+					const item = object(field(location.record, [...root, "responsesItem"]));
+					const [callId, itemId] = text(block.id).split("|");
+					let argumentsMatch = false;
+					if (item.type === "function_call" && typeof item.arguments === "string") {
+						try {
+							argumentsMatch = isDeepStrictEqual(JSON.parse(item.arguments), callArguments(block));
+						} catch {
+							// Invalid authoritative arguments cannot prove a completed call.
+						}
+					} else if (item.type === "custom_tool_call") {
+						argumentsMatch = isDeepStrictEqual(Object.values(object(callArguments(block))), [item.input]);
+					}
+					if (
+						!argumentsMatch ||
+						item.call_id !== callId ||
+						(itemId !== undefined && item.id !== itemId) ||
+						item.name !== block.name ||
+						item.namespace !== block.namespace ||
+						(item.status !== undefined && item.status !== "completed")
+					)
+						refuse(`invalid committed item for interrupted call ${block.id}`);
+				} else if (block.executionStarted !== true)
+					refuse(`interrupted call ${block.id} has no committed output proof`);
+				if (block.executionArguments !== undefined) object(block.executionArguments);
+			}
+			return content;
 		}
 		function system(value: unknown, baseline: boolean): RecordValue {
 			const message = object(value);
@@ -591,9 +809,8 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 			if (!baseline && (message.replace || message.nativeHead))
 				refuse("mid-history system replacement requires context reconstruction");
 			const converted = { ...message };
-			if (message.deferredToolEntries !== undefined) {
+			if (message.deferredToolEntries !== undefined)
 				for (const item of array(message.deferredToolEntries)) tool(item);
-			}
 			for (const key of systemFields) delete converted[key];
 			for (const key of ["toolsAdded", "toolsRemoved"]) {
 				if (message[key] !== undefined)
@@ -608,11 +825,30 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 			}
 			return converted;
 		}
+		const tails = new Map<string, string>();
 		function* convertedEntries(): Generator<RecordValue> {
-			for (const entry of records) {
+			for (const [index, entry] of ordered.entries()) {
 				const copy = { ...entry };
+				if (copy.parentId !== null) copy.parentId = tails.get(text(copy.parentId)) ?? copy.parentId;
 				const metadata: RecordValue = {};
 				const prefix: RecordValue[] = [];
+				const suffix: RecordValue[] = [];
+				const original = entries.get(text(entry.id))!;
+				if (original.parentId !== entry.parentId) metadata.originalParentId = original.parentId;
+				for (const key of entryFields) if (key in original) metadata[key] = original[key];
+				if (firstByFrame.get(text(entry.id)) === entry.id) metadata.originalSnapshot = original;
+				if (index === 0 && aliasMetadata.length) {
+					const id = randomUUID();
+					prefix.push({
+						type: "custom",
+						id,
+						parentId: copy.parentId,
+						timestamp: entry.timestamp,
+						customType: "legacy-conversion-tool-aliases",
+						data: aliasMetadata,
+					});
+					copy.parentId = id;
+				}
 				if (entry.type === "compaction") {
 					const kept = text(entry.firstKeptEntryId);
 					copy.firstKeptEntryId = firstByFrame.get(kept) ?? kept;
@@ -622,17 +858,15 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 						refuse(`compaction ${entry.id} retains history outside its window`);
 				}
 				for (const key of entryFields) delete copy[key];
-				if (entry.type === "custom" && entry.customType === "response-steering") {
+				if (entry.type === "custom" && entry.customType === "response-steering")
 					copy.customType = "legacy-conversion-steering";
-				}
 				if (entry.type === "context_window") {
 					if (entry.handoff !== undefined && typeof entry.handoff !== "string")
 						refuse(`invalid handoff at ${entry.id}`);
 					if (entry.tokensBefore !== null && (typeof entry.tokensBefore !== "number" || entry.tokensBefore < 0))
 						refuse(`invalid tokensBefore at ${entry.id}`);
 					copy.type = "compaction";
-					const handoff = entry.handoff === undefined ? undefined : field(recordById.get(entry.id)!, ["handoff"]);
-					copy.summary = `Context window ${entry.id} starts here. Earlier conversation is not available in this window.${handoff ? `\n\nHandoff from the previous window:\n${handoff}` : ""}`;
+					copy.summary = `Context window ${entry.id} starts here. Earlier conversation is not available in this window.`;
 					copy.firstKeptEntryId = entry.id;
 					copy.tokensBefore = entry.tokensBefore ?? 0;
 					copy.fromHook = true;
@@ -665,7 +899,10 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 							const content: RecordValue[] = [];
 							let reasoning: RecordValue[] = [];
 							let previousThinking = false;
-							for (const block of array(message.content).map(object)) {
+							const blocks = ["error", "aborted"].includes(String(message.stopReason))
+								? committedContent(message)
+								: array(message.content).map(object);
+							for (const block of blocks) {
 								if (block.type === "thinking") {
 									if (!previousThinking) reasoning = [];
 									const blanked = { ...block, thinking: "" };
@@ -688,19 +925,9 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 								)
 							)
 								refuse(`window ${entry.id} retains edited execution history`);
-							const carried: RecordValue = {
-								...message,
-								content,
-								usage: {
-									input: 0,
-									output: 0,
-									cacheRead: 0,
-									cacheWrite: 0,
-									totalTokens: 0,
-									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-								},
-							};
+							const carried: RecordValue = { ...message, content, stopReason: "toolUse", usage: zeroUsage };
 							delete carried.toolExecutionFailed;
+							delete carried.errorMessage;
 							const carriedEntry: RecordValue = {
 								type: "message",
 								id: randomUUID(),
@@ -747,10 +974,10 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 						yield {
 							type: "custom",
 							id: entry.id,
-							parentId: entry.parentId,
+							parentId: copy.parentId,
 							timestamp: entry.timestamp,
 							customType: "legacy-conversion-snapshot",
-							data: { responseId: object(entry.message).responseId },
+							data: { original },
 						};
 						continue;
 					}
@@ -771,17 +998,59 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 							systemFields.filter((key) => key in message).map((key) => [key, message[key]]),
 						);
 					} else if (message.role === "assistant") {
+						if (
+							["error", "aborted"].includes(String(message.stopReason)) &&
+							array(message.content).some((block) => object(block).type === "toolCall")
+						) {
+							const content = committedContent(message).map((block) =>
+								block.type === "toolCall" ? tool(block) : block,
+							);
+							const replay: RecordValue = { ...message, content, stopReason: "toolUse", usage: zeroUsage };
+							delete replay.errorMessage;
+							delete replay.toolExecutionFailed;
+							metadata.originalSnapshot = original;
+							const replayEntry: RecordValue = {
+								type: "message",
+								id: randomUUID(),
+								parentId: entry.id,
+								timestamp: entry.timestamp,
+								message: replay,
+							};
+							carriedSources.set(replayEntry, {
+								record: recordById.get(finalByFirst.get(text(entry.id)) ?? text(entry.id))!,
+								content,
+							});
+							suffix.push(replayEntry);
+						}
 						message.content = array(message.content).map((block) =>
 							object(block).type === "toolCall" ? tool(block) : block,
 						);
-						for (const key of ["toolExecutionFailed"]) {
-							if (key in message) metadata[key] = message[key];
-							delete message[key];
-						}
+						if ("toolExecutionFailed" in message) metadata.toolExecutionFailed = message.toolExecutionFailed;
+						delete message.toolExecutionFailed;
 						copy.message = message;
 					} else if (message.role === "toolResult") {
-						if (message.toolsAdded !== undefined && array(message.toolsAdded).length)
-							refuse(`tool search declarations at ${entry.id} require context reconstruction`);
+						if (message.toolsAdded !== undefined) {
+							metadata.toolsAdded = message.toolsAdded;
+							if (array(message.toolsAdded).length) {
+								const declaration: RecordValue = {
+									type: "message",
+									id: randomUUID(),
+									parentId: entry.id,
+									timestamp: entry.timestamp,
+									message: system(
+										{
+											role: "system",
+											content: "",
+											timestamp: message.timestamp,
+											toolsAdded: message.toolsAdded,
+										},
+										false,
+									),
+								};
+								declarationSources.set(declaration, recordById.get(entry.id)!);
+								suffix.push(declaration);
+							}
+						}
 						copy.message = tool(message, true);
 						for (const key of ["elapsedMs", "executionSkipped"]) if (key in message) metadata[key] = message[key];
 					} else copy.message = message;
@@ -795,11 +1064,14 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 					if (firstByFrame.has(target) || path.findIndex((item) => item.id === target) < boundary)
 						refuse(`context edit ${entry.id} targets a coalesced response or earlier context boundary`);
 					const targetEntry = entries.get(target)!;
+					const targetMessage = targetEntry.type === "message" ? object(targetEntry.message) : undefined;
 					if (
-						targetEntry.type === "message" &&
-						object(targetEntry.message).role === "assistant" &&
-						array(object(targetEntry.message).content).some(
-							(block) => object(block).type === "toolCall" && object(block).async === true,
+						targetMessage?.role === "assistant" &&
+						array(targetMessage.content).some(
+							(block) =>
+								object(block).type === "toolCall" &&
+								(object(block).async === true ||
+									["error", "aborted"].includes(String(targetMessage.stopReason))),
 						)
 					)
 						refuse(`context edit ${entry.id} changes legacy execution history`);
@@ -813,24 +1085,191 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 						refuse(`legacy call edit at ${entry.id}`);
 				}
 				if (metadata.system && Object.keys(object(metadata.system)).length === 0) delete metadata.system;
-				if (!Object.keys(metadata).length) {
-					yield* prefix;
-					yield copy;
+				if (suffix.length) tails.set(text(entry.id), text(suffix.at(-1)!.id));
+				yield* prefix;
+				if (Object.keys(metadata).length) {
+					const id = randomUUID();
+					const parentId = copy.parentId;
+					copy.parentId = id;
+					yield {
+						type: "custom",
+						id,
+						parentId,
+						timestamp: entry.timestamp,
+						customType: "legacy-conversion-metadata",
+						data: { sourceEntryId: entry.id, ...metadata },
+					};
+				}
+				yield copy;
+				yield* suffix;
+			}
+		}
+		// Only token projections and source locations are retained for grouping; no historical bodies are collected.
+		let converted = Array.from(convertedEntries());
+		replayEntries = new Map(converted.map((entry) => [text(entry.id), entry]));
+		const children = new Map<string, number>();
+		const groups = new Map<string, RecordValue[]>();
+		const ownerByReceipt = new Map<string, string>();
+		for (const entry of converted) {
+			if (entry.parentId !== null) {
+				const parentId = text(entry.parentId);
+				children.set(parentId, (children.get(parentId) ?? 0) + 1);
+			}
+			if (entry.type !== "message" || object(entry.message).role !== "toolResult") continue;
+			const callId = object(entry.message).toolCallId;
+			const owner = pathTo(text(entry.id)).findLast((ancestor) => {
+				if (ancestor.type !== "message") return false;
+				const message = object(ancestor.message);
+				return (
+					message.role === "assistant" &&
+					!["error", "aborted"].includes(String(message.stopReason)) &&
+					array(message.content).some((block) => object(block).type === "toolCall" && object(block).id === callId)
+				);
+			});
+			if (!owner) refuse(`no native ancestor call for receipt ${entry.id}`);
+			const id = text(owner.id);
+			const receipts = groups.get(id) ?? [];
+			receipts.push(entry);
+			groups.set(id, receipts);
+			ownerByReceipt.set(text(entry.id), id);
+		}
+		const relocated = new Map<string, RecordValue[]>();
+		for (const [ownerId, receipts] of groups) {
+			const owner = replayEntries.get(ownerId)!;
+			const callIds = array(object(owner.message).content)
+				.map(object)
+				.filter((block) => block.type === "toolCall")
+				.map((block) => block.id);
+			function alreadyGrouped(group: RecordValue[]): boolean {
+				const path = pathTo(text(group.at(-1)!.id));
+				return isDeepStrictEqual(
+					path
+						.slice(path.indexOf(owner) + 1)
+						.filter((entry) =>
+							entry.type === "message"
+								? object(entry.message).role !== "system"
+								: ["compaction", "branch_summary", "custom_message"].includes(String(entry.type)),
+						)
+						.map((entry) => entry.id),
+					group.map((entry) => entry.id),
+				);
+			}
+			const byCall = new Map(receipts.map((entry) => [object(entry.message).toolCallId, entry]));
+			if (byCall.size !== receipts.length) {
+				// Ordinary branches with already-complete groups need no shared receipt relocation.
+				for (const receipt of receipts) {
+					const group = pathTo(text(receipt.id)).filter((entry) => ownerByReceipt.get(text(entry.id)) === ownerId);
+					if (
+						alreadyGrouped(group) &&
+						isDeepStrictEqual(
+							group.map((entry) => object(entry.message).toolCallId),
+							callIds.slice(0, group.length),
+						)
+					)
+						continue;
+					refuse(`branch-dependent native receipt relocation at ${ownerId}`);
+				}
+				continue;
+			}
+			const group: RecordValue[] = [];
+			for (const id of callIds) if (byCall.has(id)) group.push(byCall.get(id)!);
+			if (alreadyGrouped(group)) continue;
+			// ponytail: relocate through one unambiguous path; branch-specific receipts need a separate conversion proof.
+			const path = pathTo(text(receipts.at(-1)!.id));
+			for (const entry of path.slice(path.indexOf(owner), -1))
+				if ((children.get(text(entry.id)) ?? 0) > 1) refuse(`branched native receipt relocation at ${ownerId}`);
+			relocated.set(ownerId, group);
+		}
+		if (relocated.size) {
+			const tips = converted.filter((entry) => !children.has(text(entry.id))).map((entry) => text(entry.id));
+			function contributions(list: RecordValue[], tip: string, index: Map<string, RecordValue>): Set<string> {
+				return new Set(
+					buildSessionProjection(
+						list as unknown as SessionEntry[],
+						tip,
+						index as unknown as Map<string, SessionEntry>,
+					)
+						.entries.filter((entry) => entry.messages.length)
+						.map((entry) => entry.sourceEntry.id),
+				);
+			}
+			const retained = new Map(tips.map((tip) => [tip, contributions(converted, tip, replayEntries)]));
+			const oldSlots = new Map<string, string | null>();
+			const anchors = new Map<string, RecordValue>();
+			const moved = new Set<string>();
+			for (const group of relocated.values()) for (const entry of group) moved.add(text(entry.id));
+			for (const id of moved) {
+				const receipt = replayEntries.get(id)!;
+				const parent = receipt.parentId === null ? undefined : replayEntries.get(text(receipt.parentId));
+				if (!entries.has(id)) {
+					oldSlots.set(id, receipt.parentId as string | null);
 					continue;
 				}
-				const id = randomUUID();
-				const parentId = copy.parentId;
-				copy.parentId = id;
-				yield* prefix;
-				yield {
-					type: "custom",
-					id,
-					parentId,
-					timestamp: entry.timestamp,
-					customType: "legacy-conversion-metadata",
-					data: { sourceEntryId: entry.id, ...metadata },
-				};
-				yield copy;
+				const anchor =
+					parent?.customType === "legacy-conversion-metadata" && object(parent.data).sourceEntryId === id
+						? parent
+						: {
+								type: "custom",
+								id: randomUUID(),
+								parentId: receipt.parentId,
+								timestamp: receipt.timestamp,
+								customType: "legacy-conversion-metadata",
+								data: { sourceEntryId: id },
+							};
+				object(anchor.data).originalParentId = entries.get(id)!.parentId;
+				oldSlots.set(id, text(anchor.id));
+				if (anchor !== parent) anchors.set(id, anchor);
+			}
+			function stateTail(id: string | null): string | null {
+				if (id === null) return null;
+				if (oldSlots.has(id)) return stateTail(oldSlots.get(id)!);
+				return (relocated.get(id)?.at(-1)?.id as string | undefined) ?? id;
+			}
+			const groupParents = new Map<string, string>();
+			for (const [owner, group] of relocated)
+				for (const [index, receipt] of group.entries())
+					groupParents.set(text(receipt.id), index === 0 ? owner : text(group[index - 1].id));
+			const regrouped: RecordValue[] = [];
+			for (const entry of converted) {
+				if (moved.has(text(entry.id))) {
+					if (anchors.has(text(entry.id))) regrouped.push(anchors.get(text(entry.id))!);
+				} else {
+					regrouped.push(entry);
+					regrouped.push(...(relocated.get(text(entry.id)) ?? []));
+				}
+			}
+			converted = regrouped;
+			const referenceMetadata = new Map<unknown, RecordValue>();
+			for (const entry of converted) {
+				entry.parentId = groupParents.get(text(entry.id)) ?? stateTail(entry.parentId as string | null);
+				if (entry.type === "branch_summary" && oldSlots.has(text(entry.fromId))) {
+					const fromId = text(entry.fromId);
+					entry.fromId = tails.get(fromId) ?? stateTail(fromId);
+					const id = randomUUID();
+					referenceMetadata.set(entry.id, {
+						type: "custom",
+						id,
+						parentId: entry.parentId,
+						timestamp: entry.timestamp,
+						customType: "legacy-conversion-metadata",
+						data: { sourceEntryId: entry.id, originalFromId: fromId },
+					});
+					entry.parentId = id;
+				}
+			}
+			if (referenceMetadata.size) {
+				const withReferences: RecordValue[] = [];
+				for (const entry of converted) {
+					if (referenceMetadata.has(entry.id)) withReferences.push(referenceMetadata.get(entry.id)!);
+					withReferences.push(entry);
+				}
+				converted = withReferences;
+			}
+			const index = new Map(converted.map((entry) => [text(entry.id), entry]));
+			for (const [tip, expected] of retained) {
+				const mappedTip = tails.get(tip) ?? stateTail(tip);
+				if (!mappedTip || !isDeepStrictEqual(contributions(converted, mappedTip, index), expected))
+					refuse(`native receipt grouping changes retained context on branch ${tip}`);
 			}
 		}
 		const selected = (record: JournalRecord, path: JsonPath, rewrite?: JournalRewrite): JournalReplacement => ({
@@ -843,17 +1282,20 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 					["toolsAdded", "toolsRemoved"].includes(String(path[root.length])) &&
 					[...callFields, ...resultFields, "toolSearch"].includes(String(path.at(-1)))),
 			replace: (path) => {
-				if (path.length !== root.length + 2 || path[root.length] !== "toolsRemoved") return undefined;
-				const item = array(message.toolsRemoved)[Number(path.at(-1))];
-				return typeof item === "string" ? { value: { name: item } } : undefined;
+				const key = String(path[root.length]);
+				if (!["toolsAdded", "toolsRemoved"].includes(key)) return undefined;
+				const item = array(message[key])[Number(path[root.length + 1])];
+				if (path.length === root.length + 2 && typeof item === "string") return { value: tool({ name: item }) };
+				if (path.length === root.length + 3 && path.at(-1) === "name") return { value: tool(item).name };
+				return undefined;
 			},
 		});
 		const messageRewrite = (record: JournalRecord): JournalRewrite => {
 			const message = object(record.value.message);
-			if (message.role === "system") {
-				return systemRewrite(["message"], message);
-			}
+			if (message.role === "system") return systemRewrite(["message"], message);
 			return {
+				overrides:
+					message.role === "toolResult" ? { toolName: { value: tool(message, true).toolName } } : undefined,
 				omit: (path) =>
 					message.role === "assistant"
 						? (path.length === 2 && path[1] === "toolExecutionFailed") ||
@@ -865,23 +1307,38 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 						: message.role === "toolResult" &&
 							path.length === 2 &&
 							[...callFields, ...resultFields, "toolSearch"].includes(String(path[1])),
+				replace: (path) =>
+					message.role === "assistant" &&
+					path.length === 4 &&
+					path[0] === "message" &&
+					path[1] === "content" &&
+					path[3] === "name" &&
+					object(array(message.content)[Number(path[2])]).type === "toolCall"
+						? { value: tool(array(message.content)[Number(path[2])]).name }
+						: undefined,
 			};
 		};
 		const writeCarried = (value: RecordValue, sink: JsonByteSink): void => {
 			const source = carriedSources.get(value)!;
-			const overrides: Record<string, JournalReplacement> = {};
+			const rewrite = messageRewrite(source.record);
+			const overrides: Record<string, JournalReplacement> = { ...rewrite.overrides };
 			if (source.content) {
 				overrides.content = {
 					write: (output) => {
 						output("[");
 						source.content!.forEach((block, index) => {
 							if (index) output(",");
-							const location = blockSources.get(block)!;
+							const location = blockSources.get(block) ?? callLocations.get(block)!;
 							const root: JsonPath = ["message", "content", location.index];
+							const blankThinking = "blankThinking" in location && location.blankThinking;
 							writeJournalValue(scan.source, location.record, root, output, {
-								overrides: location.blankThinking ? { thinking: { value: "" } } : undefined,
+								overrides: blankThinking
+									? { thinking: { value: "" } }
+									: block.type === "toolCall"
+										? { name: { value: block.name } }
+										: undefined,
 								omit: (path) =>
-									!location.blankThinking &&
+									block.type === "toolCall" &&
 									path.length === root.length + 1 &&
 									[...callFields, ...resultFields, "toolSearch"].includes(String(path.at(-1))),
 							});
@@ -889,14 +1346,16 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 						output("]");
 					},
 				};
-				overrides.usage = { value: object(value.message).usage };
+				overrides.usage = { value: zeroUsage };
+				overrides.stopReason = { value: "toolUse" };
 			}
-			const rewrite = messageRewrite(source.record);
 			writeJournalValue(scan.source, source.record, ["message"], sink, {
 				...rewrite,
 				overrides,
 				omit: (path) =>
-					rewrite.omit?.(path) === true || (source.receipt === true && path.length === 2 && path[1] === "usage"),
+					rewrite.omit?.(path) === true ||
+					(source.content !== undefined && path.length === 2 && path[1] === "errorMessage") ||
+					(source.receipt === true && path.length === 2 && path[1] === "usage"),
 			});
 		};
 		const writeMetadata = (value: RecordValue, sink: JsonByteSink): void => {
@@ -909,19 +1368,20 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 				if (!first) sink(",");
 				first = false;
 				sink(`${JSON.stringify(key)}:`);
-				if (key !== "system") {
-					sink(JSON.stringify(item));
-					continue;
+				if (key === "originalSnapshot") writeJournalValue(scan.source, source, [], sink);
+				else if (key === "toolsAdded") writeJournalValue(scan.source, source, ["message", "toolsAdded"], sink);
+				else if (key !== "system") sink(JSON.stringify(item));
+				else {
+					sink("{");
+					let firstField = true;
+					for (const key of Object.keys(object(item))) {
+						if (!firstField) sink(",");
+						firstField = false;
+						sink(`${JSON.stringify(key)}:`);
+						writeJournalValue(scan.source, source, [...root, key], sink);
+					}
+					sink("}");
 				}
-				sink("{");
-				let firstField = true;
-				for (const field of Object.keys(object(item))) {
-					if (!firstField) sink(",");
-					firstField = false;
-					sink(`${JSON.stringify(field)}:`);
-					writeJournalValue(scan.source, source, [...root, field], sink);
-				}
-				sink("}");
 			}
 			sink("}");
 		};
@@ -931,13 +1391,15 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		try {
 			try {
 				copyJournalRecord(scan.source, scan.records[0]!, fd);
-				for (const value of convertedEntries()) {
+				for (const value of converted) {
 					assertSessionConversionNotRequired([value]);
 					const source = recordById.get(value.id);
 					const carried = carriedSources.has(value);
-					const metadata = value.customType === "legacy-conversion-metadata";
-					if (!source || carried || redundant.has(text(value.id))) {
-						const payload = carried ? "message" : metadata ? "data" : undefined;
+					const declaration = declarationSources.get(value);
+					const metadata = !source && value.customType === "legacy-conversion-metadata";
+					const snapshot = redundant.has(text(value.id));
+					if (!source || carried || snapshot) {
+						const payload = carried || declaration ? "message" : metadata || snapshot ? "data" : undefined;
 						if (!payload) writeFileSync(fd, `${JSON.stringify(value)}\n`);
 						else {
 							writeFileSync(
@@ -946,17 +1408,45 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 							);
 							const sink: JsonByteSink = (bytes) => writeFileSync(fd, bytes);
 							if (carried) writeCarried(value, sink);
-							else writeMetadata(value, sink);
+							else if (declaration) {
+								const message = object(value.message);
+								sink(
+									`${JSON.stringify({ role: "system", content: "", timestamp: message.timestamp }).slice(0, -1)},"toolsAdded":`,
+								);
+								writeJournalValue(
+									scan.source,
+									declaration,
+									["message", "toolsAdded"],
+									sink,
+									systemRewrite(["message"], object(declaration.value.message)),
+								);
+								sink("}");
+							} else if (snapshot) {
+								sink('{"original":');
+								writeJournalValue(scan.source, source!, [], sink);
+								sink("}");
+							} else writeMetadata(value, sink);
 							writeFileSync(fd, "}\n");
 						}
 						continue;
 					}
 					const overrides: Record<string, JournalReplacement> = {};
-					for (const key of ["type", "parentId", "customType", "firstKeptEntryId", "tokensBefore", "fromHook"])
+					for (const key of [
+						"type",
+						"parentId",
+						"customType",
+						"firstKeptEntryId",
+						"tokensBefore",
+						"fromHook",
+						"fromId",
+					])
 						if (Object.hasOwn(value, key) && value[key] !== source.value[key])
 							overrides[key] = { value: value[key] };
 					if (source.value.type === "context_window") {
-						overrides.summary = { value: value.summary };
+						const handoff = source.value.handoff === undefined ? undefined : field(source, ["handoff"]);
+						overrides.summary = {
+							value: `${value.summary}${handoff ? `\n\nHandoff from the previous window:\n${handoff}` : ""}`,
+						};
 						overrides.details = { value: value.details };
 					}
 					if (value.message !== undefined) {
@@ -967,7 +1457,7 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 						overrides.systemMessage = selected(
 							source,
 							["systemMessage"],
-							systemRewrite(["systemMessage"], object(value.systemMessage)),
+							systemRewrite(["systemMessage"], object(source.value.systemMessage)),
 						);
 					transformJournalRecord(scan.source, source, fd, {
 						overrides,

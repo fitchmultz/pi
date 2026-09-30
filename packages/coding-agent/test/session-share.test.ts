@@ -41,7 +41,6 @@ describe("shareSession", () => {
 			const statuses: string[] = [];
 			const errors: string[] = [];
 			let upload: ReadStream | undefined;
-			let descriptor: number | undefined;
 			let loader: BorderedLoader | undefined;
 			const context = {
 				session: {
@@ -69,7 +68,6 @@ describe("shareSession", () => {
 				upload = options.body;
 				const fd: unknown = Reflect.get(upload, "fd");
 				if (typeof fd !== "number") throw new Error("expected captured file descriptor");
-				descriptor = fd;
 				const headers = options.headers as Record<string, string>;
 				const size = fstatSync(fd).size;
 				expect(headers).toMatchObject({
@@ -108,7 +106,8 @@ describe("shareSession", () => {
 			expect(errors).toEqual([]);
 			expect(statuses.join(" ")).toContain(cancel ? "Share cancelled" : "https://example.invalid/shared");
 			expect(upload?.destroyed).toBe(true);
-			expect(() => fstatSync(descriptor!)).toThrow();
+			// A closed descriptor number may already belong to another file.
+			expect(Reflect.get(upload!, "fd")).toBeNull();
 			expect(childProcessMocks.spawn).not.toHaveBeenCalled();
 		},
 	);

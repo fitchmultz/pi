@@ -87,9 +87,9 @@ async function runCheckpointProgram(
 			timeout: 30_000,
 		});
 		owned.throwIfAborted();
-		if (result.killed || result.code !== 0)
+		if (result.killed || result.code !== 0 || result.signal)
 			throw new Error(
-				`Restart checkpoint ${mode} failed (${result.killed ? "cancelled" : result.code}): ${result.stderr}`,
+				`Restart checkpoint ${mode} failed (${result.killed ? "cancelled" : (result.signal ?? result.code)}): ${result.stderr}`,
 			);
 	} finally {
 		for (const name of signals) process.off(name, interrupt);

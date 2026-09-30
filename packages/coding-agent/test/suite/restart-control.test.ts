@@ -303,9 +303,11 @@ describe("native restart control at session boundaries", () => {
 		},
 	);
 
-	it.each(["success", "queues", "journal", "error"] as const)(
+	it.for(["success", "queues", "journal", "error", "transform-signal", "rollback-signal"] as const)(
 		"owns one offline transform and retains its immutable original (%s)",
-		async (outcome) => {
+		async (outcome, context) => {
+			if (process.platform === "win32" && outcome.endsWith("-signal"))
+				return context.skip("Unix child termination signals");
 			const f = await setup();
 			f.harness.session.setThinkingLevel("off");
 			const program = join(f.root, "offline transform; literal.mjs");
@@ -320,7 +322,10 @@ import { dirname, join } from "node:path";
 import { readSessionCheckpointState, writeCheckpointFile } from ${JSON.stringify(resolve("src/core/checkpoint.ts"))};
 const [mode, original, candidate] = process.argv.slice(2);
 appendFileSync(${JSON.stringify(trace)}, mode + "\\n");
-if (mode === "rollback") process.exit(0);
+if (mode === "rollback") {
+  if (${JSON.stringify(outcome)} === "rollback-signal") process.kill(process.pid, "SIGKILL");
+  process.exit(0);
+}
 if (${JSON.stringify(outcome)} === "error") throw new Error("offline conversion failed");
 const state = readSessionCheckpointState(original);
 if (${JSON.stringify(outcome)} === "journal") appendFileSync(state.selection.sessionFile,
@@ -332,11 +337,12 @@ const header = records.shift();
 if (${JSON.stringify(outcome)} === "queues") state.queues.followUp.push({ role: "user", content: "not accepted", timestamp: 1 });
 await writeCheckpointFile(candidate, { ...state, header, selection: { ...state.selection, sessionFile: converted } },
   (async function* () { for (const record of records) yield record; })(), new AbortController().signal);
+if (${JSON.stringify(outcome)} === "transform-signal") process.kill(process.pid, "SIGKILL");
 `,
 			);
 			await requestRestart(f.socket, { checkpointTransform: program });
 			await vi.waitFor(() => expect(f.shutdown).toHaveBeenCalledTimes(1));
-			if (outcome === "success") {
+			if (outcome === "success" || outcome === "rollback-signal") {
 				await finalize(f);
 				const message = f.sent.find((message) => message.type === "pi:restart");
 				if (message?.type !== "pi:restart") throw new Error("Missing final restart");
@@ -359,9 +365,10 @@ await writeCheckpointFile(candidate, { ...state, header, selection: { ...state.s
 				const originalPath = message.checkpoint.files!.original.path;
 				const immutable = readFileSync(originalPath);
 				expect(await prepareRestartCheckpoint(handoff, args)).toBe(message.checkpoint.files!.candidate!.path);
-				expect(await prepareRestartCheckpoint({ ...handoff, failure: "candidate failed" }, args)).toBe(
-					originalPath,
-				);
+				const fallback = prepareRestartCheckpoint({ ...handoff, failure: "candidate failed" }, args);
+				if (outcome === "rollback-signal")
+					await expect(fallback).rejects.toThrow("Restart checkpoint rollback failed (SIGKILL)");
+				else expect(await fallback).toBe(originalPath);
 				expect(readFileSync(originalPath)).toEqual(immutable);
 				expect(readSessionCheckpoint(originalPath).completedExit).toBeUndefined();
 				expect(readFileSync(trace, "utf8")).toBe("transform\nrollback\n");
@@ -373,7 +380,9 @@ await writeCheckpointFile(candidate, { ...state, header, selection: { ...state.s
 						? "non-entry working state"
 						: outcome === "journal"
 							? "journal differs"
-							: "offline conversion failed",
+							: outcome === "transform-signal"
+								? "Restart checkpoint transform failed (SIGKILL)"
+								: "offline conversion failed",
 				);
 				expect(f.sent.map((message) => message.type)).toEqual(["pi:ready"]);
 				const originals = directories

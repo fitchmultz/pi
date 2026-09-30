@@ -7437,6 +7437,6 @@ export class InteractiveMode {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
 		}
-		if (!this.isShuttingDown) this.unregisterSignalHandlers();
+		if (!this.shutdownCheckpointController) this.unregisterSignalHandlers();
 	}
 }
