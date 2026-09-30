@@ -6,10 +6,8 @@
  */
 
 /**
- * - `codemode`: tools are callable from codemode scripts and listed in its description, but not
- *   declared to the model.
- * - `codemode-deferred`: like `codemode`, but not listed in the codemode description. Scripts find
- *   them with `searchTools()`.
+ * - `codemode` and `codemode-deferred`: tools are callable from codemode scripts, outside inline
+ *   declarations. Scripts discover them with `searchTools()`.
  * - `deferred`: not declared to the model until the `tool_search` tool loads them; the model then
  *   calls them directly. Does not need codemode.
  * - `direct`: tools are declared to the model like any other tool (and callable from codemode).
@@ -26,6 +24,9 @@ const MCP_EXPOSURES: readonly string[] = [
 ] satisfies McpExposure[];
 
 interface McpServerConfigBase {
+	/** Connect on first use (default), or eagerly when the session starts. Independent of exposure. */
+	connection?: "lazy" | "eager";
+	description?: string;
 	/** Default: `codemode`. */
 	exposure?: McpExposure;
 	/**
@@ -53,6 +54,8 @@ export interface McpStdioServerConfig extends McpServerConfigBase {
 
 /** OAuth client settings for servers that do not support dynamic client registration. */
 export interface McpOAuthConfig {
+	/** HTTPS client metadata document for servers supporting CIMD. */
+	clientMetadataUrl?: string;
 	/** Pre-registered client id. Without it, pi registers a client with the authorization server. */
 	clientId?: string;
 	/** May reference environment variables (`${NAME}`) or commands (`!cmd`). */
@@ -78,7 +81,14 @@ const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
 export function isLoopbackRedirectUri(value: string): boolean {
 	if (!URL.canParse(value)) return false;
 	const url = new URL(value);
-	return url.protocol === "http:" && LOOPBACK_HOSTS.includes(url.hostname) && url.search === "" && url.hash === "";
+	return (
+		url.protocol === "http:" &&
+		LOOPBACK_HOSTS.includes(url.hostname) &&
+		url.username === "" &&
+		url.password === "" &&
+		url.search === "" &&
+		url.hash === ""
+	);
 }
 
 export interface McpHttpServerConfig extends McpServerConfigBase {
@@ -104,6 +114,15 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 function validateOAuth(value: unknown): string | undefined {
 	if (value === undefined) return undefined;
 	if (!isRecord(value)) return "oauth must be an object";
+	if (value.clientMetadataUrl !== undefined) {
+		if (typeof value.clientMetadataUrl !== "string" || !URL.canParse(value.clientMetadataUrl)) {
+			return "oauth.clientMetadataUrl must be an HTTPS URL with a non-root path";
+		}
+		const url = new URL(value.clientMetadataUrl);
+		if (url.protocol !== "https:" || url.pathname === "/" || url.username || url.password || url.hash) {
+			return "oauth.clientMetadataUrl must be an HTTPS URL with a non-root path and no credentials or fragment";
+		}
+	}
 	if (value.clientId !== undefined && typeof value.clientId !== "string") return "oauth.clientId must be a string";
 	if (value.clientSecret !== undefined && typeof value.clientSecret !== "string") {
 		return "oauth.clientSecret must be a string";
@@ -116,7 +135,8 @@ function validateOAuth(value: unknown): string | undefined {
 		if (typeof value.callbackUrl !== "string" || !isLoopbackRedirectUri(value.callbackUrl)) {
 			return "oauth.callbackUrl must be an http URI on localhost, 127.0.0.1, or [::1] without query or fragment";
 		}
-		const urlPort = new URL(value.callbackUrl).port;
+		const urlPort = /^http:\/\/(?:\[[^\]]+\]|[^/?#:]+):(\d+)(?:[/?#]|$)/i.exec(value.callbackUrl)?.[1];
+		if (urlPort !== undefined && Number(urlPort) < 1) return "oauth.callbackUrl must use a nonzero port";
 		if (urlPort && port !== undefined && Number(urlPort) !== port) {
 			return "oauth.callbackUrl and oauth.callbackPort name different ports";
 		}
@@ -140,7 +160,7 @@ function toolPatternRegExp(pattern: string): RegExp {
 /** Exposure of one tool of a server: its `toolExposure` entry, else the server's `exposure`. */
 export function getMcpToolExposure(config: McpServerConfig, toolName: string): McpExposure {
 	const overrides = config.toolExposure ?? {};
-	const exact = overrides[toolName];
+	const exact = Object.hasOwn(overrides, toolName) ? overrides[toolName] : undefined;
 	if (exact !== undefined) return exact;
 	for (const [pattern, exposure] of Object.entries(overrides)) {
 		if (pattern.includes("*") && toolPatternRegExp(pattern).test(toolName)) return exposure;
@@ -153,6 +173,12 @@ export function validateMcpServerConfig(name: string, value: unknown): McpServer
 	if (!SERVER_NAME.test(name)) return `invalid server name "${name}" (use letters, digits, "_" and "-")`;
 	if (!isRecord(value)) return `server "${name}" must be an object`;
 	const { type, exposure, enabled, timeout, toolExposure } = value;
+	if (value.connection !== undefined && value.connection !== "lazy" && value.connection !== "eager") {
+		return `server "${name}": connection must be "lazy" or "eager"`;
+	}
+	if (value.description !== undefined && typeof value.description !== "string") {
+		return `server "${name}": description must be a string`;
+	}
 	const exposures = MCP_EXPOSURES.map((value) => `"${value}"`).join(", ");
 	if (exposure !== undefined && !isExposure(exposure)) {
 		return `server "${name}": exposure must be one of ${exposures}`;

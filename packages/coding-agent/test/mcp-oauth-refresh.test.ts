@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryAuthStorageBackend } from "../src/core/auth-storage.ts";
+import type { McpServerEntry } from "../src/extensions/mcp/config.ts";
 import { createMcpAuthProvider, McpOAuthCredentialStore, signInMcpServer } from "../src/extensions/mcp/oauth.ts";
 import { startOAuthMcpServer } from "./suite/mcp-oauth-server.ts";
 
@@ -20,8 +21,9 @@ describe("MCP OAuth refresh", () => {
 		cleanups.push(() => rmSync(lockDir, { recursive: true, force: true }));
 		// Stores sharing the credential file and lock directory stand in for separate pi processes.
 		const backend = new InMemoryAuthStorageBackend();
+		const entry: McpServerEntry = { name: "issues", config: { url: server.url }, source: "test" };
 		const process = () => {
-			const store = new McpOAuthCredentialStore(backend, lockDir).forServer(server.url);
+			const store = new McpOAuthCredentialStore(backend, lockDir).forServer(entry);
 			const provider = createMcpAuthProvider({
 				serverUrl: server.url,
 				store,
@@ -31,7 +33,7 @@ describe("MCP OAuth refresh", () => {
 			return { store, provider };
 		};
 		await signInMcpServer({
-			serverUrl: server.url,
+			entry,
 			store: process().store,
 			settings: {},
 			prompt: {

@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ToolResultMessage } from "@earendil-works/pi-ai/compat";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryAuthStorageBackend } from "../../src/core/auth-storage.ts";
 import { runMcpCommand } from "../../src/extensions/mcp/cli.ts";
 import type { McpOAuthConfig, McpServerEntry } from "../../src/extensions/mcp/config.ts";
 import { createMcpExtension } from "../../src/extensions/mcp/index.ts";
 import { McpOAuthCredentialStore } from "../../src/extensions/mcp/oauth.ts";
-import { createHarness, createTestUiContext, getMessageText, type Harness } from "./harness.ts";
+import { createHarness, createTestUiContext, getMessageText, getToolResult, type Harness } from "./harness.ts";
 import { startOAuthMcpServer } from "./mcp-oauth-server.ts";
 
 describe("AgentSession MCP OAuth", () => {
@@ -20,13 +20,19 @@ describe("AgentSession MCP OAuth", () => {
 		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-	async function setup(browser: "follow" | "paste", oauth?: McpOAuthConfig) {
+	async function setup(browser: "follow" | "paste" | "manual", oauth?: McpOAuthConfig, lazy = false) {
 		const server = await startOAuthMcpServer();
 		cleanups.push(server.close);
 		const backend = new InMemoryAuthStorageBackend();
+		const credentials = new McpOAuthCredentialStore(backend);
 		const entry: McpServerEntry = {
 			name: "issues",
-			config: { url: server.url, exposure: "direct", ...(oauth ? { oauth } : {}) },
+			config: {
+				url: server.url,
+				exposure: "direct",
+				...(lazy ? {} : { connection: "eager" }),
+				...(oauth ? { oauth } : {}),
+			},
 			source: "test",
 		};
 		const notifications: string[] = [];
@@ -37,13 +43,13 @@ describe("AgentSession MCP OAuth", () => {
 			extensionFactories: [
 				createMcpExtension({
 					loadConfig: () => ({ servers: [entry], errors: [] }),
-					credentials: new McpOAuthCredentialStore(backend),
+					credentials,
 					openUrl: (url) => {
 						opened.push(new URL(url));
 						if (browser === "follow") {
 							// The browser follows the authorization redirect to the loopback callback.
 							void fetch(url);
-						} else {
+						} else if (browser === "paste") {
 							// The browser cannot reach the callback; the user pastes the redirect URL.
 							redirectLocation = fetch(url, { redirect: "manual" }).then(
 								(response) => response.headers.get("location") ?? "",
@@ -53,7 +59,10 @@ describe("AgentSession MCP OAuth", () => {
 				}),
 			],
 		});
-		cleanups.push(() => harness.cleanup());
+		cleanups.push(async () => {
+			await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			harness.cleanup();
+		});
 		await harness.session.bindExtensions({
 			uiContext: createTestUiContext({
 				notify: (message) => notifications.push(message),
@@ -66,7 +75,29 @@ describe("AgentSession MCP OAuth", () => {
 							),
 			}),
 		});
-		return { harness, server, notifications, backend, opened };
+		if (!lazy)
+			await vi.waitFor(() =>
+				expect(notifications).toContain("MCP servers need attention:\n  issues: needs sign-in\nRun /mcp to fix."),
+			);
+		return {
+			harness,
+			server,
+			notifications,
+			backend,
+			opened,
+			credentials,
+			entry,
+			redirectLocation: () => redirectLocation,
+		};
+	}
+
+	async function modelCall(harness: Harness, name: string, args: Record<string, string>): Promise<ToolResultMessage> {
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		await harness.session.prompt("use the native MCP tool");
+		return getToolResult(harness, name);
 	}
 
 	async function callWhoami(harness: Harness): Promise<ToolResultMessage> {
@@ -84,7 +115,7 @@ describe("AgentSession MCP OAuth", () => {
 	}
 
 	it("signs in through the browser, refreshes expired tokens, and signs out", async () => {
-		const { harness, server, notifications, backend } = await setup("follow");
+		const { harness, server, notifications, backend, credentials, entry } = await setup("follow");
 
 		await harness.session.prompt("/mcp");
 		// Startup problems are reported once, pointing to /mcp.
@@ -96,27 +127,29 @@ describe("AgentSession MCP OAuth", () => {
 		expect(server.log).toEqual(["401 none", "register", "token code"]);
 		expect(backend.withLock((current) => ({ result: current }))).toContain('"access_token": "access-1"');
 
-		expect(getMessageText(await callWhoami(harness))).toBe("token access-1");
+		expect(getMessageText({ content: (await callWhoami(harness)).content.slice(0, 1) })).toBe("token access-1");
 
 		// An expired access token is refreshed without user interaction.
 		server.expireAccessTokens();
-		expect(getMessageText(await callWhoami(harness))).toBe("token access-2");
+		expect(getMessageText({ content: (await callWhoami(harness)).content.slice(0, 1) })).toBe("token access-2");
 		expect(server.log.slice(-3)).toEqual(["401 access-1", "token refresh", "call access-2"]);
 
 		// A token past its expiry is refreshed before the request, without a 401 round trip.
-		backend.withLock((current) => {
-			const states = JSON.parse(current ?? "{}") as Record<string, { tokensExpireAt?: number }>;
-			for (const state of Object.values(states)) state.tokensExpireAt = Date.now() - 1_000;
-			return { result: undefined, next: JSON.stringify(states) };
+		const scoped = credentials.forServer(entry);
+		await scoped.withMutationLock(async () => {
+			const state = await scoped.load();
+			if (!state) throw new Error("No signed-in grant");
+			state.tokensExpireAt = Date.now() - 1_000;
+			await scoped.save(state);
 		});
-		expect(getMessageText(await callWhoami(harness))).toBe("token access-3");
+		expect(getMessageText({ content: (await callWhoami(harness)).content.slice(0, 1) })).toBe("token access-3");
 		expect(server.log.slice(-2)).toEqual(["token refresh", "call access-3"]);
 
 		await harness.session.prompt("/mcp logout issues");
 		expect(notifications.at(-1)).toBe('Signed out of MCP server "issues".');
 		const result = await callWhoami(harness);
 		expect(result.isError).toBe(true);
-		expect(getMessageText(result)).toBe('MCP server "issues" requires sign-in. Run /mcp to sign in.');
+		expect(getMessageText(result)).toBe("Tool mcp__issues__whoami not found");
 	});
 
 	it("accepts a pasted redirect URL when the browser cannot reach the callback", async () => {
@@ -124,7 +157,7 @@ describe("AgentSession MCP OAuth", () => {
 
 		await harness.session.prompt("/mcp login");
 		expect(notifications.at(-1)).toBe('Signed in to MCP server "issues" (1 tools).');
-		expect(getMessageText(await callWhoami(harness))).toBe(`token access-1`);
+		expect(getMessageText({ content: (await callWhoami(harness)).content.slice(0, 1) })).toBe(`token access-1`);
 		expect(server.log).toContain("token code");
 	});
 
@@ -145,7 +178,7 @@ describe("AgentSession MCP OAuth", () => {
 		expect(notifications.at(-1)).toBe('Signed in to MCP server "issues" (1 tools).');
 		expect(opened[0].searchParams.get("redirect_uri")).toBe(callbackUrl);
 		expect(opened[0].searchParams.get("scope")).toBe("issues:read");
-		expect(getMessageText(await callWhoami(harness))).toBe("token access-1");
+		expect(getMessageText({ content: (await callWhoami(harness)).content.slice(0, 1) })).toBe("token access-1");
 	});
 
 	it("adds the listening port to a callback URL without one", async () => {
@@ -180,6 +213,69 @@ describe("AgentSession MCP OAuth", () => {
 		expect(output.at(-1)).toBe('Signed in to MCP server "issues" (1 tools).');
 
 		// The session still waits for a sign-in, and reconnects when the next turn starts.
-		expect(getMessageText(await callWhoami(harness))).toBe("token access-1");
+		expect(getMessageText({ content: (await callWhoami(harness)).content.slice(0, 1) })).toBe("token access-1");
+	});
+
+	it.each(["follow", "paste"] as const)(
+		"supports model-led lazy sign-in with a %s browser and keeps completion results private",
+		async (browser) => {
+			const { harness, server, opened, credentials, entry, redirectLocation } = await setup(
+				browser,
+				undefined,
+				true,
+			);
+			await harness.session.prompt("/mcp");
+			expect(server.log).toEqual([]);
+			harness.session.setActiveToolsByName(["mcp_auth", "mcp_discover"]);
+			const started = await modelCall(harness, "mcp_auth", { action: "begin", server: "issues" });
+			expect(started.isError).toBe(false);
+			const pending = JSON.parse(getMessageText(started)) as { state: string; id: string; redirectUrl: string };
+			expect(pending.state).toBe("pending");
+			expect(opened).toHaveLength(1);
+			expect(credentials.tokens(entry)).toBeUndefined();
+			const redirectUrl = await redirectLocation();
+			if (redirectUrl) {
+				const wrongState = new URL(redirectUrl);
+				wrongState.searchParams.set("state", "different-sign-in");
+				const rejected = await modelCall(harness, "mcp_auth", {
+					action: "complete",
+					id: pending.id,
+					redirectUrl: wrongState.href,
+				});
+				expect(rejected.isError).toBe(true);
+				expect(getMessageText(rejected)).toContain("different sign-in");
+			}
+			const completed = await modelCall(harness, "mcp_auth", {
+				action: "complete",
+				id: pending.id,
+				...(redirectUrl ? { redirectUrl } : {}),
+			});
+			expect(completed.isError).toBe(false);
+			expect(JSON.parse(getMessageText(completed))).toEqual({
+				state: "signed-in",
+				server: "issues",
+				id: pending.id,
+			});
+			expect(getMessageText(completed)).not.toMatch(/access-|refresh-|code=|state=/);
+			expect(credentials.tokens(entry)?.access_token).toBe("access-1");
+			expect(harness.session.getCallableToolNames()).not.toContain("mcp__issues__whoami");
+			await modelCall(harness, "mcp_discover", { server: "issues" });
+			expect(getMessageText({ content: (await callWhoami(harness)).content.slice(0, 1) })).toBe("token access-1");
+			expect(opened).toHaveLength(1);
+		},
+	);
+
+	it("cancels a model sign-in without saving a grant or allowing completion afterward", async () => {
+		const { harness, server, credentials, entry } = await setup("manual", undefined, true);
+		harness.session.setActiveToolsByName(["mcp_auth"]);
+		const started = await modelCall(harness, "mcp_auth", { action: "begin", server: "issues" });
+		const { id } = JSON.parse(getMessageText(started)) as { id: string };
+		const cancelled = await modelCall(harness, "mcp_auth", { action: "cancel", id });
+		expect(JSON.parse(getMessageText(cancelled))).toEqual({ state: "cancelled", id });
+		expect(credentials.tokens(entry)).toBeUndefined();
+		expect(server.log).toEqual(["register"]);
+		const completed = await modelCall(harness, "mcp_auth", { action: "complete", id });
+		expect(completed.isError).toBe(true);
+		expect(getMessageText(completed)).toContain("Unknown, expired, or withdrawn");
 	});
 });

@@ -175,6 +175,7 @@ import {
 import type { BackgroundCommandToolDetails } from "./tools/background-command.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { finalizeToolResult } from "./tools/result-finalizer.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
@@ -537,6 +538,8 @@ export class AgentSession {
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
+	/** Selected tools whose lazy extension has not registered them yet. */
+	private _pendingActiveToolNames = new Set<string>();
 	/** Created on the first `ctx.executeTool()` call. */
 	private _nestedToolCalls: NestedToolCallRunner | undefined;
 	/** Declared tools whose declarations requests leave out, from `prepareLoadout` hooks. */
@@ -794,6 +797,16 @@ export class AgentSession {
 			autoResizeImages: this.settingsManager.getImageAutoResize(),
 			...(resizeOptions ? { resizeOptions } : {}),
 		});
+		const permitted = {
+			...result,
+			content: normalizedContent,
+			details: hookResult ? hookResult.details : result.details,
+			structuredContent: hookResult ? hookResult.structuredContent : result.structuredContent,
+			isError: hookResult?.isError ?? isError,
+			usage: hookResult?.usage ?? result.usage,
+		};
+		const finalized = await finalizeToolResult(result, permitted);
+		if (finalized) return finalized;
 
 		if (!hookResult && normalizedContent === content) {
 			return undefined;
@@ -1887,14 +1900,28 @@ export class AgentSession {
 
 	/**
 	 * Set active tools by name.
-	 * Only tools in the registry can be enabled. Unknown and hidden tool names are ignored.
+	 * Only registered, non-hidden tools are enabled. Missing names are retained for lazy registration
+	 * under the current allowlist and exclusions; hidden tools are never activated.
 	 * Also rebuilds the system prompt to reflect the new tool set.
 	 * Changes take effect on the next agent turn.
 	 */
-	setActiveToolsByName(toolNames: string[]): void {
+	setActiveToolsByName(toolNames: string[], options?: { preservePending?: boolean }): void {
 		this._assertNotCheckpointHeld();
-		const tools = this._applyToolLoadout(toolNames);
+		const names = options?.preservePending ? [...toolNames, ...this._pendingActiveToolNames] : toolNames;
+		this._rememberPendingTools(names);
+		const tools = this._applyToolLoadout(names);
 		this._rebuildSystemPrompt(tools.map((tool) => tool.name));
+	}
+
+	private _rememberPendingTools(names: readonly string[]): void {
+		this._pendingActiveToolNames = new Set(
+			names.filter(
+				(name) =>
+					!this._toolRegistry.has(name) &&
+					(!this._allowedToolNames || this._allowedToolNames.has(name)) &&
+					!this._excludedToolNames?.has(name),
+			),
+		);
 	}
 
 	private _getToolExposure(name: string): ToolExposure {
@@ -2091,6 +2118,9 @@ export class AgentSession {
 	): SystemMessage | undefined {
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions(this._baseSystemPromptOptions);
 		this._hasPreparedPrompt = true;
+		if (!isDeepStrictEqual(options.selectedTools, this.getActiveToolNames())) {
+			this._rememberPendingTools(options.selectedTools);
+		}
 		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
 		this._recordToolSelection();
 		const sections = diffSystemPromptSections(
@@ -2120,7 +2150,7 @@ export class AgentSession {
 	}
 
 	private _recordToolSelection(): void {
-		const names = this.getActiveToolNames();
+		const names = [...this.getActiveToolNames(), ...this._pendingActiveToolNames];
 		const previous = this.sessionManager
 			.getBranch()
 			.findLast((entry) => entry.type === "custom" && entry.customType === TOOL_LOADOUT_SELECTION);
@@ -2141,6 +2171,7 @@ export class AgentSession {
 				? (selection.data as string[])
 				: current?.toolsAdded?.map((tool) => tool.name);
 		if (!selected) return;
+		this._rememberPendingTools(selected);
 		const names = this._applyToolLoadout(selected).map((tool) => tool.name);
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
 			...this._baseSystemPromptOptions,
@@ -4299,7 +4330,7 @@ export class AgentSession {
 				getActiveTools: () => this.getActiveToolNames(),
 				getAllTools: () => this.getAllTools(),
 				getSettings: () => this.settingsManager.getSettings(),
-				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
+				setActiveTools: (toolNames, options) => this.setActiveToolsByName(toolNames, options),
 				refreshTools: () => this._refreshToolRegistry(),
 				getCommands,
 				setModel: async (model) => {
@@ -4380,7 +4411,7 @@ export class AgentSession {
 		const previousActivatedOnRegistration = new Set(
 			[...this._toolRegistry.keys()].filter((name) => this._isActivatedOnRegistration(name)),
 		);
-		const previousActiveToolNames = this.getActiveToolNames();
+		const previousActiveToolNames = [...this.getActiveToolNames(), ...this._pendingActiveToolNames];
 		const allowedToolNames = this._allowedToolNames;
 		const excludedToolNames = this._excludedToolNames;
 		const isAllowedTool = (name: string): boolean =>
@@ -4572,7 +4603,7 @@ export class AgentSession {
 		resetApiProviders();
 		await this._resourceLoader.reload();
 		this._buildRuntime({
-			activeToolNames: this.getActiveToolNames(),
+			activeToolNames: [...this.getActiveToolNames(), ...this._pendingActiveToolNames],
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});

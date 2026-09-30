@@ -3,13 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type JsonRpcMessage,
+	type JsonRpcRequest,
 	LATEST_PROTOCOL_VERSION,
+	McpAbortError,
 	McpAuthRequiredError,
 	McpHttpError,
 	McpSessionExpiredError,
+	McpTimeoutError,
+	type ServerCapabilities,
 } from "@earendil-works/pi-mcp";
 import { createInMemoryTransportPair, type InMemoryTransport } from "@earendil-works/pi-mcp/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryAuthStorageBackend } from "../src/core/auth-storage.ts";
 import { truncateMiddle } from "../src/core/tools/truncate.ts";
 import { getMcpToolExposure, loadMcpConfig, type McpServerEntry } from "../src/extensions/mcp/config.ts";
@@ -299,33 +303,78 @@ describe("MCP tools", () => {
 
 describe("MCP connections", () => {
 	const servers: InMemoryTransport[] = [];
+	const connections: McpServerConnection[] = [];
+	afterEach(async () => {
+		for (const connection of connections.splice(0)) await connection.close();
+		for (const server of servers.splice(0)) await server.close();
+		vi.useRealTimers();
+	});
 
-	/** In-memory server that answers initialize, tools/list, and tools/call with "ok". */
-	function createTransport(options: { expireFirstCall?: boolean; methods?: string[]; noTools?: boolean } = {}) {
+	/** Wire peer; the client and connection lifecycle remain real. */
+	function createTransport(
+		options: {
+			expireFirstCall?: boolean;
+			methods?: string[];
+			noTools?: boolean;
+			capabilities?: ServerCapabilities;
+			handlers?: Record<string, (request: JsonRpcRequest) => unknown | Promise<unknown>>;
+		} = {},
+	) {
 		const pair = createInMemoryTransportPair();
 		servers.push(pair.server);
 		pair.server.onMessage((message) => {
 			if (!("id" in message) || !("method" in message)) return;
 			options.methods?.push(message.method);
-			const response: JsonRpcMessage =
-				message.method === "initialize"
-					? {
-							jsonrpc: "2.0",
-							id: message.id,
-							result: {
+			queueMicrotask(async () => {
+				let result: unknown;
+				const handler = options.handlers?.[message.method];
+				if (handler) result = await handler(message);
+				else {
+					switch (message.method) {
+						case "initialize":
+							result = {
 								protocolVersion: LATEST_PROTOCOL_VERSION,
-								capabilities: options.noTools ? { prompts: {} } : { tools: {} },
+								capabilities: options.capabilities ?? (options.noTools ? { prompts: {} } : { tools: {} }),
 								serverInfo: { name: "fake", version: "1.0.0" },
-							},
-						}
-					: message.method === "tools/list"
-						? options.noTools
-							? { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } }
-							: { jsonrpc: "2.0", id: message.id, result: { tools: [] } }
-						: message.method === "resources/read"
-							? { jsonrpc: "2.0", id: message.id, result: { contents: [{ uri: "docs://a", text: "ok" }] } }
-							: { jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: "ok" }] } };
-			queueMicrotask(() => void pair.server.send(response));
+							};
+							break;
+						case "tools/list":
+							if (options.noTools) {
+								await pair.server.send({
+									jsonrpc: "2.0",
+									id: message.id,
+									error: { code: -32601, message: "Method not found" },
+								});
+								return;
+							}
+							result = { tools: [] };
+							break;
+						case "prompts/list":
+							result = { prompts: [{ name: "brief" }] };
+							break;
+						case "resources/list":
+							result = { resources: [] };
+							break;
+						case "resources/templates/list":
+							result = { resourceTemplates: [] };
+							break;
+						case "resources/read":
+							result = { contents: [{ uri: "docs://a", text: "ok" }] };
+							break;
+						case "tools/call":
+							result = { content: [{ type: "text", text: "ok" }] };
+							break;
+						default:
+							await pair.server.send({
+								jsonrpc: "2.0",
+								id: message.id,
+								error: { code: -32601, message: "Method not found" },
+							});
+							return;
+					}
+				}
+				await pair.server.send({ jsonrpc: "2.0", id: message.id, result });
+			});
 		});
 		void pair.server.start();
 		if (options.expireFirstCall) {
@@ -353,8 +402,141 @@ describe("MCP connections", () => {
 			log,
 			onTools: () => {},
 		});
+		connections.push(connection);
 		return { connection, opened: () => opened };
 	}
+
+	it("closes default-lazy transports after ten idle minutes and reconnects on the next request", async () => {
+		vi.useFakeTimers();
+		const closed = vi.fn();
+		const transport = () => {
+			const client = createTransport();
+			client.onClose(closed);
+			return client;
+		};
+		const { connection, opened } = connect({ name: "fake", config: { command: "unused" }, source: "test" }, [
+			transport,
+			transport,
+		]);
+		expect(opened()).toBe(0);
+		await connection.callTool("echo", {}, {});
+		await vi.advanceTimersByTimeAsync(10 * 60 * 1000 - 1);
+		expect(connection.state).toBe("connected");
+		expect(closed).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(connection.state).toBe("idle");
+		expect(closed).toHaveBeenCalledTimes(1);
+		expect(await connection.callTool("echo", {}, {})).toEqual({ content: [{ type: "text", text: "ok" }] });
+		expect(connection.state).toBe("connected");
+		expect(opened()).toBe(2);
+	});
+
+	it("retains eager transports beyond the lazy idle timeout", async () => {
+		vi.useFakeTimers();
+		const closed = vi.fn();
+		const { connection, opened } = connect(
+			{ name: "fake", config: { command: "unused", connection: "eager" }, source: "test" },
+			[
+				() => {
+					const client = createTransport();
+					client.onClose(closed);
+					return client;
+				},
+			],
+		);
+		await connection.getClient();
+		await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+		expect(connection.state).toBe("connected");
+		expect(closed).not.toHaveBeenCalled();
+		expect(await connection.callTool("echo", {}, {})).toEqual({ content: [{ type: "text", text: "ok" }] });
+		expect(opened()).toBe(1);
+		await connection.close();
+		expect(closed).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps an active request connected and starts the idle period only after its response", async () => {
+		vi.useFakeTimers();
+		const received = Promise.withResolvers<void>();
+		const response = Promise.withResolvers<unknown>();
+		const transport = createTransport({
+			handlers: {
+				"tools/call": () => {
+					received.resolve();
+					return response.promise;
+				},
+			},
+		});
+		const closed = vi.fn();
+		transport.onClose(closed);
+		const { connection, opened } = connect({ name: "fake", config: { command: "unused" }, source: "test" }, [
+			() => transport,
+		]);
+		await connection.getClient();
+		await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
+		const pending = connection.callTool("slow", {}, { timeoutMs: 20 * 60 * 1000 });
+		await received.promise;
+		await vi.advanceTimersByTimeAsync(11 * 60 * 1000);
+		expect(connection.state).toBe("connected");
+		expect(closed).not.toHaveBeenCalled();
+		response.resolve({ content: [{ type: "text", text: "done" }] });
+		expect(await pending).toEqual({ content: [{ type: "text", text: "done" }] });
+		expect(opened()).toBe(1);
+		await vi.advanceTimersByTimeAsync(10 * 60 * 1000 - 1);
+		expect(closed).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(connection.state).toBe("idle");
+		expect(closed).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		{ kind: "tools", method: "tools/list", items: [{ name: "new", inputSchema: { type: "object" } }] },
+		{ kind: "resources", method: "resources/list", items: [{ name: "new", uri: "docs://new" }] },
+		{ kind: "prompts", method: "prompts/list", items: [{ name: "new" }] },
+	] as const)(
+		"protects a $kind notification refresh from idle close and publishes its response",
+		async ({ kind, method, items }) => {
+			vi.useFakeTimers();
+			const received = Promise.withResolvers<void>();
+			const response = Promise.withResolvers<unknown>();
+			let lists = 0;
+			const transport = createTransport({
+				capabilities: {
+					tools: { listChanged: true },
+					resources: { listChanged: true },
+					prompts: { listChanged: true },
+				},
+				handlers: {
+					[method]: () => {
+						if (++lists === 1) return { [kind]: [] };
+						received.resolve();
+						return response.promise;
+					},
+				},
+			});
+			const closed = vi.fn();
+			transport.onClose(closed);
+			const { connection, opened } = connect(
+				{ name: "fake", config: { command: "unused", timeout: 20 * 60 }, source: "test" },
+				[() => transport],
+			);
+			await connection.getClient();
+			await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
+			await servers.at(-1)?.send({ jsonrpc: "2.0", method: `notifications/${kind}/list_changed` });
+			await received.promise;
+			await vi.advanceTimersByTimeAsync(11 * 60 * 1000);
+			expect(connection.state).toBe("connected");
+			expect(closed).not.toHaveBeenCalled();
+			response.resolve({ [kind]: items });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(connection[kind]).toEqual(items);
+			expect(opened()).toBe(1);
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000 - 1);
+			expect(closed).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(connection.state).toBe("idle");
+			expect(closed).toHaveBeenCalledTimes(1);
+		},
+	);
 
 	it("starts a new session and retries once when the session expired", async () => {
 		const { connection, opened } = connect({ name: "fake", config: { command: "unused" }, source: "test" }, [
@@ -422,7 +604,8 @@ for await (const line of createInterface({ input: process.stdin })) {
 		await connection.getClient();
 		expect(connection.state).toBe("connected");
 		expect(connection.tools).toEqual([]);
-		expect(methods).toEqual(["initialize"]);
+		expect(connection.prompts).toEqual([{ name: "brief" }]);
+		expect(methods).toEqual(["initialize", "prompts/list"]);
 		await connection.close();
 	});
 
@@ -479,14 +662,36 @@ for await (const line of createInterface({ input: process.stdin })) {
 	});
 
 	it("retries resource reads, but not tool calls, after a transient HTTP error", async () => {
-		const transport = createTransport();
+		const received = Promise.withResolvers<void>();
+		let balance = 100;
+		const invoices: string[] = [];
+		const methods: string[] = [];
+		const transport = createTransport({
+			methods,
+			handlers: {
+				"tools/call": (request) => {
+					const { invoice, amount } = (request.params as { arguments: { invoice: string; amount: number } })
+						.arguments;
+					balance -= amount;
+					invoices.push(invoice);
+					received.resolve();
+					// The invoice was charged, but its response never reaches the client.
+					return new Promise(() => {});
+				},
+			},
+		});
 		const send = transport.send.bind(transport);
-		const failed = new Set<string>();
-		// The first read and the first call fail with 502.
+		let reads = 0;
+		let calls = 0;
 		transport.send = async (message) => {
 			const method = "method" in message ? message.method : "";
-			if ((method === "resources/read" || method === "tools/call") && !failed.has(method)) {
-				failed.add(method);
+			if (method === "resources/read" && ++reads === 1) {
+				throw new McpHttpError(502, "MCP HTTP request failed with status 502");
+			}
+			if (method === "tools/call") {
+				calls++;
+				await send(message);
+				await received.promise;
 				throw new McpHttpError(502, "MCP HTTP request failed with status 502");
 			}
 			return send(message);
@@ -495,8 +700,75 @@ for await (const line of createInterface({ input: process.stdin })) {
 			() => transport,
 		]);
 		expect(await connection.readResource("docs://a", {})).toEqual({ contents: [{ uri: "docs://a", text: "ok" }] });
-		await expect(connection.callTool("echo", {}, {})).rejects.toThrow("status 502");
+		expect(reads).toBe(2);
+		await expect(connection.callTool("charge", { invoice: "invoice-1", amount: 25 }, {})).rejects.toMatchObject({
+			message: `MCP tool "fake/charge" did not return a confirmed result: MCP HTTP request failed with status 502. It may have run. Check the server's state before repeating it; pi did not retry the call.`,
+			cause: expect.any(McpHttpError),
+		});
+		expect(await connection.readResource("docs://a", {})).toEqual({ contents: [{ uri: "docs://a", text: "ok" }] });
+		expect(balance).toBe(75);
+		expect(invoices).toEqual(["invoice-1"]);
+		expect(calls).toBe(1);
+		expect(methods.filter((method) => method === "tools/call")).toHaveLength(1);
 		await connection.close();
+	});
+
+	it.each(["timeout", "abort"] as const)("does not replay a charged invoice after response %s", async (failure) => {
+		vi.useFakeTimers();
+		const received = Promise.withResolvers<void>();
+		let balance = 100;
+		const invoices: string[] = [];
+		const methods: string[] = [];
+		const transport = createTransport({
+			methods,
+			handlers: {
+				"tools/call": (request) => {
+					const { invoice, amount } = (request.params as { arguments: { invoice: string; amount: number } })
+						.arguments;
+					balance -= amount;
+					invoices.push(invoice);
+					received.resolve();
+					return new Promise(() => {});
+				},
+			},
+		});
+		const { connection, opened } = connect({ name: "fake", config: { command: "unused" }, source: "test" }, [
+			() => transport,
+		]);
+		const cancelled: JsonRpcMessage[] = [];
+		servers.at(-1)?.onMessage((message) => {
+			if ("method" in message && message.method === "notifications/cancelled") cancelled.push(message);
+		});
+		const controller = new AbortController();
+		const pending = connection.callTool(
+			"charge",
+			{ invoice: "invoice-1", amount: 25 },
+			{ signal: controller.signal, timeoutMs: 50 },
+		);
+		const reason = failure === "timeout" ? "MCP request timed out after 50ms" : "MCP request aborted";
+		const rejected = expect(pending).rejects.toMatchObject({
+			message: `MCP tool "fake/charge" did not return a confirmed result: ${reason}. It may have run. Check the server's state before repeating it; pi did not retry the call.`,
+			cause: failure === "timeout" ? expect.any(McpTimeoutError) : expect.any(McpAbortError),
+		});
+		await received.promise;
+		expect(balance).toBe(75);
+		expect(invoices).toEqual(["invoice-1"]);
+		if (failure === "timeout") await vi.advanceTimersByTimeAsync(50);
+		else controller.abort("stop");
+		await rejected;
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(cancelled).toEqual([
+			{
+				jsonrpc: "2.0",
+				method: "notifications/cancelled",
+				params: { requestId: 3, reason: failure === "timeout" ? "Request timed out" : "stop" },
+			},
+		]);
+		expect(await connection.readResource("docs://a", {})).toEqual({ contents: [{ uri: "docs://a", text: "ok" }] });
+		expect(balance).toBe(75);
+		expect(invoices).toEqual(["invoice-1"]);
+		expect(methods.filter((method) => method === "tools/call")).toHaveLength(1);
+		expect(opened()).toBe(1);
 	});
 
 	it("asks OAuth servers that keep rejecting requests for a new sign-in", async () => {

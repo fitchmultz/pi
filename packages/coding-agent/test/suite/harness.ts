@@ -109,6 +109,7 @@ export function createTestUiContext(overrides: Partial<ExtensionUIContext> = {})
 }
 
 export interface HarnessOptions {
+	cwd?: string;
 	sessionManager?: SessionManager;
 	settingsManager?: SettingsManager;
 	models?: FauxModelDefinition[];
@@ -224,16 +225,23 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		},
 	});
 	const extensionsResult = options.extensionFactories
-		? await createTestExtensionsResult(options.extensionFactories, tempDir)
+		? await createTestExtensionsResult(options.extensionFactories, options.cwd ?? tempDir)
 		: undefined;
 	const resourceLoader =
 		options.resourceLoader ?? createTestResourceLoader(extensionsResult ? { extensionsResult } : undefined);
+	const factories = options.extensionFactories;
+	if (factories && !options.resourceLoader) {
+		resourceLoader.reload = async () => {
+			const refreshed = await createTestExtensionsResult(factories, options.cwd ?? tempDir);
+			resourceLoader.getExtensions = () => refreshed;
+		};
+	}
 
 	const session = new AgentSession({
 		agent,
 		sessionManager,
 		settingsManager,
-		cwd: tempDir,
+		cwd: options.cwd ?? tempDir,
 		modelRuntime: getModelRuntime(modelRegistry),
 		resourceLoader,
 		baseToolsOverride: toolMap,

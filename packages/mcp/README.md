@@ -27,6 +27,8 @@ await client.close();
 
 For a remote server, use `new StreamableHttpTransport({ url, headers })`. Fetch can be injected for proxying or custom networking.
 
+The client connects when the host calls `connect()`. It does not read `mcp.json`, restore catalogs, or apply coding-agent permission hooks. Pi's lazy/eager lifecycle, discovery, and result artifacts belong to the [coding-agent MCP extension](../coding-agent/docs/mcp.md).
+
 ### Tools for an LLM
 
 `toLlmContent(result)` converts a `CallToolResult` to text and image content for a model, in the shape of `@earendil-works/pi-ai`'s `TextContent` and `ImageContent`. Text and images pass through, embedded text and image resources are unwrapped, and audio, resource links, and binary resources become short text placeholders. A result without content blocks but with `structuredContent` becomes its JSON.
@@ -54,6 +56,20 @@ const tools: AgentTool[] = (await client.listTools()).map((tool) => ({
 ```
 
 The [mcp-codemode example](https://github.com/earendil-works/pi/tree/main/packages/agent/examples/mcp-codemode) also forwards progress, passes `structuredContent` through, and lets `@earendil-works/pi-codemode` scripts call the tools.
+
+### Resources and prompts
+
+`listResources()` and `listResourceTemplates()` follow all pages. `listResourcesPage(cursor?, options?)` and `listResourceTemplatesPage(cursor?, options?)` return one page with an optional `nextCursor`; `readResource(uri, options?)` returns resource contents.
+
+`listPrompts(options?)` follows all prompt pages and returns `Prompt[]`. Each prompt has a `name`, optional title and description, and optional arguments with `name`, `description`, and `required`. Fetch one with string-valued arguments:
+
+```typescript
+const prompts = await client.listPrompts();
+const prompt = await client.getPrompt("summarize", { topic: "MCP" });
+// GetPromptResult: { description?, messages: [{ role: "user" | "assistant", content: ContentBlock }] }
+```
+
+`Prompt`, `PromptArgument`, and `GetPromptResult` are exported from the package root. `getPrompt()` validates the response envelope; the host decides how to present its content. The client does not register slash commands or send messages to a model. Subscribe with `onNotification("notifications/prompts/list_changed", handler)` to refresh an inventory when the server changes it.
 
 ### OAuth
 
@@ -120,6 +136,7 @@ An MCP transport owns framing and I/O. It delivers individual JSON-RPC messages 
 - ping
 - paginated `tools/list`
 - `tools/call`, including structured content
+- paginated resources and resource templates, resource reads, paginated prompts, and prompt retrieval
 - progress notifications and timeout renewal
 - request cancellation
 - Streamable HTTP sessions, the server-to-client GET stream with reconnection, and resumption of dropped response streams with `Last-Event-ID`
@@ -127,7 +144,7 @@ An MCP transport owns framing and I/O. It delivers individual JSON-RPC messages 
 - server `ping` and `roots/list` requests
 - logging and tool-list-change notifications through the generic notification API
 - OAuth protected-resource and authorization-server discovery
-- PKCE authorization code flow, dynamic client registration, token refresh (one refresh shared by concurrent 401s), and step-up authorization for `insufficient_scope`
+- PKCE authorization code flow, dynamic registration, pre-registered clients and HTTPS client metadata documents, token refresh (one refresh shared by concurrent 401s), and step-up authorization for `insufficient_scope`
 
 Batch JSON-RPC messages, legacy HTTP+SSE, servers, sampling, and tasks are outside the initial core.
 

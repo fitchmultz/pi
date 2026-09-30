@@ -301,12 +301,16 @@ Discovery delivers owner-supplied full instructions and never expands callable
 permissions. Same-batch use is refused until an instruction-bearing request has
 occurred. See [extensions](packages/coding-agent/docs/extensions.md).
 
-The separate MCP adapter remains independently managed. It adds capabilities such
-as MCP Apps, elicitation, prompts, saved-result access, and additional transports
-and auth flows. Its `/mcp` command replaces the builtin session connector; it does
-not transparently share native configuration, credentials, or tool names. The
-builtin `pi mcp` CLI remains separate. This integration does not migrate personal
-servers or credentials or remove the adapter. See [MCP](packages/coding-agent/docs/mcp.md#other-mcp-extensions).
+Native MCP provides lazy-by-default connections with explicit eager profiles,
+account-bound catalogs, scoped discovery, resources, prompt commands, browser
+OAuth, and complete hook-permitted result artifacts. The separate adapter remains
+independently managed for other hosts and capabilities such as MCP Apps,
+elicitation, and additional transports and auth flows. Its `/mcp` command replaces
+the builtin session connector; configuration, credentials, and names are not
+transparently shared. The builtin `pi mcp` CLI offers explicit copy-only adapter
+import. This integration does not cut over personal servers or credentials,
+remove the adapter, or qualify separately deployed profiles. See
+[MCP](packages/coding-agent/docs/mcp.md#extensions-and-sdk-hosts).
 
 Old native-window sessions require the standalone
 [`pi convert-session`](packages/coding-agent/docs/session-format.md) command before

@@ -13,6 +13,8 @@ import { APP_NAME, CONFIG_DIR_NAME } from "../../config.ts";
 import { validateMcpServerConfig } from "../../core/mcp-servers.ts";
 import { ProjectTrustStore } from "../../core/trust-manager.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
+import { importAdapter } from "./adapter-import.ts";
+import { McpCatalogStore, type McpServerCatalog } from "./catalog.ts";
 import {
 	addMcpServerConfig,
 	getMcpToolExposure,
@@ -34,17 +36,20 @@ const HELP = `${chalk.bold("Usage:")}
   ${APP_NAME} mcp add <server> [options] -- <command> [args...]
   ${APP_NAME} mcp add <server> [options] --url <url>
   ${APP_NAME} mcp remove <server> [-l]
-  ${APP_NAME} mcp list [--json]
+  ${APP_NAME} mcp list [--json] [--connect]
+  ${APP_NAME} mcp import-adapter --config <path> [--config <override>] [--dry-run]
   ${APP_NAME} mcp login <server> [--timeout <seconds>]
   ${APP_NAME} mcp logout <server>
 
 Configure and check MCP servers and sign in to OAuth servers without starting a session.
-Reads ~/${CONFIG_DIR_NAME}/agent/mcp.json and, in trusted projects, ${CONFIG_DIR_NAME}/mcp.json.
+Reads ~/.config/mcp/mcp.json, ~/${CONFIG_DIR_NAME}/agent/mcp.json and trusted project
+${CONFIG_DIR_NAME}/mcp.json, in increasing precedence order.
 
 Commands:
   add <server>            Add or replace a server in mcp.json
   remove <server>         Remove a server from mcp.json
-  list                    Show state, tools, and errors (exits 1 on failure)
+  list                    Show config and cached tools without connecting
+  import-adapter          Copy adapter config and optional grants; never overwrite native entries
   login <server>          Sign in through the browser
   logout <server>         Delete the stored OAuth credentials
 
@@ -65,10 +70,20 @@ Options for add:
                           Fixed OAuth callback port
   --exposure <mode>       codemode (default), codemode-deferred, deferred, direct,
                           or hidden
+  --connection <mode>     lazy (default) or eager, independent of exposure
 
 Other options:
   --json                  Print the list as JSON
-  --timeout <seconds>     How long login waits for the browser (default: 300)`;
+  --connect               Probe enabled servers when listing (exits 1 on failure)
+  --timeout <seconds>     How long login waits for the browser (default: 300)
+
+Import options:
+  --config <path>         Adapter sources, in increasing precedence order (repeatable)
+  --credentials <path>    Exported AuthEntry JSON object keyed by adapter profile name
+  --keychain              Read the adapter's macOS Keychain entries explicitly
+  --adapter-stopped       Confirm all adapter sessions using these grants are stopped;
+                          keep them stopped, since rotating tokens are not independent copies
+  --dry-run               Validate conversion without writing config or credentials`;
 
 const HELP_HINT = chalk.dim(`Use "${APP_NAME} mcp --help" for usage.`);
 
@@ -84,6 +99,7 @@ export interface McpCommandOptions {
 	/** Defaults to console output. */
 	log?: (line: string) => void;
 	error?: (line: string) => void;
+	sharedConfigPath?: string;
 }
 
 interface ServerReport {
@@ -92,6 +108,7 @@ interface ServerReport {
 	source: string;
 	enabled: boolean;
 	exposure: string;
+	connection: "lazy" | "eager";
 	transport: string;
 	state: string;
 	tools: string[];
@@ -99,6 +116,7 @@ interface ServerReport {
 	toolExposure?: Record<string, string>;
 	resources?: number;
 	resourceTemplates?: number;
+	prompts?: number;
 	error?: string;
 }
 
@@ -193,23 +211,62 @@ export async function runMcpCommand(args: string[], options: McpCommandOptions):
 			? add(rest, projectConfig, options, log, error)
 			: remove(rest, projectConfig, options, log, error);
 	}
+	const credentials = options.credentials ?? new McpOAuthCredentialStore(undefined, options.agentDir);
+	if (command === "import-adapter") {
+		const parsed = parseOptions(
+			rest,
+			{ config: "list", credentials: "value", keychain: "flag", "adapter-stopped": "flag", "dry-run": "flag" },
+			error,
+		);
+		if (!parsed || parsed.positional.length) return 1;
+		try {
+			const credentialFile = parsed.values.get("credentials");
+			const result = await importAdapter({
+				configPaths: parsed.lists.get("config") ?? [],
+				agentDir: options.agentDir,
+				credentials,
+				credentialFile: typeof credentialFile === "string" ? credentialFile : undefined,
+				keychain: parsed.values.has("keychain"),
+				adapterStopped: parsed.values.has("adapter-stopped"),
+				dryRun: parsed.values.has("dry-run"),
+			});
+			log(
+				`${result.dryRun ? "Validated" : "Copied and verified"} ${result.servers.length} servers and ${result.grants.length} grants. Adapter sources are unchanged.`,
+			);
+			return 0;
+		} catch (importError) {
+			error(`Adapter import failed: ${errorMessage(importError)}`);
+			return 1;
+		}
+	}
 	const projectTrusted = new ProjectTrustStore(options.agentDir).get(options.cwd) === true;
-	const loaded = loadMcpConfig({ agentDir: options.agentDir, cwd: options.cwd, projectTrusted });
+	const loaded = loadMcpConfig({
+		agentDir: options.agentDir,
+		cwd: options.cwd,
+		projectTrusted,
+		sharedConfigPath: options.sharedConfigPath,
+	});
 	const untrustedNote =
 		!projectTrusted && existsSync(projectConfig)
 			? `${projectConfig} is ignored because the project is not trusted. Start ${APP_NAME} in the project to trust it.`
 			: undefined;
-	const credentials = options.credentials ?? new McpOAuthCredentialStore();
-
 	switch (command) {
 		case "list": {
-			const parsed = parseOptions(rest, { json: "flag" }, error);
+			const parsed = parseOptions(rest, { json: "flag", connect: "flag" }, error);
 			if (!parsed) return 1;
 			if (parsed.positional.length > 0) {
-				error(`Usage: ${APP_NAME} mcp list [--json]\n${HELP_HINT}`);
+				error(`Usage: ${APP_NAME} mcp list [--json] [--connect]\n${HELP_HINT}`);
 				return 1;
 			}
-			return list(loaded, parsed.values.has("json"), untrustedNote, options, credentials, log);
+			return list(
+				loaded,
+				parsed.values.has("json"),
+				parsed.values.has("connect"),
+				untrustedNote,
+				options,
+				credentials,
+				log,
+			);
 		}
 		case "login":
 		case "logout": {
@@ -234,7 +291,7 @@ export async function runMcpCommand(args: string[], options: McpCommandOptions):
 				return 1;
 			}
 			if (command === "logout") {
-				const removed = credentials.remove(url);
+				const removed = await credentials.remove(entry);
 				log(removed ? `Signed out of MCP server "${name}".` : `No stored credentials for MCP server "${name}".`);
 				return 0;
 			}
@@ -244,7 +301,7 @@ export async function runMcpCommand(args: string[], options: McpCommandOptions):
 				return 1;
 			}
 			try {
-				return await login(entry, connection, url, timeout * 1000, options, credentials, log, error);
+				return await login(entry, connection, timeout * 1000, options, credentials, log, error);
 			} finally {
 				await connection.close();
 			}
@@ -291,6 +348,7 @@ function add(
 			"oauth-client-secret": "value",
 			"oauth-callback-port": "value",
 			exposure: "value",
+			connection: "value",
 		},
 		error,
 		2,
@@ -347,6 +405,7 @@ function add(
 		};
 	}
 	if (exposure !== undefined) config.exposure = exposure;
+	if (value("connection") !== undefined) config.connection = value("connection");
 	const validated = validateMcpServerConfig(name, config);
 	if (typeof validated === "string") {
 		error(validated);
@@ -406,11 +465,15 @@ function remove(
 		log(`Removed ${scope} MCP server "${name}" from ${path}.`);
 		return 0;
 	}
-	const other = loadMcpConfig({ agentDir: options.agentDir, cwd: options.cwd, projectTrusted: true }).servers.find(
-		(server) => server.name === name && server.scope !== scope,
-	);
+	const other = loadMcpConfig({
+		agentDir: options.agentDir,
+		cwd: options.cwd,
+		projectTrusted: true,
+		sharedConfigPath: options.sharedConfigPath,
+	}).servers.find((server) => server.name === name && server.scope !== scope);
+	const inherited = other?.scope === "shared";
 	error(
-		`No ${scope} MCP server named "${name}" in ${path}.${other ? ` It is defined in ${other.source}${other.scope === "project" ? "; use --local" : "; omit --local"}.` : ""}`,
+		`No ${scope} MCP server named "${name}" in ${path}.${other ? (inherited ? ` It is inherited from ${other.source}; disable it with /mcp instead.` : ` It is defined in ${other.source}${other.scope === "project" ? "; use --local" : "; omit --local"}.`) : ""}`,
 	);
 	return 1;
 }
@@ -418,11 +481,13 @@ function remove(
 async function list(
 	loaded: LoadedMcpConfig,
 	json: boolean,
+	connect: boolean,
 	untrustedNote: string | undefined,
 	options: McpCommandOptions,
 	credentials: McpOAuthCredentialStore,
 	log: (line: string) => void,
 ): Promise<number> {
+	const catalogs = new McpCatalogStore({ agentDir: options.agentDir });
 	const reports = await Promise.all(
 		loaded.servers.map(async (entry): Promise<ServerReport> => {
 			const report: ServerReport = {
@@ -431,11 +496,37 @@ async function list(
 				source: entry.source,
 				enabled: entry.config.enabled !== false,
 				exposure: entry.config.exposure ?? "codemode",
+				connection: entry.config.connection ?? "lazy",
 				transport: describeTransport(entry),
 				state: "disabled",
 				tools: [],
 			};
 			if (!report.enabled) return report;
+			if (!connect) {
+				let catalog: McpServerCatalog | undefined;
+				try {
+					catalog = catalogs.load(entry, options.cwd, credentials.catalogIdentity(entry));
+				} catch (error) {
+					report.state = "cache-error";
+					report.error = errorMessage(error);
+					return report;
+				}
+				report.state = catalog ? "cached" : "configured";
+				report.tools = catalog?.tools.map((tool) => tool.name) ?? [];
+				if (catalog?.hasResources) {
+					report.resources = catalog.resources.length;
+					report.resourceTemplates = catalog.resourceTemplates.length;
+				}
+				if (catalog) {
+					report.prompts = catalog.prompts.length;
+					const overrides = catalog.tools.flatMap((tool) => {
+						const exposure = getMcpToolExposure(entry.config, tool.name);
+						return exposure === report.exposure ? [] : [[tool.name, exposure] as const];
+					});
+					if (overrides.length) report.toolExposure = Object.fromEntries(overrides);
+				}
+				return report;
+			}
 			const connection = createConnection(entry, options, credentials);
 			try {
 				await connection.getClient();
@@ -453,12 +544,31 @@ async function list(
 				report.resources = connection.resources.length;
 				report.resourceTemplates = connection.resourceTemplates.length;
 			}
+			report.prompts = connection.prompts.length;
+			if (connection.state === "connected") {
+				try {
+					catalogs.save(entry, options.cwd, credentials.catalogIdentity(entry), {
+						tools: connection.tools,
+						hasResources: connection.hasResources,
+						resources: connection.resources,
+						resourceTemplates: connection.resourceTemplates,
+						prompts: connection.prompts,
+						instructions: connection.instructions,
+					});
+				} catch (error) {
+					report.error = `Could not save the MCP catalog: ${errorMessage(error)}`;
+				}
+			}
 			if (connection.state !== "connected" && connection.error) report.error = connection.error;
 			await connection.close();
 			return report;
 		}),
 	);
-	const failed = loaded.errors.length > 0 || reports.some((report) => report.enabled && report.state !== "connected");
+	const failed =
+		loaded.errors.length > 0 ||
+		reports.some(
+			(report) => report.enabled && (report.error !== undefined || (connect && report.state !== "connected")),
+		);
 
 	if (json) {
 		log(
@@ -493,6 +603,7 @@ async function list(
 		if (report.resources !== undefined) {
 			log(`  resources: ${report.resources}, URI templates: ${report.resourceTemplates ?? 0}`);
 		}
+		if (report.prompts) log(`  prompts: ${report.prompts}`);
 		if (report.error) log(`  ${report.error.split("\n").join("\n  ")}`);
 	}
 	for (const configError of loaded.errors) log(`config error: ${configError}`);
@@ -503,7 +614,6 @@ async function list(
 async function login(
 	entry: McpServerEntry,
 	connection: McpServerConnection,
-	url: string,
 	timeoutMs: number,
 	options: McpCommandOptions,
 	credentials: McpOAuthCredentialStore,
@@ -527,8 +637,8 @@ async function login(
 	const interactive = process.stdin.isTTY === true && options.openUrl === undefined;
 	try {
 		await signInMcpServer({
-			serverUrl: url,
-			store: credentials.forServer(url),
+			entry,
+			store: credentials.forServer(entry),
 			settings: connection.oauthSettings(),
 			challenge: connection.challenge,
 			prompt: {

@@ -29,7 +29,7 @@ const resourceLoader = new DefaultResourceLoader({
 	extensionFactories: [
 		createCodemodeExtension({ mode: "on" }),
 		createToolSearchExtension(),
-		// Reads mcp.json from the agent directory and the trusted project, like the CLI.
+		// Reads shared, Pi-global and trusted-project mcp.json with the CLI's lazy default.
 		createMcpExtension(),
 	],
 });
@@ -46,7 +46,7 @@ const { session } = await createAgentSession({
 });
 
 try {
-	// Emits session_start, which connects the MCP servers in the background.
+	// Restores matching catalogs without connecting lazy servers; explicit eager servers connect.
 	await session.bindExtensions({});
 	console.log("Active tools:", session.getActiveToolNames().join(", "));
 	session.subscribe((event) => {

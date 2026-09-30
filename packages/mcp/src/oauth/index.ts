@@ -52,3 +52,4 @@ export type {
 	OAuthServerInfo,
 	OAuthTokens,
 } from "./types.ts";
+export { parseClientInformation, parseOAuthTokens } from "./types.ts";
