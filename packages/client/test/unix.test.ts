@@ -2,7 +2,7 @@ import { type ChildProcess, fork } from "node:child_process";
 import { once } from "node:events";
 import { lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { Server as RuntimeServer } from "../../server/src/server.ts";
 import { createTestServerServices } from "../../server/src/testing/host.ts";
@@ -14,9 +14,10 @@ const servers = new Set<RuntimeServer>();
 const rawServers = new Set<Server>();
 const rawSockets = new Set<Socket>();
 const children = new Set<ChildProcess>();
+const socketTempDir = process.platform === "android" ? resolve(dirname(process.execPath), "../tmp") : "/tmp";
 
 async function makeDirectory(): Promise<string> {
-	const directory = await mkdtemp(join("/tmp", "pc-"));
+	const directory = await mkdtemp(join(socketTempDir, "pc-"));
 	tempDirectories.add(directory);
 	return directory;
 }

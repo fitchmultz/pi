@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-	copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
+	chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
 	realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -66,7 +66,6 @@ export function isolatedEnvironment(home, tools) {
 
 export function prepareTermuxCompiler(source, tools, env) {
 	// TypeScript 7 has no Android package. Use the lockfile-pinned Linux compiler.
-	// ponytail: fixture coverage verifies installation, not execution on real Termux hardware.
 	const name = `@typescript/typescript-linux-${process.arch}`;
 	const key = `node_modules/${name}`;
 	const locked = JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8")).packages[key];
@@ -83,6 +82,38 @@ export function prepareTermuxCompiler(source, tools, env) {
 		cwd: directory, env,
 	});
 	const binary = join(directory, key, "lib/tsc");
+	const probe = spawnSync(binary, ["--version"], { env, encoding: "utf8" });
+	if (probe.stderr?.startsWith("SIGSYS:") && probe.stderr.includes("fanotifyAvailable")) {
+		console.log("Android blocked the compiler's fanotify probe; rebuilding the pinned source (requires Go >=1.26).");
+		const { gitHead } = JSON.parse(readFileSync(join(directory, key, "package.json"), "utf8"));
+		if (!/^[a-f0-9]{40}$/.test(gitHead ?? "")) throw new Error("Missing pinned TypeScript source commit");
+		const goEnv = { ...env, GOOS: process.platform === "android" ? "android" : "linux",
+			GOARCH: process.arch === "x64" ? "amd64" : process.arch,
+			CGO_ENABLED: process.platform === "android" && process.arch === "x64" ? "1" : "0",
+			GOTOOLCHAIN: "local", GOWORK: "off",
+			GOPATH: join(directory, "go"), GOCACHE: join(directory, "go-cache") };
+		const downloaded = JSON.parse(run("go", ["mod", "download", "-json", `github.com/microsoft/typescript-go@${gitHead}`], {
+			cwd: directory, env: goEnv, stdio: "pipe",
+		}));
+		if (downloaded.Origin?.Hash !== gitHead || !downloaded.Sum || !downloaded.Dir) {
+			throw new Error("Downloaded TypeScript source does not match the pinned commit");
+		}
+		const buildSource = join(directory, "source");
+		rmSync(buildSource, { recursive: true, force: true });
+		cpSync(downloaded.Dir, buildSource, { recursive: true });
+		const watcher = join(buildSource, "internal/fswatch/fanotify_linux.go");
+		const contents = readFileSync(watcher, "utf8");
+		const patched = contents.replace(/func fanotifyAvailable\(\) bool \{[\s\S]*?\n\}/, "func fanotifyAvailable() bool {\n\treturn false\n}");
+		if (patched === contents) throw new Error("Cannot disable the compiler's fanotify probe");
+		// ponytail: build-only compiler uses inotify; use an official Android artifact when published.
+		chmodSync(watcher, 0o644);
+		writeFileSync(watcher, patched);
+		const compiled = join(directory, "tsc");
+		run("go", ["build", "-mod=readonly", "-buildvcs=false", "-trimpath", "-tags=noembed", "-o", compiled, "./cmd/tsgo"], {
+			cwd: buildSource, env: goEnv,
+		});
+		renameSync(compiled, binary);
+	}
 	const version = run(binary, ["--version"], { env, stdio: "pipe" });
 	if (version !== `Version ${locked.version}`) throw new Error(`Unexpected compiler version: ${version}`);
 	replaceSymlink(binary, join(source, "node_modules/.bin/tsc"));

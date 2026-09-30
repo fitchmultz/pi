@@ -56,18 +56,24 @@ const getSuggestions = (
 
 describe("CombinedAutocompleteProvider", () => {
 	describe("extractPathPrefix", () => {
-		it("extracts / from 'hey /' when forced", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["hey /"];
-			const cursorLine = 0;
-			const cursorCol = 5; // After the "/"
+		let baseDir = "";
+		beforeEach(() => {
+			baseDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-absolute-"));
+			setupFolder(baseDir, { files: { "README.md": "readme" } });
+		});
+		afterEach(() => rmSync(baseDir, { recursive: true, force: true }));
 
-			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
+		it("extracts an absolute path after prose when forced", async () => {
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = `hey ${baseDir}/`;
+			const result = await getSuggestions(provider, [line], 0, line.length, true);
 
-			assert.notEqual(result, null, "Should return suggestions for root directory");
-			if (result) {
-				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
-			}
+			assert.ok(result);
+			assert.strictEqual(result.prefix, `${baseDir}/`);
+			assert.deepStrictEqual(
+				result.items.map((item) => item.value),
+				[`${baseDir}/README.md`],
+			);
 		});
 
 		it("extracts /A from '/A' when forced", async () => {
@@ -99,18 +105,16 @@ describe("CombinedAutocompleteProvider", () => {
 		});
 
 		it("triggers for absolute paths after slash command argument", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["/command /"];
-			const cursorLine = 0;
-			const cursorCol = 10; // After the second "/"
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = `/command ${baseDir}/`;
+			const result = await getSuggestions(provider, [line], 0, line.length, true);
 
-			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
-
-			console.log("Result:", result);
-			assert.notEqual(result, null, "Should trigger for absolute paths in command arguments");
-			if (result) {
-				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
-			}
+			assert.ok(result);
+			assert.strictEqual(result.prefix, `${baseDir}/`);
+			assert.deepStrictEqual(
+				result.items.map((item) => item.value),
+				[`${baseDir}/README.md`],
+			);
 		});
 	});
 

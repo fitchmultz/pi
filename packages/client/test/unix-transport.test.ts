@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server, Socket } from "node:net";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { parseServiceCall } from "@earendil-works/chord";
 import { ClientMessageDecoder, encodeServerMessage, PROTOCOL_VERSION } from "@earendil-works/pi-protocol";
@@ -12,9 +12,10 @@ const serverId = "00000000-0000-4000-8000-000000000001";
 const tempDirectories = new Set<string>();
 const servers = new Set<Server>();
 const sockets = new Set<Socket>();
+const socketTempDir = process.platform === "android" ? resolve(dirname(process.execPath), "../tmp") : "/tmp";
 
 async function makeSocketPath(): Promise<string> {
-	const directory = await mkdtemp(join("/tmp", "pi-client-transport-"));
+	const directory = await mkdtemp(join(socketTempDir, "pi-client-transport-"));
 	tempDirectories.add(directory);
 	return join(directory, "pi.sock");
 }

@@ -1,4 +1,5 @@
-import { realpathSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as nodeResolvePath, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,8 @@ export function canonicalizePath(path: string): string {
 
 export function getFileRevision(path: string): string | undefined {
 	try {
+		// Android can preserve both timestamps across same-size writes within one filesystem tick.
+		if (process.platform === "android") return createHash("sha256").update(readFileSync(path)).digest("hex");
 		const stats = statSync(path, { bigint: true });
 		return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
 	} catch {

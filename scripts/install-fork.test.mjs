@@ -319,30 +319,70 @@ test("isolated npm scripts can invoke npm and package executables on Termux", { 
 	assert.deepEqual(output.trim().split(/\r?\n/), [tools.npmVersion, "package executable"]);
 });
 
-test("Termux compiler installation preserves the source lock and uses its pinned artifact without scripts", { skip: process.platform === "win32" }, (t) => {
-	const f = fixture(t);
-	const name = `@typescript/typescript-linux-${process.arch}`;
-	const directory = join(f.root, "compiler");
-	mkdirSync(join(directory, "lib"), { recursive: true });
-	writeFileSync(join(directory, "package.json"), JSON.stringify({
-		name, version: "1.2.3", os: ["linux"], cpu: [process.arch],
-		scripts: { postinstall: "node -e 'process.exit(27)'" },
-	}));
-	writeFileSync(join(directory, "lib/tsc"), '#!/usr/bin/env node\nconsole.log("Version 1.2.3");\n', { mode: 0o755 });
-	const tarball = packReleasePackages([{ name, directory }], join(f.root, "tarballs"), { npm: tools.npm, env: f.env }).get(name);
-	const lock = JSON.stringify({
-		lockfileVersion: 3,
-		packages: {
-			[`node_modules/${name}`]: {
-				version: "1.2.3", resolved: `file:${tarball}`, optional: true, os: ["linux"], cpu: [process.arch],
-				integrity: `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`,
+for (const blocked of [false, true]) {
+	test(`Termux compiler preserves frozen inputs without scripts (${blocked ? "fanotify rebuild" : "published artifact"})`, {
+		skip: process.platform === "win32" || (blocked && process.platform === "darwin"),
+	}, (t) => {
+		const f = fixture(t);
+		const name = `@typescript/typescript-linux-${process.arch}`;
+		const directory = join(f.root, "compiler");
+		const gitHead = "a".repeat(40);
+		let originalWatcher;
+		let watcher;
+		if (blocked) {
+			const go = join(execFileSync("go", ["env", "GOROOT"], { encoding: "utf8" }).trim(), "bin/go");
+			const module = join(f.root, "go-source");
+			mkdirSync(join(module, "cmd/tsgo"), { recursive: true });
+			mkdirSync(join(module, "internal/fswatch"), { recursive: true });
+			writeFileSync(join(module, "go.mod"), "module github.com/microsoft/typescript-go\n\ngo 1.21\n");
+			watcher = join(module, "internal/fswatch/fanotify_linux.go");
+			originalWatcher = "package fswatch\n\nfunc init() { fanotifyAvailable() }\n\nfunc fanotifyAvailable() bool {\n\tpanic(\"forbidden fanotify probe\")\n}\n";
+			writeFileSync(watcher, originalWatcher);
+			writeFileSync(join(module, "cmd/tsgo/main.go"), `package main
+import ("fmt"; _ "github.com/microsoft/typescript-go/internal/fswatch")
+func main() { fmt.Println("Version 1.2.3") }
+`);
+			const bin = join(f.root, "bin");
+			mkdirSync(bin);
+			// Only source retrieval is substituted; compile and execute a real Go binary offline.
+			writeFileSync(join(bin, "go"), `#!/usr/bin/env node
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args[0] === "mod") {
+  assert.deepEqual(args, ["mod", "download", "-json", "github.com/microsoft/typescript-go@${gitHead}"]);
+  console.log(${JSON.stringify(JSON.stringify({ Dir: module, Sum: "fixture", Origin: { Hash: gitHead } }))});
+} else {
+  const result = spawnSync(${JSON.stringify(go)}, args, { stdio: "inherit" });
+  process.exit(result.status ?? 1);
+}
+`, { mode: 0o755 });
+			f.env.PATH = `${bin}:${f.env.PATH}`;
+		}
+		mkdirSync(join(directory, "lib"), { recursive: true });
+		writeFileSync(join(directory, "package.json"), JSON.stringify({
+			name, version: "1.2.3", gitHead, os: ["linux"], cpu: [process.arch],
+			scripts: { postinstall: "node -e 'process.exit(27)'" },
+		}));
+		writeFileSync(join(directory, "lib/tsc"), blocked
+			? '#!/usr/bin/env node\nconsole.error("SIGSYS: bad system call\\ninternal/fswatch.fanotifyAvailable()"); process.exit(2);\n'
+			: '#!/usr/bin/env node\nconsole.log("Version 1.2.3");\n', { mode: 0o755 });
+		const tarball = packReleasePackages([{ name, directory }], join(f.root, "tarballs"), { npm: tools.npm, env: f.env }).get(name);
+		const lock = JSON.stringify({
+			lockfileVersion: 3,
+			packages: {
+				[`node_modules/${name}`]: {
+					version: "1.2.3", resolved: `file:${tarball}`, optional: true, os: ["linux"], cpu: [process.arch],
+					integrity: `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`,
+				},
 			},
-		},
+		});
+		writeFileSync(join(f.root, "package-lock.json"), lock);
+		mkdirSync(join(f.root, "node_modules/.bin"), { recursive: true });
+		symlinkSync(join(f.root, "unusable-android-wrapper"), join(f.root, "node_modules/.bin/tsc"));
+		prepareTermuxCompiler(f.root, tools, { ...f.env, npm_config_offline: "true" });
+		assert.equal(readFileSync(join(f.root, "package-lock.json"), "utf8"), lock);
+		assert.equal(execFileSync(join(f.root, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
+		if (blocked) assert.equal(readFileSync(watcher, "utf8"), originalWatcher);
 	});
-	writeFileSync(join(f.root, "package-lock.json"), lock);
-	mkdirSync(join(f.root, "node_modules/.bin"), { recursive: true });
-	symlinkSync(join(f.root, "unusable-android-wrapper"), join(f.root, "node_modules/.bin/tsc"));
-	prepareTermuxCompiler(f.root, tools, { ...f.env, npm_config_offline: "true" });
-	assert.equal(readFileSync(join(f.root, "package-lock.json"), "utf8"), lock);
-	assert.equal(execFileSync(join(f.root, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
-});
+}

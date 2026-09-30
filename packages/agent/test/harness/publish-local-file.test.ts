@@ -223,15 +223,16 @@ describe("publishLocalFile", () => {
 		},
 	);
 
-	it("replaces only the named path while hardlinks and open handles retain old bytes", async () => {
+	it("replaces only the named path while open handles and supported hardlinks retain old bytes", async () => {
 		const target = join(root, "file");
 		await nativeFs.writeFile(target, "original");
-		await nativeFs.link(target, join(root, "hardlink"));
+		if (process.platform !== "android") await nativeFs.link(target, join(root, "hardlink"));
 		const reader = await nativeFs.open(target, "r");
 		try {
 			await publishLocalFile(target, "replacement");
 			expect(await nativeFs.readFile(target, "utf8")).toBe("replacement");
-			expect(await nativeFs.readFile(join(root, "hardlink"), "utf8")).toBe("original");
+			if (process.platform !== "android")
+				expect(await nativeFs.readFile(join(root, "hardlink"), "utf8")).toBe("original");
 			expect(await reader.readFile("utf8")).toBe("original");
 		} finally {
 			await reader.close();

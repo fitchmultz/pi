@@ -25,6 +25,7 @@ process.stdin.on("data", (chunk) => {
 		const command = JSON.parse(buffer.slice(0, newline));
 		buffer = buffer.slice(newline + 1);
 		const respond = (data) => output({ type: "response", id: command.id, command: command.type, success: true, ...data });
+		if (command.type === "set_session_name" && command.name === "__ready__") { respond(); continue; }
 		${handleCommand}
 	}
 });
@@ -33,6 +34,7 @@ process.stdin.on("data", (chunk) => {
 	const client = new RpcClient({ cliPath });
 	clients.push(client);
 	await client.start();
+	await client.setSessionName("__ready__");
 	return client;
 }
 

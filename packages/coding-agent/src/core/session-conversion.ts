@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, linkSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { publishLocalFileExclusiveSync } from "@earendil-works/pi-agent-core/node";
 
 type RecordValue = Record<string, unknown>;
 
@@ -601,8 +602,7 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 	});
 	assertSessionConversionNotRequired(converted);
 	const output = `${[header, ...converted].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
-	// A same-directory hard link publishes a complete, fsynced inode and fails if
-	// any output entry already exists (including symlinks and source hard links).
+	// Publish a complete, fsynced inode only if no output entry exists, including dangling symlinks.
 	const temporary = join(dirname(resolve(outputPath)), `.pi-session-conversion-${randomUUID()}.tmp`);
 	const fd = openSync(temporary, "wx", 0o600);
 	try {
@@ -613,8 +613,8 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 			closeSync(fd);
 		}
 		if (!readFileSync(sourcePath).equals(source)) refuse("source changed during conversion; stop its writer first");
-		linkSync(temporary, outputPath);
+		publishLocalFileExclusiveSync(temporary, outputPath);
 	} finally {
-		unlinkSync(temporary);
+		rmSync(temporary, { force: true });
 	}
 }

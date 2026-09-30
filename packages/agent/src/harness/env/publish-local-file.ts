@@ -1,7 +1,41 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, linkSync, unlinkSync } from "node:fs";
 import { access, lstat, open, readlink, realpath, rename, stat, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { getSystemErrorName } from "node:util";
+
+/** Publish a complete staged inode without replacing any destination, then remove the stage. */
+export function publishLocalFileExclusiveSync(stage: string, target: string): void {
+	if (process.platform !== "android") {
+		linkSync(stage, target);
+		unlinkSync(stage);
+		return;
+	}
+	// Android forbids hardlinks. Unlike mv, renameat2 fails if exclusive rename is unsupported.
+	const errno = Number(
+		execFileSync(
+			"python3",
+			[
+				"-I",
+				"-S",
+				"-c",
+				"import ctypes, os, sys; libc = ctypes.CDLL(None, use_errno=True); result = libc.renameat2(-100, os.fsencode(sys.argv[1]), -100, os.fsencode(sys.argv[2]), 1); print(ctypes.get_errno() if result else 0)",
+				stage,
+				target,
+			],
+			{ encoding: "utf8", timeout: 10_000 },
+		),
+	);
+	if (errno !== 0) {
+		throw Object.assign(new Error(`Exclusive file publication failed: ${stage} -> ${target}`), {
+			code: getSystemErrorName(-errno),
+			errno: -errno,
+			path: target,
+			syscall: "renameat2",
+		});
+	}
+}
 
 /** Resolve a local file target, including a dangling final symlink. Its parent must exist. */
 export async function resolveLocalFileTarget(absolutePath: string): Promise<string> {

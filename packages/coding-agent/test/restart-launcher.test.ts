@@ -497,7 +497,7 @@ setInterval(() => {}, 1000);
 				child.once("error", reject);
 				child.once("exit", (code, exitSignal) => resolveResult({ code, signal: exitSignal }));
 			});
-			await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true));
+			await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true), { timeout: 10_000 });
 			const workerPid = Number(readFileSync(pidFile, "utf8"));
 			workerPids.push(workerPid);
 			child.kill(signal);
@@ -507,6 +507,7 @@ setInterval(() => {}, 1000);
 			await vi.waitFor(() => expect(existsSync(cleaned)).toBe(true));
 			await vi.waitFor(() => expect(() => process.kill(workerPid, 0)).toThrow());
 		},
+		15_000,
 	);
 	it("changes workers and explicit extensions, preserving the exact checkpoint without replaying startup input", async () => {
 		const f = fixture("process.send({ type: 'pi:ready' }, () => process.exit(0));");

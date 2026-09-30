@@ -257,7 +257,9 @@ describe("shell output finalization", () => {
 			const script = join(env.cwd, "descendant.cjs");
 			await writeFile(
 				script,
-				`const {spawn} = require('node:child_process'); const child = spawn(process.execPath, ['-e', "process.stdout.write(Buffer.from([0xe2])); let n=0; const timer=setInterval(()=>{process.stderr.write('x'); if(++n===5){clearInterval(timer); process.stdout.write(Buffer.from([0x82,0xac]));}},40);"], {stdio:'inherit'}); child.unref();`,
+				`const {spawn} = require('node:child_process');
+const child = spawn(process.execPath, ['-e', "process.stdout.write(Buffer.from([0xe2])); process.send('ready'); let n=0; const timer=setInterval(()=>{process.stderr.write('x'); if(++n===5){clearInterval(timer); process.stdout.write(Buffer.from([0x82,0xac]));}},40);"], {stdio:['inherit','inherit','inherit','ipc']});
+child.once('message', () => { child.disconnect(); child.unref(); });`,
 			);
 			const collected = await collect(env, `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`);
 			expect(getOrThrow(collected.result).exitCode).toBe(0);
