@@ -820,11 +820,13 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 			if (firstByFrame.has(target) || path.findIndex((item) => item.id === target) < boundary)
 				refuse(`context edit ${entry.id} targets a coalesced response or earlier context boundary`);
 			const targetEntry = entries.get(target)!;
+			const targetMessage = targetEntry.type === "message" ? object(targetEntry.message) : undefined;
 			if (
-				targetEntry.type === "message" &&
-				object(targetEntry.message).role === "assistant" &&
-				array(object(targetEntry.message).content).some(
-					(block) => object(block).type === "toolCall" && object(block).async === true,
+				targetMessage?.role === "assistant" &&
+				array(targetMessage.content).some(
+					(block) =>
+						object(block).type === "toolCall" &&
+						(object(block).async === true || ["error", "aborted"].includes(String(targetMessage.stopReason))),
 				)
 			)
 				refuse(`context edit ${entry.id} changes legacy execution history`);
@@ -858,14 +860,13 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		];
 	});
 	replayEntries = new Map(converted.map((entry) => [text(entry.id), entry]));
-	const children = new Map<string, string[]>();
+	const children = new Map<string, number>();
 	const groups = new Map<string, RecordValue[]>();
 	const ownerByReceipt = new Map<string, string>();
 	for (const entry of converted) {
 		if (entry.parentId !== null) {
-			const ids = children.get(text(entry.parentId)) ?? [];
-			ids.push(text(entry.id));
-			children.set(text(entry.parentId), ids);
+			const parentId = text(entry.parentId);
+			children.set(parentId, (children.get(parentId) ?? 0) + 1);
 		}
 		if (entry.type !== "message" || object(entry.message).role !== "toolResult") continue;
 		const callId = object(entry.message).toolCallId;
@@ -898,7 +899,9 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 				path
 					.slice(path.indexOf(owner) + 1)
 					.filter((entry) =>
-						["message", "compaction", "branch_summary", "custom_message"].includes(String(entry.type)),
+						entry.type === "message"
+							? object(entry.message).role !== "system"
+							: ["compaction", "branch_summary", "custom_message"].includes(String(entry.type)),
 					)
 					.map((entry) => entry.id),
 				group.map((entry) => entry.id),
@@ -926,8 +929,7 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		// ponytail: relocate through one unambiguous path; branch-specific receipts need a separate conversion proof.
 		const path = pathTo(text(receipts.at(-1)!.id));
 		for (const entry of path.slice(path.indexOf(owner), -1))
-			if ((children.get(text(entry.id))?.length ?? 0) > 1)
-				refuse(`branched native receipt relocation at ${ownerId}`);
+			if ((children.get(text(entry.id)) ?? 0) > 1) refuse(`branched native receipt relocation at ${ownerId}`);
 		relocated.set(ownerId, group);
 	}
 	if (relocated.size) {

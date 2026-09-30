@@ -397,18 +397,34 @@ describe("one-time session conversion", () => {
 		).toEqual(["branchSummary", "user"]);
 	});
 
-	it.each(["adjacent", "late"])("keeps branch-local receipts distinct when %s", (arrival) => {
+	it.each(["adjacent", "system", "late"])("keeps branch-local receipts distinct when %s", (arrival) => {
 		const input = [entry("calling", null, { type: "message", message: assistant([call]) })];
 		for (const branch of ["a", "b"]) {
-			const user = entry(`${branch}-user`, arrival === "adjacent" ? `${branch}-result` : "calling", {
+			if (arrival === "system")
+				input.push(
+					entry(`${branch}-system`, "calling", {
+						type: "message",
+						message: {
+							role: "system",
+							content: `instructions ${branch}`,
+							timestamp: 1,
+							toolsAdded: [{ name: `added_${branch}`, description: "Branch tool", parameters: {} }],
+						},
+					}),
+				);
+			const user = entry(`${branch}-user`, arrival === "late" ? "calling" : `${branch}-result`, {
 				type: "message",
 				message: { role: "user", content: `input ${branch}`, timestamp: 2 },
 			});
-			const result = entry(`${branch}-result`, arrival === "adjacent" ? "calling" : `${branch}-user`, {
-				type: "message",
-				message: { ...(settled()[2].message as Entry), content: [{ type: "text", text: `receipt ${branch}` }] },
-			});
-			input.push(...(arrival === "adjacent" ? [result, user] : [user, result]));
+			const result = entry(
+				`${branch}-result`,
+				arrival === "late" ? `${branch}-user` : arrival === "system" ? `${branch}-system` : "calling",
+				{
+					type: "message",
+					message: { ...(settled()[2].message as Entry), content: [{ type: "text", text: `receipt ${branch}` }] },
+				},
+			);
+			input.push(...(arrival === "late" ? [user, result] : [result, user]));
 		}
 		const { source, output, bytes } = fixture(input);
 		if (arrival === "late") {
@@ -420,7 +436,14 @@ describe("one-time session conversion", () => {
 			for (const branch of ["a", "b"]) {
 				const replay = providerReplay(entries, ["call"], `${branch}-user`);
 				expect(replay[1]).toMatchObject({ content: [{ type: "text", text: `receipt ${branch}` }] });
-				expect(replay[2]).toMatchObject({ role: "user", content: `input ${branch}` });
+				expect(replay.at(-1)).toMatchObject({ role: "user", content: `input ${branch}` });
+				if (arrival === "system") {
+					expect(replay[2]).toMatchObject({ role: "system", content: `instructions ${branch}` });
+					expect(
+						getCurrentTools(buildSessionContext(entries, `${branch}-user`).messages).map((tool) => tool.name),
+					).toEqual([`added_${branch}`]);
+					expect(entries.find((item) => item.id === `${branch}-system`)).toMatchObject({ parentId: "calling" });
+				}
 			}
 			expect(entries.map((item) => item.id)).toEqual(expect.arrayContaining(input.map((item) => item.id)));
 		}
@@ -1299,6 +1322,33 @@ describe("one-time session conversion", () => {
 			expect(() => convertSessionFile(source, output)).toThrow("changes legacy execution history");
 			expect(readFileSync(source, "utf8")).toBe(bytes);
 			expect(existsSync(output)).toBe(false);
+		},
+	);
+
+	it.each(["error", "aborted"])(
+		"refuses edits of interrupted %s execution history before publication",
+		(stopReason) => {
+			for (const replacement of [null, { content: [{ type: "text", text: "redacted" }] }]) {
+				const input = [
+					entry("failed", null, {
+						type: "message",
+						message: assistant(
+							[
+								{ type: "text", text: "signed content removed by edit", textSignature: "msg_done" },
+								{ ...call, async: false },
+							],
+							{ stopReason },
+						),
+					}),
+					entry("result", "failed", { type: "message", message: settled()[2].message }),
+					entry("edit", "result", { type: "context_edit", targetId: "failed", replacement }),
+				];
+				const { source, output, bytes, directory } = fixture(input);
+				expect(() => convertSessionFile(source, output)).toThrow("changes legacy execution history");
+				expect(readFileSync(source, "utf8")).toBe(bytes);
+				expect(existsSync(output)).toBe(false);
+				expect(readdirSync(directory)).toEqual(["original.jsonl"]);
+			}
 		},
 	);
 
