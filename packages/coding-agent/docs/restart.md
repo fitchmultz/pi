@@ -63,6 +63,8 @@ Capture or final-cleanup failure prints `Managed restart checkpoint failed: ...`
 
 A replacement becomes ready after runtime creation and TUI initialization. If the selected worker is missing, fails, or takes more than 60 seconds to reach readiness, the launcher tries the exact previous worker and explicit extension list once, against the same checkpoint, even if the selector moved again. It also restores the previous selection policy: later ordinary restarts follow the original selector unless an earlier explicit `--runtime` was active. A supplied continuation includes the startup failure notice so the agent can diagnose it. If recovery also fails, Pi stops instead of entering a restart loop.
 
+When the launcher accepts readiness from the replacement or its single recovery worker, fallback is no longer needed. It removes the ordinary native-owned capture file and its empty private directory. Failed or unready startup retains the capture; explicit offline transformations retain their migration evidence. Original journals, caller-selected checkpoints and unrelated files are never removed.
+
 Readiness is not proof that every tool or provider works. Validate candidates before requesting activation. Failures **after readiness** are not automatically replayed or rolled back: doing so could duplicate work whose side effects already occurred.
 
 The control endpoint is local and session-scoped. On Unix it lives inside a private temporary directory. It is replaced on resource reload/session replacement and removed during shutdown. It is not a permission boundary within the user's account, and staged extensions remain full-trust code. See [Security](security.md).
@@ -95,6 +97,8 @@ Use the public `readSessionCheckpointState`, `writeCheckpointFile`, and `validat
 Managed restart is provided by the bundled Node CLI. Print, JSON and RPC modes and one-shot startup benchmarks do not expose the interactive restart endpoint; SDK hosts and standalone binaries retain their existing lifecycle behavior.
 
 The launcher itself remains loaded across worker replacements. Changes to launcher code take effect on the next full CLI launch. It intentionally stays small and outside ordinary agent/runtime updates.
+
+Already-running older launchers continue forwarding checkpoint references but retain ordinary capture files. A full CLI launch acquires readiness cleanup; a worker-only restart cannot upgrade the launcher.
 
 An already-running older worker does not acquire final file capture or `--checkpoint-transform` merely because files were updated. Its selection-only restart can bootstrap an updated worker only when its actual accepted queues, pending input, next-turn messages and drafts are empty; the old handoff cannot transfer them. Do not infer queue contents from JSONL or clear them to manufacture eligibility.
 

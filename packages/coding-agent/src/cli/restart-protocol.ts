@@ -34,6 +34,11 @@ export interface RestartCheckpoint {
 		candidate?: { path: string; sha256: string };
 		/** The same trusted program, used only to restore prepared prior extension artifacts. */
 		rollback?: string;
+		/** Native-owned ordinary capture; unlink only these matching identities after accepted readiness. */
+		cleanup?: {
+			directory: { dev: number; ino: number };
+			original: { dev: number; ino: number };
+		};
 	};
 }
 

@@ -361,6 +361,18 @@ export default function(pi) {
 					await vi.waitFor(() =>
 						expect(state()).toMatchObject({ pid: resumed.pid, paused: false, editor: "", calls: 0 }),
 					);
+					// PR #159: real final native captures must not accumulate across repeated restarts.
+					for (let count = 3; count <= 4; count++) {
+						await requestRestart(state().socket, { sessionId: initial.sessionId });
+						await vi.waitFor(() => expect(starts()).toHaveLength(count), { timeout: 8_000 });
+						await vi.waitFor(() => expect(state()).toMatchObject({ pid: starts().at(-1)!.pid, calls: 0 }));
+						expect(starts().at(-1)?.sessionFile).toBe(initial.sessionFile);
+						await vi.waitFor(() =>
+							expect(
+								readdirSync(terminal.temporary).filter((name) => name.startsWith("pi-restart-checkpoint-")),
+							).toEqual([]),
+						);
+					}
 				}
 				expect(existsSync(editorProcess.file)).toBe(false);
 				execFileSync("tmux", ["-L", socket, "send-keys", "-t", "test", "C-d"]);
@@ -782,12 +794,12 @@ if (mode === "rollback") {
 				.map(quote)
 				.join(" ");
 			const extension = (version: string) => `
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync } from "node:fs";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { VERSION, getPackageDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 const record = (value) => appendFileSync(${JSON.stringify(trace)}, JSON.stringify({version:${JSON.stringify(version)},runtimeVersion:VERSION,packageDir:getPackageDir(),pid:process.pid,...value}) + "\\n");
-record({event:"factory"});
+record({event:"factory",captures:readdirSync(${JSON.stringify(terminal.temporary)}).filter(name => name.startsWith("pi-restart-checkpoint-"))});
 ${
 	offlineTransform
 		? `if (${JSON.stringify(version)} === "v1" && readPrepared() !== "prior") throw new Error("Prior artifacts not restored before recovery extensions");
@@ -865,6 +877,7 @@ export default function(pi) {
 							text?: string;
 							cwd?: string;
 							pendingInputs?: number;
+							captures?: string[];
 						},
 				);
 			const starts = events.filter((event) => event.event === "start");
@@ -878,6 +891,18 @@ export default function(pi) {
 			expect(starts[0].runtimeVersion).toBe(originalVersion);
 			expect(realpathSync(starts[0].packageDir)).toBe(realpathSync(initialPackageDir));
 			const candidateFactory = events.find((event) => event.event === "factory" && event.version === "v2");
+			expect(candidateFactory?.captures).toHaveLength(1);
+			const captures = readdirSync(terminal.temporary).filter((name) => name.startsWith("pi-restart-checkpoint-"));
+			expect(captures).toHaveLength(offlineTransform ? 1 : 0);
+			if (offlineTransform) {
+				const capture = join(terminal.temporary, captures[0]);
+				expect(readSessionCheckpoint(join(capture, "original.json")).selection.sessionFile).toBe(
+					starts[0].sessionFile,
+				);
+				expect(readSessionCheckpoint(join(capture, "candidate.json")).selection.sessionFile).not.toBe(
+					starts[0].sessionFile,
+				);
+			}
 			expect(candidateFactory?.runtimeVersion).toBe(candidateVersion);
 			expect(realpathSync(candidateFactory!.packageDir)).toBe(realpathSync(candidateRuntime));
 			expect(starts[1].runtimeVersion).toBe(failCandidate ? originalVersion : candidateVersion);

@@ -478,6 +478,14 @@ export function createRestartControl(options: {
 							if (process.platform !== "win32") syncRestartPath(directory);
 							files.candidate = { path: candidatePath, sha256: await checkpointSha256(candidatePath, signal) };
 							files.rollback = request.checkpointTransform;
+						} else {
+							const dir = lstatSync(directory);
+							const file = lstatSync(originalPath);
+							// ponytail: already-loaded launchers retain captures; a full CLI launch upgrades cleanup.
+							files.cleanup = {
+								directory: { dev: dir.dev, ino: dir.ino },
+								original: { dev: file.dev, ino: file.ino },
+							};
 						}
 						signal.throwIfAborted();
 						if (committed !== request) throw new Error("Restart cancelled during final cleanup");

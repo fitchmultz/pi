@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { getActiveManagedInstallRoot } from "./managed-install.ts";
@@ -125,10 +125,31 @@ export async function superviseCli(
 			const workerProcess = child;
 			workerProcess.on("message", (message: unknown) => {
 				if (!message || typeof message !== "object" || !("type" in message)) return;
-				if (message.type === "pi:ready" && !timedOut) {
+				if (message.type === "pi:ready" && !timedOut && !stopping) {
 					ready = true;
 					fallback = undefined;
 					clearTimeout(timeout);
+					const files = handoff?.checkpoint.files;
+					if (files?.cleanup && !files.candidate && !files.rollback) {
+						try {
+							const directory = dirname(files.original.path);
+							const dir = lstatSync(directory);
+							const file = lstatSync(files.original.path);
+							if (
+								dir.isDirectory() &&
+								file.isFile() &&
+								dir.dev === files.cleanup.directory.dev &&
+								dir.ino === files.cleanup.directory.ino &&
+								file.dev === files.cleanup.original.dev &&
+								file.ino === files.cleanup.original.ino
+							) {
+								unlinkSync(files.original.path);
+								rmdirSync(directory);
+							}
+						} catch {
+							// Leave changed or inaccessible files and nonempty directories alone; admission already succeeded.
+						}
+					}
 				} else if (message.type === "pi:restart" && ready && !stopping) {
 					restart = message as Extract<RestartWorkerMessage, { type: "pi:restart" }>;
 				}

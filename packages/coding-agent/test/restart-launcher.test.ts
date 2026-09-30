@@ -2,6 +2,7 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -46,10 +47,17 @@ afterEach(() => {
 function fixture(
 	candidateBody: string,
 	fallbackBody = "process.send({ type: 'pi:ready' }, () => process.exit(0));",
-	options: { model?: RestartCheckpoint["model"]; args?: string[] } = {},
+	options: { model?: RestartCheckpoint["model"]; args?: string[]; ordinary?: boolean } = {},
 ) {
 	const root = mkdtempSync(join(tmpdir(), "pi-supervisor-test-"));
 	directories.push(root);
+	const capture = mkdtempSync(join(root, "pi-restart-checkpoint-"));
+	const original = join(capture, "original.json");
+	writeFileSync(original, "immutable recovery checkpoint");
+	writeFileSync(join(root, "session.jsonl"), "original journal");
+	writeFileSync(join(root, "public-checkpoint.json"), "caller checkpoint");
+	const directoryIdentity = lstatSync(capture);
+	const originalIdentity = lstatSync(original);
 	const trace = join(root, "trace.jsonl");
 	const runtime = join(root, "candidate");
 	mkdirSync(join(runtime, "dist", "bundle"), { recursive: true });
@@ -63,15 +71,24 @@ function fixture(
 		activeTools: ["bash"],
 		knownTools: ["bash", "read"],
 		files: {
-			original: { path: join(root, "original.json"), sha256: "a".repeat(64) },
-			candidate: { path: join(root, "candidate.json"), sha256: "b".repeat(64) },
-			rollback: join(root, "prepared-artifacts.mjs"),
+			original: { path: original, sha256: "a".repeat(64) },
+			...(options.ordinary
+				? {
+						cleanup: {
+							directory: { dev: directoryIdentity.dev, ino: directoryIdentity.ino },
+							original: { dev: originalIdentity.dev, ino: originalIdentity.ino },
+						},
+					}
+				: {
+						candidate: { path: join(capture, "candidate.json"), sha256: "b".repeat(64) },
+						rollback: join(root, "prepared-artifacts.mjs"),
+					}),
 		},
 	};
 	const log = (name: string) => `
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 const handoff = process.env.PI_RESTART_HANDOFF ? JSON.parse(process.env.PI_RESTART_HANDOFF) : undefined;
-appendFileSync(${JSON.stringify(trace)}, JSON.stringify({name:${JSON.stringify(name)}, pid:process.pid, args:process.argv.slice(2), handoff, socket:process.env.PI_RESTART_SOCKET}) + '\\n');
+appendFileSync(${JSON.stringify(trace)}, JSON.stringify({name:${JSON.stringify(name)}, pid:process.pid, args:process.argv.slice(2), handoff, socket:process.env.PI_RESTART_SOCKET, capturePresent:existsSync(${JSON.stringify(original)})}) + '\\n');
 `;
 	const worker = join(root, "working.mjs");
 	const toolConfiguration = { allowedToolNames: [], excludedToolNames: ["blocked"], noBuiltinTools: true };
@@ -94,6 +111,9 @@ if (!handoff) {
 	writeFileSync(join(runtime, "dist", "bundle", "cli-worker.js"), `${log("candidate")}\n${candidateBody}`);
 	return {
 		worker,
+		root,
+		capture,
+		original,
 		checkpoint,
 		toolConfiguration,
 		read: () =>
@@ -107,6 +127,7 @@ if (!handoff) {
 							pid: number;
 							args: string[];
 							socket?: string;
+							capturePresent: boolean;
 							handoff?: RestartHandoff;
 						},
 				),
@@ -528,24 +549,79 @@ setInterval(() => {}, 1000);
 		},
 		15_000,
 	);
-	it("changes workers and explicit extensions, preserving the exact checkpoint without replaying startup input", async () => {
-		const f = fixture("process.send({ type: 'pi:ready' }, () => process.exit(0));");
-		expect(await superviseCli(f.worker, ["original task", "@original.md"], { env: cleanEnv, execArgv: [] })).toBe(0);
-		const trace = f.read();
-		expect(trace.map((entry) => entry.name)).toEqual(["working", "candidate"]);
-		expect(trace[0].pid).not.toBe(trace[1].pid);
-		expect(trace[1].handoff?.checkpoint).toEqual(f.checkpoint);
-		expect(trace[1].handoff?.toolConfiguration).toEqual(f.toolConfiguration);
-		expect(trace[1].handoff?.message).toBe("Check the new capability");
-		expect(trace[1].args).toContain(f.checkpoint.sessionFile);
-		expect(trace[1].args).toContain("faux/faux-1");
-		expect(trace[1].args).not.toContain("--approve");
-		expect(trace[1].args).not.toContain("--no-approve");
-		expect(trace[1].args).not.toContain("original task");
-		expect(trace[1].args).not.toContain("@original.md");
-		expect(trace[1].args.at(-1)).toMatch(/v2\.ts$/);
-		expect(trace.every((entry) => entry.socket === undefined)).toBe(true);
-	});
+	// PR #159: ordinary captures are temporary only after the launcher accepts readiness.
+	it.each([false, true])(
+		"changes workers without replaying input and retires only ordinary captures (%s)",
+		async (ordinary) => {
+			const f = fixture("process.send({ type: 'pi:ready' }, () => process.exit(0));", undefined, { ordinary });
+			expect(await superviseCli(f.worker, ["original task", "@original.md"], { env: cleanEnv, execArgv: [] })).toBe(
+				0,
+			);
+			const trace = f.read();
+			expect(trace.map((entry) => entry.name)).toEqual(["working", "candidate"]);
+			expect(trace[0].pid).not.toBe(trace[1].pid);
+			expect(trace[1].handoff?.checkpoint).toEqual(f.checkpoint);
+			expect(trace[1].handoff?.toolConfiguration).toEqual(f.toolConfiguration);
+			expect(trace[1].handoff?.message).toBe("Check the new capability");
+			expect(trace[1].args).toContain(f.checkpoint.sessionFile);
+			expect(trace[1].args).toContain("faux/faux-1");
+			expect(trace[1].args).not.toContain("--approve");
+			expect(trace[1].args).not.toContain("--no-approve");
+			expect(trace[1].args).not.toContain("original task");
+			expect(trace[1].args).not.toContain("@original.md");
+			expect(trace[1].args.at(-1)).toMatch(/v2\.ts$/);
+			expect(trace.every((entry) => entry.socket === undefined)).toBe(true);
+			expect(trace.every((entry) => entry.capturePresent)).toBe(true);
+			expect(existsSync(f.original)).toBe(!ordinary);
+			expect(existsSync(f.capture)).toBe(!ordinary);
+			expect(readFileSync(f.checkpoint.sessionFile, "utf8")).toBe("original journal");
+			expect(readFileSync(join(f.root, "public-checkpoint.json"), "utf8")).toBe("caller checkpoint");
+		},
+	);
+
+	it.each(["file", "directory", "locator", "extra file"] as const)(
+		"preserves unrelated data when a capture's %s changes before readiness",
+		async (change) => {
+			const f = fixture(
+				`
+const original = handoff.checkpoint.files.original.path;
+const directory = original.slice(0, original.lastIndexOf("/"));
+if (${JSON.stringify(change)} === "file") {
+	renameSync(original, original + ".retained");
+	writeFileSync(original, "replacement file");
+} else if (${JSON.stringify(change)} === "directory") {
+	renameSync(directory, directory + ".retained");
+	mkdirSync(directory);
+	writeFileSync(original, "replacement file");
+} else if (${JSON.stringify(change)} === "extra file") {
+	writeFileSync(directory + "/unrelated", "keep me");
+}
+process.send({ type: 'pi:ready' }, () => process.exit(0));
+`,
+				undefined,
+				{ ordinary: true },
+			);
+			if (change === "locator") {
+				// A locator is not permission to delete a journal, even with a native cleanup receipt.
+				const source = readFileSync(f.worker, "utf8");
+				writeFileSync(
+					f.worker,
+					source.replaceAll(JSON.stringify(f.original), JSON.stringify(f.checkpoint.sessionFile)),
+				);
+			}
+			expect(await superviseCli(f.worker, [], { env: cleanEnv, execArgv: [] })).toBe(0);
+			expect(readFileSync(f.checkpoint.sessionFile, "utf8")).toBe("original journal");
+			expect(existsSync(f.capture)).toBe(true);
+			if (change === "extra file") {
+				expect(existsSync(f.original)).toBe(false);
+				expect(readFileSync(join(f.capture, "unrelated"), "utf8")).toBe("keep me");
+			} else {
+				expect(readFileSync(f.original, "utf8")).toBe(
+					change === "locator" ? "immutable recovery checkpoint" : "replacement file",
+				);
+			}
+		},
+	);
 
 	// PR #29: an authenticated raw ID must not redirect a retained CLI key to another provider.
 	it.each([false, true])(
@@ -599,7 +675,7 @@ setInterval(() => {}, 1000);
 	);
 
 	it("rolls back failed startup to the prior runtime and extension list, with no lost continuation", async () => {
-		const f = fixture("process.exit(17);");
+		const f = fixture("process.exit(17);", undefined, { ordinary: true });
 		expect(await superviseCli(f.worker, ["original task"], { env: cleanEnv, execArgv: [] })).toBe(0);
 		const trace = f.read();
 		expect(trace.map((entry) => entry.name)).toEqual(["working", "candidate", "working"]);
@@ -611,24 +687,43 @@ setInterval(() => {}, 1000);
 		});
 		expect(trace[2].args.at(-1)).toMatch(/v1\.ts$/);
 		expect(trace[2].args).not.toContain("original task");
+		expect(trace.every((entry) => entry.capturePresent)).toBe(true);
+		expect(existsSync(f.capture)).toBe(false);
 	});
 
 	it("bounds rollback when the previous runtime also fails", async () => {
-		const f = fixture("process.exit(17);", "process.exit(23);");
+		const f = fixture("process.exit(17);", "process.exit(23);", { ordinary: true });
 		expect(await superviseCli(f.worker, [], { env: cleanEnv, execArgv: [] })).toBe(23);
 		expect(f.read().map((entry) => entry.name)).toEqual(["working", "candidate", "working"]);
+		expect(readFileSync(f.original, "utf8")).toBe("immutable recovery checkpoint");
 	});
 
 	it("recovers from a startup hang", async () => {
-		const f = fixture("setInterval(() => {}, 1000);");
+		const f = fixture("setInterval(() => {}, 1000);", undefined, { ordinary: true });
 		expect(await superviseCli(f.worker, [], { env: cleanEnv, execArgv: [], startupTimeoutMs: 500 })).toBe(0);
 		expect(f.read().at(-1)?.handoff?.failure).toContain("startup deadline");
+		expect(f.read().every((entry) => entry.capturePresent)).toBe(true);
+		expect(existsSync(f.capture)).toBe(false);
+	});
+
+	it("retains fallback evidence when a timed-out candidate sends late readiness", async () => {
+		const f = fixture(
+			`process.on("SIGTERM", () => process.send({ type: "pi:ready" }, () => process.exit(17)));
+setInterval(() => {}, 1000);`,
+			undefined,
+			{ ordinary: true },
+		);
+		expect(await superviseCli(f.worker, [], { env: cleanEnv, execArgv: [], startupTimeoutMs: 500 })).toBe(0);
+		expect(f.read().at(-1)?.handoff?.failure).toContain("startup deadline");
+		expect(f.read().every((entry) => entry.capturePresent)).toBe(true);
+		expect(existsSync(f.capture)).toBe(false);
 	});
 
 	it("does not treat normal quit before readiness as a failed update", async () => {
-		const f = fixture("process.exit(0);");
+		const f = fixture("process.exit(0);", undefined, { ordinary: true });
 		expect(await superviseCli(f.worker, [], { env: cleanEnv, execArgv: [] })).toBe(0);
 		expect(f.read()).toHaveLength(2);
+		expect(readFileSync(f.original, "utf8")).toBe("immutable recovery checkpoint");
 	});
 
 	it("does not replay work after a ready worker later crashes", async () => {
