@@ -229,6 +229,7 @@ export async function runMcpCommand(args: string[], options: McpCommandOptions):
 				keychain: parsed.values.has("keychain"),
 				adapterStopped: parsed.values.has("adapter-stopped"),
 				dryRun: parsed.values.has("dry-run"),
+				sharedConfigPath: options.sharedConfigPath,
 			});
 			log(
 				`${result.dryRun ? "Validated" : "Copied and verified"} ${result.servers.length} servers and ${result.grants.length} grants. Adapter sources are unchanged.`,
@@ -417,7 +418,7 @@ function add(
 	const scope = project ? "project" : "global";
 	let replaced: boolean;
 	try {
-		replaced = addMcpServerConfig(path, name, validated);
+		replaced = addMcpServerConfig(path, name, validated, options.sharedConfigPath);
 	} catch (addError) {
 		error(`Could not update ${path}: ${errorMessage(addError)}`);
 		return 1;
@@ -456,7 +457,7 @@ function remove(
 	const scope = project ? "project" : "global";
 	let removed: boolean;
 	try {
-		removed = removeMcpServerConfig(path, name);
+		removed = removeMcpServerConfig(path, name, options.sharedConfigPath);
 	} catch (removeError) {
 		error(`Could not update ${path}: ${errorMessage(removeError)}`);
 		return 1;
@@ -657,7 +658,6 @@ async function login(
 		);
 		return 1;
 	}
-	connection.challenge = undefined;
 	try {
 		await connection.reconnect();
 	} catch (connectError) {

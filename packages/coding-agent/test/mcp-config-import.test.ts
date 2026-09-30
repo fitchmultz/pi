@@ -1,11 +1,29 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readlinkSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { dirname, join, relative } from "node:path";
+import lockfile from "proper-lockfile";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryAuthStorageBackend } from "../src/core/auth-storage.ts";
 import { importAdapter } from "../src/extensions/mcp/adapter-import.ts";
 import { runMcpCommand } from "../src/extensions/mcp/cli.ts";
-import { loadMcpConfig, updateMcpServerConfig } from "../src/extensions/mcp/config.ts";
+import {
+	addMcpServerConfig,
+	loadMcpConfig,
+	removeMcpServerConfig,
+	updateMcpServerConfig,
+} from "../src/extensions/mcp/config.ts";
 import { McpOAuthCredentialStore } from "../src/extensions/mcp/oauth.ts";
 
 const endpoint = "https://server.example/mcp";
@@ -37,6 +55,7 @@ function authEntry(token: string, expiry?: number) {
 describe("MCP shared config and copy-only adapter import", () => {
 	const dirs: string[] = [];
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 	function setup() {
@@ -84,7 +103,7 @@ describe("MCP shared config and copy-only adapter import", () => {
 		if (!inherited) throw new Error("missing inherited config");
 		expect(inherited.scope).toBe("shared");
 		expect(inherited.writableSource).toBe(join(paths.agentDir, "mcp.json"));
-		updateMcpServerConfig(inherited, { enabled: false, connection: "eager" });
+		updateMcpServerConfig(inherited, { enabled: false, connection: "eager" }, loaded.sharedConfigPath);
 		expect(readFileSync(paths.sharedConfigPath, "utf8")).toBe(sharedBefore);
 		expect(read(join(paths.agentDir, "mcp.json"))).toMatchObject({
 			unrelated: { keep: true },
@@ -121,7 +140,7 @@ describe("MCP shared config and copy-only adapter import", () => {
 		]);
 	});
 
-	it("dry-runs then copies partial adapter overrides and verified grants, preserving source bytes and unrelated native content", async () => {
+	it("dry-runs then imports through a relative dotfiles link, preserving sources, target settings and the link", async () => {
 		const paths = setup();
 		const source = join(paths.root, "adapter.json");
 		const override = join(paths.root, "override.json");
@@ -135,7 +154,13 @@ describe("MCP shared config and copy-only adapter import", () => {
 		});
 		write(override, { mcpServers: { work: { description: "Work account", disabled: true } } });
 		write(credentialFile, { work: authEntry("work", 1_700_000_000), personal: authEntry("personal") });
-		write(join(paths.agentDir, "mcp.json"), { unrelated: "keep", mcpServers: {} });
+		const destination = join(paths.agentDir, "mcp.json");
+		const target = join(paths.root, "dotfiles.json");
+		writeFileSync(target, `${JSON.stringify({ unrelated: "keep", mcpServers: {} }, null, "\t")}\n`);
+		chmodSync(target, 0o640);
+		const link = "../dotfiles.json";
+		symlinkSync(link, destination);
+		const targetBefore = readFileSync(target, "utf8");
 		const before = [source, override, credentialFile].map((path) => readFileSync(path, "utf8"));
 		const options = { ...paths, configPaths: [source, override], credentialFile, adapterStopped: true };
 		expect(await importAdapter({ ...options, dryRun: true })).toEqual({
@@ -144,8 +169,14 @@ describe("MCP shared config and copy-only adapter import", () => {
 			dryRun: true,
 		});
 		expect(read(join(paths.agentDir, "mcp.json"))).toEqual({ unrelated: "keep", mcpServers: {} });
+		expect(readFileSync(target, "utf8")).toBe(targetBefore);
+		expect(readlinkSync(destination)).toBe(link);
 		const result = await importAdapter(options);
 		expect(result.grants).toEqual(["work", "personal"]);
+		expect(readlinkSync(destination)).toBe(link);
+		expect(read(target).mcpServers.local).toMatchObject({ command: "node", connection: "eager", timeout: 2.5 });
+		expect(readFileSync(target, "utf8")).toContain('\n\t"unrelated": "keep"');
+		expect(statSync(target).mode & 0o777).toBe(0o640);
 		const loaded = loadMcpConfig({ ...paths, projectTrusted: false });
 		const work = loaded.servers.find((entry) => entry.name === "work");
 		const personal = loaded.servers.find((entry) => entry.name === "personal");
@@ -187,6 +218,153 @@ describe("MCP shared config and copy-only adapter import", () => {
 		expect(readFileSync(join(paths.agentDir, "mcp.json"), "utf8")).toBe(copied);
 	});
 
+	it.each(["add", "remove", "update"])(
+		"%s writes through a relative dotfiles link without detaching it",
+		(mutation) => {
+			const paths = setup();
+			write(paths.sharedConfigPath, { sharedContent: "unchanged", mcpServers: {} });
+			const sharedBefore = readFileSync(paths.sharedConfigPath, "utf8");
+			const target = join(paths.root, "dotfiles.json");
+			writeFileSync(target, '{\n\t"unrelated": {"keep": true},\n\t"mcpServers": {"old": {"command": "old"}}\n}\n');
+			chmodSync(target, 0o660);
+			const path = join(paths.agentDir, "mcp.json");
+			const link = "../dotfiles.json";
+			symlinkSync(link, path);
+			const loaded = loadMcpConfig({ ...paths, projectTrusted: false });
+			const entry = loaded.servers.find((server) => server.name === "old");
+			if (!entry) throw new Error("missing symlinked config");
+			expect(entry).toMatchObject({ source: path, writableSource: path, scope: "global" });
+			// A restrictive umask must not narrow the existing managed file's permissions.
+			const umask = process.umask(0o077);
+			try {
+				if (mutation === "add")
+					expect(addMcpServerConfig(path, "new", { command: "new" }, loaded.sharedConfigPath)).toBe(false);
+				else if (mutation === "remove")
+					expect(removeMcpServerConfig(path, "old", loaded.sharedConfigPath)).toBe(true);
+				else updateMcpServerConfig(entry, { enabled: false }, loaded.sharedConfigPath);
+			} finally {
+				process.umask(umask);
+			}
+			expect(readlinkSync(path)).toBe(link);
+			expect(read(target).unrelated).toEqual({ keep: true });
+			if (mutation === "add") expect(read(target).mcpServers.new).toEqual({ command: "new" });
+			else if (mutation === "remove") expect(read(target).mcpServers.old).toBeUndefined();
+			else expect(read(target).mcpServers.old).toEqual({ command: "old", enabled: false });
+			expect(readFileSync(target, "utf8")).toContain('\n\t"unrelated": {');
+			expect(statSync(target).mode & 0o777).toBe(0o660);
+			expect(readFileSync(paths.sharedConfigPath, "utf8")).toBe(sharedBefore);
+		},
+	);
+
+	it.each(["dangling", "directory", "readonly"])(
+		"refuses a %s target without replacing its relative link",
+		async (kind) => {
+			const paths = setup();
+			const target = join(paths.root, "target.json");
+			if (kind === "directory") mkdirSync(target);
+			else if (kind === "readonly") {
+				write(target, { mcpServers: { old: { command: "old" } } });
+				chmodSync(target, 0o444);
+			}
+			const path = join(paths.agentDir, "mcp.json");
+			const link = "../target.json";
+			symlinkSync(link, path);
+			const before = kind === "readonly" ? readFileSync(target, "utf8") : undefined;
+			const refusal = kind === "dangling" ? /ENOENT/ : kind === "directory" ? /regular file/ : /not writable/;
+			const entry = {
+				name: "old",
+				config: { command: "old" },
+				source: path,
+				writableSource: path,
+				scope: "global" as const,
+			};
+			for (const mutate of [
+				() => addMcpServerConfig(path, "new", { command: "new" }, paths.sharedConfigPath),
+				() => removeMcpServerConfig(path, "old", paths.sharedConfigPath),
+				() => updateMcpServerConfig(entry, { enabled: false }, paths.sharedConfigPath),
+			])
+				expect(mutate).toThrow(refusal);
+			const source = join(paths.root, "adapter.json");
+			write(source, { mcpServers: { new: { command: "do-not-run" } } });
+			const sourceBefore = readFileSync(source, "utf8");
+			for (const dryRun of [true, false])
+				await expect(importAdapter({ ...paths, configPaths: [source], dryRun })).rejects.toThrow(refusal);
+			expect(readlinkSync(path)).toBe(link);
+			if (kind === "readonly") {
+				expect(readFileSync(target, "utf8")).toBe(before);
+				expect(statSync(target).mode & 0o777).toBe(0o444);
+			} else if (kind === "directory") expect(lstatSync(target).isDirectory()).toBe(true);
+			else expect(existsSync(target)).toBe(false);
+			expect(readFileSync(source, "utf8")).toBe(sourceBefore);
+		},
+	);
+
+	it.each([
+		["default", "global"],
+		["default", "project"],
+		["custom", "global"],
+		["custom", "project"],
+	])("refuses %s shared-source aliases in %s settings and CLI writes", async (sourceKind, scope) => {
+		const paths = setup();
+		vi.stubEnv("HOME", paths.root);
+		vi.stubEnv("USERPROFILE", paths.root);
+		const sharedConfigPath = sourceKind === "default" ? undefined : paths.sharedConfigPath;
+		const shared = sharedConfigPath ?? join(paths.root, ".config", "mcp", "mcp.json");
+		mkdirSync(dirname(shared), { recursive: true });
+		write(shared, { unrelated: "shared", mcpServers: { old: { command: "old" } } });
+		const before = readFileSync(shared, "utf8");
+		const path = scope === "global" ? join(paths.agentDir, "mcp.json") : join(paths.cwd, ".pi", "mcp.json");
+		const link = relative(dirname(path), shared);
+		symlinkSync(link, path);
+		const options = { ...paths, sharedConfigPath, log: () => {}, error: () => {} };
+		const loaded = loadMcpConfig({ ...options, projectTrusted: true });
+		const entry = loaded.servers.find((server) => server.name === "old");
+		if (!entry) throw new Error("missing aliased shared entry");
+		expect(entry).toMatchObject({ source: path, writableSource: path, scope });
+		expect(() => updateMcpServerConfig(entry, { enabled: false }, loaded.sharedConfigPath)).toThrow(
+			"read-only shared source",
+		);
+		const local = scope === "project" ? ["--local"] : [];
+		expect(await runMcpCommand(["add", ...local, "new", "--", "do-not-run"], options)).toBe(1);
+		expect(await runMcpCommand(["remove", ...local, "old"], options)).toBe(1);
+		if (scope === "global") {
+			const source = join(paths.root, "adapter.json");
+			write(source, { mcpServers: { new: { command: "do-not-run" } } });
+			const sourceBefore = readFileSync(source, "utf8");
+			expect(await runMcpCommand(["import-adapter", "--config", source], options)).toBe(1);
+			expect(readFileSync(source, "utf8")).toBe(sourceBefore);
+		}
+		expect(readlinkSync(path)).toBe(link);
+		expect(readFileSync(shared, "utf8")).toBe(before);
+	});
+
+	it("serializes config mutations through different relative aliases of the same canonical target", () => {
+		const paths = setup();
+		const target = join(paths.root, "dotfiles.json");
+		write(target, { mcpServers: {} });
+		const first = join(paths.agentDir, "mcp.json");
+		const second = join(paths.cwd, ".pi", "mcp.json");
+		const firstLink = relative(dirname(first), target);
+		const secondLink = relative(dirname(second), target);
+		symlinkSync(firstLink, first);
+		symlinkSync(secondLink, second);
+		const before = readFileSync(target, "utf8");
+		const release = lockfile.lockSync(first);
+		try {
+			expect(() => addMcpServerConfig(second, "new", { command: "new" }, paths.sharedConfigPath)).toThrow(
+				"already being held",
+			);
+			expect(readlinkSync(second)).toBe(secondLink);
+			expect(readFileSync(target, "utf8")).toBe(before);
+		} finally {
+			release();
+		}
+		expect(addMcpServerConfig(second, "new", { command: "new" }, paths.sharedConfigPath)).toBe(false);
+		expect(readlinkSync(first)).toBe(firstLink);
+		expect(readlinkSync(second)).toBe(secondLink);
+		expect(read(target).mcpServers.new).toEqual({ command: "new" });
+	});
+
 	it("refuses unstopped rotating grants and mismatched URL/client/issuer/callback before any writes", async () => {
 		const paths = setup();
 		const source = join(paths.root, "adapter.json");
@@ -217,10 +395,12 @@ describe("MCP shared config and copy-only adapter import", () => {
 		async (kind) => {
 			const paths = setup();
 			const nativePath = join(paths.agentDir, "mcp-auth.json");
-			const source = kind === "config" ? nativePath : join(paths.root, "adapter.json");
-			const credentialFile = kind === "credentials" ? nativePath : join(paths.root, "grants.json");
+			const source = join(paths.root, "adapter.json");
+			const credentialFile = join(paths.root, "grants.json");
 			write(source, { mcpServers: { work: { url: endpoint, oauth: { clientId: "client" } } } });
 			write(credentialFile, { work: authEntry("work") });
+			const link = relative(dirname(nativePath), kind === "config" ? source : credentialFile);
+			symlinkSync(link, nativePath);
 			const before = [source, credentialFile].map((path) => readFileSync(path, "utf8"));
 			await expect(
 				importAdapter({
@@ -232,9 +412,25 @@ describe("MCP shared config and copy-only adapter import", () => {
 				}),
 			).rejects.toThrow("source and destination must differ");
 			expect(existsSync(join(paths.agentDir, "mcp.json"))).toBe(false);
+			expect(readlinkSync(nativePath)).toBe(link);
 			expect([source, credentialFile].map((path) => readFileSync(path, "utf8"))).toEqual(before);
 		},
 	);
+
+	it("refuses a config-destination link to its adapter source before any writes", async () => {
+		const paths = setup();
+		const source = join(paths.root, "adapter.json");
+		write(source, { mcpServers: { local: { command: "do-not-run" } } });
+		const before = readFileSync(source, "utf8");
+		const destination = join(paths.agentDir, "mcp.json");
+		const link = "../adapter.json";
+		symlinkSync(link, destination);
+		await expect(importAdapter({ ...paths, configPaths: [source] })).rejects.toThrow(
+			"source and destination must differ",
+		);
+		expect(readlinkSync(destination)).toBe(link);
+		expect(readFileSync(source, "utf8")).toBe(before);
+	});
 
 	it("rejects ambiguous transports and auth policies that native MCP cannot preserve", async () => {
 		const paths = setup();

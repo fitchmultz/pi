@@ -317,44 +317,17 @@ async function runFlow(provider: OAuthClientProvider, options: OAuthFlowOptions)
 		});
 		// RFC 6749: an omitted scope means the requested scope was granted.
 		if (tokens.scope === undefined && scope !== undefined) tokens.scope = scope;
-		if (
-			scope
-				?.split(/\s+/)
-				.filter(Boolean)
-				.some((item) => !tokens.scope?.split(/\s+/).includes(item))
-		) {
-			throw new McpOAuthAuthorizationRequiredError();
-		}
 		await provider.saveTokens(tokens);
 		return "AUTHORIZED";
 	}
 	const existing = options.skipRefresh ? undefined : await provider.tokens();
 	if (existing?.refresh_token) {
-		const requiredScope = options.scope;
-		if (
-			requiredScope &&
-			existing.scope !== undefined &&
-			requiredScope
-				.split(/\s+/)
-				.filter(Boolean)
-				.some((item) => !existing.scope?.split(/\s+/).includes(item))
-		) {
-			throw new McpOAuthAuthorizationRequiredError();
-		}
 		try {
 			const tokens = await refreshAuthorization(discovered.authorizationServerUrl, {
 				...tokenOptions,
 				refreshToken: existing.refresh_token,
 			});
 			if (tokens.scope === undefined && existing.scope !== undefined) tokens.scope = existing.scope;
-			if (
-				requiredScope
-					?.split(/\s+/)
-					.filter(Boolean)
-					.some((item) => !tokens.scope?.split(/\s+/).includes(item))
-			) {
-				throw new McpOAuthAuthorizationRequiredError();
-			}
 			await provider.saveTokens(tokens);
 			return "AUTHORIZED";
 		} catch (error) {

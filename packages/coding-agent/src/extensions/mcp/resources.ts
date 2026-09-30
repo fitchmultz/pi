@@ -328,7 +328,7 @@ export function createMcpResourceToolDefinitions(options: {
 				...(result.contents.length > 1 ? [{ type: "text" as const, text: `${contents.uri}:` }] : []),
 				{ type: "resource" as const, resource: contents },
 			]);
-			const converted = await toModelContent(server.name, blocks, { deferFiles: true });
+			const converted = toModelContent(server.name, blocks);
 			const contents = result.contents.map(({ _meta: _ignored, ...rest }) => rest);
 			return finishMcpResult(
 				{

@@ -116,8 +116,8 @@ describe("pi mcp", () => {
 		});
 		const catalogPath = join(configured.agentDir, "mcp-catalog.json");
 		const before = readFileSync(catalogPath, "utf8");
-		const malformed = JSON.parse(before) as { servers: Record<string, { prompts: { title?: unknown }[] }> };
-		malformed.servers.__proto__.prompts[0].title = 7;
+		const malformed = JSON.parse(before) as { servers: Record<string, { prompts: { title?: unknown }[] }[]> };
+		malformed.servers.__proto__[0].prompts[0].title = 7;
 		writeFileSync(catalogPath, JSON.stringify(malformed));
 		const rejected = await run(["list", "--json"], undefined, configured.agentDir);
 		expect(JSON.parse(rejected.output).servers[0]).toMatchObject({ state: "configured", tools: [] });
@@ -128,6 +128,40 @@ describe("pi mcp", () => {
 		});
 		const replaced = await run(["list", "--json"], undefined, configured.agentDir);
 		expect(JSON.parse(replaced.output).servers[0]).toMatchObject({ state: "configured", tools: [] });
+	});
+
+	it("retains eight recent catalog identities and preserves same-identity collision names when saving descriptors", async () => {
+		const configured = await run(["list", "--json"], {
+			docs: { url: "http://unused.invalid/mcp" },
+		});
+		const profile = loadMcpConfig({
+			agentDir: configured.agentDir,
+			cwd: configured.agentDir,
+			projectTrusted: false,
+		}).servers[0];
+		const catalog = new McpCatalogStore({ agentDir: configured.agentDir });
+		for (let i = 0; i < 9; i++) {
+			catalog.save(profile, configured.agentDir, `grant-${i}`, {
+				tools: [{ name: `tool-${i}`, inputSchema: { type: "object" } }],
+				hasResources: false,
+				resources: [],
+				resourceTemplates: [],
+				prompts: [],
+				names: { [`tool-${i}`]: `mcp__docs__tool_${i}` },
+			});
+		}
+		const reopened = new McpCatalogStore({ agentDir: configured.agentDir });
+		expect(reopened.load(profile, configured.agentDir, "grant-0")).toBeUndefined();
+		for (let i = 1; i < 9; i++) {
+			expect(reopened.load(profile, configured.agentDir, `grant-${i}`)?.tools[0].name).toBe(`tool-${i}`);
+		}
+		const latest = reopened.load(profile, configured.agentDir, "grant-8")!;
+		delete latest.names;
+		reopened.save(profile, configured.agentDir, "grant-8", latest);
+		expect(reopened.load(profile, configured.agentDir, "grant-8")?.names).toEqual({
+			"tool-8": "mcp__docs__tool_8",
+		});
+		expect(reopened.load(profile, configured.agentDir, "unknown-account")).toBeUndefined();
 	});
 
 	it("rejects unknown servers and servers without OAuth for login and logout", async () => {

@@ -1,4 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+	appendFileSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readlinkSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,16 +29,19 @@ import {
 	type Tool,
 } from "@earendil-works/pi-mcp";
 import { createInMemoryTransportPair } from "@earendil-works/pi-mcp/testing";
+import { ProcessTerminal, stripTerminalSequences, TuiMainScreen } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryAuthStorageBackend } from "../../src/core/auth-storage.ts";
 import type { ExtensionFactory } from "../../src/core/extensions/types.ts";
+import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
 import { McpCatalogStore } from "../../src/extensions/mcp/catalog.ts";
-import type { McpServerEntry } from "../../src/extensions/mcp/config.ts";
+import { loadMcpConfig, type McpServerEntry } from "../../src/extensions/mcp/config.ts";
 import { createMcpExtension } from "../../src/extensions/mcp/index.ts";
 import { McpOAuthCredentialStore } from "../../src/extensions/mcp/oauth.ts";
 import { createToolSearchExtension } from "../../src/extensions/tool-search/index.ts";
+import { initTheme, theme } from "../../src/modes/interactive/theme/theme.ts";
 import {
 	createHarness,
 	createTestUiContext,
@@ -206,6 +219,8 @@ describe("native MCP lazy lifecycle", () => {
 	afterEach(async () => {
 		vi.useRealTimers();
 		while (fixtures.length) await fixtures.pop()?.close();
+		vi.unstubAllEnvs();
+		vi.unstubAllGlobals();
 	});
 	function fixture(entries: McpServerEntry[], specs?: Record<string, ServerSpec>) {
 		const current = nativeFixture(entries, specs);
@@ -259,6 +274,72 @@ describe("native MCP lazy lifecycle", () => {
 		expect(f.opened).toEqual(["eager"]);
 	});
 
+	it("refuses a manager save through a Pi-owned link to the loader's custom shared source", async () => {
+		const f = fixture([]);
+		const agentDir = join(f.cwd, "agent");
+		mkdirSync(agentDir);
+		const sharedConfigPath = join(f.cwd, "shared.json");
+		const before = JSON.stringify({ mcpServers: { local: { command: "must-never-run", exposure: "hidden" } } });
+		writeFileSync(sharedConfigPath, before);
+		const path = join(agentDir, "mcp.json");
+		symlinkSync("../shared.json", path);
+		let managed = false;
+		let uiError: unknown;
+		initTheme("dark");
+		const harness = await createHarness({
+			cwd: f.cwd,
+			extensionFactories: [
+				createMcpExtension({
+					loadConfig: () => loadMcpConfig({ agentDir, cwd: f.cwd, projectTrusted: false, sharedConfigPath }),
+					credentials: f.credentials,
+					catalog: f.catalog,
+				}),
+			],
+		});
+		try {
+			await harness.session.bindExtensions({
+				mode: "tui",
+				uiContext: createTestUiContext({
+					custom: (factory) =>
+						new Promise((resolve, reject) => {
+							// The real manager renders and handles keys; its terminal stays stopped.
+							Promise.resolve(
+								factory(new TuiMainScreen(new ProcessTerminal()), theme, new KeybindingsManager(), resolve),
+							)
+								.then(async (view) => {
+									view.handleInput?.("\r");
+									await vi.waitFor(() => expect(view.render(160).join("\n")).toContain("Disable"));
+									view.handleInput?.("\x1b[B");
+									view.handleInput?.("\x1b[B");
+									view.handleInput?.("\r");
+									await vi.waitFor(() =>
+										expect(
+											view.render(160).map(stripTerminalSequences).join(" ").replace(/\s+/g, " "),
+										).toContain("read-only shared source"),
+									);
+									view.handleInput?.("\x1b");
+									await vi.waitFor(() => expect(view.render(160).join("\n")).toContain("MCP servers"));
+									view.handleInput?.("\x1b");
+									managed = true;
+								})
+								.catch((error) => {
+									uiError = error;
+									reject(error);
+								});
+						}),
+				}),
+			});
+			await harness.session.prompt("/mcp");
+			if (uiError) throw uiError;
+			expect(managed).toBe(true);
+			expect(readlinkSync(path)).toBe("../shared.json");
+			expect(readFileSync(sharedConfigPath, "utf8")).toBe(before);
+		} finally {
+			await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			harness.cleanup();
+		}
+	});
+
 	it("gives independent SDK sessions their own lazy clients and shutdown lifecycles", async () => {
 		const f = fixture([entry("docs", "direct")]);
 		const parent = await f.session();
@@ -287,9 +368,6 @@ describe("native MCP lazy lifecycle", () => {
 		await resumed.session.prompt("/mcp prompts docs");
 		expect(f.notifications.at(-1)).toContain("/mcp__docs__brief");
 		expect(f.opened).toEqual(["docs"]);
-		expect(JSON.parse(readFileSync(join(f.cwd, "mcp-catalog.json"), "utf8")).servers.docs.tools[0].name).toBe(
-			"fetch",
-		);
 		spec.tools = [FETCH, { ...FETCH, name: "constructor" }, { ...FETCH, name: "__proto__" }];
 		await resumed.session.prompt("/mcp reconnect docs");
 		expect(resumed.session.getCallableToolNames()).toEqual(
@@ -304,6 +382,86 @@ describe("native MCP lazy lifecycle", () => {
 				.filter(({ request }) => request.method === "tools/call")
 				.map(({ request }) => (request.params as { name: string }).name),
 		).toEqual(["constructor", "__proto__"]);
+	});
+
+	it("restores a root's tools, prompts and selected declarations after another root saves the same profile", async () => {
+		const spec = { tools: [FETCH], prompts: [{ name: "brief", description: "Root A brief" }] };
+		const f = fixture([entry("docs", "direct")], { docs: spec });
+		const original = await f.session();
+		await original.session.prompt("/mcp reconnect docs");
+		original.session.setActiveToolsByName(["read", "mcp__docs__fetch"]);
+		original.setResponses([fauxAssistantMessage("saved")]);
+		await original.session.prompt("save root A selection");
+		await original.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+
+		const otherRoot = join(f.cwd, "other-root");
+		mkdirSync(otherRoot);
+		spec.tools = [{ ...FETCH, name: "lookup" }];
+		spec.prompts = [{ name: "other", description: "Root B brief" }];
+		const other = await f.session({ cwd: otherRoot });
+		await other.session.prompt("/mcp reconnect docs");
+		await other.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+
+		const restored = await f.session({ sessionManager: original.sessionManager });
+		expect(f.opened).toEqual(["docs", "docs"]);
+		expect(restored.session.getCallableToolNames()).toContain("mcp__docs__fetch");
+		expect(restored.session.getCallableToolNames()).not.toContain("mcp__docs__lookup");
+		expect(restored.session.extensionRunner.getCommand("mcp__docs__brief")?.description).toBe("Root A brief");
+		expect(restored.session.extensionRunner.getCommand("mcp__docs__other")).toBeUndefined();
+		restored.setResponses([
+			(context) => {
+				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toContain("mcp__docs__fetch");
+				return fauxAssistantMessage("ready");
+			},
+		]);
+		await restored.session.prompt("continue root A");
+		expect(f.opened).toEqual(["docs", "docs"]);
+	});
+
+	it("reuses stdio catalogs across inherited bookkeeping changes but separates credential and explicit env changes", async () => {
+		for (const name of ["PI_SESSION_ID", "PI_SUBAGENT_RUN_ID", "TERM_SESSION_ID", "PWD"])
+			vi.stubEnv(name, "session-one");
+		vi.stubEnv("SSH_AUTH_SOCK", "/fixture/agent-one");
+		vi.stubEnv("PI_MCP_ACCOUNT_TOKEN", "account-one");
+		const profile: McpServerEntry = { name: "stdio", config: { command: "unused" }, source: "fixture" };
+		const f = fixture([profile]);
+		const original = await f.session();
+		await original.session.prompt("/mcp reconnect stdio");
+		await original.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		for (const name of ["PI_SESSION_ID", "PI_SUBAGENT_RUN_ID", "TERM_SESSION_ID", "PWD"])
+			vi.stubEnv(name, "session-two");
+		const restored = await f.session();
+		expect(restored.session.getCallableToolNames()).toContain("mcp__stdio__fetch");
+		expect(f.opened).toEqual(["stdio"]);
+
+		for (const [name, changed] of [
+			["SSH_AUTH_SOCK", "/fixture/agent-two"],
+			["PI_MCP_ACCOUNT_TOKEN", "account-two"],
+			["__MISE_DIFF", "different-credential-baseline"],
+		]) {
+			const previous = process.env[name];
+			vi.stubEnv(name, changed);
+			const separate = await f.session();
+			expect(separate.session.getCallableToolNames(), name).not.toContain("mcp__stdio__fetch");
+			vi.stubEnv(name, previous);
+		}
+		if ("command" in profile.config) profile.config.env = { PI_SESSION_ID: "explicit-account-one" };
+		const explicit = await f.session();
+		await explicit.session.prompt("/mcp reconnect stdio");
+		if ("command" in profile.config) profile.config.env = { PI_SESSION_ID: "explicit-account-two" };
+		const replaced = await f.session();
+		expect(replaced.session.getCallableToolNames()).not.toContain("mcp__stdio__fetch");
+		vi.stubEnv("PI_MODEL", "referenced-account-one");
+		if ("command" in profile.config) {
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: literal config value reference
+			profile.config.env = { PI_SESSION_ID: "${PI_MODEL}" };
+		}
+		const referenced = await f.session();
+		await referenced.session.prompt("/mcp reconnect stdio");
+		vi.stubEnv("PI_MODEL", "referenced-account-two");
+		const changedReference = await f.session();
+		expect(changedReference.session.getCallableToolNames()).not.toContain("mcp__stdio__fetch");
+		expect(f.opened).toEqual(["stdio", "stdio", "stdio"]);
 	});
 
 	it("keeps serialized request declarations stable through cached discovery, unchanged refresh and reconnect", async () => {
@@ -425,6 +583,126 @@ describe("native MCP lazy lifecycle", () => {
 		}
 	});
 
+	it.each([
+		{ transport: "http", reconnect: "idle", changed: false },
+		{ transport: "http", reconnect: "idle", changed: true },
+		{ transport: "http", reconnect: "expired", changed: false },
+		{ transport: "http", reconnect: "expired", changed: true },
+		{ transport: "stdio", reconnect: "idle", changed: false },
+		{ transport: "stdio", reconnect: "idle", changed: true },
+	])(
+		"keeps an opaque $transport credential prepared call valid after $reconnect only when its resolved account is unchanged ($changed)",
+		async ({ transport, reconnect, changed }) => {
+			vi.useFakeTimers();
+			const cwd = mkdtempSync(join(tmpdir(), "pi-mcp-live-secret-"));
+			const tokenPath = join(cwd, "token");
+			const requestsPath = join(cwd, "requests.jsonl");
+			const serverPath = join(cwd, "server.mjs");
+			writeFileSync(tokenPath, "Bearer account-one");
+			writeFileSync(requestsPath, "");
+			if (transport === "stdio")
+				writeFileSync(
+					serverPath,
+					`
+import { appendFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+for await (const line of createInterface({ input: process.stdin })) {
+	const request = JSON.parse(line);
+	if (!("id" in request)) continue;
+	appendFileSync(${JSON.stringify(requestsPath)}, JSON.stringify({ method: request.method, token: process.env.TOKEN }) + "\\n");
+	const result = request.method === "initialize"
+		? { protocolVersion: ${JSON.stringify(LATEST_PROTOCOL_VERSION)}, capabilities: { tools: {} }, serverInfo: { name: "opaque", version: "1" } }
+		: request.method === "tools/list" ? { tools: [${JSON.stringify(FETCH)}] }
+		: { content: [{ type: "text", text: "ok" }], structuredContent: { value: "ok" } };
+	process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+}`,
+				);
+			const command = `!${JSON.stringify(process.execPath)} -p ${JSON.stringify(`require('node:fs').readFileSync(${JSON.stringify(tokenPath)}, 'utf8')`)}`;
+			const profile: McpServerEntry = {
+				name: "opaque",
+				source: "fixture",
+				config:
+					transport === "http"
+						? { url: "http://opaque.invalid/mcp", headers: { Authorization: command }, exposure: "direct" }
+						: { command: process.execPath, args: [serverPath], env: { TOKEN: command }, exposure: "direct" },
+			};
+			let initialized = 0;
+			let expired = false;
+			const requests = () =>
+				readFileSync(requestsPath, "utf8")
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line) as { method: string; token: string | null });
+			const calls = () =>
+				requests()
+					.filter((request) => request.method === "tools/call")
+					.map((request) => request.token);
+			vi.stubGlobal("fetch", async (_url: string | URL, init?: RequestInit) => {
+				if (init?.method !== "POST") return new Response(null, { status: init?.method === "GET" ? 405 : 200 });
+				const request = JSON.parse(String(init.body)) as JsonRpcRequest;
+				if (!("id" in request)) return new Response(null, { status: 202 });
+				const headers = new Headers(init.headers);
+				if (request.method === "tools/call" && expired && headers.get("mcp-session-id") === "session-1")
+					return new Response(null, { status: 404 });
+				appendFileSync(
+					requestsPath,
+					`${JSON.stringify({ method: request.method, token: headers.get("authorization") })}\n`,
+				);
+				const result =
+					request.method === "initialize"
+						? {
+								protocolVersion: LATEST_PROTOCOL_VERSION,
+								capabilities: { tools: {} },
+								serverInfo: { name: "opaque", version: "1" },
+							}
+						: request.method === "tools/list"
+							? { tools: [FETCH] }
+							: { content: [{ type: "text", text: "ok" }], structuredContent: { value: "ok" } };
+				return Response.json(
+					{ jsonrpc: "2.0", id: request.id, result },
+					{
+						headers: request.method === "initialize" ? { "mcp-session-id": `session-${++initialized}` } : {},
+					},
+				);
+			});
+			const harness = await createHarness({
+				cwd,
+				initialActiveToolNames: ["read"],
+				extensionFactories: [
+					createMcpExtension({
+						loadConfig: () => ({ servers: [profile], errors: [] }),
+						credentials: new McpOAuthCredentialStore(new InMemoryAuthStorageBackend()),
+						catalog: new McpCatalogStore({ agentDir: cwd }),
+					}),
+				],
+			});
+			try {
+				await harness.session.bindExtensions({});
+				expect(requests()).toEqual([]);
+				await harness.session.prompt("/mcp reconnect opaque");
+				if (reconnect === "idle") await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+				else expired = true;
+				if (changed) writeFileSync(tokenPath, "Bearer account-two");
+				const result = await run(harness, "mcp__opaque__fetch", {});
+				expect(result.isError).toBe(changed);
+				expect(requests().filter((request) => request.method === "initialize")).toHaveLength(2);
+				if (changed) {
+					expect(getMessageText(result)).toMatch(/changed|no longer available/);
+					expect(calls()).toEqual([]);
+					expect((await run(harness, "mcp__opaque__fetch", {})).isError).toBe(false);
+					expect(calls()).toEqual(["Bearer account-two"]);
+				} else {
+					expect(calls()).toEqual(["Bearer account-one"]);
+				}
+			} finally {
+				await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+				harness.cleanup();
+				rmSync(cwd, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("preserves permissions and exclusions when discovery installs a real native tool", async () => {
 		const f = fixture([entry("docs")]);
 		const harness = await f.session({}, [
@@ -471,14 +749,12 @@ describe("native MCP lazy lifecycle", () => {
 	});
 
 	it("migrates raw adapter selections once using collision-safe native names and retains inactive pins", async () => {
-		const f = fixture([entry("docs", "direct")], {
-			docs: {
-				tools: [
-					{ ...FETCH, name: "a.b" },
-					{ ...FETCH, name: "a_b" },
-				],
-			},
-		});
+		const tools = [
+			{ ...FETCH, name: "a.b" },
+			{ ...FETCH, name: "a_b" },
+		];
+		const spec = { tools };
+		const f = fixture([entry("docs", "direct")], { docs: spec });
 		const manager = SessionManager.inMemory(f.cwd);
 		manager.appendCustomEntry("mcp-tool-selection", {
 			selected: [{ server: "docs", tool: "a_b" }],
@@ -494,6 +770,15 @@ describe("native MCP lazy lifecycle", () => {
 		const selected = harness.session.getActiveToolNames().find((name) => /^mcp__docs__a_b_[a-f0-9]{8}$/.test(name));
 		expect(selected).toBeDefined();
 		expect(harness.session.getActiveToolNames()).not.toContain("mcp__docs__a_b");
+		const definition = harness.session.getToolDefinition("mcp__docs__a_b");
+		harness.session.setActiveToolsByName([...harness.session.getActiveToolNames(), "mcp__docs__a_b"]);
+		spec.tools = tools.filter((tool) => tool.name !== "a.b");
+		await f.peers.at(-1)?.pair.server.send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+		await vi.waitFor(() => expect(harness.session.getActiveToolNames()).not.toContain("mcp__docs__a_b"));
+		spec.tools = tools;
+		await f.peers.at(-1)?.pair.server.send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+		await vi.waitFor(() => expect(harness.session.getActiveToolNames()).toContain("mcp__docs__a_b"));
+		expect(harness.session.getToolDefinition("mcp__docs__a_b")).toBe(definition);
 		harness.session.setActiveToolsByName(["codemode"]);
 		harness.setResponses([fauxAssistantMessage("ready")]);
 		await harness.session.prompt("save native choice");

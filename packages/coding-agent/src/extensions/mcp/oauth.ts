@@ -15,6 +15,7 @@ import {
 	parseWwwAuthenticate,
 } from "@earendil-works/pi-mcp/oauth";
 import { APP_NAME } from "../../config.ts";
+import { isLoopbackRedirectUri } from "../../core/mcp-servers.ts";
 import type { McpServerEntry } from "./config.ts";
 import type { McpOAuthServerStore } from "./oauth-credentials.ts";
 
@@ -30,7 +31,7 @@ export interface McpOAuthSettings {
 	scope?: string;
 }
 
-function mergeScopes(...scopes: (string | undefined)[]): string | undefined {
+export function mergeScopes(...scopes: (string | undefined)[]): string | undefined {
 	const merged = [...new Set(scopes.flatMap((scope) => scope?.split(/\s+/).filter(Boolean) ?? []))];
 	return merged.length ? merged.join(" ") : undefined;
 }
@@ -76,11 +77,22 @@ export function createMcpAuthProvider(options: {
 	onChallenge: (challenge: OAuthChallenge) => void;
 }): McpAuthProvider {
 	const { serverUrl, store } = options;
+	const identity = store.catalogIdentity();
+	const assertIdentity = () => {
+		if (store.catalogIdentity() !== identity)
+			throw new Error("MCP server changed accounts. Discover it again before calling it.");
+	};
+	const load = async () => {
+		assertIdentity();
+		const state = await store.load();
+		assertIdentity();
+		return state;
+	};
 	let refreshing: Promise<void> | undefined;
 	const refresh = (staleToken: string | undefined, fetch: McpFetch = globalThis.fetch, challenge?: OAuthChallenge) => {
 		refreshing ??= store
 			.withMutationLock(async () => {
-				const state = await store.load();
+				const state = await load();
 				if (state?.tokens?.access_token !== staleToken) return;
 				if (!state?.tokens?.refresh_token) throw new McpOAuthAuthorizationRequiredError();
 				const settings = options.settings();
@@ -115,14 +127,15 @@ export function createMcpAuthProvider(options: {
 	return {
 		token: async () => {
 			await refreshing?.catch(() => undefined);
-			const state = await store.load();
+			const state = await load();
 			const token = state?.tokens?.access_token;
 			const expired = state?.tokensExpireAt !== undefined && state.tokensExpireAt - 30_000 <= Date.now();
 			if (!expired || !state?.tokens?.refresh_token) return token;
 			await refresh(token).catch(() => undefined);
-			return (await store.load())?.tokens?.access_token;
+			return (await load())?.tokens?.access_token;
 		},
 		onUnauthorized: async (context) => {
+			assertIdentity();
 			const challenge = parseWwwAuthenticate(context.response.headers.get("www-authenticate"));
 			options.onChallenge(challenge);
 			if (challenge.error === "insufficient_scope") throw new McpOAuthAuthorizationRequiredError();
@@ -178,6 +191,8 @@ export class McpSignInFlow {
 		store: McpOAuthServerStore;
 		settings: McpOAuthSettings;
 		challenge?: OAuthChallenge;
+		requestedScope?: string;
+		onRequestedScope?: (scope: string | undefined) => void;
 		fetch?: McpFetch;
 		timeoutMs?: number;
 		/** Cancels this start only; detached once the pending browser flow is handed back. */
@@ -198,14 +213,7 @@ export class McpSignInFlow {
 		const registered = configured && registrations.includes(configured) ? configured : registrations[0];
 		const raw = configured ?? registered ?? "http://127.0.0.1/callback";
 		const url = new URL(raw);
-		if (
-			url.protocol !== "http:" ||
-			!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) ||
-			url.username ||
-			url.password ||
-			url.search ||
-			url.hash
-		) {
+		if (!isLoopbackRedirectUri(raw)) {
 			throw new Error("OAuth callback must be an HTTP loopback URL without credentials, query or fragment");
 		}
 		// A persisted registration fixes the complete redirect, not just its port.
@@ -257,7 +265,7 @@ export class McpSignInFlow {
 			});
 			const flow = {
 				serverUrl,
-				scope: mergeScopes(settings.scope, options.challenge?.scope),
+				scope: mergeScopes(settings.scope, options.requestedScope, stored?.tokens?.scope, options.challenge?.scope),
 				resourceMetadataUrl: options.challenge?.resourceMetadataUrl,
 				fetch: (input: Parameters<McpFetch>[0], init: Parameters<McpFetch>[1]) =>
 					(options.fetch ?? globalThis.fetch)(input, {
@@ -268,6 +276,8 @@ export class McpSignInFlow {
 			await authorizeMcp(provider, { ...flow, skipRefresh: true });
 			controller.signal.throwIfAborted();
 			if (!authorizationUrl) throw new Error("OAuth flow did not produce an authorization URL");
+			flow.scope = authorizationUrl.searchParams.get("scope") ?? undefined;
+			options.onRequestedScope?.(flow.scope);
 			const state = await provider.state();
 			let submit = (_result: OAuthCallback) => {};
 			const manual = new Promise<OAuthCallback>((resolve) => {
@@ -328,10 +338,7 @@ export class McpSignInFlow {
 				const issuer = discovery?.authorizationServerMetadata?.issuer ?? discovery?.authorizationServerUrl;
 				const required =
 					discovery?.authorizationServerMetadata?.authorization_response_iss_parameter_supported === true;
-				if (
-					(required && !response.iss) ||
-					(response.iss && response.iss.replace(/\/$/, "") !== issuer?.replace(/\/$/, ""))
-				)
+				if ((required && response.iss === undefined) || (response.iss !== undefined && response.iss !== issuer))
 					throw new Error("OAuth callback issuer does not match discovery");
 				await authorizeMcp(pending.provider, { ...pending.flow, authorizationCode: response.code });
 				pending.controller.signal.throwIfAborted();
@@ -370,6 +377,8 @@ export async function signInMcpServer(options: {
 	store: McpOAuthServerStore;
 	settings: McpOAuthSettings;
 	challenge?: OAuthChallenge;
+	requestedScope?: string;
+	onRequestedScope?: (scope: string | undefined) => void;
 	prompt: McpSignInPrompt;
 	/** Share with this runtime's model/browser sign-ins. CLI may omit it and own a flow. */
 	flow?: McpSignInFlow;

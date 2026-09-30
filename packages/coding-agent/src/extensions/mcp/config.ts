@@ -22,9 +22,21 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	accessSync,
+	chmodSync,
+	constants,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME } from "../../config.ts";
 import { type McpExposure, type McpServerConfig, validateMcpServerConfig } from "../../core/mcp-servers.ts";
@@ -54,6 +66,8 @@ export interface McpServerEntry {
 
 export interface LoadedMcpConfig {
 	servers: McpServerEntry[];
+	/** Read-only shared source to protect when saving Pi-owned overrides. */
+	sharedConfigPath?: string;
 	/** Activate codemode for configured `codemode` or `codemode-deferred` servers. Default: true. */
 	autoEnableCodemode?: boolean;
 	errors: string[];
@@ -112,7 +126,8 @@ export function loadMcpConfig(options: {
 }): LoadedMcpConfig {
 	const state: McpConfigState = { servers: new Map(), errors: [] };
 	const global = join(options.agentDir, "mcp.json");
-	readConfigFile(options.sharedConfigPath ?? join(homedir(), ".config", "mcp", "mcp.json"), "shared", global, state);
+	const sharedConfigPath = options.sharedConfigPath ?? join(homedir(), ".config", "mcp", "mcp.json");
+	readConfigFile(sharedConfigPath, "shared", global, state);
 	readConfigFile(global, "global", global, state);
 	if (options.projectTrusted) {
 		const project = join(options.cwd, CONFIG_DIR_NAME, "mcp.json");
@@ -120,6 +135,7 @@ export function loadMcpConfig(options: {
 	}
 	return {
 		servers: [...state.servers.values()],
+		sharedConfigPath,
 		...(state.autoEnableCodemode === undefined ? {} : { autoEnableCodemode: state.autoEnableCodemode }),
 		errors: state.errors,
 	};
@@ -136,11 +152,15 @@ export interface McpServerConfigPatch {
  * Change one entry in its Pi-owned destination. Inherited shared entries are copied whole.
  * Other content and indentation are preserved.
  */
-export function updateMcpServerConfig(entry: McpServerEntry, patch: McpServerConfigPatch): void {
+export function updateMcpServerConfig(
+	entry: McpServerEntry,
+	patch: McpServerConfigPatch,
+	sharedConfigPath: string | undefined = entry.scope === "shared" ? entry.source : undefined,
+): void {
 	if (entry.scope === "extension") throw new Error("Extension MCP settings are runtime-local");
 	const path = entry.writableSource ?? (entry.scope === "shared" ? undefined : entry.source);
 	if (!path) throw new Error("MCP entry has no Pi-owned writable destination");
-	editMcpServers(path, (servers, parsed) => {
+	editMcpServers(path, sharedConfigPath, (servers, parsed) => {
 		const existing = Object.hasOwn(servers, entry.name) ? servers[entry.name] : undefined;
 		const server = structuredClone(isRecord(existing) ? existing : entry.config) as Record<string, unknown>;
 		if (patch.enabled !== undefined) {
@@ -166,9 +186,14 @@ export function updateMcpServerConfig(entry: McpServerEntry, patch: McpServerCon
  * Add a server to an `mcp.json`, creating the file when missing. An existing entry with the same
  * name is replaced. Returns true when an entry was replaced.
  */
-export function addMcpServerConfig(path: string, name: string, config: McpServerConfig): boolean {
+export function addMcpServerConfig(
+	path: string,
+	name: string,
+	config: McpServerConfig,
+	sharedConfigPath?: string,
+): boolean {
 	let replaced = false;
-	editMcpServers(path, (servers, parsed) => {
+	editMcpServers(path, sharedConfigPath, (servers, parsed) => {
 		replaced = Object.hasOwn(servers, name);
 		parsed.mcpServers = { ...servers, [name]: config };
 		return true;
@@ -177,9 +202,9 @@ export function addMcpServerConfig(path: string, name: string, config: McpServer
 }
 
 /** Explicit import only: copy missing whole entries; reject all writes if a destination already exists. */
-export function copyMcpServerConfigs(path: string, entries: McpServerEntry[]): void {
+export function copyMcpServerConfigs(path: string, entries: McpServerEntry[], sharedConfigPath?: string): void {
 	if (entries.length === 0) return;
-	editMcpServers(path, (servers, parsed) => {
+	editMcpServers(path, sharedConfigPath, (servers, parsed) => {
 		for (const entry of entries) {
 			if (Object.hasOwn(servers, entry.name))
 				throw new Error(`MCP server "${entry.name}" already exists in ${path}`);
@@ -196,10 +221,10 @@ export function copyMcpServerConfigs(path: string, entries: McpServerEntry[]): v
 }
 
 /** Remove a server from an `mcp.json`. Returns false when the file does not define it. */
-export function removeMcpServerConfig(path: string, name: string): boolean {
-	if (!existsSync(path)) return false;
+export function removeMcpServerConfig(path: string, name: string, sharedConfigPath?: string): boolean {
+	if (!lstatSync(path, { throwIfNoEntry: false })) return false;
 	let removed = false;
-	editMcpServers(path, (servers) => {
+	editMcpServers(path, sharedConfigPath, (servers) => {
 		if (!Object.hasOwn(servers, name)) return false;
 		delete servers[name];
 		removed = true;
@@ -208,18 +233,53 @@ export function removeMcpServerConfig(path: string, name: string): boolean {
 	return removed;
 }
 
-/**
- * Read an `mcp.json` (an empty config when missing), let `edit` change its `mcpServers`, and write
- * it back with its indentation when `edit` returns true. Other content is kept.
- */
+/** Resolve and validate a Pi-owned destination without creating files (also used by import preflight). */
+export function resolveMcpConfigWriteTarget(
+	path: string,
+	sharedConfigPath = join(homedir(), ".config", "mcp", "mcp.json"),
+): string {
+	const entry = lstatSync(path, { throwIfNoEntry: false });
+	if (entry && !entry.isFile() && !entry.isSymbolicLink()) throw new Error(`${path}: expected a regular file`);
+	const target = entry
+		? realpathSync(path)
+		: existsSync(dirname(path))
+			? join(realpathSync(dirname(path)), basename(path))
+			: resolve(path);
+	const sharedTarget = existsSync(sharedConfigPath)
+		? realpathSync(sharedConfigPath)
+		: existsSync(dirname(sharedConfigPath))
+			? join(realpathSync(dirname(sharedConfigPath)), basename(sharedConfigPath))
+			: resolve(sharedConfigPath);
+	if (resolve(path) === resolve(sharedConfigPath) || target === sharedTarget) {
+		throw new Error(`${path}: Pi-owned config must not alias the read-only shared source ${sharedConfigPath}`);
+	}
+	const stat = lstatSync(target, { throwIfNoEntry: false });
+	if (stat && !stat.isFile()) throw new Error(`${path}: expected a regular file`);
+	if (stat) {
+		if ((stat.mode & 0o222) === 0) throw new Error(`${path}: config target is not writable`);
+		accessSync(target, constants.W_OK);
+	}
+	return target;
+}
+
+/** Read, edit and atomically publish under the canonical target lock. Other content and indentation are kept. */
 function editMcpServers(
 	path: string,
+	sharedConfigPath: string | undefined,
 	edit: (servers: Record<string, unknown>, parsed: Record<string, unknown>) => boolean,
 ): void {
-	mkdirSync(dirname(path), { recursive: true });
-	const release = lockfile.lockSync(path, { realpath: false });
+	const resolved = resolveMcpConfigWriteTarget(path, sharedConfigPath);
+	mkdirSync(dirname(resolved), { recursive: true });
+	const target = resolveMcpConfigWriteTarget(resolved, sharedConfigPath);
+	const release = lockfile.lockSync(target, { realpath: false });
 	try {
-		const text = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+		const stat = lstatSync(target, { throwIfNoEntry: false });
+		if (stat && !stat.isFile()) throw new Error(`${path}: expected a regular file`);
+		if (stat) {
+			if ((stat.mode & 0o222) === 0) throw new Error(`${path}: config target is not writable`);
+			accessSync(target, constants.W_OK);
+		}
+		const text = stat ? readFileSync(target, "utf8") : undefined;
 		const parsed: unknown = text === undefined ? {} : JSON.parse(text);
 		if (!isRecord(parsed) || (parsed.mcpServers !== undefined && !isRecord(parsed.mcpServers))) {
 			throw new Error(`${path}: expected an object with an "mcpServers" object`);
@@ -228,13 +288,15 @@ function editMcpServers(
 		parsed.mcpServers = servers;
 		if (!edit(servers, parsed)) return;
 		const indent = (text && /^([ \t]+)\S/m.exec(text)?.[1]) || "  ";
-		const stage = `${path}.${randomUUID()}.tmp`;
+		const mode = stat ? stat.mode & 0o777 : 0o600;
+		const stage = `${target}.${randomUUID()}.tmp`;
 		try {
 			writeFileSync(stage, `${JSON.stringify(parsed, null, indent)}\n`, {
 				flag: "wx",
-				mode: existsSync(path) ? statSync(path).mode & 0o777 : 0o600,
+				mode,
 			});
-			renameSync(stage, path);
+			chmodSync(stage, mode);
+			renameSync(stage, target);
 		} finally {
 			rmSync(stage, { force: true });
 		}

@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import type { McpOAuthState } from "@earendil-works/pi-mcp/oauth";
 import { parseClientInformation, parseOAuthTokens } from "@earendil-works/pi-mcp/oauth";
 import { validateMcpServerConfig } from "../../core/mcp-servers.ts";
-import { copyMcpServerConfigs, type McpServerEntry } from "./config.ts";
+import { copyMcpServerConfigs, type McpServerEntry, resolveMcpConfigWriteTarget } from "./config.ts";
 import type { McpOAuthCredentialStore } from "./oauth-credentials.ts";
 
 function record(value: unknown): Record<string, unknown> {
@@ -299,6 +299,8 @@ export interface AdapterImportOptions {
 	/** Ordered from lowest to highest precedence. Explicit paths only. */
 	configPaths: string[];
 	agentDir: string;
+	/** Read-only shared config source; defaults to ~/.config/mcp/mcp.json. */
+	sharedConfigPath?: string;
 	credentials: McpOAuthCredentialStore;
 	/** JSON object keyed by exact adapter profile names, containing AuthEntry objects. */
 	credentialFile?: string;
@@ -325,10 +327,9 @@ export async function importAdapter(
 			throw new Error("Import source and destination must differ");
 		}
 	}
+	const target = resolveMcpConfigWriteTarget(destination, options.sharedConfigPath);
 	const entries = readConfigs(options.configPaths, destination);
-	const existing = existsSync(destination)
-		? record(record(parseJson(readFileSync(destination, "utf8"))).mcpServers ?? {})
-		: {};
+	const existing = existsSync(target) ? record(record(parseJson(readFileSync(target, "utf8"))).mcpServers ?? {}) : {};
 	for (const entry of entries) {
 		if (Object.hasOwn(existing, entry.name))
 			throw new Error(`MCP server "${entry.name}" already exists in ${destination}`);
@@ -345,7 +346,7 @@ export async function importAdapter(
 		return value === undefined ? [] : [{ entry, state: convertAdapterGrant(entry, value) }];
 	});
 	if (!options.dryRun) {
-		copyMcpServerConfigs(destination, entries);
+		copyMcpServerConfigs(destination, entries, options.sharedConfigPath);
 		for (const grant of grants) {
 			try {
 				await options.credentials.importGrant(grant.entry, grant.state);

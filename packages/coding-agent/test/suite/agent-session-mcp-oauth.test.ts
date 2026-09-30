@@ -11,7 +11,7 @@ import type { McpOAuthConfig, McpServerEntry } from "../../src/extensions/mcp/co
 import { createMcpExtension } from "../../src/extensions/mcp/index.ts";
 import { McpOAuthCredentialStore } from "../../src/extensions/mcp/oauth.ts";
 import { createHarness, createTestUiContext, getMessageText, getToolResult, type Harness } from "./harness.ts";
-import { startOAuthMcpServer } from "./mcp-oauth-server.ts";
+import { type OAuthMcpServerOptions, startOAuthMcpServer } from "./mcp-oauth-server.ts";
 
 describe("AgentSession MCP OAuth", () => {
 	const cleanups: (() => Promise<void> | void)[] = [];
@@ -20,8 +20,13 @@ describe("AgentSession MCP OAuth", () => {
 		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-	async function setup(browser: "follow" | "paste" | "manual", oauth?: McpOAuthConfig, lazy = false) {
-		const server = await startOAuthMcpServer();
+	async function setup(
+		browser: "follow" | "paste" | "manual",
+		oauth?: McpOAuthConfig,
+		lazy = false,
+		serverOptions: OAuthMcpServerOptions = {},
+	) {
+		const server = await startOAuthMcpServer(serverOptions);
 		cleanups.push(server.close);
 		const backend = new InMemoryAuthStorageBackend();
 		const credentials = new McpOAuthCredentialStore(backend);
@@ -37,6 +42,7 @@ describe("AgentSession MCP OAuth", () => {
 		};
 		const notifications: string[] = [];
 		const opened: URL[] = [];
+		const browserRequests: Promise<Response>[] = [];
 		let redirectLocation: Promise<string> | undefined;
 		const harness: Harness = await createHarness({
 			initialActiveToolNames: [],
@@ -48,7 +54,9 @@ describe("AgentSession MCP OAuth", () => {
 						opened.push(new URL(url));
 						if (browser === "follow") {
 							// The browser follows the authorization redirect to the loopback callback.
-							void fetch(url);
+							const request = fetch(url);
+							request.catch(() => undefined);
+							browserRequests.push(request);
 						} else if (browser === "paste") {
 							// The browser cannot reach the callback; the user pastes the redirect URL.
 							redirectLocation = fetch(url, { redirect: "manual" }).then(
@@ -60,6 +68,7 @@ describe("AgentSession MCP OAuth", () => {
 			],
 		});
 		cleanups.push(async () => {
+			await Promise.all(browserRequests);
 			await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 			harness.cleanup();
 		});
@@ -88,6 +97,7 @@ describe("AgentSession MCP OAuth", () => {
 			credentials,
 			entry,
 			redirectLocation: () => redirectLocation,
+			waitForBrowser: () => Promise.all(browserRequests),
 		};
 	}
 
@@ -262,6 +272,108 @@ describe("AgentSession MCP OAuth", () => {
 			await modelCall(harness, "mcp_discover", { server: "issues" });
 			expect(getMessageText({ content: (await callWhoami(harness)).content.slice(0, 1) })).toBe("token access-1");
 			expect(opened).toHaveLength(1);
+		},
+	);
+
+	it.each([401, 403] as const)(
+		"keeps narrowed read consent usable and retains unresolved write guidance after a %s challenge",
+		async (challengeStatus) => {
+			const { harness, server, credentials, entry, opened, waitForBrowser } = await setup(
+				"follow",
+				undefined,
+				true,
+				{
+					scopesSupported: ["read", "optional"],
+					grantScope: "read",
+					writeScope: "write",
+					challengeStatus,
+				},
+			);
+			harness.session.setActiveToolsByName(["mcp_auth", "mcp_discover"]);
+			const first = await modelCall(harness, "mcp_auth", { action: "begin", server: "issues" });
+			const { id } = JSON.parse(getMessageText(first)) as { id: string };
+			expect(opened[0].searchParams.get("scope")).toBe("read optional");
+			const completed = await modelCall(harness, "mcp_auth", { action: "complete", id });
+			expect(completed.isError).toBe(false);
+			expect(credentials.tokens(entry)?.scope).toBe("read");
+			const epoch = credentials.catalogIdentity(entry);
+			await modelCall(harness, "mcp_discover", { server: "issues" });
+			expect((await callWhoami(harness)).isError).toBe(false);
+			const denied = await modelCall(harness, "mcp__issues__write", {});
+			expect(denied.isError).toBe(true);
+			expect(server.log.filter((line) => line.startsWith("write denied"))).toHaveLength(1);
+			expect(server.log).not.toContain("token refresh");
+			expect(server.writes()).toBe(0);
+
+			const stepUp = await modelCall(harness, "mcp_auth", { action: "begin", server: "issues" });
+			const stepId = (JSON.parse(getMessageText(stepUp)) as { id: string }).id;
+			expect(opened[1].searchParams.get("scope")?.split(" ")).toEqual(["read", "optional", "write"]);
+			expect((await modelCall(harness, "mcp_auth", { action: "complete", id: stepId })).isError).toBe(false);
+			expect(credentials.catalogIdentity(entry)).not.toBe(epoch);
+			expect(credentials.tokens(entry)?.scope).toBe("read");
+			expect(server.writes()).toBe(0);
+			await modelCall(harness, "mcp_discover", { server: "issues" });
+			server.expireAccessTokens();
+			expect((await callWhoami(harness)).isError).toBe(false);
+			expect(server.log.filter((line) => line === "token refresh")).toHaveLength(1);
+
+			const retry = await modelCall(harness, "mcp_auth", { action: "begin", server: "issues" });
+			expect(opened[2].searchParams.get("scope")?.split(" ")).toEqual(["read", "optional", "write"]);
+			await waitForBrowser();
+			await modelCall(harness, "mcp_auth", {
+				action: "cancel",
+				id: (JSON.parse(getMessageText(retry)) as { id: string }).id,
+			});
+			expect((await modelCall(harness, "mcp__issues__write", {})).isError).toBe(true);
+			expect(server.log.filter((line) => line.startsWith("write denied"))).toHaveLength(2);
+			expect(server.log.filter((line) => line === "token refresh")).toHaveLength(1);
+			expect(server.writes()).toBe(0);
+		},
+	);
+
+	it("lets the server authorize a broader scope grant without a client-side literal scope gate", async () => {
+		const { harness, server, credentials, entry } = await setup("follow", undefined, true, {
+			scopesSupported: ["files:read"],
+			grantScope: "files:read",
+			writeScope: "files:write",
+			writeGrant: "files:all",
+			callbackIssuer: "exact",
+		});
+		harness.session.setActiveToolsByName(["mcp_auth", "mcp_discover"]);
+		for (const scope of ["files:read", "files:all"]) {
+			server.setGrantScope(scope);
+			const started = await modelCall(harness, "mcp_auth", { action: "begin", server: "issues" });
+			const { id } = JSON.parse(getMessageText(started)) as { id: string };
+			expect((await modelCall(harness, "mcp_auth", { action: "complete", id })).isError).toBe(false);
+			expect(credentials.tokens(entry)?.scope).toBe(scope);
+			await modelCall(harness, "mcp_discover", { server: "issues" });
+			expect((await modelCall(harness, "mcp__issues__write", {})).isError).toBe(scope === "files:read");
+		}
+		expect(server.log.filter((line) => line.startsWith("write denied"))).toHaveLength(1);
+		expect(server.writes()).toBe(1);
+		expect(server.log).not.toContain("token refresh");
+	});
+
+	it.each(["trailing-slash", "empty"] as const)(
+		"refuses a captured %s issuer before exchanging a code or replacing the existing grant",
+		async (callbackIssuer) => {
+			const { harness, server, credentials, entry } = await setup("follow", undefined, true, { callbackIssuer });
+			await credentials.importGrant(entry, {
+				serverUrl: server.url,
+				issuer: new URL(server.url).origin,
+				clientInformation: { client_id: "client-1" },
+				tokens: { access_token: "existing-account", token_type: "Bearer", scope: "read" },
+			});
+			const epoch = credentials.catalogIdentity(entry);
+			harness.session.setActiveToolsByName(["mcp_auth"]);
+			const started = await modelCall(harness, "mcp_auth", { action: "begin", server: "issues" });
+			const { id } = JSON.parse(getMessageText(started)) as { id: string };
+			const refused = await modelCall(harness, "mcp_auth", { action: "complete", id });
+			expect(refused.isError).toBe(true);
+			expect(getMessageText(refused)).toContain("issuer");
+			expect(server.log).not.toContain("token code");
+			expect(credentials.catalogIdentity(entry)).toBe(epoch);
+			expect(credentials.tokens(entry)?.access_token).toBe("existing-account");
 		},
 	);
 

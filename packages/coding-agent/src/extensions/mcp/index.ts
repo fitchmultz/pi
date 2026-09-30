@@ -180,6 +180,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 		/** Servers from `mcp.json`, which take precedence over registered servers of the same name. */
 		let configuredEntries: McpServerEntry[] = [];
 		let configErrors: string[] = [];
+		let sharedConfigPath: string | undefined;
 		/** Registered servers that `mcp.json` overrides, shown in `/mcp`. */
 		let overridden: string[] = [];
 		/** Between session_start and session_shutdown. Registrations before that are read on session_start. */
@@ -198,13 +199,15 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 		let sessionContext: ExtensionContext | undefined;
 		let selectionMigration: McpSelectionMigration | undefined;
 		let inactiveToolNames = new Set<string>();
+		let inactiveMigrationOwners = new Set<string>();
 		const migratedFeatures = { gateway: TOOL_SEARCH_TOOL_NAME, script: CODEMODE_TOOL_NAME };
 		let credentials = options.credentials;
 		let serverLog: McpServerLog | undefined;
 		let signInFlow: McpSignInFlow | undefined;
 		const catalog = options.catalog ?? new McpCatalogStore();
 		const openUrl = options.openUrl ?? openBrowser;
-		const updateConfig = options.updateConfig ?? ((entry, patch) => updateMcpServerConfig(entry, patch));
+		const updateConfig =
+			options.updateConfig ?? ((entry, patch) => updateMcpServerConfig(entry, patch, sharedConfigPath));
 		const authServers = new Map<string, McpServer>();
 
 		const listeners = new Set<() => void>();
@@ -262,6 +265,9 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			sessionContext = ctx;
 			const branch = ctx.sessionManager.getBranch();
 			selectionMigration = readMcpSelectionMigration(branch);
+			inactiveMigrationOwners = new Set(
+				selectionMigration?.inactive.map(({ server, tool }) => `${server}\0${tool}`),
+			);
 			const snapshots = branch.flatMap((entry) =>
 				entry.type === "custom" && entry.customType === "pi-tool-loadout" && Array.isArray(entry.data)
 					? [entry.data.filter((name): name is string => typeof name === "string")]
@@ -314,10 +320,21 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			}
 		};
 
+		const rememberDirectSelection = (server: string) => {
+			const offered = serverTools.get(server);
+			const active = new Set(pi.getActiveTools());
+			for (const tool of pi.getAllTools()) {
+				if (tool.exposure !== "direct" || !offered?.has(tool.name)) continue;
+				if (active.has(tool.name)) inactiveToolNames.delete(tool.name);
+				else inactiveToolNames.add(tool.name);
+			}
+		};
+
 		const registerTools = (connection: McpServerConnection) => {
 			const server = connection.entry.name;
 			const currentServer = findServer(server);
 			if (currentServer?.connection !== connection || !isEnabled(currentServer)) return;
+			rememberDirectSelection(server);
 			const entry = currentServer.entry;
 			const namespaceName = `mcp__${server}`;
 			const namespace = {
@@ -343,21 +360,18 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			for (const tool of connection.tools) {
 				const name = assignName(tool.name, `${server}\0${tool.name}`);
 				const exposure = getMcpToolExposure(entry.config, tool.name);
-				const inactive =
-					inactiveToolNames.has(name) ||
-					selectionMigration?.inactive.some(
-						(selection) => selection.server === server && selection.tool === tool.name,
-					);
+				if (inactiveMigrationOwners.delete(`${server}\0${tool.name}`)) inactiveToolNames.add(name);
+				const inactive = inactiveToolNames.has(name);
 				const next = {
 					tool,
 					exposure,
 					namespace,
 					timeoutMs: connection.timeoutMs,
 					bindingIdentity: connection.bindingIdentity,
-					defaultActive: !inactive,
 				};
 				const existing = definitions.get(name);
 				if (existing && isDeepStrictEqual(metadata.get(name), next)) {
+					existing.defaultActive = !inactive;
 					pi.registerTool(existing);
 					continue;
 				}
@@ -368,9 +382,13 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 					exposure,
 					namespace,
 					timeoutMs: connection.timeoutMs,
-					getClient: async () => connection,
+					getClient: async () => {
+						const current = findServer(server);
+						if (!current || !isEnabled(current)) throw new Error(`MCP server "${server}" is no longer enabled.`);
+						return current.connection ?? prepareServer(current);
+					},
 					bindingIdentity: connection.bindingIdentity,
-					readableResources: () => resourceServers().includes(connection),
+					readableResources: () => serversWithResources().some((current) => current.entry.name === server),
 				});
 				if (inactive) definition.defaultActive = false;
 				definitions.set(definition.name, definition);
@@ -449,6 +467,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 
 		/** Make a disabled server's tools unreachable. */
 		const hideTools = (server: string) => {
+			rememberDirectSelection(server);
 			for (const name of serverTools.get(server) ?? []) {
 				const definition = definitions.get(name);
 				if (definition) pi.registerTool({ ...definition, exposure: "hidden" });
@@ -609,6 +628,12 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			) {
 				return prepareServer(server);
 			}
+			connection.requestedScope = previous?.requestedScope;
+			const challengedScopes = previous?.challenge?.scope?.split(/\s+/).filter(Boolean);
+			const grantedScopes = store.tokens(server.entry)?.scope?.split(/\s+/) ?? [];
+			// Scope strings guide consent only; the server owns operation permissions and scope hierarchies.
+			if (challengedScopes?.some((scope) => !grantedScopes.includes(scope)))
+				connection.challenge = previous?.challenge;
 			try {
 				const cached = catalog.load(server.entry, sessionCwd, credentialIdentity);
 				if (cached) {
@@ -696,14 +721,16 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 					flow: signInFlow,
 					settings: connection.oauthSettings(),
 					challenge: connection.challenge,
+					requestedScope: connection.requestedScope,
+					onRequestedScope: (scope) => {
+						connection.requestedScope = scope;
+					},
 					prompt,
 				});
 			} catch (error) {
 				if (error instanceof runtime.McpSignInCancelledError) return "Sign-in cancelled.";
 				return `Sign-in failed: ${errorMessage(error)}`;
 			}
-			// The challenge that asked for this sign-in (for example for more scope) is answered.
-			connection.challenge = undefined;
 			try {
 				await discoverServer(server);
 			} catch (error) {
@@ -1048,6 +1075,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 
 		pi.on("session_start", async (_event, ctx) => {
 			const loaded = (options.loadConfig ?? defaultLoadConfig)(ctx);
+			sharedConfigPath = loaded.sharedConfigPath;
 			configErrors = loaded.errors;
 			autoEnableCodemode = loaded.autoEnableCodemode ?? true;
 			warnedUnreachable = false;
@@ -1315,6 +1343,10 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 						store: getCredentials(runtime).forServer(server.entry),
 						settings: connection.oauthSettings(),
 						challenge: connection.challenge,
+						requestedScope: connection.requestedScope,
+						onRequestedScope: (scope) => {
+							connection.requestedScope = scope;
+						},
 						signal,
 					});
 					if (signal?.aborted) {
@@ -1355,7 +1387,6 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 					signal?.removeEventListener("abort", cancel);
 					if (!signInFlow.has(input.id)) authServers.delete(input.id);
 				}
-				if (server.connection) server.connection.challenge = undefined;
 				// Install only this grant's metadata; sign-in does not eagerly connect unrelated profiles.
 				await prepareServer(server);
 				if (ctx) ensureDiscoveryActive(ctx);

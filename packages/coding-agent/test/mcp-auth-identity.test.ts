@@ -146,40 +146,47 @@ describe("MCP account identity and sign-in", () => {
 		await logout;
 		expect(credentials.tokens(work)).toBeUndefined();
 		expect(credentials.catalogIdentity(work)).not.toBe(identity);
-		await provider.onUnauthorized?.({
-			serverUrl: new URL(endpoint),
-			response: new Response(null, { status: 401 }),
-			token: "account-one",
-			fetch: server.fetch,
-		});
+		await expect(
+			provider.onUnauthorized?.({
+				serverUrl: new URL(endpoint),
+				response: new Response(null, { status: 401 }),
+				token: "account-one",
+				fetch: server.fetch,
+			}),
+		).rejects.toThrow("changed accounts");
 		expect(server.requests.filter((path) => path === "/token")).toHaveLength(1);
 		expect(credentials.tokens(work)).toBeUndefined();
 	});
 
-	it("refresh preserves omitted scope/expiry and never creates browser consent or a new epoch", async () => {
-		const credentials = new McpOAuthCredentialStore(new InMemoryAuthStorageBackend());
-		const work = entry();
-		await credentials.importGrant(work, grant());
-		const identity = credentials.catalogIdentity(work);
-		const provider = createMcpAuthProvider({
-			serverUrl: endpoint,
-			store: credentials.forServer(work),
-			settings: () => ({}),
-			onChallenge: () => {},
-		});
-		const server = authServer({ resourceScopes: ["read", "optional"] });
-		await provider.onUnauthorized?.({
-			serverUrl: new URL(endpoint),
-			response: new Response(null, { status: 401 }),
-			token: "account-one",
-			fetch: server.fetch,
-		});
-		expect(credentials.catalogIdentity(work)).toBe(identity);
-		expect(credentials.tokens(work)?.scope).toBe("read");
-		expect((await credentials.forServer(work).load())?.tokensExpireAt).toBeUndefined();
-		expect(server.requests).not.toContain("/register");
-		expect(server.requests).not.toContain("/authorize");
-	});
+	it.each([undefined, "read"])(
+		"refresh preserves the actual %s scope grant without requiring optional scopes",
+		async (scope) => {
+			const credentials = new McpOAuthCredentialStore(new InMemoryAuthStorageBackend());
+			const work = entry();
+			const saved = grant();
+			if (scope !== undefined && saved.tokens) saved.tokens.scope = "read write";
+			await credentials.importGrant(work, saved);
+			const identity = credentials.catalogIdentity(work);
+			const provider = createMcpAuthProvider({
+				serverUrl: endpoint,
+				store: credentials.forServer(work),
+				settings: () => ({ scope: "read write optional" }),
+				onChallenge: () => {},
+			});
+			const server = authServer({ resourceScopes: ["read", "optional"], scope });
+			await provider.onUnauthorized?.({
+				serverUrl: new URL(endpoint),
+				response: new Response(null, { status: 401 }),
+				token: "account-one",
+				fetch: server.fetch,
+			});
+			expect(credentials.catalogIdentity(work)).toBe(identity);
+			expect(credentials.tokens(work)?.scope).toBe("read");
+			expect((await credentials.forServer(work).load())?.tokensExpireAt).toBeUndefined();
+			expect(server.requests).not.toContain("/register");
+			expect(server.requests).not.toContain("/authorize");
+		},
+	);
 
 	it("keeps pending flows private and cancellation preserves the existing grant and registration", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-mcp-private-auth-"));
@@ -222,7 +229,7 @@ describe("MCP account identity and sign-in", () => {
 		expect(credentials.tokens(work)).toBeUndefined();
 	});
 
-	it("checks exact callback, state, issuer and granted scope before replacing a grant", async () => {
+	it("checks callback, state and issuer before committing the actual narrower grant or inferred scope", async () => {
 		const credentials = new McpOAuthCredentialStore(new InMemoryAuthStorageBackend());
 		const work = entry();
 		await credentials.importGrant(work, grant());
@@ -253,16 +260,16 @@ describe("MCP account identity and sign-in", () => {
 			fetch: server.fetch,
 		});
 		await expect(flow.complete(missingIssuer.id, redirect(missingIssuer))).rejects.toThrow("issuer");
-		const insufficient = await flow.begin({
+		const narrowed = await flow.begin({
 			entry: work,
 			store: credentials.forServer(work),
 			settings: { scope: "read write" },
 			fetch: server.fetch,
 		});
-		await expect(flow.complete(insufficient.id, redirect(insufficient, { iss: issuer }))).rejects.toThrow(
-			"authorization",
-		);
-		expect(credentials.tokens(work)?.access_token).toBe("account-one");
+		const originalEpoch = credentials.catalogIdentity(work);
+		await flow.complete(narrowed.id, redirect(narrowed, { iss: issuer }));
+		expect(credentials.tokens(work)).toMatchObject({ access_token: "account-two", scope: "read" });
+		expect(credentials.catalogIdentity(work)).not.toBe(originalEpoch);
 		const success = await flow.begin({
 			entry: work,
 			store: credentials.forServer(work),
@@ -275,6 +282,31 @@ describe("MCP account identity and sign-in", () => {
 		expect(credentials.catalogIdentity(work)).not.toBe(epoch);
 		expect((await credentials.forServer(work).load())?.codeVerifier).toBeUndefined();
 	});
+
+	it.each([true, false])(
+		"compares any present callback issuer exactly when support is advertised as %s",
+		async (requiredIssuer) => {
+			const credentials = new McpOAuthCredentialStore(new InMemoryAuthStorageBackend());
+			const work = entry();
+			await credentials.importGrant(work, grant());
+			const epoch = credentials.catalogIdentity(work);
+			const flow = new McpSignInFlow();
+			cleanups.push(() => flow.close());
+			const server = authServer({ requiredIssuer });
+			for (const iss of [`${issuer}/`, ""]) {
+				const started = await flow.begin({
+					entry: work,
+					store: credentials.forServer(work),
+					settings: {},
+					fetch: server.fetch,
+				});
+				await expect(flow.complete(started.id, redirect(started, { iss }))).rejects.toThrow("issuer");
+				expect(server.requests).not.toContain("/token");
+				expect(credentials.catalogIdentity(work)).toBe(epoch);
+				expect(credentials.tokens(work)?.access_token).toBe("account-one");
+			}
+		},
+	);
 
 	it("renews an expired dynamic client registration before asking for browser consent", async () => {
 		const probe = await OAuthCallbackServer.listen();

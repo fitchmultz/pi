@@ -11,6 +11,7 @@ import {
 	McpSessionExpiredError,
 	McpTimeoutError,
 	type ServerCapabilities,
+	StreamableHttpTransport,
 } from "@earendil-works/pi-mcp";
 import { createInMemoryTransportPair, type InMemoryTransport } from "@earendil-works/pi-mcp/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -23,7 +24,7 @@ import {
 	McpServerConnection,
 	McpServerLog,
 } from "../src/extensions/mcp/runtime.ts";
-import { convertMcpResult, createMcpToolName } from "../src/extensions/mcp/tools.ts";
+import { convertMcpResult, createMcpToolName, finishMcpResult } from "../src/extensions/mcp/tools.ts";
 
 // Config values are resolved at connect time, so the literal reference must survive loading.
 // biome-ignore lint/suspicious/noTemplateCurlyInString: literal config value reference
@@ -217,12 +218,7 @@ describe("MCP tools", () => {
 	});
 
 	it("points resource links to read_mcp_resource and saves binary resources", async () => {
-		const saved: [string | Uint8Array, string][] = [];
-		const saveOutput = async (data: string | Uint8Array, extension: string) => {
-			saved.push([data, extension]);
-			return `/tmp/saved${extension}`;
-		};
-		const converted = await convertMcpResult(
+		const converted = convertMcpResult(
 			"docs",
 			"t",
 			{
@@ -243,49 +239,68 @@ describe("MCP tools", () => {
 					{ type: "resource", resource: { uri: "docs://logo", mimeType: "image/png", blob: "AAAA" } },
 				],
 			},
-			{ saveOutput, readableResources: true },
+			{ readableResources: true },
 		);
 		expect(converted.content).toEqual([
 			{
 				type: "text",
 				text: '[Resource docs://guide "The Guide" (text/markdown, 2.0KB): How to use it. Read it with read_mcp_resource (server "docs")]',
 			},
-			{ type: "text", text: "[Binary resource file:///r/report.pdf (application/pdf, 4B) saved to /tmp/saved.pdf]" },
+			{
+				type: "text",
+				text: "[Binary resource file:///r/report.pdf (application/pdf, 4B); read its blob from the complete MCP result]",
+			},
 			{ type: "image", data: "AAAA", mimeType: "image/png" },
 		]);
-		expect(saved).toEqual([[Buffer.from("%PDF"), ".pdf"]]);
+		const finished = await finishMcpResult(converted, undefined);
+		const binary = finished.content.find(
+			(block) => block.type === "text" && block.text.startsWith("[Binary resource file:///r/report.pdf saved to "),
+		);
+		const binaryPath = binary?.type === "text" ? /saved to (.+)\]/.exec(binary.text)?.[1] : undefined;
+		const fullPath = finished.details.fullResultPath;
+		if (!binaryPath || !fullPath) throw new Error("Missing MCP result artifacts");
+		try {
+			expect(binaryPath).toMatch(/\.pdf$/);
+			expect(readFileSync(binaryPath)).toEqual(Buffer.from("%PDF"));
+			expect(JSON.parse(readFileSync(fullPath, "utf8"))).toEqual(converted.structuredContent);
+		} finally {
+			rmSync(binaryPath, { force: true });
+			rmSync(fullPath, { force: true });
+		}
 	});
 
 	it("cuts the middle of model-facing text over 20KB and keeps the full result for scripts", async () => {
-		const saved: (string | Uint8Array)[] = [];
-		const saveOutput = async (data: string | Uint8Array) => {
-			saved.push(data);
-			return "/tmp/full.txt";
-		};
 		const lines = Array.from({ length: 3000 }, (_, index) => `line ${index + 1}`);
 		const full = lines.join("\n");
 		const image = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
 		const result = { content: [{ type: "text" as const, text: full }, image] };
-		const converted = await convertMcpResult("docs", "snapshot", result, { saveOutput });
-		expect(converted.content).toHaveLength(2);
-		const text = (converted.content[0] as { text: string }).text;
-		// Codex's format: a header, the start and end of the text, then the file with the full text.
-		expect(text).toMatch(
-			new RegExp(
-				`^Warning: truncated output \\(original token count: ${Math.ceil(full.length / 4)}\\)\nTotal output lines: 3000\n\nline 1\nline 2\n`,
-			),
-		);
-		expect(text).toMatch(/…\d+ chars truncated…/);
-		expect(text.endsWith("line 3000\n\n[Full output: /tmp/full.txt (read it with offset/limit)]")).toBe(true);
-		expect(Buffer.byteLength(text)).toBeLessThan(21 * 1024);
-		expect(converted.content[1]).toEqual(image);
-		expect(converted.details).toEqual({ server: "docs", tool: "snapshot", fullOutputPath: "/tmp/full.txt" });
-		expect(saved).toEqual([full]);
-		expect(converted.structuredContent).toEqual(result);
-
-		// Text within the limit is not saved.
-		await convertMcpResult("docs", "small", { content: [{ type: "text", text: "ok" }] }, { saveOutput });
-		expect(saved).toHaveLength(1);
+		const converted = await finishMcpResult(convertMcpResult("docs", "snapshot", result), undefined);
+		const path = converted.details.fullResultPath;
+		if (!path) throw new Error("Missing complete MCP result");
+		try {
+			expect(converted.content).toHaveLength(3);
+			const text = (converted.content[0] as { text: string }).text;
+			// Codex's format: a header, the start and end of the text, then the complete result file.
+			expect(text).toMatch(
+				new RegExp(
+					`^Warning: truncated output \\(original token count: ${Math.ceil(full.length / 4)}\\)\nTotal output lines: 3000\n\nline 1\nline 2\n`,
+				),
+			);
+			expect(text).toMatch(/…\d+ chars truncated…/);
+			expect(text.endsWith(`line 3000\n\n[Full output: ${path} (read it with offset/limit)]`)).toBe(true);
+			expect(Buffer.byteLength(text)).toBeLessThan(21 * 1024);
+			expect(converted.content[1]).toEqual(image);
+			expect(converted.details).toEqual({
+				server: "docs",
+				tool: "snapshot",
+				fullOutputPath: path,
+				fullResultPath: path,
+			});
+			expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(result);
+			expect(converted.structuredContent).toEqual({ ...result, fullResultPath: path });
+		} finally {
+			rmSync(path, { force: true });
+		}
 	});
 
 	it("cuts multi-byte text only at character boundaries", () => {
@@ -551,6 +566,89 @@ describe("MCP connections", () => {
 		expect(opened()).toBe(2);
 		await connection.close();
 	});
+
+	it.each(["sign-in", "refresh"] as const)(
+		"keeps an HTTP write retry within its original account after a concurrent %s",
+		async (change) => {
+			const entry: McpServerEntry = {
+				name: "invoices",
+				source: "test",
+				config: { url: "https://server.example/mcp", oauth: { clientId: "client" } },
+			};
+			const credentials = new McpOAuthCredentialStore(new InMemoryAuthStorageBackend());
+			const grant = {
+				serverUrl: "https://server.example/mcp",
+				clientInformation: { client_id: "client" },
+				tokens: { access_token: "account-one", refresh_token: "refresh-one", token_type: "Bearer" },
+			};
+			await credentials.importGrant(entry, grant);
+			const identity = credentials.catalogIdentity(entry);
+			const tool = { name: "create_invoice", inputSchema: { type: "object" } };
+			const calls: (string | null)[] = [];
+			const invoices: (string | null)[] = [];
+			const nextToken = change === "sign-in" ? "account-two" : "refreshed-account-one";
+			const connection = new McpServerConnection({
+				entry,
+				cwd: process.cwd(),
+				credentials,
+				onTools: () => {},
+				createTransport: (_entry, _cwd, authProvider) =>
+					new StreamableHttpTransport({
+						url: grant.serverUrl,
+						authProvider,
+						openGetStream: false,
+						fetch: async (_url, init) => {
+							const request: JsonRpcRequest = JSON.parse(String(init?.body));
+							const authorization = new Headers(init?.headers).get("authorization");
+							if (request.method === "tools/call") {
+								calls.push(authorization);
+								if (calls.length === 1) {
+									const store = credentials.forServer(entry);
+									const next = { ...grant, tokens: { ...grant.tokens, access_token: nextToken } };
+									if (change === "sign-in") await store.commitGrant(next, identity);
+									else await store.withMutationLock(() => Promise.resolve(store.save(next)));
+									return new Response(null, { status: 401 });
+								}
+								invoices.push(authorization);
+							}
+							const result =
+								request.method === "initialize"
+									? {
+											protocolVersion: LATEST_PROTOCOL_VERSION,
+											capabilities: { tools: {} },
+											serverInfo: { name: "invoices", version: "1" },
+										}
+									: request.method === "tools/list"
+										? { tools: [tool] }
+										: { content: [{ type: "text", text: "invoice created" }] };
+							return "id" in request
+								? Response.json({ jsonrpc: "2.0", id: request.id, result })
+								: new Response(null, { status: 202 });
+						},
+					}),
+			});
+			connections.push(connection);
+			await connection.getClient();
+			const expected = { tool, bindingIdentity: connection.bindingIdentity };
+			if (change === "sign-in") {
+				await expect(connection.callTool(tool.name, {}, {}, expected)).rejects.toThrow("changed accounts");
+				expect(calls).toEqual(["Bearer account-one"]);
+				expect(invoices).toEqual([]);
+				expect(credentials.tokens(entry)?.access_token).toBe("account-two");
+				await connection.reconnect();
+				await expect(connection.callTool(tool.name, {}, {}, expected)).rejects.toThrow("changed");
+				await connection.callTool(tool.name, {}, {}, { tool, bindingIdentity: connection.bindingIdentity });
+				expect(invoices).toEqual(["Bearer account-two"]);
+			} else {
+				await expect(connection.callTool(tool.name, {}, {}, expected)).resolves.toEqual({
+					content: [{ type: "text", text: "invoice created" }],
+				});
+				expect(calls).toEqual(["Bearer account-one", "Bearer refreshed-account-one"]);
+				expect(invoices).toEqual(["Bearer refreshed-account-one"]);
+				expect(credentials.catalogIdentity(entry)).toBe(identity);
+			}
+		},
+	);
 
 	it.skipIf(process.platform === "win32")(
 		"expands ~ in the command, arguments, and cwd of stdio servers",

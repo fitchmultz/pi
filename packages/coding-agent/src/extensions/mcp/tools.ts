@@ -162,12 +162,8 @@ export async function limitMcpContent(
 }
 
 export interface ConvertMcpResultOptions {
-	/** Saves truncated text and binary resources. Default: a temp file. */
-	saveOutput?: McpOutputSaver;
 	/** Whether the server's resources can be read with `read_mcp_resource`, which resource links then name. */
 	readableResources?: boolean;
-	/** Session calls publish files and apply output limits only after all result hooks. */
-	deferFiles?: boolean;
 }
 
 /** File extension for a saved binary resource: the one its URI ends in, else `.bin`. */
@@ -184,11 +180,11 @@ function isTextMimeType(mimeType: string | undefined): boolean {
 }
 
 /** Model-facing content of one block of `server`'s result. */
-async function blockToContent(
+function blockToContent(
 	server: string,
 	block: ContentBlock,
 	options: ConvertMcpResultOptions,
-): Promise<(TextContent | ImageContent)[]> {
+): (TextContent | ImageContent)[] {
 	if (block.type === "resource_link") {
 		const details = [block.mimeType, block.size === undefined ? undefined : formatSize(block.size)].filter(Boolean);
 		const read = options.readableResources ? `. Read it with ${READ_MCP_RESOURCE_TOOL} (server "${server}")` : "";
@@ -205,51 +201,37 @@ async function blockToContent(
 		const data = Buffer.from(blob, "base64");
 		if (isTextMimeType(mimeType)) return [{ type: "text", text: data.toString("utf8") }];
 		const kind = `${mimeType ?? "unknown type"}, ${formatSize(data.length)}`;
-		if (options.deferFiles) {
-			return [
-				{ type: "text", text: `[Binary resource ${uri} (${kind}); read its blob from the complete MCP result]` },
-			];
-		}
-		try {
-			const path = await (options.saveOutput ?? saveToTempFile)(data, extensionOf(uri));
-			return [{ type: "text", text: `[Binary resource ${uri} (${kind}) saved to ${path}]` }];
-		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			return [{ type: "text", text: `[Binary resource ${uri} (${kind}) could not be saved: ${reason}]` }];
-		}
+		return [{ type: "text", text: `[Binary resource ${uri} (${kind}); read its blob from the complete MCP result]` }];
 	}
 	return toLlmContent({ content: [block] });
 }
 
 /** Model-facing content of `server`'s content blocks, before the output limit. */
-export async function toModelContent(
+export function toModelContent(
 	server: string,
 	blocks: readonly ContentBlock[],
 	options: ConvertMcpResultOptions = {},
-): Promise<(TextContent | ImageContent)[]> {
-	return (await Promise.all(blocks.map((block) => blockToContent(server, block, options)))).flat();
+): (TextContent | ImageContent)[] {
+	return blocks.flatMap((block) => blockToContent(server, block, options));
 }
 
 /** Convert an MCP result. `isError` results become error results that keep the structured result. */
-export async function convertMcpResult(
+export function convertMcpResult(
 	server: string,
 	tool: string,
 	result: CallToolResult,
 	options: ConvertMcpResultOptions = {},
-): Promise<AgentToolResult<McpToolDetails>> {
+): AgentToolResult<McpToolDetails> {
 	// Without content blocks, toLlmContent falls back to the structured content as JSON.
 	const converted: (TextContent | ImageContent)[] =
-		result.content.length > 0 ? await toModelContent(server, result.content, options) : toLlmContent(result);
+		result.content.length > 0 ? toModelContent(server, result.content, options) : toLlmContent(result);
 	if (result.isError && textOf(converted) === "") {
 		converted.push({ type: "text", text: `MCP tool ${server}/${tool} returned an error` });
 	}
-	const { content, fullOutputPath } = options.deferFiles
-		? { content: converted, fullOutputPath: undefined }
-		: await limitMcpContent(converted, options.saveOutput);
 	const { _meta: _ignored, ...scriptResult } = result;
 	return {
-		content,
-		details: { server, tool, ...(fullOutputPath ? { fullOutputPath } : {}) },
+		content: converted,
+		details: { server, tool },
 		structuredContent: scriptResult as unknown as JsonValue,
 		...(result.isError ? { isError: true } : {}),
 	};
@@ -421,9 +403,8 @@ export function createMcpToolDefinition(options: {
 			if (!result.isError && output && !output.Check(result.structuredContent)) {
 				throw new Error(`MCP tool "${label}" returned structured content that does not match its output schema.`);
 			}
-			const converted = await convertMcpResult(server, tool.name, result, {
+			const converted = convertMcpResult(server, tool.name, result, {
 				readableResources: options.readableResources?.(),
-				deferFiles: true,
 			});
 			return finishMcpResult(converted, ctx);
 		},

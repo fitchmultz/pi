@@ -51,13 +51,19 @@ pi mcp remove docs
 
 `add` replaces an existing entry in its destination. Add `-l` for the project file; otherwise commands edit the global Pi file. Pi never edits the shared file. Changing an inherited shared entry in `/mcp` copies that whole entry into Pi's global file and applies the change there. To stop using an inherited server, disable it in `/mcp`; removing a Pi override exposes the shared entry again.
 
+Pi-owned config files may be symlinks to writable dotfiles. Management and import update the real file under its lock and leave the link intact, preserving unrelated settings, indentation, and permissions. Dangling links, nonregular or read-only targets, and links to the shared source are refused.
+
 After adding or editing entries outside a session, run `/reload` or start a new session.
 
 ## Connections and catalogs
 
 Startup restores matching cached tool, resource, and prompt descriptors and assigned tool names from `~/.pi/agent/mcp-catalog.json` without starting lazy processes, opening server connections, executing secret commands, or starting browser consent. A cold server has no tool schemas yet; discover it by server or namespace before calling it. Eager servers connect at startup; the first prompt waits up to 10 seconds for eager servers with direct tools.
 
-Catalogs and live bindings are bound to the profile name, working directory, transport configuration, resolved environment-backed credentials, and OAuth grant identity. OAuth refresh preserves the account's catalog identity; sign-in, grant import, and logout change it. Stale metadata is withdrawn before calls are admitted. Credentials supplied by opaque `!command` expressions cannot be identified without executing them, so those profiles **skip cached restore** and require live discovery. Status and global search do not execute the commands to fill that gap.
+Catalogs and live bindings are bound to the profile name, working directory, transport configuration, resolved environment-backed credentials, and OAuth grant identity. The store retains the eight most recently saved identities per profile, so discovery in another project does not immediately replace your catalog. OAuth refresh preserves the account's catalog identity; sign-in, grant import, and logout change it. Stale metadata is withdrawn before calls are admitted.
+
+For stdio, identity includes the effective working directory and environment, except known inherited Pi routing and shell/terminal bookkeeping. Explicit `env` values always count; set a bookkeeping field there if your server uses it as configuration. Credential-agent, executable-path, mise, and unknown environment inputs remain included.
+
+Credentials supplied by opaque `!command` expressions cannot be identified without executing them, so those profiles **skip cached restore** and require live discovery. Status and global search do not execute the commands to fill that gap. Once connected through a native transport, an unchanged resolved credential preserves tool bindings through reconnect; a changed credential revokes prepared calls.
 
 Lazy connections close after 10 minutes without an active request and reconnect on use. Their cached descriptors remain available. Eager connections stay open until shutdown or an explicit management action. Running sessions notice external native CLI sign-in or logout on the next turn; eager profiles attempt reconnection then, while lazy profiles wait for discovery or use. A dropped connection reconnects on the next call. Tool-list and prompt-list notifications update descriptors; withdrawn tools become unreachable and withdrawn prompt commands are removed.
 
@@ -152,7 +158,7 @@ Pi supports dynamic client registration, pre-registered clients, and HTTPS clien
 
 `clientSecret` is optional. `callbackPort` sets `http://127.0.0.1:<port>/callback`; `callbackUrl` supplies another registered HTTP loopback URI on `localhost`, `127.0.0.1`, or `[::1]`, without credentials, query, or fragment. A new callback URL without a port gets `callbackPort` or a free port appended. A stored registration fixes its exact redirect URI, including host, path, and port; Pi does not silently substitute another address if it cannot listen there.
 
-`scope` supplies space-separated scopes when needed; server challenges can add scopes. Refresh happens automatically for expired or rejected access tokens. A request for additional consent requires explicit sign-in again. Logout deletes the profile's grant and withdraws its old account metadata.
+`scope` supplies space-separated scopes to request. Pi stores the actual grant, which may be narrower. Further consent requests include prior requested and granted scopes plus unresolved server challenges; partial consent leaves authorized operations usable. The server decides scope hierarchies and operation permissions. Refresh happens automatically for expired or rejected access tokens, but a request denied with `insufficient_scope` is not refreshed or replayed. Additional consent requires explicit sign-in again. Logout deletes the profile's grant and withdraws its old account metadata.
 
 ## Exposure
 

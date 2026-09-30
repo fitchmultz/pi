@@ -25,6 +25,51 @@ interface StoredCatalog extends McpServerCatalog {
 	identity: string;
 }
 
+// ponytail: eight recently saved roots/accounts per profile; an evicted identity needs discovery.
+const MAX_CATALOG_IDENTITIES = 8;
+// ponytail: servers using inherited routing/terminal state as configuration must set it explicitly in env.
+const INHERITED_BOOKKEEPING = new Set([
+	"PI_SESSION_ID",
+	"PI_SESSION_FILE",
+	"PI_PROVIDER",
+	"PI_MODEL",
+	"PI_REASONING_LEVEL",
+	"PI_SUBAGENT_CHILD",
+	"PI_SUBAGENT_CHILD_AGENT",
+	"PI_SUBAGENT_CHILD_INDEX",
+	"PI_SUBAGENT_DEPTH",
+	"PI_SUBAGENT_MAX_DEPTH",
+	"PI_SUBAGENT_EAGER_TOOL",
+	"PI_SUBAGENT_FANOUT_CHILD",
+	"PI_SUBAGENT_INHERIT_PROJECT_CONTEXT",
+	"PI_SUBAGENT_INHERIT_SKILLS",
+	"PI_SUBAGENT_INHERITED_EXTENSIONS_JSON",
+	"PI_SUBAGENT_INTERCOM_SESSION_NAME",
+	"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+	"PI_SUBAGENT_PARENT_CAPABILITY_TOKEN",
+	"PI_SUBAGENT_PARENT_CHILD_INDEX",
+	"PI_SUBAGENT_PARENT_CONTROL_INBOX",
+	"PI_SUBAGENT_PARENT_DEPTH",
+	"PI_SUBAGENT_PARENT_EVENT_SINK",
+	"PI_SUBAGENT_PARENT_PATH",
+	"PI_SUBAGENT_PARENT_ROOT_RUN_ID",
+	"PI_SUBAGENT_PARENT_RUN_ID",
+	"PI_SUBAGENT_ROOT_SESSION_ID",
+	"PI_SUBAGENT_RUN_ID",
+	"PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE",
+	"PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA",
+	"MCP_DIRECT_TOOLS",
+	"PWD",
+	"OLDPWD",
+	"SHLVL",
+	"_",
+	"TERM_SESSION_ID",
+	"ITERM_SESSION_ID",
+	"TMUX_PANE",
+	"_P9K_TTY",
+	"_P9K_SSH_TTY",
+]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -91,7 +136,7 @@ function parseCatalogs(content: string | undefined): Record<string, unknown> {
 	if (!content?.trim()) return {};
 	try {
 		const parsed: unknown = JSON.parse(content);
-		return isRecord(parsed) && parsed.version === 1 && isRecord(parsed.servers) ? parsed.servers : {};
+		return isRecord(parsed) && parsed.version === 2 && isRecord(parsed.servers) ? parsed.servers : {};
 	} catch {
 		return {};
 	}
@@ -104,6 +149,21 @@ function environment(values: Record<string, string> | undefined): Record<string,
 		Object.entries(values)
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([name, value]) => [name, resolveConfigValue(value)]),
+	);
+}
+
+/** Identity inputs only; this does not change the environment inherited by the child. */
+export function mcpStdioIdentityEnvironment(
+	configured: Record<string, string | undefined> | undefined,
+	inherit = true,
+): Record<string, string | undefined> {
+	return Object.fromEntries(
+		Object.entries({
+			...(inherit
+				? Object.fromEntries(Object.entries(process.env).filter(([name]) => !INHERITED_BOOKKEEPING.has(name)))
+				: {}),
+			...configured,
+		}).sort(([a], [b]) => a.localeCompare(b)),
 	);
 }
 
@@ -132,9 +192,7 @@ export function mcpCatalogIdentity(entry: McpServerEntry, cwd: string, credentia
 			: {
 					command: config.command,
 					args: config.args,
-					env: Object.fromEntries(
-						Object.entries({ ...process.env, ...environment(config.env) }).sort(([a], [b]) => a.localeCompare(b)),
-					),
+					env: mcpStdioIdentityEnvironment(environment(config.env)),
 					cwd: resolve(cwd, config.cwd?.replace(/^~(?=\/|$)/, homedir()) ?? "."),
 				};
 	return createHash("sha256")
@@ -156,9 +214,12 @@ export class McpCatalogStore {
 		if (!identity || (this.path && !existsSync(this.path))) return undefined;
 		return this.backend.withLock((content) => {
 			const servers = parseCatalogs(content);
-			const catalog = Object.hasOwn(servers, entry.name) ? servers[entry.name] : undefined;
+			const stored = Object.hasOwn(servers, entry.name) ? servers[entry.name] : undefined;
+			const catalog = Array.isArray(stored)
+				? stored.find((value) => validCatalog(value) && value.identity === identity)
+				: undefined;
 			return {
-				result: validCatalog(catalog) && catalog.identity === identity ? structuredClone(catalog) : undefined,
+				result: validCatalog(catalog) ? structuredClone(catalog) : undefined,
 			};
 		});
 	}
@@ -168,11 +229,31 @@ export class McpCatalogStore {
 		if (!identity) return;
 		this.backend.withLock((content) => {
 			const servers = parseCatalogs(content);
-			const next = { ...catalog, identity };
-			if (isDeepStrictEqual(servers[entry.name], next)) return { result: undefined };
+			const stored = Object.hasOwn(servers, entry.name) ? servers[entry.name] : undefined;
+			const catalogs = Array.isArray(stored) ? stored.filter(validCatalog) : [];
+			const previous = catalogs.find((value) => value.identity === identity);
+			const next = {
+				...catalog,
+				...(catalog.names === undefined && previous?.names ? { names: previous.names } : {}),
+				identity,
+			};
+			if (isDeepStrictEqual(catalogs[0], next)) return { result: undefined };
 			return {
 				result: undefined,
-				next: `${JSON.stringify({ version: 1, servers: { ...servers, [entry.name]: next } }, null, 2)}\n`,
+				next: `${JSON.stringify(
+					{
+						version: 2,
+						servers: {
+							...servers,
+							[entry.name]: [next, ...catalogs.filter((value) => value.identity !== identity)].slice(
+								0,
+								MAX_CATALOG_IDENTITIES,
+							),
+						},
+					},
+					null,
+					2,
+				)}\n`,
 			};
 		});
 	}

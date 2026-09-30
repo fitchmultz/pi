@@ -320,6 +320,22 @@ describe("AgentSession MCP integration", () => {
 			tools = SERVER_TOOLS;
 			await listChanged();
 			expect(reachable()).toContain("mcp__docs__fail");
+
+			if (exposure === "direct") {
+				harness.session.setActiveToolsByName(["mcp__docs__search"]);
+				tools = SERVER_TOOLS.filter((tool) => tool.name !== "fail");
+				await listChanged();
+				tools = SERVER_TOOLS;
+				await listChanged();
+				expect(harness.session.getActiveToolNames()).toEqual(["mcp__docs__search"]);
+
+				harness.session.setActiveToolsByName(["mcp__docs__search", "mcp__docs__fail"]);
+				tools = SERVER_TOOLS.filter((tool) => tool.name !== "fail");
+				await listChanged();
+				tools = SERVER_TOOLS;
+				await listChanged();
+				expect(harness.session.getActiveToolNames()).toContain("mcp__docs__fail");
+			}
 		},
 	);
 
@@ -666,6 +682,7 @@ describe("AgentSession MCP servers registered by extensions", () => {
 	/** `configured` are the mcp.json servers; `plugins` register servers through the extension API. */
 	async function setup(plugins: ExtensionFactory | ExtensionFactory[], configured: McpServerEntry[] = []) {
 		const connected: McpServerEntry[] = [];
+		const closed: string[] = [];
 		const harness = await createHarness({
 			initialActiveToolNames: [],
 			extensionFactories: [
@@ -676,6 +693,7 @@ describe("AgentSession MCP servers registered by extensions", () => {
 					createTransport: (entry) => {
 						connected.push(entry);
 						const pair = createFakeServer([]);
+						pair.client.onClose(() => closed.push(entry.name));
 						void pair.server.start();
 						return pair.client;
 					},
@@ -684,7 +702,7 @@ describe("AgentSession MCP servers registered by extensions", () => {
 		});
 		harnesses.push(harness);
 		await harness.session.bindExtensions({});
-		return { harness, connected };
+		return { harness, connected, closed };
 	}
 
 	it("connects servers registered while extensions load", async () => {
@@ -715,6 +733,45 @@ describe("AgentSession MCP servers registered by extensions", () => {
 		pi.unregisterMcpServer("late");
 		await vi.waitFor(() => expect(harness.session.getCallableToolNames()).not.toContain("mcp__late__search"));
 	});
+
+	it.each(["disable/re-enable", "connection policy change"] as const)(
+		"routes unchanged tool definitions to the replacement connection after %s",
+		async (change) => {
+			let api: ExtensionAPI | undefined;
+			const config = { url: "http://plugin.invalid", exposure: "direct" as const };
+			const { harness, connected, closed } = await setup((pi) => {
+				api = pi;
+				pi.registerMcpServer("plugin", { ...config, connection: "eager" });
+			});
+			if (!api) throw new Error("No extension API");
+			await vi.waitFor(() => expect(harness.session.getActiveToolNames()).toContain("mcp__plugin__search"));
+			const definition = harness.session.getToolDefinition("mcp__plugin__search");
+			const call = async (query: string) => {
+				harness.setResponses([
+					fauxAssistantMessage([fauxToolCall("mcp__plugin__search", { query })], { stopReason: "toolUse" }),
+					fauxAssistantMessage("done"),
+				]);
+				await harness.session.prompt("search");
+				return toolResult(harness, "mcp__plugin__search");
+			};
+			expect((await call("before")).isError).toBe(false);
+			if (change === "disable/re-enable") {
+				api.registerMcpServer("plugin", { ...config, enabled: false });
+				await vi.waitFor(() => expect(closed).toEqual(["plugin"]));
+				expect(harness.session.getCallableToolNames()).not.toContain("mcp__plugin__search");
+			}
+			api.registerMcpServer("plugin", { ...config, connection: "lazy" });
+			await vi.waitFor(() => expect(closed).toEqual(["plugin"]));
+			await vi.waitFor(() =>
+				expect(harness.session.getToolDefinition("mcp__plugin__search")?.exposure).toBe("direct"),
+			);
+			expect(harness.session.getToolDefinition("mcp__plugin__search")).toBe(definition);
+			const result = await call("after");
+			expect(result.isError).toBe(false);
+			expect(result.content[0]).toEqual({ type: "text", text: "after guide\nafter faq" });
+			expect(connected).toHaveLength(2);
+		},
+	);
 
 	it("prefers the mcp.json server over a registered server of the same name", async () => {
 		const configured: McpServerEntry = {

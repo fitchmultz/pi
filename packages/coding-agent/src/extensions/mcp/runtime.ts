@@ -4,7 +4,7 @@
  * server is configured.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -37,7 +37,7 @@ import {
 import { McpOAuthAuthorizationRequiredError, type OAuthChallenge } from "@earendil-works/pi-mcp/oauth";
 import { VERSION } from "../../config.ts";
 import { resolveConfigValueOrThrow, resolveHeadersOrThrow } from "../../core/resolve-config-value.ts";
-import { type McpServerCatalog, mcpCatalogIdentity } from "./catalog.ts";
+import { type McpServerCatalog, mcpCatalogIdentity, mcpStdioIdentityEnvironment } from "./catalog.ts";
 import type { McpServerEntry } from "./config.ts";
 import type { McpServerLog } from "./log.ts";
 import {
@@ -45,6 +45,7 @@ import {
 	type McpAuthProvider,
 	type McpOAuthCredentialStore,
 	type McpOAuthSettings,
+	mergeScopes,
 } from "./oauth.ts";
 import { isMcpAppResource, type McpResourceServer } from "./resources.ts";
 import type { McpToolCaller, McpToolExpectation } from "./tools.ts";
@@ -180,8 +181,10 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 	bindingIdentity: string;
 	/** Server instructions from `initialize`, describing its tools as a group. */
 	instructions: string | undefined;
-	/** Last OAuth challenge from the server; sign-in uses its resource metadata URL and scope. */
+	/** Last OAuth challenge, retaining unresolved scope guidance through ordinary token expiry. */
 	challenge: OAuthChallenge | undefined;
+	/** Effective consent request in this runtime, including advertised scopes denied by consent. */
+	requestedScope: string | undefined;
 	private client: McpClient | undefined;
 	private connectingClient: McpClient | undefined;
 	private opening: Promise<McpClient> | undefined;
@@ -192,7 +195,7 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 	private stderrTail: string | undefined;
 	private readonly cwd: string;
 	private readonly createTransport: McpTransportFactory;
-	private readonly authProvider: McpAuthProvider | undefined;
+	private readonly authProviders = new Set<McpAuthProvider>();
 	private readonly credentials: McpOAuthCredentialStore;
 	private readonly onTools: (connection: McpServerConnection) => void;
 	private readonly onChange: ((connection: McpServerConnection) => void) | undefined;
@@ -218,17 +221,6 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 		this.credentials = options.credentials;
 		this.credentialIdentity = options.credentials.catalogIdentity(this.entry);
 		this.bindingIdentity = mcpCatalogIdentity(this.entry, this.cwd, this.credentialIdentity) ?? randomUUID();
-		const url = this.oauthUrl;
-		this.authProvider = url
-			? createMcpAuthProvider({
-					serverUrl: url,
-					store: options.credentials.forServer(this.entry),
-					settings: () => this.oauthSettings(),
-					onChallenge: (challenge) => {
-						this.challenge = challenge;
-					},
-				})
-			: undefined;
 	}
 
 	get name(): string {
@@ -492,6 +484,20 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 	private async connectOnce(): Promise<McpClient> {
 		const credentialIdentity = this.credentials.catalogIdentity(this.entry);
 		const bindingIdentity = mcpCatalogIdentity(this.entry, this.cwd, credentialIdentity);
+		const url = this.oauthUrl;
+		// Each transport stays bound to its opening grant, including auth retries of prepared writes.
+		const authProvider = url
+			? createMcpAuthProvider({
+					serverUrl: url,
+					store: this.credentials.forServer(this.entry),
+					settings: () => this.oauthSettings(),
+					onChallenge: (challenge) => {
+						this.challenge = this.challenge?.scope
+							? { ...this.challenge, ...challenge, scope: mergeScopes(this.challenge.scope, challenge.scope) }
+							: challenge;
+					},
+				})
+			: undefined;
 		const client = new McpClient({
 			name: "pi",
 			version: VERSION,
@@ -499,11 +505,50 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 			roots: [{ uri: pathToFileURL(this.cwd).href, name: basename(this.cwd) }],
 		});
 		this.connectingClient = client;
+		if (authProvider) {
+			this.authProviders.add(authProvider);
+			client.onClose(() => {
+				void authProvider.settled().then(() => this.authProviders.delete(authProvider));
+			});
+		}
 		const log = this.log;
 		if (log) client.onNotification("notifications/message", (params) => log.write(this.entry.name, params));
 		let transport: McpTransport | undefined;
 		try {
-			transport = this.createTransport(this.entry, this.cwd, this.authProvider);
+			transport = this.createTransport(this.entry, this.cwd, authProvider);
+			// Native transports already resolved their used inputs. Never run a secret again for identity,
+			// including an OAuth client secret that the connection did not need.
+			const inputs =
+				transport instanceof StreamableHttpTransport
+					? {
+							url: transport.url.href,
+							headers: Object.fromEntries(
+								Object.entries(transport.options.headers ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+							),
+						}
+					: transport instanceof StdioTransport
+						? {
+								command: transport.options.command,
+								args: transport.options.args,
+								cwd: transport.options.cwd,
+								env: mcpStdioIdentityEnvironment(transport.options.env, transport.options.inheritEnv !== false),
+							}
+						: undefined;
+			// ponytail: opaque custom transports without native options revoke bindings on each reconnect.
+			const liveBindingIdentity =
+				bindingIdentity ??
+				(inputs
+					? createHash("sha256")
+							.update(
+								JSON.stringify({
+									profile: this.name,
+									cwd: this.cwd,
+									credentialIdentity,
+									transport: inputs,
+								}),
+							)
+							.digest("hex")
+					: randomUUID());
 			await client.connect(transport);
 			client.onNotification("notifications/tools/list_changed", () => {
 				void this.refreshTools(client);
@@ -540,9 +585,7 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 			this.prompts = prompts;
 			this.catalogKnown = true;
 			this.credentialIdentity = credentialIdentity;
-			// Opaque command-backed credentials can change accounts between connections. Revoke their
-			// prepared bindings on reconnect rather than pretending that unchanged schemas prove ownership.
-			this.bindingIdentity = bindingIdentity ?? randomUUID();
+			this.bindingIdentity = liveBindingIdentity;
 			this.state = "connected";
 			this.error = undefined;
 			this.onTools(this);
@@ -644,6 +687,7 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 		await this.opening?.catch(() => undefined);
 		// A refresh the server already answered may have rotated the refresh token; exiting before the
 		// new tokens are saved would lose the grant.
-		await this.authProvider?.settled();
+		await Promise.all([...this.authProviders].map((provider) => provider.settled()));
+		this.authProviders.clear();
 	}
 }
