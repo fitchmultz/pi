@@ -12,7 +12,7 @@ import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { JsonAgentSessionEvent } from "../json-event.ts";
-import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
+import { attachJsonlRecordReader, serializeJsonLine } from "./jsonl.ts";
 import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
 // ============================================================================
@@ -104,7 +104,8 @@ export class RpcClient {
 			process.stderr.write(data);
 		});
 
-		childProcess.once("exit", (code, signal) => {
+		// close follows stdout/stderr EOF, so buffered final responses are delivered before exit rejection.
+		childProcess.once("close", (code, signal) => {
 			if (this.process !== childProcess) return;
 			const error = this.createProcessExitError(code, signal);
 			this.exitError = error;
@@ -123,11 +124,21 @@ export class RpcClient {
 			this.exitError = stdinError;
 			this.rejectPendingRequests(stdinError);
 		});
-
-		// Set up strict JSONL reader for stdout.
-		this.stopReadingStdout = attachJsonlLineReader(childProcess.stdout!, (line) => {
-			this.handleLine(line);
+		childProcess.stdout?.on("error", (error) => {
+			if (this.process !== childProcess) return;
+			const stdoutError = new Error(`Agent process stdout error: ${error.message}. Stderr: ${this.stderr}`);
+			this.exitError = stdoutError;
+			this.rejectPendingRequests(stdoutError);
 		});
+
+		this.stopReadingStdout = attachJsonlRecordReader(
+			childProcess.stdout!,
+			(record) => this.handleRecord(record),
+			(error) => {
+				// Preserve recovery after a non-protocol line, but retain malformed/truncated diagnostics.
+				this.stderr += `${error.message.slice(0, 2000)}\n`;
+			},
+		);
 
 		// Wait a moment for process to initialize
 		await new Promise((resolve) => setTimeout(resolve, 100));
@@ -476,6 +487,7 @@ export class RpcClient {
 	 * Collect events until agent becomes idle.
 	 */
 	collectEvents(timeout = 60000): Promise<JsonAgentSessionEvent[]> {
+		// ponytail: explicit full-event collection needs the caller's heap; onEvent avoids retaining the feed.
 		return new Promise((resolve, reject) => {
 			const events: JsonAgentSessionEvent[] = [];
 			const timer = setTimeout(() => {
@@ -516,13 +528,12 @@ export class RpcClient {
 	// Internal
 	// =========================================================================
 
-	private handleLine(line: string): void {
+	private handleRecord(data: Record<string, unknown>): void {
 		try {
-			const data = JSON.parse(line);
-
 			if (data.type === "response") {
-				const pending = this.pendingRequests.get(data.id);
-				this.pendingRequests.delete(data.id);
+				const id = typeof data.id === "string" ? data.id : undefined;
+				const pending = id === undefined ? undefined : this.pendingRequests.get(id);
+				if (id !== undefined) this.pendingRequests.delete(id);
 				pending?.resolve(data as RpcResponse);
 				return;
 			}
@@ -533,7 +544,7 @@ export class RpcClient {
 				listener(data as JsonAgentSessionEvent);
 			}
 		} catch {
-			// Ignore non-JSON lines
+			// A throwing event listener must not stop reception of later records.
 		}
 	}
 

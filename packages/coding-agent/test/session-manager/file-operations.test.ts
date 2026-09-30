@@ -1,13 +1,18 @@
+import { execFileSync } from "node:child_process";
 import { constants as bufferConstants } from "buffer";
 import {
 	appendFileSync,
+	chmodSync,
 	closeSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	openSync,
 	readFileSync,
+	renameSync,
 	rmSync,
+	truncateSync,
+	unlinkSync,
 	writeFileSync,
 	writeSync,
 } from "fs";
@@ -18,14 +23,229 @@ import {
 	CURRENT_SESSION_VERSION,
 	findMostRecentSession,
 	getDefaultSessionDir,
-	loadEntriesFromFile,
 	SessionManager,
 } from "../../src/core/session-manager.ts";
 import { assistantMsg, readSessionFileRoles, userMsg } from "../utilities.ts";
 
 const HEADER_SCAN_LIMIT_BYTES = 1024 * 1024;
 
-describe("loadEntriesFromFile", () => {
+describe("SessionManager scan descriptor ownership", () => {
+	function verifyLowDescriptorLimit(scenario: string): void {
+		const directory = mkdtempSync(join(tmpdir(), "pi-session-descriptors-"));
+		try {
+			const output = execFileSync(
+				"bash",
+				[
+					"-c",
+					'ulimit -n 128; exec "$@"',
+					"pi-session-descriptors",
+					process.execPath,
+					"--import",
+					new URL("../../src/experimental/source-resolver.ts", import.meta.url).href,
+					new URL("../fixtures/session-descriptor-ownership.ts", import.meta.url).pathname,
+					directory,
+					scenario,
+				],
+				{ encoding: "utf8", timeout: 30_000 },
+			);
+			expect(JSON.parse(output)).toEqual({
+				scenario,
+				completed: 320,
+				sourceBytesMatchExpected: true,
+				lazyBodiesUsable: true,
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	}
+
+	it.each([
+		"resume-invalid-header",
+		"resume-malformed",
+		"resume-conversion",
+		"resume-empty",
+		"fork-invalid-header",
+		"fork-malformed",
+		"fork-conversion",
+		"fork-directory",
+		"fork-options",
+		"fork-stage",
+		"refresh-yield",
+		"same-file-reload",
+	])("keeps scans bounded across repeated %s operations", verifyLowDescriptorLimit);
+
+	it.skipIf(process.getuid?.() === 0)("keeps scans bounded across repeated flush-retry operations", () => {
+		verifyLowDescriptorLimit("flush-retry");
+	});
+
+	it.skipIf(process.getuid?.() === 0)("closes the scan after refused empty-file initialization", () => {
+		verifyLowDescriptorLimit("open-empty-readonly");
+	});
+
+	it.skipIf(process.getuid?.() === 0)("retains installed lazy bodies after migration publication fails", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-session-migration-source-"));
+		const source = join(directory, "legacy.jsonl");
+		const data = { text: `${"full body ".repeat(100)}end` };
+		const original = `${[
+			{ type: "session", version: 2, id: "legacy", cwd: directory, timestamp: new Date(0).toISOString() },
+			{ type: "custom", id: "kept", parentId: null, customType: "note", data },
+		]
+			.map((entry) => JSON.stringify(entry))
+			.join("\n")}\n`;
+		writeFileSync(source, original);
+		chmodSync(source, 0o400);
+		try {
+			const manager = SessionManager.create(directory, directory);
+			manager.appendMessage({ role: "user", content: "active session", timestamp: 1 });
+			expect(() => manager.setSessionFile(source)).toThrow(/EACCES/);
+			expect(manager.getEntry("kept")).toMatchObject({ data });
+			expect(readFileSync(source, "utf8")).toBe(original);
+			chmodSync(source, 0o600);
+			manager.flush();
+			expect(SessionManager.open(source).getEntry("kept")).toMatchObject({ data });
+		} finally {
+			chmodSync(source, 0o600);
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("SessionManager retained lazy history", () => {
+	let directory: string;
+
+	beforeEach(() => {
+		directory = mkdtempSync(join(tmpdir(), "pi-session-retained-"));
+	});
+
+	afterEach(() => {
+		rmSync(directory, { recursive: true, force: true });
+	});
+
+	function fixture() {
+		const source = join(directory, "source.jsonl");
+		const body = { text: `${"complete 雪 body ".repeat(200)}end`, exact: [false, null, 0] };
+		const header = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: "source",
+			cwd: directory,
+			timestamp: new Date(0).toISOString(),
+		};
+		const entry = {
+			type: "custom",
+			id: "body",
+			parentId: null,
+			customType: "kept",
+			timestamp: header.timestamp,
+			data: body,
+		};
+		const original = `${JSON.stringify(header)}\n${JSON.stringify(entry)}\n`;
+		writeFileSync(source, original);
+		const manager = SessionManager.open(source, directory);
+		const foreign = SessionManager.inMemory(directory, undefined, [manager.getHeader()!, ...manager.getEntries()]);
+		foreign.createBranchedSession(entry.id);
+		return { source, body, original, manager, foreign };
+	}
+
+	it("preserves complete outward and foreign bodies across refresh, reload, branch, fork, switch and unlink", () => {
+		const { source, body, original, manager, foreign } = fixture();
+		const retained = [
+			manager.getEntry("body")!,
+			manager.getEntries()[0]!,
+			manager.getBranch()[0]!,
+			manager.getTree()[0]!.entry,
+			foreign.getEntry("body")!,
+		];
+		const added = {
+			type: "session_info",
+			id: "external",
+			parentId: "body",
+			timestamp: new Date(0).toISOString(),
+			name: "external append",
+		};
+		const appended = `${original}${JSON.stringify(added)}\n`;
+		appendFileSync(source, `${JSON.stringify(added)}\n`);
+		expect(manager.getEntryMetadata(added.id)).toMatchObject({ name: added.name });
+		expect(manager.getEntry("body")).toBe(retained[0]);
+		expect(manager.getLeafId()).toBe("body");
+		manager.setSessionFile(source);
+		const reloaded = manager.getEntry("body")!;
+		expect(reloaded).not.toBe(retained[0]);
+		retained.push(reloaded);
+		const branch = manager.createBranchedSession("body")!;
+		expect(branch).not.toBe(source);
+		const branched = manager.getEntry("body")!;
+		expect(branched).not.toBe(reloaded);
+		retained.push(branched);
+		const fork = SessionManager.forkFrom(source, directory, directory, { id: "retained-fork" });
+		expect(fork.getHeader()?.parentSession).toBe(source);
+		expect(readFileSync(source, "utf8")).toBe(appended);
+		unlinkSync(source);
+		manager.setSessionFile(fork.getSessionFile()!);
+		unlinkSync(branch);
+		for (const entry of [...retained, manager.getEntry("body")!]) expect(entry).toMatchObject({ data: body });
+		expect(fork.getEntry("body")).toMatchObject({ data: body });
+	});
+
+	it("keeps each captured generation's refusal boundary after same-inode reload and identical replacement", () => {
+		const { source, body, original, manager, foreign } = fixture();
+		const prior = manager.getEntry("body")!;
+		const foreignView = foreign.getEntry("body")!;
+		manager.setSessionFile(source);
+		const current = manager.getEntry("body")!;
+		const replacement = join(directory, "replacement.jsonl");
+		writeFileSync(replacement, original);
+		renameSync(replacement, source);
+		for (const view of [prior, current, foreignView])
+			expect(() => JSON.stringify(view)).toThrow("Journal source generation changed");
+		expect(manager.getEntry("body")).toBe(current);
+		expect(current).toMatchObject({ data: body });
+		for (const view of [prior, foreignView])
+			expect(() => JSON.stringify(view)).toThrow("Journal source generation changed");
+		expect(readFileSync(source, "utf8")).toBe(original);
+
+		const mutated = original.replace('"exact":[false,null,0]', '"exact":[false,null,1]');
+		expect(mutated).not.toBe(original);
+		writeFileSync(source, mutated);
+		expect(() => JSON.stringify(current)).toThrow("Journal record changed since indexing");
+		expect(() => manager.getEntryMetadata("body")).toThrow("Journal source generation changed");
+		expect(readFileSync(source, "utf8")).toBe(mutated);
+		writeFileSync(source, original);
+		manager.getEntriesRevision();
+		truncateSync(source, 10);
+		expect(() => JSON.stringify(current)).toThrow("Journal source generation changed");
+		expect(() => manager.getEntry("body")).toThrow("Journal source generation changed");
+		expect(readFileSync(source)).toHaveLength(10);
+		writeFileSync(source, original);
+		manager.getEntriesRevision();
+		unlinkSync(source);
+		for (const view of [prior, current, foreignView]) expect(view).toMatchObject({ data: body });
+	});
+
+	it("refuses conversion loads without closing accepted shared history or changing rejected bytes", () => {
+		const { source, body, original, manager, foreign } = fixture();
+		const prior = manager.getEntry("body")!;
+		manager.setSessionFile(source);
+		const current = manager.getEntry("body")!;
+		const foreignView = foreign.getEntry("body")!;
+		for (const [entry, error] of [
+			[{ type: "context_window", id: "legacy", parentId: "body" }, "one-time conversion"],
+			[{ type: "message", id: "broken", parentId: "body" }, "expected a journal object"],
+		] as const) {
+			const rejected = `${original}${JSON.stringify(entry)}\n`;
+			writeFileSync(source, rejected);
+			expect(() => manager.setSessionFile(source)).toThrow(error);
+			expect(manager.getSessionFile()).toBe(source);
+			expect(manager.getSessionId()).toBe("source");
+			for (const view of [prior, current, foreignView]) expect(view).toMatchObject({ data: body });
+			expect(readFileSync(source, "utf8")).toBe(rejected);
+		}
+		unlinkSync(source);
+		for (const view of [prior, current, foreignView]) expect(view).toMatchObject({ data: body });
+	});
+});
+
+describe("SessionManager.open", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
@@ -50,72 +270,45 @@ describe("loadEntriesFromFile", () => {
 		);
 	}
 
-	it("returns empty array for non-existent file", () => {
-		const entries = loadEntriesFromFile(join(tempDir, "nonexistent.jsonl"));
-		expect(entries).toEqual([]);
-	});
-
-	it("returns empty array for empty file", () => {
-		const file = join(tempDir, "empty.jsonl");
-		writeFileSync(file, "");
-		expect(loadEntriesFromFile(file)).toEqual([]);
-	});
-
-	it("returns empty array for file without valid session header", () => {
-		const file = join(tempDir, "no-header.jsonl");
-		writeFileSync(file, '{"type":"message","id":"1"}\n');
-		expect(loadEntriesFromFile(file)).toEqual([]);
-	});
-
-	it("returns empty array for malformed JSON", () => {
+	it("refuses wholly malformed input without changing its bytes", () => {
 		const file = join(tempDir, "malformed.jsonl");
 		writeFileSync(file, "not json\n");
-		expect(loadEntriesFromFile(file)).toEqual([]);
+		expect(() => SessionManager.open(file)).toThrow("not a valid pi session");
+		expect(readFileSync(file, "utf8")).toBe("not json\n");
 	});
 
-	it("loads valid session file", () => {
-		const file = join(tempDir, "valid.jsonl");
-		writeFileSync(
-			file,
-			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
-				'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}\n',
-		);
-		const entries = loadEntriesFromFile(file);
-		expect(entries).toHaveLength(2);
-		expect(entries[0].type).toBe("session");
-		expect(entries[1].type).toBe("message");
-	});
-
-	it("skips malformed lines but keeps valid ones", () => {
+	it("skips malformed lines but keeps valid ones without rewriting current-version history", () => {
 		const file = join(tempDir, "mixed.jsonl");
-		writeFileSync(
-			file,
-			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
-				"not valid json\n" +
-				'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}\n',
-		);
-		const entries = loadEntriesFromFile(file);
-		expect(entries).toHaveLength(2);
+		const content =
+			'{"type":"session","version":3,"id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
+			"not valid json\n" +
+			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}\n';
+		writeFileSync(file, content);
+		const manager = SessionManager.open(file);
+		expect(manager.getEntries()).toHaveLength(1);
+		expect(manager.buildSessionContext().messages).toEqual([{ role: "user", content: "hi", timestamp: 1 }]);
+		expect(readFileSync(file, "utf8")).toBe(content);
 	});
 
 	it("adds a newline after an unterminated valid record", () => {
 		const file = join(tempDir, "unterminated.jsonl");
 		const content =
-			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
+			'{"type":"session","version":3,"id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
 			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}';
 		writeFileSync(file, content);
 
-		expect(loadEntriesFromFile(file)).toHaveLength(2);
+		expect(SessionManager.open(file).getEntries()).toHaveLength(1);
 		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
 	});
 
 	it("adds a newline after an unterminated malformed final fragment", () => {
 		const file = join(tempDir, "malformed-tail.jsonl");
 		const content =
-			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' + '{"type":"message"';
+			'{"type":"session","version":3,"id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
+			'{"type":"message"';
 		writeFileSync(file, content);
 
-		expect(loadEntriesFromFile(file)).toHaveLength(1);
+		expect(SessionManager.open(file).getEntries()).toHaveLength(0);
 		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
 	});
 
@@ -124,7 +317,7 @@ describe("loadEntriesFromFile", () => {
 		const content = '{"type":"message","id":"1"}';
 		writeFileSync(file, content);
 
-		expect(loadEntriesFromFile(file)).toEqual([]);
+		expect(() => SessionManager.open(file)).toThrow("not a valid pi session");
 		expect(readFileSync(file, "utf8")).toBe(content);
 	});
 

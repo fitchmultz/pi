@@ -14,7 +14,8 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -87,13 +88,19 @@ import {
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { generateBugReportSummary } from "./bug-report.ts";
 import type { CacheWarmer, CacheWarmingStatus } from "./cache-warmer.ts";
-import type {
-	CheckpointBoundary,
-	CheckpointHold,
-	CheckpointOptions,
-	SessionCheckpoint,
-	SessionCheckpointQueues,
-	ShutdownCheckpoint,
+import {
+	assertCheckpointTarget,
+	type CheckpointBoundary,
+	type CheckpointFileHold,
+	type CheckpointHold,
+	type CheckpointOptions,
+	normalizeCheckpointValue,
+	type SessionCheckpoint,
+	type SessionCheckpointQueues,
+	type SessionCheckpointState,
+	type ShutdownCheckpoint,
+	type ShutdownCheckpointFile,
+	writeCheckpointFile,
 } from "./checkpoint.ts";
 import {
 	type CompactionPreparation,
@@ -568,9 +575,12 @@ export class AgentSession {
 				config.settingsManager.getSessionDir() ||
 				join(config.agentDir ?? getAgentDir(), "sessions"),
 		);
-		for (const entry of config.sessionManager.getEntries()) {
-			if (entry.type === "custom" && entry.customType === BACKGROUND_COMMAND_RUN_STATE)
-				this._backgroundWakeSuppressed = entry.data === true;
+		let backgroundStateId: string | undefined;
+		for (const entry of config.sessionManager.iterateEntryMetadata())
+			if (entry.type === "custom" && entry.customType === BACKGROUND_COMMAND_RUN_STATE) backgroundStateId = entry.id;
+		if (backgroundStateId) {
+			const state = config.sessionManager.getEntry(backgroundStateId);
+			this._backgroundWakeSuppressed = state?.type === "custom" && state.data === true;
 		}
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
@@ -718,7 +728,10 @@ export class AgentSession {
 		const model = this.model;
 		if (!model) return;
 		const getModel = (provider: string, modelId: string) => this._modelRuntime.getModel(provider, modelId);
-		const recorded = getBranchSelection(this.sessionManager.getBranch(), getModel);
+		const recorded = getBranchSelection(
+			this.sessionManager.iterateEntryMetadata({ branchFrom: this.sessionManager.getLeafId() }),
+			getModel,
+		);
 		if (!recorded || (recorded.provider === model.provider && recorded.modelId === model.id)) return;
 		const recordedModel = getModel(recorded.provider, recorded.modelId);
 		if (!isVirtualModel(model) && !(recordedModel && isVirtualModel(recordedModel))) return;
@@ -1135,7 +1148,9 @@ export class AgentSession {
 		useReportedUsage: boolean;
 	} {
 		let invalidated = false;
-		let entry = this.sessionManager.getLeafEntry();
+		let entry = this.sessionManager.getLeafId()
+			? this.sessionManager.getEntryMetadata(this.sessionManager.getLeafId()!)
+			: undefined;
 		while (entry) {
 			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
 			if (entry.type === "context_edit") invalidated = true;
@@ -1148,16 +1163,13 @@ export class AgentSession {
 					message.model === model.id &&
 					message.stopReason !== "aborted" &&
 					message.stopReason !== "error" &&
-					calculateContextTokens(message.usage) > 0 &&
-					messages.some(
-						(projected) =>
-							isSameResponse(projected, message) || this._entryIdsByMessage.get(projected) === entryId,
-					)
+					calculateContextTokens(message.usage!) > 0 &&
+					messages.some((projected) => this._findPersistedMessageEntryId(projected) === entryId)
 				) {
 					return { hasPostCompactionUsage: true, useReportedUsage: !invalidated };
 				}
 			}
-			entry = entry.parentId ? this.sessionManager.getEntry(entry.parentId) : undefined;
+			entry = entry.parentId ? this.sessionManager.getEntryMetadata(entry.parentId) : undefined;
 		}
 		return { hasPostCompactionUsage: true, useReportedUsage: false };
 	}
@@ -1582,24 +1594,17 @@ export class AgentSession {
 	private _findPersistedMessageEntryId(message: AgentMessage): string | undefined {
 		const mapped = this._entryIdsByMessage.get(message);
 		if (mapped) return mapped;
-		for (const entry of [...this.sessionManager.getBranch()].reverse()) {
-			if (entry.type === "message" && entry.message === message) return entry.id;
-		}
-
 		const messageIndex = this.agent.state.messages.indexOf(message);
 		if (messageIndex < 0) return undefined;
 		const projection = this.sessionManager.buildSessionProjection();
 		let projectedIndex = 0;
 		for (const entry of projection.entries) {
 			for (let i = 0; i < entry.messages.length; i++) {
-				if (projectedIndex === messageIndex) {
-					this._entryIdsByMessage.set(message, entry.sourceEntry.id);
-					return entry.sourceEntry.id;
-				}
-				projectedIndex++;
+				const current = this.agent.state.messages[projectedIndex++];
+				if (current) this._entryIdsByMessage.set(current, entry.sourceEntry.id);
 			}
 		}
-		return undefined;
+		return this._entryIdsByMessage.get(message);
 	}
 
 	private _omitRecoveryAttempt(message: AssistantMessage, toolResults: AgentMessage[] = []): void {
@@ -2990,44 +2995,59 @@ export class AgentSession {
 			throw new Error(`Settings checkpoint failed: ${errors.map((error) => error.error.message).join("; ")}`);
 	}
 
-	private _captureCheckpoint(boundary: CheckpointBoundary): SessionCheckpoint {
+	private _captureCheckpointState(boundary: CheckpointBoundary): SessionCheckpointState {
 		if (this._checkpointActiveTools) throw new Error("Checkpoint restore requires extension initialization");
 		const sessionFile = this.sessionFile;
 		const header = this.sessionManager.getHeader();
 		if (!sessionFile || !header) throw new Error("Checkpoint requires a persistent session");
 		// Both live and clean-exit capture must reconcile accepted entries after failed I/O.
 		this.sessionManager.flush();
-		const checkpoint: SessionCheckpoint = {
+		const checkpoint: SessionCheckpointState = {
 			version: 1,
 			createdAt: new Date().toISOString(),
-			selection: {
-				sessionFile,
-				sessionId: this.sessionId,
-				cwd: this._cwd,
-				leafId: this.sessionManager.getLeafId(),
-				model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
-				thinkingLevel: this.thinkingLevel,
-				activeTools: this.getActiveToolNames(),
-				knownTools: this.getAllTools().map((tool) => tool.name),
-			},
-			header,
-			entries: this.sessionManager.getEntries(),
+			selection: normalizeCheckpointValue(
+				{
+					sessionFile,
+					sessionId: this.sessionId,
+					cwd: this._cwd,
+					leafId: this.sessionManager.getLeafId(),
+					model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
+					thinkingLevel: this.thinkingLevel,
+					activeTools: this.getActiveToolNames(),
+					knownTools: this.getAllTools().map((tool) => tool.name),
+				},
+				"selection",
+			),
+			header: normalizeCheckpointValue(header, "header"),
 			queues: this.getCheckpointQueues(),
-			toolConfiguration: {
-				noBuiltinTools: this._noBuiltinTools || undefined,
-				allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
-				excludedToolNames: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
-			},
-			scopedModels: this._scopedModels.map(({ model, thinkingLevel }) => ({
-				provider: model.provider,
-				id: model.id,
-				thinkingLevel,
-			})),
+			toolConfiguration: normalizeCheckpointValue(
+				{
+					noBuiltinTools: this._noBuiltinTools || undefined,
+					allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
+					excludedToolNames: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
+				},
+				"toolConfiguration",
+			),
+			scopedModels: this._scopedModels.map(({ model, thinkingLevel }, index) =>
+				normalizeCheckpointValue({ provider: model.provider, id: model.id, thinkingLevel }, String(index)),
+			),
 			boundary,
 			settled: boundary === "settled" && this.isIdle,
 		};
-		// Both held and final-exit artifacts use the same native snapshot and JSON validation.
-		return JSON.parse(JSON.stringify(checkpoint)) as SessionCheckpoint;
+		return checkpoint;
+	}
+
+	private *_checkpointEntries(): Iterable<SessionEntry> {
+		for (const entry of this.sessionManager.getEntries()) yield entry;
+	}
+
+	private _captureCheckpoint(boundary: CheckpointBoundary): SessionCheckpoint {
+		const state = this._captureCheckpointState(boundary);
+		// ponytail: explicit object capture needs heap for every requested body; file capture never uses this array.
+		const entries = Array.from(this._checkpointEntries(), (entry, index) =>
+			normalizeCheckpointValue(entry, String(index)),
+		);
+		return { ...state, entries };
 	}
 
 	private _notifyShutdownCheckpointWaiters(): void {
@@ -3065,6 +3085,43 @@ export class AgentSession {
 
 	/** Caller owns stopped ingress and completed shutdown handlers. Never use this as a live-process sleep receipt. */
 	async captureShutdownCheckpoint(): Promise<ShutdownCheckpoint> {
+		return this._captureShutdownCheckpoint(() => this._captureCheckpoint("settled"));
+	}
+
+	async captureShutdownCheckpointFile(
+		path: string,
+		signal?: AbortSignal,
+		retainedRuntimeProvider?: string,
+	): Promise<ShutdownCheckpointFile> {
+		const temporary = `${path}.${randomUUID()}.tmp`;
+		try {
+			const candidate = await this._captureShutdownCheckpoint(
+				(held) => {
+					const state = this._captureCheckpointState("settled");
+					assertCheckpointTarget(path, state.selection.sessionFile);
+					return writeCheckpointFile(temporary, state, this._checkpointEntries(), held);
+				},
+				signal,
+				retainedRuntimeProvider,
+			);
+			return {
+				...candidate,
+				release: () => {
+					candidate.release();
+					rmSync(temporary, { force: true });
+				},
+			};
+		} catch (error) {
+			rmSync(temporary, { force: true });
+			throw error;
+		}
+	}
+
+	private async _captureShutdownCheckpoint<T extends SessionCheckpointState>(
+		capture: (signal: AbortSignal) => T | Promise<T>,
+		signal?: AbortSignal,
+		retainedRuntimeProvider?: string,
+	): Promise<{ checkpoint: T; signal: AbortSignal; release(): void }> {
 		if (!this._shutdownAbortController.signal.aborted) throw new Error("Session shutdown has not begun");
 		this._flushPendingBashMessages();
 		this._flushPendingCustomMessages();
@@ -3083,9 +3140,16 @@ export class AgentSession {
 			controller.signal.throwIfAborted();
 			if (!this._isShutdownCheckpointSettled() || this.pendingInputCount)
 				throw new Error("Unfinished native callbacks or input prevent a clean-exit checkpoint");
-			if (this.model && this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime")
+			if (
+				this.model &&
+				this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime" &&
+				this.model.provider !== retainedRuntimeProvider
+			)
 				throw new Error("Runtime-only API key cannot be restored from a clean-exit checkpoint");
-			return { checkpoint: this._captureCheckpoint("settled"), signal: controller.signal, release };
+			const held = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+			const checkpoint = await capture(held);
+			held.throwIfAborted();
+			return { checkpoint, signal: held, release };
 		} catch (error) {
 			release();
 			throw error;
@@ -3094,6 +3158,20 @@ export class AgentSession {
 
 	/** Acquire a completed-turn or fully settled native hold. Never call from an awaited run handler. */
 	async acquireCheckpoint(options: CheckpointOptions = {}): Promise<CheckpointHold> {
+		return this._acquireCheckpoint(options, (boundary) => this._captureCheckpoint(boundary));
+	}
+
+	/** Capture detached immutable v1 bytes using the same acquisition/refusal barrier as object capture. */
+	async acquireCheckpointFile(path: string, options: CheckpointOptions = {}): Promise<CheckpointFileHold> {
+		return this._acquireCheckpoint(options, (boundary, signal) =>
+			writeCheckpointFile(path, this._captureCheckpointState(boundary), this._checkpointEntries(), signal),
+		);
+	}
+
+	private async _acquireCheckpoint<T extends SessionCheckpointState>(
+		options: CheckpointOptions,
+		capture: (boundary: CheckpointBoundary, signal: AbortSignal) => T | Promise<T>,
+	): Promise<Omit<CheckpointHold, "checkpoint"> & { checkpoint: T }> {
 		if (this._checkpointRequest) return Promise.reject(new Error("Checkpoint already requested"));
 		this._shutdownAbortController.signal.throwIfAborted();
 		options.signal?.throwIfAborted();
@@ -3156,7 +3234,8 @@ export class AgentSession {
 						releaseWriters.push(this._extensionRunner.checkpointActivity.hold(cancel));
 						await this._flushCheckpointSettings();
 						if (released) return;
-						const checkpoint = this._captureCheckpoint(boundary);
+						const checkpoint = await capture(boundary, holdController.signal);
+						if (released) return;
 						if (this.model && this._modelRuntime.getProviderAuthStatus(this.model.provider).source === "runtime")
 							sleepBlockers.push(
 								"Selected provider uses a runtime-only API key; persist native authentication first",
@@ -3235,15 +3314,18 @@ export class AgentSession {
 
 	getCheckpointQueues(): SessionCheckpointQueues {
 		const queues = this.agent.getQueuedMessages();
-		return structuredClone({
-			...queues,
+		return {
+			steering: queues.steering.map((message, index) => normalizeCheckpointValue(message, String(index))),
+			followUp: queues.followUp.map((message, index) => normalizeCheckpointValue(message, String(index))),
 			steeringMode: this.steeringMode,
 			followUpMode: this.followUpMode,
-			nextTurn: this._pendingNextTurnMessages,
+			nextTurn: this._pendingNextTurnMessages.map((message, index) =>
+				normalizeCheckpointValue(message, String(index)),
+			),
 			persistOnCancel: [...queues.steering, ...queues.followUp].flatMap((message, index) =>
 				message.role === "custom" && this._cancelPersistentCustomMessages.has(message) ? [index] : [],
 			),
-		});
+		};
 	}
 
 	/** Startup handlers may reconstruct tools; apply the exact saved selection after they finish. */
@@ -3277,7 +3359,12 @@ export class AgentSession {
 		this._assertNotCheckpointHeld();
 		if (this._checkpointRestored || !this.isIdle || this.hasPendingMessages || this.pendingNextTurnCount)
 			throw new Error("Checkpoint queues require a fresh idle session");
-		const queues = structuredClone(saved);
+		const queues = {
+			...saved,
+			steering: saved.steering.map((message, index) => normalizeCheckpointValue(message, String(index))),
+			followUp: saved.followUp.map((message, index) => normalizeCheckpointValue(message, String(index))),
+			nextTurn: saved.nextTurn.map((message, index) => normalizeCheckpointValue(message, String(index))),
+		};
 		this._checkpointRestored = true;
 		this._backgroundCheckpointPaused = true;
 		this.agent.steeringMode = queues.steeringMode;
@@ -3733,17 +3820,21 @@ export class AgentSession {
 				throw new Error("Compaction cancelled");
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			const compactionId = this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+			);
 			// Retain admitted input after the new boundary before compaction observers rebuild the transcript.
 			this._flushPendingProviderMessages();
-			const newEntries = this.sessionManager.getEntries();
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
+			const savedCompactionEntry = this.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
 
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
@@ -4053,17 +4144,21 @@ export class AgentSession {
 			}
 			abortController.signal.throwIfAborted();
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			const compactionId = this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+			);
 			// Retain admitted input after the new boundary before compaction observers rebuild the transcript.
 			this._flushPendingProviderMessages();
-			const newEntries = this.sessionManager.getEntries();
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
+			const savedCompactionEntry = this.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
 
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
@@ -4794,17 +4889,23 @@ export class AgentSession {
 			)
 				return;
 			const seen = new Set<string>();
-			for (const entry of this.sessionManager.getEntries()) {
-				if (entry.type === "custom_message" && entry.customType === BACKGROUND_COMMAND_NOTICE) {
-					const details = entry.details as { jobIds?: string[] } | undefined;
+			for (const metadata of this.sessionManager.iterateEntryMetadata()) {
+				if (metadata.type === "custom_message" && metadata.customType === BACKGROUND_COMMAND_NOTICE) {
+					const entry = this.sessionManager.getEntry(metadata.id);
+					const details = (entry?.type === "custom_message" ? entry.details : undefined) as
+						| { jobIds?: string[] }
+						| undefined;
 					for (const id of details?.jobIds ?? []) seen.add(id);
 				} else if (
-					entry.type === "message" &&
-					entry.message.role === "toolResult" &&
-					entry.message.toolName === "background_command" &&
-					!entry.message.isError
+					metadata.type === "message" &&
+					metadata.message.role === "toolResult" &&
+					metadata.message.toolName === "background_command" &&
+					!metadata.message.isError
 				) {
-					const details = entry.message.details as BackgroundCommandToolDetails | undefined;
+					const entry = this.sessionManager.getEntry(metadata.id);
+					const details = (entry?.type === "message" ? (entry.message as ToolResultMessage).details : undefined) as
+						| BackgroundCommandToolDetails
+						| undefined;
 					if (details)
 						for (const job of "jobs" in details ? details.jobs : [details]) {
 							if (job.id && backgroundCommandFinished(job)) seen.add(job.id);
@@ -5205,13 +5306,12 @@ export class AgentSession {
 	 * Get all user messages from session for fork selector.
 	 */
 	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
-		const entries = this.sessionManager.getEntries();
 		const result: Array<{ entryId: string; text: string }> = [];
 
-		for (const entry of entries) {
-			if (entry.type !== "message") continue;
-			if (entry.message.role !== "user") continue;
-
+		for (const metadata of this.sessionManager.iterateEntryMetadata()) {
+			if (metadata.type !== "message" || metadata.message.role !== "user") continue;
+			const entry = this.sessionManager.getEntry(metadata.id)!;
+			if (entry.type !== "message" || entry.message.role !== "user") continue;
 			const text = contentText(entry.message.content, "");
 			if (text) {
 				result.push({ entryId: entry.id, text });
@@ -5234,7 +5334,7 @@ export class AgentSession {
 		let toolCalls = 0;
 		const usageTotals = createUsageTotals();
 
-		for (const entry of this.sessionManager.getEntries()) {
+		for (const entry of this.sessionManager.iterateEntryMetadata()) {
 			if (entry.type === "usage") {
 				addUsageToTotals(usageTotals, entry.usage);
 			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
@@ -5252,11 +5352,8 @@ export class AgentSession {
 				}
 			} else if (message.role === "assistant") {
 				assistantMessages++;
-				const assistantMsg = message as AssistantMessage;
-				if (Array.isArray(assistantMsg.content)) {
-					toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				}
-				addUsageToTotals(usageTotals, assistantMsg.usage);
+				toolCalls += message.toolCallCount;
+				addUsageToTotals(usageTotals, message.usage!);
 			}
 		}
 
@@ -5312,10 +5409,13 @@ export class AgentSession {
 	/**
 	 * Export session to HTML.
 	 * @param outputPath Optional output path (defaults to session directory)
-	 * @param options Optional export presentation settings
+	 * @param options Optional presentation settings and cancellation signal
 	 * @returns Path to exported file
 	 */
-	async exportToHtml(outputPath?: string, options: { themeName?: string } = {}): Promise<string> {
+	async exportToHtml(
+		outputPath?: string,
+		options: { themeName?: string; signal?: AbortSignal } = {},
+	): Promise<string> {
 		const themeName = [options.themeName, this.settingsManager.getTheme()].find(
 			(candidate) => candidate !== undefined && getThemeByName(candidate) !== undefined,
 		);
@@ -5331,6 +5431,7 @@ export class AgentSession {
 			outputPath,
 			themeName,
 			toolRenderer,
+			signal: options.signal,
 		});
 	}
 
@@ -5377,12 +5478,21 @@ export class AgentSession {
 		const isEligibleAssistant = (message: AgentMessage): message is AssistantMessage =>
 			message.role === "assistant" && !(message.stopReason === "aborted" && message.content.length === 0);
 		// The active projection can omit completed answers after compaction; /copy still owns the raw branch.
-		const lastAssistant =
-			this.messages.findLast(isEligibleAssistant) ??
-			this.sessionManager
-				.getBranch()
-				.flatMap((entry) => (entry.type === "message" ? [entry.message] : []))
-				.findLast(isEligibleAssistant);
+		let lastAssistant = this.messages.findLast(isEligibleAssistant);
+		if (!lastAssistant) {
+			const branch = Array.from(
+				this.sessionManager.iterateEntryMetadata({ branchFrom: this.sessionManager.getLeafId() }),
+			);
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const metadata = branch[i]!;
+				if (metadata.type !== "message" || metadata.message.role !== "assistant") continue;
+				const entry = this.sessionManager.getEntry(metadata.id)!;
+				if (entry.type === "message" && isEligibleAssistant(entry.message)) {
+					lastAssistant = entry.message;
+					break;
+				}
+			}
+		}
 
 		if (!lastAssistant) return undefined;
 

@@ -361,6 +361,18 @@ export default function(pi) {
 					await vi.waitFor(() =>
 						expect(state()).toMatchObject({ pid: resumed.pid, paused: false, editor: "", calls: 0 }),
 					);
+					// PR #159: real final native captures must not accumulate across repeated restarts.
+					for (let count = 3; count <= 4; count++) {
+						await requestRestart(state().socket, { sessionId: initial.sessionId });
+						await vi.waitFor(() => expect(starts()).toHaveLength(count), { timeout: 8_000 });
+						await vi.waitFor(() => expect(state()).toMatchObject({ pid: starts().at(-1)!.pid, calls: 0 }));
+						expect(starts().at(-1)?.sessionFile).toBe(initial.sessionFile);
+						await vi.waitFor(() =>
+							expect(
+								readdirSync(terminal.temporary).filter((name) => name.startsWith("pi-restart-checkpoint-")),
+							).toEqual([]),
+						);
+					}
 				}
 				expect(existsSync(editorProcess.file)).toBe(false);
 				execFileSync("tmux", ["-L", socket, "send-keys", "-t", "test", "C-d"]);
@@ -714,12 +726,14 @@ export default function(pi) {
 	});
 
 	it.each([
-		{ failCandidate: false, externalCli: false },
-		{ failCandidate: true, externalCli: false },
-		{ failCandidate: false, externalCli: true },
+		{ failCandidate: false, externalCli: false, offlineTransform: false },
+		{ failCandidate: true, externalCli: false, offlineTransform: false },
+		{ failCandidate: false, externalCli: true, offlineTransform: false },
+		{ failCandidate: false, externalCli: false, offlineTransform: true },
+		{ failCandidate: true, externalCli: false, offlineTransform: true },
 	])(
-		"resumes automatically after a staged extension/runtime update (failed candidate: $failCandidate, external CLI: $externalCli)",
-		async ({ failCandidate, externalCli }) => {
+		"resumes automatically after a staged extension/runtime update (failed candidate: $failCandidate, external CLI: $externalCli, offline transform: $offlineTransform)",
+		async ({ failCandidate, externalCli, offlineTransform }) => {
 			expect(existsSync(bundledLauncher), "Build the coding-agent bundle before this terminal test").toBe(true);
 			if (externalCli) {
 				vi.stubEnv("PI_TEST_CLI", join(stageBundledRuntime("98.0.0-external-test"), "dist", "bundle", "cli.js"));
@@ -737,6 +751,34 @@ export default function(pi) {
 			const trace = join(root, "trace.jsonl");
 			const first = join(root, "v1.ts");
 			const second = join(root, "v2.ts");
+			const offline = join(root, "offline.mjs");
+			const preparedArtifact = join(root, "prepared-artifact");
+			writeFileSync(preparedArtifact, "prior");
+			if (offlineTransform)
+				writeFileSync(
+					offline,
+					`
+import { appendFileSync, copyFileSync, createReadStream, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
+import { writeCheckpointFile, validateSessionCheckpointFile } from ${JSON.stringify(join(packageDir, "dist", "index.js"))};
+const [mode, original, candidate] = process.argv.slice(2);
+appendFileSync(${JSON.stringify(trace)}, JSON.stringify({event:"offline",mode}) + "\\n");
+if (mode === "rollback") {
+  writeFileSync(${JSON.stringify(preparedArtifact)}, "prior");
+} else {
+  const state = validateSessionCheckpointFile(original);
+  const converted = join(dirname(candidate), "converted.jsonl");
+  copyFileSync(state.selection.sessionFile, converted);
+  const lines = createInterface({ input:createReadStream(converted), crlfDelay:Infinity });
+  const records = lines[Symbol.asyncIterator]();
+  const header = JSON.parse((await records.next()).value);
+  await writeCheckpointFile(candidate, { ...state, header, selection:{ ...state.selection, sessionFile:converted } },
+    (async function* () { for await (const line of records) if (line.trim()) yield JSON.parse(line); })(), new AbortController().signal);
+  writeFileSync(${JSON.stringify(preparedArtifact)}, "candidate");
+}
+`,
+				);
 			const command = [
 				process.execPath,
 				bundledLauncher,
@@ -745,18 +787,25 @@ export default function(pi) {
 				candidateRuntime,
 				"-e",
 				second,
+				...(offlineTransform ? ["--checkpoint-transform", offline] : []),
 				"--message",
 				"Verify the activated capability",
 			]
 				.map(quote)
 				.join(" ");
 			const extension = (version: string) => `
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync } from "node:fs";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { VERSION, getPackageDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 const record = (value) => appendFileSync(${JSON.stringify(trace)}, JSON.stringify({version:${JSON.stringify(version)},runtimeVersion:VERSION,packageDir:getPackageDir(),pid:process.pid,...value}) + "\\n");
-record({event:"factory"});
+record({event:"factory",captures:readdirSync(${JSON.stringify(terminal.temporary)}).filter(name => name.startsWith("pi-restart-checkpoint-"))});
+${
+	offlineTransform
+		? `if (${JSON.stringify(version)} === "v1" && readPrepared() !== "prior") throw new Error("Prior artifacts not restored before recovery extensions");
+function readPrepared() { return readFileSync(${JSON.stringify(preparedArtifact)}, "utf8"); }`
+		: ""
+}
 ${failCandidate && version === "v2" ? 'throw new Error("Deliberately broken candidate");' : ""}
 export default function(pi) {
 	const faux = fauxProvider();
@@ -828,18 +877,32 @@ export default function(pi) {
 							text?: string;
 							cwd?: string;
 							pendingInputs?: number;
+							captures?: string[];
 						},
 				);
 			const starts = events.filter((event) => event.event === "start");
 			expect(starts).toHaveLength(2);
 			expect(starts[1].sessionId).toBe(starts[0].sessionId);
-			expect(starts[1].sessionFile).toBe(starts[0].sessionFile);
+			if (offlineTransform && !failCandidate) expect(starts[1].sessionFile).not.toBe(starts[0].sessionFile);
+			else expect(starts[1].sessionFile).toBe(starts[0].sessionFile);
 			expect(starts[1].pid).not.toBe(starts[0].pid);
 			expect(starts[1].version).toBe(failCandidate ? "v1" : "v2");
 			expect(starts[1].cwd).toBe(starts[0].cwd);
 			expect(starts[0].runtimeVersion).toBe(originalVersion);
 			expect(realpathSync(starts[0].packageDir)).toBe(realpathSync(initialPackageDir));
 			const candidateFactory = events.find((event) => event.event === "factory" && event.version === "v2");
+			expect(candidateFactory?.captures).toHaveLength(1);
+			const captures = readdirSync(terminal.temporary).filter((name) => name.startsWith("pi-restart-checkpoint-"));
+			expect(captures).toHaveLength(offlineTransform ? 1 : 0);
+			if (offlineTransform) {
+				const capture = join(terminal.temporary, captures[0]);
+				expect(readSessionCheckpoint(join(capture, "original.json")).selection.sessionFile).toBe(
+					starts[0].sessionFile,
+				);
+				expect(readSessionCheckpoint(join(capture, "candidate.json")).selection.sessionFile).not.toBe(
+					starts[0].sessionFile,
+				);
+			}
 			expect(candidateFactory?.runtimeVersion).toBe(candidateVersion);
 			expect(realpathSync(candidateFactory!.packageDir)).toBe(realpathSync(candidateRuntime));
 			expect(starts[1].runtimeVersion).toBe(failCandidate ? originalVersion : candidateVersion);
@@ -882,6 +945,12 @@ export default function(pi) {
 				}
 			}
 			expect(calls.size).toBe(0);
+			if (offlineTransform) {
+				expect(
+					events.filter((event) => event.event === "offline").map((event) => (event as { mode?: string }).mode),
+				).toEqual(failCandidate ? ["transform", "rollback"] : ["transform"]);
+				expect(readFileSync(preparedArtifact, "utf8")).toBe(failCandidate ? "prior" : "candidate");
+			}
 		},
 		30_000,
 	);

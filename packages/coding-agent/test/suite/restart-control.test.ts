@@ -1,17 +1,20 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage, type SystemMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseArgs } from "../../src/cli/args.ts";
 import {
 	RESTART_SOCKET_ENV,
 	type RestartHandoff,
 	type RestartWorkerMessage,
 	requestRestart,
 } from "../../src/cli/restart-protocol.ts";
-import { createRestartControl, restoreRestartSession } from "../../src/cli/restart-worker.ts";
+import { createRestartControl, prepareRestartCheckpoint, restoreRestartSession } from "../../src/cli/restart-worker.ts";
+import { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
+import { readSessionCheckpoint, validateSessionCheckpointFile } from "../../src/core/checkpoint.ts";
 import type { ExtensionUIContext, InlineExtension } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
@@ -26,6 +29,7 @@ afterEach(async () => {
 	}
 	for (const path of directories.splice(0)) rmSync(path, { force: true, recursive: true });
 	vi.unstubAllEnvs();
+	vi.restoreAllMocks();
 });
 
 async function setup(
@@ -61,9 +65,40 @@ async function setup(
 	};
 	await harness.session.bindExtensions({ mode: "tui", uiContext, shutdownHandler: shutdown });
 	await control.ready();
+	const runtime = new AgentSessionRuntime(
+		harness.session,
+		{
+			cwd: root,
+			agentDir: root,
+			modelRuntime: harness.session.modelRuntime,
+			settingsManager: harness.settingsManager,
+			resourceLoader: harness.session.resourceLoader,
+			diagnostics: [],
+		},
+		async () => {
+			throw new Error("No replacement in this host");
+		},
+	);
 	const socket = process.env[RESTART_SOCKET_ENV]!;
 	expect(socket).toBeTruthy();
-	return { harness, control, socket, sent, shutdown, notify, editor, sessionManager };
+	return { harness, control, socket, sent, shutdown, notify, editor, sessionManager, runtime, root };
+}
+
+async function finalize(f: Awaited<ReturnType<typeof setup>>, signal = AbortSignal.timeout(30_000)) {
+	f.control.shutdownRequested("extension");
+	const writer = f.control.prepareShutdownCheckpoint();
+	if (!writer) throw new Error("No committed restart");
+	directories.push(dirname(writer.path));
+	const hold = await f.runtime.disposeWithCheckpointFile(writer.path, {
+		signal,
+		waitForHost: async () => {},
+		retainedRuntimeProvider: writer.retainedRuntimeProvider,
+	});
+	try {
+		await writer.publish(hold.checkpoint, AbortSignal.any([signal, hold.signal]));
+	} finally {
+		hold.release();
+	}
 }
 
 describe("native restart control at session boundaries", () => {
@@ -146,7 +181,7 @@ describe("native restart control at session boundaries", () => {
 		expect(existsSync(f.socket)).toBe(true);
 		await requestRestart(f.socket, { sessionId: f.sessionManager.getSessionId(), message: "Resume work" });
 		await vi.waitFor(() => expect(f.shutdown).toHaveBeenCalledTimes(1));
-		await f.harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await finalize(f);
 		expect(f.sent).toMatchObject([
 			{ type: "pi:ready" },
 			{
@@ -235,7 +270,7 @@ describe("native restart control at session boundaries", () => {
 		await vi.waitFor(() => expect(f.shutdown).toHaveBeenCalledTimes(1));
 		expect(writes).toBe(1);
 		expect(f.harness.eventsOfType("agent_settled")).toHaveLength(1);
-		await f.harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await finalize(f);
 		const restart = f.sent.find((message) => message.type === "pi:restart");
 		expect(restart?.type).toBe("pi:restart");
 		if (restart?.type !== "pi:restart") throw new Error("Missing restart checkpoint");
@@ -258,13 +293,134 @@ describe("native restart control at session boundaries", () => {
 		async (sameProvider) => {
 			const f = await setup({ args: ["--api-key", "test-only-key", "-ne"] });
 			f.control.setInitialProvider(sameProvider ? f.harness.getModel().provider : "different-provider");
+			if (sameProvider)
+				await f.harness.session.modelRuntime.setRuntimeApiKey(f.harness.getModel().provider, "test-only-key");
 			await requestRestart(f.socket, {});
 			await vi.waitFor(() => expect(f.shutdown).toHaveBeenCalledTimes(1));
-			await f.harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			await finalize(f);
 			const restart = f.sent.find((message) => message.type === "pi:restart");
 			expect(restart?.type === "pi:restart" && restart.args.includes("test-only-key")).toBe(sameProvider);
 		},
 	);
+
+	it.for(["success", "queues", "journal", "error", "transform-signal", "rollback-signal"] as const)(
+		"owns one offline transform and retains its immutable original (%s)",
+		async (outcome, context) => {
+			if (process.platform === "win32" && outcome.endsWith("-signal"))
+				return context.skip("Unix child termination signals");
+			const f = await setup();
+			f.harness.session.setThinkingLevel("off");
+			const program = join(f.root, "offline transform; literal.mjs");
+			const trace = join(f.root, "offline-modes");
+			const journal = f.sessionManager.getSessionFile()!;
+			const before = readFileSync(journal);
+			writeFileSync(
+				program,
+				`
+import { appendFileSync, copyFileSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { readSessionCheckpointState, writeCheckpointFile } from ${JSON.stringify(resolve("src/core/checkpoint.ts"))};
+const [mode, original, candidate] = process.argv.slice(2);
+appendFileSync(${JSON.stringify(trace)}, mode + "\\n");
+if (mode === "rollback") {
+  if (${JSON.stringify(outcome)} === "rollback-signal") process.kill(process.pid, "SIGKILL");
+  process.exit(0);
+}
+if (${JSON.stringify(outcome)} === "error") throw new Error("offline conversion failed");
+const state = readSessionCheckpointState(original);
+if (${JSON.stringify(outcome)} === "journal") appendFileSync(state.selection.sessionFile,
+  JSON.stringify({ type: "custom", id: "outside", parentId: state.selection.leafId, timestamp: new Date().toISOString(), customType: "outside", data: {} }) + "\\n");
+const converted = join(dirname(candidate), "converted.jsonl");
+copyFileSync(state.selection.sessionFile, converted);
+const records = readFileSync(converted, "utf8").trim().split("\\n").map(line => JSON.parse(line));
+const header = records.shift();
+if (${JSON.stringify(outcome)} === "queues") state.queues.followUp.push({ role: "user", content: "not accepted", timestamp: 1 });
+await writeCheckpointFile(candidate, { ...state, header, selection: { ...state.selection, sessionFile: converted } },
+  (async function* () { for (const record of records) yield record; })(), new AbortController().signal);
+if (${JSON.stringify(outcome)} === "transform-signal") process.kill(process.pid, "SIGKILL");
+`,
+			);
+			await requestRestart(f.socket, { checkpointTransform: program });
+			await vi.waitFor(() => expect(f.shutdown).toHaveBeenCalledTimes(1));
+			if (outcome === "success" || outcome === "rollback-signal") {
+				await finalize(f);
+				const message = f.sent.find((message) => message.type === "pi:restart");
+				if (message?.type !== "pi:restart") throw new Error("Missing final restart");
+				expect(message.checkpoint.sessionFile).toBe(journal);
+				expect(message.checkpoint.files?.candidate?.path).toBeTruthy();
+				const handoff = { checkpoint: message.checkpoint, toolConfiguration: message.toolConfiguration };
+				const args = parseArgs([
+					...message.args,
+					"--session",
+					journal,
+					"--session-cwd",
+					f.harness.tempDir,
+					"--thinking",
+					"off",
+					"--provider",
+					f.harness.getModel().provider,
+					"--model",
+					`${f.harness.getModel().provider}/${f.harness.getModel().id}`,
+				]);
+				const originalPath = message.checkpoint.files!.original.path;
+				const immutable = readFileSync(originalPath);
+				expect(await prepareRestartCheckpoint(handoff, args)).toBe(message.checkpoint.files!.candidate!.path);
+				const fallback = prepareRestartCheckpoint({ ...handoff, failure: "candidate failed" }, args);
+				if (outcome === "rollback-signal")
+					await expect(fallback).rejects.toThrow("Restart checkpoint rollback failed (SIGKILL)");
+				else expect(await fallback).toBe(originalPath);
+				expect(readFileSync(originalPath)).toEqual(immutable);
+				expect(readSessionCheckpoint(originalPath).completedExit).toBeUndefined();
+				expect(readFileSync(trace, "utf8")).toBe("transform\nrollback\n");
+				await expect(prepareRestartCheckpoint(handoff, { ...args, model: "other" })).rejects.toThrow("arguments");
+				expect(() => validateSessionCheckpointFile(originalPath)).not.toThrow();
+			} else {
+				await expect(finalize(f)).rejects.toThrow(
+					outcome === "queues"
+						? "non-entry working state"
+						: outcome === "journal"
+							? "journal differs"
+							: outcome === "transform-signal"
+								? "Restart checkpoint transform failed (SIGKILL)"
+								: "offline conversion failed",
+				);
+				expect(f.sent.map((message) => message.type)).toEqual(["pi:ready"]);
+				const originals = directories
+					.map((directory) => join(directory, "original.json"))
+					.filter((path) => existsSync(path));
+				expect(originals).toHaveLength(1);
+				expect(readSessionCheckpoint(originals[0]).selection.sessionFile).toBe(journal);
+				expect(readFileSync(trace, "utf8")).toBe("transform\n");
+			}
+			if (outcome !== "journal") expect(readFileSync(journal)).toEqual(before);
+		},
+	);
+
+	it("cancels and joins the actual offline child before reporting failure", async () => {
+		const f = await setup();
+		const program = join(f.root, "held.mjs");
+		const entered = join(f.root, "entered");
+		const joined = join(f.root, "joined");
+		writeFileSync(
+			program,
+			`import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => setTimeout(() => { writeFileSync(${JSON.stringify(joined)}, "joined"); process.exit(0); }, 50));
+writeFileSync(${JSON.stringify(entered)}, String(process.pid));
+setInterval(() => {}, 1000);
+`,
+		);
+		await requestRestart(f.socket, { checkpointTransform: program });
+		await vi.waitFor(() => expect(f.shutdown).toHaveBeenCalledTimes(1));
+		const controller = new AbortController();
+		const closing = finalize(f, controller.signal);
+		const rejected = expect(closing).rejects.toThrow("cancel");
+		await vi.waitFor(() => expect(existsSync(entered)).toBe(true));
+		controller.abort(new Error("cancel requested"));
+		await rejected;
+		expect(readFileSync(joined, "utf8")).toBe("joined");
+		expect(() => process.kill(Number(readFileSync(entered, "utf8")), 0)).toThrow();
+		expect(f.sent.map((message) => message.type)).toEqual(["pi:ready"]);
+	});
 
 	it("cancels a queued restart when the agent is interrupted", async () => {
 		const f = await setup();

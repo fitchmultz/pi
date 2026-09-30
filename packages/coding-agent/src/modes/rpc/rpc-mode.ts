@@ -19,18 +19,18 @@ import type {
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { writeJsonRecordToStdout } from "../../core/json-record-writer.ts";
 import {
 	flushRawStdout,
 	restoreStdout,
 	takeOverStdout,
 	waitForRawStdoutBackpressure,
-	writeRawStdout,
 } from "../../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import type { InteractiveMode } from "../interactive/interactive-mode.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { toJsonEvent } from "../json-event.ts";
-import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
+import { attachJsonlLineReader, rpcOutputLayout } from "./jsonl.ts";
 import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
@@ -82,7 +82,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		if (frontend === "rpc") {
-			writeRawStdout(serializeJsonLine(obj));
+			writeJsonRecordToStdout(obj, rpcOutputLayout);
 		}
 	};
 
@@ -918,8 +918,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			frontend = "rpc";
 			session.setExtensionMode("rpc");
 			attachInput();
-			writeRawStdout(
-				`\x1e${tuiHandoffToken}\x1e${serializeJsonLine({ type: "tui_detached", state: getRpcState() })}`,
+			writeJsonRecordToStdout(
+				{ type: "tui_detached", state: getRpcState() },
+				rpcOutputLayout,
+				`\x1e${tuiHandoffToken}\x1e`,
 			);
 			for (const pending of pendingExtensionRequests.values()) output(pending.request);
 			for (const pending of pendingCustomRequests.values()) output(pending.request);

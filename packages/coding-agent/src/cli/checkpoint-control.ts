@@ -3,7 +3,7 @@ import { chmodSync, rmSync, statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { dirname, isAbsolute } from "node:path";
 import type { AgentSession } from "../core/agent-session.ts";
-import { type CheckpointHold, writeSessionCheckpoint } from "../core/checkpoint.ts";
+import type { CheckpointFileHold } from "../core/checkpoint.ts";
 
 export const CHECKPOINT_SOCKET_ENV = "PI_CHECKPOINT_SOCKET";
 
@@ -24,7 +24,7 @@ export async function startCheckpointControl(options: {
 	const server = createServer((socket) => {
 		sockets.add(socket);
 		const controller = new AbortController();
-		let hold: CheckpointHold | undefined;
+		let hold: CheckpointFileHold | undefined;
 		let pending = false;
 		let token: string | undefined;
 		let input = "";
@@ -64,7 +64,7 @@ export async function startCheckpointControl(options: {
 				if (boundary !== "turn" && boundary !== "settled") throw new Error("Invalid checkpoint boundary");
 				pending = true;
 				try {
-					hold = await options.getSession().acquireCheckpoint({
+					hold = await options.getSession().acquireCheckpointFile(request.path, {
 						boundary,
 						signal: controller.signal,
 						quiesce: options.quiesce,
@@ -76,7 +76,6 @@ export async function startCheckpointControl(options: {
 						return;
 					}
 					if (hold.signal.aborted) throw new Error("Checkpoint invalidated before publication");
-					writeSessionCheckpoint(request.path, hold.checkpoint);
 					token = randomUUID();
 					const acquired = hold;
 					acquired.signal.addEventListener(

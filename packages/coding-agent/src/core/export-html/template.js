@@ -5,14 +5,22 @@
       // DATA LOADING
       // ============================================================
 
-      const base64 = document.getElementById('session-data').textContent;
-      const binary = atob(base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
+      function decodeRecord(element) {
+        const binary = atob(element.textContent);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return JSON.parse(new TextDecoder('utf-8').decode(bytes));
       }
-      const data = JSON.parse(new TextDecoder('utf-8').decode(bytes));
-      const { header, entries, leafId: defaultLeafId, systemPrompt, tools, renderedTools } = data;
+      const data = decodeRecord(document.getElementById('session-data'));
+      const { header, leafId: defaultLeafId, systemPrompt, tools } = data;
+      const entries = Array.from(document.querySelectorAll('.session-index'), decodeRecord);
+      // ponytail: one requested body/page and the HTML document must fit the browser; history is never joined.
+      function recordFor(entry) {
+        return decodeRecord(document.getElementById(`session-entry-${entry.record}`));
+      }
+      function fullEntry(entry) {
+        return recordFor(entry).entry;
+      }
 
       // ============================================================
       // URL PARAMETER HANDLING
@@ -83,14 +91,12 @@
           }
         }
 
-        // Sort children by timestamp
-        function sortChildren(node) {
+        // Sort each node directly; long single-child histories do not need recursive walks.
+        for (const node of nodeMap.values()) {
           node.children.sort((a, b) =>
             new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime()
           );
-          node.children.forEach(sortChildren);
         }
-        roots.forEach(sortChildren);
 
         return roots;
       }
@@ -119,14 +125,14 @@
         const path = [];
         let current = byId.get(targetId);
         while (current) {
-          path.unshift(current);
+          path.push(current);
           // Stop if no parent or self-referencing (root)
           if (!current.parentId || current.parentId === current.id) {
             break;
           }
           current = byId.get(current.parentId);
         }
-        return path;
+        return path.reverse();
       }
 
       // Tree node lookup for finding leaves
@@ -141,12 +147,12 @@
         // Build tree node map lazily
         if (!treeNodeMap) {
           treeNodeMap = new Map();
-          const tree = buildTree();
-          function mapNodes(node) {
+          const stack = buildTree();
+          while (stack.length) {
+            const node = stack.pop();
             treeNodeMap.set(node.entry.id, node);
-            node.children.forEach(mapNodes);
+            for (const child of node.children) stack.push(child);
           }
-          tree.forEach(mapNodes);
         }
 
         const node = treeNodeMap.get(nodeId);
@@ -169,24 +175,13 @@
         const result = [];
         const multipleRoots = roots.length > 1;
 
-        // Mark which subtrees contain the active leaf
-        const containsActive = new Map();
-        function markActive(node) {
-          let has = activePathIds.has(node.entry.id);
-          for (const child of node.children) {
-            if (markActive(child)) has = true;
-          }
-          containsActive.set(node, has);
-          return has;
-        }
-        roots.forEach(markActive);
-
+        // The active path already includes every ancestor of the selected leaf.
         // Stack: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
         const stack = [];
 
         // Add roots (prioritize branch containing active leaf)
         const orderedRoots = [...roots].sort((a, b) =>
-          Number(containsActive.get(b)) - Number(containsActive.get(a))
+          Number(activePathIds.has(b.entry.id)) - Number(activePathIds.has(a.entry.id))
         );
         for (let i = orderedRoots.length - 1; i >= 0; i--) {
           const isLast = i === orderedRoots.length - 1;
@@ -203,7 +198,7 @@
 
           // Order children (active branch first)
           const orderedChildren = [...children].sort((a, b) =>
-            Number(containsActive.get(b)) - Number(containsActive.get(a))
+            Number(activePathIds.has(b.entry.id)) - Number(activePathIds.has(a.entry.id))
           );
 
           // Calculate child indent (matches tree-selector.ts)
@@ -367,7 +362,7 @@
           // Hide assistant messages with only tool calls (no text) unless error/aborted
           if (entry.type === 'message' && entry.message.role === 'assistant') {
             const msg = entry.message;
-            const hasText = hasTextContent(msg.content);
+            const hasText = msg.hasText;
             const isErrorOrAborted = msg.stopReason && msg.stopReason !== 'stop' && msg.stopReason !== 'toolUse';
             if (!hasText && !isErrorOrAborted) return false;
           }
@@ -398,7 +393,8 @@
 
           // Apply search filter
           if (searchTokens.length > 0) {
-            const nodeText = getSearchableText(entry, label);
+            const searchable = ['message', 'custom_message', 'branch_summary'].includes(entry.type) ? fullEntry(entry) : entry;
+            const nodeText = getSearchableText(searchable, label);
             if (!searchTokens.every(t => nodeText.includes(t))) return false;
           }
 
@@ -560,44 +556,6 @@
         return tool.name;
       }
 
-      function formatToolCall(tool) {
-        const args = tool.arguments ?? {};
-        switch (tool.name) {
-          case 'read': {
-            const path = shortenPath(String(args.path || args.file_path || ''));
-            const offset = args.offset;
-            const limit = args.limit;
-            let display = path;
-            if (args.json !== undefined) display += ` json=${JSON.stringify(args.json)}`;
-            if (offset !== undefined || limit !== undefined) {
-              const start = offset ?? 1;
-              const end = limit !== undefined ? start + limit - 1 : '';
-              display += `:${start}${end ? `-${end}` : ''}`;
-            }
-            return `[read: ${display}]`;
-          }
-          case 'write':
-            return `[write: ${shortenPath(String(args.path || args.file_path || ''))}]`;
-          case 'edit':
-            return `[edit: ${shortenPath(String(args.path || args.file_path || ''))}]`;
-          case 'bash': {
-            const rawCmd = String(args.command || '');
-            const cmd = rawCmd.replace(/[\n\t]/g, ' ').trim().slice(0, 50);
-            return `[bash: ${cmd}${rawCmd.length > 50 ? '...' : ''}]`;
-          }
-          case 'grep':
-            return `[grep: /${args.pattern || ''}/ in ${shortenPath(String(args.path || '.'))}]`;
-          case 'find':
-            return `[find: ${args.pattern || ''} in ${shortenPath(String(args.path || '.'))}]`;
-          case 'ls':
-            return `[ls: ${shortenPath(String(args.path || '.'))}]`;
-          default: {
-            const argsStr = JSON.stringify(args).slice(0, 40);
-            return `[${toolDisplayName(tool)}: ${argsStr}${JSON.stringify(args).length > 40 ? '...' : ''}]`;
-          }
-        }
-      }
-
       function escapeHtml(text) {
         return String(text)
           .replace(/&/g, '&amp;')
@@ -620,74 +578,60 @@
       }
 
       /**
-       * Truncate string to maxLen chars, append "..." if truncated.
-       */
-      function truncate(s, maxLen = 100) {
-        if (s.length <= maxLen) return s;
-        return s.slice(0, maxLen) + '...';
-      }
-
-      /**
        * Get display text for tree node (returns HTML string).
        */
       function getTreeNodeDisplayHtml(entry, label) {
-        const normalize = s => s.replace(/[\n\t]/g, ' ').trim();
         const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : '';
 
         switch (entry.type) {
           case 'message': {
             const msg = entry.message;
             if (msg.role === 'user') {
-              const rawContent = extractContent(msg.content);
-              const skillBlock = parseSkillBlock(rawContent);
-              if (skillBlock) {
-                let treeHtml = labelHtml + `<span class="tree-role-skill">skill:</span> ${escapeHtml(skillBlock.name)}`;
-                if (skillBlock.userMessage) {
-                  treeHtml += ` · <span class="tree-role-user">user:</span> ${escapeHtml(truncate(normalize(skillBlock.userMessage)))}`;
+              if (msg.skill) {
+                let treeHtml = labelHtml + `<span class="tree-role-skill">skill:</span> ${escapeHtml(msg.skill.name)}`;
+                if (msg.skill.userMessage) {
+                  treeHtml += ` · <span class="tree-role-user">user:</span> ${escapeHtml(msg.skill.userMessage)}`;
                 }
                 return treeHtml;
               }
-              const content = truncate(normalize(rawContent));
-              return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(content)}`;
+              return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(msg.preview)}`;
             }
             if (msg.role === 'assistant') {
-              const textContent = truncate(normalize(extractContent(msg.content)));
-              if (textContent) {
-                return labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(textContent)}`;
+              if (msg.preview) {
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(msg.preview)}`;
               }
               if (msg.stopReason === 'aborted') {
                 return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(aborted)</span>`;
               }
               if (msg.errorMessage) {
-                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(truncate(msg.errorMessage))}</span>`;
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(msg.errorMessage)}</span>`;
               }
               return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(no text)</span>`;
             }
             if (msg.role === 'toolResult') {
               const path = buildActivePathIds(currentLeafId).has(entry.id) ? currentPath : getPath(findNewestLeaf(entry.id));
-              const toolCall = path.flatMap(e => e.type === 'message' && e.message.role === 'assistant' ? e.message.content : [])
-                .find(block => block.type === 'toolCall' && block.id === msg.toolCallId);
+              let toolCall;
+              for (const candidate of path) {
+                if (candidate.type !== 'message' || candidate.message.role !== 'assistant') continue;
+                toolCall = candidate.message.toolPreviews.find(call => call.id === msg.toolCallId);
+                if (toolCall) break;
+              }
               if (toolCall) {
-                return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall))}</span>`;
+                return labelHtml + `<span class="tree-role-tool">${escapeHtml(toolCall.preview)}</span>`;
               }
               return labelHtml + `<span class="tree-role-tool">[${escapeHtml(toolDisplayName({ name: msg.toolName || 'tool' }))}]</span>`;
             }
             if (msg.role === 'bashExecution') {
-              const cmd = truncate(normalize(msg.command || ''));
-              return labelHtml + `<span class="tree-role-tool">[bash]:</span> ${escapeHtml(cmd)}`;
+              return labelHtml + `<span class="tree-role-tool">[bash]:</span> ${escapeHtml(msg.command)}`;
             }
             return labelHtml + `<span class="tree-muted">[${escapeHtml(msg.role)}]</span>`;
           }
           case 'compaction':
             return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
-          case 'branch_summary': {
-            const summary = truncate(normalize(entry.summary || ''));
-            return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
-          }
-          case 'custom_message': {
-            const content = typeof entry.content === 'string' ? entry.content : extractContent(entry.content);
-            return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalize(content)))}`;
-          }
+          case 'branch_summary':
+            return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(entry.preview)}`;
+          case 'custom_message':
+            return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(entry.preview)}`;
           case 'model_change':
             return labelHtml + `<span class="tree-muted">[model: ${escapeHtml(entry.modelId)}]</span>`;
           case 'thinking_level_change':
@@ -837,7 +781,7 @@
         for (const entry of currentPath) {
           if (entry.type === 'message' && entry.message.role === 'toolResult') {
             if (entry.message.toolCallId === toolCallId) {
-              return entry;
+              return fullEntry(entry);
             }
           }
         }
@@ -1039,7 +983,12 @@
           }
           default: {
             // Check for pre-rendered custom tool HTML
-            const rendered = renderedTools?.[call.id];
+            const callEntry = currentPath.find(entry => entry.type === 'message' && entry.message.role === 'assistant' &&
+              entry.message.toolPreviews.some(preview => preview.id === call.id));
+            const renderedCall = callEntry ? recordFor(callEntry).renderedTools?.[call.id] : undefined;
+            const resultIndex = resultEntry ? byId.get(resultEntry.id) : undefined;
+            const renderedResult = resultIndex ? recordFor(resultIndex).renderedTools?.[call.id] : undefined;
+            const rendered = { calls: renderedCall?.calls, results: renderedResult?.results };
             const callHtml = rendered?.calls?.[JSON.stringify(args)];
             const resultHtml = rendered?.results?.[resultEntry?.id];
             if (callHtml || resultHtml?.collapsed || resultHtml?.expanded) {
@@ -1087,18 +1036,11 @@
        * Reconstructs the original format: header line + entry lines.
        */
       window.downloadSessionJson = function() {
-        // Build JSONL content: header first, then all entries
-        const lines = [];
-        if (header) {
-          lines.push(JSON.stringify({ type: 'header', ...header }));
-        }
-        for (const entry of entries) {
-          lines.push(JSON.stringify(entry));
-        }
-        const jsonlContent = lines.join('\n');
-
-        // Create download
-        const blob = new Blob([jsonlContent], { type: 'application/x-ndjson' });
+        // Blob parts retain complete bytes without a session-wide string or decoded body array.
+        const parts = [];
+        if (header) parts.push(JSON.stringify(header));
+        for (const entry of entries) parts.push(new Blob(['\n', JSON.stringify(fullEntry(entry))]));
+        const blob = new Blob(parts, { type: 'application/x-ndjson' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1367,7 +1309,7 @@
                   cost.cacheWrite += msg.usage.cost.cacheWrite || 0;
                 }
               }
-              toolCalls += msg.content.filter(c => c.type === 'toolCall').length;
+              toolCalls += msg.toolCalls;
             }
             if (msg.role === 'toolResult') toolResults++;
           } else if (entry.type === 'compaction') {
@@ -1480,8 +1422,8 @@
       // NAVIGATION
       // ============================================================
 
-      // Cache for rendered entry DOM nodes
-      const entryCache = new Map();
+      const PAGE_SIZE = 50;
+      let pageStart = 0;
 
       function getScrollTargetElementId(entryId) {
         const entry = byId.get(entryId);
@@ -1494,28 +1436,15 @@
       }
 
       function renderEntryToNode(entry) {
-        // Assistant cards include branch-dependent results.
-        const cacheable = entry.type !== 'message' || entry.message.role !== 'assistant';
-        if (cacheable && entryCache.has(entry.id)) {
-          return entryCache.get(entry.id).cloneNode(true);
-        }
-
-        // Render to HTML string, then parse to node
-        const html = renderEntry(entry);
+        if (!['message', 'custom_message', 'compaction', 'branch_summary', 'model_change'].includes(entry.type)) return null;
+        const html = renderEntry(fullEntry(entry));
         if (!html) return null;
-
         const template = document.createElement('template');
         template.innerHTML = html;
-        const node = template.content.firstElementChild;
-
-        // Cache branch-independent nodes.
-        if (cacheable && node) {
-          entryCache.set(entry.id, node.cloneNode(true));
-        }
-        return node;
+        return template.content.firstElementChild;
       }
 
-      function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null) {
+      function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null, requestedStart = null) {
         currentLeafId = targetId;
         currentTargetId = scrollToEntryId || targetId;
         const targetEntry = byId.get(currentTargetId);
@@ -1535,13 +1464,24 @@
         const messagesEl = document.getElementById('messages');
         const fragment = document.createDocumentFragment();
 
-        for (const entry of path) {
+        const selected = Math.max(0, path.findIndex(entry => entry.id === currentTargetId));
+        pageStart = requestedStart ?? (scrollMode === 'none' && !scrollToEntryId ? 0 : Math.floor(selected / PAGE_SIZE) * PAGE_SIZE);
+        function pageButton(text, start) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = text;
+          button.addEventListener('click', () => navigateTo(targetId, 'none', currentTargetId, start));
+          fragment.appendChild(button);
+        }
+        if (pageStart > 0) pageButton('Earlier messages', Math.max(0, pageStart - PAGE_SIZE));
+        for (const entry of path.slice(pageStart, pageStart + PAGE_SIZE)) {
           const node = renderEntryToNode(entry);
           if (node) {
             fragment.appendChild(node);
           }
         }
 
+        if (pageStart + PAGE_SIZE < path.length) pageButton('Later messages', pageStart + PAGE_SIZE);
         messagesEl.innerHTML = '';
         messagesEl.appendChild(fragment);
 

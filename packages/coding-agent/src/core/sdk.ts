@@ -13,7 +13,12 @@ import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { CacheWarmer } from "./cache-warmer.ts";
-import { openSessionCheckpoint, restoreSessionCheckpoint, type SessionCheckpoint } from "./checkpoint.ts";
+import {
+	openSessionCheckpoint,
+	openSessionCheckpointFile,
+	restoreSessionCheckpoint,
+	type SessionCheckpoint,
+} from "./checkpoint.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
@@ -48,6 +53,8 @@ setDefaultStreamFn(streamSimple);
 
 export interface CreateAgentSessionOptions {
 	checkpoint?: SessionCheckpoint;
+	/** Stream-validated self-contained v1 artifact. Mutually exclusive with checkpoint. */
+	checkpointFile?: string;
 	/** Hosts bind startup input before completion notifications may wake the model. */
 	deferBackgroundCommandNotifications?: boolean;
 	/** Working directory for project-local discovery. Default: process.cwd() */
@@ -185,8 +192,13 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	const checkpoint = options.checkpoint;
-	const checkpointManager = checkpoint ? openSessionCheckpoint(checkpoint) : undefined;
+	if (options.checkpoint && options.checkpointFile) throw new Error("Supply checkpoint or checkpointFile, not both");
+	const fileCheckpoint = options.checkpointFile
+		? openSessionCheckpointFile(resolvePath(options.checkpointFile))
+		: undefined;
+	const checkpoint = fileCheckpoint?.checkpoint ?? options.checkpoint;
+	const checkpointManager =
+		fileCheckpoint?.sessionManager ?? (options.checkpoint ? openSessionCheckpoint(options.checkpoint) : undefined);
 	const cwd = resolvePath(
 		checkpoint?.selection.cwd ?? options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd(),
 	);
@@ -210,7 +222,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Check if session has existing data to restore
 	const existingSession = sessionManager.buildSessionContext();
 	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
+	const hasThinkingEntry = Array.from(
+		sessionManager.iterateEntryMetadata({ branchFrom: sessionManager.getLeafId() }),
+	).some((entry) => entry.type === "thinking_level_change");
 
 	let model = checkpoint
 		? checkpoint.selection.model
@@ -222,8 +236,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Assistant messages name the physical model that answered, so a virtual selection is only in
 	// model_change entries.
-	const sessionModel = getBranchSelection(sessionManager.getBranch(), (provider, modelId) =>
-		modelRuntime.getModel(provider, modelId),
+	const sessionModel = getBranchSelection(
+		sessionManager.iterateEntryMetadata({ branchFrom: sessionManager.getLeafId() }),
+		(provider, modelId) => modelRuntime.getModel(provider, modelId),
 	);
 
 	// If session has data, try to restore model from it
@@ -483,7 +498,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		deferBackgroundCommandNotifications: options.deferBackgroundCommandNotifications,
 	});
 
-	if (options.checkpoint) restoreSessionCheckpoint(session, options.checkpoint);
+	if (checkpoint) restoreSessionCheckpoint(session, checkpoint);
 
 	const extensionsResult = resourceLoader.getExtensions();
 

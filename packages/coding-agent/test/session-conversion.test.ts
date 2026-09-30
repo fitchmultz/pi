@@ -1,21 +1,25 @@
 import { execFile, execFileSync } from "node:child_process";
-import {
+import { createHash } from "node:crypto";
+import fs, {
+	closeSync,
 	existsSync,
 	linkSync,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { getCurrentTools } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { convertResponsesMessages } from "../../ai/src/api/openai-responses-shared.ts";
 import { transformMessages } from "../../ai/src/api/transform-messages.ts";
 import { normalizeContext } from "../../ai/src/compat.ts";
@@ -163,6 +167,8 @@ function providerReplay(entries: SessionEntry[], expectedIds: string[], leaf?: s
 	return messages;
 }
 afterEach(() => {
+	vi.restoreAllMocks();
+	syncBuiltinESMExports();
 	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -210,14 +216,26 @@ describe("one-time session conversion", () => {
 		]);
 	});
 
-	it("preserves supported hosted web-search metadata on assistant responses", () => {
-		const input = settled();
-		const webSearch = { calls: [], citations: [] };
-		(input[3].message as Entry).webSearch = webSearch;
-		const { source, output } = fixture(input);
-		convertSessionFile(source, output);
-		expect(buildSessionContext(convertedEntries(output)).messages[1]).toMatchObject({ webSearch });
-	});
+	it.each(["toString", "constructor", "__proto__"])(
+		"preserves web-search metadata and own %s fields on entries and messages",
+		(key) => {
+			const input = settled();
+			const webSearch = { calls: [], citations: [] };
+			const extra = { [key]: { exact: [false, null, 0] } };
+			input[1] = { ...input[1], ...extra };
+			input[3].message = { ...(input[3].message as Entry), webSearch, ...extra };
+			const { source, output, bytes } = fixture(input);
+			convertSessionFile(source, output);
+			const entries = convertedEntries(output);
+			const copied = entries.find((entry) => entry.id === "snapshot")!;
+			const message = buildSessionContext(entries).messages[1];
+			expect(Object.hasOwn(copied, key)).toBe(true);
+			expect(copied).toMatchObject(extra);
+			expect(Object.hasOwn(message, key)).toBe(true);
+			expect(message).toMatchObject({ webSearch, ...extra });
+			expect(readFileSync(source, "utf8")).toBe(bytes);
+		},
+	);
 
 	it("keeps differing API response identities separate with their original billing", () => {
 		const input = [
@@ -454,6 +472,11 @@ describe("one-time session conversion", () => {
 		"carries receipts completed %s a fresh window without old prose or double billing",
 		(arrival) => {
 			const input = settled();
+			(input[3].message as Entry).content = [
+				{ type: "thinking", thinking: "private reasoning", thinkingSignature: "signed-block" },
+				call,
+				{ type: "text", text: "completed response" },
+			];
 			if (arrival === "before")
 				input.push(
 					entry("window", "final", {
@@ -484,7 +507,12 @@ describe("one-time session conversion", () => {
 				"assistant",
 				"toolResult",
 			]);
-			expect(context.messages[1]).toMatchObject({ content: [{ type: "toolCall", id: "call", name: "lookup" }] });
+			expect(context.messages[1]).toMatchObject({
+				content: [
+					{ type: "thinking", thinking: "", thinkingSignature: "signed-block" },
+					{ type: "toolCall", id: "call", name: "lookup", arguments: { query: "example" } },
+				],
+			});
 			expect(context.messages[2]).toMatchObject({ content: [{ type: "text", text: "final result" }] });
 			providerReplay(entries, ["call"]);
 			expect(JSON.stringify(context.messages)).not.toContain("completed response");
@@ -1182,7 +1210,19 @@ describe("one-time session conversion", () => {
 		);
 		const run = promisify(execFile);
 		const results = await Promise.allSettled(
-			[0, 1].map(() => run(process.execPath, [script, source, output], { timeout: 30_000 })),
+			[0, 1].map(() =>
+				run(
+					process.execPath,
+					[
+						"--import",
+						new URL("../src/experimental/source-resolver.ts", import.meta.url).href,
+						script,
+						source,
+						output,
+					],
+					{ timeout: 30_000 },
+				),
+			),
 		);
 		expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
 		expect(buildSessionContext(convertedEntries(output)).messages.map((message) => message.role)).toEqual([
@@ -1304,6 +1344,21 @@ describe("one-time session conversion", () => {
 		expect(existsSync(output)).toBe(false);
 	});
 
+	it("refuses a changed source after staging without publishing or undoing the other writer's bytes", () => {
+		const { source, output, bytes, directory } = fixture(settled());
+		const changed = `${bytes}\n`;
+		const fsync = fs.fsyncSync;
+		vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
+			fsync(fd);
+			writeFileSync(source, changed);
+		});
+		syncBuiltinESMExports();
+		expect(() => convertSessionFile(source, output)).toThrow("source changed during conversion");
+		expect(readFileSync(source, "utf8")).toBe(changed);
+		expect(existsSync(output)).toBe(false);
+		expect(readdirSync(directory)).toEqual(["original.jsonl"]);
+	});
+
 	it.each([null, { content: [{ type: "text", text: "redacted" }] }, { content: [] }])(
 		"refuses edits that could restore an omitted async receipt after compaction: %j",
 		(replacement) => {
@@ -1362,10 +1417,143 @@ describe("one-time session conversion", () => {
 			script,
 			`import { convertSessionFile } from ${JSON.stringify(new URL("../src/core/session-conversion.ts", import.meta.url).href)};\nconvertSessionFile(process.argv[2], process.argv[3]);\n`,
 		);
-		execFileSync(process.execPath, ["--max-old-space-size=128", script, source, output], { timeout: 30_000 });
+		execFileSync(
+			process.execPath,
+			[
+				"--max-old-space-size=128",
+				"--import",
+				new URL("../src/experimental/source-resolver.ts", import.meta.url).href,
+				script,
+				source,
+				output,
+			],
+			{ timeout: 30_000 },
+		);
 		expect(readFileSync(source, "utf8")).toBe(bytes);
 		expect(convertedEntries(output)).toEqual(input);
 	});
+
+	it("streams archived interrupted snapshots while grouping late receipts and keeping declarations stationary", () => {
+		const input = [
+			settled()[0],
+			entry("failed", "system", {
+				type: "message",
+				message: assistant([call, { type: "text", text: "unsigned partial" }], {
+					stopReason: "error",
+					errorMessage: "interrupted",
+				}),
+			}),
+			entry("user", "failed", {
+				type: "message",
+				message: { role: "user", content: "intervening input", timestamp: 2 },
+			}),
+			entry("later", "user", {
+				type: "message",
+				message: assistant([{ type: "text", text: "later response" }], {
+					responseId: "later",
+					stopReason: "stop",
+				}),
+			}),
+			entry("result", "later", {
+				type: "message",
+				message: {
+					...(settled()[2].message as Entry),
+					usage,
+					toolsAdded: [{ name: "found", namespace: "docs", description: "Discovered", parameters: {} }],
+				},
+			}),
+			entry("summary", "result", { type: "branch_summary", fromId: "result", summary: "branch summary" }),
+		];
+		const { directory, source, output } = fixture(input);
+		const expected = createHash("sha256");
+		const fd = openSync(source, "w");
+		const write = (bytes: string | Buffer) => {
+			writeFileSync(fd, bytes);
+			expected.update(bytes);
+		};
+		try {
+			write(`${JSON.stringify(header)}\n`);
+			for (const item of input) {
+				if (item.id !== "failed") write(`${JSON.stringify(item)}\n`);
+				else {
+					write(`${JSON.stringify(item).slice(0, -1)},"opaque":"`);
+					const chunk = Buffer.alloc(1024 * 1024, "x");
+					for (let index = 0; index < 64; index++) write(chunk);
+					write('"}\n');
+				}
+			}
+		} finally {
+			closeSync(fd);
+		}
+		const script = join(directory, "interrupted.mjs");
+		writeFileSync(
+			script,
+			`import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { convertSessionFile } from ${JSON.stringify(new URL("../src/core/session-conversion.ts", import.meta.url).href)};
+import { closeJournalSource, scanJournal } from ${JSON.stringify(new URL("../src/core/session-journal.ts", import.meta.url).href)};
+import { buildSessionContext } from ${JSON.stringify(new URL("../src/core/session-manager.ts", import.meta.url).href)};
+import { convertToLlm } from ${JSON.stringify(new URL("../src/core/messages.ts", import.meta.url).href)};
+import { transformMessages } from ${JSON.stringify(new URL("../../ai/src/api/transform-messages.ts", import.meta.url).href)};
+import { getCurrentTools } from ${JSON.stringify(new URL("../../ai/src/utils/transcript.ts", import.meta.url).href)};
+const [source, output, expected] = process.argv.slice(2);
+convertSessionFile(source, output);
+const hash = createHash("sha256");
+for await (const bytes of createReadStream(source)) hash.update(bytes);
+assert.equal(hash.digest("hex"), expected);
+let copiedBytes = 0;
+let copiedValues = 0;
+const scan = scanJournal(output, {
+	policy: "strict",
+	select: (path) => !path.length ? "descend" : ["data", "opaque"].includes(String(path[0])) ? "skip" : "keep",
+	onToken: (token, path) => {
+		if (path.at(-1) !== "opaque") return;
+		if (token.name === "stringChunk") {
+			assert.match(token.value, /^x+$/);
+			copiedBytes += token.value.length;
+		}
+		if (token.name === "endString") copiedValues++;
+	},
+});
+closeJournalSource(scan.source);
+assert.equal(copiedValues, 2);
+assert.equal(copiedBytes, 128 * 1024 * 1024);
+const entries = scan.records.slice(1).map((record) => record.value);
+const failed = entries.find((entry) => entry.id === "failed");
+assert.deepEqual(failed.message.usage, ${JSON.stringify(usage)});
+assert.equal(failed.message.stopReason, "error");
+const context = buildSessionContext(entries);
+assert.deepEqual(getCurrentTools(context.messages).map((tool) => tool.name), ["lookup", "found"]);
+const messages = transformMessages(convertToLlm(context.messages), ${JSON.stringify(model)});
+assert.deepEqual(messages.map((message) => message.role), ["system", "assistant", "toolResult", "user", "assistant", "system", "user"]);
+assert.equal(messages[1].usage.totalTokens, 0);
+assert.deepEqual(messages[1].content, [{ type: "toolCall", id: "call", name: "lookup", arguments: { query: "example" } }]);
+assert.deepEqual(messages[2].usage, ${JSON.stringify(usage)});
+assert.deepEqual(messages[2].content, [{ type: "text", text: "final result" }]);
+assert.equal(messages[3].content, "intervening input");
+assert.deepEqual(messages[4].content, [{ type: "text", text: "later response" }]);
+assert.equal(messages[5].toolsAdded[0].name, "found");
+console.log("archivedBytes=" + copiedBytes + " sourceUnchanged=true providerReceipts=1 stationaryDeclaration=true");
+`,
+		);
+		const receipt = execFileSync(
+			process.execPath,
+			[
+				"--max-old-space-size=64",
+				"--import",
+				new URL("../src/experimental/source-resolver.ts", import.meta.url).href,
+				script,
+				source,
+				output,
+				expected.digest("hex"),
+			],
+			{ timeout: 60_000, encoding: "utf8" },
+		);
+		expect(receipt).toBe(
+			"archivedBytes=134217728 sourceUnchanged=true providerReceipts=1 stationaryDeclaration=true\n",
+		);
+	}, 90_000);
 
 	it("startup distinguishes retired mechanisms from ordinary upstream and unrelated extension data", () => {
 		expect(() =>

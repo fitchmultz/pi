@@ -1,10 +1,27 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, {
+	existsSync,
+	linkSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type ImageContent, Type } from "@earendil-works/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.ts";
-import { openSessionCheckpoint, readSessionCheckpoint, writeSessionCheckpoint } from "../../src/core/checkpoint.ts";
+import {
+	openSessionCheckpoint,
+	openSessionCheckpointFile,
+	readSessionCheckpoint,
+	readSessionCheckpointState,
+	type SessionCheckpointQueues,
+	writeSessionCheckpoint,
+} from "../../src/core/checkpoint.ts";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -30,6 +47,8 @@ afterEach(() => {
 	for (const session of restored.splice(0)) session.dispose();
 	for (const harness of harnesses.splice(0)) harness.cleanup();
 	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+	vi.restoreAllMocks();
+	syncBuiltinESMExports();
 });
 
 function deferred() {
@@ -53,6 +72,303 @@ async function setup(options: Parameters<typeof createHarness>[0] = {}) {
 }
 
 describe("native working-session checkpoint", () => {
+	it("explicit object capture detaches each pending entry and queue value with native JSON normalization", async () => {
+		const h = await setup();
+		const date = "2026-09-22T00:00:00.000Z";
+		const data = { nested: { value: "saved" }, createdAt: new Date(date), omitted: undefined };
+		h.sessionManager.appendCustomEntry("detached-state", data);
+		const details = { value: "queued", createdAt: new Date(date) };
+		const queuedImage = { ...image };
+		h.session.agent.steer({
+			role: "custom",
+			customType: "queued",
+			content: [queuedImage],
+			details,
+			display: true,
+			timestamp: 1,
+		});
+		const hold = await h.session.acquireCheckpoint();
+		hold.release();
+		data.nested.value = "later";
+		details.value = "later";
+		queuedImage.data = "later";
+		expect(
+			hold.checkpoint.entries.find((entry) => entry.type === "custom" && entry.customType === "detached-state"),
+		).toMatchObject({
+			data: { nested: { value: "saved" }, createdAt: date },
+		});
+		expect(hold.checkpoint.queues.steering).toMatchObject([
+			{
+				customType: "queued",
+				content: [image],
+				details: { value: "queued", createdAt: date },
+			},
+		]);
+		expect(JSON.stringify(hold.checkpoint)).not.toContain('"omitted"');
+		expect(h.session.getCheckpointQueues().steering).toMatchObject([{ details: { value: "later" } }]);
+	});
+
+	it.each([false, true])("cold file capture survives release and source loss (null leaf: %s)", async (nullLeaf) => {
+		const h = await setup({ models: [{ id: "first" }, { id: "second" }], allowedToolNames: ["read"] });
+		h.session.setScopedModels([{ model: h.getModel("second")!, thinkingLevel: "off" }]);
+		const selected = h.sessionManager.appendMessage(fauxAssistantMessage("selected history"));
+		const sibling = h.sessionManager.appendMessage(fauxAssistantMessage("unselected history"));
+		if (nullLeaf) h.sessionManager.resetLeaf();
+		else h.sessionManager.branch(selected);
+		const queues: SessionCheckpointQueues = {
+			steering: [
+				{ role: "user", content: [{ type: "text", text: "accepted image" }, image], timestamp: 1 },
+				{
+					role: "custom",
+					customType: "persistent",
+					content: [image],
+					details: { payload: [1, "雪"] },
+					display: true,
+					timestamp: 2,
+				},
+			],
+			followUp: [{ role: "user", content: [{ type: "text", text: "accepted follow-up" }], timestamp: 3 }],
+			nextTurn: [
+				{
+					role: "custom",
+					customType: "next",
+					content: "next-turn",
+					details: { value: 42 },
+					display: true,
+					timestamp: 4,
+				},
+			],
+			persistOnCancel: [1],
+			steeringMode: "all",
+			followUpMode: "one-at-a-time",
+		};
+		h.session.restoreCheckpointQueues(queues);
+		const path = join(h.tempDir, "file-checkpoint.json");
+		const hold = await h.session.acquireCheckpointFile(path, { quiesce: () => () => {} });
+		expect(hold.sleepReady).toBe(true);
+		expect(hold.checkpoint).not.toHaveProperty("entries");
+		const bytes = readFileSync(path, "utf8");
+		hold.release();
+		h.sessionManager.appendCustomEntry("after-release", { newer: true });
+		h.session.setScopedModels([{ model: h.getModel("first")! }]);
+		await h.session.steer("after-release queue");
+		rmSync(h.session.sessionFile!);
+		expect(readFileSync(path, "utf8")).toBe(bytes);
+
+		const { session } = await createAgentSession({
+			checkpointFile: path,
+			modelRuntime: h.session.modelRuntime,
+			resourceLoader: h.session.resourceLoader,
+			settingsManager: h.settingsManager,
+		});
+		restored.push(session);
+		expect(session.sessionId).toBe(h.session.sessionId);
+		expect(session.sessionManager.getLeafId()).toBe(nullLeaf ? null : selected);
+		expect(session.messages.map(getMessageText)).toEqual(nullLeaf ? [] : ["selected history"]);
+		expect(session.sessionManager.getEntry(sibling)).toMatchObject({
+			message: { content: [{ type: "text", text: "unselected history" }] },
+		});
+		expect(session.scopedModels.map((scope) => [scope.model.id, scope.thinkingLevel])).toEqual([["second", "off"]]);
+		expect(session.getAllTools().map((tool) => tool.name)).toEqual(["read"]);
+		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(session.getCheckpointQueues()).toMatchObject({
+			steering: [
+				{ role: "user", content: [{ type: "text", text: "accepted image" }, image] },
+				{ role: "custom", customType: "persistent", content: [image], details: { payload: [1, "雪"] } },
+			],
+			followUp: [{ role: "user", content: [{ type: "text", text: "accepted follow-up" }] }],
+			nextTurn: [{ customType: "next", content: "next-turn", details: { value: 42 } }],
+			persistOnCancel: [1],
+			steeringMode: "all",
+			followUpMode: "one-at-a-time",
+		});
+		expect(
+			readSessionCheckpoint(path).entries.some(
+				(entry) => entry.type === "custom" && entry.customType === "after-release",
+			),
+		).toBe(false);
+		expect(h.faux.state.callCount).toBe(0);
+		expect(readFileSync(path, "utf8")).toBe(bytes);
+		await expect(
+			createAgentSession({ checkpoint: readSessionCheckpoint(path), checkpointFile: path }),
+		).rejects.toThrow("not both");
+	});
+
+	it("file restore validates all entries before refusing a newer or malformed journal unchanged", async () => {
+		const h = await setup();
+		h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+		const path = join(h.tempDir, "checkpoint.json");
+		const hold = await h.session.acquireCheckpointFile(path);
+		hold.release();
+		const duplicate = join(h.tempDir, "duplicate.json");
+		writeFileSync(duplicate, readFileSync(path, "utf8").replace(/^\s*{/, '{"entries":null,'));
+		expect(openSessionCheckpointFile(duplicate).sessionManager.getSessionId()).toBe(h.session.sessionId);
+		h.sessionManager.appendCustomEntry("newer", { preserve: true });
+		const journal = h.session.sessionFile!;
+		const before = readFileSync(journal);
+		expect(() => openSessionCheckpointFile(path)).toThrow("differs");
+		expect(readFileSync(journal)).toEqual(before);
+		const invalid = join(h.tempDir, "invalid.json");
+		writeFileSync(
+			invalid,
+			readFileSync(path, "utf8").replace(
+				/}\s*$/,
+				',"entries":[{"type":"custom","id":"orphan","parentId":"missing","timestamp":"2026-09-22T00:00:00Z","customType":"orphan","data":{}}]}',
+			),
+		);
+		rmSync(journal);
+		expect(() => openSessionCheckpointFile(invalid)).toThrow("entry tree");
+		expect(existsSync(journal)).toBe(false);
+		expect(() => readSessionCheckpointState(invalid)).toThrow("entry tree");
+	});
+
+	it("cold restore refuses a journal appended during comparison without touching the new work", async () => {
+		const h = await setup();
+		const leaf = h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+		const path = join(h.tempDir, "checkpoint.json");
+		const hold = await h.session.acquireCheckpointFile(path);
+		hold.release();
+		const journal = h.session.sessionFile!;
+		const before = readFileSync(journal, "utf8");
+		const identity = fs.statSync(journal);
+		const tail = `${JSON.stringify({
+			type: "custom",
+			id: "new-work",
+			parentId: leaf,
+			timestamp: "2026-09-22T00:00:00Z",
+			customType: "late-work",
+			data: { saved: true },
+		})}\n`;
+		let appended = false;
+		const read = fs.readSync;
+		vi.spyOn(fs, "readSync").mockImplementation((...args) => {
+			const count = Reflect.apply(read, fs, args) as number;
+			if (!appended && count > 0 && fs.fstatSync(args[0]).ino === identity.ino) {
+				appended = true;
+				fs.appendFileSync(journal, tail);
+			}
+			return count;
+		});
+		syncBuiltinESMExports();
+		expect(() => openSessionCheckpointFile(path)).toThrow("changed during comparison");
+		expect(appended).toBe(true);
+		expect(readFileSync(journal, "utf8")).toBe(before + tail);
+	});
+
+	it.each(["scope", "configuration", "model", "thinking", "exit marker", "creation time"])(
+		"rejects malformed %s metadata before publishing a missing journal",
+		async (field) => {
+			const h = await setup();
+			h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+			const path = join(h.tempDir, "checkpoint.json");
+			const hold = await h.session.acquireCheckpointFile(path);
+			hold.release();
+			const saved = readSessionCheckpoint(path);
+			const invalid: Record<string, unknown> = { ...saved };
+			if (field === "scope") invalid.scopedModels = { provider: "invalid", id: "invalid" };
+			else if (field === "configuration") invalid.toolConfiguration = { noBuiltinTools: "yes" };
+			else if (field === "model") invalid.selection = { ...saved.selection, model: { provider: 99, id: "saved" } };
+			else if (field === "thinking") invalid.selection = { ...saved.selection, thinkingLevel: "invalid" };
+			else if (field === "exit marker") invalid.completedExit = { pid: "invalid" };
+			else invalid.createdAt = 17;
+			writeFileSync(path, JSON.stringify(invalid));
+			rmSync(h.session.sessionFile!);
+			expect(() => openSessionCheckpointFile(path)).toThrow("Invalid");
+			expect(existsSync(h.session.sessionFile!)).toBe(false);
+			expect(() => readSessionCheckpointState(path)).toThrow("Invalid");
+		},
+	);
+
+	it("file capture includes awaited barrier appends and preserves old bytes on late failure or cancellation", async () => {
+		const h = await setup({
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_checkpoint", async () => {
+						await Promise.resolve();
+						pi.appendEntry("barrier-tail", { saved: true });
+						return { sleepReady: true };
+					});
+				},
+			],
+		});
+		h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+		await h.session.steer("retain accepted input");
+		const path = join(h.tempDir, "checkpoint.json");
+		const hold = await h.session.acquireCheckpointFile(path, { quiesce: () => () => {} });
+		expect(readSessionCheckpoint(path).entries.at(-1)).toMatchObject({
+			type: "custom",
+			customType: "barrier-tail",
+			data: { saved: true },
+		});
+		hold.release();
+		const before = readFileSync(path);
+		const write = fs.writeFileSync;
+		const failure = vi.spyOn(fs, "writeFileSync").mockImplementation((file, data, options) => {
+			if (typeof file === "number" && typeof data === "string" && data.startsWith('{"type":"message"')) {
+				throw new Error("checkpoint disk full");
+			}
+			write(file, data, options);
+		});
+		syncBuiltinESMExports();
+		const unquiesce = vi.fn();
+		await expect(h.session.acquireCheckpointFile(path, { quiesce: () => unquiesce })).rejects.toThrow(
+			"checkpoint disk full",
+		);
+		failure.mockRestore();
+		syncBuiltinESMExports();
+		expect(unquiesce).toHaveBeenCalledOnce();
+		expect(h.session.isCheckpointHeld).toBe(false);
+		expect(readFileSync(path)).toEqual(before);
+		for (const kind of ["abort", "late write"] as const) {
+			const controller = new AbortController();
+			await expect(
+				h.session.acquireCheckpointFile(path, {
+					signal: controller.signal,
+					quiesce: () => {
+						setImmediate(() => {
+							if (kind === "abort") controller.abort();
+							else expect(() => h.session.setSessionName("late write")).toThrow("held");
+						});
+						return () => {};
+					},
+				}),
+			).rejects.toThrow("cancelled");
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(h.session.isCheckpointHeld).toBe(false);
+			expect(readFileSync(path)).toEqual(before);
+		}
+		expect(readdirSync(h.tempDir).some((name) => name.endsWith(".tmp"))).toBe(false);
+		expect(h.session.getSteeringMessages()).toEqual(["retain accepted input"]);
+		await h.session.followUp("still accepted");
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"file capture refuses journal aliases and unrelated destinations",
+		async () => {
+			const h = await setup();
+			h.sessionManager.appendMessage(fauxAssistantMessage("private history"));
+			const journal = h.session.sessionFile!;
+			const before = readFileSync(journal);
+			const hardlink = join(h.tempDir, "journal-link.json");
+			linkSync(journal, hardlink);
+			const symlink = join(h.tempDir, "journal-symlink.json");
+			symlinkSync(journal, symlink);
+			const unrelated = join(h.tempDir, "unrelated.json");
+			writeFileSync(unrelated, '{"important":true}');
+			for (const destination of [journal, hardlink, symlink, unrelated, "relative.json"]) {
+				const release = vi.fn();
+				await expect(h.session.acquireCheckpointFile(destination, { quiesce: () => release })).rejects.toThrow();
+				expect(release).toHaveBeenCalledOnce();
+				expect(h.session.isCheckpointHeld).toBe(false);
+			}
+			expect(readFileSync(journal)).toEqual(before);
+			expect(readFileSync(unrelated, "utf8")).toBe('{"important":true}');
+			h.session.beginShutdown();
+			await expect(h.session.captureShutdownCheckpointFile(unrelated)).rejects.toThrow();
+			expect(readFileSync(unrelated, "utf8")).toBe('{"important":true}');
+		},
+	);
+
 	it("restores session-only model cycling scope and keeps runtime-only authentication awake", async () => {
 		const h = await setup({ models: [{ id: "first" }, { id: "second" }] });
 		h.session.setScopedModels([{ model: h.getModel("second")!, thinkingLevel: "off" }]);

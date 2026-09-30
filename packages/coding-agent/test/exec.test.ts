@@ -144,6 +144,24 @@ describe("extension command output", () => {
 	});
 
 	it.skipIf(process.platform === "win32")(
+		"reports a real child's signal death without changing code or killed",
+		async () => {
+			const result = await execCommand(
+				process.execPath,
+				["-e", "process.stdout.write('before crash');process.kill(process.pid,'SIGKILL')"],
+				process.cwd(),
+			);
+			expect(result).toEqual({
+				stdout: "before crash",
+				stderr: "",
+				code: 0,
+				killed: false,
+				signal: "SIGKILL",
+			});
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
 		"force-kills a real child that ignores SIGTERM at the existing deadline",
 		async () => {
 			const pending = execCommand(

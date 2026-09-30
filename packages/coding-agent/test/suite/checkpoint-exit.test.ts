@@ -1,10 +1,11 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
-import { RESTART_SOCKET_ENV, requestRestart } from "../../src/cli/restart-protocol.ts";
+import { RESTART_SOCKET_ENV, type RestartWorkerMessage, requestRestart } from "../../src/cli/restart-protocol.ts";
 import { createRestartControl } from "../../src/cli/restart-worker.ts";
 import { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import { prepareCheckpointExit, readSessionCheckpoint, writeSessionCheckpoint } from "../../src/core/checkpoint.ts";
@@ -12,8 +13,9 @@ import type { InlineExtension } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { main } from "../../src/main.ts";
-import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
+import { InteractiveMode, type InteractiveModeOptions } from "../../src/modes/interactive/interactive-mode.ts";
 import type * as TuiRenderer from "../../src/modes/interactive/tui-renderer.ts";
+import { waitForChildProcess } from "../../src/utils/child-process.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 vi.mock("../../src/utils/tools-manager.ts", () => ({ ensureTool: async () => undefined }));
@@ -58,6 +60,7 @@ async function setup(
 		extensions?: InlineExtension[];
 		enabled?: boolean;
 		onShutdownRequested?: (source: "user" | "extension" | "signal") => void;
+		prepareRestartCheckpoint?: InteractiveModeOptions["prepareRestartCheckpoint"];
 	} = {},
 ) {
 	const directory = mkdtempSync(join(tmpdir(), "pi-exit-"));
@@ -107,6 +110,7 @@ async function setup(
 	const mode = new InteractiveMode(runtime, {
 		terminal,
 		onShutdownRequested: options.onShutdownRequested,
+		prepareRestartCheckpoint: options.prepareRestartCheckpoint,
 		writeExitCheckpoint: options.enabled === false ? undefined : prepareCheckpointExit(path),
 	});
 	modes.push(mode);
@@ -442,22 +446,154 @@ describe("native deliberate clean-exit checkpoint", () => {
 		expect(existsSync(f.path)).toBe(false);
 	});
 
-	it.skipIf(process.platform === "win32")(
-		"does not publish clean proof for the actual managed-restart shutdown route",
-		async () => {
-			const sent: string[] = [];
+	it.skipIf(process.platform === "win32").each(["SIGTERM", "SIGHUP"] as const)(
+		"ordinary quit permits %s termination during a held shutdown handler",
+		async (signal) => {
+			const directory = mkdtempSync(join(tmpdir(), "pi-quit-signal-"));
+			directories.push(directory);
+			const program = join(directory, "quit.mjs");
+			const entered = join(directory, "shutdown-entered");
+			writeFileSync(
+				program,
+				`
+import { writeFileSync } from "node:fs";
+import { createHarness } from ${JSON.stringify(resolve("test/suite/harness.ts"))};
+import { AgentSessionRuntime } from ${JSON.stringify(resolve("src/core/agent-session-runtime.ts"))};
+import { InteractiveMode } from ${JSON.stringify(resolve("src/modes/interactive/interactive-mode.ts"))};
+import { VirtualTerminal } from ${JSON.stringify(resolve("../tui/test/virtual-terminal.ts"))};
+const h = await createHarness({
+  settings: { quietStartup: true, compaction: { enabled: false }, retry: { enabled: false } },
+  extensionFactories: [pi => pi.on("session_shutdown", () => {
+    writeFileSync(${JSON.stringify(entered)}, "entered");
+    setTimeout(() => process.exit(7), 1000);
+    process.kill(process.pid, ${JSON.stringify(signal)});
+    return new Promise(() => {});
+  })],
+});
+const runtime = new AgentSessionRuntime(h.session, {
+  cwd: h.tempDir, agentDir: ${JSON.stringify(directory)}, modelRuntime: h.session.modelRuntime,
+  settingsManager: h.settingsManager, resourceLoader: h.session.resourceLoader, diagnostics: [],
+}, async () => { throw new Error("No replacement during quit"); });
+const terminal = new VirtualTerminal(120, 40);
+const mode = new InteractiveMode(runtime, { terminal });
+await mode.init();
+terminal.sendInput("/quit");
+terminal.sendInput("\\r");
+`,
+			);
+			const child = spawn(process.execPath, ["--import", resolve("src/experimental/source-resolver.ts"), program], {
+				env: {
+					...process.env,
+					PI_CODING_AGENT_DIR: directory,
+					PI_OFFLINE: "1",
+					PI_CHECKPOINT_SOCKET: "",
+					PI_CHECKPOINT_EXIT_PATH: "",
+					PI_MANAGED_CLI: "",
+					PI_EXPERIMENTAL: "",
+				},
+				stdio: ["ignore", "ignore", "pipe"],
+			});
+			onTestFinished(() => {
+				if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+			});
+			let stderr = "";
+			child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+				stderr += chunk;
+			});
+			const code = await waitForChildProcess(child);
+			expect(existsSync(entered), stderr).toBe(true);
+			expect({ code, signal: child.signalCode }, stderr).toEqual({ code: null, signal });
+		},
+	);
+
+	it.skipIf(process.platform === "win32").each(["off-tip", "null"] as const)(
+		"publishes only final unmarked state after every managed-restart shutdown handler (%s leaf)",
+		async (leaf) => {
+			const sent: RestartWorkerMessage[] = [];
+			const entered = deferred();
+			const finish = deferred();
+			let selected: string | null = null;
 			const control = createRestartControl({
 				args: [],
 				send: async (message) => {
-					sent.push(message.type);
+					sent.push(message);
 				},
 			});
-			const f = await setup({ extensions: [control.extension], onShutdownRequested: control.shutdownRequested });
+			const f = await setup({
+				extensions: [
+					control.extension,
+					(pi) => {
+						pi.on("session_shutdown", async () => {
+							entered.resolve();
+							await finish.promise;
+							pi.appendEntry("last-shutdown-receipt", { complete: true });
+							if (selected === null) f.h.sessionManager.resetLeaf();
+							else f.h.sessionManager.branch(selected);
+							pi.sendMessage(
+								{
+									customType: "shutdown-context",
+									content: [
+										{ type: "text", text: "final accepted context" },
+										{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+									],
+									display: false,
+								},
+								{ deliverAs: "nextTurn", triggerTurn: false },
+							);
+						});
+					},
+				],
+				onShutdownRequested: control.shutdownRequested,
+				prepareRestartCheckpoint: control.prepareShutdownCheckpoint,
+			});
 			f.h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+			selected = leaf === "null" ? null : f.h.sessionManager.getLeafId();
+			f.h.session.setScopedModels([{ model: f.h.getModel("second")!, thinkingLevel: "off" }]);
+			f.h.session.setSteeringMode("one-at-a-time");
+			f.h.session.setFollowUpMode("all");
 			await control.ready();
 			await requestRestart(process.env[RESTART_SOCKET_ENV]!, {});
+			await entered.promise;
+			try {
+				expect(sent.map((message) => message.type)).toEqual(["pi:ready"]);
+				expect(f.exits).toEqual([]);
+			} finally {
+				finish.resolve();
+			}
 			await vi.waitFor(() => expect(f.exits).toEqual([0]));
-			expect(sent).toContain("pi:restart");
+			const restart = sent.find((message) => message.type === "pi:restart");
+			if (restart?.type !== "pi:restart") throw new Error("Missing final restart checkpoint");
+			const original = restart.checkpoint.files!.original.path;
+			directories.push(join(original, ".."));
+			const saved = readSessionCheckpoint(original);
+			expect(saved.completedExit).toBeUndefined();
+			expect(saved.entries.at(-1)).toMatchObject({
+				type: "custom",
+				customType: "last-shutdown-receipt",
+				data: { complete: true },
+			});
+			expect(saved.selection).toEqual(
+				expect.objectContaining({ sessionId: f.h.session.sessionId, leafId: selected }),
+			);
+			expect(saved.queues).toMatchObject({
+				steering: [],
+				followUp: [],
+				persistOnCancel: [],
+				steeringMode: "one-at-a-time",
+				followUpMode: "all",
+				nextTurn: [
+					{
+						customType: "shutdown-context",
+						content: [
+							{ type: "text", text: "final accepted context" },
+							{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+						],
+					},
+				],
+			});
+			expect(saved.scopedModels).toEqual([
+				{ provider: f.h.getModel().provider, id: "second", thinkingLevel: "off" },
+			]);
 			expect(existsSync(f.path)).toBe(false);
 		},
 	);
@@ -483,6 +619,146 @@ describe("native deliberate clean-exit checkpoint", () => {
 			await closing;
 			expect(f.exits).toEqual([1]);
 			expect(existsSync(f.path)).toBe(false);
+		},
+	);
+
+	it.each(["UI", "signal", "user"] as const)(
+		"late native %s cancels and joins managed offline preparation without a handoff",
+		async (kind) => {
+			const sent: RestartWorkerMessage[] = [];
+			const control = createRestartControl({
+				args: [],
+				send: async (message) => {
+					sent.push(message);
+				},
+			});
+			const f = await setup({
+				extensions: [control.extension],
+				onShutdownRequested: control.shutdownRequested,
+				prepareRestartCheckpoint: control.prepareShutdownCheckpoint,
+			});
+			f.h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+			const program = join(f.directory, "held-offline.mjs");
+			const entered = join(f.directory, "entered");
+			const joined = join(f.directory, "joined");
+			const finish = join(f.directory, "finish");
+			writeFileSync(
+				program,
+				`
+import { copyFileSync, existsSync, writeFileSync } from "node:fs";
+const [, original, candidate] = process.argv.slice(2);
+process.on("SIGTERM", () => { clearInterval(timer); setTimeout(() => { writeFileSync(${JSON.stringify(joined)}, "cancelled"); process.exit(0); }, 50); });
+writeFileSync(${JSON.stringify(entered)}, String(process.pid));
+const timer = setInterval(() => {
+  if (!existsSync(${JSON.stringify(finish)})) return;
+  copyFileSync(original, candidate);
+  writeFileSync(${JSON.stringify(joined)}, "completed");
+  process.exit(0);
+}, 10);
+`,
+			);
+			await control.ready();
+			await requestRestart(process.env[RESTART_SOCKET_ENV]!, { checkpointTransform: program });
+			await vi.waitFor(() => expect(existsSync(entered)).toBe(true));
+			if (kind === "UI") f.mode.getExtensionUIContext().setEditorText("late unsaved text");
+			else await f.view.shutdown(kind === "signal" ? { fromSignal: true } : undefined);
+			try {
+				await vi.waitFor(() => expect(f.exits).toEqual([1]));
+			} finally {
+				// Unblock a broken implementation too, without racing normal completion against SIGTERM.
+				writeFileSync(finish, "release");
+				await vi.waitFor(() => expect(existsSync(joined)).toBe(true));
+			}
+			expect(readFileSync(joined, "utf8")).toBe("cancelled");
+			expect(() => process.kill(Number(readFileSync(entered, "utf8")), 0)).toThrow();
+			expect(sent.map((message) => message.type)).toEqual(["pi:ready"]);
+			expect(f.errors).toHaveBeenCalledWith(expect.stringContaining("original restart checkpoint retained at"));
+			const error = f.errors.mock.calls.find(([text]) =>
+				String(text).includes("original restart checkpoint retained at"),
+			)![0];
+			const original = String(error).split("original restart checkpoint retained at ")[1];
+			directories.push(join(original, ".."));
+			expect(readSessionCheckpoint(original).completedExit).toBeUndefined();
+		},
+	);
+
+	it("user quit during terminal drainage prevents offline preparation from starting", async () => {
+		const sent: RestartWorkerMessage[] = [];
+		const entered = deferred();
+		const finish = deferred();
+		const control = createRestartControl({
+			args: [],
+			send: async (message) => {
+				sent.push(message);
+			},
+		});
+		const f = await setup({
+			extensions: [control.extension],
+			onShutdownRequested: control.shutdownRequested,
+			prepareRestartCheckpoint: control.prepareShutdownCheckpoint,
+		});
+		f.h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+		const started = join(f.directory, "offline-started");
+		const program = join(f.directory, "offline.mjs");
+		writeFileSync(
+			program,
+			`import { copyFileSync, writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(started)}, "started");
+copyFileSync(process.argv[3], process.argv[4]);
+`,
+		);
+		vi.spyOn(f.terminal, "drainInput").mockImplementation(async () => {
+			entered.resolve();
+			await finish.promise;
+		});
+		await control.ready();
+		await requestRestart(process.env[RESTART_SOCKET_ENV]!, { checkpointTransform: program });
+		await entered.promise;
+		await f.view.shutdown();
+		finish.resolve();
+		await vi.waitFor(() => expect(f.exits).toEqual([1]));
+		expect(existsSync(started)).toBe(false);
+		expect(sent.map((message) => message.type)).toEqual(["pi:ready"]);
+	});
+
+	it.each(["UI", "signal", "user"] as const)(
+		"late native %s during restart IPC prevents a successful worker exit",
+		async (kind) => {
+			const sent: RestartWorkerMessage[] = [];
+			const entered = deferred();
+			const finish = deferred();
+			const control = createRestartControl({
+				args: [],
+				send: async (message) => {
+					sent.push(message);
+					if (message.type !== "pi:restart") return;
+					directories.push(join(message.checkpoint.files!.original.path, ".."));
+					entered.resolve();
+					await finish.promise;
+				},
+			});
+			const f = await setup({
+				extensions: [control.extension],
+				onShutdownRequested: control.shutdownRequested,
+				prepareRestartCheckpoint: control.prepareShutdownCheckpoint,
+			});
+			f.h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+			await control.ready();
+			await requestRestart(process.env[RESTART_SOCKET_ENV]!, {});
+			await entered.promise;
+			try {
+				if (kind === "UI") f.mode.getExtensionUIContext().setEditorText("late unsaved text");
+				else await f.view.shutdown(kind === "signal" ? { fromSignal: true } : undefined);
+			} finally {
+				finish.resolve();
+			}
+			await vi.waitFor(() => expect(f.exits).toEqual([1]));
+			// The launcher requires exit0 as well as IPC before it can replace the worker.
+			expect(sent.map((message) => message.type)).toEqual(["pi:ready", "pi:restart"]);
+			expect(f.errors).toHaveBeenCalledWith(expect.stringContaining("original restart checkpoint retained at"));
+			const restart = sent.find((message) => message.type === "pi:restart");
+			if (restart?.type !== "pi:restart") throw new Error("Missing retained restart artifact");
+			expect(readSessionCheckpoint(restart.checkpoint.files!.original.path).completedExit).toBeUndefined();
 		},
 	);
 

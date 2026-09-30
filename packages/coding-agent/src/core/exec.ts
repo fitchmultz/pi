@@ -26,6 +26,8 @@ export interface ExecResult {
 	stderr: string;
 	code: number;
 	killed: boolean;
+	/** Signal that terminated the child, if any, independent of whether exec requested a kill. */
+	signal?: NodeJS.Signals;
 }
 
 /**
@@ -94,7 +96,7 @@ export async function execCommand(
 			stderr += decoder.end("stderr");
 			proc.stdout.destroy();
 			proc.stderr.destroy();
-			resolve({ stdout, stderr, code, killed });
+			resolve({ stdout, stderr, code, killed, ...(proc.signalCode ? { signal: proc.signalCode } : {}) });
 		};
 		const onReadError = () => {
 			if (settled) return;

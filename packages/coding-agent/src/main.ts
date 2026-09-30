@@ -33,7 +33,7 @@ import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
-import { createManagedRestart, restoreRestartSession } from "./cli/restart-worker.ts";
+import { createManagedRestart, prepareRestartCheckpoint, restoreRestartSession } from "./cli/restart-worker.ts";
 import { runSessionConversionCommand } from "./cli/session-conversion-command.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
@@ -48,9 +48,9 @@ import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
 import {
 	CHECKPOINT_EXIT_PATH_ENV,
-	openSessionCheckpoint,
+	openSessionCheckpointFile,
 	prepareCheckpointExit,
-	readSessionCheckpoint,
+	readSessionCheckpointState,
 } from "./core/checkpoint.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
@@ -612,13 +612,13 @@ export async function main(args: string[], options?: MainOptions) {
 	if (runSessionConversionCommand(args)) return;
 	resetTimings();
 	const exitCheckpointPath = process.env[CHECKPOINT_EXIT_PATH_ENV];
-	let exitRestoreCheckpoint: ReturnType<typeof readSessionCheckpoint> | undefined;
+	let exitRestoreCheckpoint: ReturnType<typeof readSessionCheckpointState> | undefined;
 	let writeExitCheckpoint: ReturnType<typeof prepareCheckpointExit> | undefined;
 	if (exitCheckpointPath) {
 		// Load a shared restore/output path first, but clear old proof even if another restore input fails.
 		try {
 			const restorePath = parseArgs(args).checkpoint;
-			if (restorePath) exitRestoreCheckpoint = readSessionCheckpoint(resolvePath(restorePath, process.cwd()));
+			if (restorePath) exitRestoreCheckpoint = readSessionCheckpointState(resolvePath(restorePath, process.cwd()));
 		} finally {
 			writeExitCheckpoint = prepareCheckpointExit(exitCheckpointPath);
 		}
@@ -745,9 +745,16 @@ export async function main(args: string[], options?: MainOptions) {
 			"--checkpoint requires interactive mode without startup prompts or session/model/tool selection overrides",
 		);
 	}
+	if (restart?.handoff?.checkpoint.files && appMode !== "interactive")
+		throw new Error("Managed restart checkpoint requires interactive mode");
+	const checkpointFile = restart?.handoff
+		? ((await prepareRestartCheckpoint(restart.handoff, parsed)) ??
+			(parsed.checkpoint ? resolvePath(parsed.checkpoint, cwd) : undefined))
+		: parsed.checkpoint
+			? resolvePath(parsed.checkpoint, cwd)
+			: undefined;
 	const checkpoint =
-		exitRestoreCheckpoint ??
-		(parsed.checkpoint ? readSessionCheckpoint(resolvePath(parsed.checkpoint, cwd)) : undefined);
+		exitRestoreCheckpoint ?? (checkpointFile ? readSessionCheckpointState(checkpointFile) : undefined);
 
 	validateSessionCwdFlags(parsed);
 	validateForkFlags(parsed);
@@ -782,7 +789,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	let sessionManager = checkpoint
-		? openSessionCheckpoint(checkpoint)
+		? openSessionCheckpointFile(checkpointFile!).sessionManager
 		: await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	if (restart?.handoff) restoreRestartSession(sessionManager, restart.handoff);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
@@ -905,6 +912,13 @@ export async function main(args: string[], options?: MainOptions) {
 				message: `Extension package "${path}": ${warning}`,
 			})),
 		];
+		// A failed provider extension cannot supply the cold model. Report its actual
+		// startup error before checkpoint construction would mask it as a missing model.
+		if (isInitialRuntime && checkpoint && resourceLoader.getExtensions().errors.length > 0) {
+			reportDiagnostics(deduplicateDiagnostics(diagnostics));
+			console.error(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT));
+			process.exit(1);
+		}
 
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
@@ -944,7 +958,7 @@ export async function main(args: string[], options?: MainOptions) {
 				noBuiltinTools: sessionOptions.noTools === "builtin" || undefined,
 			};
 		const created = await createAgentSessionFromServices({
-			checkpoint: isInitialRuntime ? checkpoint : undefined,
+			checkpointFile: isInitialRuntime ? checkpointFile : undefined,
 			services,
 			sessionManager,
 			sessionStartEvent,
@@ -1103,6 +1117,7 @@ export async function main(args: string[], options?: MainOptions) {
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
 			onShutdownRequested: restart?.shutdownRequested,
+			prepareRestartCheckpoint: restart?.prepareShutdownCheckpoint,
 			writeExitCheckpoint,
 		});
 		await interactiveMode.init();

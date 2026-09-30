@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { closeJournalSource, scanJournal } from "../../src/core/session-journal.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 
 // Retain real filesystem writes, with deterministic partial-write/close error controls.
@@ -186,7 +187,7 @@ it.each(["header", "entry", "close"] as const)(
 	},
 );
 
-it.each(["before", "partial", "complete"] as const)(
+it.each(["before", "partial", "complete", "unterminated"] as const)(
 	"keeps another writer's saved conversation when repairing an append that failed %s writing",
 	async (failurePoint) => {
 		const actual = await vi.importActual<typeof fs>("node:fs");
@@ -199,22 +200,63 @@ it.each(["before", "partial", "complete"] as const)(
 		const failure = new Error("append failed");
 		vi.mocked(fs.appendFileSync).mockImplementationOnce((path, data) => {
 			if (failurePoint !== "before") {
-				actual.appendFileSync(path, failurePoint === "partial" ? String(data).slice(0, 20) : data);
+				actual.appendFileSync(
+					path,
+					failurePoint === "partial"
+						? String(data).slice(0, 20)
+						: failurePoint === "unterminated"
+							? String(data).slice(0, -1)
+							: data,
+				);
 			}
 			throw failure;
 		});
 		expect(() => first.appendCustomEntry("retained", {})).toThrow(failure);
 		const accepted = first.getLeafEntry()!;
 		const beforeRepair = fs.readFileSync(file);
+		first.getEntries();
 		first.flush();
 
 		expect(fs.readFileSync(file).subarray(0, beforeRepair.length)).toEqual(beforeRepair);
+		expect(fs.readFileSync(file).at(-1)).toBe(10);
+		if (failurePoint === "unterminated") {
+			const scan = scanJournal(file, { policy: "live" });
+			try {
+				expect(scan.records.filter((record) => record.value.id === accepted.id)).toHaveLength(1);
+			} finally {
+				closeJournalSource(scan.source);
+			}
+		}
 		const reopened = SessionManager.open(file);
 		expect(reopened.getEntry(prompt)).toEqual(second.getEntry(prompt));
 		expect(reopened.getEntry(answer)).toEqual(second.getEntry(answer));
 		expect(reopened.getEntries().filter((entry) => entry.id === accepted.id)).toEqual([accepted]);
 	},
 );
+
+it.each([false, true])("retains a failed append when its saved content conflicts (LF: %s)", async (terminated) => {
+	const actual = await vi.importActual<typeof fs>("node:fs");
+	const sm = SessionManager.create(directory, directory);
+	sm.appendMessage(fauxAssistantMessage("saved response"));
+	const file = sm.getSessionFile()!;
+	const before = fs.readFileSync(file);
+	vi.mocked(fs.appendFileSync).mockImplementationOnce(() => {
+		throw new Error("append failed");
+	});
+	expect(() => sm.appendCustomEntry("retained", { value: "accepted" })).toThrow("append failed");
+	const accepted = sm.getLeafEntry()!;
+	actual.appendFileSync(
+		file,
+		`${JSON.stringify({ ...accepted, data: { value: "conflicting" } })}${terminated ? "\n" : ""}`,
+	);
+	const conflicting = fs.readFileSync(file);
+	expect(() => sm.flush()).toThrow(`Conflicting persisted entry: ${accepted.id}`);
+	expect(accepted).toMatchObject({ data: { value: "accepted" } });
+	expect(fs.readFileSync(file)).toEqual(conflicting);
+	fs.writeFileSync(file, before);
+	sm.flush();
+	expect(SessionManager.open(file).getEntry(accepted.id)).toEqual(accepted);
+});
 
 it.each(["before", "during"] as const)(
 	"preserves a successful append when another writer fails %s it",

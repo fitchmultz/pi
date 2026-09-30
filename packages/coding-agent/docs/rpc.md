@@ -55,6 +55,8 @@ Do not use a generic line reader that treats Unicode line or paragraph separator
 
 Read stdout continuously. Pi honors stdout backpressure, but a client that stops reading can stall the process. Honor stdin backpressure when writing commands. Stdout is reserved for protocol records; diagnostics and application logging go to stderr.
 
+`RpcClient` frames incoming bytes on LF and assembles JSON tokens without accumulating a whole-record string. It preserves complete response and event objects, including entry trees and message arrays. Full-data getters and event collection still need heap for the values the caller requests; `onEvent()` avoids retaining the entire feed. Malformed records are skipped with diagnostics retained by `getStderr()`, and truncated final records are never delivered. Valid final objects without LF remain accepted when the pipe closes.
+
 ## Run lifecycle
 
 A successful `prompt` response means the prompt was accepted, queued, or handled. It does not mean model work completed:

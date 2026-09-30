@@ -76,6 +76,7 @@ function createSession(options: {
 		},
 		sessionManager: {
 			getEntries: () => entries,
+			iterateEntryMetadata: () => entries,
 			getEntriesRevision: () => entries.length,
 			getEntryCount: () => entries.length,
 			getSessionId: () => "test-session",

@@ -66,6 +66,8 @@ Use `--no-session` for an ephemeral run. An ephemeral session cannot be resumed 
 
 Use `--session` when you already know the session path or ID. Use `--fork` to create a new session from an existing session before interactive mode starts.
 
+Saved history is indexed by byte offsets. Session settings, usage, tree previews, and context selection do not load unrelated historical extension data. Branching and conversion copy records individually, preserving full values. A requested full value or active model context still needs enough memory to hold it.
+
 ## Restart or checkpoint a session
 
 The Node CLI's [managed restart](restart.md) resumes the same saved session after a staged core runtime update or when a clean process is needed. `/reload` applies extension code and resource changes in the current process.
@@ -85,7 +87,9 @@ Conversion makes an exclusive new copy and preserves the original; an existing o
 
 ## Export or share a session
 
-Use `/export` to write the current session as HTML or JSONL. Use `/share` to upload it and get a viewer link. Pi uses a Radius artifact when Radius authentication is configured; otherwise, it uses a private GitHub gist.
+Use `/export` to write the current session as HTML or JSONL. JSONL preserves the selected branch; HTML includes the complete tree, images, and custom tool rendering in one self-contained file. Both write records individually. The HTML viewer decodes requested records and shows history in 50-entry pages with Earlier/Later controls. Tree navigation and search retain access to the full history. Large files still require browser memory to load, and one requested full value must fit its consumer; exports are never silently truncated.
+
+Use `/share` to upload the completed export file and get a viewer link. Pi uses a Radius artifact when Radius authentication is configured; otherwise, it uses a private GitHub gist. Radius streams the exact JSONL file bytes with its stat-derived content length.
 
 Review exported or shared sessions first. They can contain prompts, model responses, tool arguments, command output, file contents, and extension messages.
 

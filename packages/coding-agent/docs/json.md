@@ -18,6 +18,10 @@ Node.js `readline` is not suitable for this stream because it also recognizes th
 
 Read stdout continuously. A reader that stops consuming records can stall Pi when the pipe buffer fills. Stdout is reserved for JSONL; diagnostics and application logging go to stderr.
 
+Pi preserves complete aggregate payloads, including `agent_end.messages`, `turn_end.toolResults`, and queue arrays. It serializes native envelopes and aggregate members separately, stages each complete aggregate record privately, then drains it with bounded writes and pipe backpressure. Headers, ordinary deltas, and responses without aggregate fields use native `JSON.stringify` and the same ordered stdout queue without temporary files. Both paths snapshot the event synchronously; later in-process listeners cannot change the queued record. A circular value, BigInt, or throwing `toJSON` rejects that record before any of its bytes reach stdout.
+
+Aggregate records can exceed JavaScript's single-string limit. Individual payloads and custom `toJSON` results still require enough memory for native serialization. Receivers should token-parse large records instead of collecting a whole line before parsing it.
+
 ## Session header
 
 The first JSON-mode record is the current [session header](session-format.md#sessionheader):

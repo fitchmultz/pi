@@ -1,14 +1,18 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { JsonObject } from "@earendil-works/pi-ai";
 import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import type {
-	CompactionEntry,
-	ModelChangeEntry,
-	SessionEntry,
-	SessionMessageEntry,
-	SessionTreeNode,
+import {
+	type CompactionEntry,
+	type ModelChangeEntry,
+	type SessionEntry,
+	SessionManager,
+	type SessionMessageEntry,
+	type SessionTreeNode,
 } from "../src/core/session-manager.ts";
 import { TreeSelectorComponent } from "../src/modes/interactive/components/tree-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -132,6 +136,33 @@ function buildTree(entries: Array<SessionEntry>): SessionTreeNode[] {
 }
 
 describe("TreeSelectorComponent", () => {
+	test("searches a saved Bash command beyond its bounded preview", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-tree-command-"));
+		try {
+			const manager = SessionManager.create(directory, directory);
+			manager.appendMessage({ role: "user", content: "start", timestamp: 1 });
+			const id = manager.appendMessage({
+				role: "bashExecution",
+				command: `${"prefix ".repeat(60)}needle`,
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: 2,
+			});
+			const selector = new TreeSelectorComponent(
+				manager.getTree(),
+				id,
+				24,
+				() => {},
+				() => {},
+			);
+			selector.handleInput("needle");
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(id);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
 	for (const scenario of [
 		{
 			json: { path: "/rows", fields: ["name", "status"] },

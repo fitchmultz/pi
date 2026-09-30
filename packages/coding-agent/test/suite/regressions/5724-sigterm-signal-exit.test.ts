@@ -93,6 +93,6 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 		dispose.resolve();
 		await shutdownPromise;
 
-		expect(order).toEqual(["dispose", "drainInput", "stop"]);
+		expect(order).toEqual(["dispose", "drainInput", "stop", "unregister"]);
 	});
 });

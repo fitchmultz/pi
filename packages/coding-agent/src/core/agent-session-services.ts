@@ -55,6 +55,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	services: AgentSessionServices;
 	sessionManager: SessionManager;
 	checkpoint?: CreateAgentSessionOptions["checkpoint"];
+	checkpointFile?: CreateAgentSessionOptions["checkpointFile"];
 	deferBackgroundCommandNotifications?: boolean;
 	sessionStartEvent?: SessionStartEvent;
 	model?: Model<any>;
@@ -224,6 +225,7 @@ export async function createAgentSessionFromServices(
 		resourceLoader: options.services.resourceLoader,
 		sessionManager: options.sessionManager,
 		checkpoint: options.checkpoint,
+		checkpointFile: options.checkpointFile,
 		deferBackgroundCommandNotifications: options.deferBackgroundCommandNotifications,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
