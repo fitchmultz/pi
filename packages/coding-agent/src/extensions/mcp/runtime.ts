@@ -37,7 +37,12 @@ import {
 import { McpOAuthAuthorizationRequiredError, type OAuthChallenge } from "@earendil-works/pi-mcp/oauth";
 import { VERSION } from "../../config.ts";
 import { resolveConfigValueOrThrow, resolveHeadersOrThrow } from "../../core/resolve-config-value.ts";
-import { type McpServerCatalog, mcpCatalogIdentity, mcpStdioIdentityEnvironment } from "./catalog.ts";
+import {
+	type McpServerCatalog,
+	mcpCatalogIdentity,
+	mcpConfigIdentity,
+	mcpStdioIdentityEnvironment,
+} from "./catalog.ts";
 import type { McpServerEntry } from "./config.ts";
 import type { McpServerLog } from "./log.ts";
 import {
@@ -177,6 +182,8 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 	catalogKnown = false;
 	/** Durable grant identity, stable through refresh. */
 	credentialIdentity: string;
+	/** Observable opening inputs, including opaque command configuration but not command output. */
+	configIdentity: string;
 	/** Resolved transport/account identity of the registered tool and prompt bindings. */
 	bindingIdentity: string;
 	/** Server instructions from `initialize`, describing its tools as a group. */
@@ -220,6 +227,7 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 		this.log = options.log;
 		this.credentials = options.credentials;
 		this.credentialIdentity = options.credentials.catalogIdentity(this.entry);
+		this.configIdentity = mcpConfigIdentity(this.entry, this.cwd, this.credentialIdentity);
 		this.bindingIdentity = mcpCatalogIdentity(this.entry, this.cwd, this.credentialIdentity) ?? randomUUID();
 	}
 
@@ -379,11 +387,8 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 				const client = await this.getClient();
 				try {
 					const credentialIdentity = this.credentials.catalogIdentity(this.entry);
-					const bindingIdentity = mcpCatalogIdentity(this.entry, this.cwd, credentialIdentity);
-					if (
-						this.credentialIdentity !== credentialIdentity ||
-						(bindingIdentity !== undefined && bindingIdentity !== this.bindingIdentity)
-					) {
+					const configIdentity = mcpConfigIdentity(this.entry, this.cwd, credentialIdentity);
+					if (this.credentialIdentity !== credentialIdentity || configIdentity !== this.configIdentity) {
 						throw new Error(`MCP server "${this.name}" changed accounts. Discover it again before calling it.`);
 					}
 					return await run(client);
@@ -483,6 +488,7 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 
 	private async connectOnce(): Promise<McpClient> {
 		const credentialIdentity = this.credentials.catalogIdentity(this.entry);
+		const configIdentity = mcpConfigIdentity(this.entry, this.cwd, credentialIdentity);
 		const bindingIdentity = mcpCatalogIdentity(this.entry, this.cwd, credentialIdentity);
 		const url = this.oauthUrl;
 		// Each transport stays bound to its opening grant, including auth retries of prepared writes.
@@ -571,7 +577,7 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 			if (this.closed) throw new Error("shut down while connecting");
 			if (
 				credentialIdentity !== this.credentials.catalogIdentity(this.entry) ||
-				bindingIdentity !== mcpCatalogIdentity(this.entry, this.cwd, credentialIdentity)
+				configIdentity !== mcpConfigIdentity(this.entry, this.cwd, credentialIdentity)
 			) {
 				throw new Error("MCP account changed while connecting; discover the server again.");
 			}
@@ -585,6 +591,7 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 			this.prompts = prompts;
 			this.catalogKnown = true;
 			this.credentialIdentity = credentialIdentity;
+			this.configIdentity = configIdentity;
 			this.bindingIdentity = liveBindingIdentity;
 			this.state = "connected";
 			this.error = undefined;

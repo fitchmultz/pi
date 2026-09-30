@@ -1,5 +1,6 @@
 import {
 	appendFileSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -384,6 +385,39 @@ describe("native MCP lazy lifecycle", () => {
 		).toEqual(["constructor", "__proto__"]);
 	});
 
+	it("does not cache a live account's list-change metadata under a replacement environment account", async () => {
+		vi.stubEnv("PI_MCP_FIXTURE_TOKEN", "account-one");
+		const profile = entry("docs", "direct");
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: literal config value reference
+		if ("url" in profile.config) profile.config.headers = { Authorization: "Bearer ${PI_MCP_FIXTURE_TOKEN}" };
+		const accountOne = { tools: [FETCH] };
+		const specs = { docs: accountOne };
+		const f = fixture([profile], specs);
+		const original = await f.session();
+		await original.session.prompt("/mcp reconnect docs");
+		expect(original.session.getCallableToolNames()).toContain("mcp__docs__fetch");
+
+		vi.stubEnv("PI_MCP_FIXTURE_TOKEN", "account-two");
+		accountOne.tools = [FETCH, { ...FETCH, name: "account_one_only" }];
+		await f.peers.at(-1)?.pair.server.send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+		await vi.waitFor(() => expect(original.session.getCallableToolNames()).toContain("mcp__docs__account_one_only"));
+		await original.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+
+		specs.docs = { tools: [{ ...FETCH, name: "lookup" }] };
+		const replacement = await f.session();
+		expect(f.opened).toEqual(["docs"]);
+		expect(replacement.session.getCallableToolNames()).not.toContain("mcp__docs__account_one_only");
+		expect(replacement.session.getCallableToolNames()).not.toContain("mcp__docs__fetch");
+		await run(replacement, "tool_search", { query: "lookup", server: "docs" });
+		expect((await run(replacement, "mcp__docs__lookup", {})).isError).toBe(false);
+		expect(f.opened).toEqual(["docs", "docs"]);
+		expect(
+			f.requests
+				.filter(({ request }) => request.method === "tools/call")
+				.map(({ request }) => (request.params as { name: string }).name),
+		).toEqual(["lookup"]);
+	});
+
 	it("restores a root's tools, prompts and selected declarations after another root saves the same profile", async () => {
 		const spec = { tools: [FETCH], prompts: [{ name: "brief", description: "Root A brief" }] };
 		const f = fixture([entry("docs", "direct")], { docs: spec });
@@ -548,40 +582,58 @@ describe("native MCP lazy lifecycle", () => {
 		expect(f.opened).toEqual(["docs"]);
 	});
 
-	it("rejects changed static credentials after admission and installs a fresh callable binding on rediscovery", async () => {
-		const previous = process.env.PI_MCP_FIXTURE_TOKEN;
-		process.env.PI_MCP_FIXTURE_TOKEN = "account-one";
-		const profile = entry("docs", "direct");
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: literal config value reference
-		if ("url" in profile.config) profile.config.headers = { Authorization: "Bearer ${PI_MCP_FIXTURE_TOKEN}" };
-		const f = fixture([profile]);
-		let changeAccount = false;
-		const harness = await f.session({}, [
-			(pi) => {
-				pi.on("tool_call", (event) => {
-					if (event.toolName === "mcp__docs__fetch" && changeAccount)
-						process.env.PI_MCP_FIXTURE_TOKEN = "account-two";
-				});
-			},
-		]);
-		try {
-			await harness.session.prompt("/mcp reconnect docs");
-			changeAccount = true;
-			const stale = await run(harness, "mcp__docs__fetch", {});
-			expect(stale.isError).toBe(true);
-			expect(getMessageText(stale)).toContain("changed accounts");
-			expect(f.requests.filter(({ request }) => request.method === "tools/call")).toEqual([]);
-			changeAccount = false;
-			await harness.session.prompt("/mcp reconnect docs");
-			const fresh = await run(harness, "mcp__docs__fetch", {});
-			expect(fresh.isError).toBe(false);
-			expect(f.requests.filter(({ request }) => request.method === "tools/call")).toHaveLength(1);
-			expect(f.opened).toEqual(["docs", "docs"]);
-		} finally {
-			if (previous === undefined) delete process.env.PI_MCP_FIXTURE_TOKEN;
-			else process.env.PI_MCP_FIXTURE_TOKEN = previous;
-		}
-	});
+	it.each(["http", "mixed-http", "mixed-stdio"] as const)(
+		"rejects changed environment credentials after admission and installs a fresh binding on rediscovery (%s)",
+		async (profileKind) => {
+			const previous = process.env.PI_MCP_FIXTURE_TOKEN;
+			process.env.PI_MCP_FIXTURE_TOKEN = "account-one";
+			const profile = entry("docs", "direct");
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: literal config value reference
+			if ("url" in profile.config) profile.config.headers = { Authorization: "Bearer ${PI_MCP_FIXTURE_TOKEN}" };
+			if (profileKind === "mixed-stdio") {
+				profile.config = {
+					command: "unused",
+					exposure: "direct",
+					// biome-ignore lint/suspicious/noTemplateCurlyInString: literal config value reference
+					env: { TOKEN: "${PI_MCP_FIXTURE_TOKEN}" },
+				};
+			}
+			const f = fixture([profile]);
+			const commandMarker = join(f.cwd, "secret-command-ran");
+			if (profileKind !== "http") {
+				const command = `!${JSON.stringify(process.execPath)} -e ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(commandMarker)}, 'ran'); process.stdout.write('stable')`)}`;
+				if ("url" in profile.config) profile.config.headers = { ...profile.config.headers, "X-Extra": command };
+				else profile.config.env = { ...profile.config.env, EXTRA: command };
+			}
+			let changeAccount = false;
+			const harness = await f.session({}, [
+				(pi) => {
+					pi.on("tool_call", (event) => {
+						if (event.toolName === "mcp__docs__fetch" && changeAccount)
+							process.env.PI_MCP_FIXTURE_TOKEN = "account-two";
+					});
+				},
+			]);
+			try {
+				await harness.session.prompt("/mcp reconnect docs");
+				changeAccount = true;
+				const stale = await run(harness, "mcp__docs__fetch", {});
+				expect(stale.isError).toBe(true);
+				expect(getMessageText(stale)).toContain("changed accounts");
+				expect(f.requests.filter(({ request }) => request.method === "tools/call")).toEqual([]);
+				changeAccount = false;
+				await harness.session.prompt("/mcp reconnect docs");
+				const fresh = await run(harness, "mcp__docs__fetch", {});
+				expect(fresh.isError).toBe(false);
+				expect(f.requests.filter(({ request }) => request.method === "tools/call")).toHaveLength(1);
+				expect(f.opened).toEqual(["docs", "docs"]);
+				expect(existsSync(commandMarker)).toBe(false);
+			} finally {
+				if (previous === undefined) delete process.env.PI_MCP_FIXTURE_TOKEN;
+				else process.env.PI_MCP_FIXTURE_TOKEN = previous;
+			}
+		},
+	);
 
 	it.each([
 		{ transport: "http", reconnect: "idle", changed: false },

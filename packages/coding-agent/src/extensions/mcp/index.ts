@@ -22,7 +22,7 @@ import type {
 import { openBrowser } from "../../utils/open-browser.ts";
 import { CODEMODE_TOOL_NAME, isCodemodeTool } from "../codemode/tool.ts";
 import { isToolSearchTool, TOOL_SEARCH_TOOL_NAME } from "../tool-search/tool.ts";
-import { McpCatalogStore, mcpCatalogIdentity } from "./catalog.ts";
+import { McpCatalogStore, mcpConfigIdentity } from "./catalog.ts";
 import {
 	getMcpToolExposure,
 	type LoadedMcpConfig,
@@ -92,8 +92,6 @@ interface McpServer {
 	/** Result of the last `/mcp` action that failed, shown in the manager. */
 	message?: string;
 	ready?: Promise<void>;
-	catalogIdentity?: string;
-	credentialIdentity?: string;
 	names?: Record<string, string>;
 }
 
@@ -443,12 +441,13 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 				if (![...currentPrompts.values()].includes(name)) pi.unregisterCommand(name);
 			promptCommands.set(server, currentPrompts);
 			if (connection.state === "connected") {
-				currentServer.catalogIdentity = mcpCatalogIdentity(entry, sessionCwd, connection.credentialIdentity);
 				currentServer.names = Object.fromEntries(
 					[...toolOwners]
 						.filter(([, owner]) => owner.startsWith(`${server}\0`))
 						.map(([name, owner]) => [owner.slice(server.length + 1), name]),
 				);
+				if (connection.configIdentity !== mcpConfigIdentity(entry, sessionCwd, connection.credentialIdentity))
+					return;
 				try {
 					catalog.save(entry, sessionCwd, connection.credentialIdentity, {
 						tools: connection.tools,
@@ -607,24 +606,24 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			const runtime = await loadMcpRuntime();
 			const store = getCredentials(runtime);
 			const credentialIdentity = store.catalogIdentity(server.entry);
-			const identity = mcpCatalogIdentity(server.entry, sessionCwd, credentialIdentity);
+			const identity = mcpConfigIdentity(server.entry, sessionCwd, credentialIdentity);
 			if (
 				server.connection &&
-				server.credentialIdentity === credentialIdentity &&
-				server.catalogIdentity === identity
+				server.connection.credentialIdentity === credentialIdentity &&
+				server.connection.configIdentity === identity
 			)
 				return server.connection;
 			const previous = server.connection;
 			server.connection = undefined;
-			server.credentialIdentity = credentialIdentity;
-			server.catalogIdentity = identity;
 			server.names = undefined;
 			hideTools(server.entry.name);
 			await previous?.close();
 			const connection = await createConnection(server);
 			if (
 				connection.credentialIdentity !== credentialIdentity ||
-				store.catalogIdentity(server.entry) !== credentialIdentity
+				connection.configIdentity !== identity ||
+				store.catalogIdentity(server.entry) !== credentialIdentity ||
+				mcpConfigIdentity(server.entry, sessionCwd, credentialIdentity) !== identity
 			) {
 				return prepareServer(server);
 			}

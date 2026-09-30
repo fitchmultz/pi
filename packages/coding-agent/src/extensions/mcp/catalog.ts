@@ -142,21 +142,27 @@ function parseCatalogs(content: string | undefined): Record<string, unknown> {
 	}
 }
 
+type ConfigIdentityValue = string | undefined | { command: string };
+
+function configIdentityValue(value: string): ConfigIdentityValue {
+	return isCommandConfigValue(value) ? { command: value } : resolveConfigValue(value);
+}
+
 /** Only environment substitution is safe at cache-only startup. Command-backed secrets stay opaque. */
-function environment(values: Record<string, string> | undefined): Record<string, string | undefined> | undefined {
+function environment(values: Record<string, string> | undefined): Record<string, ConfigIdentityValue> | undefined {
 	if (!values) return undefined;
 	return Object.fromEntries(
 		Object.entries(values)
 			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([name, value]) => [name, resolveConfigValue(value)]),
+			.map(([name, value]) => [name, configIdentityValue(value)]),
 	);
 }
 
 /** Identity inputs only; this does not change the environment inherited by the child. */
 export function mcpStdioIdentityEnvironment(
-	configured: Record<string, string | undefined> | undefined,
+	configured: Record<string, ConfigIdentityValue> | undefined,
 	inherit = true,
-): Record<string, string | undefined> {
+): Record<string, ConfigIdentityValue> {
 	return Object.fromEntries(
 		Object.entries({
 			...(inherit
@@ -167,15 +173,9 @@ export function mcpStdioIdentityEnvironment(
 	);
 }
 
-export function mcpCatalogIdentity(entry: McpServerEntry, cwd: string, credentialIdentity: string): string | undefined {
+/** Observable config and grant inputs; command values are identified without executing them. */
+export function mcpConfigIdentity(entry: McpServerEntry, cwd: string, credentialIdentity: string): string {
 	const { config } = entry;
-	const secrets =
-		"url" in config
-			? [...Object.values(config.headers ?? {}), config.oauth?.clientSecret]
-			: Object.values(config.env ?? {});
-	// ponytail: command-backed credentials have no observable account identity at cache-only startup;
-	// rediscover that profile explicitly rather than running a secret command or reusing another account's catalog.
-	if (secrets.some((value) => value !== undefined && isCommandConfigValue(value))) return undefined;
 	const transport =
 		"url" in config
 			? {
@@ -186,7 +186,7 @@ export function mcpCatalogIdentity(entry: McpServerEntry, cwd: string, credentia
 						clientSecret:
 							config.oauth.clientSecret === undefined
 								? undefined
-								: resolveConfigValue(config.oauth.clientSecret),
+								: configIdentityValue(config.oauth.clientSecret),
 					},
 				}
 			: {
@@ -198,6 +198,18 @@ export function mcpCatalogIdentity(entry: McpServerEntry, cwd: string, credentia
 	return createHash("sha256")
 		.update(JSON.stringify({ profile: entry.name, cwd: resolve(cwd), transport, credentialIdentity }))
 		.digest("hex");
+}
+
+export function mcpCatalogIdentity(entry: McpServerEntry, cwd: string, credentialIdentity: string): string | undefined {
+	const { config } = entry;
+	const secrets =
+		"url" in config
+			? [...Object.values(config.headers ?? {}), config.oauth?.clientSecret]
+			: Object.values(config.env ?? {});
+	// ponytail: command-backed credentials have no observable account identity at cache-only startup;
+	// rediscover that profile explicitly rather than running a secret command or reusing another account's catalog.
+	if (secrets.some((value) => value !== undefined && isCommandConfigValue(value))) return undefined;
+	return mcpConfigIdentity(entry, cwd, credentialIdentity);
 }
 
 export class McpCatalogStore {
