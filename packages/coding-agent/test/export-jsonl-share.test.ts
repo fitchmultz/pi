@@ -173,13 +173,14 @@ describe("JSONL share export", () => {
 		const before = fs.statSync(destination);
 		const hardlink = join(tempDir, "hardlink.jsonl");
 		const symlink = join(tempDir, "symlink.jsonl");
-		fs.linkSync(destination, hardlink);
+		if (process.platform !== "android") fs.linkSync(destination, hardlink);
 		fs.symlinkSync(destination, symlink);
 		expect(exportSessionToJsonl(manager, symlink)).toBe(symlink);
 		expect(fs.statSync(destination).mode & 0o777).toBe(0o600);
 		expect(fs.statSync(destination).ino).toBe(before.ino);
 		expect(fs.lstatSync(symlink).isSymbolicLink()).toBe(true);
-		expect(readFileSync(hardlink, "utf8")).toBe(readFileSync(destination, "utf8"));
+		if (process.platform !== "android")
+			expect(readFileSync(hardlink, "utf8")).toBe(readFileSync(destination, "utf8"));
 		const ordinary = join(tempDir, "ordinary.jsonl");
 		writeFileSync(ordinary, "reference mode");
 		const newPath = exportSessionToJsonl(manager, join(tempDir, "new.jsonl"));

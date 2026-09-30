@@ -1,7 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
 	existsSync,
 	linkSync,
+	lstatSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
@@ -11,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { assertSessionConversionNotRequired, convertSessionFile } from "../src/core/session-conversion.ts";
 import { buildSessionContext, type SessionEntry } from "../src/core/session-manager.ts";
@@ -324,14 +327,47 @@ describe("one-time session conversion", () => {
 		]);
 	});
 
-	it.each(["same path", "existing file", "symlink", "hard link"])("never overwrites %s", (collision) => {
+	it.each([
+		"same path",
+		"existing file",
+		"symlink",
+		"dangling symlink",
+		"directory",
+		...(process.platform === "android" ? [] : ["hard link"]),
+	])("never overwrites %s", (collision) => {
 		const { source, output, bytes } = fixture(settled());
 		if (collision === "existing file") writeFileSync(output, "keep me");
 		if (collision === "symlink") symlinkSync(source, output);
+		if (collision === "dangling symlink") symlinkSync("missing", output);
+		if (collision === "directory") mkdirSync(output);
 		if (collision === "hard link") linkSync(source, output);
+		const before = lstatSync(collision === "same path" ? source : output);
 		expect(() => convertSessionFile(source, collision === "same path" ? source : output)).toThrow();
+		const after = lstatSync(collision === "same path" ? source : output);
+		expect([after.dev, after.ino, after.mode]).toEqual([before.dev, before.ino, before.mode]);
 		expect(readFileSync(source, "utf8")).toBe(bytes);
 		if (collision === "existing file") expect(readFileSync(output, "utf8")).toBe("keep me");
+	});
+
+	it("publishes exactly one complete journal when conversions race for the same output", async () => {
+		const { directory, source, output, bytes } = fixture(settled());
+		const script = join(directory, "race.mjs");
+		writeFileSync(
+			script,
+			`import { convertSessionFile } from ${JSON.stringify(new URL("../src/core/session-conversion.ts", import.meta.url).href)};\nconvertSessionFile(process.argv[2], process.argv[3]);\n`,
+		);
+		const run = promisify(execFile);
+		const results = await Promise.allSettled(
+			[0, 1].map(() => run(process.execPath, [script, source, output], { timeout: 30_000 })),
+		);
+		expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+		expect(buildSessionContext(convertedEntries(output)).messages.map((message) => message.role)).toEqual([
+			"system",
+			"assistant",
+			"toolResult",
+		]);
+		expect(readFileSync(source, "utf8")).toBe(bytes);
+		expect(readdirSync(directory).sort()).toEqual(["converted.jsonl", "original.jsonl", "race.mjs"]);
 	});
 
 	it.each([

@@ -1,9 +1,12 @@
 import type * as ChildProcess from "node:child_process";
 import type * as Fs from "node:fs";
+import { platform } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ensureTool, getLatestVersion, type ToolStatus } from "../src/utils/tools-manager.ts";
 
 const originalOffline = process.env.PI_OFFLINE;
+
+vi.mock("os", { spy: true });
 
 vi.mock("fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof Fs>();
@@ -25,6 +28,7 @@ afterEach(() => {
 	if (originalOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = originalOffline;
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 function redirectResponse(location: string): Response {
@@ -119,6 +123,7 @@ describe("ensureTool", () => {
 
 	it("surfaces the error cause chain when a download fails", async () => {
 		delete process.env.PI_OFFLINE;
+		vi.mocked(platform).mockReturnValue("linux");
 		const cause = new Error("connect ETIMEDOUT 140.82.113.3:443");
 		vi.stubGlobal(
 			"fetch",
@@ -138,5 +143,21 @@ describe("ensureTool", () => {
 				message: "Failed to download fd: fetch failed: connect ETIMEDOUT 140.82.113.3:443",
 			},
 		]);
+	});
+
+	it.each([
+		["fd", "fd"],
+		["rg", "ripgrep"],
+	] as const)("directs Android users to pkg for %s without downloading", async (tool, pkg) => {
+		delete process.env.PI_OFFLINE;
+		vi.mocked(platform).mockReturnValue("android");
+		const fetch = vi.fn();
+		vi.stubGlobal("fetch", fetch);
+		const statuses: ToolStatus[] = [];
+
+		await expect(ensureTool(tool, (status) => statuses.push(status))).resolves.toBeUndefined();
+
+		expect(statuses).toEqual([{ type: "warning", message: `${pkg} not found. Install with: pkg install ${pkg}` }]);
+		expect(fetch).not.toHaveBeenCalled();
 	});
 });

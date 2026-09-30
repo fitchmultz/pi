@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -131,7 +131,11 @@ test("commits verified upstream dependency updates with explicit lockfile author
 test("delivery verification fails rather than skipping terminal coverage without tmux", (t) => {
 	const directory = mkdtempSync(join(tmpdir(), "pi-no-tmux-test-"));
 	t.after(() => rmSync(directory, { recursive: true, force: true }));
-	const result = spawnSync(process.execPath, [join(root, "scripts/verify-fork.mjs"), "--suite", "runtime"], {
+	// The verifier prepends Node's directory, which also contains tmux on Termux.
+	const node = join(directory, "node");
+	copyFileSync(process.execPath, node);
+	symlinkSync(realpathSync(join(dirname(process.execPath), "npm")), join(directory, "npm"));
+	const result = spawnSync(node, [join(root, "scripts/verify-fork.mjs"), "--suite", "runtime"], {
 		encoding: "utf8", env: { ...process.env, PATH: directory },
 	});
 	assert.equal(result.status, 1);

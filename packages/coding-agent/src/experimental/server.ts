@@ -609,8 +609,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
 		};
 		const socketPath = getUnixSocketPath(serverId, directory);
 		const controlPath = join(directory, `control-${serverId}.sock`);
-		const serverNonce = randomUUID().replaceAll("-", "").slice(0, 12);
-		const serverPath = join(directory, `server-${serverId}-${serverNonce}.sock`);
+		const serverNonce = randomUUID().replaceAll("-", "");
+		// Termux's default server directory leaves too little room for two IDs in a Unix socket pathname.
+		const serverPath = join(
+			directory,
+			process.platform === "android"
+				? `server-${serverNonce}.sock`
+				: `server-${serverId}-${serverNonce.slice(0, 12)}.sock`,
+		);
 		startupLease = await ensureCoordinator(socketPath, controlPath);
 		coordinator = new CoordinatorConnection({ controlPath, endpoint: serverPath });
 		const sessionDir = resolveSessionDirectory(options.sessionDir);

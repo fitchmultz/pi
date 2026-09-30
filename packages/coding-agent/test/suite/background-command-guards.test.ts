@@ -29,7 +29,13 @@ describe("background shell guards in shipped examples", () => {
 			h = await createHarness({ extensionFactories: [factory] });
 			for (const [flag, value] of flags)
 				h.session.resourceLoader.getExtensions().runtime.flagValues.set(flag, value);
-			await h.session.bindExtensions({ mode: "print" });
+			const platform = Object.getOwnPropertyDescriptor(process, "platform");
+			if (factory === sandbox) Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+			try {
+				await h.session.bindExtensions({ mode: "print" });
+			} finally {
+				if (platform) Object.defineProperty(process, "platform", platform);
+			}
 			if (factory === planMode) {
 				expect(h.session.getActiveToolNames()).not.toContain("background_command");
 				// A second extension can re-enable tools; the normal call guard still applies.

@@ -158,9 +158,20 @@ hand-made workspace dependency links are used.
 
 The checkout installer also supports Termux on Android: it preserves the native
 shell/exec environment, isolates temporary files, and installs the lockfile-pinned
-static Linux TypeScript compiler into the disposable build. Restart sockets fall
+TypeScript compiler and declaration files into the disposable build. If Android
+blocks the Linux compiler's startup fanotify probe, it builds an Android compiler
+from the npm artifact's exact source commit, with only that probe disabled (inotify
+remains available). Go verifies source/module checksums; the shared module cache
+and checkout lockfile are not modified. This fallback requires Go >=1.26, plus
+clang on x64 (`pkg install golang clang`). No npm lifecycle scripts are enabled.
+macOS/Linux continue using their official compiler artifacts. Restart sockets fall
 back to Termux's writable short temporary path when needed. The `pi update --fork`
 bootstrap preserves that same native shell/exec environment.
+
+Android blocks hardlinks as well. Session conversion and optional Unix servers use
+the native exclusive rename syscall through Python 3's standard library
+(`pkg install python`). They fail rather than overwrite a destination or fall back
+to a non-atomic move. macOS/Linux keep their hardlink publication path.
 
 The integration uses upstream request-boundary execution and provider transports.
 Live native steering, async tool successors, and the parallel native context-window
@@ -337,8 +348,9 @@ old machinery solely to keep tests unchanged.
 - Validate the actual installed consumer, worker and WASM assets, and tmux UI
   lifecycle, including reload disposal/reinitialization, background accounting,
   compact rendering, and PTY handoff. Qualify supported platforms separately;
-  TypeScript 7 uses a disposable static compiler on Termux, but fixture validation
-  is not qualification on real Termux hardware.
+  TypeScript 7 uses a disposable compiler on Termux, with a pinned-source Android
+  build when its Linux artifact is blocked; fixture validation is not qualification
+  on real Termux hardware.
 - Update operational product docs alongside implementation, not before it:
   extension/name/discovery SDK and event contracts; JSON/message/session formats
   and conversion; compaction/Posthorse; model/cache/WebSocket behavior; reload,
