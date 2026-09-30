@@ -48,26 +48,55 @@ describe("native JSON record writer", () => {
 		expect(readdirSync(tmpdir())).toEqual([]);
 	});
 
-	it("matches native property order, omission/null and toJSON keys across native aggregates", () => {
-		const keyed = () => ({ toJSON: (key: string) => key });
-		const messages = [keyed(), undefined, null, NaN, -0];
-		messages.length++;
-		messages.push(keyed());
+	it.each(["7", 1.5, NaN, -2, undefined])(
+		"matches native property order, omission/null and toJSON keys with array length %s",
+		(length) => {
+			const keyed = () => ({ toJSON: (key: string) => key });
+			const messages = [keyed(), undefined, null, NaN, -0];
+			messages.length++;
+			messages.push(keyed());
+			let lengthReads = 0;
+			const value = {
+				type: "agent_end",
+				omitted: undefined,
+				messages: new Proxy(messages, {
+					get: (target, key, receiver) => {
+						if (key !== "length") return Reflect.get(target, key, receiver);
+						lengthReads++;
+						return length;
+					},
+				}),
+				toolResults: new Set([1, 2]),
+				steering: [keyed()],
+				followUp: [],
+				extra: { date: new Date("2020-01-01"), unicode: "a\u2028b\u2029c🙂", keyed: keyed() },
+			};
+			const expected = JSON.stringify(value);
+			const chunks: string[] = [];
+			let bytes = 0;
+			writeJsonValue(
+				value,
+				(text) => {
+					bytes += text.length;
+					if (bytes > expected.length) throw new Error("Serialized record exceeds native JSON output");
+					chunks.push(text);
+				},
+				jsonEventLayout,
+			);
+			expect(chunks.join("")).toBe(expected);
+			expect(lengthReads).toBe(2);
+		},
+	);
+
+	it.each([2n, Symbol("length")])("rejects native Proxy array length %s", (length) => {
 		const value = {
 			type: "agent_end",
-			omitted: undefined,
-			messages: new Proxy(messages, {
-				get: (target, key, receiver) =>
-					key === "length" ? String(target.length) : Reflect.get(target, key, receiver),
+			messages: new Proxy(["first", "second"], {
+				get: (target, key, receiver) => (key === "length" ? length : Reflect.get(target, key, receiver)),
 			}),
-			toolResults: new Set([1, 2]),
-			steering: [keyed()],
-			followUp: [],
-			extra: { date: new Date("2020-01-01"), unicode: "a\u2028b\u2029c🙂", keyed: keyed() },
 		};
-		const chunks: string[] = [];
-		writeJsonValue(value, (text) => chunks.push(text), jsonEventLayout);
-		expect(chunks.join("")).toBe(JSON.stringify(value));
+		expect(() => JSON.stringify(value)).toThrow(TypeError);
+		expect(() => writeJsonValue(value, () => {}, jsonEventLayout)).toThrow(TypeError);
 	});
 
 	it("calls custom container toJSON once with its native key, retaining native return semantics", () => {

@@ -147,7 +147,7 @@ export function writeJsonValue(
 			stack.push({
 				kind: "array",
 				value: member,
-				length: member.length,
+				length: Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(+member.length) || 0)),
 				index: 0,
 				layout: frame.layout,
 			});

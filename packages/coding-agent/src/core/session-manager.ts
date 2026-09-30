@@ -607,11 +607,11 @@ export interface SessionInfo {
 	created: Date;
 	modified: Date;
 	messageCount: number;
-	/** Complete first user text, loaded on explicit access. */
+	/** Complete first user text, cached after successful explicit access. */
 	firstMessage: string;
 	/** Bounded display text; ordinary selectors do not load firstMessage. */
 	firstMessagePreview?: string;
-	/** Complete user/assistant text, loaded on explicit access; subject to consumer heap/string limits. */
+	/** Complete user/assistant text, cached after successful access; subject to consumer heap/string limits. */
 	allMessagesText: string;
 }
 
@@ -1144,6 +1144,8 @@ async function buildSessionInfo(
 		let messageCount = 0;
 		let firstMessageRecord: JournalRecord | undefined;
 		let firstMessagePreview = "(no messages)";
+		let firstMessage: string | undefined;
+		let allMessagesText: string | undefined;
 		const messages: JournalRecord[] = [];
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
@@ -1232,12 +1234,14 @@ async function buildSessionInfo(
 				messageCount,
 				firstMessagePreview,
 				get firstMessage() {
-					return firstMessageRecord ? readMessagesText([firstMessageRecord]) : "(no messages)";
+					firstMessage ??= firstMessageRecord ? readMessagesText([firstMessageRecord]) : "(no messages)";
+					return firstMessage;
 				},
 				get allMessagesText() {
 					// ponytail: explicit full-text access/search needs the consumer's aggregate heap and string capacity.
 					// Add a streaming matcher only if that explicit consumer boundary must become bounded.
-					return readMessagesText(messages);
+					allMessagesText ??= readMessagesText(messages);
+					return allMessagesText;
 				},
 			};
 		} finally {
@@ -1406,33 +1410,39 @@ export class SessionManager {
 		const explicitPath = resolvePath(sessionFile);
 		if (existsSync(explicitPath)) {
 			const scan = scanJournal(explicitPath, { ...metadataProjection(), policy: "tolerant" });
-			const entries = scan.records.map((record) => record.value as unknown as FileEntry);
-			if (entries.length && (entries[0]?.type !== "session" || typeof entries[0].id !== "string"))
-				throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
-			assertSessionConversionNotRequired(entries);
-
-			// If file was empty, initialize it with a valid session header. If it was
-			// non-empty but did not parse as a pi session, fail without modifying it.
-			if (entries.length === 0) {
-				if (statSync(explicitPath).size > 0) {
+			let retained = false;
+			try {
+				const entries = scan.records.map((record) => record.value as unknown as FileEntry);
+				if (entries.length && (entries[0]?.type !== "session" || typeof entries[0].id !== "string"))
 					throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
-				}
-				this.newSession();
-				this.sessionFile = explicitPath;
-				this._rewriteFile();
-				this.flushed = true;
-				return;
-			}
+				assertSessionConversionNotRequired(entries);
 
-			this.sessionFile = explicitPath;
-			this._loadJournal(scan);
-			if (this._migrateIndexedJournal()) this._rewriteFile();
-			else if (scan.pendingTail) {
-				// Preserve writable load repair; read-only inspection never terminates a tail.
-				appendFileSync(explicitPath, "\n");
-				this.journalSource = { ...scan.source, ...statSync(explicitPath) };
+				// If file was empty, initialize it with a valid session header. If it was
+				// non-empty but did not parse as a pi session, fail without modifying it.
+				if (entries.length === 0) {
+					if (statSync(explicitPath).size > 0) {
+						throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
+					}
+					this.newSession();
+					this.sessionFile = explicitPath;
+					this._rewriteFile();
+					this.flushed = true;
+					return;
+				}
+
+				this.sessionFile = explicitPath;
+				this._loadJournal(scan);
+				retained = true;
+				if (this._migrateIndexedJournal()) this._rewriteFile();
+				else if (scan.pendingTail) {
+					// Preserve writable load repair; read-only inspection never terminates a tail.
+					appendFileSync(explicitPath, "\n");
+					this.journalSource = { ...scan.source, ...statSync(explicitPath) };
+				}
+				this.flushed = true;
+			} finally {
+				if (!retained) closeJournalSource(scan.source);
 			}
-			this.flushed = true;
 		} else {
 			this.newSession();
 			this.sessionFile = explicitPath; // preserve explicit path from --session flag
@@ -2642,48 +2652,51 @@ export class SessionManager {
 		const resolvedSourcePath = resolvePath(sourcePath);
 		const resolvedTargetCwd = resolvePath(targetCwd);
 		const scan = scanJournal(resolvedSourcePath, { ...metadataProjection(), policy: "tolerant" });
-		const sourceHeader = scan.records[0]?.value;
-		if (!sourceHeader || sourceHeader.type !== "session" || typeof sourceHeader.id !== "string")
-			throw new Error(`Cannot fork: source session file is empty or invalid: ${resolvedSourcePath}`);
-		assertSessionConversionNotRequired(scan.records.map((record) => record.value));
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd);
-		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-		if (options?.id !== undefined) assertValidSessionId(options.id);
-		const newSessionId = options?.id ?? createSessionId();
-		const timestamp = new Date().toISOString();
-		const newSessionFile = join(dir, `${timestamp.replace(/[:.]/g, "-")}_${newSessionId}.jsonl`);
-		const newHeader: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: newSessionId,
-			timestamp,
-			cwd: resolvedTargetCwd,
-			parentSession: resolvedSourcePath,
-		};
-		const temporary = `${newSessionFile}.${randomUUID()}.tmp`;
-		const fd = openSync(temporary, "wx", 0o600);
 		try {
+			const sourceHeader = scan.records[0]?.value;
+			if (!sourceHeader || sourceHeader.type !== "session" || typeof sourceHeader.id !== "string")
+				throw new Error(`Cannot fork: source session file is empty or invalid: ${resolvedSourcePath}`);
+			assertSessionConversionNotRequired(scan.records.map((record) => record.value));
+			const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd);
+			if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+			if (options?.id !== undefined) assertValidSessionId(options.id);
+			const newSessionId = options?.id ?? createSessionId();
+			const timestamp = new Date().toISOString();
+			const newSessionFile = join(dir, `${timestamp.replace(/[:.]/g, "-")}_${newSessionId}.jsonl`);
+			const newHeader: SessionHeader = {
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: newSessionId,
+				timestamp,
+				cwd: resolvedTargetCwd,
+				parentSession: resolvedSourcePath,
+			};
+			const temporary = `${newSessionFile}.${randomUUID()}.tmp`;
+			const fd = openSync(temporary, "wx", 0o600);
 			try {
-				writeFileSync(fd, `${JSON.stringify(newHeader)}\n`);
-				if (((sourceHeader.version as number) ?? 1) < CURRENT_SESSION_VERSION) {
-					const migration = SessionManager.inMemory(resolvedTargetCwd);
-					migration._loadJournal(scan);
-					migration._migrateIndexedJournal();
-					for (const entry of migration.getEntries()) writeSessionEntry(fd, entry);
-				} else {
-					for (const record of scan.records)
-						if (record.value.type !== "session") copyJournalRecord(scan.source, record, fd);
+				try {
+					writeFileSync(fd, `${JSON.stringify(newHeader)}\n`);
+					if (((sourceHeader.version as number) ?? 1) < CURRENT_SESSION_VERSION) {
+						const migration = SessionManager.inMemory(resolvedTargetCwd);
+						migration._loadJournal(scan);
+						migration._migrateIndexedJournal();
+						for (const entry of migration.getEntries()) writeSessionEntry(fd, entry);
+					} else {
+						for (const record of scan.records)
+							if (record.value.type !== "session") copyJournalRecord(scan.source, record, fd);
+					}
+					fsyncSync(fd);
+				} finally {
+					closeSync(fd);
 				}
-				fsyncSync(fd);
+				publishLocalFileExclusiveSync(temporary, newSessionFile);
 			} finally {
-				closeSync(fd);
+				rmSync(temporary, { force: true });
 			}
-			publishLocalFileExclusiveSync(temporary, newSessionFile);
+			return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
 		} finally {
-			rmSync(temporary, { force: true });
 			closeJournalSource(scan.source);
 		}
-		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
 	}
 
 	/**

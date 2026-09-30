@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -48,7 +48,7 @@ describe("session selector search", () => {
 		}
 	}, 70_000);
 
-	it("retains complete explicit values and cross-message picker search beyond list previews", async () => {
+	it("retains cached complete snapshots and cross-message picker search beyond list previews", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "pi-session-search-"));
 		try {
 			const manager = SessionManager.create(directory, directory);
@@ -63,12 +63,16 @@ describe("session selector search", () => {
 			expect(sessions[0]!.firstMessagePreview).toBe(first.slice(0, 256));
 			expect(sessions[0]!.firstMessage).toBe(first);
 			expect(sessions[0]!.allMessagesText).toBe(`${first} ${second}`);
+			const archive = join(directory, "archived.jsonl");
+			renameSync(source, archive);
+			expect(sessions[0]!.firstMessage).toBe(first);
+			expect(sessions[0]!.allMessagesText).toBe(`${first} ${second}`);
 			for (const query of ["reachable-needle", '"alpha beta"', "re:alpha\\s+beta"]) {
 				expect(filterAndSortSessions(sessions, query, "recent").map((session) => session.id)).toEqual([
 					manager.getSessionId(),
 				]);
 			}
-			expect(readFileSync(source)).toEqual(before);
+			expect(readFileSync(archive)).toEqual(before);
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}

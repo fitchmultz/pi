@@ -383,20 +383,17 @@ class SessionList implements Component, Focusable {
 			this.filteredSessions = flattenSessionTree(roots);
 		} else {
 			// Other modes or with search: flat list
-			try {
-				const filtered = filterAndSortSessions(nameFiltered, query, this.sortMode, "all");
-				this.filteredSessions = filtered.map((session) => ({
-					session,
-					depth: 0,
-					isLast: true,
-					ancestorContinues: [],
-				}));
-			} catch (error) {
-				this.filteredSessions = [];
+			const filtered = filterAndSortSessions(nameFiltered, query, this.sortMode, "all", (session, error) => {
 				this.onError?.(
-					`Cannot search full session text: ${error instanceof Error ? error.message : String(error)}`,
+					`Cannot search full session text: ${error instanceof Error ? error.message : String(error)} (${session.path})`,
 				);
-			}
+			});
+			this.filteredSessions = filtered.map((session) => ({
+				session,
+				depth: 0,
+				isLast: true,
+				ancestorContinues: [],
+			}));
 		}
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredSessions.length - 1));
 	}

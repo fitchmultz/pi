@@ -1,6 +1,8 @@
+import { execFileSync } from "node:child_process";
 import { constants as bufferConstants } from "buffer";
 import {
 	appendFileSync,
+	chmodSync,
 	closeSync,
 	existsSync,
 	mkdirSync,
@@ -23,6 +25,81 @@ import {
 import { assistantMsg, readSessionFileRoles, userMsg } from "../utilities.ts";
 
 const HEADER_SCAN_LIMIT_BYTES = 1024 * 1024;
+
+describe("SessionManager scan descriptor ownership", () => {
+	function verifyLowDescriptorLimit(scenario: string): void {
+		const directory = mkdtempSync(join(tmpdir(), "pi-session-descriptors-"));
+		try {
+			const output = execFileSync(
+				"bash",
+				[
+					"-c",
+					'ulimit -n 128; exec "$@"',
+					"pi-session-descriptors",
+					process.execPath,
+					"--import",
+					new URL("../../src/experimental/source-resolver.ts", import.meta.url).href,
+					new URL("../fixtures/session-descriptor-ownership.ts", import.meta.url).pathname,
+					directory,
+					scenario,
+				],
+				{ encoding: "utf8", timeout: 30_000 },
+			);
+			expect(JSON.parse(output)).toEqual({
+				scenario,
+				completed: 320,
+				sourceBytesUnchanged: true,
+				lazyBodiesUsable: true,
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	}
+
+	it.each([
+		"resume-invalid-header",
+		"resume-malformed",
+		"resume-conversion",
+		"resume-empty",
+		"fork-invalid-header",
+		"fork-malformed",
+		"fork-conversion",
+		"fork-directory",
+		"fork-options",
+		"fork-stage",
+	])("keeps scans bounded across repeated %s operations", verifyLowDescriptorLimit);
+
+	it.skipIf(process.getuid?.() === 0)("closes the scan after refused empty-file initialization", () => {
+		verifyLowDescriptorLimit("open-empty-readonly");
+	});
+
+	it.skipIf(process.getuid?.() === 0)("retains installed lazy bodies after migration publication fails", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-session-migration-source-"));
+		const source = join(directory, "legacy.jsonl");
+		const data = { text: `${"full body ".repeat(100)}end` };
+		const original = `${[
+			{ type: "session", version: 2, id: "legacy", cwd: directory, timestamp: new Date(0).toISOString() },
+			{ type: "custom", id: "kept", parentId: null, customType: "note", data },
+		]
+			.map((entry) => JSON.stringify(entry))
+			.join("\n")}\n`;
+		writeFileSync(source, original);
+		chmodSync(source, 0o400);
+		try {
+			const manager = SessionManager.create(directory, directory);
+			manager.appendMessage({ role: "user", content: "active session", timestamp: 1 });
+			expect(() => manager.setSessionFile(source)).toThrow(/EACCES/);
+			expect(manager.getEntry("kept")).toMatchObject({ data });
+			expect(readFileSync(source, "utf8")).toBe(original);
+			chmodSync(source, 0o600);
+			manager.flush();
+			expect(SessionManager.open(source).getEntry("kept")).toMatchObject({ data });
+		} finally {
+			chmodSync(source, 0o600);
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("SessionManager.open", () => {
 	let tempDir: string;
