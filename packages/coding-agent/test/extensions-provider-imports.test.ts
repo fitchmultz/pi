@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, test } from "vitest";
 
 test.for(["source", "modular", "bundled"])(
-	"loads standalone provider imports through the %s CLI",
+	"loads models and standalone provider imports through the %s CLI",
 	(mode, { onTestFinished }) => {
 		const root = mkdtempSync(join(tmpdir(), "pi-provider-imports-"));
 		onTestFinished(() => rmSync(root, { recursive: true, force: true }));
@@ -32,14 +32,24 @@ for (const key of Object.keys(expected${index})) {
 		writeFileSync(
 			extension,
 			`import assert from "node:assert/strict";
-import { fauxProvider as rootFauxProvider } from "@earendil-works/pi-ai";
+import { createModels as rootCreateModels, fauxProvider as rootFauxProvider } from "@earendil-works/pi-ai";
+import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 ${imports.join("\n")}
-export default function(pi) {
+export default async function(pi) {
   ${checks.join("\n")}
   assert.equal(fauxProvider, rootFauxProvider);
+  assert.equal(createModels, rootCreateModels);
+  assert.equal(typeof createProvider, "function");
+  const models = createModels();
+  assert.deepEqual(models.getModels(), []);
+  assert.deepEqual(models.getProviders(), []);
   const faux = fauxProvider({ api: "provider-imports", provider: "provider-imports" });
-  faux.setResponses([fauxAssistantMessage("all provider imports passed")]);
+  models.setProvider(faux.provider);
+  faux.setResponses([fauxAssistantMessage("models subpath passed"), fauxAssistantMessage("all provider imports passed")]);
+  const response = await models.completeSimple(faux.getModel(), { messages: [] });
+  assert.equal(response.stopReason, "stop");
+  assert.deepEqual(response.content, [{ type: "text", text: "models subpath passed" }]);
   pi.registerProvider(faux.provider);
 }
 `,
@@ -75,7 +85,16 @@ export default function(pi) {
 			],
 			{
 				cwd: root,
-				env: { PATH: process.env.PATH, HOME: root, PI_CODING_AGENT_DIR: root, PI_OFFLINE: "1", PI_TELEMETRY: "0" },
+				env: {
+					PATH: process.env.PATH,
+					HOME: root,
+					TMPDIR: root,
+					XDG_CACHE_HOME: root,
+					JITI_FS_CACHE: "0",
+					PI_CODING_AGENT_DIR: root,
+					PI_OFFLINE: "1",
+					PI_TELEMETRY: "0",
+				},
 				encoding: "utf8",
 				timeout: 30_000,
 			},

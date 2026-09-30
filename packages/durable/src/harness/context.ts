@@ -64,6 +64,43 @@ export async function deriveContext(
 ): Promise<ContextView> {
 	if (bounds === undefined) return { head: undefined, entries: [], messages: [] };
 	const head = bounds.head;
+	const range = await scanRange(storage, conversationId, bounds, context);
+	const edits = new Map<EntryId, ContextEdit>();
+	for (const entry of range) for (const edit of entry.edits ?? []) edits.set(edit.target, edit);
+
+	const entries = selectActive(head, range);
+	const messages: Message[] = [];
+	for (const entry of entries) {
+		const edit = edits.get(entry.id);
+		if (edit?.action === "omit") continue;
+		const contributed = edit?.action === "replace" ? edit.messages : (entry.model ?? []);
+		for (const message of contributed) {
+			if (message.role === "assistant" && EXCLUDED_STOP_REASONS.has(message.stopReason)) continue;
+			messages.push(message);
+		}
+	}
+	return { head, entries, messages: orderToolResults(messages) };
+}
+
+/** The raw active entries within captured bounds, without deriving model context. */
+export async function activeEntries(
+	storage: Storage,
+	conversationId: ConversationId,
+	bounds: ContextBounds | undefined,
+	context: Context,
+): Promise<EntryRecord[]> {
+	if (bounds === undefined) return [];
+	return selectActive(bounds.head, await scanRange(storage, conversationId, bounds, context));
+}
+
+/** Visible entries from the head marker's head, or transcript start, through the tail, oldest first. */
+async function scanRange(
+	storage: Storage,
+	conversationId: ConversationId,
+	bounds: ContextBounds,
+	context: Context,
+): Promise<EntryRecord[]> {
+	const head = bounds.head;
 	const range: EntryRecord[] = [];
 	let cursor: Cursor | undefined;
 	do {
@@ -78,23 +115,12 @@ export async function deriveContext(
 		range.push(...page.items);
 		cursor = page.next;
 	} while (cursor !== undefined);
-	range.reverse();
+	return range.reverse();
+}
 
-	const edits = new Map<EntryId, ContextEdit>();
-	for (const entry of range) for (const edit of entry.edits ?? []) edits.set(edit.target, edit);
-
-	const entries = head === undefined ? range : [head, ...range.filter((entry) => entry.head === undefined)];
-	const messages: Message[] = [];
-	for (const entry of entries) {
-		const edit = edits.get(entry.id);
-		if (edit?.action === "omit") continue;
-		const contributed = edit?.action === "replace" ? edit.messages : (entry.model ?? []);
-		for (const message of contributed) {
-			if (message.role === "assistant" && EXCLUDED_STOP_REASONS.has(message.stopReason)) continue;
-			messages.push(message);
-		}
-	}
-	return { head, entries, messages: orderToolResults(messages) };
+/** The head marker followed by the range's non-head entries, or the whole range without a marker. */
+function selectActive(head: ContextBounds["head"], range: EntryRecord[]): EntryRecord[] {
+	return head === undefined ? range : [head, ...range.filter((entry) => entry.head === undefined)];
 }
 
 /**

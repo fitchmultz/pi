@@ -1,6 +1,7 @@
 import * as bundledPiAgentCore from "@earendil-works/pi-agent-core";
 import * as bundledPiAgentNode from "@earendil-works/pi-agent-core/node";
 import * as bundledPiAiCompat from "@earendil-works/pi-ai/compat";
+import * as bundledPiAiModels from "@earendil-works/pi-ai/models";
 import * as bundledPiAiOauth from "@earendil-works/pi-ai/oauth";
 import * as bundledPiTui from "@earendil-works/pi-tui";
 import * as bundledTypebox from "typebox";
@@ -27,6 +28,7 @@ export const VIRTUAL_MODULES: Record<string, unknown> = {
 	// global API keep working at runtime until compat is removed.
 	"@earendil-works/pi-ai": bundledPiAiCompat,
 	"@earendil-works/pi-ai/compat": bundledPiAiCompat,
+	"@earendil-works/pi-ai/models": bundledPiAiModels,
 	"@earendil-works/pi-ai/oauth": bundledPiAiOauth,
 	"@earendil-works/pi-coding-agent": bundledPiCodingAgent,
 	"@mariozechner/pi-agent-core": bundledPiAgentCore,

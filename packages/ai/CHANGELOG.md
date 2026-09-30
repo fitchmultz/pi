@@ -8,6 +8,10 @@
 - Fixed OpenAI Codex WebSocket continuation baselines changing after later in-memory edits.
 - Fixed Anthropic strict schema requests exceeding per-request limits by admitting optional strict tools within those limits.
 
+### Added
+
+- Added the lightweight `@earendil-works/pi-ai/models` entry point for model collections and provider construction without loading TypeBox, built-in catalogs, or provider SDKs.
+
 ## [0.99.1] - 2026-09-29
 
 ### Added

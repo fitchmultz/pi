@@ -9,6 +9,7 @@ export function wrapToolDefinition<TDetails = unknown>(
 	definition: ToolDefinition<any, TDetails>,
 	ctxFactory?: ToolContextFactory,
 ): AgentTool<any, TDetails> {
+	const execute = definition.execute;
 	return {
 		name: definition.name,
 		label: definition.label,
@@ -19,7 +20,8 @@ export function wrapToolDefinition<TDetails = unknown>(
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
 		execute: (toolCallId, params, signal, onUpdate, ctx?: ExtensionToolContext) =>
-			definition.execute(
+			execute.call(
+				definition,
 				toolCallId,
 				params,
 				signal,
@@ -37,22 +39,54 @@ export function wrapToolDefinitions(
 	return definitions.map((definition) => wrapToolDefinition(definition, ctxFactory));
 }
 
+const agentToolDefinitions = new WeakMap<AgentTool, ToolDefinition>();
+
 /**
- * Synthesize a minimal ToolDefinition from an AgentTool.
+ * Adapt an AgentTool's four-argument executor without detaching its live execution fields.
  *
  * This keeps AgentSession's internal registry definition-first even when a caller
  * provides plain AgentTool overrides that do not include prompt metadata or renderers.
  */
 export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDefinition<any, unknown> {
-	return {
-		name: tool.name,
-		label: tool.label,
-		description: tool.description,
-		parameters: tool.parameters as any,
-		outputSchema: tool.outputSchema,
-		constrainedSampling: tool.constrainedSampling,
-		prepareArguments: tool.prepareArguments,
-		executionMode: tool.executionMode,
-		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
+	const cached = agentToolDefinitions.get(tool);
+	if (cached) return cached;
+	let execution: { source: AgentTool["execute"]; adapted: ToolDefinition["execute"] } | undefined;
+	const definition: ToolDefinition = {
+		get name() {
+			return tool.name;
+		},
+		get label() {
+			return tool.label;
+		},
+		get description() {
+			return tool.description;
+		},
+		get parameters() {
+			return tool.parameters;
+		},
+		get outputSchema() {
+			return tool.outputSchema;
+		},
+		get constrainedSampling() {
+			return tool.constrainedSampling;
+		},
+		get prepareArguments() {
+			return tool.prepareArguments;
+		},
+		get executionMode() {
+			return tool.executionMode;
+		},
+		get execute() {
+			const execute = tool.execute;
+			if (!execution || execution.source !== execute) {
+				execution = {
+					source: execute,
+					adapted: (id, params, signal, onUpdate) => execute.call(tool, id, params, signal, onUpdate),
+				};
+			}
+			return execution.adapted;
+		},
 	};
+	agentToolDefinitions.set(tool, definition);
+	return definition;
 }

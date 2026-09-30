@@ -147,7 +147,7 @@ function registerNativeReloadHook(): void {
 	nodeModule.registerHooks({
 		resolve(specifier, context, nextResolve) {
 			const resolved = nextResolve(specifier, context);
-			if (!context.conditions.includes("import") || !resolved.url.startsWith("file:")) return resolved;
+			if (!Array.from(context.conditions).includes("import") || !resolved.url.startsWith("file:")) return resolved;
 			const url = new URL(resolved.url);
 			const entry = nativeExtensionImport.getStore();
 			let version = entry?.entry === resolved.url ? entry.version : undefined;
