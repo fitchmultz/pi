@@ -7,9 +7,7 @@ The native TUI reports `sleepReady: true` for a fully settled, resumable working
 ## SDK
 
 ```typescript
-import { writeSessionCheckpoint } from "@earendil-works/pi-coding-agent";
-
-const hold = await session.acquireCheckpoint({
+const hold = await session.acquireCheckpointFile("/private/checkpoint.json", {
   boundary: "turn", // or "settled" (default)
   signal: AbortSignal.timeout(30_000),
   quiesce: () => {
@@ -19,13 +17,17 @@ const hold = await session.acquireCheckpoint({
   },
 });
 try {
-  writeSessionCheckpoint("/private/checkpoint.json", hold.checkpoint);
+  console.log(hold.checkpoint.path);
   // Coordinate other writers and seal a filesystem archive while held.
   // Do not continue capture if hold.signal becomes aborted.
 } finally {
   hold.release();
 }
 ```
+
+`acquireCheckpointFile()` writes the complete self-contained v1 artifact while holding the same native barrier as `acquireCheckpoint()`. It writes entries individually, validates a private stage, then atomically publishes the file. The destination must be absolute with an existing parent. Native journals, their filesystem aliases, symlinks, and unrelated existing files are refused. Cancellation or serialization/I/O failure retains the previous artifact and releases the hold. After publication, release and later session changes do not alter those bytes.
+
+`acquireCheckpoint()` remains available when the host explicitly needs a complete object. Its entries and queue values are detached through native JSON normalization individually; it requires heap for all requested values. `writeSessionCheckpoint(path, checkpoint)` writes that object record-wise. Both object and file APIs retain native circular-value, BigInt, and throwing `toJSON` errors. A full individual entry or queued value must fit its consumer; neither API silently truncates it.
 
 Acquisition waits for a completed turn, or final settlement after retries, compaction, and queued continuations. A `turn` request made at qualified settlement returns the actual `boundary: "settled"`; it does not force an intermediate receipt. Active-turn holds remain `boundary: "turn"` and `sleepReady: false`. Explicit `settled` requests wait for settlement.
 
@@ -52,14 +54,13 @@ Version 1 JSON contains:
 The artifact is private (0600), atomically replaced, and contains sensitive conversation data. The filesystem archive must also preserve working files, Git, native settings, credentials, extension files, and referenced resources. Serialization does not preserve live tool/dialog/command callbacks, arbitrary memory, shell processes, or shutdown-only extension state. Native settings/authentication and extension files remain in their original locations and must be included in the archive. A selected provider's runtime-only API key keeps sleep readiness false; persist authentication through native login first.
 
 ```typescript
-import { createAgentSession, readSessionCheckpoint } from "@earendil-works/pi-coding-agent";
+import { createAgentSession } from "@earendil-works/pi-coding-agent";
 
-const checkpoint = readSessionCheckpoint("/private/checkpoint.json");
-const { session } = await createAgentSession({ checkpoint });
+const { session } = await createAgentSession({ checkpointFile: "/private/checkpoint.json" });
 await session.bindExtensions({}); // Or bind your host's normal UI/actions; native modes do this themselves.
 ```
 
-Restore applies the exact branch (including null) **before** constructing context. It preserves the conversation ID and requires the original filesystem layout and model/tools. An existing journal that differs from the artifact is rejected, never overwritten. A missing journal is materialized from the artifact, including pre-first-assistant state. Restore the matching filesystem archive first; never use a stale checkpoint over newer work.
+File restore validates the complete artifact and stages its entries as native JSONL without decoding a session-wide string. It applies the exact branch (including null) **before** constructing context. It preserves the conversation ID and requires the original filesystem layout and model/tools. An existing journal is compared per normalized record; a difference is rejected before any mutation. A missing journal is exclusively published only after complete validation, including pre-first-assistant state. The artifact remains usable when the original journal is unavailable. Restore the matching filesystem archive first; never use a stale checkpoint over newer work.
 
 An absent `selection.model` explicitly preserves no selected model, including pre-login state. Restore does not substitute a catalog default even if models are now available. Real selected models and scoped models must still exist.
 
@@ -67,7 +68,9 @@ Ordinary `session_start` and extension registration can reconstruct dynamic tool
 
 Queues are installed once without rerunning input handlers, prompt expansion, model calls, or tools. Startup waits for explicit user input; this avoids silently replaying uncertain external effects after unexpected failure. Steering/follow-up user texts appear in the native pending display; custom/next-turn payloads remain in native queues. `getCheckpointQueues()` provides a non-consuming snapshot; `restoreCheckpointQueues()` rejects duplicate installation or nonempty/busy destinations. Legacy journals requiring conversion cannot be loaded as checkpoint entries; conversion does not itself restore accepted live queues.
 
-Lower-level hosts can use `openSessionCheckpoint()` before session creation and `restoreSessionCheckpoint()` afterward. Prefer the `checkpoint` factory option to avoid ordinary new-session metadata changing a null leaf.
+`checkpointFile` and `checkpoint` are mutually exclusive factory options. `readSessionCheckpoint(path)` still returns the complete object, assembled per entry rather than from one artifact-sized string; it requires heap for that full object. Ordinary SDK/CLI file restore does not call it.
+
+Lower-level hosts can use `openSessionCheckpointFile(path)` to obtain `{ checkpoint, sessionManager }`, or `openSessionCheckpoint(checkpoint)` for an explicit object, before session creation and `restoreSessionCheckpoint()` afterward. Prefer the factory options to avoid ordinary new-session metadata changing a null leaf.
 
 ## Supported extension persistence
 
@@ -143,7 +146,7 @@ The path must be absolute with an existing parent directory. At CLI startup Pi l
 
 Scope `PI_CHECKPOINT_*` variables to the primary launcher, not unrelated shells or nested Pi invocations: inherited options can revoke exit proof or collide with the primary control socket.
 
-On deliberate user `/quit`, Ctrl-D, or double Ctrl-C, Pi stops terminal ingress, awaits ordinary `session_shutdown` handlers, cancels and joins remaining native work, joins native command/UI callback cleanup, flushes native auth/catalog/settings persistence, and captures the complete final native selection/entries/accepted remaining queues/scope. It uses the same v1 snapshot and atomic 0600 writer as held checkpoints. Native cancellation may move cancellation-persistent customs into entries; the artifact records the actual final state, not the pre-exit queue. No continuation or tool/model replay is invented.
+On deliberate user `/quit`, Ctrl-D, or double Ctrl-C, Pi stops terminal ingress, awaits ordinary `session_shutdown` handlers, cancels and joins remaining native work, joins native command/UI callback cleanup, flushes native auth/catalog/settings persistence, and captures the complete final native selection/entries/accepted remaining queues/scope. It uses the same record-wise v1 file capture as held checkpoints, retaining a private candidate until final cleanup and validity checks succeed. Native cancellation may move cancellation-persistent customs into entries; the artifact records the actual final state, not the pre-exit queue. No continuation or tool/model replay is invented.
 
 Actual shutdown persistence is authoritative here: shutdown-only extensions can persist through their usual `session_shutdown` handlers, rather than needing the live-sleep barrier. As with ordinary extension lifecycle ownership, detached arbitrary work must be cancelled/joined and state persisted by the extension; returning from shutdown does not serialize JavaScript memory. Live native question/command callbacks cannot qualify until they actually finish or cancel. Unpersisted drafts/custom UI/mode-held input fail closed rather than being silently omitted.
 

@@ -2,6 +2,8 @@
 
 Sessions are stored as JSONL (JSON Lines) files. Each nonempty line is a JSON object with a `type` field; readers should ignore blank separator lines. Session entries form a tree structure via `id`/`parentId` fields, enabling in-place branching without creating new files.
 
+Pi indexes structural metadata and byte ranges from a captured file descriptor and end offset. Historical payloads remain in the journal and load on demand. The index is derived; it is never a second session authority. Live readers commit newline-terminated records only; sealed readers can inspect a valid unterminated final record. Strict accounting and conversion reject malformed records, including malformed ignored values. Read-only inspection never repairs a source; opening a writable manager may migrate old versions or terminate a tail.
+
 For programmatic creation, persistence, and tree navigation, see the [`SessionManager` API](sdk.md#sessionmanager-api).
 
 
@@ -228,7 +230,7 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 
 ## Persistence failures
 
-Appends accept entries in memory before journal I/O. An I/O error retains the entry, ID, parent, leaf, revision, and indexes; do not append again to retry saving. `flush()` and later appends retry missing entries without replacing the journal, preserving entries saved by other writers. An incomplete final line is terminated and skipped during parsing; entries already saved are not duplicated. Errors propagate until saving succeeds.
+Appends accept entries in memory before journal I/O. An I/O error retains the entry, ID, parent, leaf, revision, and indexes; do not append again to retry saving. `flush()` and later appends retry missing entries without replacing the journal, preserving entries saved by other writers. An incomplete final line is terminated and skipped during parsing; entries already saved are not duplicated. A saved ID with different content refuses the retry and retains the accepted entry. Errors propagate until saving succeeds.
 
 Full rewrites stage a complete sibling temporary file and rename only after writes/close succeed. Journals opened through symlinks replace the resolved target while preserving the alias and permission mode. Failed staging preserves old bytes and removes temporary output. Full rewrites need a writable journal and parent; new journals retain exclusive collision protection.
 
@@ -242,48 +244,25 @@ Use `pi convert-session SOURCE.jsonl NEW_PATH.jsonl` for a settled v3 legacy for
 
 Conversion refuses unsafe or uncertain work: unfinished or deferred responses, missing/mismatched tool results, unsettled steering, duplicate/colliding tool identities, unsupported causal receipt order or boundary/edit reconstruction, malformed references and unsupported entry types. Native response snapshots are coalesced only when a unique final response exists on every affected branch; legacy context windows become compaction boundaries where safe. Some removed metadata is retained in custom `legacy-conversion-*` entries for audit, not model input. Do not replay refused work. This copy conversion is separate from live [working-session checkpoints](checkpoint.md), which preserve exact accepted queues and selection.
 
-## Parsing Example
+## Metadata inspection example
+
+Metadata inspection avoids loading unrelated payloads. Use the readonly manager supplied by an extension context or SDK host:
 
 ```typescript
-import { readFileSync } from "fs";
+import type { ReadonlySessionManager } from "@earendil-works/pi-coding-agent";
 
-const lines = readFileSync("session.jsonl", "utf8").trim().split("\n");
-
-for (const line of lines) {
-  if (!line.trim()) continue;
-  const entry = JSON.parse(line);
-
-  switch (entry.type) {
-    case "session":
-      console.log(`Session v${entry.version ?? 1}: ${entry.id}`);
-      break;
-    case "message":
-      console.log(`[${entry.id}] ${entry.message.role}: ${JSON.stringify(entry.message.content)}`);
-      break;
-    case "compaction":
-      console.log(`[${entry.id}] Compaction: ${entry.tokensBefore} tokens summarized`);
-      break;
-    case "branch_summary":
-      console.log(`[${entry.id}] Branch from ${entry.fromId}`);
-      break;
-    case "usage":
-      console.log(`[${entry.id}] Usage (${entry.kind}): ${entry.usage.totalTokens} tokens`);
-      break;
-    case "custom":
-      console.log(`[${entry.id}] Custom (${entry.customType}): ${JSON.stringify(entry.data)}`);
-      break;
-    case "custom_message":
-      console.log(`[${entry.id}] Extension message (${entry.customType}): ${entry.content}`);
-      break;
-    case "label":
-      console.log(`[${entry.id}] Label "${entry.label}" on ${entry.targetId}`);
-      break;
-    case "model_change":
-      console.log(`[${entry.id}] Model: ${entry.provider}/${entry.modelId}`);
-      break;
-    case "thinking_level_change":
-      console.log(`[${entry.id}] Thinking: ${entry.thinkingLevel}`);
-      break;
+function inspectSession(manager: ReadonlySessionManager) {
+  for (const entry of manager.iterateEntryMetadata()) {
+    console.log(entry.id, entry.parentId, entry.type, entry.preview);
+    if (entry.type === "usage") {
+      console.log(entry.provider, entry.model, entry.usage.totalTokens);
+    }
   }
+
+  // Load one explicitly requested complete entry, not the whole journal.
+  const selected = manager.getLeafId();
+  if (selected !== null) return manager.getEntry(selected);
 }
 ```
+
+`getEntry()` and shallow entry collections preserve enumerable optional fields and complete serialization. Reading a payload or serializing an entry requests its full value; that individual value must fit the caller's memory.

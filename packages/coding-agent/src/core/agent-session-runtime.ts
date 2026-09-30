@@ -4,7 +4,7 @@ import { raceWithAbortSignal } from "../utils/abort.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
-import type { ShutdownCheckpoint } from "./checkpoint.ts";
+import type { ShutdownCheckpoint, ShutdownCheckpointFile } from "./checkpoint.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -459,12 +459,34 @@ export class AgentSessionRuntime {
 		signal: AbortSignal;
 		waitForHost: () => Promise<void>;
 	}): Promise<ShutdownCheckpoint> {
+		return this._disposeWithCheckpoint(options, () => this.session.captureShutdownCheckpoint());
+	}
+
+	async disposeWithCheckpointFile(
+		path: string,
+		options: {
+			signal: AbortSignal;
+			waitForHost: () => Promise<void>;
+		},
+	): Promise<ShutdownCheckpointFile> {
+		return this._disposeWithCheckpoint(options, () =>
+			this.session.captureShutdownCheckpointFile(path, options.signal),
+		);
+	}
+
+	private async _disposeWithCheckpoint<T extends ShutdownCheckpoint | ShutdownCheckpointFile>(
+		options: {
+			signal: AbortSignal;
+			waitForHost: () => Promise<void>;
+		},
+		capture: () => Promise<T>,
+	): Promise<T> {
 		this.session.beginShutdown();
 		const errors: string[] = [];
 		const unsubscribe = this.session.extensionRunner.onError((error) =>
 			errors.push(`${error.extensionPath}: ${error.error}`),
 		);
-		let checkpoint: ShutdownCheckpoint | undefined;
+		let checkpoint: T | undefined;
 		let disposed = false;
 		try {
 			const result = await raceWithAbortSignal(
@@ -482,7 +504,7 @@ export class AgentSessionRuntime {
 					// UI teardown can initiate native cleanup (for example pi.exec from a component disposer).
 					await this.session.finishShutdownForCheckpoint();
 					options.signal.throwIfAborted();
-					const candidate = await this.session.captureShutdownCheckpoint();
+					const candidate = await capture();
 					checkpoint = candidate;
 					try {
 						options.signal.throwIfAborted();

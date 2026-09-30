@@ -8,9 +8,10 @@
 
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
+import { writeJsonRecordToStdout } from "../core/json-record-writer.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
-import { toJsonEvent } from "./json-event.ts";
+import { jsonEventLayout, toJsonEvent } from "./json-event.ts";
 
 /**
  * Options for print mode.
@@ -111,7 +112,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
 			if (mode === "json") {
-				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
+				writeJsonRecordToStdout(toJsonEvent(event), jsonEventLayout);
 			}
 		});
 		unsubscribeBackpressure =
@@ -126,7 +127,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		if (mode === "json") {
 			const header = session.sessionManager.getHeader();
 			if (header) {
-				writeRawStdout(`${JSON.stringify(header)}\n`);
+				writeJsonRecordToStdout(header, jsonEventLayout);
 			}
 		}
 
@@ -152,17 +153,26 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			const activeLastMessage = session.state.messages.at(-1);
 			// Compaction and trailing context can hide the answer, but a newer user or tool
 			// message must prevent falling back to an earlier answer on the selected branch.
-			const lastMessage =
-				activeLastMessage?.role === "assistant"
-					? activeLastMessage
-					: session.sessionManager
-							.getBranch()
-							.flatMap((entry) => (entry.type === "message" ? [entry.message] : []))
-							.findLast(
-								(message) =>
-									message.role === "assistant" || message.role === "user" || message.role === "toolResult",
-							);
-			const assistantMsg = lastMessage?.role === "assistant" ? lastMessage : undefined;
+			let assistantMsg = activeLastMessage?.role === "assistant" ? activeLastMessage : undefined;
+			if (!assistantMsg) {
+				for (let id = session.sessionManager.getLeafId(); id; ) {
+					const metadata = session.sessionManager.getEntryMetadata(id);
+					if (!metadata) break;
+					if (metadata.type === "message") {
+						const { role, stopReason } = metadata.message;
+						if (role === "assistant" || role === "user" || role === "toolResult") {
+							if (role === "assistant" && stopReason !== "toolUse") {
+								const entry = session.sessionManager.getEntry(id);
+								if (entry?.type === "message" && entry.message.role === "assistant") {
+									assistantMsg = entry.message;
+								}
+							}
+							break;
+						}
+					}
+					id = metadata.parentId;
+				}
+			}
 
 			if (assistantMsg && assistantMsg.stopReason !== "toolUse") {
 				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {

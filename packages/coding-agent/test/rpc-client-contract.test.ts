@@ -173,4 +173,24 @@ describe("RpcClient response contract", () => {
 		await waiting;
 		expect(Reflect.get(client, "pendingRequests").size).toBe(0);
 	});
+
+	it("retains malformed/truncated pipe diagnostics while delivering later valid records", async () => {
+		const client = await startClient(`
+			process.stdout.write('not-json\\n');
+			respond();
+			if (command.name === "truncate") process.stdout.end('{"unfinished":');
+		`);
+		await client.setSessionName("continue");
+		expect(client.getStderr()).toContain("Invalid JSONL");
+		await client.setSessionName("truncate");
+		await vi.waitFor(() => expect(client.getStderr()).toContain("Parser has expected a value"));
+	});
+
+	it("rejects pending commands on a stdout transport error", async () => {
+		const client = await startClient("");
+		const waiting = expect(client.waitForIdle()).rejects.toThrow("Agent process stdout error: pipe failed");
+		const child: ChildProcess = Reflect.get(client, "process");
+		child.stdout!.emit("error", new Error("pipe failed"));
+		await waiting;
+	});
 });

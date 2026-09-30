@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import { describe, expect, test } from "vitest";
-import { attachJsonlLineReader, serializeJsonLine } from "../src/modes/rpc/jsonl.ts";
+import { attachJsonlLineReader, attachJsonlRecordReader, serializeJsonLine } from "../src/modes/rpc/jsonl.ts";
 
 describe("RPC JSONL framing", () => {
 	test("serializes strict JSONL records without escaping Unicode separators", () => {
@@ -61,5 +61,47 @@ describe("RPC JSONL framing", () => {
 		await done;
 
 		expect(lines).toEqual(['{"a":1}']);
+	});
+
+	test("receives token-framed records across one-byte Unicode splits with native duplicate-key semantics", async () => {
+		const text = '{"data":{"old":1},"data":{"text":"🙂a\\nb\u2028c\u2029"},"__proto__":{"kept":true}}\r\n{"last":2}';
+		const records: Record<string, unknown>[] = [];
+		const errors: Error[] = [];
+		const stream = Readable.from([...Buffer.from(text)].map((byte) => Buffer.from([byte])));
+		attachJsonlRecordReader(
+			stream,
+			(record) => records.push(record),
+			(error) => errors.push(error),
+		);
+		await new Promise<void>((resolve) => stream.on("end", resolve));
+		expect(records).toEqual(text.split("\r\n").map((line) => JSON.parse(line)));
+		expect(Object.hasOwn(records[0], "__proto__")).toBe(true);
+		expect(errors).toEqual([]);
+	});
+
+	test("reports malformed, unexpected BOM, invalid UTF-8 and truncated records and resumes at the next LF", async () => {
+		const records: Record<string, unknown>[] = [];
+		const errors: Error[] = [];
+		const stream = Readable.from([
+			Buffer.from(' \r\n{"ok":1}\n{"a":}\n{}{}\n[]\n'),
+			Buffer.from([123, 34, 120, 34, 58, 34, 255, 34, 125, 10]),
+			Buffer.from('{"ok":2}\n\ufeff{"unexpected":"bom"}\n{"unfinished":'),
+		]);
+		attachJsonlRecordReader(
+			stream,
+			(record) => records.push(record),
+			(error) => errors.push(error),
+		);
+		await new Promise<void>((resolve) => stream.on("end", resolve));
+		expect(records).toEqual([{ ok: 1 }, { ok: 2 }]);
+		expect(errors).toHaveLength(6);
+		expect(errors.map((error) => error.message)).toEqual([
+			expect.stringContaining("line 3"),
+			expect.stringContaining("line 4"),
+			expect.stringContaining("line 5"),
+			expect.stringContaining("line 6"),
+			expect.stringContaining("line 8"),
+			expect.stringContaining("line 9"),
+		]);
 	});
 });

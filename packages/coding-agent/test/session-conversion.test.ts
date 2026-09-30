@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import {
+import fs, {
 	existsSync,
 	linkSync,
 	lstatSync,
@@ -11,10 +11,11 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { assertSessionConversionNotRequired, convertSessionFile } from "../src/core/session-conversion.ts";
 import { buildSessionContext, type SessionEntry } from "../src/core/session-manager.ts";
 
@@ -118,6 +119,8 @@ function convertedEntries(path: string): SessionEntry[] {
 		.map((line) => JSON.parse(line) as SessionEntry);
 }
 afterEach(() => {
+	vi.restoreAllMocks();
+	syncBuiltinESMExports();
 	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -205,6 +208,11 @@ describe("one-time session conversion", () => {
 		"carries receipts completed %s a fresh window without old prose or double billing",
 		(arrival) => {
 			const input = settled();
+			(input[3].message as Entry).content = [
+				{ type: "thinking", thinking: "private reasoning", thinkingSignature: "signed-block" },
+				call,
+				{ type: "text", text: "completed response" },
+			];
 			if (arrival === "before")
 				input.push(
 					entry("window", "final", {
@@ -235,7 +243,12 @@ describe("one-time session conversion", () => {
 				"assistant",
 				"toolResult",
 			]);
-			expect(context.messages[1]).toMatchObject({ content: [{ type: "toolCall", id: "call", name: "lookup" }] });
+			expect(context.messages[1]).toMatchObject({
+				content: [
+					{ type: "thinking", thinking: "", thinkingSignature: "signed-block" },
+					{ type: "toolCall", id: "call", name: "lookup", arguments: { query: "example" } },
+				],
+			});
 			expect(context.messages[2]).toMatchObject({ content: [{ type: "text", text: "final result" }] });
 			expect(JSON.stringify(context.messages)).not.toContain("completed response");
 			const total = entries.reduce(
@@ -358,7 +371,19 @@ describe("one-time session conversion", () => {
 		);
 		const run = promisify(execFile);
 		const results = await Promise.allSettled(
-			[0, 1].map(() => run(process.execPath, [script, source, output], { timeout: 30_000 })),
+			[0, 1].map(() =>
+				run(
+					process.execPath,
+					[
+						"--import",
+						new URL("../src/experimental/source-resolver.ts", import.meta.url).href,
+						script,
+						source,
+						output,
+					],
+					{ timeout: 30_000 },
+				),
+			),
 		);
 		expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
 		expect(buildSessionContext(convertedEntries(output)).messages.map((message) => message.role)).toEqual([
@@ -497,6 +522,21 @@ describe("one-time session conversion", () => {
 		expect(existsSync(output)).toBe(false);
 	});
 
+	it("refuses a changed source after staging without publishing or undoing the other writer's bytes", () => {
+		const { source, output, bytes, directory } = fixture(settled());
+		const changed = `${bytes}\n`;
+		const fsync = fs.fsyncSync;
+		vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
+			fsync(fd);
+			writeFileSync(source, changed);
+		});
+		syncBuiltinESMExports();
+		expect(() => convertSessionFile(source, output)).toThrow("source changed during conversion");
+		expect(readFileSync(source, "utf8")).toBe(changed);
+		expect(existsSync(output)).toBe(false);
+		expect(readdirSync(directory)).toEqual(["original.jsonl"]);
+	});
+
 	it.each([null, { content: [{ type: "text", text: "redacted" }] }, { content: [] }])(
 		"refuses edits that could restore an omitted async receipt after compaction: %j",
 		(replacement) => {
@@ -528,7 +568,18 @@ describe("one-time session conversion", () => {
 			script,
 			`import { convertSessionFile } from ${JSON.stringify(new URL("../src/core/session-conversion.ts", import.meta.url).href)};\nconvertSessionFile(process.argv[2], process.argv[3]);\n`,
 		);
-		execFileSync(process.execPath, ["--max-old-space-size=128", script, source, output], { timeout: 30_000 });
+		execFileSync(
+			process.execPath,
+			[
+				"--max-old-space-size=128",
+				"--import",
+				new URL("../src/experimental/source-resolver.ts", import.meta.url).href,
+				script,
+				source,
+				output,
+			],
+			{ timeout: 30_000 },
+		);
 		expect(readFileSync(source, "utf8")).toBe(bytes);
 		expect(convertedEntries(output)).toEqual(input);
 	});

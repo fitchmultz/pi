@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { publishLocalFileExclusiveSync } from "@earendil-works/pi-agent-core/node";
 import {
 	type AssistantMessage,
 	getCurrentSystemMessage,
@@ -12,15 +13,16 @@ import {
 	type UserMessage,
 	uuidv7,
 } from "@earendil-works/pi-ai";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
 	accessSync,
 	appendFileSync,
 	closeSync,
 	constants,
-	createReadStream,
 	existsSync,
 	fchmodSync,
+	fstatSync,
+	fsyncSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -34,7 +36,6 @@ import {
 } from "fs";
 import { readdir, stat } from "fs/promises";
 import { basename, join, resolve } from "path";
-import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
@@ -46,6 +47,20 @@ import {
 	createCustomMessage,
 } from "./messages.ts";
 import { assertSessionConversionNotRequired } from "./session-conversion.ts";
+import {
+	closeJournalSource,
+	copyJournalRecord,
+	type JournalRecord,
+	type JournalScan,
+	type JournalSource,
+	type JsonProjectionOptions,
+	JsonTokenProjection,
+	readJournalRecord,
+	rewriteJournalRecord,
+	scanJournal,
+	scanJournalAsync,
+	transformJournalRecord,
+} from "./session-journal.ts";
 export const CURRENT_SESSION_VERSION = 3;
 
 export interface SessionHeader {
@@ -203,6 +218,350 @@ export type SessionEntry =
 	| LabelEntry
 	| SessionInfoEntry;
 
+export interface SessionMessageMetadata {
+	readonly role: AgentMessage["role"];
+	readonly provider?: string;
+	readonly model?: string;
+	readonly responseModel?: string;
+	readonly responseId?: string;
+	readonly api?: string;
+	readonly timestamp?: number;
+	readonly stopReason?: string;
+	readonly thinkingLevel?: string;
+	readonly toolCallId?: string;
+	readonly toolName?: string;
+	readonly isError?: boolean;
+	readonly usage?: Usage;
+	readonly toolCallCount: number;
+	readonly hasText: boolean;
+	readonly hasThinking: boolean;
+	readonly toolCalls?: readonly { readonly id: string; readonly name: string; readonly index: number }[];
+}
+
+type MetadataFields<T> = T extends SessionMessageEntry
+	? Omit<T, "message"> & { message: SessionMessageMetadata }
+	: T extends CompactionEntry
+		? Omit<T, "summary" | "details" | "systemMessage">
+		: T extends BranchSummaryEntry
+			? Omit<T, "summary" | "details">
+			: T extends CustomEntry
+				? Omit<T, "data">
+				: T extends CustomMessageEntry
+					? Omit<T, "content" | "details">
+					: T extends ContextEditEntry
+						? Omit<T, "replacement"> & { omitted: boolean }
+						: T;
+
+/** Small readonly native facts. No payload, writable offset, or resource locator is exposed. */
+export type SessionEntryMetadata = Readonly<
+	MetadataFields<SessionEntry> & { sequence: number; preview?: string; checkpoint?: boolean }
+>;
+
+export interface SessionMetadataQuery {
+	/** Omitted: physical journal order. String: root-to-entry ancestry. Null: empty branch. */
+	branchFrom?: string | null;
+}
+
+const metadataByEntry = new WeakMap<object, SessionEntryMetadata>();
+const textTraits = new WeakMap<object, boolean>();
+const recordLocations = new WeakMap<object, { source: JournalSource; record: JournalRecord }>();
+const entryRewrites = new WeakMap<object, Record<string, string | number | boolean | null>>();
+const entryDeletedFields = new WeakMap<object, readonly string[]>();
+const entryMessageRoles = new WeakMap<object, string>();
+const pendingRecordDigests = new WeakMap<object, string>();
+
+/** Internal JSONL copy boundary used by forks, native export, and journal repair. */
+export function writeSessionEntry(
+	fd: number,
+	entry: FileEntry,
+	overrides: Record<string, string | number | boolean | null> = {},
+): void {
+	const location = recordLocations.get(entry);
+	if (location) {
+		const changes = { ...entryRewrites.get(entry), ...overrides };
+		const deleted = entryDeletedFields.get(entry);
+		const role = entryMessageRoles.get(entry);
+		if (deleted || role)
+			transformJournalRecord(location.source, location.record, fd, {
+				overrides: Object.fromEntries(Object.entries(changes).map(([key, value]) => [key, { value }])),
+				omit: (path) => path.length === 1 && Boolean(deleted?.includes(String(path[0]))),
+				replace: (path) =>
+					role && path.length === 2 && path[0] === "message" && path[1] === "role" ? { value: role } : undefined,
+			});
+		else if (Object.keys(changes).length) rewriteJournalRecord(location.source, location.record, fd, changes);
+		else copyJournalRecord(location.source, location.record, fd);
+	} else {
+		const json = JSON.stringify(Object.keys(overrides).length ? { ...entry, ...overrides } : entry);
+		pendingRecordDigests.set(entry, createHash("sha256").update(json).digest("hex"));
+		writeFileSync(fd, `${json}\n`);
+	}
+}
+
+/** Internal adapter for projections and tree UI, including ordinary in-memory entries. */
+export function getSessionEntryMetadata(entry: SessionEntry): SessionEntryMetadata {
+	return metadataByEntry.get(entry) ?? entryMetadata(entry, 0);
+}
+
+const structuralFields = new Set([
+	"type",
+	"id",
+	"parentId",
+	"timestamp",
+	"version",
+	"cwd",
+	"parentSession",
+	"customType",
+	"thinkingLevel",
+	"provider",
+	"modelId",
+	"model",
+	"kind",
+	"contributionId",
+	"note",
+	"usage",
+	"firstKeptEntryId",
+	"firstKeptEntryIndex",
+	"tokensBefore",
+	"fromHook",
+	"fromId",
+	"targetId",
+	"label",
+	"name",
+	"display",
+]);
+const messageFacts = new Set([
+	"role",
+	"provider",
+	"model",
+	"responseModel",
+	"api",
+	"timestamp",
+	"stopReason",
+	"thinkingLevel",
+	"usage",
+	"toolCallId",
+	"toolName",
+	"isError",
+	"checkpoint",
+	"responseId",
+	"deferred",
+	"errorMessage",
+	"command",
+	"contextWindowId",
+	"nativeHead",
+	"replace",
+	"deferredToolEntries",
+	"toolsAdded",
+	"toolsRemoved",
+	"namespace",
+	"toolCallKind",
+	"executionSkipped",
+]);
+const publicMessageFacts = [
+	"role",
+	"provider",
+	"model",
+	"responseModel",
+	"responseId",
+	"api",
+	"timestamp",
+	"stopReason",
+	"thinkingLevel",
+	"usage",
+	"toolCallId",
+	"toolName",
+	"isError",
+];
+const usageFields = new Set(["input", "output", "cacheRead", "cacheWrite", "cacheWrite1h", "reasoning", "totalTokens"]);
+
+function metadataProjection(): JsonProjectionOptions {
+	let blockHasText = false;
+	let messageHasText = false;
+	let customHasText = false;
+	return {
+		onStart: () => {
+			blockHasText = messageHasText = customHasText = false;
+		},
+		onStringValue: (path, nonblank) => {
+			if (path.length === 2 && path[0] === "message" && path[1] === "content") messageHasText = nonblank;
+			if (path.length === 1 && path[0] === "content") customHasText = nonblank;
+			if (
+				path.at(-1) === "text" &&
+				((path.length === 4 && path[0] === "message" && path[1] === "content") ||
+					(path.length === 3 && path[0] === "content"))
+			)
+				blockHasText = nonblank;
+		},
+		onValue: (path, value) => {
+			if (value && typeof value === "object") {
+				const object = value as Record<string, unknown>;
+				if (
+					typeof path.at(-1) === "number" &&
+					((path.length === 3 && path[0] === "message" && path[1] === "content") ||
+						(path.length === 2 && path[0] === "content"))
+				) {
+					textTraits.set(object, blockHasText);
+					blockHasText = false;
+				}
+				if ((path.length === 1 && path[0] === "message") || path.length === 0) {
+					textTraits.set(
+						object,
+						Array.isArray(object.content)
+							? object.content.some((block) => block?.type === "text" && textTraits.get(block))
+							: path.length
+								? messageHasText
+								: customHasText,
+					);
+					if (path.length) messageHasText = false;
+					else customHasText = false;
+				}
+			}
+			return false;
+		},
+		select: (path) => {
+			if (path.length === 0) return "descend";
+			const field = String(path[0]);
+			if (path.includes("usage")) {
+				if (path.at(-1) === "usage" || path.at(-1) === "cost") return "descend";
+				return usageFields.has(String(path.at(-1))) || path.at(-1) === "total" ? "keep" : "skip";
+			}
+			if (path.length === 1 && structuralFields.has(field)) return "keep";
+			if (path.length === 1 && ["checkpoint", "consumedToolResultIds", "concurrentToolResultIds"].includes(field))
+				return "keep";
+			if (["message", "systemMessage", "replacement", "content"].includes(field)) {
+				if (path.length === 1) return "descend";
+				const key = path.at(-1);
+				if (key === "content" || typeof key === "number") return "descend";
+				if (messageFacts.has(String(key))) {
+					if (["toolsAdded", "toolsRemoved", "deferredToolEntries"].includes(String(key))) return "descend";
+					return "keep";
+				}
+				if (
+					[
+						"type",
+						"id",
+						"name",
+						"namespace",
+						"async",
+						"toolSearch",
+						"responsesItem",
+						"executionStarted",
+						"executionArguments",
+						"executionDetached",
+						"kind",
+						"text",
+						"thinking",
+					].includes(String(key))
+				) {
+					return key === "executionArguments" || key === "responsesItem" ? "descend" : "keep";
+				}
+				return "skip";
+			}
+			return field === "summary" && path.length === 1 ? "keep" : "skip";
+		},
+		stringLimit: (path) =>
+			["text", "thinking", "summary", "errorMessage", "command"].includes(String(path.at(-1))) ||
+			path.at(-1) === "content"
+				? 256
+				: Infinity,
+	};
+}
+
+function entryMetadata(raw: SessionEntry | Record<string, unknown>, sequence: number): SessionEntryMetadata {
+	const entry = raw as Record<string, unknown>;
+	const result: Record<string, unknown> = { sequence };
+	for (const key of structuralFields) if (Object.hasOwn(entry, key)) result[key] = entry[key];
+	if (Object.hasOwn(entry, "checkpoint")) result.checkpoint = entry.checkpoint;
+	if (entry.type === "message") {
+		const message = entry.message as Record<string, unknown>;
+		const content = message.content;
+		const blocks = Array.isArray(content) ? (content as Record<string, unknown>[]) : [];
+		result.message = {
+			...Object.fromEntries(
+				publicMessageFacts.filter((key) => Object.hasOwn(message, key)).map((key) => [key, message[key]]),
+			),
+			toolCallCount: blocks.filter((block) => block?.type === "toolCall").length,
+			hasText:
+				textTraits.get(message) ??
+				(typeof content === "string"
+					? content.trim().length > 0
+					: blocks.some(
+							(block) =>
+								block?.type === "text" && typeof block.text === "string" && block.text.trim().length > 0,
+						)),
+			hasThinking: blocks.some((block) => block?.type === "thinking" && Boolean(block.thinking)),
+			toolCalls: blocks.flatMap((block, index) =>
+				block?.type === "toolCall" ? [{ id: block.id as string, name: block.name as string, index }] : [],
+			),
+		};
+		result.preview =
+			message.role === "bashExecution"
+				? message.command
+				: typeof content === "string"
+					? content.slice(0, 256)
+					: blocks
+							.filter((block) => block?.type === "text")
+							.map((block) => String(block.text ?? ""))
+							.join("")
+							.slice(0, 256) || message.errorMessage;
+	} else if (entry.type === "custom_message") {
+		result.preview =
+			typeof entry.content === "string"
+				? entry.content.slice(0, 256)
+				: (Array.isArray(entry.content) ? (entry.content as Record<string, unknown>[]) : [])
+						.filter((block) => block?.type === "text")
+						.map((block) => String(block.text ?? ""))
+						.join("")
+						.slice(0, 256);
+	} else if (entry.type === "branch_summary") {
+		result.preview = typeof entry.summary === "string" ? entry.summary.slice(0, 256) : undefined;
+	} else if (entry.type === "context_edit") {
+		result.omitted = entry.replacement === null;
+	}
+	for (const owner of [result, result.message as Record<string, unknown> | undefined]) {
+		if (!owner) continue;
+		if (owner.usage && typeof owner.usage === "object") {
+			const usage = owner.usage as Usage;
+			owner.usage = Object.freeze({ ...usage, cost: usage.cost ? Object.freeze({ ...usage.cost }) : usage.cost });
+		}
+	}
+	const message = result.message as { toolCalls?: object[] } | undefined;
+	if (message?.toolCalls) {
+		for (const call of message.toolCalls) Object.freeze(call);
+		Object.freeze(message.toolCalls);
+	}
+	if (result.message) Object.freeze(result.message);
+	return Object.freeze(result) as SessionEntryMetadata;
+}
+
+/** Internal selected call preview; no historical message body is retained by the tree's call index. */
+export function getSessionToolCallArguments(entry: SessionEntry, index: number, name: string): Record<string, unknown> {
+	const location = recordLocations.get(entry);
+	if (!location) {
+		if (entry.type !== "message" || entry.message.role !== "assistant") return {};
+		const call = entry.message.content[index];
+		return call?.type === "toolCall" ? call.arguments : {};
+	}
+	const native = ["read", "write", "edit", "bash", "grep", "find", "ls"].includes(name);
+	const prefix = ["message", "content", index, "arguments"];
+	// ponytail: unknown custom-tool argument previews request one complete argument value.
+	// Add a bounded tool-specific projection if a measured individual argument exceeds its consumer's heap.
+	const raw = readJournalRecord(location.source, location.record, (path) => {
+		if (path.length <= prefix.length && path.every((part, offset) => prefix[offset] === part)) {
+			return path.length === prefix.length && !native ? "keep" : "descend";
+		}
+		if (
+			native &&
+			prefix.every((part, offset) => path[offset] === part) &&
+			["path", "file_path", "offset", "limit", "json", "command", "pattern"].includes(String(path[prefix.length]))
+		)
+			return "keep";
+		return "skip";
+	});
+	const message = raw.message as { content?: { arguments?: Record<string, unknown> }[] } | undefined;
+	return message?.content?.[index]?.arguments ?? {};
+}
+
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
 
@@ -261,6 +620,8 @@ export type ReadonlySessionManager = Pick<
 	| "getLeafId"
 	| "getLeafEntry"
 	| "getEntry"
+	| "getEntryMetadata"
+	| "iterateEntryMetadata"
 	| "getLabel"
 	| "getBranch"
 	| "buildContextEntries"
@@ -430,13 +791,14 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
 
-	for (const entry of path) {
+	for (const view of path) {
+		const entry = getSessionEntryMetadata(view);
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			model = { provider: entry.message.provider, modelId: entry.message.model };
+			model = { provider: entry.message.provider!, modelId: entry.message.model! };
 		}
 	}
 
@@ -514,7 +876,8 @@ export function buildContextEntries(
 		if (entry.id === compaction.firstKeptEntryId) {
 			foundFirstKept = true;
 		}
-		if (foundFirstKept && !(entry.type === "message" && entry.message.role === "system")) {
+		const metadata = getSessionEntryMetadata(entry);
+		if (foundFirstKept && !(metadata.type === "message" && metadata.message.role === "system")) {
 			contextEntries.push(entry);
 		}
 	}
@@ -528,10 +891,10 @@ export function buildContextEntries(
  * Handles compaction and branch summaries along the path.
  */
 function projectContextEntry(entry: SessionEntry, edit: ContextEditEntry | undefined): AgentMessage[] {
+	if (edit?.replacement === null) return [];
 	const messages = sessionEntryToContextMessages(entry);
 	if (!edit) return messages;
-	const replacement = edit.replacement;
-	if (replacement === null) return [];
+	const replacement = edit.replacement!;
 
 	return messages.map((message) => {
 		if (
@@ -612,7 +975,6 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 	return sessionDir;
 }
 
-const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
 const SESSION_HEADER_READ_BUFFER_SIZE = 4096;
 /** Bound synchronous header discovery while allowing large cwd and custom metadata fields. */
 const MAX_SESSION_HEADER_SCAN_BYTES = 1024 * 1024;
@@ -634,51 +996,21 @@ function parseSessionEntryLine(line: string): FileEntry | null {
 	}
 }
 
-/** Exported for testing */
+/** Explicit full-array reader. Ordinary session loading uses the selective index instead. */
 export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	const resolvedFilePath = normalizePath(filePath);
 	if (!existsSync(resolvedFilePath)) return [];
-
-	const entries: FileEntry[] = [];
-	let pending = "";
-	const fd = openSync(resolvedFilePath, "r");
+	// ponytail: this API intentionally returns every requested body; use metadata inspection for bounded history.
+	const scan = scanJournal(resolvedFilePath, { policy: "tolerant" });
+	const entries = scan.records.map((record) => record.value as unknown as FileEntry);
+	if (!entries.length || entries[0]?.type !== "session" || typeof entries[0].id !== "string") return [];
 	try {
-		const decoder = new StringDecoder("utf8");
-		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-
-		while (true) {
-			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-			if (bytesRead === 0) break;
-
-			pending += decoder.write(buffer.subarray(0, bytesRead));
-			let lineStart = 0;
-			let newlineIndex = pending.indexOf("\n", lineStart);
-			while (newlineIndex !== -1) {
-				const entry = parseSessionEntryLine(pending.slice(lineStart, newlineIndex));
-				if (entry) entries.push(entry);
-				lineStart = newlineIndex + 1;
-				newlineIndex = pending.indexOf("\n", lineStart);
-			}
-			pending = pending.slice(lineStart);
-		}
-
-		pending += decoder.end();
-		const finalEntry = parseSessionEntryLine(pending);
-		if (finalEntry) entries.push(finalEntry);
+		assertSessionConversionNotRequired(entries);
+		if (scan.pendingTail) appendFileSync(resolvedFilePath, "\n");
+		return entries;
 	} finally {
-		closeSync(fd);
+		closeJournalSource(scan.source);
 	}
-
-	// Validate session header before repairing the file.
-	if (entries.length === 0) return entries;
-	const header = entries[0];
-	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
-		return [];
-	}
-
-	assertSessionConversionNotRequired(entries);
-	if (pending) appendFileSync(resolvedFilePath, "\n");
-	return entries;
 }
 
 /**
@@ -828,71 +1160,78 @@ async function buildSessionInfo(
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
 
-		const rl = createInterface({
-			input: createReadStream(filePath, { encoding: "utf8", signal }),
-			crlfDelay: Infinity,
-		});
+		const scan = await scanJournalAsync(filePath, { ...metadataProjection(), policy: "tolerant", signal });
+		try {
+			for (const record of scan.records) {
+				const entry = record.value as unknown as FileEntry;
 
-		for await (const line of rl) {
-			const entry = parseSessionEntryLine(line);
-			if (!entry) continue;
+				if (!header) {
+					if (entry.type !== "session") return null;
+					header = entry;
+					continue;
+				}
 
-			if (!header) {
-				if (entry.type !== "session") return null;
-				header = entry;
-				continue;
+				// Extract session name (use latest, including explicit clears)
+				if (entry.type === "session_info") {
+					name = entry.name?.trim() || undefined;
+				}
+
+				if (entry.type !== "message") continue;
+				messageCount++;
+
+				const activityTime = getMessageActivityTime(entry);
+				if (typeof activityTime === "number") {
+					lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
+				}
+
+				if (entry.message.role !== "user" && entry.message.role !== "assistant") continue;
+				const full = readJournalRecord(scan.source, record, (path) => {
+					if (
+						path.length === 0 ||
+						(path[0] === "message" &&
+							(path.length === 1 || path.at(-1) === "content" || typeof path.at(-1) === "number"))
+					)
+						return "descend";
+					return ["role", "text", "type", "timestamp"].includes(String(path.at(-1))) ? "keep" : "skip";
+				});
+				const message = full.message as Message;
+				if (!isMessageWithContent(message)) continue;
+				const textContent = extractTextContent(message);
+				if (!textContent) continue;
+
+				allMessages.push(textContent);
+				if (!firstMessage && message.role === "user") {
+					firstMessage = textContent;
+				}
 			}
 
-			// Extract session name (use latest, including explicit clears)
-			if (entry.type === "session_info") {
-				name = entry.name?.trim() || undefined;
-			}
+			if (!header) return null;
 
-			if (entry.type !== "message") continue;
-			messageCount++;
+			const cwd = typeof header.cwd === "string" ? header.cwd : "";
+			const parentSessionPath = header.parentSession;
+			const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
+			const modified =
+				typeof lastActivityTime === "number" && lastActivityTime > 0
+					? new Date(lastActivityTime)
+					: !Number.isNaN(headerTime)
+						? new Date(headerTime)
+						: stats.mtime;
 
-			const activityTime = getMessageActivityTime(entry);
-			if (typeof activityTime === "number") {
-				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
-			}
-
-			const message = entry.message;
-			if (!isMessageWithContent(message)) continue;
-			if (message.role !== "user" && message.role !== "assistant") continue;
-
-			const textContent = extractTextContent(message);
-			if (!textContent) continue;
-
-			allMessages.push(textContent);
-			if (!firstMessage && message.role === "user") {
-				firstMessage = textContent;
-			}
+			return {
+				path: filePath,
+				id: header.id,
+				cwd,
+				name,
+				parentSessionPath,
+				created: new Date(header.timestamp),
+				modified,
+				messageCount,
+				firstMessage: firstMessage || "(no messages)",
+				allMessagesText: allMessages.join(" "),
+			};
+		} finally {
+			closeJournalSource(scan.source);
 		}
-
-		if (!header) return null;
-
-		const cwd = typeof header.cwd === "string" ? header.cwd : "";
-		const parentSessionPath = header.parentSession;
-		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
-		const modified =
-			typeof lastActivityTime === "number" && lastActivityTime > 0
-				? new Date(lastActivityTime)
-				: !Number.isNaN(headerTime)
-					? new Date(headerTime)
-					: stats.mtime;
-
-		return {
-			path: filePath,
-			id: header.id,
-			cwd,
-			name,
-			parentSessionPath,
-			created: new Date(header.timestamp),
-			modified,
-			messageCount,
-			firstMessage: firstMessage || "(no messages)",
-			allMessagesText: allMessages.join(" "),
-		};
 	} catch {
 		signal?.throwIfAborted();
 		return null;
@@ -1010,7 +1349,7 @@ export class SessionManager {
 	private persist: boolean;
 	private flushed: boolean = false;
 	/** A failed write may have left missing entries or a partial JSONL record. */
-	private needsRewrite: "w" | "wx" | undefined;
+	private needsRewrite: "w" | "wx" | "exclusive" | undefined;
 	private failedAppendIndex: number | undefined;
 	private fileEntries: FileEntry[] = [];
 	private entriesRevision = 0;
@@ -1018,6 +1357,9 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private journalSource: JournalSource | undefined;
+	private recordsByEntry = recordLocations;
+	private decodedRecord: { entry: FileEntry; value: Record<string, unknown> } | undefined;
 
 	private constructor(
 		cwd: string,
@@ -1035,7 +1377,7 @@ export class SessionManager {
 		}
 
 		if (sessionFile) {
-			this._setSessionFile(sessionFile, preloadedFileEntries);
+			this._setSessionFile(sessionFile);
 		} else if (preloadedFileEntries?.length) {
 			this._loadEntries(preloadedFileEntries, newSessionOptions);
 		} else {
@@ -1049,10 +1391,13 @@ export class SessionManager {
 		this._setSessionFile(sessionFile);
 	}
 
-	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
+	private _setSessionFile(sessionFile: string): void {
 		const explicitPath = resolvePath(sessionFile);
 		if (existsSync(explicitPath)) {
-			const entries = preloadedFileEntries ?? loadEntriesFromFile(explicitPath);
+			const scan = scanJournal(explicitPath, { ...metadataProjection(), policy: "tolerant" });
+			const entries = scan.records.map((record) => record.value as unknown as FileEntry);
+			if (entries.length && (entries[0]?.type !== "session" || typeof entries[0].id !== "string"))
+				throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
 			assertSessionConversionNotRequired(entries);
 
 			// If file was empty, initialize it with a valid session header. If it was
@@ -1069,7 +1414,13 @@ export class SessionManager {
 			}
 
 			this.sessionFile = explicitPath;
-			this._loadEntries(entries);
+			this._loadJournal(scan);
+			if (this._migrateIndexedJournal()) this._rewriteFile();
+			else if (scan.pendingTail) {
+				// Preserve writable load repair; read-only inspection never terminates a tail.
+				appendFileSync(explicitPath, "\n");
+				this.journalSource = { ...scan.source, ...statSync(explicitPath) };
+			}
 			this.flushed = true;
 		} else {
 			this.newSession();
@@ -1093,6 +1444,8 @@ export class SessionManager {
 			parentSession: options?.parentSession,
 		};
 		this.fileEntries = [header];
+		this.journalSource = undefined;
+		this.decodedRecord = undefined;
 		this.entriesRevision++;
 		this.byId.clear();
 		this.labelsById.clear();
@@ -1108,7 +1461,7 @@ export class SessionManager {
 	}
 
 	private _loadEntries(entries: FileEntry[], options?: NewSessionOptions): void {
-		assertSessionConversionNotRequired(entries);
+		assertSessionConversionNotRequired(entries.map((entry) => recordLocations.get(entry)?.record.value ?? entry));
 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 
 		if (header) {
@@ -1124,6 +1477,215 @@ export class SessionManager {
 		}
 
 		this._buildIndex();
+	}
+
+	private _loadJournal(scan: JournalScan): void {
+		const first = scan.records[0];
+		if (!first || first.value.type !== "session" || typeof first.value.id !== "string")
+			throw new Error(`Session file is not a valid ${APP_NAME} session: ${scan.source.path}`);
+		this.journalSource = scan.source;
+		this.decodedRecord = undefined;
+		this.fileEntries = scan.records.map((record, sequence) => this._entryView(record, sequence));
+		this.sessionId = first.value.id;
+		this._buildIndex();
+	}
+
+	private _migrateIndexedJournal(): boolean {
+		const header = this.getHeader();
+		const version = header?.version ?? 1;
+		if (!header || version >= CURRENT_SESSION_VERSION) return false;
+		header.version = CURRENT_SESSION_VERSION;
+		entryRewrites.set(header, { version: CURRENT_SESSION_VERSION });
+		const ids = new Set<string>();
+		let parentId: string | null = null;
+		for (const entry of this.fileEntries) {
+			if (entry.type === "session") continue;
+			const changes: Record<string, string | null> = {};
+			if (version < 2) {
+				entry.id = generateId(ids);
+				ids.add(entry.id);
+				entry.parentId = parentId;
+				parentId = entry.id;
+				changes.id = entry.id;
+				changes.parentId = entry.parentId;
+			}
+			const location = this.recordsByEntry.get(entry)!;
+			const message = location.record.value.message as Record<string, unknown> | undefined;
+			if (version < 3 && entry.type === "message" && message?.role === "hookMessage")
+				entryMessageRoles.set(entry, "custom");
+			entryRewrites.set(entry, changes);
+		}
+		for (let sequence = 1; sequence < this.fileEntries.length; sequence++) {
+			const entry = this.fileEntries[sequence]!;
+			if (entry.type === "session") continue;
+			const location = this.recordsByEntry.get(entry)!;
+			if (
+				version < 2 &&
+				entry.type === "compaction" &&
+				typeof location.record.value.firstKeptEntryIndex === "number"
+			) {
+				const kept = this.fileEntries[location.record.value.firstKeptEntryIndex];
+				if (kept && kept.type !== "session") {
+					entry.firstKeptEntryId = kept.id;
+					entryRewrites.get(entry)!.firstKeptEntryId = kept.id;
+				}
+				delete (entry as CompactionEntry & { firstKeptEntryIndex?: number }).firstKeptEntryIndex;
+				entryDeletedFields.set(entry, ["firstKeptEntryIndex"]);
+			}
+			const raw = { ...location.record.value, ...entryRewrites.get(entry) };
+			const role = entryMessageRoles.get(entry);
+			if (role) raw.message = { ...(raw.message as Record<string, unknown>), role };
+			metadataByEntry.set(entry, entryMetadata(raw, sequence - 1));
+		}
+		this.decodedRecord = undefined;
+		this._buildIndex();
+		return true;
+	}
+
+	private _entryView(record: JournalRecord, sequence: number, metadata?: SessionEntryMetadata): FileEntry {
+		const view: Record<string, unknown> = {};
+		for (const key of record.fields) {
+			if (structuralFields.has(key) && key !== "usage") {
+				Object.defineProperty(view, key, {
+					value: record.value[key],
+					enumerable: true,
+					writable: true,
+					configurable: true,
+				});
+			} else {
+				Object.defineProperty(view, key, {
+					enumerable: true,
+					get: () => this._readEntryBody(view as unknown as FileEntry)[key],
+				});
+			}
+		}
+		this.recordsByEntry.set(view, { source: this.journalSource!, record });
+		if (view.type !== "session") metadataByEntry.set(view, metadata ?? entryMetadata(record.value, sequence - 1));
+		return view as unknown as FileEntry;
+	}
+
+	private _readEntryBody(entry: FileEntry): Record<string, unknown> {
+		const location = this.recordsByEntry.get(entry);
+		if (!location) throw new Error("Session entry no longer belongs to its source journal");
+		const { source, record } = location;
+		if (this.decodedRecord?.entry === entry) {
+			const stats = existsSync(source.path) ? statSync(source.path) : fstatSync(source.handle.fd);
+			if (
+				stats.dev === source.dev &&
+				stats.ino === source.ino &&
+				stats.size === source.size &&
+				stats.mtimeMs === source.mtimeMs &&
+				stats.ctimeMs === source.ctimeMs
+			)
+				return this.decodedRecord.value;
+		}
+		const value = readJournalRecord(source, record);
+		if (value.id !== record.value.id || value.type !== record.value.type)
+			throw new Error("Session entry source changed");
+		const role = entryMessageRoles.get(entry);
+		if (role && value.message && typeof value.message === "object")
+			(value.message as Record<string, unknown>).role = role;
+		this.decodedRecord = { entry, value };
+		return value;
+	}
+
+	/** Reconstruct a stale derived index without repairing or rewriting the source. */
+	private _refreshJournal(): void {
+		const source = this.journalSource;
+		if (!source || source.path !== this.sessionFile || !existsSync(source.path)) return;
+		const stats = statSync(source.path);
+		if (
+			stats.dev === source.dev &&
+			stats.ino === source.ino &&
+			stats.size === source.size &&
+			stats.mtimeMs === source.mtimeMs &&
+			stats.ctimeMs === source.ctimeMs
+		)
+			return;
+		const scan = scanJournal(source.path, { ...metadataProjection(), policy: "tolerant" });
+		const saved = new Map(scan.records.map((record) => [record.value.id, record]));
+		const savedDigests = new Set(scan.records.map((record) => record.digest));
+		try {
+			if (scan.records[0]?.value.type !== "session" || scan.records[0].value.id !== this.sessionId)
+				throw new Error("Journal source generation changed");
+			assertSessionConversionNotRequired(scan.records.map((record) => record.value));
+			for (const entry of this.fileEntries) {
+				const old = this.recordsByEntry.get(entry);
+				if (old && old.source.path === source.path && !savedDigests.has(old.record.digest))
+					throw new Error("Journal source generation changed");
+				if (!old && saved.has(entry.id) && saved.get(entry.id)?.digest !== pendingRecordDigests.get(entry))
+					throw new Error(`Conflicting persisted entry: ${entry.id}`);
+			}
+		} catch (error) {
+			closeJournalSource(scan.source);
+			throw error;
+		}
+		const existing = new Map<string, FileEntry[]>();
+		for (const entry of this.fileEntries) {
+			const digest = this.recordsByEntry.get(entry)?.record.digest ?? pendingRecordDigests.get(entry);
+			if (digest) {
+				const candidates = existing.get(digest) ?? [];
+				candidates.push(entry);
+				existing.set(digest, candidates);
+			}
+		}
+		const dirty = this.fileEntries.filter((entry) => !this.recordsByEntry.has(entry) && !saved.has(entry.id));
+		const order = [
+			...scan.records.map((record) => record.digest),
+			...dirty.map((entry) => pendingRecordDigests.get(entry) ?? entry.id),
+		];
+		const changed =
+			this.fileEntries.length !== order.length ||
+			this.fileEntries.some(
+				(entry, index) =>
+					(this.recordsByEntry.get(entry)?.record.digest ?? pendingRecordDigests.get(entry) ?? entry.id) !==
+					order[index],
+			);
+		const revision = this.entriesRevision;
+		const leaf = this.leafId;
+		this.journalSource = scan.source;
+		this.decodedRecord = undefined;
+		this.fileEntries = scan.records.map((record, sequence) => {
+			const entry = existing.get(record.digest)?.shift();
+			if (entry && this.recordsByEntry.has(entry)) {
+				this.recordsByEntry.set(entry, { source: scan.source, record });
+				if (entry.type !== "session") metadataByEntry.set(entry, entryMetadata(record.value, sequence - 1));
+				return entry;
+			}
+			return this._entryView(record, sequence);
+		});
+		this.fileEntries.push(...dirty);
+		if (this.failedAppendIndex !== undefined) this.failedAppendIndex = dirty.length ? scan.records.length : undefined;
+		this._buildIndex();
+		this.entriesRevision = revision + (changed ? 1 : 0);
+		this.leafId = leaf;
+	}
+
+	/** Persistence confirmation releases only saved bodies; dirty entries remain ordinary objects. */
+	private _dropPersistedBodies(): void {
+		if (!this.sessionFile || !existsSync(this.sessionFile)) return;
+		const scan = scanJournal(this.sessionFile, { ...metadataProjection(), policy: "tolerant" });
+		const saved = new Map(scan.records.map((record) => [record.value.id, record]));
+		const leaf = this.leafId;
+		this.journalSource = scan.source;
+		this.decodedRecord = undefined;
+		for (let i = 0; i < this.fileEntries.length; i++) {
+			const entry = this.fileEntries[i]!;
+			const record = saved.get(entry.id);
+			if (!record) continue;
+			if (this.recordsByEntry.has(entry)) {
+				this.recordsByEntry.set(entry, { source: scan.source, record });
+				entryRewrites.delete(entry);
+				entryDeletedFields.delete(entry);
+				entryMessageRoles.delete(entry);
+				if (entry.type !== "session") metadataByEntry.set(entry, entryMetadata(record.value, i - 1));
+				continue;
+			}
+			const view = this._entryView(record, i);
+			this.fileEntries[i] = view;
+			if (view.type !== "session") this.byId.set(view.id, view);
+		}
+		this.leafId = leaf;
 	}
 
 	private _buildIndex(): void {
@@ -1148,7 +1710,7 @@ export class SessionManager {
 		}
 	}
 
-	private _rewriteFile(flag: "w" | "wx" = "w"): void {
+	private _rewriteFile(flag: "w" | "wx" | "exclusive" = "w"): void {
 		if (!this.persist || !this.sessionFile) return;
 		if (flag === "w") this.needsRewrite = flag;
 		let destination = this.sessionFile;
@@ -1159,8 +1721,8 @@ export class SessionManager {
 			accessSync(destination, constants.W_OK);
 			mode = statSync(destination).mode & 0o777;
 		}
-		const temporary = flag === "w" ? `${destination}.${randomUUID()}.tmp` : undefined;
-		const fd = openSync(temporary ?? destination, "wx", mode);
+		const temporary = flag !== "wx" ? `${destination}.${randomUUID()}.tmp` : undefined;
+		const fd = openSync(temporary ?? destination, "wx", flag === "exclusive" ? 0o600 : mode);
 		this.needsRewrite = flag;
 		// Only successful exclusive creation authorizes repairing an initial file.
 		if (!temporary) this.flushed = true;
@@ -1168,14 +1730,19 @@ export class SessionManager {
 			try {
 				if (mode !== undefined) fchmodSync(fd, mode);
 				for (const entry of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+					writeSessionEntry(fd, entry);
 				}
+				if (flag === "exclusive") fsyncSync(fd);
 			} finally {
 				closeSync(fd);
 			}
-			if (temporary) renameSync(temporary, destination);
+			if (temporary) {
+				if (flag === "exclusive") publishLocalFileExclusiveSync(temporary, destination);
+				else renameSync(temporary, destination);
+			}
 			this.flushed = true;
 			this.needsRewrite = undefined;
+			this._dropPersistedBodies();
 		} finally {
 			if (temporary) rmSync(temporary, { force: true });
 		}
@@ -1185,27 +1752,45 @@ export class SessionManager {
 	flush(): void {
 		if (!this.persist || !this.sessionFile) return;
 		// A partially saved journal may already have been resumed by another writer.
-		if (this.needsRewrite === "wx" && loadEntriesFromFile(this.sessionFile).length > 0) {
+		if (
+			this.needsRewrite === "wx" &&
+			scanJournal(this.sessionFile, { ...metadataProjection(), policy: "tolerant" }).records.length > 0
+		) {
 			this.needsRewrite = undefined;
 			this.failedAppendIndex = 1;
 		}
 		if (this.needsRewrite || (!this.flushed && this._hasPersistableEntries())) {
-			this._rewriteFile(this.flushed ? "w" : "wx");
+			this._rewriteFile(this.needsRewrite === "exclusive" ? "exclusive" : this.flushed ? "w" : "wx");
 		}
 		if (this.failedAppendIndex !== undefined) {
 			if (!existsSync(this.sessionFile)) {
 				this._rewriteFile("wx");
 			} else {
-				const entries = loadEntriesFromFile(this.sessionFile);
-				if (entries.length === 0) {
-					throw new Error(`Session file is not a valid ${APP_NAME} session: ${this.sessionFile}`);
-				}
-				const saved = new Set(entries.map((entry) => entry.id));
-				for (const entry of this.fileEntries.slice(this.failedAppendIndex)) {
-					if (!saved.has(entry.id)) appendFileSync(this.sessionFile, `\n${JSON.stringify(entry)}\n`);
+				const scan = scanJournal(this.sessionFile, { ...metadataProjection(), policy: "tolerant" });
+				try {
+					if (scan.records.length === 0)
+						throw new Error(`Session file is not a valid ${APP_NAME} session: ${this.sessionFile}`);
+					const saved = new Map(scan.records.map((record) => [record.value.id, record]));
+					const pending = this.fileEntries.slice(this.failedAppendIndex);
+					for (const entry of pending) {
+						const record = saved.get(entry.id);
+						const expected =
+							pendingRecordDigests.get(entry) ??
+							createHash("sha256").update(JSON.stringify(entry)).digest("hex");
+						if (record && record.digest !== expected) throw new Error(`Conflicting persisted entry: ${entry.id}`);
+					}
+					for (const entry of pending) {
+						if (saved.has(entry.id)) continue;
+						const json = JSON.stringify(entry);
+						pendingRecordDigests.set(entry, createHash("sha256").update(json).digest("hex"));
+						appendFileSync(this.sessionFile, `\n${json}\n`);
+					}
+				} finally {
+					closeJournalSource(scan.source);
 				}
 			}
 			this.failedAppendIndex = undefined;
+			this._dropPersistedBodies();
 		}
 	}
 
@@ -1240,12 +1825,17 @@ export class SessionManager {
 	 * first assistant reply) keeps the prompt on disk if the first turn never completes (#10000).
 	 */
 	private _hasPersistableEntries(): boolean {
-		return this.fileEntries.some(
-			(e) =>
-				e.type === "custom" ||
-				e.type === "usage" ||
-				(e.type === "message" && (e.message.role === "user" || e.message.role === "assistant")),
-		);
+		for (const entry of this.fileEntries) {
+			if (entry.type === "session") continue;
+			const metadata = getSessionEntryMetadata(entry);
+			if (
+				metadata.type === "custom" ||
+				metadata.type === "usage" ||
+				(metadata.type === "message" && (metadata.message.role === "user" || metadata.message.role === "assistant"))
+			)
+				return true;
+		}
+		return false;
 	}
 
 	_persist(entry: SessionEntry): void {
@@ -1257,8 +1847,43 @@ export class SessionManager {
 		}
 		this.failedAppendIndex = this.fileEntries.length - 1;
 		// Isolate this entry from another writer's partial record.
-		appendFileSync(this.sessionFile, `\n${JSON.stringify(entry)}\n`);
+		const json = JSON.stringify(entry);
+		pendingRecordDigests.set(entry, createHash("sha256").update(json).digest("hex"));
+		const before = statSync(this.sessionFile);
+		appendFileSync(this.sessionFile, `\n${json}\n`);
 		this.failedAppendIndex = undefined;
+		const after = statSync(this.sessionFile);
+		if (
+			after.dev !== before.dev ||
+			after.ino !== before.ino ||
+			after.size !== before.size + Buffer.byteLength(json) + 2
+		) {
+			this._dropPersistedBodies();
+		} else {
+			this.journalSource = {
+				path: this.sessionFile,
+				dev: after.dev,
+				ino: after.ino,
+				size: after.size,
+				mtimeMs: after.mtimeMs,
+				ctimeMs: after.ctimeMs,
+				handle: this.journalSource!.handle,
+			};
+			this.decodedRecord = undefined;
+			const projection = new JsonTokenProjection(metadataProjection());
+			projection.write(json);
+			const record: JournalRecord = {
+				start: before.size + 1,
+				end: after.size - 1,
+				line: 0,
+				value: projection.finish() as Record<string, unknown>,
+				fields: projection.fields,
+				digest: createHash("sha256").update(json).digest("hex"),
+			};
+			const view = this._entryView(record, this.fileEntries.length - 1) as SessionEntry;
+			this.fileEntries[this.fileEntries.length - 1] = view;
+			this.byId.set(view.id, view);
+		}
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1459,6 +2084,7 @@ export class SessionManager {
 
 	/** Get the current session name from the latest session_info entry, if any. */
 	getSessionName(): string | undefined {
+		this._refreshJournal();
 		// Walk entries in reverse to find the latest session_info entry.
 		// Empty names explicitly clear the session title. Reads fileEntries directly: the footer
 		// calls this on every frame, and getEntries() copies the whole session.
@@ -1517,11 +2143,15 @@ export class SessionManager {
 		const editable =
 			target.type === "custom_message" ||
 			(target.type === "message" &&
-				(target.message.role === "user" ||
-					target.message.role === "assistant" ||
-					target.message.role === "toolResult"));
+				(() => {
+					const metadata = getSessionEntryMetadata(target);
+					return (
+						metadata.type === "message" && ["user", "assistant", "toolResult"].includes(metadata.message.role)
+					);
+				})());
 		if (!editable) throw new Error(`Entry ${targetId} does not contribute editable model content`);
-		const targetRole = target.type === "message" ? target.message.role : "custom";
+		const targetMetadata = getSessionEntryMetadata(target);
+		const targetRole = targetMetadata.type === "message" ? targetMetadata.message.role : "custom";
 		const normalizedReplacement =
 			replacement !== null &&
 			(targetRole === "assistant" || targetRole === "toolResult") &&
@@ -1549,11 +2179,34 @@ export class SessionManager {
 	}
 
 	getLeafEntry(): SessionEntry | undefined {
+		this._refreshJournal();
 		return this.leafId ? this.byId.get(this.leafId) : undefined;
 	}
 
 	getEntry(id: string): SessionEntry | undefined {
+		this._refreshJournal();
 		return this.byId.get(id);
+	}
+
+	getEntryMetadata(id: string): SessionEntryMetadata | undefined {
+		this._refreshJournal();
+		const entry = this.byId.get(id);
+		return entry
+			? (metadataByEntry.get(entry) ?? entryMetadata(entry, this.fileEntries.indexOf(entry) - 1))
+			: undefined;
+	}
+
+	*iterateEntryMetadata(query: SessionMetadataQuery = {}): Iterable<SessionEntryMetadata> {
+		this._refreshJournal();
+		if (query.branchFrom !== undefined) {
+			if (query.branchFrom === null) return;
+			for (const entry of this.getBranch(query.branchFrom)) yield getSessionEntryMetadata(entry);
+		} else {
+			for (let sequence = 1; sequence < this.fileEntries.length; sequence++) {
+				const entry = this.fileEntries[sequence]!;
+				if (entry.type !== "session") yield metadataByEntry.get(entry) ?? entryMetadata(entry, sequence - 1);
+			}
+		}
 	}
 
 	/**
@@ -1603,6 +2256,7 @@ export class SessionManager {
 	 * Use buildSessionContext() to get the resolved messages for the LLM.
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
+		this._refreshJournal();
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
 		let current = startId ? this.byId.get(startId) : undefined;
@@ -1650,6 +2304,7 @@ export class SessionManager {
 
 	/** Changes on append or replacement, not when only the active leaf moves. */
 	getEntriesRevision(): number {
+		this._refreshJournal();
 		return this.entriesRevision;
 	}
 
@@ -1659,6 +2314,7 @@ export class SessionManager {
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
 	getEntries(): SessionEntry[] {
+		this._refreshJournal();
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
 	}
 
@@ -1794,18 +2450,24 @@ export class SessionManager {
 				replacementByLabelId.set(labelId, entry.id);
 			}
 			pendingLabelIds.length = 0;
-			pathWithoutLabels.push(
-				entry.type === "compaction"
-					? {
-							...entry,
-							parentId: pathParentId,
-							firstKeptEntryId:
-								entry.firstKeptEntryId === entry.id
-									? entry.id
-									: (replacementByLabelId.get(entry.firstKeptEntryId) ?? entry.firstKeptEntryId),
-						}
-					: { ...entry, parentId: pathParentId },
-			);
+			const overrides: Record<string, string | null> = { parentId: pathParentId };
+			if (entry.type === "compaction") {
+				overrides.firstKeptEntryId =
+					entry.firstKeptEntryId === entry.id
+						? entry.id
+						: (replacementByLabelId.get(entry.firstKeptEntryId) ?? entry.firstKeptEntryId);
+			}
+			const location = this.recordsByEntry.get(entry);
+			const copy = location
+				? (this._entryView(location.record, pathWithoutLabels.length + 1) as SessionEntry)
+				: (Object.defineProperties({}, Object.getOwnPropertyDescriptors(entry)) as SessionEntry);
+			Object.assign(copy, overrides);
+			metadataByEntry.set(copy, { ...getSessionEntryMetadata(entry), ...overrides } as SessionEntryMetadata);
+			if (location) {
+				this.recordsByEntry.set(copy, location);
+				entryRewrites.set(copy, { ...entryRewrites.get(entry), ...overrides });
+			}
+			pathWithoutLabels.push(copy);
 			pathParentId = entry.id;
 		}
 
@@ -1857,7 +2519,7 @@ export class SessionManager {
 			this.flushed = false;
 			this._buildIndex();
 
-			if (this._hasPersistableEntries()) this._rewriteFile();
+			if (this._hasPersistableEntries()) this._rewriteFile("exclusive");
 
 			return newSessionFile;
 		}
@@ -1902,23 +2564,22 @@ export class SessionManager {
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
 		let header: SessionHeader | null = null;
-		let preloadedFileEntries: FileEntry[] | undefined;
 		if (cwdOverride === undefined && existsSync(resolvedPath)) {
 			try {
 				header = readSessionHeader(resolvedPath);
 			} catch (error) {
 				if (!(error instanceof SessionHeaderScanLimitError)) throw error;
-				// The bounded scan is only a discovery optimization. A full load remains
-				// authoritative for legacy files with very large headers or prefixes.
-				preloadedFileEntries = loadEntriesFromFile(resolvedPath);
-				const firstEntry = preloadedFileEntries[0];
-				header = firstEntry?.type === "session" ? firstEntry : null;
+				// Discovery's header limit never forces an eager transcript load.
+				const scan = scanJournal(resolvedPath, { ...metadataProjection(), policy: "tolerant" });
+				const firstEntry = scan.records[0]?.value;
+				header = firstEntry?.type === "session" ? (firstEntry as unknown as SessionHeader) : null;
+				closeJournalSource(scan.source);
 			}
 		}
 		const cwd = cwdOverride ?? (header ? getSessionHeaderCwd(header) : undefined) ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloadedFileEntries);
+		return new SessionManager(cwd, dir, resolvedPath, true);
 	}
 
 	/**
@@ -1959,33 +2620,17 @@ export class SessionManager {
 	): SessionManager {
 		const resolvedSourcePath = resolvePath(sourcePath);
 		const resolvedTargetCwd = resolvePath(targetCwd);
-		const sourceEntries = loadEntriesFromFile(resolvedSourcePath);
-		if (sourceEntries.length === 0) {
+		const scan = scanJournal(resolvedSourcePath, { ...metadataProjection(), policy: "tolerant" });
+		const sourceHeader = scan.records[0]?.value;
+		if (!sourceHeader || sourceHeader.type !== "session" || typeof sourceHeader.id !== "string")
 			throw new Error(`Cannot fork: source session file is empty or invalid: ${resolvedSourcePath}`);
-		}
-
-		const sourceHeader = sourceEntries.find((e) => e.type === "session") as SessionHeader | undefined;
-		if (!sourceHeader) {
-			throw new Error(`Cannot fork: source session has no header: ${resolvedSourcePath}`);
-		}
-
-		migrateToCurrentVersion(sourceEntries);
-
+		assertSessionConversionNotRequired(scan.records.map((record) => record.value));
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-
-		// Create new session file with new ID but forked content
-		if (options?.id !== undefined) {
-			assertValidSessionId(options.id);
-		}
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+		if (options?.id !== undefined) assertValidSessionId(options.id);
 		const newSessionId = options?.id ?? createSessionId();
 		const timestamp = new Date().toISOString();
-		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-		const newSessionFile = join(dir, `${fileTimestamp}_${newSessionId}.jsonl`);
-
-		// Write new header pointing to source as parent, with updated cwd
+		const newSessionFile = join(dir, `${timestamp.replace(/[:.]/g, "-")}_${newSessionId}.jsonl`);
 		const newHeader: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -1994,15 +2639,29 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
-
-		// Copy all non-header entries from source
-		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+		const temporary = `${newSessionFile}.${randomUUID()}.tmp`;
+		const fd = openSync(temporary, "wx", 0o600);
+		try {
+			try {
+				writeFileSync(fd, `${JSON.stringify(newHeader)}\n`);
+				if (((sourceHeader.version as number) ?? 1) < CURRENT_SESSION_VERSION) {
+					const migration = SessionManager.inMemory(resolvedTargetCwd);
+					migration._loadJournal(scan);
+					migration._migrateIndexedJournal();
+					for (const entry of migration.getEntries()) writeSessionEntry(fd, entry);
+				} else {
+					for (const record of scan.records)
+						if (record.value.type !== "session") copyJournalRecord(scan.source, record, fd);
+				}
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
 			}
+			publishLocalFileExclusiveSync(temporary, newSessionFile);
+		} finally {
+			rmSync(temporary, { force: true });
+			closeJournalSource(scan.source);
 		}
-
 		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
 	}
 

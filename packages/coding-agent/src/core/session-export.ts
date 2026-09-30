@@ -2,14 +2,20 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readSync, rmSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
-import { CURRENT_SESSION_VERSION, type SessionHeader, type SessionManager } from "./session-manager.ts";
+import {
+	CURRENT_SESSION_VERSION,
+	type SessionEntry,
+	type SessionHeader,
+	type SessionManager,
+	writeSessionEntry,
+} from "./session-manager.ts";
 
 type TrailingEntries = (parentId: string | null, timestamp: string) => readonly object[];
 
-function* sessionBranchLines(
+function* sessionBranchRecords(
 	sessionManager: SessionManager,
 	createTrailingEntries?: TrailingEntries,
-): Generator<string> {
+): Generator<{ entry: object; parentId?: string | null }> {
 	const timestamp = new Date().toISOString();
 	const header: SessionHeader = {
 		type: "session",
@@ -18,14 +24,14 @@ function* sessionBranchLines(
 		timestamp,
 		cwd: sessionManager.getCwd(),
 	};
-	yield `${JSON.stringify(header)}\n`;
+	yield { entry: header };
 	let parentId: string | null = null;
-	for (const entry of sessionManager.getBranch()) {
-		yield `${JSON.stringify({ ...entry, parentId })}\n`;
-		parentId = entry.id;
+	for (const metadata of sessionManager.iterateEntryMetadata({ branchFrom: sessionManager.getLeafId() })) {
+		yield { entry: sessionManager.getEntry(metadata.id)!, parentId };
+		parentId = metadata.id;
 	}
 	for (const entry of createTrailingEntries?.(parentId, timestamp) ?? []) {
-		yield `${JSON.stringify(entry)}\n`;
+		yield { entry };
 	}
 }
 
@@ -34,7 +40,11 @@ export function serializeSessionBranch(
 	sessionManager: SessionManager,
 	createTrailingEntries?: TrailingEntries,
 ): string {
-	return Array.from(sessionBranchLines(sessionManager, createTrailingEntries)).join("");
+	// ponytail: this explicit string API needs enough heap/string space for the requested branch; file export streams it.
+	return Array.from(
+		sessionBranchRecords(sessionManager, createTrailingEntries),
+		({ entry, parentId }) => `${JSON.stringify(parentId === undefined ? entry : { ...entry, parentId })}\n`,
+	).join("");
 }
 
 /** Write the current session branch and optional export-only entries as JSONL. */
@@ -54,8 +64,9 @@ export function exportSessionToJsonl(
 	try {
 		const spool = openSync(join(temporaryDirectory, "session.jsonl"), "w+", 0o600);
 		try {
-			for (const line of sessionBranchLines(sessionManager, createTrailingEntries)) {
-				writeFileSync(spool, line);
+			for (const { entry, parentId } of sessionBranchRecords(sessionManager, createTrailingEntries)) {
+				if (parentId === undefined) writeFileSync(spool, `${JSON.stringify(entry)}\n`);
+				else writeSessionEntry(spool, entry as SessionEntry, { parentId });
 			}
 
 			// Unlike copyFileSync or rename, opening the destination preserves its mode and links.

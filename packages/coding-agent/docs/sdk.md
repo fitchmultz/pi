@@ -39,6 +39,10 @@ Sessions are persistent by default. `SessionManager` owns the persisted or in-me
 
 `SessionManager` is authoritative for finalized model context. Restore external history by constructing the session with a manager containing those entries. Assigning `session.agent.state.messages` does not replace persisted context.
 
+File-backed history keeps a derived byte-offset index and enumerable lazy payload fields. `getEntry()`, `getEntries()`, `getBranch()`, and `getTree()` preserve complete entry values without loading unrelated historical bodies. Reading or serializing a payload requests that value; a full individual value and active model context still require sufficient consumer memory.
+
+Use `getEntryMetadata(id)` for one entry's readonly structural, configuration, usage, and bounded-preview facts. `iterateEntryMetadata()` returns those facts in physical journal order; `{ branchFrom: id }` returns root-to-entry ancestry, and `{ branchFrom: null }` returns no entries. Neither method reads custom `data`, message bodies, or compaction details. Both are available through `ReadonlySessionManager` and extension contexts. JSONL remains authoritative; the index rebuilds when the source changes and refuses changed prior records rather than returning stale bodies.
+
 Use an in-memory manager when the host does not want session files:
 
 ```typescript
@@ -104,7 +108,11 @@ New CLI sessions include this tool by default. Existing saved selections and exp
 
 ### Working-session checkpoints
 
-`acquireCheckpoint({ boundary, signal?, quiesce? })` holds native activity after awaited persistence and callbacks. Release in `finally`; check the hold's abort signal throughout capture. `createAgentSession({ checkpoint: readSessionCheckpoint(path) })` restores saved selection, tool restrictions, and pending queues without running them. Bind extensions before prompting so startup can reconstruct dynamic tools and validate the saved selection. If the checkpoint has no selected model, restore preserves that unselected state; model prompts still require a selection.
+`acquireCheckpointFile(absolutePath, { boundary, signal?, quiesce? })` holds native activity after awaited persistence and callbacks, writes a complete self-contained v1 file record-wise, and returns its path in `hold.checkpoint.path`. Release in `finally`; check the hold's abort signal throughout archive/upload work. Published bytes remain independent of release and later session changes. Failure retains the previous artifact and releases the hold.
+
+`createAgentSession({ checkpointFile: path })` stream-validates the complete file and restores saved selection, tool restrictions, and pending queues without running them. It refuses differing existing journals unchanged and exclusively publishes a missing journal only after validation. `checkpointFile` and `checkpoint` are mutually exclusive.
+
+The explicit `acquireCheckpoint()` and `readSessionCheckpoint(path)` object APIs detach/assemble values per entry and require heap for the full requested object. A single full entry or queued value still must fit its consumer. Bind extensions before prompting so startup can reconstruct dynamic tools and validate the saved selection. If the checkpoint has no selected model, restore preserves that unselected state; model prompts still require a selection.
 
 The hold's `sleepReady` and `sleepBlockers` describe the native session only. The archive owner still coordinates other writers and preserves the matching files. See [Working-session checkpoints](checkpoint.md).
 

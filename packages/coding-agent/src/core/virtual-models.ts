@@ -23,7 +23,7 @@ import {
 	type Provider,
 	type ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import type { SessionEntry } from "./session-manager.ts";
+import { getSessionEntryMetadata, type SessionEntry, type SessionEntryMetadata } from "./session-manager.ts";
 
 /** API id of virtual catalog entries. Requests for it fail unless routed first. */
 export const VIRTUAL_MODEL_API = "pi-virtual";
@@ -124,7 +124,7 @@ export function findLatestResponse(messages: readonly AgentMessage[]): Assistant
  * registered does not hold, so the selection falls back to the physical model that answered last.
  */
 export function getBranchSelection(
-	branch: readonly SessionEntry[],
+	branch: Iterable<SessionEntry | SessionEntryMetadata>,
 	getModel: (provider: string, modelId: string) => Model<Api> | undefined,
 ): { provider: string; modelId: string } | undefined {
 	const isVirtual = (provider: string, modelId: string) => {
@@ -132,12 +132,17 @@ export function getBranchSelection(
 		return model !== undefined && isVirtualModel(model);
 	};
 	let selection: { provider: string; modelId: string } | undefined;
-	for (const entry of branch) {
+	for (const source of branch) {
+		const entry = "sequence" in source ? source : getSessionEntryMetadata(source);
 		if (entry.type === "model_change") {
 			selection = { provider: entry.provider, modelId: entry.modelId };
-		} else if (entry.type === "message" && entry.message.role === "assistant" && !isVirtualModel(entry.message)) {
+		} else if (
+			entry.type === "message" &&
+			entry.message.role === "assistant" &&
+			entry.message.api !== VIRTUAL_MODEL_API
+		) {
 			if (!selection || !isVirtual(selection.provider, selection.modelId)) {
-				selection = { provider: entry.message.provider, modelId: entry.message.model };
+				selection = { provider: entry.message.provider!, modelId: entry.message.model! };
 			}
 		}
 	}

@@ -216,6 +216,27 @@ it.each(["before", "partial", "complete"] as const)(
 	},
 );
 
+it("retains a failed append when the same entry id was persisted with different content", async () => {
+	const actual = await vi.importActual<typeof fs>("node:fs");
+	const sm = SessionManager.create(directory, directory);
+	sm.appendMessage(fauxAssistantMessage("saved response"));
+	const file = sm.getSessionFile()!;
+	const before = fs.readFileSync(file);
+	vi.mocked(fs.appendFileSync).mockImplementationOnce(() => {
+		throw new Error("append failed");
+	});
+	expect(() => sm.appendCustomEntry("retained", { value: "accepted" })).toThrow("append failed");
+	const accepted = sm.getLeafEntry()!;
+	actual.appendFileSync(file, `${JSON.stringify({ ...accepted, data: { value: "conflicting" } })}\n`);
+	const conflicting = fs.readFileSync(file);
+	expect(() => sm.flush()).toThrow(`Conflicting persisted entry: ${accepted.id}`);
+	expect(accepted).toMatchObject({ data: { value: "accepted" } });
+	expect(fs.readFileSync(file)).toEqual(conflicting);
+	fs.writeFileSync(file, before);
+	sm.flush();
+	expect(SessionManager.open(file).getEntry(accepted.id)).toEqual(accepted);
+});
+
 it.each(["before", "during"] as const)(
 	"preserves a successful append when another writer fails %s it",
 	async (timing) => {

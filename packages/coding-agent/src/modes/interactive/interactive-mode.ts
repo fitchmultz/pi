@@ -78,7 +78,7 @@ import {
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
 import { type CacheMiss, collectCacheMisses, computeCacheWaste, detectCacheMiss } from "../../core/cache-stats.ts";
 import { formatCacheWarmingStatus, formatCacheWarmingUsage } from "../../core/cache-warmer.ts";
-import { CheckpointActivity, type SessionCheckpoint, type ShutdownCheckpoint } from "../../core/checkpoint.ts";
+import { CheckpointActivity, type CheckpointExitWriter, type ShutdownCheckpointFile } from "../../core/checkpoint.ts";
 import { findExtensionStackMatches, recordCrash, takeUnnotifiedCrash } from "../../core/crash-log.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "../../core/defaults.ts";
 import type {
@@ -449,7 +449,7 @@ export interface InteractiveModeOptions {
 	/** Synchronous host notification before shutdown can yield or re-enter. */
 	onShutdownRequested?: (source: "user" | "extension" | "signal") => void;
 	/** CLI-owned final artifact writer, called only immediately before a deliberate successful user exit. */
-	writeExitCheckpoint?: (checkpoint: SessionCheckpoint) => void;
+	writeExitCheckpoint?: CheckpointExitWriter;
 	/** Terminal implementation. Defaults to the current process terminal. */
 	terminal?: Terminal;
 }
@@ -4672,7 +4672,7 @@ export class InteractiveMode {
 				this.extensionInput ||
 				this.extensionEditor ||
 				(this.editor.getExpandedText?.() ?? this.editor.getText()).length > 0);
-		let checkpoint: ShutdownCheckpoint | undefined;
+		let checkpoint: ShutdownCheckpointFile | undefined;
 		try {
 			this.themeController.disableAutoSync();
 			await this.ui.terminal.drainInput(1000);
@@ -4685,7 +4685,7 @@ export class InteractiveMode {
 					30_000,
 				);
 				try {
-					checkpoint = await this.runtimeHost.disposeWithCheckpoint({
+					checkpoint = await this.runtimeHost.disposeWithCheckpointFile(writeExitCheckpoint.path, {
 						signal: controller.signal,
 						waitForHost: async () => {
 							await this.checkpointUIActivity.flush();

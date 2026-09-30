@@ -5,14 +5,22 @@
       // DATA LOADING
       // ============================================================
 
-      const base64 = document.getElementById('session-data').textContent;
-      const binary = atob(base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
+      function decodeRecord(element) {
+        const binary = atob(element.textContent);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return JSON.parse(new TextDecoder('utf-8').decode(bytes));
       }
-      const data = JSON.parse(new TextDecoder('utf-8').decode(bytes));
-      const { header, entries, leafId: defaultLeafId, systemPrompt, tools, renderedTools } = data;
+      const data = decodeRecord(document.getElementById('session-data'));
+      const { header, leafId: defaultLeafId, systemPrompt, tools } = data;
+      const entries = Array.from(document.querySelectorAll('.session-index'), decodeRecord);
+      // ponytail: one requested body/page and the HTML document must fit the browser; history is never joined.
+      function recordFor(entry) {
+        return decodeRecord(document.getElementById(`session-entry-${entry.record}`));
+      }
+      function fullEntry(entry) {
+        return recordFor(entry).entry;
+      }
 
       // ============================================================
       // URL PARAMETER HANDLING
@@ -367,7 +375,7 @@
           // Hide assistant messages with only tool calls (no text) unless error/aborted
           if (entry.type === 'message' && entry.message.role === 'assistant') {
             const msg = entry.message;
-            const hasText = hasTextContent(msg.content);
+            const hasText = msg.hasText;
             const isErrorOrAborted = msg.stopReason && msg.stopReason !== 'stop' && msg.stopReason !== 'toolUse';
             if (!hasText && !isErrorOrAborted) return false;
           }
@@ -398,7 +406,8 @@
 
           // Apply search filter
           if (searchTokens.length > 0) {
-            const nodeText = getSearchableText(entry, label);
+            const searchable = ['message', 'custom_message', 'branch_summary'].includes(entry.type) ? fullEntry(entry) : entry;
+            const nodeText = getSearchableText(searchable, label);
             if (!searchTokens.every(t => nodeText.includes(t))) return false;
           }
 
@@ -631,6 +640,8 @@
        * Get display text for tree node (returns HTML string).
        */
       function getTreeNodeDisplayHtml(entry, label) {
+        if (entry.record !== undefined && (entry.type === 'custom_message' || entry.type === 'branch_summary' ||
+          (entry.type === 'message' && entry.message.role !== 'toolResult'))) entry = fullEntry(entry);
         const normalize = s => s.replace(/[\n\t]/g, ' ').trim();
         const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : '';
 
@@ -665,8 +676,13 @@
             }
             if (msg.role === 'toolResult') {
               const path = buildActivePathIds(currentLeafId).has(entry.id) ? currentPath : getPath(findNewestLeaf(entry.id));
-              const toolCall = path.flatMap(e => e.type === 'message' && e.message.role === 'assistant' ? e.message.content : [])
-                .find(block => block.type === 'toolCall' && block.id === msg.toolCallId);
+              let toolCall;
+              for (const candidate of path) {
+                if (candidate.type !== 'message' || candidate.message.role !== 'assistant') continue;
+                const message = fullEntry(candidate).message;
+                toolCall = message.content.find(block => block.type === 'toolCall' && block.id === msg.toolCallId);
+                if (toolCall) break;
+              }
               if (toolCall) {
                 return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall))}</span>`;
               }
@@ -837,7 +853,7 @@
         for (const entry of currentPath) {
           if (entry.type === 'message' && entry.message.role === 'toolResult') {
             if (entry.message.toolCallId === toolCallId) {
-              return entry;
+              return fullEntry(entry);
             }
           }
         }
@@ -1039,7 +1055,12 @@
           }
           default: {
             // Check for pre-rendered custom tool HTML
-            const rendered = renderedTools?.[call.id];
+            const callEntry = currentPath.find(entry => entry.type === 'message' && entry.message.role === 'assistant' &&
+              fullEntry(entry).message.content.some(block => block.type === 'toolCall' && block.id === call.id));
+            const renderedCall = callEntry ? recordFor(callEntry).renderedTools?.[call.id] : undefined;
+            const resultIndex = resultEntry ? byId.get(resultEntry.id) : undefined;
+            const renderedResult = resultIndex ? recordFor(resultIndex).renderedTools?.[call.id] : undefined;
+            const rendered = { calls: renderedCall?.calls, results: renderedResult?.results };
             const callHtml = rendered?.calls?.[JSON.stringify(args)];
             const resultHtml = rendered?.results?.[resultEntry?.id];
             if (callHtml || resultHtml?.collapsed || resultHtml?.expanded) {
@@ -1087,18 +1108,11 @@
        * Reconstructs the original format: header line + entry lines.
        */
       window.downloadSessionJson = function() {
-        // Build JSONL content: header first, then all entries
-        const lines = [];
-        if (header) {
-          lines.push(JSON.stringify({ type: 'header', ...header }));
-        }
-        for (const entry of entries) {
-          lines.push(JSON.stringify(entry));
-        }
-        const jsonlContent = lines.join('\n');
-
-        // Create download
-        const blob = new Blob([jsonlContent], { type: 'application/x-ndjson' });
+        // Blob parts retain complete bytes without a session-wide string or decoded body array.
+        const parts = [];
+        if (header) parts.push(JSON.stringify(header));
+        for (const entry of entries) parts.push(new Blob(['\n', JSON.stringify(fullEntry(entry))]));
+        const blob = new Blob(parts, { type: 'application/x-ndjson' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1367,7 +1381,7 @@
                   cost.cacheWrite += msg.usage.cost.cacheWrite || 0;
                 }
               }
-              toolCalls += msg.content.filter(c => c.type === 'toolCall').length;
+              toolCalls += msg.toolCalls;
             }
             if (msg.role === 'toolResult') toolResults++;
           } else if (entry.type === 'compaction') {
@@ -1480,8 +1494,8 @@
       // NAVIGATION
       // ============================================================
 
-      // Cache for rendered entry DOM nodes
-      const entryCache = new Map();
+      const PAGE_SIZE = 50;
+      let pageStart = 0;
 
       function getScrollTargetElementId(entryId) {
         const entry = byId.get(entryId);
@@ -1494,28 +1508,15 @@
       }
 
       function renderEntryToNode(entry) {
-        // Assistant cards include branch-dependent results.
-        const cacheable = entry.type !== 'message' || entry.message.role !== 'assistant';
-        if (cacheable && entryCache.has(entry.id)) {
-          return entryCache.get(entry.id).cloneNode(true);
-        }
-
-        // Render to HTML string, then parse to node
-        const html = renderEntry(entry);
+        if (!['message', 'custom_message', 'compaction', 'branch_summary', 'model_change'].includes(entry.type)) return null;
+        const html = renderEntry(fullEntry(entry));
         if (!html) return null;
-
         const template = document.createElement('template');
         template.innerHTML = html;
-        const node = template.content.firstElementChild;
-
-        // Cache branch-independent nodes.
-        if (cacheable && node) {
-          entryCache.set(entry.id, node.cloneNode(true));
-        }
-        return node;
+        return template.content.firstElementChild;
       }
 
-      function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null) {
+      function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null, requestedStart = null) {
         currentLeafId = targetId;
         currentTargetId = scrollToEntryId || targetId;
         const targetEntry = byId.get(currentTargetId);
@@ -1535,13 +1536,24 @@
         const messagesEl = document.getElementById('messages');
         const fragment = document.createDocumentFragment();
 
-        for (const entry of path) {
+        const selected = Math.max(0, path.findIndex(entry => entry.id === currentTargetId));
+        pageStart = requestedStart ?? (scrollMode === 'none' && !scrollToEntryId ? 0 : Math.floor(selected / PAGE_SIZE) * PAGE_SIZE);
+        function pageButton(text, start) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = text;
+          button.addEventListener('click', () => navigateTo(targetId, 'none', currentTargetId, start));
+          fragment.appendChild(button);
+        }
+        if (pageStart > 0) pageButton('Earlier messages', Math.max(0, pageStart - PAGE_SIZE));
+        for (const entry of path.slice(pageStart, pageStart + PAGE_SIZE)) {
           const node = renderEntryToNode(entry);
           if (node) {
             fragment.appendChild(node);
           }
         }
 
+        if (pageStart + PAGE_SIZE < path.length) pageButton('Later messages', pageStart + PAGE_SIZE);
         messagesEl.innerHTML = '';
         messagesEl.appendChild(fragment);
 

@@ -36,7 +36,12 @@ vi.mock("../src/core/output-guard.js", () => ({
 
 vi.mock("../src/modes/interactive/theme/theme.js", () => ({ theme: {} }));
 
+vi.mock("../src/core/json-record-writer.ts", () => ({
+	writeJsonRecordToStdout: (value: unknown) => rpcIo.outputLines.push(`${JSON.stringify(value)}\n`),
+}));
+
 vi.mock("../src/modes/rpc/jsonl.js", () => ({
+	rpcOutputLayout: { fields: {} },
 	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
 		rpcIo.lineHandler = onLine;
 		return () => {};
