@@ -315,6 +315,8 @@ async function runFlow(provider: OAuthClientProvider, options: OAuthFlowOptions)
 			codeVerifier: await provider.codeVerifier(),
 			redirectUrl: provider.redirectUrl,
 		});
+		// RFC 6749: an omitted scope means the requested scope was granted.
+		if (tokens.scope === undefined && scope !== undefined) tokens.scope = scope;
 		await provider.saveTokens(tokens);
 		return "AUTHORIZED";
 	}
@@ -325,10 +327,12 @@ async function runFlow(provider: OAuthClientProvider, options: OAuthFlowOptions)
 				...tokenOptions,
 				refreshToken: existing.refresh_token,
 			});
+			if (tokens.scope === undefined && existing.scope !== undefined) tokens.scope = existing.scope;
 			await provider.saveTokens(tokens);
 			return "AUTHORIZED";
 		} catch (error) {
 			if (error instanceof OAuthInsecureEndpointError) throw error;
+			if (error instanceof McpOAuthAuthorizationRequiredError) throw error;
 			if (error instanceof OAuthError && error.code !== "server_error") throw error;
 		}
 	}

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added paginated prompt discovery and `getPrompt()` with public `Prompt`, `PromptArgument`, and `GetPromptResult` types.
+- Added HTTPS OAuth client metadata document support and persisted issuer/registration metadata for account-bound hosts.
+
 ## [0.99.1] - 2026-09-29
 
 ## [0.99.0] - 2026-09-29

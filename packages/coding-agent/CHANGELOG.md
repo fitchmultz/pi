@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added lazy-by-default native MCP connections for every exposure, explicit eager profiles, idle cleanup, account-bound catalogs, and cache-only global versus scoped live discovery, including same-script codemode search and calls.
+- Added native MCP prompt commands, complete hook-permitted JSON result artifacts, explicit browser sign-in begin/complete/cancel, and copy-only adapter configuration and optional grant import.
+- Added shared MCP configuration with whole-entry Pi-global and trusted-project overrides, namespace usage instructions, and owning-extension command removal.
 - Added opt-in provider credential isolation for account-routing extensions without deleting stored credentials.
 - Added durable `background_command` shell jobs with status, logs, and completion receipts across Pi exit.
 - Added working-session checkpoints and managed Node CLI restart with pending-input protection and one-attempt startup rollback.
@@ -11,8 +14,15 @@
 - Added extension-owned on-demand instruction groups without broadening tool permissions.
 - Added JSON path and field selection before `read` output truncation, optional compact transcript view, background external usage accounting, and PTY-backed RPC TUI handoff.
 
+### Changed
+
+- Changed `pi mcp list` to inspect configuration and cached catalogs without connecting; use `--connect` for a live probe.
+- Kept deferred native MCP schemas and server usage instructions out of inline codemode declarations; discover them by server or namespace.
+
 ### Fixed
 
+- Fixed lazy tool registration losing permitted saved selections across resume or unrelated tool activation, while preserving deselection and configured restrictions.
+- Fixed MCP account changes and changed live definitions retaining stale callable bindings; uncertain tool-call failures now explain that the operation may have run.
 - Fixed settled legacy session conversion to group genuine receipts for synchronous provider input, preserve committed interrupted output and billing, and retain branch state, declaration order, durable steering, and distinct API/tool identities.
 - Fixed context usage losing measured reasoning tokens when request transforms append content.
 - Fixed empty runtime API keys falling back to stored credentials.

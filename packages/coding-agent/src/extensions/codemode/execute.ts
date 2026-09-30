@@ -22,6 +22,12 @@ import { getCodemodeWorkerUrl, getQuickJSWasmPath } from "../../config.ts";
 import type { ExtensionToolContext } from "../../core/extensions/types.ts";
 import type { SessionEntry } from "../../core/session-manager.ts";
 import { combineUsage } from "../../core/usage-totals.ts";
+import {
+	discoverMcpTools,
+	formatMcpDiscoveryCoverage,
+	type McpDiscoveryReport,
+	resolveToolNamespace,
+} from "../mcp/discovery.ts";
 import { Bm25Ranker, createToolSearchDocument, DEFAULT_TOOL_SEARCH_LIMIT } from "../tool-search/tool.ts";
 import {
 	CODEMODE_STORE_ENTRY_TYPE,
@@ -210,6 +216,20 @@ function toScriptValue(tool: AgentTool<any>, outcome: AgentToolCallOutcome): unk
 	return text;
 }
 
+function resolveCodemodeTool(tools: readonly AgentTool[], name: string): AgentTool | undefined {
+	const exact = tools.find((tool) => tool.name === name);
+	if (exact) return exact;
+	const matches = tools.filter((tool) => toCodemodeIdentifier(tool.name) === name);
+	if (matches.length > 1) throw new Error(`Ambiguous tool "${name}": use its native name`);
+	return matches[0];
+}
+
+/** A normalized identifier is usable only when it cannot select a different tool. */
+function codemodeToolName(tool: AgentTool, tools: readonly AgentTool[]): string {
+	const id = toCodemodeIdentifier(tool.name);
+	return tools.some((other) => other !== tool && toCodemodeIdentifier(other.name) === id) ? tool.name : id;
+}
+
 /**
  * Run one script. Without a session context (a plain Agent or a direct call) scripts cannot call
  * tools, `store()` starts empty, and writes are dropped.
@@ -235,41 +255,55 @@ export async function executeCodemode(
 	const publish = () => onUpdate?.({ content: [], details: snapshot() });
 
 	const callable = ctx ? getCodemodeCallableTools(ctx.tools) : [];
+	const liveTools = () => (ctx ? getCodemodeCallableTools(ctx.tools) : []);
+	let partialCoverage: McpDiscoveryReport | undefined;
 	// ALL_TOOLS entries carry the declaration.
 	const samples = new Map(callable.map((tool) => [tool.name, renderToolSample(toCodemodeDeclaration(tool))]));
+	const executeTool = async (name: string, args: unknown, callSignal: AbortSignal) => {
+		const tool = resolveCodemodeTool(liveTools(), name);
+		if (!tool || !ctx) throw new Error(`Unknown or unavailable tool "${name}"`);
+		const record: CodemodeNestedCall = {
+			id: `${toolCallId}/?`,
+			name: tool.name,
+			args: previewArgs(args),
+			status: "running",
+		};
+		calls.push(record);
+		publish();
+		const callStartedAt = performance.now();
+		const outcome = await ctx.executeTool(tool.name, args, { signal: callSignal });
+		record.id = outcome.toolCall.id;
+		record.durationMs = performance.now() - callStartedAt;
+		if (outcome.isError) {
+			record.status = callSignal.aborted ? "cancelled" : "error";
+			record.error = truncateText(textOf(outcome.result) || `Tool "${tool.name}" failed`, ERROR_PREVIEW_CHARS);
+		} else {
+			record.status = "ok";
+		}
+		publish();
+		return toScriptValue(tool, outcome);
+	};
 	const sandboxTools: CodemodeTool[] = callable.map((tool) => ({
 		name: tool.name,
 		description: samples.get(tool.name),
-		execute: async (args, { signal: callSignal }) => {
-			const record: CodemodeNestedCall = {
-				id: `${toolCallId}/?`,
-				name: tool.name,
-				args: previewArgs(args),
-				status: "running",
-			};
-			calls.push(record);
-			publish();
-			const callStartedAt = performance.now();
-			// Only tools from ctx.tools are callable, so ctx is set here.
-			if (!ctx) throw new Error("Tool calls need a session");
-			const outcome = await ctx.executeTool(tool.name, args, { signal: callSignal });
-			record.id = outcome.toolCall.id;
-			record.durationMs = performance.now() - callStartedAt;
-			if (outcome.isError) {
-				record.status = callSignal.aborted ? "cancelled" : "error";
-				record.error = truncateText(textOf(outcome.result) || `Tool "${tool.name}" failed`, ERROR_PREVIEW_CHARS);
-			} else {
-				record.status = "ok";
-			}
-			publish();
-			return toScriptValue(tool, outcome);
-		},
+		execute: (args, { signal: callSignal }) => executeTool(tool.name, args, callSignal),
 	}));
 
 	const sandbox = new CodemodeSandbox({
 		tools: sandboxTools,
 		globals: [
-			...createDiscoveryGlobals(callable, samples, options),
+			...createDiscoveryGlobals(ctx, liveTools, options, (coverage) => {
+				partialCoverage = coverage;
+			}),
+			{
+				name: "callTool",
+				spread: true,
+				execute: (args, { signal: callSignal }) => {
+					const [name, input] = args as unknown[];
+					if (typeof name !== "string") throw new Error("callTool() expects a tool name");
+					return executeTool(name, input, callSignal);
+				},
+			},
 			...(options.models && ctx
 				? createModelGlobals(ctx.modelRegistry, toolCallId, calls, publish, addModelUsage)
 				: []),
@@ -312,42 +346,82 @@ export async function executeCodemode(
 	const details = snapshot();
 	if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
 	return {
-		content: [{ type: "text", text: header }, ...truncated.items],
+		content: [
+			{ type: "text", text: header },
+			...truncated.items,
+			...(partialCoverage ? [{ type: "text" as const, text: formatMcpDiscoveryCoverage(partialCoverage) }] : []),
+		],
 		details,
 		...(modelUsage ? { usage: modelUsage } : {}),
 		...(result.ok ? {} : { isError: true }),
 	};
 }
 
-/** `searchTools()` and `describeTool()`: ranked search and lookup over the script's nested tools. */
+/** Live metadata lookup; the sandbox's `tools` and `ALL_TOOLS` remain the initial snapshot. */
 function createDiscoveryGlobals(
-	tools: readonly AgentTool<any>[],
-	samples: ReadonlyMap<string, string>,
+	ctx: ExtensionToolContext | undefined,
+	getTools: () => readonly AgentTool[],
 	options: CodemodeToolOptions,
+	onPartialCoverage: (coverage: McpDiscoveryReport) => void,
 ): CodemodeTool[] {
 	const ranker = new Bm25Ranker();
-	const entry = (name: string) => ({ name: toCodemodeIdentifier(name), description: samples.get(name) ?? "" });
+	const discoverScope = async (scope: string | undefined, signal: AbortSignal) => {
+		const coverage = await discoverMcpTools(ctx, undefined, signal);
+		if (scope === undefined) {
+			if (coverage?.complete === false) onPartialCoverage(coverage);
+			return undefined;
+		}
+		if (!scope.trim()) throw new Error("namespace/server must not be empty");
+		const resolved =
+			resolveToolNamespace(
+				[
+					...(coverage?.servers.map((entry) => entry.namespace) ?? []),
+					...getTools().flatMap((tool) => {
+						const namespace = options.getToolNamespace?.(tool.name);
+						return namespace ? [namespace.name] : [];
+					}),
+				],
+				scope,
+			) ?? scope;
+		const server = coverage?.servers.find((entry) => entry.namespace === resolved);
+		if (server) await discoverMcpTools(ctx, server.name, signal);
+		return resolved;
+	};
 	return [
 		{
 			name: "searchTools",
 			spread: true,
-			execute: (args) => {
-				const [query, searchOptions] = args as [unknown, { limit?: unknown; namespace?: unknown } | undefined];
+			execute: async (args, { signal }) => {
+				const [query, searchOptions] = args as [
+					unknown,
+					{ limit?: unknown; namespace?: unknown; server?: unknown } | undefined,
+				];
 				if (typeof query !== "string") throw new Error("searchTools() expects a query string");
 				const limit = searchOptions?.limit ?? DEFAULT_TOOL_SEARCH_LIMIT;
 				if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
 					throw new Error("searchTools() limit must be a positive integer");
 				}
-				const namespace = searchOptions?.namespace;
+				if (searchOptions?.namespace !== undefined && searchOptions?.server !== undefined) {
+					throw new Error("Use either namespace or server, not both");
+				}
+				const namespace = searchOptions?.namespace ?? searchOptions?.server;
 				if (namespace !== undefined && namespace !== null && typeof namespace !== "string") {
 					throw new Error("searchTools() namespace must be a string");
 				}
+				const scope = await discoverScope(namespace ?? undefined, signal);
+				const tools = getTools();
 				const documents = tools.flatMap((tool) => {
 					const toolNamespace = options.getToolNamespace?.(tool.name);
-					if (namespace && toolNamespace?.name !== namespace) return [];
+					if (scope !== undefined && toolNamespace?.name !== scope) return [];
 					return [createToolSearchDocument(tool, toolNamespace)];
 				});
-				return ranker.rank(query, documents, limit).map((match) => entry(match.name));
+				return ranker.rank(query, documents, limit).map((match) => {
+					const tool = tools.find((tool) => tool.name === match.name)!;
+					return {
+						name: codemodeToolName(tool, tools),
+						description: renderToolSample(toCodemodeDeclaration(tool)),
+					};
+				});
 			},
 		},
 		{
@@ -356,10 +430,27 @@ function createDiscoveryGlobals(
 			execute: (args) => {
 				const [name] = args as unknown[];
 				if (typeof name !== "string") throw new Error("describeTool() expects a tool name");
-				const tool = tools.find(
-					(candidate) => candidate.name === name || toCodemodeIdentifier(candidate.name) === name,
-				);
-				return tool ? samples.get(tool.name) : undefined;
+				const tool = resolveCodemodeTool(getTools(), name);
+				return tool ? renderToolSample(toCodemodeDeclaration(tool)) : undefined;
+			},
+		},
+		{
+			name: "describeNamespace",
+			spread: true,
+			execute: async (args, { signal }) => {
+				const [name] = args as unknown[];
+				if (typeof name !== "string") throw new Error("describeNamespace() expects a namespace name");
+				const scope = await discoverScope(name, signal);
+				const callable = getTools();
+				const tools = callable.filter((tool) => options.getToolNamespace?.(tool.name)?.name === scope);
+				const namespace = tools.length > 0 ? options.getToolNamespace?.(tools[0].name) : undefined;
+				if (!namespace) return undefined;
+				return {
+					name: namespace.name,
+					...(namespace.description ? { description: namespace.description } : {}),
+					...(namespace.instructions ? { instructions: namespace.instructions } : {}),
+					tools: tools.map((tool) => codemodeToolName(tool, callable)),
+				};
 			},
 		},
 	];

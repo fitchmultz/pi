@@ -360,6 +360,11 @@ function createExtensionAPI(
 			});
 		},
 
+		unregisterCommand(name: string): void {
+			assertActive();
+			extension.commands.delete(name);
+		},
+
 		registerShortcut(
 			shortcut: KeyId,
 			options: {
@@ -475,9 +480,9 @@ function createExtensionAPI(
 			return runtime.getSettings();
 		},
 
-		setActiveTools(toolNames: string[]): void {
+		setActiveTools(toolNames: string[], options?: Parameters<ExtensionAPI["setActiveTools"]>[1]): void {
 			assertActive();
-			runtime.setActiveTools(toolNames);
+			runtime.setActiveTools(toolNames, options);
 		},
 
 		getCommands() {

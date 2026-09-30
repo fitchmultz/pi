@@ -18,12 +18,14 @@ import {
 } from "./protocol/jsonrpc.ts";
 import {
 	type ClientCapabilities,
+	type GetPromptResult,
 	type Implementation,
 	type InitializeResult,
 	LATEST_PROTOCOL_VERSION,
 	type ListResourcesResult,
 	type ListResourceTemplatesResult,
 	type ProgressNotification,
+	type Prompt,
 	type ReadResourceResult,
 	type Resource,
 	type ResourceTemplate,
@@ -107,6 +109,19 @@ function validateListPage(
 }
 
 const isTool = (tool: Record<string, unknown>) => typeof tool.name === "string" && isObject(tool.inputSchema);
+const isPrompt = (prompt: Record<string, unknown>) =>
+	typeof prompt.name === "string" &&
+	(prompt.title === undefined || typeof prompt.title === "string") &&
+	(prompt.description === undefined || typeof prompt.description === "string") &&
+	(prompt.arguments === undefined ||
+		(Array.isArray(prompt.arguments) &&
+			prompt.arguments.every(
+				(argument) =>
+					isObject(argument) &&
+					typeof argument.name === "string" &&
+					(argument.description === undefined || typeof argument.description === "string") &&
+					(argument.required === undefined || typeof argument.required === "boolean"),
+			)));
 // `name` is required by the spec, but some servers omit it; the URI stands in.
 const isResource = (resource: Record<string, unknown>) =>
 	typeof resource.uri === "string" && (resource.name === undefined || typeof resource.name === "string");
@@ -125,14 +140,43 @@ function pageCursor(page: { nextCursor?: string }): { nextCursor?: string } {
 	return page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor };
 }
 
+function isResourceContents(value: unknown): boolean {
+	return (
+		isObject(value) &&
+		typeof value.uri === "string" &&
+		(value.mimeType === undefined || typeof value.mimeType === "string") &&
+		(typeof value.text === "string" || typeof value.blob === "string")
+	);
+}
+
+function isContentBlock(value: unknown): boolean {
+	if (!isObject(value)) return false;
+	switch (value.type) {
+		case "text":
+			return typeof value.text === "string";
+		case "image":
+		case "audio":
+			return typeof value.data === "string" && typeof value.mimeType === "string";
+		case "resource_link":
+			return (
+				typeof value.uri === "string" &&
+				typeof value.name === "string" &&
+				["title", "description", "mimeType"].every(
+					(key) => value[key] === undefined || typeof value[key] === "string",
+				) &&
+				(value.size === undefined || typeof value.size === "number")
+			);
+		case "resource":
+			return isResourceContents(value.resource);
+		default:
+			return false;
+	}
+}
+
 function validateReadResourceResult(value: unknown): ReadResourceResult {
 	if (!isObject(value) || !Array.isArray(value.contents)) throw invalid("Invalid MCP resources/read result");
 	for (const contents of value.contents) {
-		if (
-			!isObject(contents) ||
-			typeof contents.uri !== "string" ||
-			(typeof contents.text !== "string" && typeof contents.blob !== "string")
-		) {
+		if (!isResourceContents(contents)) {
 			throw invalid("Invalid contents in MCP resources/read result");
 		}
 	}
@@ -141,7 +185,11 @@ function validateReadResourceResult(value: unknown): ReadResourceResult {
 
 /** `content` is required by the spec, but servers that only return `structuredContent` omit it (the SDK defaults it too). */
 function validateCallToolResult(value: unknown): CallToolResult {
-	if (!isObject(value) || (value.content !== undefined && !Array.isArray(value.content))) {
+	if (
+		!isObject(value) ||
+		(value.content !== undefined && (!Array.isArray(value.content) || !value.content.every(isContentBlock))) ||
+		(value.isError !== undefined && typeof value.isError !== "boolean")
+	) {
 		throw new McpError(JSON_RPC_ERROR_CODES.invalidRequest, "Invalid MCP tools/call result");
 	}
 	if (value.structuredContent !== undefined && !isObject(value.structuredContent)) {
@@ -293,6 +341,32 @@ export class McpClient {
 
 	async listTools(options: McpRequestOptions = {}): Promise<Tool[]> {
 		return (await this.listAll("tools/list", "tools", isTool, options)) as unknown as Tool[];
+	}
+
+	async listPrompts(options: McpRequestOptions = {}): Promise<Prompt[]> {
+		return (await this.listAll("prompts/list", "prompts", isPrompt, options)) as unknown as Prompt[];
+	}
+
+	async getPrompt(
+		name: string,
+		args?: Record<string, string>,
+		options: McpRequestOptions = {},
+	): Promise<GetPromptResult> {
+		const result = await this.request("prompts/get", { name, ...(args ? { arguments: args } : {}) }, options);
+		if (
+			!isObject(result) ||
+			!Array.isArray(result.messages) ||
+			(result.description !== undefined && typeof result.description !== "string") ||
+			!result.messages.every(
+				(message) =>
+					isObject(message) &&
+					(message.role === "user" || message.role === "assistant") &&
+					isContentBlock(message.content),
+			)
+		) {
+			throw invalid("Invalid MCP prompts/get result");
+		}
+		return result as unknown as GetPromptResult;
 	}
 
 	/** Every resource, following `nextCursor` through all pages. */

@@ -311,11 +311,15 @@ export interface AutocompleteProvider {
 // Combined provider that handles both slash commands and file paths
 export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	readonly inputContext?: "line" = "line";
-	private commands: (SlashCommand | AutocompleteItem)[];
+	private commands: (SlashCommand | AutocompleteItem)[] | (() => (SlashCommand | AutocompleteItem)[]);
 	private basePath: string;
 	private fdPath: string | null;
 
-	constructor(commands: (SlashCommand | AutocompleteItem)[] = [], basePath: string, fdPath: string | null = null) {
+	constructor(
+		commands: (SlashCommand | AutocompleteItem)[] | (() => (SlashCommand | AutocompleteItem)[]) = [],
+		basePath: string,
+		fdPath: string | null = null,
+	) {
 		this.commands = commands;
 		this.basePath = basePath;
 		this.fdPath = fdPath;
@@ -349,11 +353,12 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			return null;
 		}
 		if (!options.force && textBeforeCursor.startsWith("/")) {
+			const commands = typeof this.commands === "function" ? this.commands() : this.commands;
 			const spaceIndex = textBeforeCursor.indexOf(" ");
 
 			if (spaceIndex === -1) {
 				const prefix = textBeforeCursor.slice(1);
-				const commandItems = this.commands.map((cmd) => {
+				const commandItems = commands.map((cmd) => {
 					const name = "name" in cmd ? cmd.name : cmd.value;
 					const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
 					const desc = cmd.description ?? "";
@@ -391,7 +396,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const commandName = textBeforeCursor.slice(1, spaceIndex);
 			const argumentText = textBeforeCursor.slice(spaceIndex + 1);
 
-			const command = this.commands.find((cmd) => {
+			const command = commands.find((cmd) => {
 				const name = "name" in cmd ? cmd.name : cmd.value;
 				return name === commandName;
 			});

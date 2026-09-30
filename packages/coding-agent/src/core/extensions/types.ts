@@ -544,6 +544,8 @@ export interface ToolNamespace {
 	name: string;
 	/** Shown once above the group's tools. */
 	description?: string;
+	/** Usage instructions returned by codemode's describeNamespace(), outside tool declarations. */
+	instructions?: string;
 }
 
 /** The tools of a session as {@link ToolDefinition.prepareLoadout} sees them. */
@@ -1710,6 +1712,9 @@ export interface ExtensionAPI {
 	/** Register a custom command. */
 	registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void;
 
+	/** Remove a command registered by this extension. */
+	unregisterCommand(name: string): void;
+
 	/** Register a keyboard shortcut. */
 	registerShortcut(
 		shortcut: KeyId,
@@ -1803,10 +1808,11 @@ export interface ExtensionAPI {
 	getSettings(): Settings;
 
 	/**
-	 * Set the active tools by name. Unknown and `hidden` tools are ignored. Tools with `codemode` or
-	 * `deferred` exposure stay callable from codemode scripts whether active or not.
+	 * Set the active tools by name. Missing names wait for lazy registration under current policy;
+	 * `hidden` tools are never activated. preservePending retains missing selections when adding or
+	 * updating other tools. Tools with `codemode` or `deferred` exposure stay callable whether active or not.
 	 */
-	setActiveTools(toolNames: string[]): void;
+	setActiveTools(toolNames: string[], options?: { preservePending?: boolean }): void;
 
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
@@ -1910,8 +1916,8 @@ export interface ExtensionAPI {
 
 	/**
 	 * Register an MCP server for this session, with the same config as an `mcpServers` entry in
-	 * `mcp.json`. The server connects next to the configured servers: on `session_start` when
-	 * registered during extension load, right away when registered later. Registering a name again
+	 * `mcp.json`. The server connects on first use, or at registration when `connection` is `eager`.
+	 * Registering a name again
 	 * replaces the extension's earlier registration.
 	 *
 	 * The registration is not saved; register again on every load. A server of the same name in
@@ -2167,7 +2173,7 @@ export type GetSettingsHandler = () => Settings;
 
 export type GetCommandsHandler = () => SlashCommandInfo[];
 
-export type SetActiveToolsHandler = (toolNames: string[]) => void;
+export type SetActiveToolsHandler = ExtensionAPI["setActiveTools"];
 
 export type RefreshToolsHandler = () => void;
 

@@ -361,6 +361,7 @@ describe("AgentSession queued tool admission", () => {
 		harnesses.push(harness);
 		await harness.session.bindExtensions({});
 		harness.setResponses([fauxAssistantMessage([fauxToolCall("stable", {})], { stopReason: "toolUse" })]);
+		const originalApi = api!;
 		const prompt = harness.session.prompt("go");
 		try {
 			await entered;
@@ -372,7 +373,7 @@ describe("AgentSession queued tool admission", () => {
 				isError: true,
 				content: [{ type: "text", text: "Operation aborted" }],
 			});
-			expect(() => api!.registerTool(stable)).toThrow("stale");
+			expect(() => originalApi.registerTool(stable)).toThrow("stale");
 		} finally {
 			release();
 			await prompt;

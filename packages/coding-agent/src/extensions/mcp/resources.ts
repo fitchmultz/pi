@@ -10,7 +10,7 @@
  * the model; binary resources are saved to temp files. Scripts get the JSON payloads.
  */
 
-import type { ImageContent, JsonValue, TextContent } from "@earendil-works/pi-ai";
+import type { JsonValue } from "@earendil-works/pi-ai";
 import type {
 	ContentBlock,
 	ListResourcesResult,
@@ -21,10 +21,10 @@ import type {
 	ResourceTemplate,
 } from "@earendil-works/pi-mcp";
 import type { TSchema } from "typebox";
-import type { ToolAnnotations, ToolDefinition } from "../../core/extensions/types.ts";
+import type { ExtensionToolContext, ToolAnnotations, ToolDefinition } from "../../core/extensions/types.ts";
 import type { McpExposure } from "./config.ts";
 import {
-	limitMcpContent,
+	finishMcpResult,
 	type McpToolDetails,
 	READ_MCP_RESOURCE_TOOL,
 	toModelContent,
@@ -92,6 +92,7 @@ const LIST_OUTPUT_SCHEMA = {
 	type: "object",
 	properties: {
 		server: optionalString,
+		fullResultPath: optionalString,
 		resources: {
 			type: "array",
 			items: {
@@ -117,6 +118,7 @@ const LIST_TEMPLATES_OUTPUT_SCHEMA = {
 	type: "object",
 	properties: {
 		server: optionalString,
+		fullResultPath: optionalString,
 		resourceTemplates: {
 			type: "array",
 			items: {
@@ -142,6 +144,7 @@ const READ_OUTPUT_SCHEMA = {
 	properties: {
 		server: { type: "string" },
 		uri: { type: "string" },
+		fullResultPath: optionalString,
 		contents: {
 			type: "array",
 			items: {
@@ -171,6 +174,7 @@ function stringArgument(params: unknown, key: string): string | undefined {
 	const value = (params as Record<string, unknown> | undefined)?.[key];
 	if (value === undefined || value === null) return undefined;
 	if (typeof value !== "string") throw new Error(`${key} must be a string`);
+	if (key === "server" && !value.trim()) throw new Error("server must not be empty");
 	return value.trim() || undefined;
 }
 
@@ -182,13 +186,16 @@ async function jsonResult(
 	tool: string,
 	server: string | undefined,
 	payload: Record<string, unknown>,
-): Promise<{ content: (TextContent | ImageContent)[]; details: McpToolDetails; structuredContent: JsonValue }> {
-	const { content, fullOutputPath } = await limitMcpContent([{ type: "text", text: JSON.stringify(payload) }]);
-	return {
-		content,
-		details: { server: server ?? "", tool, ...(fullOutputPath ? { fullOutputPath } : {}) },
-		structuredContent: payload as unknown as JsonValue,
-	};
+	ctx: ExtensionToolContext | undefined,
+) {
+	return finishMcpResult(
+		{
+			content: [{ type: "text", text: JSON.stringify(payload) }],
+			details: { server: server ?? "", tool },
+			structuredContent: payload as unknown as JsonValue,
+		},
+		ctx,
+	);
 }
 
 /**
@@ -262,7 +269,7 @@ export function createMcpResourceToolDefinitions(options: {
 		outputSchema: LIST_OUTPUT_SCHEMA as unknown as TSchema,
 		exposure: toToolExposure(options.exposure),
 		annotations: readOnly,
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const payload = await list(
 				params,
 				signal,
@@ -273,7 +280,7 @@ export function createMcpResourceToolDefinitions(options: {
 				},
 				(server, requestOptions) => server.allResources(requestOptions),
 			);
-			return jsonResult(LIST_MCP_RESOURCES_TOOL, stringArgument(params, "server"), payload);
+			return jsonResult(LIST_MCP_RESOURCES_TOOL, stringArgument(params, "server"), payload, ctx);
 		},
 	};
 
@@ -286,7 +293,7 @@ export function createMcpResourceToolDefinitions(options: {
 		outputSchema: LIST_TEMPLATES_OUTPUT_SCHEMA as unknown as TSchema,
 		exposure: toToolExposure(options.exposure),
 		annotations: readOnly,
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const payload = await list(
 				params,
 				signal,
@@ -297,7 +304,7 @@ export function createMcpResourceToolDefinitions(options: {
 				},
 				(server, requestOptions) => server.allResourceTemplates(requestOptions),
 			);
-			return jsonResult(LIST_MCP_RESOURCE_TEMPLATES_TOOL, stringArgument(params, "server"), payload);
+			return jsonResult(LIST_MCP_RESOURCE_TEMPLATES_TOOL, stringArgument(params, "server"), payload, ctx);
 		},
 	};
 
@@ -309,7 +316,7 @@ export function createMcpResourceToolDefinitions(options: {
 		outputSchema: READ_OUTPUT_SCHEMA as unknown as TSchema,
 		exposure: toToolExposure(options.exposure),
 		annotations: readOnly,
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const serverName = stringArgument(params, "server");
 			const uri = stringArgument(params, "uri");
 			if (!serverName) throw new Error("server must be provided");
@@ -321,20 +328,16 @@ export function createMcpResourceToolDefinitions(options: {
 				...(result.contents.length > 1 ? [{ type: "text" as const, text: `${contents.uri}:` }] : []),
 				{ type: "resource" as const, resource: contents },
 			]);
-			const converted = await toModelContent(server.name, blocks);
-			const { content, fullOutputPath } = await limitMcpContent(
-				converted.length > 0 ? converted : [{ type: "text", text: `Resource ${uri} is empty.` }],
-			);
+			const converted = toModelContent(server.name, blocks);
 			const contents = result.contents.map(({ _meta: _ignored, ...rest }) => rest);
-			return {
-				content,
-				details: {
-					server: server.name,
-					tool: READ_MCP_RESOURCE_TOOL,
-					...(fullOutputPath ? { fullOutputPath } : {}),
+			return finishMcpResult(
+				{
+					content: converted.length > 0 ? converted : [{ type: "text", text: `Resource ${uri} is empty.` }],
+					details: { server: server.name, tool: READ_MCP_RESOURCE_TOOL },
+					structuredContent: { server: server.name, uri, contents } as unknown as JsonValue,
 				},
-				structuredContent: { server: server.name, uri, contents } as unknown as JsonValue,
-			};
+				ctx,
+			);
 		},
 	};
 

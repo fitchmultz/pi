@@ -158,7 +158,11 @@ Inline extension factories can be supplied through `DefaultResourceLoader`. Give
 
 <a id="codemode-mcp"></a>
 
-The CLI loads `codemode`, `tool_search`, and MCP as built-in extensions. SDK sessions do not; add `createCodemodeExtension()`, `createToolSearchExtension()`, and `createMcpExtension()` to the `extensionFactories` of `DefaultResourceLoader`. `codemode` and `tool_search` are registered inactive: enable them through the `defaultTools` setting (`["+codemode", "+tool_search"]` keeps the other default tools), or let the MCP extension activate them: `codemode` for servers with `codemode` or `codemode-deferred` exposure, `tool_search` for servers with `deferred` exposure. The MCP extension connects its servers on `session_start`, so call `session.bindExtensions()`. See [Codemode and MCP](../examples/sdk/14-codemode-mcp.ts).
+The CLI loads codemode, tool search, and MCP as built-in extensions. SDK sessions opt in: add `createCodemodeExtension()`, `createToolSearchExtension()`, and `createMcpExtension()` to `DefaultResourceLoader.extensionFactories`, then call `session.bindExtensions({})` to initialize them. Codemode and tool search register inactive; enable them with `defaultTools: ["+codemode", "+tool_search"]`, or let MCP activate codemode for codemode exposures and tool search for deferred or cold lazy direct servers. See [Codemode and MCP](../examples/sdk/14-codemode-mcp.ts).
+
+The same native contracts apply in SDK sessions: lazy connections by default, explicit `connection: "eager"`, account-bound catalogs, cache-only global discovery, and scoped live discovery. Codemode can use `searchTools()` followed by `callTool()` in one script; native `mcp_auth` provides runtime-local begin/complete/cancel sign-in, including a full pasted callback URL for remote hosts. Result artifacts contain only the final hook-permitted payload. See [MCP Servers](mcp.md) for inputs and examples. `McpExtensionOptions` supports host overrides such as `loadConfig`, `createTransport`, `openUrl`, and `startupWaitMs`; use the exported type for its exact interface.
+
+This lifecycle belongs to `createMcpExtension()`. A standalone `@earendil-works/pi-mcp` client connects only when its host calls `connect()` and does not read CLI configuration or inherit CLI permission hooks.
 
 For grouped on-demand owner instructions, also add the exported `instructionGroupsExtension` factory. It is separate from tool search and does not widen callable permissions. The CLI includes it by default; see [instruction groups](instruction-groups.md).
 
@@ -190,7 +194,7 @@ Request transforms may insert messages or append content blocks without losing m
 
 ### Tool identity and discovery
 
-`getActiveToolNames()` returns selected tool names; pass them to `setActiveToolsByName()`. `getAllTools()` supplies public names, descriptions, schemas, exposure, and source metadata. Selection replaces the loadout, including `[]`, without widening permissions. See [tool discovery](extensions.md#tool-discovery) and [instruction groups](instruction-groups.md).
+`getActiveToolNames()` returns currently active names; pass names to `setActiveToolsByName()`. `getAllTools()` supplies registered names, descriptions, schemas, exposure, namespace metadata (including optional `instructions`), and source metadata. Selection replaces the loadout, including `[]`, without widening permissions. Permitted missing names wait for lazy registration; hidden tools never activate. Use `session.setActiveToolsByName([...session.getActiveToolNames(), name], { preservePending: true })` when adding a tool while retaining saved selections that have not registered yet. See [tool discovery](extensions.md#tool-discovery) and [instruction groups](instruction-groups.md).
 
 ### JSON selection with read
 

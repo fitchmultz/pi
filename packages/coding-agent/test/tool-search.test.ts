@@ -3,12 +3,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { ToolNamespace } from "../src/core/extensions/types.ts";
 import { createCodemodeDescription } from "../src/extensions/codemode/tool.ts";
-import {
-	Bm25Ranker,
-	createToolSearchDescription,
-	createToolSearchDocument,
-	tokenize,
-} from "../src/extensions/tool-search/tool.ts";
+import { Bm25Ranker, createToolSearchDocument, tokenize } from "../src/extensions/tool-search/tool.ts";
 
 function tool(name: string, description: string, properties: Record<string, unknown> = {}): AgentTool {
 	return {
@@ -69,17 +64,6 @@ describe("Bm25Ranker", () => {
 	});
 });
 
-describe("tool_search description", () => {
-	it("lists the sources", () => {
-		expect(
-			createToolSearchDescription([{ name: "mcp__docs", description: "Docs server\nmore" }, { name: "mcp__x" }]),
-		).toBe(
-			"# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n- mcp__docs: Docs server\n- mcp__x\n\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search`.",
-		);
-		expect(createToolSearchDescription()).toContain("None currently enabled.");
-	});
-});
-
 describe("codemode description catalog", () => {
 	const plain = tool("read_notes", "Read notes.");
 	const github = ["a", "b", "c"].map((suffix) => tool(`mcp__github__${suffix}`, `GitHub ${suffix}.`));
@@ -92,41 +76,43 @@ describe("codemode description catalog", () => {
 
 	it("lists everything without a budget", () => {
 		const description = createCodemodeDescription(all, { namespaces });
-		expect(description).toContain("Nested tools: COMPLETE list (6 tools).");
-		expect(description).toContain("## mcp__github (3 tools)\nGitHub server");
-		expect(description).toContain("## mcp__docs (2 tools)\n\n### `mcp__docs");
-		expect(description).not.toContain("Some deferred nested tools");
+		expect(description).toContain("Nested tools:");
+		expect(description).toContain("## mcp__github\nGitHub server");
+		expect(description).toContain("## mcp__docs\n\n### `mcp__docs");
 	});
 
 	it("fills the budget round-robin, cheapest first, and says what is missing", () => {
 		// Each small section costs about 42 tokens: one tool per group, then one more.
 		const description = createCodemodeDescription(all, { namespaces, inlineBudget: 170 });
-		expect(description).toContain("Nested tools: PARTIAL - 4 of 6 shown.");
 		expect(description).toContain("### `read_notes`");
-		expect(description).toContain("## mcp__docs (2 tools, 1 shown)");
+		expect(description).toContain("## mcp__docs (some tools not listed)");
 		expect(description).toContain("### `mcp__docs__search`");
 		expect(description).not.toContain("### `mcp__docs__long`");
-		expect(description).toContain("## mcp__github (3 tools, 2 shown)");
+		expect(description).toContain("## mcp__github (some tools not listed)");
 		expect(description).toContain("To find one, call `await searchTools(query)`");
 		// Deterministic: the same input gives the same description.
 		expect(createCodemodeDescription(all, { namespaces, inlineBudget: 170 })).toBe(description);
 	});
 
-	it("never lists deferred tools and still counts them", () => {
+	it("deferred tools do not affect the description on connect or refresh", () => {
 		const description = createCodemodeDescription(all, {
 			namespaces,
 			deferred: new Set(github.map((entry) => entry.name)),
 		});
-		expect(description).toContain("Nested tools: PARTIAL - 3 of 6 shown.");
-		expect(description).toContain("## mcp__github (3 tools, none shown)\nGitHub server");
-		expect(description).not.toContain("### `mcp__github__a`");
-		expect(description).toContain("Some deferred nested tools may be omitted from this description.");
+		expect(description).not.toContain("## mcp__github");
+		expect(description).toBe(createCodemodeDescription([plain, ...docs], { namespaces }));
+		const refreshed = tool("mcp__github__new", "New tool after refresh.");
+		expect(
+			createCodemodeDescription([...all, refreshed], {
+				namespaces,
+				deferred: new Set([...github.map((entry) => entry.name), refreshed.name]),
+			}),
+		).toBe(description);
 	});
 
 	it("lists only namespaces with a zero budget", () => {
 		const description = createCodemodeDescription(all, { namespaces, inlineBudget: 0 });
-		expect(description).toContain("Nested tools: PARTIAL - 0 of 6 shown.");
-		expect(description).toContain("## mcp__docs (2 tools, none shown)");
+		expect(description).toContain("## mcp__docs (tools not listed)");
 		expect(description).not.toContain("codemode tool declaration:");
 	});
 });

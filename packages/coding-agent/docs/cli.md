@@ -13,7 +13,7 @@ pi update [target] [options]
 pi list
 pi config [options]
 pi auth <check|print-api-key|print-bearer-token> [options]
-pi mcp <add|remove|list|login|logout> [options]
+pi mcp <add|remove|list|login|logout|import-adapter> [options]
 pi restart [options]
 pi convert-session SOURCE NEW_PATH
 ```
@@ -182,7 +182,17 @@ A script may start with an options line such as `// @options: {"max_output_token
 
 While `codemode` is active, `codemode.mode` in [settings](settings.md#tools) decides how the other tools are presented. With `on` (default) declared tools keep being declared and their descriptions show how to call them from scripts. With `only` they are hidden from the model and listed in the `codemode` description instead, so the model calls them through scripts.
 
-The `codemode` description lists the callable tools with their TypeScript declarations, grouped by namespace (for example one MCP server). Declarations share a budget of 3000 estimated tokens (`codemode.inlineBudget` in [settings](settings.md#tools)); every namespace is still listed with its tool count, and the description says whether the list is complete. Scripts find the rest with `await searchTools(query, { limit, namespace })`, which ranks tools with BM25, and `await describeTool(name)`, or by filtering `ALL_TOOLS`.
+The `codemode` description lists non-deferred callable tools with their TypeScript declarations, grouped by namespace. Declarations share a budget of 3000 estimated tokens (`codemode.inlineBudget` in [settings](settings.md#tools)); namespaces indicate whether their inline declarations are complete. Native deferred MCP schemas stay out of this description; direct MCP tools can appear in `codemode.mode: "only"`. Scripts find tools with `await searchTools(query, { limit, namespace })` or `{ server }`, and read current declarations with `await describeTool(name)`. `await describeNamespace(name)` returns `{ name, description?, instructions?, tools }`.
+
+Global search is cache-only for native MCP and reports missing catalog coverage. A scoped search discovers only that server, without starting browser consent. `tools` and `ALL_TOOLS` remain the script's initial snapshot; `callTool(name, args)` can call newly discovered tools in the same script:
+
+```js
+const matches = await searchTools("search", { server: "docs", limit: 3 });
+// This example assumes the best match accepts { query: string }.
+if (matches.length) text(await callTool(matches[0].name, { query: "MCP" }));
+```
+
+The arguments are illustrative; use the selected tool's schema. See [MCP discovery](mcp.md#discover-and-call-tools).
 
 Tools with an output schema resolve to structured values: `bash` to `{ output, truncated, full_output_path?, exit_code, wall_time_seconds }`, also for non-zero exit codes, and MCP tools to their `CallToolResult`. Other tools resolve to their text output. The `output` of `bash` is not limited to the 2000 lines or 50KB the model sees: it holds up to 1 MiB, and longer output keeps its first and last 512 KiB around an omission marker, with `truncated` set and the full output in `full_output_path`.
 
@@ -190,7 +200,7 @@ Tools with an output schema resolve to structured values: `bash` to `{ output, t
 
 ### Tool search
 
-`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`. It uses the same ranking as `searchTools()` over tools that are not declared yet and declares the matches for the next model call. Loaded tools are recorded in the session like other tool changes, so they stay declared on that branch.
+`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`, or let native MCP activate it when needed. It ranks deferred tools not yet declared and declares matches for the next model call. Use `{ query, server: "docs" }` or `{ query, namespace: "mcp__docs" }` for cold scoped MCP discovery; an unscoped search reads cached coverage only. Scoped discovery also registers permitted direct tools. Loaded selections survive `/tree`, resume, and fork on that branch without overriding tool restrictions.
 
 Optional full instructions are owned by extensions; see [Instruction Groups](instruction-groups.md). Discovering a group does not grant tools beyond the existing allowlist. The built-in `discover_tools`, when installed, uses the owner event bus to opt into full instructions; stock clients retain eager instructions when the owner is unavailable.
 
@@ -376,10 +386,11 @@ These commands work outside a session, so agents can run them through `bash`. Se
 | `pi mcp add <server> [options] -- <command> [args...]` | Add or replace a stdio server in `mcp.json`; `--env KEY=VALUE` (repeatable) and `--cwd <dir>` set its environment and working directory. Arguments after the command are passed to it |
 | `pi mcp add <server> [options] --url <url>` | Add or replace a streamable HTTP server; `--header KEY=VALUE` (repeatable), `--bearer-token-env-var <NAME>` (sends `Authorization: Bearer ${NAME}`), `--oauth-client-id`, `--oauth-client-secret`, and `--oauth-callback-port` configure authentication |
 | `pi mcp remove <server>` | Remove a server from `mcp.json`; stored OAuth credentials are kept |
-| `pi mcp list [--json]` | Connect to every enabled server and print its state, tools, and errors; exit with `1` when a config entry is invalid or an enabled server is not connected |
+| `pi mcp list [--json] [--connect]` | Read configuration and matching catalogs without connecting; `--connect` probes every enabled server and refreshes catalogs. Exit with `1` for configuration or catalog errors, or a failed enabled server when probing |
 | `pi mcp login <server> [--timeout <seconds>]` | Sign in to an OAuth server: open the authorization page and wait for the browser (default 300 seconds); a terminal also accepts the pasted redirect URL |
 | `pi mcp logout <server>` | Delete the stored OAuth credentials of a server |
+| `pi mcp import-adapter --config <path> [--config <override>] [--dry-run]` | Copy supported adapter entries into Pi's global file without overwriting native entries. Optional grants require `--credentials <path>` or macOS `--keychain`, plus `--adapter-stopped`; see [import guidance](mcp.md#import-adapter-configuration) |
 
-`add` and `remove` change `~/.pi/agent/mcp.json`, or `.pi/mcp.json` in the current directory with `--local` (`-l`). `add` also takes `--exposure <mode>` (see [Exposure](mcp.md#exposure)) and does not connect; run `pi mcp list` to check the server.
+`add` and `remove` change `~/.pi/agent/mcp.json`, or `.pi/mcp.json` in the current directory with `--local` (`-l`). They never edit the shared `~/.config/mcp/mcp.json`. `add` also takes `--exposure <mode>` and `--connection lazy|eager` (default lazy, including direct exposure). It does not connect; use `list` to inspect configuration or `list --connect` for a live probe.
 
 Project `.pi/mcp.json` files are only read for projects that are already trusted.

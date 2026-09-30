@@ -75,7 +75,7 @@ Automatic retries, recovery, compaction, or queued work can continue afterward.
 | Observe or modify lifecycle behavior | `pi.on()` |
 | Add a model-callable operation | `pi.registerTool()` |
 | Expose deferred tools for built-in search | `pi.registerTool()` with `exposure` |
-| Add a `/` command | `pi.registerCommand()` |
+| Add or remove an owned `/` command | `pi.registerCommand()`, `pi.unregisterCommand()` |
 | Add a shortcut or CLI flag | `pi.registerShortcut()` or `pi.registerFlag()` |
 | Send user or custom messages | `pi.sendUserMessage()` or `pi.sendMessage()` |
 | Persist non-context session data | `pi.appendEntry()` |
@@ -86,6 +86,8 @@ Automatic retries, recovery, compaction, or queued work can continue afterward.
 | Route each request to a model | [`pi.registerVirtualModel()`](virtual-models.md) |
 | Add terminal rendering | Renderer registration and `ctx.ui` |
 | Communicate with another extension | `pi.events` |
+
+`pi.unregisterCommand(name)` removes only a command registered by the calling extension. A missing command is a no-op; another extension's command is untouched. This supports dynamic commands such as cached MCP prompts.
 
 Use the exported declarations in [`extensions/types.ts`](../src/core/extensions/types.ts) for exact event, context, tool, and result types.
 
@@ -159,7 +161,7 @@ Truncate large model-facing results and tell the model where to read the complet
 
 Declare `outputSchema` and return a matching `structuredContent` when the result is data. The model still receives `content`; programmatic callers such as codemode scripts receive `structuredContent` instead of the text. Tools without `outputSchema` are passed to scripts as their text content. To report a failure that still carries data, return the result with `isError: true` instead of throwing: the model sees an error, and scripts still receive `structuredContent`.
 
-A tool can run other tools with `ctx.executeTool(name, args, { signal, onUpdate })`. Nested calls go through argument validation and the `tool_call` and `tool_result` handlers like model-issued calls, and emit `tool_execution_start`, `tool_execution_update`, and `tool_execution_end`; all of these events carry `parentToolCallId`, and their `toolCallId` is assigned by pi as `<parent id>/<n>`. These ids do not appear as tool calls or tool results in the transcript. Nested calls do not add transcript entries: their results only reach the calling tool, which reports them itself, for example through `onUpdate` and `details`. The session keeps a bounded record of them (name, arguments, status, duration, error; never results) as `nestedCalls` on the calling tool's result message. It is used for compaction file lists and shown in HTML exports. Arguments over 8 KiB per call or 32 KiB per tool result are omitted, at most 256 calls are kept, and `complete: false` marks a record that lost anything. The `usage` of nested results, at every depth, is added to the calling tool's result `usage`, so a tool reports only its own usage, not that of the tools it called. `ctx.tools` lists the tools `ctx.executeTool()` can call. `tool_result` handlers that redact `content` should also replace `structuredContent`; replacing only `content` drops it.
+A tool can run other tools with `ctx.executeTool(name, args, { signal, onUpdate })`. Nested calls go through argument validation and the `tool_call` and `tool_result` handlers like model-issued calls, and emit `tool_execution_start`, `tool_execution_update`, and `tool_execution_end`; all of these events carry `parentToolCallId`, and their `toolCallId` is assigned by pi as `<parent id>/<n>`. These ids do not appear as tool calls or tool results in the transcript. Nested calls do not add transcript entries: their results only reach the calling tool, which reports them itself, for example through `onUpdate` and `details`. The session keeps a bounded record of them (name, arguments, status, duration, error; never results) as `nestedCalls` on the calling tool's result message. It is used for compaction file lists and shown in HTML exports. Arguments over 8 KiB per call or 32 KiB per tool result are omitted, at most 256 calls are kept, and `complete: false` marks a record that lost anything. The `usage` of nested results, at every depth, is added to the calling tool's result `usage`, so a tool reports only its own usage, not that of the tools it called. `ctx.tools` lists the tools `ctx.executeTool()` can call. `tool_result` handlers that redact `content` should also replace `structuredContent`; replacing only `content` drops it. Native MCP publishes complete JSON and binary result artifacts only after all result hooks, using the final permitted payload; neither scripts nor artifact readback recover the earlier unredacted response.
 
 See [`hello.ts`](../examples/extensions/hello.ts), [`todo.ts`](../examples/extensions/todo.ts), [`dynamic-tools.ts`](../examples/extensions/dynamic-tools.ts), and [`truncated-tool.ts`](../examples/extensions/truncated-tool.ts).
 
@@ -173,7 +175,7 @@ See [`hello.ts`](../examples/extensions/hello.ts), [`todo.ts`](../examples/exten
 - `deferred`: like `codemode`, but codemode tools do not list it; `tool_search` can find and activate it.
 - `hidden`: registered but unreachable. Re-register a tool with `exposure: "hidden"` to withdraw it, since tools cannot be unregistered.
 
-`namespace: { name, description }` groups related tools, as MCP servers do. Codemode tools list a namespace under one heading.
+`namespace: { name, description?, instructions? }` groups related tools. `description` is a short heading; `instructions` holds full usage guidance returned by codemode's `describeNamespace(name)`, outside inline tool declarations. Search indexes both. Native MCP uses namespace `mcp__<server>` and supplies the server's initialization instructions here.
 
 Registering a `direct` or `model-only` tool activates it; the other exposures are not activated on registration. The active set (`pi.getActiveTools()`, `pi.setActiveTools()`) is the set of tools declared to the model. `pi.getAllTools()` reports each tool's `exposure`, `namespace`, and `annotations`.
 
@@ -195,24 +197,26 @@ A tool that orchestrates other tools can adjust what the model sees while it is 
 
 ### Activate tools dynamically
 
-Register tools first, then select them using `pi.setActiveTools(names)`. `getAllTools()` supplies each tool's `name`, optional `namespace` metadata, exposure, description, schema, guidelines, and source. Namespace groups related tools for discovery and display; tool names are the selection keys. The setter replaces the entire selection, including clearing it with `[]`; unknown names are ignored and registration collisions reject. Selection remains subject to configured allowlists and exclusions.
+Select tools using `pi.setActiveTools(names)`. `getAllTools()` supplies registered tools' names, namespace metadata, exposure, description, schema, guidelines, and source. Names are selection keys. The setter replaces the selection, including clearing it with `[]`; permitted missing names wait for lazy registration. Hidden tools never activate, and registration collisions reject. Configured allowlists and exclusions still apply.
+
+When adding a tool without dropping saved names that have not registered yet, use `pi.setActiveTools([...pi.getActiveTools(), name], { preservePending: true })`. Omit `preservePending` for an intentional replacement. This is useful when an extension activates its own tool before lazy MCP discovery restores the saved selection.
 
 For optional full instructions, register a group through the extension-owned `pi:instruction-groups` event collector. The built-in `discover_tools` delivers them when the group is enabled; the owner supplies eager instructions when discovery is unavailable. Discovery must not widen tool permissions. See [Instruction Groups](instruction-groups.md).
 
 ### Tool discovery
 
-The built-in `tool_search` finds registered deferred tools and activates matches for the next model request. Other extensions can provide their own search tools through ordinary `registerTool()` and `setActiveTools()`; discovery does not bypass configured restrictions. Pi records declaration changes in the transcript, and providers that cannot represent a transition may resend a complete context, invalidating a cached prefix.
+The built-in `tool_search` finds deferred tools and activates matches for the next model request. For native MCP, global search reads cached catalogs only; `server` or `namespace` scope discovers just that server. Codemode's scoped `searchTools()` uses the same discovery, and `callTool(name, args)` can use a newly registered tool in the same script. `ctx.tools` reflects currently callable tools; nested calls still pass live admission and permission hooks. Other extensions can implement search with `registerTool()` and `setActiveTools()` without bypassing configured restrictions. Pi records declaration changes in the transcript; providers that cannot represent a transition may resend a complete context and invalidate a cached prefix.
 
 ### MCP servers
 
-`pi.registerMcpServer(name, config)` adds an MCP server for the current session. `config` has the shape of an `mcpServers` entry in [`mcp.json`](mcp.md): `command`, `args`, `env`, and `cwd` for stdio servers, `url`, `headers`, and `oauth` for HTTP servers, plus `exposure`, `toolExposure`, `enabled`, and `timeout`.
+`pi.registerMcpServer(name, config)` adds an MCP server for the current session. `config` has the shape of an `mcpServers` entry in [`mcp.json`](mcp.md): `command`, `args`, `env`, and `cwd` for stdio servers, `url`, `headers`, and `oauth` for HTTP servers, plus `connection`, `description`, `exposure`, `toolExposure`, `enabled`, and `timeout`.
 
 ```typescript
 pi.registerMcpServer("jira", { url: "https://mcp.example.com/jira", exposure: "codemode" });
 pi.unregisterMcpServer("jira");
 ```
 
-Servers registered while the extension loads connect when the session starts, together with the `mcp.json` servers; servers registered later connect right away, and `pi.unregisterMcpServer()` closes the connection and makes the server's tools unreachable. Registrations are not saved: register again on every load, for example based on the extension's own settings. A server in `mcp.json` with the same name takes precedence, and `/mcp` shows the override. Registering the same name again replaces the extension's earlier registration; names registered by another extension, invalid names, and invalid configs throw.
+Registered servers are lazy by default, whether registered before or after session startup. Their matching cached descriptors register without connecting; scoped discovery or use connects the target. Set `connection: "eager"` to connect at startup or immediately after a later registration. `pi.unregisterMcpServer()` closes the connection and withdraws tools and prompt commands. Registrations are not saved: register again on every load, for example based on the extension's own settings. A server in `mcp.json` with the same name takes precedence, and `/mcp` shows the override. Registering the same name again replaces the extension's earlier registration; names registered by another extension, invalid names, and invalid configs throw.
 
 The built-in MCP support connects registered servers. When nothing does, because another extension replaced it (see [MCP](mcp.md#other-mcp-extensions)), each registration is reported as an extension error. Other MCP extensions can connect registered servers too: read them with `pi.getMcpServers()` on `session_start` and handle the `mcp_servers_change` event for later changes.
 

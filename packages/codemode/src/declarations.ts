@@ -89,6 +89,7 @@ type CallToolResult<TStructured = { [key: string]: unknown }> = {
   content: ContentBlock[];
   isError?: boolean;
   structuredContent?: TStructured;
+  fullResultPath?: string;
   [key: string]: unknown;
 };`;
 

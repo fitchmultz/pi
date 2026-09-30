@@ -5,13 +5,19 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import { type Component, Container, type Focusable, type TUI } from "../../tui/src/tui.ts";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { AuthStorage } from "../src/core/auth-storage.ts";
 import { CheckpointActivity } from "../src/core/checkpoint.ts";
-import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
+import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
+import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+import type { AutocompleteProviderFactory, ExtensionAPI } from "../src/core/extensions/types.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
 
 const checkpointCallback = Reflect.get(InteractiveMode.prototype, "checkpointCallback") as <
 	Args extends unknown[],
@@ -451,6 +457,107 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 });
 
 describe("InteractiveMode.createBaseAutocompleteProvider", () => {
+	test("keeps extension command and argument suggestions live without rebuilding the provider", async () => {
+		const cwd = "/tmp/project";
+		const runtime = createExtensionRuntime();
+		let registerCommand!: ExtensionAPI["registerCommand"];
+		const extension = await loadExtensionFromFactory(
+			(pi) => {
+				registerCommand = pi.registerCommand;
+				pi.registerCommand("mcp:cached", { description: "Cached prompt", handler: async () => {} });
+			},
+			cwd,
+			createEventBus(),
+			runtime,
+			"builtin:mcp",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			runtime,
+			cwd,
+			SessionManager.inMemory(cwd),
+			await createInMemoryModelRegistry(AuthStorage.inMemory()),
+		);
+		const defaultEditor = { setAutocompleteProvider: vi.fn() };
+		const wrapper = vi.fn<AutocompleteProviderFactory>((current) => ({
+			inputContext: current.inputContext,
+			getSuggestions: (...args) => current.getSuggestions(...args),
+			applyCompletion: (...args) => current.applyCompletion(...args),
+			shouldTriggerFileCompletion: current.shouldTriggerFileCompletion?.bind(current),
+		}));
+		const fakeThis = {
+			session: {
+				promptTemplates: [{ name: "template", description: "Prompt template" }],
+				extensionRunner,
+				resourceLoader: {
+					getSkills: () => ({
+						skills: [{ name: "research", description: "Research skill", filePath: "/tmp/skill/SKILL.md" }],
+					}),
+				},
+			},
+			settingsManager: { getEnableSkillCommands: () => true },
+			skillCommands: new Map<string, string>(),
+			sessionManager: { getCwd: () => cwd },
+			fdPath: null,
+			getAutocompleteSourceTag: Reflect.get(InteractiveMode.prototype, "getAutocompleteSourceTag"),
+			prefixAutocompleteDescription: Reflect.get(InteractiveMode.prototype, "prefixAutocompleteDescription"),
+			createBaseAutocompleteProvider: Reflect.get(InteractiveMode.prototype, "createBaseAutocompleteProvider"),
+			checkpointCallback,
+			checkpointUIActivity: new CheckpointActivity(),
+			defaultEditor,
+			editor: defaultEditor,
+			autocompleteProviderWrappers: [wrapper],
+		};
+		const setup = Reflect.get(InteractiveMode.prototype, "setupAutocompleteProvider") as (
+			this: typeof fakeThis,
+		) => void;
+		setup.call(fakeThis);
+		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
+		const suggest = (line: string) =>
+			provider.getSuggestions([line], 0, line.length, { signal: new AbortController().signal });
+		const cached = { value: "mcp:cached", label: "mcp:cached", description: "Cached prompt" };
+
+		expect((await suggest("/mcp"))?.items).toEqual([cached]);
+		expect(await suggest("/mcp:research dr")).toBeNull();
+
+		registerCommand("mcp:research", {
+			description: "Draft prompt",
+			getArgumentCompletions: (prefix) => (prefix === "dr" ? [{ value: "draft", label: "Draft" }] : null),
+			handler: async () => {},
+		});
+		expect((await suggest("/mcp"))?.items).toEqual([
+			cached,
+			{ value: "mcp:research", label: "mcp:research", description: "Draft prompt" },
+		]);
+		expect(await suggest("/mcp:research dr")).toEqual({
+			prefix: "dr",
+			items: [{ value: "draft", label: "Draft" }],
+		});
+
+		registerCommand("mcp:research", {
+			description: "Published prompt",
+			getArgumentCompletions: async (prefix) => (prefix === "dr" ? [{ value: "publish", label: "Publish" }] : null),
+			handler: async () => {},
+		});
+		expect((await suggest("/mcp"))?.items).toEqual([
+			cached,
+			{ value: "mcp:research", label: "mcp:research", description: "Published prompt" },
+		]);
+		expect(await suggest("/mcp:research dr")).toEqual({
+			prefix: "dr",
+			items: [{ value: "publish", label: "Publish" }],
+		});
+
+		extension.commands.delete("mcp:research");
+		expect((await suggest("/mcp"))?.items).toEqual([cached]);
+		expect(await suggest("/mcp:research dr")).toBeNull();
+		const commands = (await suggest("/"))?.items.map((item) => item.value);
+		expect(commands).toEqual(expect.arrayContaining(["model", "template", "mcp:cached", "skill:research"]));
+		expect((await suggest("/rsc"))?.items.map((item) => item.value)).toContain("skill:research");
+		expect(wrapper).toHaveBeenCalledTimes(1);
+		expect(defaultEditor.setAutocompleteProvider).toHaveBeenCalledTimes(1);
+	});
+
 	test("matches model command arguments across provider/model order", async () => {
 		type TestModel = { id: string; provider: string; name: string };
 		type FakeInteractiveMode = {

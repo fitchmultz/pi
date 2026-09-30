@@ -804,16 +804,17 @@ export class InteractiveMode {
 			...(cmd.argumentHint && { argumentHint: cmd.argumentHint }),
 		}));
 
-		// Convert extension commands to SlashCommand format
+		// Resolve extension commands on each lookup so late registrations and removals stay live.
 		const builtinCommandNames = new Set(slashCommands.map((c) => c.name));
-		const extensionCommands: SlashCommand[] = this.session.extensionRunner
-			.getRegisteredCommands()
-			.filter((cmd) => !builtinCommandNames.has(cmd.name))
-			.map((cmd) => ({
-				name: cmd.invocationName,
-				description: this.prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
-				getArgumentCompletions: cmd.getArgumentCompletions,
-			}));
+		const getExtensionCommands = (): SlashCommand[] =>
+			this.session.extensionRunner
+				.getRegisteredCommands()
+				.filter((cmd) => !builtinCommandNames.has(cmd.name))
+				.map((cmd) => ({
+					name: cmd.invocationName,
+					description: this.prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
+					getArgumentCompletions: cmd.getArgumentCompletions,
+				}));
 
 		// Build skill commands from session.skills (if enabled)
 		this.skillCommands.clear();
@@ -830,7 +831,7 @@ export class InteractiveMode {
 		}
 
 		return new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
+			() => [...slashCommands, ...templateCommands, ...getExtensionCommands(), ...skillCommandList],
 			this.sessionManager.getCwd(),
 			this.fdPath,
 		);

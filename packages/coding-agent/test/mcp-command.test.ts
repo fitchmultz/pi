@@ -2,7 +2,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { McpCatalogStore } from "../src/extensions/mcp/catalog.ts";
 import { runMcpCommand } from "../src/extensions/mcp/cli.ts";
+import { loadMcpConfig } from "../src/extensions/mcp/config.ts";
+import { McpOAuthCredentialStore } from "../src/extensions/mcp/oauth.ts";
 
 const FIXTURE = resolve(import.meta.dirname, "../../mcp/test/fixtures/stdio-server.mjs");
 
@@ -37,7 +40,7 @@ describe("pi mcp", () => {
 	};
 
 	it("lists servers with their state, tools, and errors, and fails while anything is wrong", async () => {
-		const { exitCode, output } = await run(["list"], servers);
+		const { exitCode, output } = await run(["list", "--connect"], servers);
 		expect(exitCode).toBe(1);
 		expect(output).toContain("fixture: connected, 1 tool (codemode, global)\n");
 		expect(output).toContain("  tools: echo");
@@ -48,18 +51,117 @@ describe("pi mcp", () => {
 		expect(output).toContain("config error: ");
 		expect(output).toContain('server "bad" needs either "command"');
 
-		const ok = await run(["list"], { fixture: servers.fixture });
+		const ok = await run(["list", "--connect"], { fixture: servers.fixture });
 		expect(ok.exitCode).toBe(0);
 	});
 
 	it("prints JSON for scripts", async () => {
-		const { exitCode, output } = await run(["list", "--json"], { fixture: servers.fixture, parked: servers.parked });
+		const { exitCode, output, agentDir } = await run(["list", "--json", "--connect"], {
+			fixture: servers.fixture,
+			parked: servers.parked,
+		});
 		expect(exitCode).toBe(0);
 		const parsed = JSON.parse(output) as { servers: { name: string; state: string; tools: string[] }[] };
 		expect(parsed.servers.map(({ name, state, tools }) => ({ name, state, tools }))).toEqual([
 			{ name: "fixture", state: "connected", tools: ["echo"] },
 			{ name: "parked", state: "disabled", tools: [] },
 		]);
+		const cached = await run(["list", "--json"], undefined, agentDir);
+		expect(cached.exitCode).toBe(0);
+		expect(JSON.parse(cached.output).servers[0]).toMatchObject({ state: "cached", tools: ["echo"] });
+	});
+
+	it("lists configuration without spawning a server or resolving secrets, and reads cached tools when available", async () => {
+		const result = await run(["list", "--json"], {
+			cold: { command: "pi-test-missing-mcp-server", env: { TOKEN: "!must-not-run" }, exposure: "direct" },
+		});
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output).servers[0]).toMatchObject({
+			state: "configured",
+			connection: "lazy",
+			tools: [],
+		});
+		expect(existsSync(join(result.agentDir, "mcp-auth.json"))).toBe(false);
+		expect(existsSync(join(result.agentDir, "mcp-catalog.json"))).toBe(false);
+	});
+
+	it("lists persisted catalogs for valid profile names and rejects malformed or old-account metadata", async () => {
+		const configured = await run(["list", "--json"], {
+			["__proto__"]: { url: "http://unused.invalid/mcp", toolExposure: { echo: "direct" } },
+		});
+		const credentials = new McpOAuthCredentialStore(undefined, configured.agentDir);
+		const profile = loadMcpConfig({
+			agentDir: configured.agentDir,
+			cwd: configured.agentDir,
+			projectTrusted: false,
+		}).servers[0];
+		new McpCatalogStore({ agentDir: configured.agentDir }).save(
+			profile,
+			configured.agentDir,
+			credentials.catalogIdentity(profile),
+			{
+				tools: [{ name: "echo", inputSchema: { type: "object" } }],
+				hasResources: false,
+				resources: [],
+				resourceTemplates: [],
+				prompts: [{ name: "brief" }],
+			},
+		);
+		const cached = await run(["list", "--json"], undefined, configured.agentDir);
+		expect(JSON.parse(cached.output).servers[0]).toMatchObject({
+			state: "cached",
+			tools: ["echo"],
+			toolExposure: { echo: "direct" },
+			prompts: 1,
+		});
+		const catalogPath = join(configured.agentDir, "mcp-catalog.json");
+		const before = readFileSync(catalogPath, "utf8");
+		const malformed = JSON.parse(before) as { servers: Record<string, { prompts: { title?: unknown }[] }[]> };
+		malformed.servers.__proto__[0].prompts[0].title = 7;
+		writeFileSync(catalogPath, JSON.stringify(malformed));
+		const rejected = await run(["list", "--json"], undefined, configured.agentDir);
+		expect(JSON.parse(rejected.output).servers[0]).toMatchObject({ state: "configured", tools: [] });
+		writeFileSync(catalogPath, before);
+		await credentials.importGrant(profile, {
+			serverUrl: "http://unused.invalid/mcp",
+			tokens: { access_token: "replacement-account", token_type: "Bearer" },
+		});
+		const replaced = await run(["list", "--json"], undefined, configured.agentDir);
+		expect(JSON.parse(replaced.output).servers[0]).toMatchObject({ state: "configured", tools: [] });
+	});
+
+	it("retains eight recent catalog identities and preserves same-identity collision names when saving descriptors", async () => {
+		const configured = await run(["list", "--json"], {
+			docs: { url: "http://unused.invalid/mcp" },
+		});
+		const profile = loadMcpConfig({
+			agentDir: configured.agentDir,
+			cwd: configured.agentDir,
+			projectTrusted: false,
+		}).servers[0];
+		const catalog = new McpCatalogStore({ agentDir: configured.agentDir });
+		for (let i = 0; i < 9; i++) {
+			catalog.save(profile, configured.agentDir, `grant-${i}`, {
+				tools: [{ name: `tool-${i}`, inputSchema: { type: "object" } }],
+				hasResources: false,
+				resources: [],
+				resourceTemplates: [],
+				prompts: [],
+				names: { [`tool-${i}`]: `mcp__docs__tool_${i}` },
+			});
+		}
+		const reopened = new McpCatalogStore({ agentDir: configured.agentDir });
+		expect(reopened.load(profile, configured.agentDir, "grant-0")).toBeUndefined();
+		for (let i = 1; i < 9; i++) {
+			expect(reopened.load(profile, configured.agentDir, `grant-${i}`)?.tools[0].name).toBe(`tool-${i}`);
+		}
+		const latest = reopened.load(profile, configured.agentDir, "grant-8")!;
+		delete latest.names;
+		reopened.save(profile, configured.agentDir, "grant-8", latest);
+		expect(reopened.load(profile, configured.agentDir, "grant-8")?.names).toEqual({
+			"tool-8": "mcp__docs__tool_8",
+		});
+		expect(reopened.load(profile, configured.agentDir, "unknown-account")).toBeUndefined();
 	});
 
 	it("rejects unknown servers and servers without OAuth for login and logout", async () => {
@@ -95,6 +197,18 @@ describe("pi mcp", () => {
 		});
 	});
 
+	it("persists every valid profile name without treating inherited object properties as existing servers", async () => {
+		const added = await run(["add", "__proto__", "--", "node"], undefined);
+		expect(added.exitCode).toBe(0);
+		expect(added.output).toContain("Added global");
+		expect(readConfig(join(added.agentDir, "mcp.json"))).toEqual({
+			mcpServers: { ["__proto__"]: { command: "node" } },
+		});
+		expect((await run(["remove", "constructor"], undefined, added.agentDir)).exitCode).toBe(1);
+		expect((await run(["remove", "__proto__"], undefined, added.agentDir)).exitCode).toBe(0);
+		expect(readConfig(join(added.agentDir, "mcp.json"))).toEqual({ mcpServers: {} });
+	});
+
 	it("adds HTTP servers and keeps other content of the file", async () => {
 		const { exitCode, output, agentDir } = await run(
 			[
@@ -108,6 +222,8 @@ describe("pi mcp", () => {
 				"X-Team=core",
 				"--exposure",
 				"direct",
+				"--connection",
+				"eager",
 			],
 			{ fixture: servers.fixture },
 		);
@@ -121,6 +237,7 @@ describe("pi mcp", () => {
 					// biome-ignore lint/suspicious/noTemplateCurlyInString: literal config value reference
 					headers: { "X-Team": "core", Authorization: "Bearer ${DOCS_TOKEN}" },
 					exposure: "direct",
+					connection: "eager",
 				},
 			},
 		});
@@ -146,6 +263,7 @@ describe("pi mcp", () => {
 			["add", "x", "--header", "A=1", "--", "cmd"],
 			["add", "x", "--env", "NOVALUE", "--", "cmd"],
 			["add", "x", "--exposure", "loud", "--", "cmd"],
+			["add", "x", "--connection", "soon", "--", "cmd"],
 		];
 		for (const args of cases) {
 			const result = await run(args, undefined);

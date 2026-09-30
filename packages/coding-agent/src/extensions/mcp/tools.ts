@@ -25,8 +25,16 @@ import {
 } from "@earendil-works/pi-mcp";
 import { Text } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
-import type { ToolAnnotations, ToolDefinition, ToolExposure, ToolNamespace } from "../../core/extensions/types.ts";
+import { Compile } from "typebox/compile";
+import type {
+	ExtensionToolContext,
+	ToolAnnotations,
+	ToolDefinition,
+	ToolExposure,
+	ToolNamespace,
+} from "../../core/extensions/types.ts";
 import { formatToolCallWithArgs, getTextOutput, replaceTabs } from "../../core/tools/render-utils.ts";
+import { deferToolResultFinalization } from "../../core/tools/result-finalizer.ts";
 import { formatSize, truncateMiddle } from "../../core/tools/truncate.ts";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { McpExposure } from "./config.ts";
@@ -36,7 +44,7 @@ import type { McpExposure } from "./config.ts";
  * description; they differ only in which tool the MCP extension activates to reach them.
  */
 export function toToolExposure(exposure: McpExposure): ToolExposure {
-	return exposure === "codemode-deferred" ? "deferred" : exposure;
+	return exposure === "codemode" || exposure === "codemode-deferred" ? "deferred" : exposure;
 }
 
 /** Provider tool names are limited to 64 characters of `[A-Za-z0-9_-]`. */
@@ -53,6 +61,8 @@ export interface McpToolDetails {
 	tool: string;
 	/** Temp file with the full text output, when the model-facing text was truncated. */
 	fullOutputPath?: string;
+	/** Private JSON artifact containing the complete hook-permitted result. */
+	fullResultPath?: string;
 }
 
 /**
@@ -64,12 +74,22 @@ export type McpOutputSaver = (data: string | Uint8Array, extension: string) => P
 export async function saveToTempFile(data: string | Uint8Array, extension: string): Promise<string> {
 	const path = join(tmpdir(), `pi-mcp-${randomBytes(8).toString("hex")}${extension}`);
 	// Results can carry private data, so only the user may read the file.
-	await writeFile(path, data, { mode: 0o600 });
+	await writeFile(path, data, { mode: 0o600, flag: "wx" });
 	return path;
 }
 
+export interface McpToolExpectation {
+	tool: McpTool;
+	bindingIdentity?: string;
+}
+
 export interface McpToolCaller {
-	callTool(name: string, args: Record<string, unknown>, options: McpRequestOptions): Promise<CallToolResult>;
+	callTool(
+		name: string,
+		args: Record<string, unknown>,
+		options: McpRequestOptions,
+		expected?: McpToolExpectation,
+	): Promise<CallToolResult>;
 }
 
 /**
@@ -107,6 +127,7 @@ export function createMcpResultSchema(structuredContentSchema: Record<string, un
 			content: { type: "array", items: { type: "object" } },
 			...(structuredContentSchema ? { structuredContent: structuredContentSchema } : {}),
 			isError: { type: "boolean" },
+			fullResultPath: { type: "string" },
 			_meta: { type: "object" },
 		},
 		required: ["content"],
@@ -141,8 +162,6 @@ export async function limitMcpContent(
 }
 
 export interface ConvertMcpResultOptions {
-	/** Saves truncated text and binary resources. Default: a temp file. */
-	saveOutput?: McpOutputSaver;
 	/** Whether the server's resources can be read with `read_mcp_resource`, which resource links then name. */
 	readableResources?: boolean;
 }
@@ -161,11 +180,11 @@ function isTextMimeType(mimeType: string | undefined): boolean {
 }
 
 /** Model-facing content of one block of `server`'s result. */
-async function blockToContent(
+function blockToContent(
 	server: string,
 	block: ContentBlock,
 	options: ConvertMcpResultOptions,
-): Promise<(TextContent | ImageContent)[]> {
+): (TextContent | ImageContent)[] {
 	if (block.type === "resource_link") {
 		const details = [block.mimeType, block.size === undefined ? undefined : formatSize(block.size)].filter(Boolean);
 		const read = options.readableResources ? `. Read it with ${READ_MCP_RESOURCE_TOOL} (server "${server}")` : "";
@@ -182,47 +201,119 @@ async function blockToContent(
 		const data = Buffer.from(blob, "base64");
 		if (isTextMimeType(mimeType)) return [{ type: "text", text: data.toString("utf8") }];
 		const kind = `${mimeType ?? "unknown type"}, ${formatSize(data.length)}`;
-		try {
-			const path = await (options.saveOutput ?? saveToTempFile)(data, extensionOf(uri));
-			return [{ type: "text", text: `[Binary resource ${uri} (${kind}) saved to ${path}]` }];
-		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			return [{ type: "text", text: `[Binary resource ${uri} (${kind}) could not be saved: ${reason}]` }];
-		}
+		return [{ type: "text", text: `[Binary resource ${uri} (${kind}); read its blob from the complete MCP result]` }];
 	}
 	return toLlmContent({ content: [block] });
 }
 
 /** Model-facing content of `server`'s content blocks, before the output limit. */
-export async function toModelContent(
+export function toModelContent(
 	server: string,
 	blocks: readonly ContentBlock[],
 	options: ConvertMcpResultOptions = {},
-): Promise<(TextContent | ImageContent)[]> {
-	return (await Promise.all(blocks.map((block) => blockToContent(server, block, options)))).flat();
+): (TextContent | ImageContent)[] {
+	return blocks.flatMap((block) => blockToContent(server, block, options));
 }
 
 /** Convert an MCP result. `isError` results become error results that keep the structured result. */
-export async function convertMcpResult(
+export function convertMcpResult(
 	server: string,
 	tool: string,
 	result: CallToolResult,
 	options: ConvertMcpResultOptions = {},
-): Promise<AgentToolResult<McpToolDetails>> {
+): AgentToolResult<McpToolDetails> {
 	// Without content blocks, toLlmContent falls back to the structured content as JSON.
 	const converted: (TextContent | ImageContent)[] =
-		result.content.length > 0 ? await toModelContent(server, result.content, options) : toLlmContent(result);
+		result.content.length > 0 ? toModelContent(server, result.content, options) : toLlmContent(result);
 	if (result.isError && textOf(converted) === "") {
 		converted.push({ type: "text", text: `MCP tool ${server}/${tool} returned an error` });
 	}
-	const { content, fullOutputPath } = await limitMcpContent(converted, options.saveOutput);
 	const { _meta: _ignored, ...scriptResult } = result;
 	return {
-		content,
-		details: { server, tool, ...(fullOutputPath ? { fullOutputPath } : {}) },
+		content: converted,
+		details: { server, tool },
 		structuredContent: scriptResult as unknown as JsonValue,
 		...(result.isError ? { isError: true } : {}),
 	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Save only what the final result hooks permit, never an earlier server response. */
+export async function finalizeMcpResult(
+	result: AgentToolResult<unknown>,
+	owner: Pick<McpToolDetails, "server" | "tool">,
+): Promise<AgentToolResult<McpToolDetails>> {
+	const details = { ...owner, ...(isRecord(result.details) ? result.details : {}) };
+	const payload = result.structuredContent ?? {
+		content: result.content,
+		...(result.isError ? { isError: true } : {}),
+	};
+	let path: string;
+	try {
+		path = await saveToTempFile(JSON.stringify(payload), ".json");
+	} catch (error) {
+		const limited = await limitMcpContent(result.content, async () => {
+			throw error;
+		});
+		return {
+			...result,
+			content: [
+				...limited.content,
+				{
+					type: "text",
+					text: `[Could not save the complete MCP result: ${error instanceof Error ? error.message : String(error)}]`,
+				},
+			],
+			details,
+		};
+	}
+	const limited = await limitMcpContent(result.content, async () => path);
+	const content = [...limited.content];
+	// Binary files also come from the permitted structured payload, after redaction.
+	if (isRecord(result.structuredContent)) {
+		const raw = result.structuredContent;
+		const resources = Array.isArray(raw.contents)
+			? raw.contents
+			: Array.isArray(raw.content)
+				? raw.content.flatMap((block) => (isRecord(block) && block.type === "resource" ? [block.resource] : []))
+				: [];
+		for (const resource of resources) {
+			if (!isRecord(resource) || typeof resource.blob !== "string" || typeof resource.uri !== "string") continue;
+			const mimeType = typeof resource.mimeType === "string" ? resource.mimeType : undefined;
+			if (mimeType?.startsWith("image/") || isTextMimeType(mimeType)) continue;
+			try {
+				const binaryPath = await saveToTempFile(Buffer.from(resource.blob, "base64"), extensionOf(resource.uri));
+				content.push({ type: "text", text: `[Binary resource ${resource.uri} saved to ${binaryPath}]` });
+			} catch (error) {
+				content.push({
+					type: "text",
+					text: `[Could not save binary resource ${resource.uri}: ${error instanceof Error ? error.message : String(error)}]`,
+				});
+			}
+		}
+	}
+	content.push({ type: "text", text: `[Full MCP result: ${path} (read with json.path/json.fields or offset/limit)]` });
+	return {
+		...result,
+		content,
+		details: { ...details, fullResultPath: path, ...(limited.fullOutputPath ? { fullOutputPath: path } : {}) },
+		...(isRecord(result.structuredContent)
+			? { structuredContent: { ...result.structuredContent, fullResultPath: path } as JsonValue }
+			: {}),
+	};
+}
+
+/** Session calls publish only the final hook-permitted result; standalone calls have no hooks. */
+export function finishMcpResult(
+	result: AgentToolResult<McpToolDetails>,
+	ctx: ExtensionToolContext | undefined,
+): AgentToolResult<McpToolDetails> | Promise<AgentToolResult<McpToolDetails>> {
+	const { server, tool } = result.details;
+	const finalize = (permitted: AgentToolResult<unknown>) => finalizeMcpResult(permitted, { server, tool });
+	return ctx ? deferToolResultFinalization(result, finalize) : finalize(result);
 }
 
 /**
@@ -257,6 +348,7 @@ export function createMcpToolDefinition(options: {
 	namespace: ToolNamespace;
 	timeoutMs: number;
 	getClient: () => Promise<McpToolCaller>;
+	bindingIdentity?: string;
 	/** Whether `read_mcp_resource` can read the server's resources. */
 	readableResources?: () => boolean;
 }): ToolDefinition<TSchema, McpToolDetails> {
@@ -264,6 +356,7 @@ export function createMcpToolDefinition(options: {
 	const title = tool.title ?? tool.annotations?.title;
 	const annotations = toToolAnnotations(tool);
 	const label = `${server}/${tool.name}`;
+	const output = tool.outputSchema ? Compile(tool.outputSchema as TSchema) : undefined;
 	return {
 		name: options.name,
 		label,
@@ -291,18 +384,29 @@ export function createMcpToolDefinition(options: {
 			component.setText(text ? `\n${text}` : "");
 			return component;
 		},
-		async execute(_toolCallId, params, signal, onUpdate) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const client = await options.getClient();
-			const result = await client.callTool(tool.name, (params ?? {}) as Record<string, unknown>, {
-				signal,
-				timeoutMs: options.timeoutMs,
-				onProgress: (progress) => {
-					const total = progress.total === undefined ? "" : `/${progress.total}`;
-					const text = progress.message ?? `Progress ${progress.progress}${total}`;
-					onUpdate?.({ content: [{ type: "text", text }], details: { server, tool: tool.name } });
+			const result = await client.callTool(
+				tool.name,
+				(params ?? {}) as Record<string, unknown>,
+				{
+					signal,
+					timeoutMs: options.timeoutMs,
+					onProgress: (progress) => {
+						const total = progress.total === undefined ? "" : `/${progress.total}`;
+						const text = progress.message ?? `Progress ${progress.progress}${total}`;
+						onUpdate?.({ content: [{ type: "text", text }], details: { server, tool: tool.name } });
+					},
 				},
+				{ tool, bindingIdentity: options.bindingIdentity },
+			);
+			if (!result.isError && output && !output.Check(result.structuredContent)) {
+				throw new Error(`MCP tool "${label}" returned structured content that does not match its output schema.`);
+			}
+			const converted = convertMcpResult(server, tool.name, result, {
+				readableResources: options.readableResources?.(),
 			});
-			return convertMcpResult(server, tool.name, result, { readableResources: options.readableResources?.() });
+			return finishMcpResult(converted, ctx);
 		},
 	};
 }
