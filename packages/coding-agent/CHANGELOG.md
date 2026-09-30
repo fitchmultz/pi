@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Fixed settled legacy session conversion for concurrent receipt ordering, durable steering, result-carried tool declarations, and colliding namespaced tool identities.
 - Fixed context usage losing measured reasoning tokens when request transforms append content.
 - Fixed empty runtime API keys falling back to stored credentials.
 - Fixed cache notices comparing a response with an abandoned branch after `/tree`.

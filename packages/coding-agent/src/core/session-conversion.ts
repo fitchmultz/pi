@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -188,12 +188,13 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		entries.set(id, entry);
 		if (entry.parentId !== null) parents.add(text(entry.parentId));
 	}
+	let replayEntries = entries;
 	function pathTo(id: string): RecordValue[] {
 		const path: RecordValue[] = [];
-		let entry = entries.get(id);
+		let entry = replayEntries.get(id);
 		while (entry) {
 			path.push(entry);
-			entry = entry.parentId === null ? undefined : entries.get(text(entry.parentId));
+			entry = entry.parentId === null ? undefined : replayEntries.get(text(entry.parentId));
 		}
 		return path.reverse();
 	}
@@ -223,13 +224,16 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		}
 		for (const key of ["retainedToolResultIds", "consumedToolResultIds", "concurrentToolResultIds"]) {
 			if (entry[key] === undefined) continue;
+			if (
+				key !== "retainedToolResultIds" &&
+				(entry.type !== "message" || object(entry.message).role !== "assistant")
+			)
+				refuse(`invalid ${key} at ${entry.id}`);
 			for (const reference of array(entry[key])) {
 				const target = path.find((item) => item.id === reference);
 				if (!target || target.type !== "message" || object(target.message).role !== "toolResult")
 					refuse(`invalid ${key} at ${entry.id}`);
 			}
-			if (key === "concurrentToolResultIds" && array(entry[key]).length)
-				refuse(`${key} at ${entry.id} requires causal context reconstruction; cannot safely flatten this journal`);
 		}
 	}
 
@@ -248,7 +252,24 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		for (const entry of path) {
 			if (entry.type === "custom" && entry.customType === "response-steering") {
 				const data = object(entry.data);
-				steering.set(text(data.steeringId), data);
+				if (!["queued", "accepted", "applied", "failed", "unknown"].includes(text(data.status)))
+					refuse(`invalid steering status at ${entry.id}`);
+				if (data.steeringId === undefined && data.status !== "queued")
+					refuse(`missing steering identity at ${entry.id}`);
+				const key = JSON.stringify([data.steeringId === undefined, data.steeringId ?? entry.id]);
+				if (data.steeringId !== undefined) text(data.steeringId);
+				const previous = steering.get(key);
+				if (previous) {
+					const prior = object(previous.data);
+					for (const field of ["message", "responseId"])
+						if (
+							prior[field] !== undefined &&
+							data[field] !== undefined &&
+							!isDeepStrictEqual(prior[field], data[field])
+						)
+							refuse(`conflicting steering ${field} at ${entry.id}`);
+				}
+				steering.set(key, entry);
 			}
 			if (entry.type !== "message") continue;
 			const message = object(entry.message);
@@ -270,18 +291,34 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 				results.set(id, message);
 			}
 		}
-		for (const data of steering.values()) {
-			if (!["applied", "failed"].includes(text(data.status))) refuse(`unsettled steering on branch ${leaf}`);
+		for (const event of steering.values()) {
+			const data = object(event.data);
+			if (data.status === "failed") continue;
+			const deliveries = path.filter(
+				(entry) =>
+					entry.type === "message" &&
+					object(entry.message).role === "user" &&
+					isDeepStrictEqual(entry.message, data.message),
+			);
+			if (deliveries.length !== 1) refuse(`steering input is not journaled exactly once on branch ${leaf}`);
+			if (data.status === "applied") continue;
+			const position = path.indexOf(deliveries[0]);
 			if (
-				data.status === "applied" &&
-				!path.some(
-					(entry) =>
-						entry.type === "message" &&
-						object(entry.message).role === "user" &&
-						isDeepStrictEqual(entry.message, data.message),
-				)
+				typeof data.responseId !== "string" ||
+				!data.responseId ||
+				position <= path.indexOf(event) ||
+				!path.slice(position + 1).some((entry) => {
+					if (entry.type !== "message" || entry.checkpoint) return false;
+					const message = object(entry.message);
+					return (
+						message.role === "assistant" &&
+						typeof message.responseId === "string" &&
+						message.responseId !== data.responseId &&
+						["stop", "length", "toolUse", "error", "aborted"].includes(String(message.stopReason))
+					);
+				})
 			)
-				refuse(`applied steering input is not journaled on branch ${leaf}`);
+				refuse(`unsettled steering on branch ${leaf}`);
 		}
 		for (const frames of responses.values()) {
 			const finals = frames.filter((entry) => !entry.checkpoint && object(entry.message).stopReason !== "pending");
@@ -351,17 +388,97 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		for (const id of results.keys()) if (!calls.has(id)) refuse(`orphan result ${id} on branch ${leaf}`);
 	}
 
-	const identities = new Map<string, string>();
-	function tool(value: unknown, result = false): RecordValue {
+	let ordered = records;
+	if (
+		records.some(
+			(entry) => entry.concurrentToolResultIds !== undefined && array(entry.concurrentToolResultIds).length,
+		)
+	) {
+		// ponytail: causal reparenting supports one linear history, within each boundary.
+		// Branch-dependent or cross-boundary ordering needs a separate representability proof.
+		if (records.some((entry, index) => entry.parentId !== (index === 0 ? null : records[index - 1].id)))
+			refuse("causal receipt ordering on a branched journal requires context reconstruction");
+		const positions = new Map(records.map((entry, index) => [entry.id, index]));
+		const after = new Map<string, number>();
+		let boundary = -1;
+		for (const [index, entry] of records.entries()) {
+			if (entry.type === "compaction" || entry.type === "context_window" || entry.type === "context_edit")
+				boundary = index;
+			if (entry.type !== "message" || object(entry.message).role !== "assistant" || redundant.has(text(entry.id)))
+				continue;
+			// Legacy coalescing keeps the first frame's concurrent receipts, not later checkpoints' lists.
+			for (const id of entry.concurrentToolResultIds === undefined ? [] : array(entry.concurrentToolResultIds)) {
+				const position = positions.get(text(id))!;
+				if (position >= index) continue;
+				if (position < boundary) refuse(`causal receipt ${id} crosses a boundary at ${entry.id}`);
+				after.set(text(id), index);
+			}
+		}
+		const deferred = new Map<number, RecordValue[]>();
+		for (const entry of records) {
+			const index = after.get(text(entry.id));
+			if (index === undefined) continue;
+			const receipts = deferred.get(index) ?? [];
+			receipts.push(entry);
+			deferred.set(index, receipts);
+		}
+		ordered = records.flatMap((entry, index) => [
+			...(after.has(text(entry.id)) ? [] : [entry]),
+			...(deferred.get(index) ?? []),
+		]);
+		ordered = ordered.map((entry, index) => ({ ...entry, parentId: index === 0 ? null : ordered[index - 1].id }));
+		replayEntries = new Map(ordered.map((entry) => [text(entry.id), entry]));
+	}
+
+	const identities = new Map<string, { namespace: string | null; name: string }>();
+	const names = new Map<string, Set<string>>();
+	function identity(value: unknown, result = false): void {
 		const item = object(value);
 		const name = text(item[result ? "toolName" : "name"]);
 		const namespace = item.namespace;
 		if (namespace !== undefined && typeof namespace !== "string") refuse(`invalid legacy namespace for ${name}`);
-		const identity = JSON.stringify([namespace ?? null, name]);
-		if (identities.has(name) && identities.get(name) !== identity)
-			refuse(`legacy tool identities collide on upstream name ${name}`);
-		identities.set(name, identity);
+		const key = JSON.stringify([namespace ?? null, name]);
+		identities.set(key, { namespace: namespace ?? null, name });
+		const keys = names.get(name) ?? new Set<string>();
+		keys.add(key);
+		names.set(name, keys);
+	}
+	for (const entry of records) {
+		const message = entry.type === "message" ? object(entry.message) : undefined;
+		for (const state of [
+			message?.role === "system" || message?.role === "toolResult" ? message : undefined,
+			entry.systemMessage,
+		]) {
+			if (!state) continue;
+			for (const key of ["toolsAdded", "toolsRemoved", "deferredToolEntries"])
+				if (object(state)[key] !== undefined)
+					for (const item of array(object(state)[key])) identity(typeof item === "string" ? { name: item } : item);
+		}
+		if (message?.role === "assistant")
+			for (const block of array(message.content).map(object)) if (block.type === "toolCall") identity(block);
+		if (message?.role === "toolResult") identity(message, true);
+	}
+	const aliases = new Map<string, string>();
+	const usedNames = new Set(names.keys());
+	const aliasMetadata: RecordValue[] = [];
+	for (const key of [...identities.keys()].sort()) {
+		const item = identities.get(key)!;
+		let name = item.name;
+		if (names.get(name)!.size > 1) {
+			const base = `legacy_${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
+			name = base;
+			for (let suffix = 1; usedNames.has(name); suffix++) name = `${base}_${suffix}`;
+			usedNames.add(name);
+			aliasMetadata.push({ ...item, convertedName: name });
+		}
+		aliases.set(key, name);
+	}
+	function tool(value: unknown, result = false): RecordValue {
+		const item = object(value);
 		const converted = { ...item };
+		converted[result ? "toolName" : "name"] = aliases.get(
+			JSON.stringify([item.namespace ?? null, item[result ? "toolName" : "name"]]),
+		)!;
 		for (const key of [...callFields, ...resultFields, "toolSearch"]) delete converted[key];
 		return converted;
 	}
@@ -394,10 +511,29 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		}
 		return converted;
 	}
-	const converted = records.flatMap((entry): RecordValue[] => {
+	const tails = new Map<string, string>();
+	const converted = ordered.flatMap((entry, index): RecordValue[] => {
 		const copy = { ...entry };
+		if (copy.parentId !== null) copy.parentId = tails.get(text(copy.parentId)) ?? copy.parentId;
 		const metadata: RecordValue = {};
 		const prefix: RecordValue[] = [];
+		const suffix: RecordValue[] = [];
+		const original = entries.get(text(entry.id))!;
+		if (original.parentId !== entry.parentId) metadata.originalParentId = original.parentId;
+		for (const key of entryFields) if (key in original) metadata[key] = original[key];
+		if (firstByFrame.get(text(entry.id)) === entry.id) metadata.originalSnapshot = original;
+		if (index === 0 && aliasMetadata.length) {
+			const id = randomUUID();
+			prefix.push({
+				type: "custom",
+				id,
+				parentId: copy.parentId,
+				timestamp: entry.timestamp,
+				customType: "legacy-conversion-tool-aliases",
+				data: aliasMetadata,
+			});
+			copy.parentId = id;
+		}
 		if (entry.type === "compaction") {
 			const kept = text(entry.firstKeptEntryId);
 			copy.firstKeptEntryId = firstByFrame.get(kept) ?? kept;
@@ -515,14 +651,15 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 		}
 		if (entry.type === "message") {
 			if (redundant.has(text(entry.id))) {
+				tails.set(text(entry.id), text(entry.id));
 				return [
 					{
 						type: "custom",
 						id: entry.id,
-						parentId: entry.parentId,
+						parentId: copy.parentId,
 						timestamp: entry.timestamp,
 						customType: "legacy-conversion-snapshot",
-						data: { responseId: object(entry.message).responseId },
+						data: { original },
 					},
 				];
 			}
@@ -552,8 +689,20 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 				}
 				copy.message = message;
 			} else if (message.role === "toolResult") {
-				if (message.toolsAdded !== undefined && array(message.toolsAdded).length)
-					refuse(`tool search declarations at ${entry.id} require context reconstruction`);
+				if (message.toolsAdded !== undefined) {
+					metadata.toolsAdded = message.toolsAdded;
+					if (array(message.toolsAdded).length)
+						suffix.push({
+							type: "message",
+							id: randomUUID(),
+							parentId: entry.id,
+							timestamp: entry.timestamp,
+							message: system(
+								{ role: "system", content: "", timestamp: message.timestamp, toolsAdded: message.toolsAdded },
+								false,
+							),
+						});
+				}
 				copy.message = tool(message, true);
 				for (const key of ["elapsedMs", "executionSkipped"]) if (key in message) metadata[key] = message[key];
 			} else copy.message = message;
@@ -583,7 +732,8 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 				refuse(`legacy call edit at ${entry.id}`);
 		}
 		if (metadata.system && Object.keys(object(metadata.system)).length === 0) delete metadata.system;
-		if (!Object.keys(metadata).length) return [...prefix, copy];
+		tails.set(text(entry.id), text(suffix.at(-1)?.id ?? copy.id));
+		if (!Object.keys(metadata).length) return [...prefix, copy, ...suffix];
 		const id = randomUUID();
 		const parentId = copy.parentId;
 		copy.parentId = id;
@@ -598,6 +748,7 @@ export function convertSessionFile(sourcePath: string, outputPath: string): void
 				data: { sourceEntryId: entry.id, ...metadata },
 			},
 			copy,
+			...suffix,
 		];
 	});
 	assertSessionConversionNotRequired(converted);
