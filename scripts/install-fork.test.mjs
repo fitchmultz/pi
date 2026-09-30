@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { installCodingAgentConsumer, packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import {
@@ -320,17 +320,16 @@ test("isolated npm scripts can invoke npm and package executables on Termux", { 
 });
 
 for (const blocked of [false, true]) {
-	test(`Termux compiler preserves frozen inputs without scripts (${blocked ? "fanotify rebuild" : "published artifact"})`, {
+	test(`Termux compiler preserves frozen inputs without scripts and allows cleanup (${blocked ? "fanotify rebuild" : "published artifact"})`, {
 		skip: process.platform === "win32" || (blocked && process.platform === "darwin"),
 	}, (t) => {
 		const f = fixture(t);
 		const name = `@typescript/typescript-linux-${process.arch}`;
 		const directory = join(f.root, "compiler");
-		const gitHead = "a".repeat(40);
+		let gitHead = "a".repeat(40);
 		let originalWatcher;
 		let watcher;
 		if (blocked) {
-			const go = join(execFileSync("go", ["env", "GOROOT"], { encoding: "utf8" }).trim(), "bin/go");
 			const module = join(f.root, "go-source");
 			mkdirSync(join(module, "cmd/tsgo"), { recursive: true });
 			mkdirSync(join(module, "internal/fswatch"), { recursive: true });
@@ -342,22 +341,22 @@ for (const blocked of [false, true]) {
 import ("fmt"; _ "github.com/microsoft/typescript-go/internal/fswatch")
 func main() { fmt.Println("Version 1.2.3") }
 `);
-			const bin = join(f.root, "bin");
-			mkdirSync(bin);
-			// Only source retrieval is substituted; compile and execute a real Go binary offline.
-			writeFileSync(join(bin, "go"), `#!/usr/bin/env node
-import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-const args = process.argv.slice(2);
-if (args[0] === "mod") {
-  assert.deepEqual(args, ["mod", "download", "-json", "github.com/microsoft/typescript-go@${gitHead}"]);
-  console.log(${JSON.stringify(JSON.stringify({ Dir: module, Sum: "fixture", Origin: { Hash: gitHead } }))});
-} else {
-  const result = spawnSync(${JSON.stringify(go)}, args, { stdio: "inherit" });
-  process.exit(result.status ?? 1);
-}
-`, { mode: 0o755 });
-			f.env.PATH = `${bin}:${f.env.PATH}`;
+			const git = (args) => execFileSync("git", args, { cwd: module, env: f.env, encoding: "utf8" }).trim();
+			git(["init", "--quiet"]);
+			git(["add", "go.mod", "cmd", "internal"]);
+			git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "compiler fixture"]);
+			gitHead = git(["rev-parse", "HEAD"]);
+			// A file proxy lets real Go own cache permissions and checksum verification offline.
+			const version = `v0.0.0-20260101000000-${gitHead.slice(0, 12)}`;
+			const proxy = join(f.root, "proxy");
+			const versions = join(proxy, "github.com/microsoft/typescript-go/@v");
+			mkdirSync(versions, { recursive: true });
+			const info = JSON.stringify({ Version: version, Time: "2026-01-01T00:00:00Z", Origin: { Hash: gitHead } });
+			for (const query of [gitHead, version]) writeFileSync(join(versions, `${query}.info`), info);
+			writeFileSync(join(versions, `${version}.mod`), readFileSync(join(module, "go.mod")));
+			git(["archive", "--format=zip", `--prefix=github.com/microsoft/typescript-go@${version}/`, "--output", join(versions, `${version}.zip`), "HEAD"]);
+			f.env.GOPROXY = pathToFileURL(proxy).href;
+			f.env.GOSUMDB = "off";
 		}
 		mkdirSync(join(directory, "lib"), { recursive: true });
 		writeFileSync(join(directory, "package.json"), JSON.stringify({
@@ -384,5 +383,8 @@ if (args[0] === "mod") {
 		assert.equal(readFileSync(join(f.root, "package-lock.json"), "utf8"), lock);
 		assert.equal(execFileSync(join(f.root, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
 		if (blocked) assert.equal(readFileSync(watcher, "utf8"), originalWatcher);
+		const compiler = join(f.root, "node_modules/.termux-compiler");
+		rmSync(compiler, { recursive: true, force: true });
+		assert.equal(existsSync(compiler), false);
 	});
 }

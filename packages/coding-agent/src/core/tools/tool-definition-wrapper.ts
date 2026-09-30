@@ -39,12 +39,54 @@ export function wrapToolDefinitions(
 	return definitions.map((definition) => wrapToolDefinition(definition, ctxFactory));
 }
 
+const agentToolDefinitions = new WeakMap<AgentTool, ToolDefinition>();
+
 /**
- * Use an AgentTool as a minimal ToolDefinition, preserving its live execution fields.
+ * Adapt an AgentTool's four-argument executor without detaching its live execution fields.
  *
  * This keeps AgentSession's internal registry definition-first even when a caller
  * provides plain AgentTool overrides that do not include prompt metadata or renderers.
  */
 export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDefinition<any, unknown> {
-	return tool;
+	const cached = agentToolDefinitions.get(tool);
+	if (cached) return cached;
+	let execution: { source: AgentTool["execute"]; adapted: ToolDefinition["execute"] } | undefined;
+	const definition: ToolDefinition = {
+		get name() {
+			return tool.name;
+		},
+		get label() {
+			return tool.label;
+		},
+		get description() {
+			return tool.description;
+		},
+		get parameters() {
+			return tool.parameters;
+		},
+		get outputSchema() {
+			return tool.outputSchema;
+		},
+		get constrainedSampling() {
+			return tool.constrainedSampling;
+		},
+		get prepareArguments() {
+			return tool.prepareArguments;
+		},
+		get executionMode() {
+			return tool.executionMode;
+		},
+		get execute() {
+			const execute = tool.execute;
+			if (!execution || execution.source !== execute) {
+				execution = {
+					source: execute,
+					adapted: (id, params, signal, onUpdate) => execute.call(tool, id, params, signal, onUpdate),
+				};
+			}
+			return execution.adapted;
+		},
+	};
+	agentToolDefinitions.set(tool, definition);
+	return definition;
 }

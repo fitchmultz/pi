@@ -1,10 +1,12 @@
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI, ToolDefinition } from "../../src/core/extensions/types.ts";
+import { createReadTool } from "../../src/core/tools/read.ts";
 import { createHarness, getToolResult, type Harness } from "./harness.ts";
 
 describe("AgentSession queued tool admission", () => {
@@ -237,14 +239,16 @@ describe("AgentSession queued tool admission", () => {
 			it(`rechecks a caller-supplied base tool after ${change} (refresh: ${refresh})`, async () => {
 				let effects = 0;
 				let replacementEffects = 0;
+				let argumentCount = 0;
 				const stable: AgentTool = {
 					name: "stable",
 					label: "stable",
 					description: "A stable tool",
 					parameters: Type.Object({}),
-					async execute(_id, _args, signal) {
+					async execute(...args) {
 						expect(this).toBe(stable);
-						expect(signal).toBeInstanceOf(AbortSignal);
+						argumentCount = args.length;
+						expect(args[2]).toBeInstanceOf(AbortSignal);
 						effects++;
 						return { content: [{ type: "text", text: "original" }], details: {} };
 					},
@@ -288,6 +292,7 @@ describe("AgentSession queued tool admission", () => {
 				await harness.session.prompt("go");
 				expect(effects).toBe(change === "unchanged" ? 1 : 0);
 				expect(replacementEffects).toBe(0);
+				if (change === "unchanged") expect(argumentCount).toBe(4);
 				expect(getToolResult(harness, "stable")).toMatchObject({
 					isError: change !== "unchanged",
 					content: [
@@ -297,6 +302,27 @@ describe("AgentSession queued tool admission", () => {
 			});
 		}
 	}
+
+	it("preserves a caller-supplied read tool's configured cwd", async () => {
+		const configuredCwd = mkdtempSync(join(tmpdir(), "configured-read-"));
+		try {
+			writeFileSync(join(configuredCwd, "only-here.txt"), "configured directory\n");
+			const harness = await createHarness({ tools: [createReadTool(configuredCwd)] });
+			harnesses.push(harness);
+			await harness.session.bindExtensions({});
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("read", { path: "only-here.txt" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage("done"),
+			]);
+			await harness.session.prompt("go");
+			expect(getToolResult(harness, "read")).toMatchObject({
+				isError: false,
+				content: [{ type: "text", text: "configured directory\n" }],
+			});
+		} finally {
+			rmSync(configuredCwd, { recursive: true });
+		}
+	});
 
 	it("aborts an admitted call on reload and revokes the old extension's registration authority", async () => {
 		let enter!: () => void;
