@@ -54,7 +54,7 @@ describe("submissions", () => {
 		await harness.close(context);
 	});
 
-	it("places idle input and rejects every submission while busy without writing", async () => {
+	it("places idle input, and rejects busy input with whenBusy reject without writing", async () => {
 		const storage = new ControlledStorage();
 		const setup = chatSetup();
 		setup.now = () => 42;
@@ -72,14 +72,9 @@ describe("submissions", () => {
 		expect((await harness.getTask(live!.run!.taskId, context))?.kind).toBe("pi.generation");
 
 		const commits = storage.commits.length;
-		for (const whenBusy of ["steer", "followUp", "reject"] as const) {
-			const busy = root.submit({ type: "input", content: "again", whenBusy }, context);
-			await expect(busy).rejects.toBeInstanceOf(ConversationBusy);
-		}
-		await expect(root.submit({ type: "write", entry: { kind: "note" } }, context)).rejects.toMatchObject({
-			name: "ConversationBusy",
-			conversationId: root.id,
-		});
+		const rejected = root.submit({ type: "input", content: "again", whenBusy: "reject" }, context);
+		await expect(rejected).rejects.toBeInstanceOf(ConversationBusy);
+		await expect(rejected).rejects.toMatchObject({ conversationId: root.id });
 		expect(storage.commits.length).toBe(commits);
 		await harness.close(context);
 	});

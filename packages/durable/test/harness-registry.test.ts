@@ -1,6 +1,13 @@
 import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
-import { createRegistry, defineTask, GenerationTask, type ToolRegistration } from "@earendil-works/pi-durable";
+import {
+	createRegistry,
+	defineTask,
+	GenerationTask,
+	PostToolsTask,
+	type ToolRegistration,
+	ToolTask,
+} from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 
 type AppTool = ToolRegistration & { readonly snippet?: string };
@@ -202,7 +209,7 @@ describe("registry", () => {
 		const worker = task("worker");
 		registry.tasks.add(worker);
 		expect(() => registry.tasks.add(task("worker"))).toThrow("Task worker is already registered");
-		expect(registry.tasks.list()).toEqual([GenerationTask, worker]);
+		expect(registry.tasks.list()).toEqual([GenerationTask, ToolTask, PostToolsTask, worker]);
 
 		const first = { beforeRun: () => {} };
 		const second = { beforeRun: () => {} };
@@ -224,7 +231,7 @@ describe("registry", () => {
 
 	it("starts with undisposable, non-overridable built-in tasks", () => {
 		const registry = createRegistry();
-		expect(registry.tasks.list()).toEqual([GenerationTask]);
+		expect(registry.tasks.list()).toEqual([GenerationTask, ToolTask, PostToolsTask]);
 		expect(registry.snapshot().task("pi.generation")).toBe(GenerationTask);
 		expect(() => registry.tasks.add({ definition: { ...GenerationTask.definition } })).toThrow(
 			"Task pi.generation is already registered",

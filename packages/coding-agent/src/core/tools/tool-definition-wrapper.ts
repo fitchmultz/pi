@@ -9,6 +9,7 @@ export function wrapToolDefinition<TDetails = unknown>(
 	definition: ToolDefinition<any, TDetails>,
 	ctxFactory?: ToolContextFactory,
 ): AgentTool<any, TDetails> {
+	const execute = definition.execute;
 	return {
 		name: definition.name,
 		label: definition.label,
@@ -19,7 +20,8 @@ export function wrapToolDefinition<TDetails = unknown>(
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
 		execute: (toolCallId, params, signal, onUpdate, ctx?: ExtensionToolContext) =>
-			definition.execute(
+			execute.call(
+				definition,
 				toolCallId,
 				params,
 				signal,

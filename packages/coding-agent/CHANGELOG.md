@@ -16,6 +16,9 @@
 - Fixed context usage losing measured reasoning tokens when request transforms append content.
 - Fixed empty runtime API keys falling back to stored credentials.
 - Fixed cache notices comparing a response with an abandoned branch after `/tree`.
+- Fixed unchanged queued extension and built-in tools being rejected after unrelated or identical registration, while preserving executor, owner, schema, argument-preparation, execution-mode, withdrawal, and reload admission safeguards.
+- Fixed cold extension loading on Node 24.0 when native CommonJS resolution supplies iterable conditions rather than an array.
+- Fixed new sessions intermittently ignoring the saved default model, or warning that no models are available, when it belongs to an extension-registered native provider with a stored credential ([#9962](https://github.com/earendil-works/pi/issues/9962)).
 
 ## [0.99.1] - 2026-09-29
 

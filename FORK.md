@@ -256,6 +256,21 @@ The following approved outcomes govern implementation and review. Source integra
 does not select a runtime: merging, installation, and paid tests retain separate
 authorization and verification gates.
 
+The next integration merges all 12 upstream commits after that target through
+`1b347794e2a630e4359f2584f4eea388145d0ddf` into fork baseline
+`dfbb1d48cfd8951b3589fc6bb43b57757c369575`, preserving both ancestries.
+It includes upstream durable Packages 16–18, the lightweight `pi-ai/models`
+entry, and immediate stored-credential availability for native providers.
+Experimental durable conversations retain upstream's pinned-turn execution
+semantics; ordinary AgentSession tools retain the fork's strict admission guard.
+Unchanged registered-tool refreshes preserve execution identity, while changes
+to the executor, owner, arguments, schema, or execution mode revoke prepared
+calls. Reload aborts active work and replaces its runner. Native extension
+resolution accepts iterable conditions on the declared Node floor.
+The durable root graph budget accounts for the one extra `pi-ai/utils/estimate`
+module used by the fork's bounded declaration retention; upstream's forbidden
+barrels and provider dependencies remain forbidden.
+
 | # | Approved outcome and boundary |
 | --- | --- |
 | 1 | Adopt upstream public namespace/name APIs and migrate internals; no competing public registry or compatibility union. |

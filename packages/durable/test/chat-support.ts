@@ -17,6 +17,7 @@ import {
 	type Registry,
 	type Storage,
 } from "@earendil-works/pi-durable";
+import type { ExecutionEnv } from "../src/env/index.ts";
 import { context } from "./session-support.ts";
 
 /** Models and registry that survive a close/reopen, like a host process's own objects. */
@@ -39,12 +40,14 @@ export function chatSetup(options: RegisterFauxProviderOptions = {}): ChatSetup 
 export async function openChat(
 	storage: Storage,
 	setup: ChatSetup,
+	options: { readonly env?: ExecutionEnv } = {},
 ): Promise<{ readonly harness: Harness; readonly root: Conversation }> {
 	const harness = await Harness.open(
 		storage,
 		{
 			models: setup.models,
 			registry: setup.registry,
+			...(options.env === undefined ? {} : { env: options.env }),
 			now: () => setup.now(),
 			onReport: (error) => setup.reports.push(error),
 		},

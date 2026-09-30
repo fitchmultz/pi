@@ -57,14 +57,25 @@ import { prepareForkDocumentCopies } from "./forks.ts";
 
 type AnyTaskRecord = TaskRecord<JsonValue, JsonValue, JsonValue>;
 
-/** Complete record after applying one settlement; only a placed input can be answered. A settled record stays. */
-function settledSubmission(current: SubmissionRecord, settlement: SubmissionSettlement): SubmissionRecord {
+/** A staged submission change: a settlement, or the placement of a queued submission at its entry. */
+type SubmissionChange = SubmissionSettlement | { readonly status: "placed"; readonly entry: EntryId };
+
+/**
+ * Complete record after applying one change. Placement turns a queued input `placed` and a queued write `done`; only a
+ * placed input can be answered. A settled record stays.
+ */
+function applySubmissionChange(current: SubmissionRecord, change: SubmissionChange): SubmissionRecord {
 	if (current.status === "done" || current.status === "unanswered") return current;
-	if (settlement.status === "done" && current.status !== "placed") {
+	if (change.status === "placed") {
+		if (current.status !== "queued") throw new Error(`Submission ${current.id} is not queued`);
+		const status = current.type === "input" ? "placed" : "done";
+		return { ...current, status, entry: change.entry } as SubmissionRecord;
+	}
+	if (change.status === "done" && current.status !== "placed") {
 		throw new Error(`Submission ${current.id} is not a placed input`);
 	}
 	// Queued and placed records carry no answer, reason, or detail; an unanswered input keeps its entry.
-	return { ...current, ...settlement } as SubmissionRecord;
+	return { ...current, ...change } as SubmissionRecord;
 }
 
 const INTERNAL_SCAN_PAGE_SIZE = 256;
@@ -195,8 +206,8 @@ export class Transaction implements Tx {
 	readonly #tasksById = new Map<TaskId, TransactionTask>();
 	/** Submissions created by this transaction, by ID. */
 	readonly #submissions = new Map<SubmissionId, SubmissionRecord>();
-	/** Settlements in staging order; resolved against the latest candidate record during assembly. */
-	readonly #settlements: { readonly id: SubmissionId; readonly settlement: SubmissionSettlement }[] = [];
+	/** Submission settlements and placements in staging order; resolved against the latest candidate record during assembly. */
+	readonly #submissionChanges: { readonly id: SubmissionId; readonly change: SubmissionChange }[] = [];
 
 	/** Write and publication plans of every staged incarnation, built during assembly. */
 	readonly #plans: DocumentPlan[] = [];
@@ -240,6 +251,12 @@ export class Transaction implements Tx {
 
 	scanEntries(query: EntryQuery, limit: number, cursor?: Cursor) {
 		return this.#read("scanEntries", () => this.#host.storage.scanEntries(query, limit, cursor, this.#context));
+	}
+
+	latestHeadMarker(conversationId: ConversationId) {
+		return this.#read("latestHeadMarker", () =>
+			this.#host.storage.findLatestHeadMarker(conversationId, undefined, this.#context),
+		);
 	}
 
 	scanTasks(query: TaskQuery, limit: number, cursor?: Cursor) {
@@ -414,7 +431,14 @@ export class Transaction implements Tx {
 	settleSubmission(id: SubmissionId, settlement: SubmissionSettlement): void {
 		this.#assertOpen();
 		this.#hasTableWrite = true;
-		this.#settlements.push({ id, settlement: copyJson(settlement) as SubmissionSettlement });
+		this.#submissionChanges.push({ id, change: copyJson(settlement) as SubmissionSettlement });
+	}
+
+	/** Place a queued submission at `entry`; resolved during assembly like `settleSubmission()`. */
+	placeSubmission(id: SubmissionId, entry: EntryId): void {
+		this.#assertOpen();
+		this.#hasTableWrite = true;
+		this.#submissionChanges.push({ id, change: { status: "placed", entry } });
 	}
 
 	/** Internal: replace one task record completely. Tasks change their own state through their runtime. */
@@ -766,11 +790,11 @@ export class Transaction implements Tx {
 			plan.conversationId = task.publicationConversationId;
 		}
 
-		for (const { id, settlement } of this.#settlements) {
+		for (const { id, change } of this.#submissionChanges) {
 			const current = this.#submissions.get(id) ?? (await storage.submission(id, this.#context));
 			if (current === undefined) throw new Error(`Submission ${id} does not exist`);
-			const settled = settledSubmission(current, settlement);
-			if (settled !== current) this.#submissions.set(id, settled);
+			const next = applySubmissionChange(current, change);
+			if (next !== current) this.#submissions.set(id, next);
 		}
 
 		const writes = this.#writes;
