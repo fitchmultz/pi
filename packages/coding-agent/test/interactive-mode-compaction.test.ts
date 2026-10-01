@@ -2,7 +2,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import type { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent, PromptOptions } from "../src/core/agent-session.ts";
-import type { SessionEntry } from "../src/core/session-manager.ts";
+import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -123,7 +123,7 @@ describe("InteractiveMode compaction events", () => {
 			parentId: "previous",
 			timestamp: "2025-01-02T00:00:00Z",
 			summary: "summary",
-			firstKeptEntryId: "kept",
+			firstKeptEntryId: "previous",
 			tokensBefore: 123,
 			usage,
 		};
@@ -145,10 +145,10 @@ describe("InteractiveMode compaction events", () => {
 			defaultEditor: {},
 			statusContainer: { clear: vi.fn() },
 			chatContainer: { clear: vi.fn() },
-			sessionManager: {
-				buildContextEntries: vi.fn().mockReturnValue([latestCompaction, previousCompaction]),
-				getBranch: () => [previousCompaction, latestCompaction],
-			},
+			sessionManager: SessionManager.inMemory(process.cwd(), undefined, [previousCompaction, latestCompaction]),
+			getEntriesAfterCompaction: Reflect.get(InteractiveMode.prototype, "getEntriesAfterCompaction") as (
+				id: string,
+			) => Set<string>,
 			renderSessionEntries: vi.fn(),
 			addMessageToChat: vi.fn(),
 			addCompactionCostNotice: vi.fn(),
