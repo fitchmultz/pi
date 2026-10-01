@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added JSON selection to the `read` tool. `json: { path?, fields? }` selects a JSON Pointer target and, optionally, immediate object keys before paging and output limits. See [JSON selection with read](docs/sdk.md#json-selection-with-read).
+
 ## [1.0.0] - 2026-10-01
 
 ### New Features

@@ -129,7 +129,7 @@ Default enabled tools are `read`, `bash`, `edit`, and `write`, unless `defaultTo
 
 | Built-in | Purpose |
 |---|---|
-| `read` | Read text files and supported images |
+| `read` | Read text files and supported images, or [select JSON before truncation](sdk.md#json-selection-with-read) |
 | `bash` | Run shell commands |
 | `powershell` | Run PowerShell commands on Windows |
 | `edit` | Apply exact text replacements to an existing file |
