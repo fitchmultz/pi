@@ -957,8 +957,17 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (appMode === "rpc") {
+		const interactiveMode =
+			process.platform !== "win32" && process.stdin.isTTY && process.stdout.isTTY
+				? new InteractiveMode(runtime, {
+						autoTrustOnReloadCwd,
+						verbose: parsed.verbose,
+						tuiMode: parsed.tuiMode,
+						initialThemeSetting: parsed.useTheme,
+					})
+				: undefined;
 		printTimings();
-		await runRpcMode(runtime);
+		await runRpcMode(runtime, { interactiveMode });
 	} else if (appMode === "interactive") {
 		const interactiveMode = new InteractiveMode(runtime, {
 			managedRestart,

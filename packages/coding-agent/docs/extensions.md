@@ -240,12 +240,12 @@ Register an entry or message renderer when custom stored content should appear i
 ### UI and modes
 
 `ctx.ui` provides dialogs, notifications, status text, widgets, titles, editor access, and custom components.
-Use `ctx.ui.custom()` only when the interaction needs its own rendering and input.
+Use `ctx.ui.custom()` only when the interaction needs its own rendering and input. `ctx.ui.editor(title, prefill, { signal })` accepts an optional abort signal to dismiss a multiline editor.
 See [Terminal UI](tui.md) for component, focus, overlay, theme, and performance guidance.
 
 Extensions load in interactive, RPC, JSON, and print modes.
 Interactive mode provides the complete terminal UI.
-RPC can forward supported dialogs and notifications through the [RPC Extension UI protocol](rpc-extension-ui.md), but not custom terminal components; JSON and print modes have no UI.
+RPC can forward supported dialogs and notifications through the [RPC Extension UI protocol](rpc-extension-ui.md). POSIX PTY-backed RPC can [attach the live TUI](rpc.md#live-terminal-handoff) for a pending custom component; pipe-based RPC cannot. Handoff preserves the runtime without repeating `session_start`, and `ctx.mode` follows frontend ownership. JSON and print modes have no UI.
 Guard terminal-only behavior with `ctx.mode === "tui"` and use `ctx.hasUI` for interactions supported by interactive and RPC clients.
 
 Keep tool and event behavior independent from rendering so non-interactive modes remain functional.
