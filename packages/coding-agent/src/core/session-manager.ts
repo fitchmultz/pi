@@ -1852,16 +1852,41 @@ export class SessionManager {
 			this.flushed = true;
 			this.needsRewrite = undefined;
 			const source = openJournalSource(this.sessionFile);
+			let verified = false;
 			if (
 				source.dev === writtenStats.dev &&
 				source.ino === writtenStats.ino &&
 				source.size === writtenStats.size &&
 				source.mtimeMs === writtenStats.mtimeMs
 			) {
+				try {
+					// Publication can preserve stat fields while changing header, settings, or message bytes.
+					verifyJournalRecords(source, records);
+					verified = true;
+				} catch {
+					// The published file, not the writer's metadata, is authoritative. Reindex below.
+				}
+			}
+			if (verified) {
 				this._acceptPersistedRecords(source, records, this.journalSource);
 			} else {
 				closeJournalSource(source);
-				this._dropPersistedBodies();
+				const previousSource = this.journalSource;
+				const leaf = this.leafId;
+				const scan = scanJournal(this.sessionFile, {
+					...metadataProjection(),
+					policy: "tolerant",
+					requireFinalLf: true,
+				});
+				try {
+					assertSessionConversionNotRequired(scan.records.map((record) => record.value));
+					this._loadJournal(scan);
+				} catch (error) {
+					closeJournalSource(scan.source);
+					throw error;
+				}
+				if (leaf === null || this.byId.has(leaf)) this.leafId = leaf;
+				this._reuseJournalHandle(previousSource, scan.source);
 			}
 		} finally {
 			if (temporary) rmSync(temporary, { force: true });

@@ -575,7 +575,7 @@ function visitJournalRecord(
 	}
 }
 
-/** Revalidate selected cached bodies after a native append without reparsing or one read/stat per entry. */
+/** Revalidate selected bodies and their LF framing without reparsing or one read/stat per entry. */
 export function verifyJournalRecords(source: JournalSource, records: JournalRecord[]): void {
 	if (!records.length) return;
 	if (source.handle.closed) throw new Error("Journal source descriptor is closed");
@@ -589,22 +589,25 @@ export function verifyJournalRecords(source: JournalSource, records: JournalReco
 	if (stats.dev !== source.dev || stats.ino !== source.ino || stats.size < source.size)
 		throw new Error("Journal source generation changed");
 	const ordered = records.slice().sort((a, b) => a.start - b.start);
-	const end = ordered.at(-1)!.end;
+	const end = Math.min(source.size, ordered.at(-1)!.end + 1);
 	const buffer = Buffer.allocUnsafe(64 * 1024);
 	let bufferStart = -1;
 	let bufferEnd = -1;
 	for (const record of ordered) {
 		const hash = createHash("sha256");
+		const framedEnd = Math.min(source.size, record.end + 1);
 		let position = record.start;
-		while (position < record.end) {
+		while (position < framedEnd) {
 			if (position < bufferStart || position >= bufferEnd) {
 				const count = readSync(source.handle.fd, buffer, 0, Math.min(buffer.length, end - position), position);
 				if (!count) throw new Error("Journal record truncated");
 				bufferStart = position;
 				bufferEnd = position + count;
 			}
-			const next = Math.min(record.end, bufferEnd);
-			hash.update(buffer.subarray(position - bufferStart, next - bufferStart));
+			const next = Math.min(framedEnd, bufferEnd);
+			hash.update(buffer.subarray(position - bufferStart, Math.min(record.end, next) - bufferStart));
+			if (next > record.end && buffer[record.end - bufferStart] !== 10)
+				throw new Error("Journal record framing changed since indexing");
 			position = next;
 		}
 		if (hash.digest("hex") !== record.digest) throw new Error("Journal record changed since indexing");

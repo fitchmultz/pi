@@ -293,6 +293,57 @@ it("preserves distinct physical records with repeated IDs when indexing whole-hi
 	expect(SessionManager.open(child.getSessionFile()!).getEntries()).toEqual(entries);
 });
 
+// PR #163: publication can preserve size and mtime while changing indexed metadata.
+it.each([
+	{ kind: "selected", change: "metadata" },
+	{ kind: "whole", change: "metadata" },
+	{ kind: "selected", change: "separator" },
+	{ kind: "whole", change: "separator" },
+	{ kind: "selected", change: "final LF" },
+	{ kind: "whole", change: "final LF" },
+] as const)("certifies published $kind $change even when file stats match", async ({ kind, change }) => {
+	const actual = await vi.importActual<typeof fs>("node:fs");
+	const manager = fixture(2);
+	const model = manager.appendModelChange("catalog", "old-model");
+	const thinking = manager.appendThinkingLevelChange("high");
+	const source = manager.getSessionFile()!;
+	vi.mocked(fs.fsyncSync).mockImplementationOnce((fd) => {
+		actual.fsyncSync(fd);
+		actual.futimesSync(fd, 0, 0);
+	});
+	vi.mocked(fs.linkSync).mockImplementationOnce((temporary, destination) => {
+		actual.linkSync(temporary, destination);
+		const staged = actual.statSync(temporary);
+		const original = actual.readFileSync(destination, "utf8");
+		const edited =
+			change === "metadata"
+				? original
+						.replace('"modelId":"old-model"', '"modelId":"new-model"')
+						.replace('"thinkingLevel":"high"', '"thinkingLevel":"low "')
+						.replace('"version":3', '"version":4')
+				: change === "separator"
+					? original.replace('"modelId":"old-model"}\n', '"modelId":"old-model"} ')
+					: `${original.slice(0, -1)}x`;
+		actual.writeFileSync(destination, edited);
+		actual.utimesSync(destination, 0, 0);
+		const published = actual.statSync(destination);
+		for (const key of ["dev", "ino", "size", "mtimeMs"] as const) expect(published[key]).toBe(staged[key]);
+	});
+	const child =
+		kind === "selected" ? manager.forkBranch(thinking) : SessionManager.forkFrom(source, directory, directory);
+	if (change === "metadata") {
+		expect(child.getHeader()?.version).toBe(4);
+		expect(child.getEntryMetadata(model)).toMatchObject({ modelId: "new-model" });
+		expect(child.getEntryMetadata(thinking)).toMatchObject({ thinkingLevel: "low " });
+		expect(child.buildSessionContext()).toMatchObject({ model: { modelId: "new-model" }, thinkingLevel: "low " });
+	} else {
+		expect(child.getEntryMetadata(thinking)).toBeUndefined();
+		if (change === "separator") expect(child.getEntryMetadata(model)).toBeUndefined();
+	}
+	expect(child.buildSessionContext()).toEqual(SessionManager.open(child.getSessionFile()!).buildSessionContext());
+	expect(manager.getEntryMetadata(model)).toMatchObject({ modelId: "old-model" });
+});
+
 it.each(["identity", "size", "mtime"] as const)(
 	"reindexes published whole-history output when its %s no longer matches the stage",
 	async (change) => {
@@ -326,7 +377,7 @@ it.each(["identity", "size", "mtime"] as const)(
 );
 
 it.each(["selected", "whole"] as const)(
-	"copies %s history without rereading output, fsyncs publication, and indexes independently readable bytes",
+	"copies %s history with one output verification pass, fsyncs publication, and indexes independently readable bytes",
 	(kind) => {
 		const manager = fixture();
 		const source = manager.getSessionFile()!;
@@ -339,7 +390,9 @@ it.each(["selected", "whole"] as const)(
 		const bytesRead = vi
 			.mocked(fs.readSync)
 			.mock.results.reduce((sum, result) => sum + (result.type === "return" ? Number(result.value) : 0), 0);
-		expect(bytesRead).toBeLessThan(fs.statSync(source).size * (kind === "selected" ? 1 : 2) + 1);
+		expect(bytesRead).toBeLessThan(
+			fs.statSync(source).size * (kind === "selected" ? 1 : 2) + fs.statSync(branch).size + 1,
+		);
 		expect(fs.fsyncSync).toHaveBeenCalledTimes(1);
 		fs.writeFileSync(source, "unrelated generation\n");
 		expect(child.getEntries().map((entry) => JSON.parse(JSON.stringify(entry)))).toEqual(expected);

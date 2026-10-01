@@ -53,7 +53,7 @@ const children = Array.from({ length: 4 }, () => parent.forkBranch(leafId));
 const childFiles = children.map((child) => child.getSessionFile());
 ```
 
-The source is flushed before copying. Each persistent child retains exclusive publication, file fsync, selected-record digest verification, entry IDs, context edits, compaction boundaries, and resolved labels. The writer derives the child index from the bytes written rather than rereading the whole output. Each child still copies its selected bytes; source changes may require a rescan. Setup-only sessions retain deferred file creation. In-memory parents produce detached in-memory children. `createBranchedSession(leafId)` retains its existing behavior of replacing the calling manager with the new branch.
+The source is flushed before copying. Each persistent child retains exclusive publication, file fsync, selected-record digest verification, entry IDs, context edits, compaction boundaries, and resolved labels. The writer derives the child index from the bytes written, then verifies all published record digests and LF separators in bounded chunks before trusting its metadata, including the header and settings. Unchanged output is not reparsed; a verification mismatch rebuilds the index from the published file. Each child still copies its selected bytes; source changes may require a rescan. Setup-only sessions retain deferred file creation. In-memory parents produce detached in-memory children. `createBranchedSession(leafId)` retains its existing behavior of replacing the calling manager with the new branch.
 
 Use an in-memory manager when the host does not want session files:
 
