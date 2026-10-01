@@ -2394,7 +2394,8 @@ export class SessionManager {
 			const cached = this.projectionSource;
 			if (
 				source &&
-				(!cached ||
+				(source.path !== this.sessionFile ||
+					!cached ||
 					source.dev !== cached.dev ||
 					source.ino !== cached.ino ||
 					source.size !== cached.size ||

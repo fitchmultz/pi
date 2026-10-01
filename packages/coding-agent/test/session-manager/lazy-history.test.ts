@@ -149,6 +149,35 @@ it.each([
 	},
 );
 
+// PR #162: unpublished branches must validate their borrowed parent even after warming the cache.
+it.each(["content", "model", "thinking"] as const)("rejects changed borrowed %s in an unpublished branch", (target) => {
+	const directory = mkdtempSync(join(tmpdir(), "pi-borrowed-history-"));
+	directories.push(directory);
+	const parent = SessionManager.create(directory, directory);
+	parent.appendModelChange("catalog", "original-model");
+	parent.appendThinkingLevelChange("high");
+	const selected = parent.appendCustomMessageEntry("setup", "original content", false);
+	parent.appendMessage({ role: "user", content: "persist parent", timestamp: 1 });
+	const source = parent.getSessionFile()!;
+	const child = SessionManager.open(source);
+	const branch = child.createBranchedSession(selected)!;
+	expect(fs.existsSync(branch)).toBe(false);
+	expect(child.buildSessionContext().messages).toMatchObject([{ role: "custom", content: "original content" }]);
+	child.buildSessionProjection();
+	const before = fs.statSync(source);
+	const replacements = {
+		content: ["original content", "modified content"],
+		model: ["original-model", "modified-model"],
+		thinking: ['"high"', '"low "'],
+	};
+	const [original, changed] = replacements[target];
+	writeFileSync(source, readFileSync(source, "utf8").replace(original, changed));
+	fs.utimesSync(source, before.atime, before.mtime);
+	expect(fs.statSync(source).size).toBe(before.size);
+	expect(() => child.buildSessionProjection()).toThrow(/Journal (source generation|record) changed/);
+	expect(fs.existsSync(branch)).toBe(false);
+});
+
 it("retains cache hits when active bodies exceed the byte budget", () => {
 	const { source, manager } = fixture();
 	const content = "x".repeat(6 * 1024 * 1024);

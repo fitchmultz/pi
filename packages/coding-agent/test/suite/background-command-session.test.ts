@@ -117,14 +117,15 @@ describe("session-owned background completion", () => {
 				jobIds: [`old-${i}`],
 			});
 		}
+		// PR #162: the monitor can cache receipts before worker startup finishes.
+		const read = vi.spyOn(fs, "readSync");
+		syncBuiltinESMExports();
 		const { release, command } = held(h);
 		const job = await startBackgroundCommand(backgroundCommandDirectory(h.sessionManager), command, {
 			command,
 			cwd: h.tempDir,
 			env: getShellEnv(),
 		});
-		const read = vi.spyOn(fs, "readSync");
-		syncBuiltinESMExports();
 		await until(() => read.mock.calls.length >= 20);
 		read.mockClear();
 		await delay(1100);
