@@ -438,7 +438,8 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
-	private extensionUIContexts = new Map<Extension, ExtensionUIContext>();
+	/** Keyed by base UI: interactive shortcuts pass their own UI, distinct from the prompt-tracked runner UI. */
+	private extensionUIContexts = new WeakMap<ExtensionUIContext, Map<Extension, ExtensionUIContext>>();
 	private reportPerformanceWarning: ExtensionErrorListener = (error) => {
 		try {
 			this.emitError(error);
@@ -652,7 +653,6 @@ export class ExtensionRunner {
 	}
 
 	setUIContext(uiContext?: ExtensionUIContext, mode: ExtensionMode = "print"): void {
-		this.extensionUIContexts.clear();
 		this.uiContext = uiContext ? this.wrapUIPromptContext(uiContext) : noOpUIContext;
 		this.mode = mode;
 	}
@@ -971,9 +971,14 @@ export class ExtensionRunner {
 			get(target, key, receiver) {
 				if (key !== "ui") return Reflect.get(target, key, receiver);
 				runner.assertActive();
-				let ui = runner.extensionUIContexts.get(extension);
+				const base = ctx.ui;
+				let wrappers = runner.extensionUIContexts.get(base);
+				if (!wrappers) {
+					wrappers = new Map();
+					runner.extensionUIContexts.set(base, wrappers);
+				}
+				let ui = wrappers.get(extension);
 				if (!ui) {
-					const base = ctx.ui;
 					ui = Object.create(base) as ExtensionUIContext;
 					ui.setFooter = (factory) =>
 						base.setFooter(
@@ -1007,7 +1012,7 @@ export class ExtensionRunner {
 									}
 								: undefined,
 						);
-					runner.extensionUIContexts.set(extension, ui);
+					wrappers.set(extension, ui);
 				}
 				return ui;
 			},

@@ -13,6 +13,7 @@ import type {
 	ExtensionUIContext,
 } from "../src/core/extensions/types.ts";
 import { FooterDataProvider } from "../src/core/footer-data-provider.ts";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
@@ -279,4 +280,40 @@ describe("extension performance warnings", () => {
 			}
 		},
 	);
+
+	it("keeps shortcut UI separate from the prompt-tracked runner UI", async () => {
+		const prompts: (string | undefined)[] = [];
+		const runner = await runnerFor([
+			(pi) => {
+				pi.registerShortcut("ctrl+shift+u", {
+					handler: async (ctx) => void (await ctx.ui.confirm("Shortcut?", "")),
+				});
+				pi.on("tool_call", async (_event, ctx) => {
+					expect(ctx.ui).toBe(ctx.ui);
+					return { block: !(await ctx.ui.confirm("Allow?", "")) };
+				});
+				pi.on("ui_prompt_start", (event) => void prompts.push(event.title));
+			},
+		]);
+		const runnerConfirm = vi.fn(async () => true);
+		const shortcutConfirm = vi.fn(async () => true);
+		runner.setUIContext({ ...runner.getUIContext(), confirm: runnerConfirm }, "tui");
+		const shortcut = runner.getShortcuts(new KeybindingsManager().getEffectiveConfig()).get("ctrl+shift+u")!;
+		// Interactive mode creates a fresh, untracked UI for each shortcut invocation.
+		const pressShortcut = () =>
+			shortcut.handler(
+				Object.defineProperty(runner.createContext(), "ui", {
+					value: { ...runner.getUIContext(), confirm: shortcutConfirm },
+				}),
+			);
+
+		await pressShortcut();
+		const result = await runner.emitToolCall({ type: "tool_call", toolCallId: "call", toolName: "test", input: {} });
+		await pressShortcut();
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(result).toEqual({ block: false });
+		expect(runnerConfirm).toHaveBeenCalledTimes(1);
+		expect(shortcutConfirm).toHaveBeenCalledTimes(2);
+		expect(prompts).toEqual(["Allow?"]);
+	});
 });
