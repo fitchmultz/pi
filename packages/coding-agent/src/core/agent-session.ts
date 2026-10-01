@@ -3236,12 +3236,6 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
-	/** Change frontend ownership without restarting extensions; retained across reload. */
-	setExtensionMode(mode: ExtensionMode): void {
-		this._extensionMode = mode;
-		this._extensionRunner.setUIContext(this._extensionUIContext, mode);
-	}
-
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;

@@ -21,7 +21,6 @@ v1.0.0. It is upstream plus the features below. Everything else follows upstream
 | GPT-6 Astra Ultrafast and Codex Fast cost estimates | Service-tier pricing in `packages/ai/src/api/openai-responses.ts` and `openai-codex-responses.ts` | [models.md](packages/coding-agent/docs/models.md) |
 | Slow-extension diagnostics (handler over 100 ms, footer render over 16 ms) | Timing at handler dispatch and extension footers in `src/core/extensions/runner.ts` | [extensions.md](packages/coding-agent/docs/extensions.md) |
 | Cloudflare AI Gateway Claude IDs | `normalizeCloudflareModelId()` in `packages/ai/src/api/cloudflare.ts`, used by the generator, the provider and remote catalogs | [providers.md](packages/coding-agent/docs/providers.md) |
-| Live PTY RPC-to-TUI handoff (`attach_tui`) | `src/modes/rpc/rpc-mode.ts` plus a hosted interactive-mode lifecycle | [rpc.md](packages/coding-agent/docs/rpc.md) |
 | Small confirmed fixes | TUI input, keys and links; resized-image coordinate notes; branch-summary budgets; prompt-template and piped-input handling | [Changelog](packages/coding-agent/CHANGELOG.md#unreleased) |
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
@@ -47,6 +46,9 @@ task-cost and profiling scripts. Also dropped: the fork's native-MCP changes (th
 `pi-mcp-adapter`, which already loads servers lazily on 1.0) and the old prompt-cache protection
 framework (1.0 already keeps prompts deterministic; only the observed instruction-group prefix
 rewrite needed a fix).
+
+Dropped after the rebuild: the live PTY RPC-to-TUI handoff (`attach_tui`). It is Axiom-specific;
+Axiom pins `fitchmultz/pi` 7ca602dd and carries its own port. Reference implementation: 63401a044.
 
 ## Remotes and history
 

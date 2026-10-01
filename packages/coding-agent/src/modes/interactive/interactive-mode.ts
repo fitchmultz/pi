@@ -481,16 +481,6 @@ export class InteractiveMode {
 	private keybindings: KeybindingsManager;
 	private version: string;
 	private isInitialized = false;
-	private hostedShutdown?: () => Promise<never>;
-	private hostedActive = false;
-
-	/** While a hosted TUI is detached, RPC owns stdout; keep terminal writes out of its output. */
-	private get hostedDetached(): boolean {
-		return this.hostedShutdown !== undefined && !this.hostedActive;
-	}
-	private get terminalActive(): boolean {
-		return this.isInitialized && !this.hostedDetached;
-	}
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
@@ -966,7 +956,7 @@ export class InteractiveMode {
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
 
-		this.registerSignalHandlers(!this.hostedShutdown);
+		this.registerSignalHandlers();
 
 		// Load changelog (only show new entries, skip for resumed sessions)
 		this.changelogMarkdown = this.getChangelogForDisplay();
@@ -1020,7 +1010,6 @@ export class InteractiveMode {
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
 		this.isInitialized = true;
-		this.hostedActive = !!this.hostedShutdown;
 
 		this.themeController.applyFromSettings();
 		// The header and startup notices bake theme colors into their text, so build them once the terminal
@@ -1123,7 +1112,6 @@ export class InteractiveMode {
 
 		// Render initial messages AFTER showing loaded resources
 		this.renderInitialMessages();
-		if (this.hostedShutdown) await this.seedStreamingState();
 
 		// Set up theme file watcher
 		onThemeChange(() => {
@@ -1153,7 +1141,6 @@ export class InteractiveMode {
 	 * Update terminal title with session name and cwd.
 	 */
 	private updateTerminalTitle(): void {
-		if (!this.terminalActive) return;
 		const cwdBasename = path.basename(this.sessionManager.getCwd());
 		const sessionName = this.sessionManager.getSessionName();
 		if (sessionName) {
@@ -1275,11 +1262,7 @@ export class InteractiveMode {
 
 		this.options?.managedRestart?.start();
 
-		await this.runHosted();
-	}
-
-	/** Consume terminal submissions, including while an RPC-owned run is active. */
-	async runHosted(): Promise<never> {
+		// Main interactive loop
 		while (true) {
 			const userInput = await this.getUserInput();
 			try {
@@ -2001,72 +1984,71 @@ export class InteractiveMode {
 	 */
 	private async bindCurrentSessionExtensions(): Promise<void> {
 		const uiContext = this.createExtensionUIContext();
-		if (!this.hostedShutdown)
-			await this.session.bindExtensions({
-				uiContext,
-				mode: "tui",
-				abortHandler: () => {
-					this.restoreQueuedMessagesToEditor({ abort: true });
-				},
-				commandContextActions: {
-					waitForIdle: () => this.session.waitForIdle(),
-					newSession: async (options) => {
-						this.clearStatusIndicator();
-						try {
-							return await this.runtimeHost.newSession(options);
-						} catch (error: unknown) {
-							return this.handleFatalRuntimeError("Failed to create session", error);
-						}
-					},
-					fork: async (entryId, options) => {
-						try {
-							const result = await this.runtimeHost.fork(entryId, options);
-							if (!result.cancelled) {
-								this.editor.setText(result.selectedText ?? "");
-								this.showStatus("Forked to new session");
-							}
-							return { cancelled: result.cancelled };
-						} catch (error: unknown) {
-							return this.handleFatalRuntimeError("Failed to fork session", error);
-						}
-					},
-					navigateTree: async (targetId, options) => {
-						const result = await this.session.navigateTree(targetId, {
-							summarize: options?.summarize,
-							customInstructions: options?.customInstructions,
-							replaceInstructions: options?.replaceInstructions,
-							label: options?.label,
-						});
-						if (result.cancelled) {
-							return { cancelled: true };
-						}
-
-						this.chatContainer.clear();
-						this.renderInitialMessages();
-						if (result.editorText && !this.editor.getText().trim()) {
-							this.editor.setText(result.editorText);
-						}
-						this.showStatus("Navigated to selected point");
-						void this.flushCompactionQueue({ willRetry: false });
-						return { cancelled: false };
-					},
-					switchSession: async (sessionPath, options) => {
-						return this.handleResumeSession(sessionPath, options);
-					},
-					reload: async () => {
-						await this.handleReloadCommand();
-					},
-				},
-				shutdownHandler: () => {
-					this.shutdownRequested = true;
-					if (this.session.isIdle) {
-						void this.shutdown({ fromExtension: true });
+		await this.session.bindExtensions({
+			uiContext,
+			mode: "tui",
+			abortHandler: () => {
+				this.restoreQueuedMessagesToEditor({ abort: true });
+			},
+			commandContextActions: {
+				waitForIdle: () => this.session.waitForIdle(),
+				newSession: async (options) => {
+					this.clearStatusIndicator();
+					try {
+						return await this.runtimeHost.newSession(options);
+					} catch (error: unknown) {
+						return this.handleFatalRuntimeError("Failed to create session", error);
 					}
 				},
-				onError: (error) => {
-					this.showExtensionError(error.extensionPath, error.error, error.stack);
+				fork: async (entryId, options) => {
+					try {
+						const result = await this.runtimeHost.fork(entryId, options);
+						if (!result.cancelled) {
+							this.editor.setText(result.selectedText ?? "");
+							this.showStatus("Forked to new session");
+						}
+						return { cancelled: result.cancelled };
+					} catch (error: unknown) {
+						return this.handleFatalRuntimeError("Failed to fork session", error);
+					}
 				},
-			});
+				navigateTree: async (targetId, options) => {
+					const result = await this.session.navigateTree(targetId, {
+						summarize: options?.summarize,
+						customInstructions: options?.customInstructions,
+						replaceInstructions: options?.replaceInstructions,
+						label: options?.label,
+					});
+					if (result.cancelled) {
+						return { cancelled: true };
+					}
+
+					this.chatContainer.clear();
+					this.renderInitialMessages();
+					if (result.editorText && !this.editor.getText().trim()) {
+						this.editor.setText(result.editorText);
+					}
+					this.showStatus("Navigated to selected point");
+					void this.flushCompactionQueue({ willRetry: false });
+					return { cancelled: false };
+				},
+				switchSession: async (sessionPath, options) => {
+					return this.handleResumeSession(sessionPath, options);
+				},
+				reload: async () => {
+					await this.handleReloadCommand();
+				},
+			},
+			shutdownHandler: () => {
+				this.shutdownRequested = true;
+				if (this.session.isIdle) {
+					void this.shutdown({ fromExtension: true });
+				}
+			},
+			onError: (error) => {
+				this.showExtensionError(error.extensionPath, error.error, error.stack);
+			},
+		});
 
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 		this.setupAutocompleteProvider();
@@ -2627,42 +2609,6 @@ export class InteractiveMode {
 		};
 	}
 
-	/** Keep the live session and UI tree while RPC controls terminal ownership. */
-	host(shutdown: () => Promise<never>): ExtensionUIContext {
-		this.hostedShutdown = shutdown;
-		return this.createExtensionUIContext();
-	}
-
-	async activateHosted(): Promise<void> {
-		if (!this.isInitialized) {
-			await this.init();
-			return;
-		}
-		this.hostedActive = true;
-		this.ui.start();
-		this.themeController.rebindTui();
-		this.rebindExtensionTerminalInputListeners();
-		this.updateTerminalTitle();
-		if (this.settingsManager.getShowTerminalProgress() && (this.session.isStreaming || this.session.isCompacting)) {
-			this.ui.terminal.setProgress(true);
-		}
-		this.ui.requestRender(true);
-	}
-
-	async deactivateHosted(): Promise<void> {
-		if (!this.terminalActive) return;
-		await this.ui.terminal.drainInput();
-		this.ui.terminal.setProgress(false);
-		this.ui.stop({ preserveScreen: true });
-		this.hostedActive = false;
-	}
-
-	async rebindHostedSession(): Promise<void> {
-		if (!this.isInitialized) return;
-		await this.rebindCurrentSession({ renderBeforeBind: true });
-		if (this.terminalActive) this.themeController.applyFromSettings();
-	}
-
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
 			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
@@ -2688,7 +2634,7 @@ export class InteractiveMode {
 			pasteToEditor: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
 			setEditorText: (text) => this.editor.setText(text),
 			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
-			editor: (title, prefill, opts) => this.showExtensionEditor(title, prefill, opts),
+			editor: (title, prefill) => this.showExtensionEditor(title, prefill),
 			addAutocompleteProvider: (factory) => {
 				this.autocompleteProviderWrappers.push(factory);
 				this.setupAutocompleteProvider();
@@ -2852,27 +2798,21 @@ export class InteractiveMode {
 	/**
 	 * Show a multi-line editor for extensions (with Ctrl+G support).
 	 */
-	private showExtensionEditor(
-		title: string,
-		prefill?: string,
-		opts?: { signal?: AbortSignal },
-	): Promise<string | undefined> {
+	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
 		return new Promise((resolve) => {
-			if (opts?.signal?.aborted) return resolve(undefined);
-			const finish = (value?: string) => {
-				opts?.signal?.removeEventListener("abort", onAbort);
-				this.hideExtensionEditor();
-				resolve(value);
-			};
-			const onAbort = () => finish();
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 			this.extensionEditor = new ExtensionEditorComponent(
 				this.ui,
 				this.keybindings,
 				title,
 				prefill,
-				finish,
-				onAbort,
+				(value) => {
+					this.hideExtensionEditor();
+					resolve(value);
+				},
+				() => {
+					this.hideExtensionEditor();
+					resolve(undefined);
+				},
 				undefined,
 				this.settingsManager.getExternalEditorCommand(),
 			);
@@ -3462,7 +3402,7 @@ export class InteractiveMode {
 				break;
 
 			case "turn_start":
-				if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
+				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
 				if (this.workingVisible) {
@@ -3690,7 +3630,7 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
-				if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
+				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
 				this.clearStatusIndicator("working");
@@ -3709,7 +3649,7 @@ export class InteractiveMode {
 				break;
 
 			case "compaction_start": {
-				if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
+				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
 				// Keep editor active; submissions are queued during compaction.
@@ -3724,7 +3664,7 @@ export class InteractiveMode {
 
 			case "compaction_end": {
 				if (event.aborted) this.options?.managedRestart?.interrupt();
-				if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
+				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
 				if (this.autoCompactionEscapeHandler) {
@@ -4241,23 +4181,6 @@ export class InteractiveMode {
 		addChatActivity(this.chatContainer, new ThemedText(() => theme.fg("warning", `${label}: ${reBilled}`), 1, 0));
 	}
 
-	private async seedStreamingState(): Promise<void> {
-		if (!this.session.isStreaming) return;
-		await this.handleEvent({ type: "turn_start" });
-		const message = this.agent.state.streamingMessage;
-		if (message?.role === "assistant" && !this.streamingComponent) {
-			await this.handleEvent({ type: "message_start", message });
-			await this.handleEvent({
-				type: "message_update",
-				message,
-				assistantMessageEvent: { type: "start", partial: message },
-			});
-		}
-		for (const [id, component] of this.pendingTools) {
-			if (this.agent.state.pendingToolCalls.has(id)) component.markExecutionStarted();
-		}
-	}
-
 	renderInitialMessages(): void {
 		const entries = this.sessionManager.buildContextEntries();
 		this.renderSessionEntries(entries, {
@@ -4342,7 +4265,6 @@ export class InteractiveMode {
 	private isShuttingDown = false;
 
 	private async shutdown(options?: { fromSignal?: boolean; fromExtension?: boolean }): Promise<void> {
-		if (this.hostedShutdown) return this.hostedShutdown();
 		const restarting = this.options?.managedRestart?.beginShutdown(
 			options?.fromSignal ? "signal" : options?.fromExtension ? "extension" : "user",
 		);
@@ -4440,7 +4362,7 @@ export class InteractiveMode {
 		await this.shutdown({ fromExtension: true });
 	}
 
-	private registerSignalHandlers(includeShutdownSignals = true): void {
+	private registerSignalHandlers(): void {
 		this.unregisterSignalHandlers();
 
 		const signals: NodeJS.Signals[] = ["SIGTERM"];
@@ -4448,7 +4370,7 @@ export class InteractiveMode {
 			signals.push("SIGHUP");
 		}
 
-		for (const signal of includeShutdownSignals ? signals : []) {
+		for (const signal of signals) {
 			const handler = () => {
 				// SIGHUP no longer hard-exits: graceful shutdown emits session_shutdown
 				// first, then attempts terminal restore. A genuinely dead terminal
@@ -4488,10 +4410,6 @@ export class InteractiveMode {
 	}
 
 	private handleCtrlZ(): void {
-		if (this.hostedShutdown) {
-			this.showStatus("Suspend is not supported during TUI handoff");
-			return;
-		}
 		if (process.platform === "win32") {
 			this.showStatus("Suspend to background is not supported on Windows");
 			return;
@@ -7192,7 +7110,7 @@ export class InteractiveMode {
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
 		this.disposeActiveSelector();
-		if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
+		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}
 		this.clearStatusIndicator();
@@ -7204,7 +7122,7 @@ export class InteractiveMode {
 			this.unsubscribe();
 		}
 		if (this.isInitialized) {
-			if (this.terminalActive) this.stopInteractiveTui(fullscreenExitOutput);
+			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
 		}
 		this.unregisterSignalHandlers();

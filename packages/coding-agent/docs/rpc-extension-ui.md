@@ -11,10 +11,6 @@ If a dialog method includes a `timeout` field, the agent-side will auto-resolve 
 
 ## Limitations
 
-These limitations apply to ordinary pipe-based RPC. A POSIX PTY-backed RPC session can use [live terminal handoff](rpc.md#live-terminal-handoff): pending dialogs transfer to the TUI, and unanswered dialogs survive detachment. An RPC answer dismisses the corresponding native dialog. Dialog abort signals and original timeout deadlines remain effective across ownership changes.
-
-On PTYs, `custom()` emits `{"type":"extension_ui_request","id":"...","method":"custom"}` and waits for attachment. The factory runs in the TUI, and its `done(result)` resolves the original call. RPC responses cannot answer custom components; detach preserves them for reattachment. Other terminal UI setters configure the hosted TUI without activating it; editor factories are instantiated only while attached. The terminal title is not changed while RPC owns output.
-
 Some `ExtensionUIContext` methods are not supported or degraded in RPC mode because they require direct terminal UI access:
 
 - `custom()` returns `undefined`.
@@ -26,7 +22,7 @@ Some `ExtensionUIContext` methods are not supported or degraded in RPC mode beca
 - `getAllThemes()` returns `[]`, and `getTheme()` returns `undefined`.
 - `setTheme()` returns `{ success: false, error: "Theme switching not supported in RPC mode" }`.
 
-Note: `ctx.mode` follows ownership (`"rpc"` or `"tui"`) on PTY-backed sessions. In ordinary pipe-based RPC, `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget methods are functional via the extension UI sub-protocol. Use `ctx.mode === "tui"` to guard TUI-specific features like `custom()` that require a real terminal.
+Note: `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget methods are functional via the extension UI sub-protocol. Use `ctx.mode === "tui"` to guard TUI-specific features like `custom()` that require a real terminal.
 
 ## Requests from Pi
 
