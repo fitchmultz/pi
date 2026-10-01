@@ -13,7 +13,6 @@
 - Fixed failed Responses streams losing terminal usage, response IDs, and error details.
 - Fixed `NO_PROXY` exclusions not matching trailing DNS root dots.
 - Fixed fractional and overflowed zero retry delays becoming 60-second delays.
-- Fixed catalog generation reintroducing unsupported minimal reasoning for GPT-6.1 Sol.
 - Fixed context estimates omitting thinking and tool-call signatures.
 - Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
 - Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
