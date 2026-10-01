@@ -88,6 +88,8 @@ export type ProviderModelConfig = ProviderChatModelConfig | ProviderImageModelCo
 
 /** Input type for the extension registerProvider API. */
 export interface ProviderConfigInput {
+	/** Ignore saved credentials for auth and catalog refresh; explicit keys and login/logout remain unchanged. */
+	ignoreStoredCredentials?: boolean;
 	name?: string;
 	baseUrl?: string;
 	apiKey?: string;

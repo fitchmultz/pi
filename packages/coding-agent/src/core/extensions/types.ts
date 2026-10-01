@@ -1876,6 +1876,11 @@ export interface ExtensionVirtualModel<TState = unknown> extends Omit<VirtualMod
 
 /** Configuration for registering a provider via pi.registerProvider(). */
 export interface ProviderConfig {
+	/**
+	 * Ignore saved credentials for request authentication, availability, and catalog refresh.
+	 * Explicit request/runtime keys and /login or /logout retain their normal behavior.
+	 */
+	ignoreStoredCredentials?: boolean;
 	/** Display name for the provider in UI. */
 	name?: string;
 	/** Base URL for the API endpoint. Required when defining models. */
