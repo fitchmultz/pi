@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -18,7 +19,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRestartControl } from "../../src/cli/restart-worker.ts";
 import { estimateContextTokens, estimateTokens } from "../../src/core/compaction/index.ts";
-import type { ToolDefinition } from "../../src/core/extensions/index.ts";
+import type { AgentBeforeSettleEvent, ToolDefinition, TurnEndEvent } from "../../src/core/extensions/index.ts";
 import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -43,6 +44,7 @@ describe("AgentSession context usage estimate", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		syncBuiltinESMExports();
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
@@ -74,6 +76,58 @@ describe("AgentSession context usage estimate", () => {
 			expect(session.messages).toEqual(state);
 		},
 	);
+
+	it("keeps persisted request preparation linear while admitting pending input", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-context-history-"));
+		const previews: unknown[] = [];
+		const harness = await createHarness({
+			sessionManager: SessionManager.create(directory, directory),
+			settings: { compaction: { enabled: false }, retry: { enabled: false } },
+			extensionFactories: Array.from({ length: 4 }, (_, index) => (pi) => {
+				const inspect = (event: TurnEndEvent | AgentBeforeSettleEvent) => {
+					const user = event.context.contextMessages.find((message) => message.role === "user");
+					if (index === 0 && user) user.content = "preview mutation";
+					if (index === 1) previews.push(user?.content);
+				};
+				pi.on("turn_end", inspect);
+				pi.on("agent_before_settle", inspect);
+			}),
+		});
+		try {
+			const model = harness.getModel();
+			for (let i = 0; i < 80; i++) {
+				harness.sessionManager.appendMessage({ role: "user", content: `previous ${i}`, timestamp: i });
+				harness.sessionManager.appendMessage({
+					...fauxAssistantMessage(`response ${i}`),
+					provider: model.provider,
+					api: model.api,
+					model: model.id,
+					usage: usage(1000),
+				});
+			}
+			harness.session.state.messages = harness.sessionManager.buildSessionContext().messages;
+			const path = join(directory, "input.txt");
+			writeFileSync(path, "native read result\n");
+			const read = vi.spyOn(fs, "readSync");
+			syncBuiltinESMExports();
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("read", { path }), { stopReason: "toolUse" }),
+				fauxAssistantMessage("done"),
+			]);
+			await harness.session.prompt("new admitted input");
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+			expect(harness.session.messages).toContainEqual(
+				expect.objectContaining({ role: "toolResult", toolName: "read", isError: false }),
+			);
+			// Journal reads may grow with the prefix, but must not multiply it per pending-message lookup.
+			expect(read.mock.calls.length).toBeLessThan(500);
+			expect(previews).toEqual(["previous 0", "previous 0", "previous 0"]);
+		} finally {
+			harness.cleanup();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
 
 	it("refreshes cached usage for in-place SDK message, usage and tool-schema edits", async () => {
 		const harness = await createHarness({

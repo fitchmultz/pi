@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { deserialize, serialize } from "node:v8";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { publishLocalFileExclusiveSync } from "@earendil-works/pi-agent-core/node";
 import {
@@ -1375,6 +1376,10 @@ export class SessionManager {
 	private journalSource: JournalSource | undefined;
 	private recordsByEntry = recordLocations;
 	private decodedRecord: { entry: FileEntry; value: Record<string, unknown> } | undefined;
+	/** Pristine active-context bodies only; SDK projections receive independently decoded values. */
+	private projectionRecords = new Map<FileEntry, Buffer>();
+	private projectionRecordBytes = 0;
+	private projectionBodies: Map<FileEntry, Record<string, unknown>> | undefined;
 
 	private constructor(
 		cwd: string,
@@ -1469,6 +1474,8 @@ export class SessionManager {
 		this.fileEntries = [header];
 		this.journalSource = undefined;
 		this.decodedRecord = undefined;
+		this.projectionRecords.clear();
+		this.projectionRecordBytes = 0;
 		this.entriesRevision++;
 		this.byId.clear();
 		this.labelsById.clear();
@@ -1508,6 +1515,8 @@ export class SessionManager {
 			throw new Error(`Session file is not a valid ${APP_NAME} session: ${scan.source.path}`);
 		this.journalSource = scan.source;
 		this.decodedRecord = undefined;
+		this.projectionRecords.clear();
+		this.projectionRecordBytes = 0;
 		this.fileEntries = scan.records.map((record, sequence) => this._entryView(record, sequence));
 		this.sessionId = first.value.id;
 		this._buildIndex();
@@ -1591,6 +1600,35 @@ export class SessionManager {
 		const location = this.recordsByEntry.get(entry);
 		if (!location) throw new Error("Session entry no longer belongs to its source journal");
 		const { source, record } = location;
+		if (this.projectionBodies) {
+			const existing = this.projectionBodies.get(entry);
+			if (existing) return existing;
+			const serialized = this.projectionRecords.get(entry);
+			const value = serialized
+				? (deserialize(serialized) as Record<string, unknown>)
+				: readJournalRecord(source, record);
+			if (value.id !== record.value.id || value.type !== record.value.type)
+				throw new Error("Session entry source changed");
+			if (!serialized) {
+				const body = serialize(value);
+				const bytes = body.length;
+				if (bytes <= 16 * 1024 * 1024) {
+					while (this.projectionRecordBytes + bytes > 16 * 1024 * 1024) {
+						const oldest = this.projectionRecords.keys().next().value;
+						if (!oldest) break;
+						this.projectionRecordBytes -= this.projectionRecords.get(oldest)!.length;
+						this.projectionRecords.delete(oldest);
+					}
+					this.projectionRecords.set(entry, body);
+					this.projectionRecordBytes += bytes;
+				}
+			}
+			const role = entryMessageRoles.get(entry);
+			if (role && value.message && typeof value.message === "object")
+				(value.message as Record<string, unknown>).role = role;
+			this.projectionBodies.set(entry, value);
+			return value;
+		}
 		if (this.decodedRecord?.entry === entry) {
 			const stats = existsSync(source.path) ? statSync(source.path) : fstatSync(source.handle.fd);
 			if (
@@ -1623,8 +1661,9 @@ export class SessionManager {
 	/** Reconstruct a stale derived index without repairing or rewriting the source. */
 	private _refreshJournal(): void {
 		const source = this.journalSource;
-		if (!source || source.path !== this.sessionFile || !existsSync(source.path)) return;
-		const stats = statSync(source.path);
+		if (!source || source.path !== this.sessionFile) return;
+		const sourceExists = existsSync(source.path);
+		const stats = sourceExists ? statSync(source.path) : fstatSync(source.handle.fd);
 		if (
 			stats.dev === source.dev &&
 			stats.ino === source.ino &&
@@ -1633,6 +1672,7 @@ export class SessionManager {
 			stats.ctimeMs === source.ctimeMs
 		)
 			return;
+		if (!sourceExists) throw new Error("Journal source generation changed");
 		const scan = scanJournal(source.path, { ...metadataProjection(), policy: "tolerant", requireFinalLf: true });
 		const saved = new Map(scan.records.map((record) => [record.value.id, record]));
 		const savedDigests = new Set(scan.records.map((record) => record.digest));
@@ -1702,6 +1742,8 @@ export class SessionManager {
 		const leaf = this.leafId;
 		this.journalSource = scan.source;
 		this.decodedRecord = undefined;
+		this.projectionRecords.clear();
+		this.projectionRecordBytes = 0;
 		for (let i = 0; i < this.fileEntries.length; i++) {
 			const entry = this.fileEntries[i]!;
 			const record = saved.get(entry.id);
@@ -2325,7 +2367,22 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionProjection(): SessionProjection {
-		return buildSessionProjection(this.getEntries(), this.leafId, this.byId);
+		const entries = this.getEntries();
+		const bodies = new Map<FileEntry, Record<string, unknown>>();
+		this.projectionBodies = bodies;
+		try {
+			const projection = buildSessionProjection(entries, this.leafId, this.byId);
+			this._refreshJournal();
+			return projection;
+		} finally {
+			this.projectionBodies = undefined;
+			for (const [entry, body] of this.projectionRecords) {
+				if (!bodies.has(entry)) {
+					this.projectionRecordBytes -= body.length;
+					this.projectionRecords.delete(entry);
+				}
+			}
+		}
 	}
 
 	buildSessionContext(): SessionContext {

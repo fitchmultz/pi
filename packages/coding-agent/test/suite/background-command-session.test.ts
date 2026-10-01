@@ -1,4 +1,4 @@
-import fs, { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -107,6 +107,49 @@ describe("session-owned background completion", () => {
 		syncBuiltinESMExports();
 		vi.unstubAllEnvs();
 		expect(failures).toEqual([]);
+	});
+
+	it("does not reread acknowledged history on idle ticks or unrelated appends", async () => {
+		const h = await harness();
+		h.sessionManager.appendCustomEntry("seed", {});
+		for (let i = 0; i < 20; i++) {
+			h.sessionManager.appendCustomMessageEntry(BACKGROUND_COMMAND_NOTICE, "old output ".repeat(4000), true, {
+				jobIds: [`old-${i}`],
+			});
+		}
+		const { release, command } = held(h);
+		const job = await startBackgroundCommand(backgroundCommandDirectory(h.sessionManager), command, {
+			command,
+			cwd: h.tempDir,
+			env: getShellEnv(),
+		});
+		const read = vi.spyOn(fs, "readSync");
+		syncBuiltinESMExports();
+		await until(() => read.mock.calls.length >= 20);
+		read.mockClear();
+		await delay(1100);
+		expect(read).not.toHaveBeenCalled();
+		h.sessionManager.appendCustomEntry("unrelated", { value: true });
+		await delay(1100);
+		expect(read).not.toHaveBeenCalled();
+		// A receipt published by another writer must still suppress a duplicate completion.
+		appendFileSync(
+			h.sessionManager.getSessionFile()!,
+			`${JSON.stringify({
+				type: "custom_message",
+				id: "external-acknowledgement",
+				parentId: h.sessionManager.getLeafId(),
+				timestamp: new Date().toISOString(),
+				customType: BACKGROUND_COMMAND_NOTICE,
+				content: "Acknowledged externally",
+				display: true,
+				details: { jobIds: [job.id] },
+			})}\n`,
+		);
+		await finish(h, job, release);
+		await delay(1100);
+		expect(notices(h.session)).toHaveLength(21);
+		expect(h.faux.state.callCount).toBe(0);
 	});
 
 	it.each(["SDK", "TUI"])("delivers after the whole foreground batch in %s", async (mode) => {

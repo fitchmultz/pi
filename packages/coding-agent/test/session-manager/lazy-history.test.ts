@@ -1,13 +1,26 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, readFileSync, renameSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import fs, {
+	appendFileSync,
+	mkdtempSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	truncateSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { afterEach, expect, it, vi } from "vitest";
 import { closeJournalSource, readJournalRecord, scanJournal } from "../../src/core/session-journal.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 
 const directories: string[] = [];
 afterEach(() => {
+	vi.restoreAllMocks();
+	syncBuiltinESMExports();
 	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 function fixture(): { directory: string; source: string; manager: SessionManager; id: string } {
@@ -43,6 +56,56 @@ it("inspects and copies >512 MiB history under a 96 MiB heap without hydrating i
 	expect(receipt.bytes).toBeGreaterThan(512 * 1024 * 1024);
 	expect(receipt.retainedHeap).toBeLessThan(96 * 1024 * 1024);
 }, 200000);
+
+it("reuses active journal bodies without exposing SDK mutations or concealing source changes", () => {
+	const { source, manager } = fixture();
+	manager.appendMessage({ role: "user", content: "original request", timestamp: 1 });
+	manager.appendMessage(fauxAssistantMessage("original response"));
+	const first = manager.buildSessionProjection();
+	const read = vi.spyOn(fs, "readSync");
+	syncBuiltinESMExports();
+	const user = first.messages.find((message) => message.role === "user")!;
+	user.content = "SDK mutation";
+	const second = manager.buildSessionProjection();
+	expect(second.messages.find((message) => message.role === "user")?.content).toBe("original request");
+	expect(read).not.toHaveBeenCalled();
+	manager.appendMessage({ role: "user", content: "next request", timestamp: 2 });
+	read.mockClear();
+	expect(
+		manager
+			.buildSessionContext()
+			.messages.filter((message) => message.role === "user")
+			.map((message) => message.content),
+	).toEqual(["original request", "next request"]);
+	// Only the newly persisted body needs reading, not the saved prefix.
+	expect(read).toHaveBeenCalledTimes(1);
+	const saved = readFileSync(source, "utf8");
+	writeFileSync(source, saved.replace("original request", "modified request"));
+	expect(() => manager.buildSessionProjection()).toThrow("Journal source generation changed");
+	writeFileSync(source, saved);
+	manager.buildSessionProjection();
+	truncateSync(source, 10);
+	unlinkSync(source);
+	expect(() => manager.buildSessionProjection()).toThrow("Journal source generation changed");
+});
+
+it.each([
+	{ raw: "-0", expected: -0 },
+	{ raw: "1e400", expected: Number.POSITIVE_INFINITY },
+])("preserves native JSON numeric values in warm projections ($raw)", ({ raw, expected }) => {
+	const { source, manager } = fixture();
+	writeFileSync(
+		source,
+		`${JSON.stringify(manager.getHeader())}\n{"type":"message","id":"result","parentId":null,"timestamp":"2026-09-30T00:00:00.000Z","message":{"role":"toolResult","toolCallId":"call","toolName":"read","content":[],"details":{"value":${raw}},"isError":false,"timestamp":0}}\n`,
+	);
+	const reopened = SessionManager.open(source);
+	for (let i = 0; i < 2; i++) {
+		const result = reopened.buildSessionContext().messages.find((message) => message.role === "toolResult")!;
+		const details = result.details as { value: number };
+		expect(Object.is(details.value, expected)).toBe(true);
+		details.value = 123;
+	}
+});
 
 it.each(["toString", "constructor", "__proto__"])("preserves an own %s field when branching", (key) => {
 	const { directory, source, manager, id } = fixture();

@@ -320,6 +320,17 @@ restart a live old-format session directly into this runtime.
 
 ### Continuing contracts
 
+Persisted context projections retain at most 16 MiB of pristine serialized active
+record bodies; each projection decodes its own mutable messages. Compaction and
+branch changes discard inactive cache records, while archived payloads remain lazy.
+Journal generation and digest checks still reject changed history; external source
+changes require validated reconciliation, not an unchecked append-tail shortcut.
+Request provenance excludes admitted but unpersisted input. Unchanged boundary
+previews reuse the projection with independent messages and freshly read queues;
+idle background monitoring reuses immutable receipt IDs until journal revision or
+session identity changes. These optimizations do not change provider payloads,
+input persistence timing, completion acknowledgement, or runtime selection.
+
 OpenAI Responses (API keys and Sign in with ChatGPT) and legacy Codex Responses
 price exact `gpt-6-astra` at 6x standard only when the terminal response confirms
 `service_tier: "ultrafast"`. This includes every input, cached-input, cache-write,
