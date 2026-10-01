@@ -16,7 +16,7 @@ import type { RegisteredTool } from "./types.ts";
  */
 export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: ExtensionRunner): AgentTool {
 	return wrapToolDefinition(registeredTool.definition, (toolCallId, signal) =>
-		runner.createToolContext(toolCallId, signal),
+		runner.scopeContext(runner.createToolContext(toolCallId, signal), registeredTool.sourceInfo.path),
 	);
 }
 

@@ -261,6 +261,19 @@ Release resources in `session_shutdown` even when normal operation attempted cle
 Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path.
 Use `ctx.shutdown()` to request an orderly process shutdown.
 
+### Non-fatal performance warnings
+
+Pi reports one warning per loaded extension and event kind when a handler's synchronous
+invocation exceeds 100 ms. Custom footer renders exceeding 16 ms produce one warning per
+extension. These budgets protect input/turn responsiveness and a single TUI frame.
+
+Handler timing stops when the function returns, including when an async handler first awaits.
+Awaited I/O, dialogs, and later async work are not counted. Warnings do not cancel work or
+change results. Footer warnings are delivered after the render pass, through the same extension
+diagnostic paths as handler warnings (interactive, print, JSON, and RPC).
+Reloading the extension resets warning suppression. Cache expensive footer data outside render
+and avoid full-history queries on hot paths; use profiling for awaited or later work.
+
 <a id="examples-reference"></a>
 <a id="use-examples-as-the-implementation-reference"></a>
 
