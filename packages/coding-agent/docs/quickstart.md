@@ -26,6 +26,68 @@ Verify the installation:
 pi --version
 ```
 
+### Fork installation
+
+For the fitchmultz/pi fork, use an immutable release rather than an ordinary npm
+package directory. This supports macOS, Linux, and [Termux](termux.md#install-the-fork)
+on arm64/x64 with Node.js >=22.19, npm installed alongside Node, Git, bash, tar,
+gzip, and tmux.
+
+From a fork checkout, install dependencies without lifecycle scripts, hydrate the
+model-data snapshot, then build and validate an exact commit:
+
+```bash
+npm ci --ignore-scripts
+npm run hydrate:model-data
+selector="$(npm root -g)/@earendil-works/pi-coding-agent"
+node scripts/install-fork.mjs --ref HEAD --selector "$selector"
+ln -s "$selector/dist/bundle/cli.js" "$(npm prefix -g)/bin/pi"
+```
+
+The selector and `pi` link locations must be writable. These commands are for
+initial setup with unused locations: the installer refuses to replace a real
+package directory, and `ln -s` refuses to overwrite an existing executable.
+Do not point `pi` directly at a release; it must follow the package selector.
+
+After setup, update without keeping a checkout:
+
+```bash
+pi update --fork
+```
+
+The updater fetches and pins fork main, hydrates model data in an isolated home,
+then uses the installer to build, validate, and atomically select the release
+under `~/.local/share/pi-fork/releases`. It does not edit settings, credentials,
+extensions, or sessions. Running sessions keep their runtime until a full relaunch
+or a [managed restart](restart.md).
+
+The installer also supports `--stage`, `--activate <identity>`, and
+`--rollback <identity>`; pass the same `--selector` for each operation.
+The prior package target is preserved as `<selector>.previous`.
+Run `node scripts/install-fork.mjs --help` for options and pruning safeguards.
+
+Updates, staging, activation, rollback, and pruning share `<selector>.lock`.
+Concurrent mutations fail rather than using stale protection snapshots. Locks are
+not stolen based on age: after an unclean termination, remove an abandoned lock
+directory only after confirming every updater/installer using that selector has
+stopped.
+
+Each release store has one owning selector, recorded as a canonical path in
+`.owner-selector`. A store without that file (including existing fork stores) is
+adopted by the first mutation; its releases are preserved. Other selectors are
+refused, even for staging or pruning. Use a separate `--releases` directory for
+another selector. `pi update --fork` uses the unchanged default store above and
+refuses it if another selector owns it.
+
+Only newly installed releases receive an ownership stamp in their receipt.
+Pruning requires that stamp to match the store's owner; existing releases are
+never assigned to the first claimant, even when reused or activated.
+Legacy releases are kept until removed by hand.
+
+Dependency installs and packing use an isolated environment and an empty temporary
+npm global configuration, not the native Node prefix's registry credentials or
+ambient provider keys and `NODE_OPTIONS`.
+
 ## 2. Start Pi
 
 Change to the folder you want Pi to work with, then start it:

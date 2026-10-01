@@ -1,0 +1,299 @@
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readlinkSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import lockfile from "proper-lockfile";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PACKAGE_NAME } from "../src/config.ts";
+import { handlePackageCommand } from "../src/package-manager-cli.ts";
+import * as childProcess from "../src/utils/child-process.ts";
+import { runForkUpdate } from "../src/utils/fork-update.ts";
+
+const platforms = ["darwin", "linux", "android"];
+describe.skipIf(process.platform === "win32").each(platforms)("fork update bootstrap on %s", (platform) => {
+	const originalPlatform = process.platform;
+	let root: string;
+	let selector: string;
+	let bin: string;
+	let oldPackage: string;
+	let source: string;
+	let expectedCommit: string;
+	let temporarySource: string | undefined;
+	let failInstall: boolean;
+	let fetched: number;
+	let originalExitCode: typeof process.exitCode;
+
+	beforeEach(() => {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
+		originalExitCode = process.exitCode;
+		process.exitCode = undefined;
+		root = mkdtempSync(join(tmpdir(), "pi-fork-bootstrap-test-"));
+		const globalRoot = join(
+			root,
+			platform === "android"
+				? "real-home/.local/share/npm-global/lib/node_modules"
+				: "custom prefix/lib/node_modules",
+		);
+		selector = join(globalRoot, PACKAGE_NAME);
+		oldPackage = join(root, "old-package");
+		mkdirSync(dirname(selector), { recursive: true });
+		mkdirSync(oldPackage);
+		symlinkSync(oldPackage, selector);
+		bin = join(root, platform === "android" ? "real-home/.local/bin/pi" : "custom prefix/bin/pi");
+		mkdirSync(dirname(bin), { recursive: true });
+		symlinkSync(join(selector, "dist/bundle/cli.js"), bin);
+		vi.stubEnv("PI_PACKAGE_DIR", oldPackage);
+		vi.stubEnv("HOME", join(root, "real-home"));
+		vi.stubEnv("ANTHROPIC_API_KEY", "must-not-leak");
+		vi.stubEnv("PI_RESTART_SOCKET", "must-not-leak");
+		vi.stubEnv("NODE_OPTIONS", "");
+		vi.stubEnv("NPM_CONFIG_GLOBALCONFIG", join(root, "ambient-npmrc"));
+		vi.stubEnv("PREFIX", join(root, "termux-prefix"));
+		// An empty preload avoids loading a real Android library on the host.
+		vi.stubEnv("LD_PRELOAD", "");
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		temporarySource = undefined;
+		failInstall = false;
+		fetched = 0;
+
+		source = join(root, "remote");
+		mkdirSync(join(source, "scripts"), { recursive: true });
+		writeFileSync(join(source, "marker"), "pinned main");
+		// Observe the bootstrap boundary. Installer validation and atomic activation
+		// are exercised by scripts/install-fork.test.mjs.
+		writeFileSync(
+			join(source, "scripts/install-fork.mjs"),
+			`
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+assert.equal(args[args.indexOf('--ref') + 1], commit);
+assert.equal(readFileSync('marker', 'utf8'), 'pinned main');
+assert.equal(readFileSync('hydrated', 'utf8'), 'ready');
+assert.equal(readFileSync(process.env.npm_config_globalconfig, 'utf8'), '');
+assert.equal(process.env.NPM_CONFIG_GLOBALCONFIG, undefined);
+assert.equal(process.env.npm_config_globalconfig, process.env.HOME + '/npm-globalconfig');
+assert.equal(existsSync(${JSON.stringify(`${selector}.lock`)}), false, 'installer must acquire its own mutation lock');
+writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ args, commit, env: process.env }));
+`,
+		);
+		const git = (args: string[]) => execFileSync("git", args, { cwd: source, encoding: "utf8" }).trim();
+		git(["init", "--quiet", "--initial-branch=main"]);
+		git(["add", "."]);
+		git([
+			"-c",
+			"user.name=Test",
+			"-c",
+			"user.email=test@example.com",
+			"-c",
+			"core.hooksPath=/dev/null",
+			"commit",
+			"--quiet",
+			"-m",
+			"fixture",
+		]);
+		expectedCommit = git(["rev-parse", "HEAD"]);
+		vi.spyOn(childProcess, "spawnProcessSync").mockImplementation((command, args, options) => {
+			if (args.includes("root") && args.includes("-g")) {
+				return spawnSync(process.execPath, ["-e", `console.log(${JSON.stringify(globalRoot)})`], options);
+			}
+			// Missing prerequisites have their own case; CI need not have tmux installed.
+			if (command === "tmux") return spawnSync(process.execPath, ["--version"], options);
+			return spawnSync(command, args, options);
+		});
+		vi.spyOn(childProcess, "spawnProcess").mockImplementation((command, args, options) => {
+			temporarySource = String(options.cwd);
+			if (command === "git" && args[0] === "fetch") {
+				fetched++;
+				expect(args).toEqual(["fetch", "--depth=1", "https://github.com/fitchmultz/pi.git", "refs/heads/main"]);
+				return spawn(command, ["fetch", "--depth=1", source, "refs/heads/main"], options);
+			}
+			if (args[0]?.endsWith("npm-cli.js")) {
+				if (args[1] === "ci") {
+					expect(args).toContain("--ignore-scripts");
+					return spawn(process.execPath, ["-e", "process.exit(0)"], options);
+				}
+				expect(args.slice(1)).toEqual(["run", "hydrate:model-data"]);
+				// Advance remote main after fetch; use the fetched commit, not moving main.
+				writeFileSync(join(source, "marker"), "newer main");
+				git([
+					"-c",
+					"user.name=Test",
+					"-c",
+					"user.email=test@example.com",
+					"-c",
+					"core.hooksPath=/dev/null",
+					"commit",
+					"-am",
+					"advance",
+					"--quiet",
+				]);
+				return spawn(process.execPath, ["-e", "require('node:fs').writeFileSync('hydrated', 'ready')"], options);
+			}
+			if (failInstall && args[0]?.endsWith("install-fork.mjs")) {
+				return spawn(process.execPath, ["-e", "process.exit(23)"], options);
+			}
+			return spawn(command, args, options);
+		});
+	});
+
+	afterEach(() => {
+		Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
+		process.exitCode = originalExitCode;
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("routes --fork without settings writes, pins fetched main, isolates the build and cleans up", async () => {
+		expect(await handlePackageCommand(["update", "--fork"])).toBe(true);
+		expect(process.exitCode).toBeUndefined();
+		const observed = JSON.parse(readFileSync(join(root, "observed.json"), "utf8")) as {
+			commit: string;
+			args: string[];
+			env: NodeJS.ProcessEnv;
+		};
+		expect(observed.commit).toBe(expectedCommit);
+		expect(observed.args).toEqual([
+			"--ref",
+			expectedCommit,
+			"--selector",
+			selector,
+			"--releases",
+			join(root, "real-home/.local/share/pi-fork/releases"),
+		]);
+		expect(observed.env.ANTHROPIC_API_KEY).toBeUndefined();
+		expect(observed.env.PI_RESTART_SOCKET).toBeUndefined();
+		expect(observed.env.PI_PACKAGE_DIR).toBeUndefined();
+		expect(observed.env.HOME).not.toBe(process.env.HOME);
+		expect(observed.env.TMPDIR).toBe(join(observed.env.HOME!, "tmp"));
+		expect(observed.env.PREFIX).toBe(platform === "android" ? process.env.PREFIX : undefined);
+		expect(observed.env.LD_PRELOAD).toBe(platform === "android" ? process.env.LD_PRELOAD : undefined);
+		expect(observed.env.npm_config_script_shell).toBe(
+			platform === "android" ? join(dirname(process.execPath), "bash") : undefined,
+		);
+		expect(fetched).toBe(1);
+		expect(readFileSync(join(root, "real-home/.local/share/pi-fork/releases/.owner-selector"), "utf8")).toBe(
+			`${join(realpathSync(dirname(selector)), basename(selector))}\n`,
+		);
+		expect(existsSync(temporarySource!)).toBe(false);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+		expect(existsSync(join(process.env.HOME!, ".pi"))).toBe(false);
+	});
+
+	it("reports installer failure without success, leaves the selector and cleans up", async () => {
+		failInstall = true;
+		await handlePackageCommand(["update", "--fork"]);
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("exited with code 23"));
+		expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("Fork commit"));
+		expect(readlinkSync(selector)).toBe(oldPackage);
+		expect(existsSync(temporarySource!)).toBe(false);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it("revalidates selection after acquiring the shared mutation lock", async () => {
+		const acquire = lockfile.lock.bind(lockfile);
+		vi.spyOn(lockfile, "lock").mockImplementation(async (path, options) => {
+			const release = await acquire(path, options);
+			rmSync(selector);
+			symlinkSync(root, selector);
+			return release;
+		});
+		await expect(runForkUpdate()).rejects.toThrow("does not select this running Pi installation");
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it("refuses a store owned by another selector before fetching or changing the installation", async () => {
+		const releases = join(root, "real-home/.local/share/pi-fork/releases");
+		mkdirSync(releases, { recursive: true });
+		const owner = join(root, "other-selector");
+		writeFileSync(join(releases, ".owner-selector"), `${owner}\n`);
+		await expect(runForkUpdate()).rejects.toThrow(/owned by selector .*Use a separate release store/);
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+		expect(readlinkSync(selector)).toBe(oldPackage);
+		expect(readFileSync(join(releases, ".owner-selector"), "utf8")).toBe(`${owner}\n`);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it.each([
+		["--self"],
+		["--all"],
+		["--extensions"],
+		["--models"],
+		["--force"],
+		["pi"],
+		["self"],
+		["npm:example"],
+		["--extension", "npm:example"],
+	])("rejects --fork combined with %s before running commands", async (...target) => {
+		await handlePackageCommand(["update", "--fork", ...target]);
+		expect(process.exitCode).toBe(1);
+		expect(childProcess.spawnProcessSync).not.toHaveBeenCalled();
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+	});
+
+	it("documents the limited support in help without downloads", async () => {
+		await handlePackageCommand(["update", "--fork", "--help"]);
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("ordinary npm directories"));
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+	});
+
+	it.each(["directory", "other-runtime", "bin-bypass", "backup-file"])(
+		"refuses unsafe %s layout before fetch",
+		async (layout) => {
+			if (layout === "directory") {
+				rmSync(selector);
+				mkdirSync(selector);
+			} else if (layout === "other-runtime") {
+				vi.stubEnv("PI_PACKAGE_DIR", root);
+			} else if (layout === "bin-bypass") {
+				rmSync(bin);
+				symlinkSync(join(oldPackage, "dist/bundle/cli.js"), bin);
+			} else writeFileSync(`${selector}.previous`, "unrelated");
+			await expect(runForkUpdate()).rejects.toThrow(/Cannot safely update.*Initial setup:/);
+			expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+			expect(existsSync(join(root, "observed.json"))).toBe(false);
+		},
+	);
+
+	it("fails missing prerequisites before downloads", async () => {
+		vi.mocked(childProcess.spawnProcessSync).mockImplementation((command, _args, options) => {
+			if (command === "git") return spawnSync("/no-such-pi-test-git", [], options);
+			return spawnSync(
+				process.execPath,
+				["-e", `console.log(${JSON.stringify(dirname(dirname(selector)))})`],
+				options,
+			);
+		});
+		await expect(runForkUpdate()).rejects.toThrow(/git --version failed:.*ENOENT/);
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+	});
+});
+
+it("rejects Windows before invoking any subprocess", async () => {
+	const platform = process.platform;
+	const spy = vi.spyOn(childProcess, "spawnProcessSync");
+	try {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		await expect(runForkUpdate()).rejects.toThrow("Windows is not supported");
+		expect(spy).not.toHaveBeenCalled();
+	} finally {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
+		spy.mockRestore();
+	}
+});

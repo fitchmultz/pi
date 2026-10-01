@@ -272,12 +272,28 @@ Running `pi update` without a target updates Pi itself.
 | Task | Command |
 |---|---|
 | Update Pi | `pi update` |
+| Build, validate, and select latest fitchmultz/pi main | `pi update --fork` |
 | Update all installed packages | `pi update --extensions` |
 | Update one installed package | `pi update <source>` |
 | Refresh model catalogs | `pi update --models` |
 | Update Pi and all installed packages | `pi update --all` |
 
 Add `--force` to reinstall Pi when the selected update includes Pi.
+
+`--fork` is a separate update path for [immutable fork installations](quickstart.md#fork-installation),
+not an alias for `--self` or `--all`. It requires macOS/Linux/Termux arm64/x64,
+Node.js >=22.19 (not Bun) with adjacent npm, Git, bash, tar, gzip, tmux, and network
+access. macOS/Linux use the active npm global prefix; Termux uses
+`~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` and
+`~/.local/bin/pi`. Ordinary npm directories, Windows, and other install layouts
+are refused before downloading.
+
+The fetched commit is pinned before building. Builds use an isolated home, and
+selection changes only after validation succeeds. Extensions, settings,
+credentials, and running sessions are unchanged. Relaunch Pi or use a managed
+restart to load the selected release. `--fork` cannot combine with another update
+target, a source, `--extension`, or `--force`. Exit status is `0` on success/help
+and `1` for invalid options or a failed update.
 
 ### Aliases and command options
 

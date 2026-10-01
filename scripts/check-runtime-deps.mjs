@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isBuiltin } from "node:module";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { SyntaxKind } from "typescript/unstable/ast";
 import {
 	isCallExpression,
@@ -97,6 +98,8 @@ const fallbackConfigs = new Set(
 );
 const api = new API({
 	cwd: process.cwd(),
+	tsserverPath: process.platform === "android"
+		? realpathSync(fileURLToPath(new URL("../node_modules/.bin/tsc", import.meta.url))) : undefined,
 	fs: {
 		fileExists: (fileName) => (fallbackConfigs.has(resolve(fileName)) ? true : undefined),
 		readFile: (fileName) => (fallbackConfigs.has(resolve(fileName)) ? fallbackConfig : undefined),

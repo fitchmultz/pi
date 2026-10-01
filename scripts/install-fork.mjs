@@ -3,12 +3,14 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-	copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync,
+	chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync,
 	renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import lockfile from "proper-lockfile";
+import { claimForkReleaseStore } from "../packages/coding-agent/src/utils/fork-release-store.ts";
 import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import { findPackageDirectories } from "./package-workspaces.mjs";
 
@@ -42,6 +44,8 @@ export function resolveBuildTools() {
 
 export function isolatedEnvironment(home, tools) {
 	mkdirSync(join(home, "tmp"), { recursive: true });
+	const npmGlobalConfig = join(home, "npm-globalconfig");
+	writeFileSync(npmGlobalConfig, "");
 	return {
 		PATH: tools.path,
 		HOME: home,
@@ -57,7 +61,68 @@ export function isolatedEnvironment(home, tools) {
 		JITI_FS_CACHE: "0",
 		npm_config_cache: join(home, "npm-cache"),
 		npm_config_userconfig: join(home, ".npmrc"),
+		npm_config_globalconfig: npmGlobalConfig,
+		...(process.platform === "android" ? {
+			PREFIX: process.env.PREFIX,
+			LD_PRELOAD: process.env.LD_PRELOAD,
+			npm_config_script_shell: join(dirname(tools.node), "bash"),
+		} : {}),
 	};
+}
+
+export function prepareTermuxCompiler(source, tools, env) {
+	// TypeScript 7 has no Android package. Use the lockfile-pinned Linux compiler.
+	const name = `@typescript/typescript-linux-${process.arch}`;
+	const key = `node_modules/${name}`;
+	const locked = JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8")).packages[key];
+	if (!locked?.version || !locked.integrity) throw new Error(`Missing locked compiler: ${name}`);
+	const directory = join(source, "node_modules/.termux-compiler");
+	mkdirSync(directory, { recursive: true });
+	const optionalDependencies = { [name]: locked.version };
+	writeFileSync(join(directory, "package.json"), JSON.stringify({ private: true, optionalDependencies }));
+	writeFileSync(join(directory, "package-lock.json"), JSON.stringify({
+		lockfileVersion: 3, requires: true,
+		packages: { "": { optionalDependencies }, [key]: locked },
+	}));
+	run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--os=linux", "--include=optional", "--no-audit", "--no-fund"], {
+		cwd: directory, env,
+	});
+	const binary = join(directory, key, "lib/tsc");
+	const probe = spawnSync(binary, ["--version"], { env, encoding: "utf8" });
+	if (probe.stderr?.startsWith("SIGSYS:") && probe.stderr.includes("fanotifyAvailable")) {
+		console.log("Android blocked the compiler's fanotify probe; rebuilding the pinned source (requires Go >=1.26).");
+		const { gitHead } = JSON.parse(readFileSync(join(directory, key, "package.json"), "utf8"));
+		if (!/^[a-f0-9]{40}$/.test(gitHead ?? "")) throw new Error("Missing pinned TypeScript source commit");
+		const goEnv = { ...env, GOOS: process.platform === "android" ? "android" : "linux",
+			GOARCH: process.arch === "x64" ? "amd64" : process.arch,
+			CGO_ENABLED: process.platform === "android" && process.arch === "x64" ? "1" : "0",
+			GOTOOLCHAIN: "local", GOWORK: "off", GOFLAGS: "-modcacherw",
+			GOPATH: join(directory, "go"), GOCACHE: join(directory, "go-cache") };
+		const downloaded = JSON.parse(run("go", ["mod", "download", "-json", `github.com/microsoft/typescript-go@${gitHead}`], {
+			cwd: directory, env: goEnv, stdio: "pipe",
+		}));
+		if (downloaded.Origin?.Hash !== gitHead || !downloaded.Sum || !downloaded.Dir) {
+			throw new Error("Downloaded TypeScript source does not match the pinned commit");
+		}
+		const buildSource = join(directory, "source");
+		rmSync(buildSource, { recursive: true, force: true });
+		cpSync(downloaded.Dir, buildSource, { recursive: true });
+		const watcher = join(buildSource, "internal/fswatch/fanotify_linux.go");
+		const contents = readFileSync(watcher, "utf8");
+		const patched = contents.replace(/func fanotifyAvailable\(\) bool \{[\s\S]*?\n\}/, "func fanotifyAvailable() bool {\n\treturn false\n}");
+		if (patched === contents) throw new Error("Cannot disable the compiler's fanotify probe");
+		// ponytail: build-only compiler uses inotify; use an official Android artifact when published.
+		chmodSync(watcher, 0o644);
+		writeFileSync(watcher, patched);
+		const compiled = join(directory, "tsc");
+		run("go", ["build", "-mod=readonly", "-buildvcs=false", "-trimpath", "-tags=noembed", "-o", compiled, "./cmd/tsgo"], {
+			cwd: buildSource, env: goEnv,
+		});
+		renameSync(compiled, binary);
+	}
+	const version = run(binary, ["--version"], { env, stdio: "pipe" });
+	if (version !== `Version ${locked.version}`) throw new Error(`Unexpected compiler version: ${version}`);
+	replaceSymlink(binary, join(source, "node_modules/.bin/tsc"));
 }
 
 function packageNameFromLockPath(lockPath) {
@@ -136,7 +201,25 @@ function replaceSymlink(target, selector) {
 	}
 }
 
+async function withMutationLock(releases, selector, action) {
+	mkdirSync(dirname(selector), { recursive: true });
+	// Synchronous builds can block heartbeats. Never steal a lock based on age.
+	const release = await lockfile.lock(selector, { realpath: false, stale: Infinity, update: 1000 });
+	try {
+		selectorTarget(selector);
+		selectorTarget(`${selector}.previous`);
+		const ownerSelector = claimForkReleaseStore(releases, selector);
+		return await action(ownerSelector);
+	} finally {
+		await release();
+	}
+}
+
 export function activateRelease(releases, identity, selector) {
+	return withMutationLock(releases, selector, () => activateLockedRelease(releases, identity, selector));
+}
+
+function activateLockedRelease(releases, identity, selector) {
 	const release = readVerifiedRelease(releasePath(releases, identity));
 	const previous = selectorTarget(selector);
 	if (previous === release.packageDir) return { ...release, previous, changed: false };
@@ -168,62 +251,68 @@ function resolvedLink(link) {
 }
 
 export function pruneReleases({ releases, selector, keep }, livePaths = liveProcessPaths) {
-	const selected = [selector, `${selector}.previous`].map(resolvedLink);
-	const live = livePaths();
-	const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
-	const validated = [];
-	for (const identity of readdirSync(releases)) {
-		const directory = join(releases, identity);
-		try {
-			readVerifiedRelease(directory);
-		} catch {
-			continue; // Legacy releases and installations still in progress have no valid receipt.
+	return withMutationLock(releases, selector, (ownerSelector) => {
+		const selected = [selector, `${selector}.previous`].map(resolvedLink);
+		const live = livePaths();
+		const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
+		const validated = [];
+		for (const identity of readdirSync(releases)) {
+			const directory = join(releases, identity);
+			let receipt;
+			try {
+				receipt = readVerifiedRelease(directory).receipt;
+			} catch {
+				continue; // Legacy releases and installations still in progress have no valid receipt.
+			}
+			validated.push({ directory, ownerSelector: receipt.ownerSelector, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
 		}
-		validated.push({ directory, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
-	}
-	validated.sort((a, b) => b.validatedAt - a.validatedAt);
-	const removed = [];
-	for (const { directory } of validated.slice(keep)) {
-		const real = realpathSync(directory);
-		if (selected.some((path) => path === real || path?.startsWith(`${real}/`)) || mentioned(directory) || mentioned(real)) {
-			continue;
+		validated.sort((a, b) => b.validatedAt - a.validatedAt);
+		const removed = [];
+		for (const { directory, ownerSelector: releaseOwner } of validated.slice(keep)) {
+			if (releaseOwner !== ownerSelector) continue; // Pre-adoption releases have unknown ownership.
+			const real = realpathSync(directory);
+			if (selected.some((path) => path === real || path?.startsWith(`${real}/`)) || mentioned(directory) || mentioned(real)) {
+				continue;
+			}
+			rmSync(directory, { recursive: true, force: true });
+			removed.push(basename(directory));
 		}
-		rmSync(directory, { recursive: true, force: true });
-		removed.push(basename(directory));
-	}
-	return { kept: validated.length - removed.length, removed };
+		return { kept: validated.length - removed.length, removed };
+	});
 }
 
 // The callback builds/installs/tests only a NEW candidate. The receipt is written
 // last, and is the only reusable success marker. Existing releases are never modified.
 export async function installRelease({ releases, receipt, selector, stage = false }, installAndValidate) {
-	const identity = releaseIdentity(receipt);
-	const directory = releasePath(releases, identity);
-	mkdirSync(resolve(releases), { recursive: true });
-	let created = false;
-	try {
-		mkdirSync(directory);
-		created = true;
-	} catch (error) {
-		if (error.code !== "EEXIST") throw error;
-		const existing = readVerifiedRelease(directory).receipt;
-		for (const key of ["commit", "catalogSha256", "archiveSha256", "node", "platform", "arch"]) {
-			if (existing[key] !== receipt[key]) throw new Error(`Existing release has a different ${key}: ${directory}`);
-		}
-	}
-	if (created) {
+	return withMutationLock(releases, selector, async (ownerSelector) => {
+		const identity = releaseIdentity(receipt);
+		const directory = releasePath(releases, identity);
+		mkdirSync(resolve(releases), { recursive: true });
+		let created = false;
 		try {
-			await installAndValidate(directory);
-			writeFileSync(join(directory, receiptFile), `${JSON.stringify({ ...receipt, validated: true }, null, 2)}\n`, { flag: "wx" });
-			readVerifiedRelease(directory);
+			mkdirSync(directory);
+			created = true;
 		} catch (error) {
-			// This invocation owns this unselected, incomplete directory, not an active release.
-			rmSync(directory, { recursive: true, force: true });
-			throw error;
+			if (error.code !== "EEXIST") throw error;
+			const existing = readVerifiedRelease(directory).receipt;
+			for (const key of ["commit", "catalogSha256", "archiveSha256", "node", "platform", "arch"]) {
+				if (existing[key] !== receipt[key]) throw new Error(`Existing release has a different ${key}: ${directory}`);
+			}
 		}
-	}
-	return stage ? { ...readVerifiedRelease(directory), reused: !created, changed: false }
-		: { ...activateRelease(releases, identity, selector), reused: !created };
+		if (created) {
+			try {
+				await installAndValidate(directory);
+				writeFileSync(join(directory, receiptFile), `${JSON.stringify({ ...receipt, validated: true, ownerSelector }, null, 2)}\n`, { flag: "wx" });
+				readVerifiedRelease(directory);
+			} catch (error) {
+				// This invocation owns this unselected, incomplete directory, not an active release.
+				rmSync(directory, { recursive: true, force: true });
+				throw error;
+			}
+		}
+		return stage ? { ...readVerifiedRelease(directory), reused: !created, changed: false }
+			: { ...activateLockedRelease(releases, identity, selector), reused: !created };
+	});
 }
 
 function printUsage() {
@@ -235,15 +324,16 @@ function printUsage() {
 Builds an exact local commit (default HEAD) with the checkout's ALREADY hydrated
 model-data snapshot using create-source-archive.sh and build:offline. An optional
 --source-archive with its adjacent source.commit reuses an already frozen input.
-No fetch or model generation. npm may download frozen dependencies. Requires macOS
-or Linux, Node with npm installed alongside it, Git, tar, and tmux.
+No fetch or model generation. npm may download frozen dependencies. Requires macOS,
+Linux or Termux, Node >=22.19 with npm installed alongside it, Git, bash, tar, gzip,
+and tmux. Termux also needs Go >=1.26 when Android blocks the compiler's fanotify probe.
 
 --source-archive <file> Use a frozen source archive and adjacent source.commit
 --stage                 Build/install/validate without changing the selector
 --activate <identity>   Select an existing validated release, without rebuilding
 --rollback <identity>   Select an older validated release (same native operation)
 --prune --keep <count>  Delete validated releases older than the newest <count>,
-                        except selected, .previous and visibly running ones
+                        except legacy, selected, .previous and visibly running ones
 --releases <directory>  Default: ~/.local/share/pi-fork/releases
 --selector <symlink>    Default: ~/.local/share/npm-global/lib/node_modules/${codingAgentName}
 -h, --help              Show this help
@@ -254,6 +344,13 @@ Exit codes: 0 success, 1 failure.
 Selection atomically replaces only the package symlink; its old target is kept
 at <selector>.previous. Existing releases and user settings/auth/sessions are
 never edited. Running sessions keep their runtime until restarted.
+All release mutations share <selector>.lock. Concurrent operations fail; an
+abandoned lock must be removed only after confirming its updater/installer stopped.
+Each store records one canonical owning selector in .owner-selector, adopting
+unowned existing stores without removing releases. Other selectors must use their
+own --releases directory; all mutations, including staging and pruning, refuse them.
+Only newly installed releases are stamped with ownership and eligible for pruning.
+Legacy releases without the matching owner stamp are kept until removed by hand.
 `);
 }
 
@@ -285,7 +382,7 @@ export async function main(args = process.argv.slice(2)) {
 			throw new Error("--prune cannot combine with installation or activation");
 		}
 		if (!/^\d+$/.test(options.keep)) throw new Error("--keep requires a non-negative integer");
-		const result = pruneReleases({ ...options, keep: Number(options.keep) });
+		const result = await pruneReleases({ ...options, keep: Number(options.keep) });
 		console.log(JSON.stringify(result, null, 2));
 		return result;
 	}
@@ -293,7 +390,7 @@ export async function main(args = process.argv.slice(2)) {
 		throw new Error("Activation cannot combine with --stage, --ref or --source-archive");
 	}
 	if (selection) {
-		const result = activateRelease(options.releases, selection, options.selector);
+		const result = await activateRelease(options.releases, selection, options.selector);
 		console.log(JSON.stringify(result, null, 2));
 		return result;
 	}
@@ -341,11 +438,12 @@ export async function main(args = process.argv.slice(2)) {
 			writeFileSync(join(directory, "source.commit"), `${commit}\n`);
 			run("tmux", ["-V"], { env }); // Missing tmux must fail, not silently skip the acceptance tests.
 			run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: source, env });
+			if (process.platform === "android") prepareTermuxCompiler(source, tools, env);
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
 			const packages = findPackageDirectories(join(source, "packages"))
 				.map((directory) => ({ directory, ...JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) }))
 				.filter((pkg) => pkg.private !== true);
-			const tarballs = packReleasePackages(packages, join(directory, "tarballs"));
+			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { ...tools, env });
 			installFrozenConsumer(directory, tarballs, join(source, "packages/coding-agent/install-lock"), tools, env);
 			smokeTestCodingAgentConsumer(directory, tools.node);
 			const cli = join(packagePath(directory), "dist/bundle/cli.js");
