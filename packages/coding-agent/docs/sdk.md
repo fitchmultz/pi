@@ -43,6 +43,18 @@ File-backed history keeps a derived byte-offset index and enumerable lazy payloa
 
 Use `getEntryMetadata(id)` for one entry's readonly structural, configuration, usage, and bounded-preview facts. `iterateEntryMetadata()` returns those facts in physical journal order; `{ branchFrom: id }` returns root-to-entry ancestry, and `{ branchFrom: null }` returns no entries. Neither method reads custom `data`, message bodies, or compaction details. Both are available through `ReadonlySessionManager` and extension contexts. JSONL remains authoritative; the index rebuilds when the source changes and refuses changed prior records rather than returning stale bodies.
 
+`buildSessionProjection()` and `buildSessionContext()` reuse verified file-backed bodies selected by the latest projection. Each call still resolves the current leaf, compactions, and context edits, and returns independent model-message values. Raw `sourceEntry` references remain the manager's lazy entries. In-memory entries remain caller-owned and are not cached. Source identity or timestamp changes trigger revalidation. After a native append, the next projection verifies cached selected-record digests in bounded read chunks before reusing decoded values; append itself does not reread history. This is an in-process optimization, not an immutable-prefix or durability certificate. Active context still requires memory, and each projection still traverses and copies that context.
+
+`manager.forkBranch(leafId)` returns an independent `SessionManager` containing that selected branch without replacing the source manager or moving its leaf. Open the parent once to create several siblings:
+
+```typescript
+const parent = SessionManager.open(parentFile);
+const children = Array.from({ length: 4 }, () => parent.forkBranch(leafId));
+const childFiles = children.map((child) => child.getSessionFile());
+```
+
+The source is flushed before copying. Each persistent child retains exclusive publication, file fsync, selected-record digest verification, entry IDs, context edits, compaction boundaries, and resolved labels. The writer derives the child index from the bytes written rather than rereading the whole output. Each child still copies its selected bytes; source changes may require a rescan. Setup-only sessions retain deferred file creation. In-memory parents produce detached in-memory children. `createBranchedSession(leafId)` retains its existing behavior of replacing the calling manager with the new branch.
+
 Use an in-memory manager when the host does not want session files:
 
 ```typescript

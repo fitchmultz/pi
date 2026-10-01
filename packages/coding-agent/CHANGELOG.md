@@ -10,6 +10,7 @@
 - Added opt-in provider credential isolation for account-routing extensions without deleting stored credentials.
 - Added durable `background_command` shell jobs with status, logs, and completion receipts across Pi exit.
 - Added working-session checkpoints and managed Node CLI restart with pending-input protection and one-attempt startup rollback.
+- Added `SessionManager.forkBranch()` for independent sibling branch copies without replacing or moving the parent manager.
 - Added `pi convert-session SOURCE NEW_PATH` for settled legacy sessions, writing a new copy without replaying uncertain work.
 - Added extension-owned on-demand instruction groups without broadening tool permissions.
 - Added JSON path and field selection before `read` output truncation, optional compact transcript view, background external usage accounting, and PTY-backed RPC TUI handoff.
@@ -21,6 +22,8 @@
 
 ### Fixed
 
+- Fixed repeated native next-turn preparation rereading unchanged active message bodies and checking journal state once per ancestor; context projection still preserves branch-local edits and compaction boundaries.
+- Fixed selected-branch creation rescanning the entire copied output and rewriting unchanged parent links, while retaining record digest verification, exclusive publication, and file fsync.
 - Fixed lazy tool registration losing permitted saved selections across resume or unrelated tool activation, while preserving deselection and configured restrictions.
 - Fixed MCP account changes and changed live definitions retaining stale callable bindings; uncertain tool-call failures now explain that the operation may have run.
 - Fixed settled legacy session conversion to group genuine receipts for synchronous provider input, preserve committed interrupted output and billing, and retain branch state, declaration order, durable steering, and distinct API/tool identities.

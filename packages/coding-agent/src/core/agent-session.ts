@@ -1148,10 +1148,11 @@ export class AgentSession {
 		useReportedUsage: boolean;
 	} {
 		let invalidated = false;
-		let entry = this.sessionManager.getLeafId()
-			? this.sessionManager.getEntryMetadata(this.sessionManager.getLeafId()!)
-			: undefined;
-		while (entry) {
+		const branch = Array.from(
+			this.sessionManager.iterateEntryMetadata({ branchFrom: this.sessionManager.getLeafId() }),
+		);
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i]!;
 			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
 			if (entry.type === "context_edit") invalidated = true;
 			if (model && entry.type === "message" && entry.message.role === "assistant") {
@@ -1169,7 +1170,6 @@ export class AgentSession {
 					return { hasPostCompactionUsage: true, useReportedUsage: !invalidated };
 				}
 			}
-			entry = entry.parentId ? this.sessionManager.getEntryMetadata(entry.parentId) : undefined;
 		}
 		return { hasPostCompactionUsage: true, useReportedUsage: false };
 	}
