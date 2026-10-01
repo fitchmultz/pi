@@ -113,10 +113,16 @@ release selectable at `<selector>.previous`. On Termux the selector is
 
 ### Cutover from the 0.99 fork
 
-Sessions started by the 0.99 fork must quit and relaunch (`pi -c` or `pi --session <file>`) to run
-on 1.0. `/restart` from such a session is refused by the new worker and stays on 0.99. Keep the 0.99
-release on disk until the new release is verified; to roll back, `--rollback` (or flip the selector
-to `<selector>.previous`) and fully relaunch.
+Do the first 1.0 install from a fork checkout (`npm ci --ignore-scripts`,
+`npm run hydrate:model-data`, then `node scripts/install-fork.mjs`). A 0.99 `pi update --fork`
+holds `<selector>.lock` while it runs the 1.0 installer, which needs the same lock, so it fails with
+`Lock file is already being held` and changes nothing. Later updates can use `pi update --fork`.
+
+Sessions started by the 0.99 fork must quit and relaunch to run on 1.0. `/restart` from such a
+session is refused by the new worker and stays on 0.99. Relaunch with `pi --session <path|id>`:
+`pi -c` opens the directory's most recently modified session, which can be another live session
+when several share the directory. Keep the 0.99 release on disk until the new release is verified;
+to roll back, `--rollback` (or flip the selector to `<selector>.previous`) and fully relaunch.
 
 ## Testing
 
