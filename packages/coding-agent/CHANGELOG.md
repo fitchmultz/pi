@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `SessionManager.forkBranch()` for independent sibling branch copies without replacing or moving the parent manager.
 - Added lazy-by-default native MCP connections for every exposure, explicit eager profiles, idle cleanup, account-bound catalogs, and cache-only global versus scoped live discovery, including same-script codemode search and calls.
 - Added native MCP prompt commands, complete hook-permitted JSON result artifacts, explicit browser sign-in begin/complete/cancel, and copy-only adapter configuration and optional grant import.
 - Added shared MCP configuration with whole-entry Pi-global and trusted-project overrides, namespace usage instructions, and owning-extension command removal.
@@ -21,6 +22,7 @@
 
 ### Fixed
 
+- Fixed selected-branch creation reparsing the complete copied output and rewriting unchanged parent links, while retaining published-record and separator verification, exclusive publication, and file fsync.
 - Fixed repeated persisted-history parsing during requests and idle background-job polling, with a bounded active-body cache, isolated projections, and source-change validation after local appends.
 - Fixed model selection querying the catalog once per saved response ([#10198](https://github.com/earendil-works/pi/issues/10198)) and quadratic merging of refreshed remote catalogs.
 - Fixed lazy tool registration losing permitted saved selections across resume or unrelated tool activation, while preserving deselection and configured restrictions.

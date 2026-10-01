@@ -56,6 +56,7 @@ import {
 	type JournalSource,
 	type JsonProjectionOptions,
 	JsonTokenProjection,
+	openJournalSource,
 	readJournalRecord,
 	rewriteJournalRecord,
 	scanJournal,
@@ -277,26 +278,53 @@ export function writeSessionEntry(
 	fd: number,
 	entry: FileEntry,
 	overrides: Record<string, string | number | boolean | null> = {},
-): void {
+): JournalRecord {
 	const location = recordLocations.get(entry);
 	if (location) {
 		const changes = { ...entryRewrites.get(entry), ...overrides };
 		const deleted = entryDeletedFields.get(entry);
 		const role = entryMessageRoles.get(entry);
-		if (deleted || role)
-			transformJournalRecord(location.source, location.record, fd, {
-				overrides: Object.fromEntries(Object.entries(changes).map(([key, value]) => [key, { value }])),
-				omit: (path) => path.length === 1 && Boolean(deleted?.includes(String(path[0]))),
-				replace: (path) =>
-					role && path.length === 2 && path[0] === "message" && path[1] === "role" ? { value: role } : undefined,
-			});
-		else if (Object.keys(changes).length) rewriteJournalRecord(location.source, location.record, fd, changes);
-		else copyJournalRecord(location.source, location.record, fd);
-	} else {
-		const json = JSON.stringify(Object.keys(overrides).length ? { ...entry, ...overrides } : entry);
-		pendingRecordDigests.set(entry, createHash("sha256").update(json).digest("hex"));
-		writeFileSync(fd, `${json}\n`);
+		const written =
+			deleted || role
+				? transformJournalRecord(location.source, location.record, fd, {
+						overrides: Object.fromEntries(Object.entries(changes).map(([key, value]) => [key, { value }])),
+						omit: (path) => path.length === 1 && Boolean(deleted?.includes(String(path[0]))),
+						replace: (path) =>
+							role && path.length === 2 && path[0] === "message" && path[1] === "role"
+								? { value: role }
+								: undefined,
+					})
+				: Object.keys(changes).length
+					? rewriteJournalRecord(location.source, location.record, fd, changes)
+					: copyJournalRecord(location.source, location.record, fd);
+		const value = { ...location.record.value, ...changes };
+		for (const key of deleted ?? []) delete value[key];
+		if (role) value.message = { ...(value.message as Record<string, unknown>), role };
+		return {
+			...location.record,
+			start: 0,
+			end: written.bytes - 1,
+			digest: written.digest,
+			value,
+			fields: [
+				...new Set([...location.record.fields.filter((key) => !deleted?.includes(key)), ...Object.keys(changes)]),
+			],
+		};
 	}
+	const json = JSON.stringify(Object.keys(overrides).length ? { ...entry, ...overrides } : entry);
+	const digest = createHash("sha256").update(json).digest("hex");
+	pendingRecordDigests.set(entry, digest);
+	writeFileSync(fd, `${json}\n`);
+	const projection = new JsonTokenProjection(metadataProjection());
+	projection.write(json);
+	return {
+		start: 0,
+		end: Buffer.byteLength(json),
+		line: 0,
+		digest,
+		value: projection.finish() as Record<string, unknown>,
+		fields: projection.fields,
+	};
 }
 
 /** Internal adapter for projections and tree UI, including ordinary in-memory entries. */
@@ -1576,7 +1604,7 @@ export class SessionManager {
 		return true;
 	}
 
-	private _entryView(record: JournalRecord, sequence: number, metadata?: SessionEntryMetadata): FileEntry {
+	private _entryView(record: JournalRecord, sequence: number, source = this.journalSource!): FileEntry {
 		const view: Record<string, unknown> = {};
 		for (const key of record.fields) {
 			if (structuralFields.has(key) && key !== "usage") {
@@ -1593,8 +1621,8 @@ export class SessionManager {
 				});
 			}
 		}
-		this.recordsByEntry.set(view, { source: this.journalSource!, record });
-		if (view.type !== "session") metadataByEntry.set(view, metadata ?? entryMetadata(record.value, sequence - 1));
+		this.recordsByEntry.set(view, { source, record });
+		if (view.type !== "session") metadataByEntry.set(view, entryMetadata(record.value, sequence - 1));
 		return view as unknown as FileEntry;
 	}
 
@@ -1608,7 +1636,14 @@ export class SessionManager {
 			const serialized = this.projectionRecords.get(entry);
 			const value = serialized
 				? (deserialize(serialized) as Record<string, unknown>)
-				: readJournalRecord(source, record);
+				: readJournalRecord(source, record, (path) => {
+						if (!path.length) return "descend";
+						return structuralFields.has(String(path[0])) ||
+							["message", "content", "summary", "systemMessage", "replacement"].includes(String(path[0])) ||
+							(entry.type === "custom_message" && path[0] === "details")
+							? "keep"
+							: "skip";
+					});
 			if (value.id !== record.value.id || value.type !== record.value.type)
 				throw new Error("Session entry source changed");
 			const remaining = 16 * 1024 * 1024 - this.projectionRecordBytes;
@@ -1754,18 +1789,33 @@ export class SessionManager {
 		if (!this.sessionFile || !existsSync(this.sessionFile)) return;
 		const previousSource = this.journalSource;
 		const scan = scanJournal(this.sessionFile, { ...metadataProjection(), policy: "tolerant", requireFinalLf: true });
-		const saved = new Map(scan.records.map((record) => [record.value.id, record]));
+		this._acceptPersistedRecords(scan.source, scan.records, previousSource);
+	}
+
+	private _acceptPersistedRecords(
+		source: JournalSource,
+		records: JournalRecord[],
+		previousSource?: JournalSource,
+	): void {
+		const saved = new Map<unknown, JournalRecord[]>();
+		for (let i = records.length - 1; i >= 0; i--) {
+			const record = records[i]!;
+			const matches = saved.get(record.value.id) ?? [];
+			matches.push(record);
+			saved.set(record.value.id, matches);
+		}
 		const leaf = this.leafId;
-		this.journalSource = scan.source;
+		this.journalSource = source;
 		this.decodedRecord = undefined;
 		this.projectionRecords.clear();
 		this.projectionRecordBytes = 0;
+		this.projectionSource = undefined;
 		for (let i = 0; i < this.fileEntries.length; i++) {
 			const entry = this.fileEntries[i]!;
-			const record = saved.get(entry.id);
+			const record = saved.get(entry.id)?.pop();
 			if (!record) continue;
 			if (this.recordsByEntry.has(entry)) {
-				this.recordsByEntry.set(entry, { source: scan.source, record });
+				this.recordsByEntry.set(entry, { source, record });
 				entryRewrites.delete(entry);
 				entryDeletedFields.delete(entry);
 				entryMessageRoles.delete(entry);
@@ -1777,7 +1827,7 @@ export class SessionManager {
 			if (view.type !== "session") this.byId.set(view.id, view);
 		}
 		this.leafId = leaf;
-		this._reuseJournalHandle(previousSource, scan.source);
+		this._reuseJournalHandle(previousSource, source);
 	}
 
 	private _buildIndex(): void {
@@ -1818,13 +1868,22 @@ export class SessionManager {
 		this.needsRewrite = flag;
 		// Only successful exclusive creation authorizes repairing an initial file.
 		if (!temporary) this.flushed = true;
+		const records: JournalRecord[] = [];
+		let writtenStats: Stats;
 		try {
 			try {
 				if (mode !== undefined) fchmodSync(fd, mode);
+				let position = 0;
 				for (const entry of this.fileEntries) {
-					writeSessionEntry(fd, entry);
+					const record = writeSessionEntry(fd, entry);
+					record.start = position;
+					record.end += position;
+					record.line = records.length + 1;
+					position = record.end + 1;
+					records.push(record);
 				}
 				if (flag === "exclusive") fsyncSync(fd);
+				writtenStats = fstatSync(fd);
 			} finally {
 				closeSync(fd);
 			}
@@ -1834,7 +1893,43 @@ export class SessionManager {
 			}
 			this.flushed = true;
 			this.needsRewrite = undefined;
-			this._dropPersistedBodies();
+			const source = openJournalSource(this.sessionFile);
+			let verified = false;
+			if (
+				source.dev === writtenStats.dev &&
+				source.ino === writtenStats.ino &&
+				source.size === writtenStats.size &&
+				source.mtimeMs === writtenStats.mtimeMs
+			) {
+				try {
+					// Publication can preserve stat fields while changing header, settings, or message bytes.
+					verifyJournalRecords(source, records);
+					verified = true;
+				} catch {
+					// The published file, not the writer's metadata, is authoritative. Reindex below.
+				}
+			}
+			if (verified) {
+				this._acceptPersistedRecords(source, records, this.journalSource);
+			} else {
+				closeJournalSource(source);
+				const previousSource = this.journalSource;
+				const leaf = this.leafId;
+				const scan = scanJournal(this.sessionFile, {
+					...metadataProjection(),
+					policy: "tolerant",
+					requireFinalLf: true,
+				});
+				try {
+					assertSessionConversionNotRequired(scan.records.map((record) => record.value));
+					this._loadJournal(scan);
+				} catch (error) {
+					closeJournalSource(scan.source);
+					throw error;
+				}
+				if (leaf === null || this.byId.has(leaf)) this.leafId = leaf;
+				this._reuseJournalHandle(previousSource, scan.source);
+			}
 		} finally {
 			if (temporary) rmSync(temporary, { force: true });
 		}
@@ -2587,9 +2682,20 @@ export class SessionManager {
 	 * Returns the new session file path, or undefined if not persisting.
 	 */
 	createBranchedSession(leafId: string): string | undefined {
-		this.flush();
-		const previousSessionFile = this.sessionFile;
-		const path = this.getBranch(leafId);
+		return this._createBranchedSession(this, leafId);
+	}
+
+	/** Copy a selected branch into an independent manager without moving or replacing this manager. */
+	forkBranch(leafId: string): SessionManager {
+		const child = new SessionManager(this.cwd, this.sessionDir, undefined, this.persist);
+		child._createBranchedSession(this, leafId);
+		return child;
+	}
+
+	private _createBranchedSession(source: SessionManager, leafId: string): string | undefined {
+		source.flush();
+		const previousSessionFile = source.sessionFile;
+		const path = source.getBranch(leafId);
 		if (path.length === 0) {
 			throw new Error(`Entry ${leafId} not found`);
 		}
@@ -2610,23 +2716,21 @@ export class SessionManager {
 				replacementByLabelId.set(labelId, entry.id);
 			}
 			pendingLabelIds.length = 0;
-			const overrides: Record<string, string | null> = { parentId: pathParentId };
+			const overrides: Record<string, string | null> = {};
+			if (entry.parentId !== pathParentId) overrides.parentId = pathParentId;
 			if (entry.type === "compaction") {
-				overrides.firstKeptEntryId =
-					entry.firstKeptEntryId === entry.id
-						? entry.id
-						: (replacementByLabelId.get(entry.firstKeptEntryId) ?? entry.firstKeptEntryId);
+				const firstKeptEntryId = replacementByLabelId.get(entry.firstKeptEntryId) ?? entry.firstKeptEntryId;
+				if (firstKeptEntryId !== entry.firstKeptEntryId) overrides.firstKeptEntryId = firstKeptEntryId;
 			}
 			const location = this.recordsByEntry.get(entry);
 			const copy = location
-				? (this._entryView(location.record, pathWithoutLabels.length + 1) as SessionEntry)
-				: (Object.defineProperties({}, Object.getOwnPropertyDescriptors(entry)) as SessionEntry);
+				? (this._entryView(location.record, pathWithoutLabels.length + 1, location.source) as SessionEntry)
+				: source === this
+					? (Object.defineProperties({}, Object.getOwnPropertyDescriptors(entry)) as SessionEntry)
+					: structuredClone(entry);
 			Object.assign(copy, overrides);
 			metadataByEntry.set(copy, { ...getSessionEntryMetadata(entry), ...overrides } as SessionEntryMetadata);
-			if (location) {
-				this.recordsByEntry.set(copy, location);
-				entryRewrites.set(copy, { ...entryRewrites.get(entry), ...overrides });
-			}
+			if (location) entryRewrites.set(copy, { ...entryRewrites.get(entry), ...overrides });
 			pathWithoutLabels.push(copy);
 			pathParentId = entry.id;
 		}
@@ -2648,9 +2752,9 @@ export class SessionManager {
 		// Collect labels for entries in the path
 		const pathEntryIds = new Set(pathWithoutLabels.map((e) => e.id));
 		const labelsToWrite: Array<{ targetId: string; label: string; timestamp: string }> = [];
-		for (const [targetId, label] of this.labelsById) {
+		for (const [targetId, label] of source.labelsById) {
 			if (pathEntryIds.has(targetId)) {
-				labelsToWrite.push({ targetId, label, timestamp: this.labelTimestampsById.get(targetId)! });
+				labelsToWrite.push({ targetId, label, timestamp: source.labelTimestampsById.get(targetId)! });
 			}
 		}
 
@@ -2674,6 +2778,7 @@ export class SessionManager {
 			}
 
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+			this.journalSource = source.journalSource;
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
 			this.flushed = false;
@@ -2800,29 +2905,15 @@ export class SessionManager {
 				cwd: resolvedTargetCwd,
 				parentSession: resolvedSourcePath,
 			};
-			const temporary = `${newSessionFile}.${randomUUID()}.tmp`;
-			const fd = openSync(temporary, "wx", 0o600);
-			try {
-				try {
-					writeFileSync(fd, `${JSON.stringify(newHeader)}\n`);
-					if (((sourceHeader.version as number) ?? 1) < CURRENT_SESSION_VERSION) {
-						const migration = SessionManager.inMemory(resolvedTargetCwd);
-						migration._loadJournal(scan);
-						migration._migrateIndexedJournal();
-						for (const entry of migration.getEntries()) writeSessionEntry(fd, entry);
-					} else {
-						for (const record of scan.records)
-							if (record.value.type !== "session") copyJournalRecord(scan.source, record, fd);
-					}
-					fsyncSync(fd);
-				} finally {
-					closeSync(fd);
-				}
-				publishLocalFileExclusiveSync(temporary, newSessionFile);
-			} finally {
-				rmSync(temporary, { force: true });
-			}
-			return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
+			const child = new SessionManager(resolvedTargetCwd, dir, undefined, true);
+			child._loadJournal(scan);
+			child._migrateIndexedJournal();
+			child.fileEntries = [newHeader, ...child.fileEntries.filter((entry) => entry.type !== "session")];
+			child.sessionId = newSessionId;
+			child.sessionFile = newSessionFile;
+			child._buildIndex();
+			child._rewriteFile("exclusive");
+			return child;
 		} finally {
 			closeJournalSource(scan.source);
 		}

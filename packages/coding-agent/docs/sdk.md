@@ -43,6 +43,18 @@ File-backed history keeps a derived byte-offset index and enumerable lazy payloa
 
 Use `getEntryMetadata(id)` for one entry's readonly structural, configuration, usage, and bounded-preview facts. `iterateEntryMetadata()` returns those facts in physical journal order; `{ branchFrom: id }` returns root-to-entry ancestry, and `{ branchFrom: null }` returns no entries. Neither method reads custom `data`, message bodies, or compaction details. Both are available through `ReadonlySessionManager` and extension contexts. JSONL remains authoritative; the index rebuilds when the source changes and refuses changed prior records rather than returning stale bodies.
 
+`buildSessionProjection()` and `buildSessionContext()` retain at most 16 MiB of pristine serialized active bodies. Each call resolves the current leaf, compactions, and context edits and returns independent model-message values. Raw `sourceEntry` references remain the manager's lazy entries. In-memory entries remain caller-owned and are not cached. Source changes and native appends trigger selected-record digest revalidation before reuse; borrowed parent journals are revalidated on every projection. This is not an immutable-prefix or durability certificate. Active context still requires consumer memory, and each projection still traverses and copies that context.
+
+`manager.forkBranch(leafId)` returns an independent `SessionManager` containing that selected branch without replacing the source manager or moving its leaf. Open the parent once to create several siblings:
+
+```typescript
+const parent = SessionManager.open(parentFile);
+const children = Array.from({ length: 4 }, () => parent.forkBranch(leafId));
+const childFiles = children.map((child) => child.getSessionFile());
+```
+
+The source is flushed before copying. Each persistent child retains exclusive publication, file fsync, selected-record digest verification, entry IDs, context edits, compaction boundaries, and resolved labels. The writer derives the child index from the bytes written, then verifies all published record digests and LF separators in bounded chunks before trusting its metadata, including the header and settings. Unchanged output is not reparsed; a verification mismatch rebuilds the index from the published file. Each child still copies its selected bytes; source changes may require a rescan. Setup-only sessions retain deferred file creation. In-memory parents produce detached in-memory children. `createBranchedSession(leafId)` retains its existing behavior of replacing the calling manager with the new branch.
+
 Use an in-memory manager when the host does not want session files:
 
 ```typescript

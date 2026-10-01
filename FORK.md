@@ -331,6 +331,16 @@ idle background monitoring reuses immutable receipt IDs until journal revision o
 session identity changes. These optimizations do not change provider payloads,
 input persistence timing, completion acknowledgement, or runtime selection.
 
+Session performance work is consolidated in PR #162; PR #163 is superseded, not
+an additional merge. One bounded serialized cache serves context projection,
+including #163's selective payload reads. Independent `forkBranch()` siblings and
+writer-derived indexes retain exclusive publication and fsync. Every published
+record and LF separator is verified before index adoption; mismatches rebuild
+from authoritative bytes. Borrowed unpublished siblings retain their source
+identity for validation. The consolidation keeps #162's provenance, append/retry,
+receipt, catalog, and Codex protections rather than replacing them with the
+alternative decoded-body cache.
+
 OpenAI Responses (API keys and Sign in with ChatGPT) and legacy Codex Responses
 price exact `gpt-6-astra` at 6x standard only when the terminal response confirms
 `service_tier: "ultrafast"`. This includes every input, cached-input, cache-write,

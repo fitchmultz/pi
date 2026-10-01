@@ -232,6 +232,28 @@ export interface JournalSource {
 }
 const sourceDescriptors = new FinalizationRegistry<number>((fd) => closeSync(fd));
 
+/** Capture a published native write whose record index was built by its writer. */
+export function openJournalSource(path: string): JournalSource {
+	const fd = openSync(path, "r");
+	try {
+		const stats = fstatSync(fd);
+		const source: JournalSource = {
+			path,
+			dev: stats.dev,
+			ino: stats.ino,
+			size: stats.size,
+			mtimeMs: stats.mtimeMs,
+			ctimeMs: stats.ctimeMs,
+			handle: { fd, closed: false },
+		};
+		sourceDescriptors.register(source.handle, fd, source.handle);
+		return source;
+	} catch (error) {
+		closeSync(fd);
+		throw error;
+	}
+}
+
 /** Cold consumers release explicitly. Lazy entry views retain their source until no views remain. */
 export function closeJournalSource(source: JournalSource): void {
 	if (source.handle.closed) return;
@@ -553,7 +575,7 @@ function visitJournalRecord(
 	}
 }
 
-/** Hash cached records in shared chunks after a source change; an own append cannot certify the prefix. */
+/** Revalidate selected bodies and their LF framing without reparsing or one read/stat per entry. */
 export function verifyJournalRecords(source: JournalSource, records: readonly JournalRecord[]): void {
 	if (!records.length) return;
 	if (source.handle.closed) throw new Error("Journal source descriptor is closed");
@@ -567,22 +589,25 @@ export function verifyJournalRecords(source: JournalSource, records: readonly Jo
 	if (stats.dev !== source.dev || stats.ino !== source.ino || stats.size < source.size)
 		throw new Error("Journal source generation changed");
 	const ordered = records.slice().sort((a, b) => a.start - b.start);
-	const end = ordered.at(-1)!.end;
+	const end = Math.min(source.size, ordered.at(-1)!.end + 1);
 	const buffer = Buffer.allocUnsafe(64 * 1024);
 	let bufferStart = -1;
 	let bufferEnd = -1;
 	for (const record of ordered) {
 		const hash = createHash("sha256");
+		const framedEnd = Math.min(source.size, record.end + 1);
 		let position = record.start;
-		while (position < record.end) {
+		while (position < framedEnd) {
 			if (position < bufferStart || position >= bufferEnd) {
 				const count = readSync(source.handle.fd, buffer, 0, Math.min(buffer.length, end - position), position);
 				if (!count) throw new Error("Journal record truncated");
 				bufferStart = position;
 				bufferEnd = position + count;
 			}
-			const next = Math.min(record.end, bufferEnd);
-			hash.update(buffer.subarray(position - bufferStart, next - bufferStart));
+			const next = Math.min(framedEnd, bufferEnd);
+			hash.update(buffer.subarray(position - bufferStart, Math.min(record.end, next) - bufferStart));
+			if (next > record.end && buffer[record.end - bufferStart] !== 10)
+				throw new Error("Journal record framing changed since indexing");
 			position = next;
 		}
 		if (hash.digest("hex") !== record.digest) throw new Error("Journal record changed since indexing");
@@ -604,9 +629,16 @@ export function readJournalRecord(
 }
 
 /** Copy source bytes to a private stage. The caller publishes only after complete validation. */
-export function copyJournalRecord(source: JournalSource, record: JournalRecord, fd: number): void {
+export function copyJournalRecord(source: JournalSource, record: JournalRecord, fd: number): JournalWrite {
 	visitJournalRecord(source, record, (bytes) => writeFileSync(fd, bytes), false);
 	writeFileSync(fd, "\n");
+	return { bytes: record.end - record.start + 1, digest: record.digest };
+}
+
+export interface JournalWrite {
+	/** Includes the terminating LF; the digest excludes it, like JournalRecord. */
+	bytes: number;
+	digest: string;
 }
 
 export type JsonByteSink = (bytes: string | Uint8Array) => void;
@@ -764,15 +796,19 @@ export function transformJournalRecord(
 	record: JournalRecord,
 	fd: number,
 	rewrite: JournalRewrite = {},
-): void {
+): JournalWrite {
 	let parts: string[] = [];
 	let size = 0;
+	let bytesWritten = 0;
+	const hash = createHash("sha256");
 	const flush = () => {
 		if (parts.length) writeFileSync(fd, parts.join(""));
 		parts = [];
 		size = 0;
 	};
 	const sink: JsonByteSink = (bytes) => {
+		hash.update(bytes);
+		bytesWritten += typeof bytes === "string" ? Buffer.byteLength(bytes) : bytes.byteLength;
 		if (typeof bytes !== "string") {
 			flush();
 			writeFileSync(fd, bytes);
@@ -789,6 +825,7 @@ export function transformJournalRecord(
 	projection.finish();
 	flush();
 	writeFileSync(fd, "\n");
+	return { bytes: bytesWritten + 1, digest: hash.digest("hex") };
 }
 
 export function rewriteJournalRecord(
@@ -796,8 +833,8 @@ export function rewriteJournalRecord(
 	record: JournalRecord,
 	fd: number,
 	overrides: Record<string, string | number | boolean | null>,
-): void {
-	transformJournalRecord(source, record, fd, {
+): JournalWrite {
+	return transformJournalRecord(source, record, fd, {
 		overrides: Object.fromEntries(Object.entries(overrides).map(([key, value]) => [key, { value }])),
 	});
 }
