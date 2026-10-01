@@ -36,6 +36,7 @@
 - Fixed fuzzy edits changing untouched Unicode characters, trailing spaces, and literal carriage returns; ambiguous Unicode boundaries are rejected.
 - Fixed shell spill logs being created with permissions that expose output to other users.
 - Fixed failed session migration and whole-file rewrites truncating the existing journal.
+- Fixed a provider's auth-check failure hiding healthy models or silently replacing saved and scoped provider selections.
 
 ## [1.0.0] - 2026-10-01
 

@@ -691,7 +691,7 @@ class CodexApiError extends Error {
 	readonly payload?: Record<string, unknown>;
 
 	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
-		super(message);
+		super(options?.code ? `${options.code}: ${message}` : message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
 		this.payload = options?.payload;
@@ -772,6 +772,8 @@ async function* mapCodexEvents(
 		}
 
 		if (type === "response.failed") {
+			// Preserve terminal usage before the typed error used by transport recovery.
+			yield { ...event, type: "response.completed" } as unknown as ResponseStreamEvent;
 			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
 			const code = response?.error?.code;
 			const message = response?.error?.message;
@@ -1512,6 +1514,7 @@ async function processWebSocketStream(
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
+	const fullBody = structuredClone(body);
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1525,7 +1528,6 @@ async function processWebSocketStream(
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
-	const fullBody = body;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
@@ -1582,7 +1584,7 @@ async function processWebSocketStream(
 			entry.continuation = {
 				lastRequestBody: fullBody,
 				lastResponseId: output.responseId,
-				lastResponseItems: responseItems,
+				lastResponseItems: structuredClone(responseItems),
 			};
 		}
 	} catch (error) {

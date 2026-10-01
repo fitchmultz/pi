@@ -6,6 +6,7 @@
  */
 
 import { createServer, type ServerResponse } from "node:http";
+import { raceWithAbortSignal } from "../../utils/abort.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "../../utils/oauth-page.ts";
 import type { ProviderAuthInteraction } from "../types.ts";
 
@@ -122,6 +123,10 @@ export async function startOAuthCallbackServer<T>(
 			resolve();
 		});
 	});
+	if (signal?.aborted) {
+		server.close();
+		throw new Error("Login cancelled");
+	}
 	const address = server.address();
 	if (!address || typeof address === "string") {
 		server.close();
@@ -159,8 +164,12 @@ export async function waitForCallbackOrManualInput<T>(
 ): Promise<{ type: "callback"; value: T } | { type: "manual"; input: string }> {
 	const manualAbort = new AbortController();
 	let manualError: Error | undefined;
-	const manual = interaction
-		.prompt({ type: "manual_code", ...prompt, signal: manualAbort.signal })
+	const signal = AbortSignal.any([manualAbort.signal, interaction.signal]);
+	const manual = Promise.resolve()
+		.then(() => {
+			signal.throwIfAborted();
+			return interaction.prompt({ type: "manual_code", ...prompt, signal });
+		})
 		.then((input) => {
 			callback?.cancel();
 			return input;
@@ -171,10 +180,10 @@ export async function waitForCallbackOrManualInput<T>(
 			return undefined;
 		});
 	try {
-		const value = await callback?.wait();
+		const value = await raceWithAbortSignal(Promise.resolve(callback?.wait()), interaction.signal);
 		if (manualError) throw manualError;
 		if (value !== undefined) return { type: "callback", value };
-		const input = await manual;
+		const input = await raceWithAbortSignal(manual, interaction.signal);
 		if (manualError) throw manualError;
 		return { type: "manual", input: input ?? "" };
 	} finally {

@@ -19,6 +19,7 @@ afterEach(() => {
 
 function generateFireworksModels(
 	options: Record<string, ModelsDevReasoningOption[] | undefined>,
+	provider = "fireworks",
 ): Record<string, Model<Api>> {
 	const root = mkdtempSync(join(tmpdir(), "pi-fireworks-generation-"));
 	temporaryRoots.push(root);
@@ -60,10 +61,17 @@ function generateFireworksModels(
 	);
 	expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 	expect(result.stderr).toBe("");
-	return JSON.parse(readFileSync(join(outputPath, "providers/fireworks.json"), "utf8")) as Record<string, Model<Api>>;
+	return JSON.parse(readFileSync(join(outputPath, `providers/${provider}.json`), "utf8")) as Record<
+		string,
+		Model<Api>
+	>;
 }
 
 describe("Fireworks model generation", () => {
+	it("keeps minimal reasoning excluded for Codex Sol during offline generation", () => {
+		const models = generateFireworksModels({}, "openai-codex");
+		expect(getSupportedThinkingLevels(models["gpt-6.1-sol"])).not.toContain("minimal");
+	});
 	// Regression for #9323: import catalog efforts and correct only the known omissions.
 	it("combines upstream effort and toggle metadata with narrow corrections", () => {
 		const models = generateFireworksModels({

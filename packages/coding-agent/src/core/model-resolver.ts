@@ -366,7 +366,9 @@ export async function resolveModelScopeWithDiagnostics(
 	modelRuntime: ModelRuntime,
 	options?: AuthOperationOptions,
 ): Promise<ResolveModelScopeResult> {
-	return resolveModelScopeFromModels(patterns, await modelRuntime.getAvailable(undefined, options));
+	const available = await modelRuntime.getAvailable(undefined, options);
+	const failed = modelRuntime.getModels().filter((model) => modelRuntime.getAuthCheckError(model.provider));
+	return resolveModelScopeFromModels(patterns, [...available, ...failed]);
 }
 
 export async function resolveModelScope(
@@ -675,7 +677,7 @@ export async function findInitialModel(options: {
 	// 3. Try saved default from settings if auth is configured.
 	if (defaultProvider && defaultModelId) {
 		const found = modelRuntime.getModel(defaultProvider, defaultModelId);
-		if (found && modelRuntime.hasConfiguredAuth(found.provider)) {
+		if (found && (modelRuntime.hasConfiguredAuth(found.provider) || modelRuntime.getAuthCheckError(found.provider))) {
 			model = found;
 			const perModel = modelThinkingLevels?.[`${defaultProvider}/${defaultModelId}`];
 			if (perModel) {
@@ -723,7 +725,7 @@ export async function restoreModelFromSession(
 	// Check if restored model exists and still has auth configured
 	const hasConfiguredAuth = restoredModel ? modelRuntime.hasConfiguredAuth(restoredModel.provider) : false;
 
-	if (restoredModel && hasConfiguredAuth) {
+	if (restoredModel && (hasConfiguredAuth || modelRuntime.getAuthCheckError(savedProvider))) {
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Restored model: ${savedProvider}/${savedModelId}`));
 		}

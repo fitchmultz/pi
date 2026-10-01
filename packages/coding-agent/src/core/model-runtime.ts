@@ -195,6 +195,7 @@ export class ModelRuntime implements Models {
 	private availabilityErrorSeq = 0;
 	private readonly providerAvailabilitySeq = new Map<string, number>();
 	private availabilityError: string | undefined;
+	private authCheckErrors: ReadonlyMap<string, Error> = new Map();
 	private readonly credentialOperations = new Map<string, Promise<unknown>>();
 
 	private constructor(
@@ -349,23 +350,15 @@ export class ModelRuntime implements Models {
 	}
 
 	private async runAvailabilityRefresh(seq: number, errorSeq: number, signal: AbortSignal): Promise<void> {
-		const providers = this.models.getProviders();
-		const [available, checks, credentials] = await Promise.all([
-			this.models.getAvailable(undefined, { signal }),
-			Promise.all(
-				providers.map(
-					async (provider): Promise<[string, AuthCheck | undefined]> => [
-						provider.id,
-						await this.models.checkAuth(provider.id, { signal }),
-					],
-				),
-			),
+		const [availability, credentials] = await Promise.all([
+			this.models.getAvailability({ signal }),
 			this.credentials.list({ signal }),
 		]);
 		if (seq !== this.availabilityRefreshSeq) return;
-		const auth = new Map(checks);
+		const { available, auth, errors } = availability;
+		this.authCheckErrors = errors;
 		const configuredProviders = new Set(
-			checks
+			[...auth]
 				.filter((entry): entry is [string, AuthCheck] => entry[1] !== undefined)
 				.map(([providerId]) => providerId),
 		);
@@ -434,6 +427,9 @@ export class ModelRuntime implements Models {
 				storedProviders,
 				auth: authByProvider,
 			};
+			const authErrors = new Map(this.authCheckErrors);
+			authErrors.delete(providerId);
+			this.authCheckErrors = authErrors;
 			if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
 		} catch (error) {
 			if (
@@ -525,6 +521,7 @@ export class ModelRuntime implements Models {
 			errors.push(`Provider "${providerId}": ${error}`);
 		}
 		if (this.availabilityError) errors.push(`Availability refresh: ${this.availabilityError}`);
+		for (const [providerId, error] of this.authCheckErrors) errors.push(`Provider "${providerId}": ${error.message}`);
 		return errors.length > 0 ? errors.join("\n\n") : undefined;
 	}
 
@@ -559,6 +556,10 @@ export class ModelRuntime implements Models {
 
 	hasConfiguredAuth(providerId: string): boolean {
 		return this.snapshot.configuredProviders.has(providerId);
+	}
+
+	getAuthCheckError(providerId: string): Error | undefined {
+		return this.authCheckErrors.get(providerId);
 	}
 
 	getAuth(providerId: string, overrides?: ModelRuntimeAuthOverrides): Promise<AuthResult | undefined>;

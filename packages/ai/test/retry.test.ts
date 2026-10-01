@@ -118,6 +118,12 @@ describe("provider retry classification", () => {
 });
 
 describe("retryDelayMs", () => {
+	it("keeps fractional and zero delays even when the exponent overflows", () => {
+		expect(retryDelayMs({ baseDelayMs: 0.5 }, 1)).toBe(0.5);
+		expect(retryDelayMs({ baseDelayMs: 0 }, 2048)).toBe(0);
+		expect(retryDelayMs({ baseDelayMs: 1 }, 2048)).toBe(60000);
+	});
+
 	it("caps agent retry delay", () => {
 		// Regression for #8826.
 		expect(retryDelayMs({ baseDelayMs: 2000 }, 6)).toBe(60000);

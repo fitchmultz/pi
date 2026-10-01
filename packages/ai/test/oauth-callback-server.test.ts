@@ -158,6 +158,13 @@ describe.sequential("OAuth callback server", () => {
 		await expect(start<string>({ signal: alreadyAborted.signal })).rejects.toThrow("Login cancelled");
 	});
 
+	it("closes a listener when cancellation arrives during binding", async () => {
+		const controller = new AbortController();
+		const starting = start<string>({ signal: controller.signal });
+		controller.abort();
+		await expect(starting).rejects.toThrow("Login cancelled");
+	});
+
 	it("fails instead of picking another port when the requested port is taken", async () => {
 		const blocker: Server = createServer();
 		await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
@@ -172,6 +179,18 @@ describe.sequential("OAuth callback server", () => {
 });
 
 describe.sequential("waitForCallbackOrManualInput", () => {
+	it("cancels manual input even when the prompt ignores its abort signal", async () => {
+		const controller = new AbortController();
+		const result = waitForCallbackOrManualInput(
+			interaction(() => new Promise(() => {}), controller.signal),
+			undefined,
+			{ message: "paste", placeholder: "" },
+		);
+		controller.abort(new Error("cancelled"));
+		await expect(
+			Promise.race([result, new Promise((resolve) => setTimeout(() => resolve("hung"), 50))]),
+		).rejects.toThrow("cancelled");
+	});
 	it("returns the browser callback and aborts the manual prompt", async () => {
 		let manualSignal: AbortSignal | undefined;
 		const server = await startOAuthCallbackServer({

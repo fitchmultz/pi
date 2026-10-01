@@ -238,6 +238,20 @@ function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown
 }
 
 function normalizeOptionalNulls(value: unknown, schema: JsonSchemaObject): void {
+	const alternatives = schema.anyOf ?? schema.oneOf;
+	if (alternatives && typeof value === "object" && value !== null) {
+		// A valid nullable branch must not be changed by normalization in another branch.
+		if (getSubSchemaValidator(schema)?.Check(value)) return;
+		for (const alternative of alternatives) {
+			const candidate = structuredClone(value);
+			normalizeOptionalNulls(candidate, alternative);
+			const coerced = coerceWithJsonSchema(candidate, alternative);
+			if (!getSubSchemaValidator(alternative)?.Check(coerced)) continue;
+			for (const key of Object.keys(value)) delete (value as Record<string, unknown>)[key];
+			Object.assign(value, coerced);
+			break;
+		}
+	}
 	if (Array.isArray(value)) {
 		if (Array.isArray(schema.items)) {
 			for (let index = 0; index < value.length; index++) {

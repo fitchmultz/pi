@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openaiChatGPTOAuth } from "../src/auth/oauth/openai-chatgpt.ts";
 import type { OAuthCredential, ProviderAuthInteraction } from "../src/auth/types.ts";
@@ -6,6 +7,7 @@ const TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token";
 const REQUIRED_SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 const neverAbortedSignal = new AbortController().signal;
 const DEVICE_ID = "e61bbe28-07ef-466d-8e5d-a344f94ab305";
+const nativeFetch = globalThis.fetch;
 
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -106,6 +108,55 @@ describe("OpenAI ChatGPT OAuth", () => {
 			clientId: "oaiapp_issued",
 			scopes: REQUIRED_SCOPE.split(" "),
 		});
+	});
+
+	it("ignores unrelated error callbacks before accepting the matching authorization", async () => {
+		stubTokenEndpoint(tokenResponse());
+		const interaction = loginInteraction({ callbackClientId: "oaiapp_issued" });
+		const prompt = interaction.prompt;
+		interaction.prompt = async (options) => {
+			const correct = await prompt(options);
+			const stray = new URL(correct);
+			stray.search = "error=access_denied&state=unrelated";
+			expect((await nativeFetch(stray)).status).toBe(400);
+			expect((await nativeFetch(correct)).status).toBe(200);
+			return correct;
+		};
+		await expect(openaiChatGPTOAuth.login(interaction, { getDeviceId: () => DEVICE_ID })).resolves.toMatchObject({
+			clientId: "oaiapp_issued",
+		});
+	});
+
+	it.each(["notify", "prompt"] as const)("closes the listener when %s throws", async (method) => {
+		const interaction = loginInteraction();
+		interaction[method] = () => {
+			throw new Error("UI failed");
+		};
+		await expect(openaiChatGPTOAuth.login(interaction, { getDeviceId: () => DEVICE_ID })).rejects.toThrow(
+			"UI failed",
+		);
+		const server = createServer();
+		try {
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(1455, "127.0.0.1", resolve);
+			});
+		} finally {
+			server.close();
+		}
+	});
+
+	it("cancels a login when manual input ignores its signal", async () => {
+		const controller = new AbortController();
+		const interaction = loginInteraction();
+		interaction.signal = controller.signal;
+		interaction.prompt = () => {
+			controller.abort();
+			return new Promise(() => {});
+		};
+		await expect(openaiChatGPTOAuth.login(interaction, { getDeviceId: () => DEVICE_ID })).rejects.toThrow(
+			"Login cancelled",
+		);
 	});
 
 	it("rejects registration without an issued client ID", async () => {
