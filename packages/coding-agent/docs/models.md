@@ -34,6 +34,18 @@ Run `/thinking` to select the thinking level for the current model. Press `Ctrl+
 
 A session records model and thinking-level changes. Resuming the session restores them without changing defaults for new sessions.
 
+### Ultrafast cost estimates
+
+OpenAI Responses (API keys and Sign in with ChatGPT) and legacy Codex Responses price exact
+`gpt-6-astra` at 6x standard only when the terminal response confirms `service_tier: "ultrafast"`.
+The multiplier covers input, cached input, cache writes, and output after any long-context tier
+is selected. Missing, unknown, or `default` returned tiers do not confirm Ultrafast; other models,
+including Sol preview, are unchanged. The 8x subscription-allowance consumption rate is not
+a monetary estimate.
+
+Request and returned tiers are observable through the existing `before_provider_request` and
+`provider_stream_event` extension hooks. This does not add a tier setting or persist tier metadata.
+
 ## Connect local models
 
 Pi integrates directly with the llama.cpp router. The router discovers GGUF files and loads models on demand. Pi's `/llama` command manages the router, while `/model` selects one of its loaded models.

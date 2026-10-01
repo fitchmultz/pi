@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed exact `gpt-6-astra` Ultrafast estimates in OpenAI and Codex Responses: terminal-confirmed `ultrafast` costs 6x every standard or long-context component; request-only Ultrafast does not imply delivery.
+
 ## [1.0.0] - 2026-10-01
 
 ### Added
