@@ -142,6 +142,7 @@ Built-in extensions also add the following tools. `background_command` starts, i
 
 | Built-in extension | Purpose |
 |---|---|
+| `background_command` | Start, inspect, and cancel durable background shell commands that survive Pi exit and report completion later |
 | `codemode` | Run JavaScript that calls the other tools, for example in parallel with `Promise.allSettled`; only the script's output reaches the model |
 | `tool_search` | Search tools that are not declared to the model (`codemode` and `deferred` exposure, such as MCP tools) and declare the matches for the next call |
 | `discover_tools` | List instruction groups or enable their full instructions before using grouped tools in a later turn; never activates tools |
