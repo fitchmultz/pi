@@ -109,6 +109,8 @@ Rendering runs on the interactive path. Cache expensive layout and highlighting 
 
 Keep the default view compact and reveal detail through expansion or a dedicated screen. For custom tool rendering, handle partial results and reuse the previous component when it can be updated safely.
 
+In [compact view](settings.md#compact-view) (`true` or `"hybrid"`), Activity groups start collapsed for on and expanded for hybrid; both use the same compact cards. Clicking a heading toggles its group, and Ctrl+O expands full output. In these modes, `MessageRenderOptions.compactView` is an optional density hint; absence means normal view. Custom status renderers can use one content row when compact and unexpanded, keeping full details when expanded. Core does not truncate custom messages. Native tool cards reuse their existing renderers with a two-terminal-row preview and image placeholders; expansion reveals full content and images. Inner mouse controls retain priority over card expansion.
+
 Use `PI_TUI_WRITE_LOG` to capture the raw ANSI stream when diagnosing rendering problems. Test narrow widths, wide characters, resize events, theme changes, focus transitions, and both regular and fullscreen modes.
 
 ## Examples and source

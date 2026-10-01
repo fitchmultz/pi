@@ -91,6 +91,7 @@ See [Compaction Reference](compaction.md) for trigger, summarization, and valida
 |---|---|---|---|
 | `theme` | string | `"system"` | Built-in or custom theme name. `system` derives colors from the terminal theme. |
 | `quietStartup` | boolean \| `"header"` | `false` | `true` hides the startup header and loaded-resource listing. `"header"` keeps the header (version and key hints) but hides the model scope line and loaded-resource listing. |
+| `compactView` | boolean \| `"hybrid"` | `false` | Group tools and operational updates behind Activity rows. Global default for new interactive instances; project settings cannot override it. |
 | `tuiMode` | `"regular" \| "fullscreen"` | `"fullscreen"` | Interactive terminal UI mode. |
 | `fullscreenExitOutput` | `"transcript" \| "resume-hint"` | `"transcript"` | Output printed when fullscreen mode exits. |
 | `fullscreenScrollbar` | `"auto" \| "always" \| "hidden"` | `"auto"` | Fullscreen transcript scrollbar behavior. |
@@ -113,6 +114,16 @@ See [Compaction Reference](compaction.md) for trigger, summarization, and valida
 | `markdown.mermaid` | `"off" \| "final" \| "streaming"` | `"streaming"` | Mermaid rendering mode. |
 
 See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and platform details.
+
+### Compact view
+
+`/compact-view [on|off|hybrid|toggle]` and `/settings` → **Compact view** update this UI immediately and save the preference for future starts. Other running instances keep their choice, including after `/reload`.
+
+`true` (**on**) starts Activity groups collapsed. `"hybrid"` starts them expanded while keeping individual cards compact; clicking a heading still toggles that group. The settings selector cycles **off → on → hybrid**. Ctrl+O expands full output; toggling back restores the mode's group default.
+
+User and assistant text stay visible. Tools, shell commands, custom messages/entries, and routine notices form **Activity** groups with live call/update counts and running/failure status. Fullscreen clicks open groups and individual cards; inner controls keep their behavior. Ctrl+O (`app.tools.expand`) expands or collapses all groups and details in either terminal mode. Expanded cards retain full output, nested codemode calls, and supported images.
+
+Enabling on collapses existing groups and cards; enabling hybrid opens groups but keeps cards compact. Disabling it restores normal presentation without expanding everything. Visible thinking separates groups; hidden thinking does not. Input dialogs, the working indicator, warnings, and errors stay outside groups. Presentation changes do not alter model context or saved results; `/compact` remains the context-compaction command.
 
 ## Network and retries
 

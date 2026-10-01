@@ -130,6 +130,8 @@ export type PackageSource =
 			themes?: string[];
 	  };
 
+export type CompactView = boolean | "hybrid";
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -144,6 +146,7 @@ export interface Settings {
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
+	compactView?: CompactView; // default: false; global future-start preference
 	showCacheMissNotices?: boolean; // default: false - show cache cost and provider recovery notices
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
@@ -1045,6 +1048,17 @@ export class SettingsManager {
 
 	getHideThinkingBlock(): boolean {
 		return this.settings.hideThinkingBlock ?? false;
+	}
+
+	getCompactView(): CompactView {
+		const value = this.globalSettings.compactView;
+		return value === "hybrid" ? value : value === true;
+	}
+
+	setCompactView(compactView: CompactView): void {
+		this.globalSettings.compactView = compactView;
+		this.markModified("compactView");
+		this.save();
 	}
 
 	getShowCacheMissNotices(): boolean {

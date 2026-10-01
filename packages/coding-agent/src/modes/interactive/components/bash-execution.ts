@@ -2,7 +2,7 @@
  * Component for displaying bash command execution with streaming output.
  */
 
-import { Container, Loader, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, Loader, Spacer, Text, type TUI, type TuiMouseEvent, truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -27,11 +27,16 @@ export class BashExecutionComponent extends Container {
 	private truncationResult?: TruncationResult;
 	private fullOutputPath?: string;
 	private expanded = false;
+	private compactView: boolean;
+	private excludeFromContext: boolean;
+	private compactPreview?: { width: number; lines: string[] };
 	private contentContainer: Container;
 
-	constructor(command: string, ui: TUI, excludeFromContext = false) {
+	constructor(command: string, ui: TUI, excludeFromContext = false, compactView = false) {
 		super();
 		this.command = command;
+		this.compactView = compactView;
+		this.excludeFromContext = excludeFromContext;
 
 		// Use dim border for excluded-from-context commands (!! prefix)
 		const colorKey = excludeFromContext ? "dim" : "bashMode";
@@ -70,6 +75,52 @@ export class BashExecutionComponent extends Container {
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		this.updateDisplay();
+	}
+
+	getActivityStatus(): "running" | "complete" | "cancelled" | "error" {
+		return this.status;
+	}
+
+	setCompactView(compactView: boolean): void {
+		this.compactView = compactView;
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		if (!this.compactView) return super.handleMouse(event);
+		if (event.type !== "click" || event.button !== "left") return undefined;
+		this.setExpanded(!this.expanded);
+		return {
+			handled: true,
+			target: {
+				component: this,
+				originX: event.screenX - event.x,
+				originY: event.screenY - event.y,
+				width: event.width,
+				height: event.height,
+			},
+		};
+	}
+
+	override render(width: number): string[] {
+		if (!this.compactView || this.expanded) return super.render(width);
+		if (this.compactPreview?.width === width) return this.compactPreview.lines;
+		const command = theme.fg(
+			this.excludeFromContext ? "dim" : "bashMode",
+			theme.bold(`$ ${this.command.replace(/\s+/g, " ")}`),
+		);
+		const status =
+			this.status === "running"
+				? theme.fg("muted", "Running...")
+				: this.status === "cancelled"
+					? theme.fg("warning", "(cancelled)")
+					: this.status === "error"
+						? theme.fg("error", `(exit ${this.exitCode})`)
+						: "";
+		const output = this.outputLines.findLast((line) => line.trim()) ?? "";
+		const detail = [status, output ? theme.fg("muted", output) : ""].filter(Boolean).join(" ");
+		const lines = (detail ? [command, detail] : [command]).map((line) => truncateToWidth(line, width));
+		this.compactPreview = { width, lines };
+		return lines;
 	}
 
 	override invalidate(): void {
@@ -117,6 +168,7 @@ export class BashExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
+		this.compactPreview = undefined;
 		// Apply truncation for LLM context limits (same limits as bash tool)
 		const fullOutput = this.outputLines.join("\n");
 		const contextTruncation = truncateTail(fullOutput, {

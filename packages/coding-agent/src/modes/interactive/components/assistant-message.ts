@@ -17,6 +17,7 @@ export class AssistantMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private hiddenThinkingLabel: string;
 	private outputPad: number;
+	private compactView: boolean;
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
@@ -30,6 +31,7 @@ export class AssistantMessageComponent extends Container {
 		hiddenThinkingLabel = "Thinking...",
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		compactView = false,
 	) {
 		super();
 
@@ -37,6 +39,7 @@ export class AssistantMessageComponent extends Container {
 		this.markdownTheme = markdownTheme;
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.outputPad = outputPad;
+		this.compactView = compactView;
 		this.markdownTransformers = markdownTransformers;
 
 		// Container for text/thinking content
@@ -77,6 +80,12 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	setCompactView(compactView: boolean): void {
+		if (this.compactView === compactView) return;
+		this.compactView = compactView;
+		if (this.lastMessage) this.updateContent(this.lastMessage);
+	}
+
 	override render(width: number): string[] {
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {
@@ -95,19 +104,15 @@ export class AssistantMessageComponent extends Container {
 		// Clear content container
 		this.contentContainer.clear();
 
-		const hasVisibleContent = message.content.some(
-			(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
-		);
-
-		if (hasVisibleContent) {
-			this.contentContainer.addChild(new Spacer(1));
-		}
+		let needsSpacer = true;
 
 		// Render content in order
 		let thinkingRunIndex = 0;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && content.text.trim()) {
+				if (needsSpacer) this.contentContainer.addChild(new Spacer(1));
+				needsSpacer = false;
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.contentContainer.addChild(
@@ -133,14 +138,11 @@ export class AssistantMessageComponent extends Container {
 					continue;
 				}
 
-				// Add spacing only when another visible assistant content block follows.
-				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
-
 				const runIndex = thinkingRunIndex++;
 				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
+				if (hidden && this.compactView) continue;
+				if (needsSpacer) this.contentContainer.addChild(new Spacer(1));
+				needsSpacer = true;
 				const thinkingComponent = hidden
 					? new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0)
 					: new Markdown(
@@ -168,9 +170,6 @@ export class AssistantMessageComponent extends Container {
 						return { handled: true };
 					}),
 				);
-				if (hasVisibleContentAfter) {
-					this.contentContainer.addChild(new Spacer(1));
-				}
 			}
 		}
 
