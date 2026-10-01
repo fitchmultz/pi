@@ -26,6 +26,46 @@ Verify the installation:
 pi --version
 ```
 
+### Fork installation
+
+For the fitchmultz/pi fork, use an immutable release rather than an ordinary npm
+package directory. This supports macOS, Linux, and [Termux](termux.md#install-the-fork)
+on arm64/x64 with Node.js >=22.19, npm installed alongside Node, Git, bash, tar,
+gzip, and tmux.
+
+From a fork checkout, install dependencies without lifecycle scripts, hydrate the
+model-data snapshot, then build and validate an exact commit:
+
+```bash
+npm ci --ignore-scripts
+npm run hydrate:model-data
+selector="$(npm root -g)/@earendil-works/pi-coding-agent"
+node scripts/install-fork.mjs --ref HEAD --selector "$selector"
+ln -s "$selector/dist/bundle/cli.js" "$(npm prefix -g)/bin/pi"
+```
+
+The selector and `pi` link locations must be writable. These commands are for
+initial setup with unused locations: the installer refuses to replace a real
+package directory, and `ln -s` refuses to overwrite an existing executable.
+Do not point `pi` directly at a release; it must follow the package selector.
+
+After setup, update without keeping a checkout:
+
+```bash
+pi update --fork
+```
+
+The updater fetches and pins fork main, hydrates model data in an isolated home,
+then uses the installer to build, validate, and atomically select the release
+under `~/.local/share/pi-fork/releases`. It does not edit settings, credentials,
+extensions, or sessions. Running sessions keep their runtime until a full relaunch
+or a [managed restart](restart.md).
+
+The installer also supports `--stage`, `--activate <identity>`, and
+`--rollback <identity>`; pass the same `--selector` for each operation.
+The prior package target is preserved as `<selector>.previous`.
+Run `node scripts/install-fork.mjs --help` for options and pruning safeguards.
+
 ## 2. Start Pi
 
 Change to the folder you want Pi to work with, then start it:

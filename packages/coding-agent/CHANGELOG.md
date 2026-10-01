@@ -9,6 +9,7 @@
 - Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle saved-session resume, staged runtime and extension activation, and one-shot startup rollback. See [Managed restarts](docs/restart.md).
 - Added optional `compactView` (off by default), `/compact-view`, and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Hybrid opens groups by default while keeping cards compact.
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
+- Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
 
 ## [1.0.0] - 2026-10-01
 

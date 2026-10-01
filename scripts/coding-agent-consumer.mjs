@@ -96,6 +96,10 @@ export function smokeTestCodingAgentConsumer(directory, runtime = process.execPa
 		PI_OFFLINE: "1",
 		PI_TELEMETRY: "0",
 	};
+	if (process.platform === "android") {
+		env.PREFIX = process.env.PREFIX;
+		env.LD_PRELOAD = process.env.LD_PRELOAD;
+	}
 	for (const name of ["SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"]) {
 		if (process.env[name]) env[name] = process.env[name];
 	}

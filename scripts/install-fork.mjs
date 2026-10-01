@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-	copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync,
+	chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync,
 	renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -57,7 +57,67 @@ export function isolatedEnvironment(home, tools) {
 		JITI_FS_CACHE: "0",
 		npm_config_cache: join(home, "npm-cache"),
 		npm_config_userconfig: join(home, ".npmrc"),
+		...(process.platform === "android" ? {
+			PREFIX: process.env.PREFIX,
+			LD_PRELOAD: process.env.LD_PRELOAD,
+			npm_config_script_shell: join(dirname(tools.node), "bash"),
+		} : {}),
 	};
+}
+
+export function prepareTermuxCompiler(source, tools, env) {
+	// TypeScript 7 has no Android package. Use the lockfile-pinned Linux compiler.
+	const name = `@typescript/typescript-linux-${process.arch}`;
+	const key = `node_modules/${name}`;
+	const locked = JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8")).packages[key];
+	if (!locked?.version || !locked.integrity) throw new Error(`Missing locked compiler: ${name}`);
+	const directory = join(source, "node_modules/.termux-compiler");
+	mkdirSync(directory, { recursive: true });
+	const optionalDependencies = { [name]: locked.version };
+	writeFileSync(join(directory, "package.json"), JSON.stringify({ private: true, optionalDependencies }));
+	writeFileSync(join(directory, "package-lock.json"), JSON.stringify({
+		lockfileVersion: 3, requires: true,
+		packages: { "": { optionalDependencies }, [key]: locked },
+	}));
+	run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--os=linux", "--include=optional", "--no-audit", "--no-fund"], {
+		cwd: directory, env,
+	});
+	const binary = join(directory, key, "lib/tsc");
+	const probe = spawnSync(binary, ["--version"], { env, encoding: "utf8" });
+	if (probe.stderr?.startsWith("SIGSYS:") && probe.stderr.includes("fanotifyAvailable")) {
+		console.log("Android blocked the compiler's fanotify probe; rebuilding the pinned source (requires Go >=1.26).");
+		const { gitHead } = JSON.parse(readFileSync(join(directory, key, "package.json"), "utf8"));
+		if (!/^[a-f0-9]{40}$/.test(gitHead ?? "")) throw new Error("Missing pinned TypeScript source commit");
+		const goEnv = { ...env, GOOS: process.platform === "android" ? "android" : "linux",
+			GOARCH: process.arch === "x64" ? "amd64" : process.arch,
+			CGO_ENABLED: process.platform === "android" && process.arch === "x64" ? "1" : "0",
+			GOTOOLCHAIN: "local", GOWORK: "off", GOFLAGS: "-modcacherw",
+			GOPATH: join(directory, "go"), GOCACHE: join(directory, "go-cache") };
+		const downloaded = JSON.parse(run("go", ["mod", "download", "-json", `github.com/microsoft/typescript-go@${gitHead}`], {
+			cwd: directory, env: goEnv, stdio: "pipe",
+		}));
+		if (downloaded.Origin?.Hash !== gitHead || !downloaded.Sum || !downloaded.Dir) {
+			throw new Error("Downloaded TypeScript source does not match the pinned commit");
+		}
+		const buildSource = join(directory, "source");
+		rmSync(buildSource, { recursive: true, force: true });
+		cpSync(downloaded.Dir, buildSource, { recursive: true });
+		const watcher = join(buildSource, "internal/fswatch/fanotify_linux.go");
+		const contents = readFileSync(watcher, "utf8");
+		const patched = contents.replace(/func fanotifyAvailable\(\) bool \{[\s\S]*?\n\}/, "func fanotifyAvailable() bool {\n\treturn false\n}");
+		if (patched === contents) throw new Error("Cannot disable the compiler's fanotify probe");
+		// ponytail: build-only compiler uses inotify; use an official Android artifact when published.
+		chmodSync(watcher, 0o644);
+		writeFileSync(watcher, patched);
+		const compiled = join(directory, "tsc");
+		run("go", ["build", "-mod=readonly", "-buildvcs=false", "-trimpath", "-tags=noembed", "-o", compiled, "./cmd/tsgo"], {
+			cwd: buildSource, env: goEnv,
+		});
+		renameSync(compiled, binary);
+	}
+	const version = run(binary, ["--version"], { env, stdio: "pipe" });
+	if (version !== `Version ${locked.version}`) throw new Error(`Unexpected compiler version: ${version}`);
+	replaceSymlink(binary, join(source, "node_modules/.bin/tsc"));
 }
 
 function packageNameFromLockPath(lockPath) {
@@ -235,8 +295,9 @@ function printUsage() {
 Builds an exact local commit (default HEAD) with the checkout's ALREADY hydrated
 model-data snapshot using create-source-archive.sh and build:offline. An optional
 --source-archive with its adjacent source.commit reuses an already frozen input.
-No fetch or model generation. npm may download frozen dependencies. Requires macOS
-or Linux, Node with npm installed alongside it, Git, tar, and tmux.
+No fetch or model generation. npm may download frozen dependencies. Requires macOS,
+Linux or Termux, Node >=22.19 with npm installed alongside it, Git, bash, tar, gzip,
+and tmux. Termux also needs Go >=1.26 when Android blocks the compiler's fanotify probe.
 
 --source-archive <file> Use a frozen source archive and adjacent source.commit
 --stage                 Build/install/validate without changing the selector
@@ -341,6 +402,7 @@ export async function main(args = process.argv.slice(2)) {
 			writeFileSync(join(directory, "source.commit"), `${commit}\n`);
 			run("tmux", ["-V"], { env }); // Missing tmux must fail, not silently skip the acceptance tests.
 			run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: source, env });
+			if (process.platform === "android") prepareTermuxCompiler(source, tools, env);
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
 			const packages = findPackageDirectories(join(source, "packages"))
 				.map((directory) => ({ directory, ...JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) }))

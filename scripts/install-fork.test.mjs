@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
 	readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import {
-	activateRelease, installFrozenConsumer, installRelease, isolatedEnvironment, main, pruneReleases, releaseIdentity, resolveBuildTools,
+	activateRelease, installFrozenConsumer, installRelease, isolatedEnvironment, main, prepareTermuxCompiler, pruneReleases, releaseIdentity, resolveBuildTools,
 } from "./install-fork.mjs";
 
 const name = "@earendil-works/pi-coding-agent";
@@ -293,7 +294,121 @@ test("isolates ambient Pi/npm config and resolves native Node/npm before HOME ch
 	assert.equal(f.env.NPM_CONFIG_USERCONFIG, undefined);
 	assert.equal(f.env.TMPDIR, join(f.env.HOME, "tmp"));
 	assert.ok(existsSync(f.env.TMPDIR));
+	if (process.platform !== "android") {
+		assert.equal(f.env.LD_PRELOAD, undefined);
+		assert.equal(f.env.PREFIX, undefined);
+		assert.equal(f.env.npm_config_script_shell, undefined);
+	}
 	assert.equal(execFileSync(tools.node, [tools.npm, "--version"], { env: f.env, encoding: "utf8" }).trim(), tools.npmVersion);
 	assert.equal(execFileSync("node", ["-p", "process.execPath"], { env: f.env, encoding: "utf8" }).trim(), tools.node);
 	assert.notEqual(releaseIdentity(receipt()), releaseIdentity(receipt("a", "e")));
 });
+
+test("keeps only Termux's exec wrapper, prefix and native shell in the isolated environment", (t) => {
+	const f = fixture(t);
+	const platform = process.platform;
+	const inherited = { PREFIX: process.env.PREFIX, LD_PRELOAD: process.env.LD_PRELOAD };
+	try {
+		process.env.PREFIX = join(f.root, "termux-prefix");
+		process.env.LD_PRELOAD = join(f.root, "libtermux-exec.so");
+		Object.defineProperty(process, "platform", { value: "android", configurable: true });
+		const env = isolatedEnvironment(f.env.HOME, tools);
+		assert.equal(env.PREFIX, process.env.PREFIX);
+		assert.equal(env.LD_PRELOAD, process.env.LD_PRELOAD);
+		assert.equal(env.npm_config_script_shell, join(dirname(tools.node), "bash"));
+		assert.equal(env.PI_RESTART_SOCKET, undefined);
+		assert.equal(env.NODE_OPTIONS, undefined);
+		assert.equal(env.ANTHROPIC_API_KEY, undefined);
+	} finally {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
+		for (const [name, value] of Object.entries(inherited)) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
+});
+
+test("isolated npm scripts can invoke npm and package executables on Termux", { skip: process.platform === "win32" }, (t) => {
+	const f = fixture(t);
+	const bin = join(f.root, "node_modules/.bin");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "fixture-executable"), '#!/usr/bin/env node\nconsole.log("package executable");\n', { mode: 0o755 });
+	writeFileSync(join(f.root, "package.json"), JSON.stringify({
+		private: true,
+		scripts: { probe: "npm --version && fixture-executable" },
+	}));
+	const output = execFileSync(tools.node, [tools.npm, "run", "--silent", "probe"], {
+		cwd: f.root, env: f.env, encoding: "utf8",
+	});
+	assert.deepEqual(output.trim().split(/\r?\n/), [tools.npmVersion, "package executable"]);
+});
+
+for (const blocked of [false, true]) {
+	test(`Termux compiler preserves frozen inputs without scripts and allows cleanup (${blocked ? "fanotify rebuild" : "published artifact"})`, {
+		skip: process.platform === "win32" || (blocked && process.platform === "darwin"),
+	}, (t) => {
+		const f = fixture(t);
+		const name = `@typescript/typescript-linux-${process.arch}`;
+		const directory = join(f.root, "compiler");
+		let gitHead = "a".repeat(40);
+		let originalWatcher;
+		let watcher;
+		if (blocked) {
+			const module = join(f.root, "go-source");
+			mkdirSync(join(module, "cmd/tsgo"), { recursive: true });
+			mkdirSync(join(module, "internal/fswatch"), { recursive: true });
+			writeFileSync(join(module, "go.mod"), "module github.com/microsoft/typescript-go\n\ngo 1.21\n");
+			watcher = join(module, "internal/fswatch/fanotify_linux.go");
+			originalWatcher = "package fswatch\n\nfunc init() { fanotifyAvailable() }\n\nfunc fanotifyAvailable() bool {\n\tpanic(\"forbidden fanotify probe\")\n}\n";
+			writeFileSync(watcher, originalWatcher);
+			writeFileSync(join(module, "cmd/tsgo/main.go"), `package main
+import ("fmt"; _ "github.com/microsoft/typescript-go/internal/fswatch")
+func main() { fmt.Println("Version 1.2.3") }
+`);
+			const git = (args) => execFileSync("git", args, { cwd: module, env: f.env, encoding: "utf8" }).trim();
+			git(["init", "--quiet"]);
+			git(["add", "go.mod", "cmd", "internal"]);
+			git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "compiler fixture"]);
+			gitHead = git(["rev-parse", "HEAD"]);
+			// A file proxy lets real Go own cache permissions and checksum verification offline.
+			const version = `v0.0.0-20260101000000-${gitHead.slice(0, 12)}`;
+			const proxy = join(f.root, "proxy");
+			const versions = join(proxy, "github.com/microsoft/typescript-go/@v");
+			mkdirSync(versions, { recursive: true });
+			const info = JSON.stringify({ Version: version, Time: "2026-01-01T00:00:00Z", Origin: { Hash: gitHead } });
+			for (const query of [gitHead, version]) writeFileSync(join(versions, `${query}.info`), info);
+			writeFileSync(join(versions, `${version}.mod`), readFileSync(join(module, "go.mod")));
+			git(["archive", "--format=zip", `--prefix=github.com/microsoft/typescript-go@${version}/`, "--output", join(versions, `${version}.zip`), "HEAD"]);
+			f.env.GOPROXY = pathToFileURL(proxy).href;
+			f.env.GOSUMDB = "off";
+		}
+		mkdirSync(join(directory, "lib"), { recursive: true });
+		writeFileSync(join(directory, "package.json"), JSON.stringify({
+			name, version: "1.2.3", gitHead, os: ["linux"], cpu: [process.arch],
+			scripts: { postinstall: "node -e 'process.exit(27)'" },
+		}));
+		writeFileSync(join(directory, "lib/tsc"), blocked
+			? '#!/usr/bin/env node\nconsole.error("SIGSYS: bad system call\\ninternal/fswatch.fanotifyAvailable()"); process.exit(2);\n'
+			: '#!/usr/bin/env node\nconsole.log("Version 1.2.3");\n', { mode: 0o755 });
+		const tarball = packReleasePackages([{ name, directory }], join(f.root, "tarballs")).get(name);
+		const lock = JSON.stringify({
+			lockfileVersion: 3,
+			packages: {
+				[`node_modules/${name}`]: {
+					version: "1.2.3", resolved: `file:${tarball}`, optional: true, os: ["linux"], cpu: [process.arch],
+					integrity: `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`,
+				},
+			},
+		});
+		writeFileSync(join(f.root, "package-lock.json"), lock);
+		mkdirSync(join(f.root, "node_modules/.bin"), { recursive: true });
+		symlinkSync(join(f.root, "unusable-android-wrapper"), join(f.root, "node_modules/.bin/tsc"));
+		prepareTermuxCompiler(f.root, tools, { ...f.env, npm_config_offline: "true" });
+		assert.equal(readFileSync(join(f.root, "package-lock.json"), "utf8"), lock);
+		assert.equal(execFileSync(join(f.root, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
+		if (blocked) assert.equal(readFileSync(watcher, "utf8"), originalWatcher);
+		const compiler = join(f.root, "node_modules/.termux-compiler");
+		rmSync(compiler, { recursive: true, force: true });
+		assert.equal(existsSync(compiler), false);
+	});
+}

@@ -1,5 +1,6 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, realpathSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { SyntaxKind } from "typescript/unstable/ast";
 import {
 	isCallExpression,
@@ -56,6 +57,8 @@ const config = JSON.stringify({
 });
 const api = new API({
 	cwd: process.cwd(),
+	tsserverPath: process.platform === "android"
+		? realpathSync(fileURLToPath(new URL("../node_modules/.bin/tsc", import.meta.url))) : undefined,
 	fs: {
 		fileExists: (fileName) => (resolve(fileName) === configPath ? true : undefined),
 		readFile: (fileName) => (resolve(fileName) === configPath ? config : undefined),

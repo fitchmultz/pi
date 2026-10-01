@@ -93,3 +93,35 @@ test("fails if a development-only dependency is added back to the published depe
 	const directory = createFixture(t, { declareServer: true });
 	assert.throws(() => smokeTestCodingAgentConsumer(directory), /pi-server must not be installed/);
 });
+
+test("consumer smoke children retain the Termux environment without leaking provider keys", (t) => {
+	const directory = createFixture(t);
+	const pkg = join(directory, "node_modules", codingAgentName);
+	const prefix = join(directory, "termux-prefix");
+	const guard = `import assert from "node:assert/strict";
+assert.equal(process.env.PREFIX, ${JSON.stringify(prefix)});
+assert.equal(process.env.LD_PRELOAD, "");
+assert.equal(process.env.ANTHROPIC_API_KEY, undefined);
+`;
+	for (const entry of ["dist/index.js", "dist/cli.js", "dist/bundle/cli.js"]) {
+		const file = join(pkg, entry);
+		writeFileSync(file, guard + readFileSync(file, "utf8"));
+	}
+	const platform = process.platform;
+	const inherited = {
+		PREFIX: process.env.PREFIX, LD_PRELOAD: process.env.LD_PRELOAD, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+	};
+	try {
+		Object.defineProperty(process, "platform", { value: "android", configurable: true });
+		process.env.PREFIX = prefix;
+		process.env.LD_PRELOAD = "";
+		process.env.ANTHROPIC_API_KEY = "must-not-leak";
+		smokeTestCodingAgentConsumer(directory);
+	} finally {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
+		for (const [name, value] of Object.entries(inherited)) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
+});
