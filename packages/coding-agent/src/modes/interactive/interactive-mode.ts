@@ -484,8 +484,12 @@ export class InteractiveMode {
 	private hostedShutdown?: () => Promise<never>;
 	private hostedActive = false;
 
+	/** While a hosted TUI is detached, RPC owns stdout; keep terminal writes out of its output. */
+	private get hostedDetached(): boolean {
+		return this.hostedShutdown !== undefined && !this.hostedActive;
+	}
 	private get terminalActive(): boolean {
-		return this.isInitialized && (!this.hostedShutdown || this.hostedActive);
+		return this.isInitialized && !this.hostedDetached;
 	}
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
@@ -3458,7 +3462,7 @@ export class InteractiveMode {
 				break;
 
 			case "turn_start":
-				if (this.terminalActive && this.settingsManager.getShowTerminalProgress()) {
+				if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
 				if (this.workingVisible) {
@@ -3686,7 +3690,7 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
-				if (this.terminalActive && this.settingsManager.getShowTerminalProgress()) {
+				if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
 				this.clearStatusIndicator("working");
@@ -3705,7 +3709,7 @@ export class InteractiveMode {
 				break;
 
 			case "compaction_start": {
-				if (this.terminalActive && this.settingsManager.getShowTerminalProgress()) {
+				if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
 				// Keep editor active; submissions are queued during compaction.
@@ -3720,7 +3724,7 @@ export class InteractiveMode {
 
 			case "compaction_end": {
 				if (event.aborted) this.options?.managedRestart?.interrupt();
-				if (this.terminalActive && this.settingsManager.getShowTerminalProgress()) {
+				if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
 				if (this.autoCompactionEscapeHandler) {
@@ -7188,7 +7192,7 @@ export class InteractiveMode {
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
 		this.disposeActiveSelector();
-		if (this.terminalActive && this.settingsManager.getShowTerminalProgress()) {
+		if (!this.hostedDetached && this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}
 		this.clearStatusIndicator();
