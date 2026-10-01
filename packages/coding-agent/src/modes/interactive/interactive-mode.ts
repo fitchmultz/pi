@@ -231,6 +231,11 @@ function isExpandable(obj: unknown): obj is Expandable {
 	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
 }
 
+function addChatActivity(container: Container, component: Component): void {
+	if (container instanceof ChatContainer) container.addActivity(component);
+	else container.addChild(component);
+}
+
 class ExpandableText extends ThemedText implements Expandable {
 	private readonly state: { expanded: boolean };
 
@@ -3765,7 +3770,7 @@ export class InteractiveMode {
 		}
 		const message = status.type === "warning" ? `Warning: ${status.message}` : status.message;
 		const color = status.type === "warning" ? "warning" : "dim";
-		this.chatContainer.addActivity(new ThemedText(() => theme.fg(color, message), 1, 0));
+		addChatActivity(this.chatContainer, new ThemedText(() => theme.fg(color, message), 1, 0));
 		this.lastStatusSpacer = undefined;
 		this.lastStatusText = undefined;
 		this.ui.requestRender();
@@ -3794,7 +3799,7 @@ export class InteractiveMode {
 		this.lastStatusMessage = status;
 		const text = new ThemedText(() => theme.fg("dim", status.text), 1, 0);
 		this.chatContainer.addChild(spacer);
-		this.chatContainer.addActivity(text);
+		addChatActivity(this.chatContainer, text);
 		this.lastStatusSpacer = spacer;
 		this.lastStatusText = text;
 		this.ui.requestRender();
@@ -4060,7 +4065,7 @@ export class InteractiveMode {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
 		this.chatContainer.addChild(new Spacer(1));
 		const usage = formatCacheWarmingUsage(entry);
-		this.chatContainer.addActivity(new ThemedText(() => theme.fg("dim", usage), 1, 0));
+		addChatActivity(this.chatContainer, new ThemedText(() => theme.fg("dim", usage), 1, 0));
 	}
 
 	/**
@@ -4075,7 +4080,8 @@ export class InteractiveMode {
 		const cost = usage.cost.total >= 0.01 ? ` (~$${usage.cost.total.toFixed(2)})` : "";
 		const label = notice.kind === "compaction" ? "Compaction" : "Branch summary";
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addActivity(
+		addChatActivity(
+			this.chatContainer,
 			new ThemedText(() => theme.fg("warning", `${label}: ${formatTokens(tokens)} tokens billed${cost}`), 1, 0),
 		);
 	}
@@ -4117,7 +4123,8 @@ export class InteractiveMode {
 
 		const noun = droppedCount === 1 ? "thinking block" : "thinking blocks";
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addActivity(
+		addChatActivity(
+			this.chatContainer,
 			new ThemedText(
 				() => theme.fg("warning", `Anthropic dropped ${droppedCount} ${noun} (details in session)`),
 				1,
@@ -4151,7 +4158,7 @@ export class InteractiveMode {
 			label = `Cache miss after ${Math.round(miss.idleMs / 60_000)}m idle`;
 		}
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addActivity(new ThemedText(() => theme.fg("warning", `${label}: ${reBilled}`), 1, 0));
+		addChatActivity(this.chatContainer, new ThemedText(() => theme.fg("warning", `${label}: ${reBilled}`), 1, 0));
 	}
 
 	renderInitialMessages(): void {
@@ -4504,13 +4511,13 @@ export class InteractiveMode {
 		if (!force && expanded === this.toolOutputExpanded) return;
 
 		this.toolOutputExpanded = expanded;
-		this.chatContainer.setExpanded(expanded);
+		if (isExpandable(this.chatContainer)) this.chatContainer.setExpanded(expanded);
 		const activeHeader = this.customHeader ?? this.builtInHeader;
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
 		}
 		for (const container of [this.loadedResourcesContainer, this.chatContainer, this.pendingMessagesContainer]) {
-			for (const child of container.children) {
+			for (const child of container?.children ?? []) {
 				if (isExpandable(child)) {
 					child.setExpanded(expanded);
 				}
