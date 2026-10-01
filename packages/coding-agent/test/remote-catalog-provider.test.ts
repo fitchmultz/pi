@@ -190,6 +190,35 @@ describe("remote catalog provider", () => {
 		}
 	});
 
+	it("merges a large restored overlay in linear work while retaining replacement and append order", async () => {
+		let idReads = 0;
+		const baseline = Array.from({ length: 500 }, (_, index) => {
+			const entry = model(`model-${index}`);
+			return Object.defineProperty(entry, "id", {
+				enumerable: true,
+				get: () => {
+					idReads++;
+					return `model-${index}`;
+				},
+			});
+		});
+		const overlay = Array.from({ length: 500 }, (_, index) => ({
+			...model(`model-${index + 250}`),
+			name: `remote-${index + 250}`,
+		}));
+		const store = new InMemoryModelsStore();
+		await store.write("test-provider", { models: overlay });
+		const provider = withRemoteCatalog({ ...testProvider(), getModels: () => baseline });
+		await refreshProvider(provider, store, { allowNetwork: false });
+		idReads = 0;
+		const merged = provider.getModels();
+		expect(merged.map((entry) => entry.id)).toEqual(Array.from({ length: 750 }, (_, index) => `model-${index}`));
+		expect(merged[249].name).toBe("model-249");
+		expect(merged[250].name).toBe("remote-250");
+		expect(merged[749].name).toBe("remote-749");
+		expect(idReads).toBeLessThanOrEqual(1500);
+	});
+
 	it("prefers the newer of the generated and remote catalogs", async () => {
 		const localGeneratedAt = Date.parse("2026-07-23T10:00:00.000Z");
 		const newerHeader = new Date(localGeneratedAt + 60_000).toUTCString();

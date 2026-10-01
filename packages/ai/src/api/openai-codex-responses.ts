@@ -288,6 +288,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
 			}
+			// One detached request survives retries, fallback, and retained hook references.
+			body = structuredClone(body);
 			const websocketRequestId = codexSessionId || uuidv7();
 			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
 			const websocketHeaders = buildWebSocketHeaders(
@@ -297,7 +299,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				apiKey,
 				websocketRequestId,
 			);
-			const bodyJson = JSON.stringify(body);
+			let bodyJson: string | undefined;
 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
@@ -362,6 +364,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						if (aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
 							throw error;
 						}
+						bodyJson ??= JSON.stringify(body);
 						appendAssistantMessageDiagnostic(
 							output,
 							createAssistantMessageDiagnostic("provider_transport_failure", error, {
@@ -385,6 +388,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			// Compress the request body once for the SSE path. The Codex backend
 			// decodes Content-Encoding: zstd; the WebSocket transport above sends the
 			// uncompressed JSON frame, matching the official Codex client.
+			bodyJson ??= JSON.stringify(body);
 			const compressedBody = compressRequestBodyZstd(bodyJson);
 			if (compressedBody) {
 				sseHeaders.set("content-encoding", "zstd");
@@ -1449,10 +1453,6 @@ function requestBodyWithoutInput(body: RequestBody): RequestBody {
 	return rest;
 }
 
-function responseInputsEqual(a: ResponseInput | undefined, b: ResponseInput | undefined): boolean {
-	return JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
-}
-
 function requestBodiesMatchExceptInput(a: RequestBody, b: RequestBody): boolean {
 	return JSON.stringify(requestBodyWithoutInput(a)) === JSON.stringify(requestBodyWithoutInput(b));
 }
@@ -1466,17 +1466,15 @@ function getCachedWebSocketInputDelta(
 	}
 
 	const currentInput = body.input ?? [];
-	const baseline = [...(continuation.lastRequestBody.input ?? []), ...continuation.lastResponseItems];
-	if (currentInput.length < baseline.length) {
-		return undefined;
+	const previousInput = continuation.lastRequestBody.input ?? [];
+	const responseItems = continuation.lastResponseItems;
+	const prefixLength = previousInput.length + responseItems.length;
+	if (currentInput.length < prefixLength) return undefined;
+	for (let i = 0; i < prefixLength; i++) {
+		const previous = i < previousInput.length ? previousInput[i] : responseItems[i - previousInput.length];
+		if (JSON.stringify(currentInput[i]) !== JSON.stringify(previous)) return undefined;
 	}
-
-	const prefix = currentInput.slice(0, baseline.length);
-	if (!responseInputsEqual(prefix, baseline)) {
-		return undefined;
-	}
-
-	return currentInput.slice(baseline.length);
+	return currentInput.slice(prefixLength);
 }
 
 function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body: RequestBody): RequestBody {
@@ -1540,8 +1538,7 @@ async function processWebSocketStream(
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
-	const fullBody = structuredClone(body);
-	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, body) : body;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
 		stats.requests++;
@@ -1596,7 +1593,7 @@ async function processWebSocketStream(
 				},
 			).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");
 			entry.continuation = {
-				lastRequestBody: fullBody,
+				lastRequestBody: body,
 				lastResponseId: output.responseId,
 				lastResponseItems: structuredClone(responseItems),
 			};

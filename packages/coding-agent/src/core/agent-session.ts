@@ -468,6 +468,10 @@ export class AgentSession {
 	private readonly _backgroundCommandSessionDir: string;
 	private _backgroundCheckpointPaused = false;
 	private readonly _backgroundPending = new Set<string>();
+	private readonly _backgroundReceiptJobs = new WeakMap<SessionEntry, string[]>();
+	private _backgroundReceipts:
+		| { sessionId: string; sessionFile: string | undefined; revision: number; seen: Set<string> }
+		| undefined;
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -910,6 +914,9 @@ export class AgentSession {
 			this._failedResponse = undefined;
 			const prepare = async () => {
 				const projection = this.sessionManager.buildSessionProjection();
+				for (const entry of projection.entries) {
+					for (const message of entry.messages) this._entryIdsByMessage.set(message, entry.sourceEntry.id);
+				}
 				const canonicalContext = {
 					...request.context,
 					messages: [...projection.messages, ...this._pendingProviderMessages],
@@ -1147,11 +1154,20 @@ export class AgentSession {
 		hasPostCompactionUsage: boolean;
 		useReportedUsage: boolean;
 	} {
+		const pending = new Set(this._pendingProviderMessages);
+		const unmapped = messages.filter((message) => !pending.has(message) && !this._entryIdsByMessage.has(message));
+		if (unmapped.length) {
+			const stateMessages = new Set(this.agent.state.messages);
+			const stateMessage = unmapped.find((message) => stateMessages.has(message));
+			if (stateMessage) this._findPersistedMessageEntryId(stateMessage);
+		}
+		const persistedIds = new Set(
+			messages.filter((message) => !pending.has(message)).map((message) => this._entryIdsByMessage.get(message)),
+		);
 		let invalidated = false;
-		let entry = this.sessionManager.getLeafId()
-			? this.sessionManager.getEntryMetadata(this.sessionManager.getLeafId()!)
-			: undefined;
-		while (entry) {
+		const branch = [...this.sessionManager.iterateEntryMetadata({ branchFrom: this.sessionManager.getLeafId() })];
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
 			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
 			if (entry.type === "context_edit") invalidated = true;
 			if (model && entry.type === "message" && entry.message.role === "assistant") {
@@ -1164,12 +1180,11 @@ export class AgentSession {
 					message.stopReason !== "aborted" &&
 					message.stopReason !== "error" &&
 					calculateContextTokens(message.usage!) > 0 &&
-					messages.some((projected) => this._findPersistedMessageEntryId(projected) === entryId)
+					persistedIds.has(entryId)
 				) {
 					return { hasPostCompactionUsage: true, useReportedUsage: !invalidated };
 				}
 			}
-			entry = entry.parentId ? this.sessionManager.getEntryMetadata(entry.parentId) : undefined;
 		}
 		return { hasPostCompactionUsage: true, useReportedUsage: false };
 	}
@@ -1210,7 +1225,7 @@ export class AgentSession {
 				toolResultEntryIds,
 				outcome: this._lastActivityOutcome,
 			},
-			(entries) => this._buildBoundaryContext(entries, "turn_end"),
+			this._createBoundaryContextBuilder("turn_end"),
 		);
 		this._commitBoundaryDrafts(boundary.entries);
 		if (boundary.continue && !this._buildBoundaryContext([], "turn_end").canContinue) {
@@ -1340,11 +1355,41 @@ export class AgentSession {
 		return [...this.agent.peekQueuedMessages(), ...this._pendingCustomMessages];
 	}
 
+	private _createBoundaryContextBuilder(boundary: "turn_end" | "agent_before_settle") {
+		let cached:
+			| { sessionFile: string; revision: number; leafId: string | null; projection: SessionProjection }
+			| undefined;
+		return (drafts: SessionBoundaryDraft[]): BoundaryContextPreview => {
+			const sessionFile = this.sessionManager.getSessionFile();
+			if (drafts.length || !sessionFile) return this._buildBoundaryContext(drafts, boundary);
+			const revision = this.sessionManager.getEntriesRevision();
+			const leafId = this.sessionManager.getLeafId();
+			if (
+				!cached ||
+				cached.sessionFile !== sessionFile ||
+				cached.revision !== revision ||
+				cached.leafId !== leafId
+			) {
+				cached = { sessionFile, revision, leafId, projection: this.sessionManager.buildSessionProjection() };
+			}
+			// Handlers may mutate a preview, but cannot change the next handler's canonical context.
+			const entryMessages = structuredClone(cached.projection.entries.map((entry) => entry.messages));
+			const projection = {
+				...cached.projection,
+				entries: cached.projection.entries.map((entry, index) => ({ ...entry, messages: entryMessages[index]! })),
+				messages: entryMessages.flat(),
+			};
+			return this._buildBoundaryContext(drafts, boundary, projection);
+		};
+	}
+
 	private _buildBoundaryContext(
 		drafts: SessionBoundaryDraft[],
 		boundary: "turn_end" | "agent_before_settle",
+		projection = drafts.length
+			? this._createBoundaryPreviewManager(drafts).buildSessionProjection()
+			: this.sessionManager.buildSessionProjection(),
 	): BoundaryContextPreview {
-		const projection = this._createBoundaryPreviewManager(drafts).buildSessionProjection();
 		const pendingMessages = this._getPendingBoundaryMessages();
 		const llmMessages = convertToLlm(projection.messages);
 		const finalRole = llmMessages[llmMessages.length - 1]?.role;
@@ -1592,6 +1637,7 @@ export class AgentSession {
 	}
 
 	private _findPersistedMessageEntryId(message: AgentMessage): string | undefined {
+		if (this._pendingProviderMessages.includes(message)) return undefined;
 		const mapped = this._entryIdsByMessage.get(message);
 		if (mapped) return mapped;
 		const messageIndex = this.agent.state.messages.indexOf(message);
@@ -2314,7 +2360,7 @@ export class AgentSession {
 		try {
 			const result = await this._extensionRunner.emitBoundary(
 				{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
-				(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
+				this._createBoundaryContextBuilder("agent_before_settle"),
 			);
 			this._commitBoundaryDrafts(result.entries);
 			this._flushPendingCustomMessages();
@@ -4888,30 +4934,50 @@ export class AgentSession {
 				(atTurnEnd && (this._agentRunAbortRequested || this._promptAbortController?.signal.aborted))
 			)
 				return;
-			const seen = new Set<string>();
-			for (const metadata of this.sessionManager.iterateEntryMetadata()) {
-				if (metadata.type === "custom_message" && metadata.customType === BACKGROUND_COMMAND_NOTICE) {
+			const sessionId = this.sessionManager.getSessionId();
+			const sessionFile = this.sessionManager.getSessionFile();
+			const revision = this.sessionManager.getEntriesRevision();
+			let receipts = this._backgroundReceipts;
+			if (
+				!receipts ||
+				receipts.sessionId !== sessionId ||
+				receipts.sessionFile !== sessionFile ||
+				receipts.revision !== revision
+			) {
+				const seen = new Set<string>();
+				for (const metadata of this.sessionManager.iterateEntryMetadata()) {
+					const notice = metadata.type === "custom_message" && metadata.customType === BACKGROUND_COMMAND_NOTICE;
+					const result =
+						metadata.type === "message" &&
+						metadata.message.role === "toolResult" &&
+						metadata.message.toolName === "background_command" &&
+						!metadata.message.isError;
+					if (!notice && !result) continue;
 					const entry = this.sessionManager.getEntry(metadata.id);
-					const details = (entry?.type === "custom_message" ? entry.details : undefined) as
-						| { jobIds?: string[] }
-						| undefined;
-					for (const id of details?.jobIds ?? []) seen.add(id);
-				} else if (
-					metadata.type === "message" &&
-					metadata.message.role === "toolResult" &&
-					metadata.message.toolName === "background_command" &&
-					!metadata.message.isError
-				) {
-					const entry = this.sessionManager.getEntry(metadata.id);
-					const details = (entry?.type === "message" ? (entry.message as ToolResultMessage).details : undefined) as
-						| BackgroundCommandToolDetails
-						| undefined;
-					if (details)
-						for (const job of "jobs" in details ? details.jobs : [details]) {
-							if (job.id && backgroundCommandFinished(job)) seen.add(job.id);
+					if (!entry) continue;
+					let ids = this._backgroundReceiptJobs.get(entry);
+					if (!ids) {
+						ids = [];
+						if (entry.type === "custom_message") {
+							const details = entry.details as { jobIds?: string[] } | undefined;
+							ids.push(...(details?.jobIds ?? []));
+						} else if (entry.type === "message") {
+							const details = (entry.message as ToolResultMessage).details as
+								| BackgroundCommandToolDetails
+								| undefined;
+							if (details)
+								for (const job of "jobs" in details ? details.jobs : [details]) {
+									if (job.id && backgroundCommandFinished(job)) ids.push(job.id);
+								}
 						}
+						this._backgroundReceiptJobs.set(entry, ids);
+					}
+					for (const id of ids) seen.add(id);
 				}
+				receipts = { sessionId, sessionFile, revision, seen };
+				this._backgroundReceipts = receipts;
 			}
+			const seen = receipts.seen;
 			for (const id of seen) this._backgroundPending.delete(id);
 			if (jobs.every((job) => backgroundCommandFinished(job) && seen.has(job.id))) {
 				clearInterval(this._backgroundTimer);

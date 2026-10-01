@@ -1,13 +1,26 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, readFileSync, renameSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import fs, {
+	appendFileSync,
+	mkdtempSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	truncateSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { afterEach, expect, it, vi } from "vitest";
 import { closeJournalSource, readJournalRecord, scanJournal } from "../../src/core/session-journal.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 
 const directories: string[] = [];
 afterEach(() => {
+	vi.restoreAllMocks();
+	syncBuiltinESMExports();
 	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 function fixture(): { directory: string; source: string; manager: SessionManager; id: string } {
@@ -43,6 +56,203 @@ it("inspects and copies >512 MiB history under a 96 MiB heap without hydrating i
 	expect(receipt.bytes).toBeGreaterThan(512 * 1024 * 1024);
 	expect(receipt.retainedHeap).toBeLessThan(96 * 1024 * 1024);
 }, 200000);
+
+it("reuses active journal bodies without exposing SDK mutations or concealing source changes", () => {
+	const { source, manager } = fixture();
+	manager.appendMessage({ role: "user", content: "original request", timestamp: 1 });
+	manager.appendMessage(fauxAssistantMessage("original response"));
+	const first = manager.buildSessionProjection();
+	const read = vi.spyOn(fs, "readSync");
+	syncBuiltinESMExports();
+	const user = first.messages.find((message) => message.role === "user")!;
+	user.content = "SDK mutation";
+	const second = manager.buildSessionProjection();
+	expect(second.messages.find((message) => message.role === "user")?.content).toBe("original request");
+	expect(read).not.toHaveBeenCalled();
+	manager.appendMessage({ role: "user", content: "next request", timestamp: 2 });
+	read.mockClear();
+	expect(
+		manager
+			.buildSessionContext()
+			.messages.filter((message) => message.role === "user")
+			.map((message) => message.content),
+	).toEqual(["original request", "next request"]);
+	// One shared prefix verification plus the new body, not a parse/read of every saved entry.
+	expect(read.mock.calls.length).toBeLessThanOrEqual(2);
+	const saved = readFileSync(source, "utf8");
+	writeFileSync(source, saved.replace("original request", "modified request"));
+	expect(() => manager.buildSessionProjection()).toThrow("Journal source generation changed");
+	writeFileSync(source, saved);
+	manager.buildSessionProjection();
+	truncateSync(source, 10);
+	unlinkSync(source);
+	expect(() => manager.buildSessionProjection()).toThrow("Journal source generation changed");
+});
+
+it.each([
+	{ timing: "before", target: "request", externalAppend: false, compacted: false },
+	{ timing: "before", target: "model", externalAppend: false, compacted: false },
+	{ timing: "during retry", target: "request", externalAppend: false, compacted: false },
+	{ timing: "during retry", target: "model", externalAppend: false, compacted: false },
+	{ timing: "during", target: "request", externalAppend: false, compacted: false },
+	{ timing: "during", target: "request", externalAppend: true, compacted: false },
+	{ timing: "during", target: "model", externalAppend: false, compacted: false },
+	{ timing: "during", target: "model", externalAppend: false, compacted: true },
+])(
+	"rejects $target edits $timing an append (external=$externalAppend, compacted=$compacted)",
+	({ timing, target, externalAppend, compacted }) => {
+		const { source, manager } = fixture();
+		manager.appendModelChange("catalog", "original-model");
+		const kept = manager.appendMessage({ role: "user", content: "original request", timestamp: 1 });
+		if (compacted) manager.appendCompaction("summary", kept, 10);
+		manager.buildSessionProjection();
+		const stats = fs.statSync(source);
+		const append = fs.appendFileSync;
+		const edit = () => {
+			const original = target === "model" ? "original-model" : "original request";
+			const changed = target === "model" ? "modified-model" : "modified request";
+			writeFileSync(source, readFileSync(source, "utf8").replace(original, changed));
+			fs.utimesSync(source, stats.atime, stats.mtime);
+			if (externalAppend)
+				append(
+					source,
+					`${JSON.stringify({ type: "session_info", id: "external", parentId: null, timestamp: new Date(0).toISOString(), name: "added" })}\n`,
+				);
+		};
+		if (timing === "during retry") {
+			vi.spyOn(fs, "appendFileSync").mockImplementationOnce(() => {
+				throw new Error("controlled append failure");
+			});
+			syncBuiltinESMExports();
+			expect(() => manager.appendCustomEntry("own-append", {})).toThrow("controlled append failure");
+		}
+		if (timing === "before") edit();
+		else {
+			vi.spyOn(fs, "appendFileSync").mockImplementationOnce((file, data, options) => {
+				append(file, data, options);
+				edit();
+			});
+			syncBuiltinESMExports();
+		}
+		expect(() => {
+			if (timing === "during retry") manager.flush();
+			else manager.appendCustomEntry("own-append", {});
+			manager.buildSessionProjection();
+		}).toThrow(/Journal (source generation|record) changed/);
+		const rejected = readFileSync(source);
+		if (timing === "before" || timing === "during retry") {
+			expect(() => manager.flush()).toThrow(/Journal (source generation|record) changed/);
+			expect(() => manager.appendCustomEntry("retry", {})).toThrow(/Journal (source generation|record) changed/);
+		} else manager.flush();
+		expect(() => manager.buildSessionProjection()).toThrow(/Journal (source generation|record) changed/);
+		expect(readFileSync(source)).toEqual(rejected);
+	},
+);
+
+// PR #162: unpublished branches must validate their borrowed parent even after warming the cache.
+it.each([
+	{ target: "content", independent: false },
+	{ target: "model", independent: false },
+	{ target: "thinking", independent: false },
+	{ target: "content", independent: true },
+	{ target: "model", independent: true },
+	{ target: "thinking", independent: true },
+] as const)(
+	"rejects changed borrowed $target in an unpublished branch (independent=$independent)",
+	({ target, independent }) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-borrowed-history-"));
+		directories.push(directory);
+		const parent = SessionManager.create(directory, directory);
+		parent.appendModelChange("catalog", "original-model");
+		parent.appendThinkingLevelChange("high");
+		const selected = parent.appendCustomMessageEntry("setup", "original content", false);
+		parent.appendMessage({ role: "user", content: "persist parent", timestamp: 1 });
+		const source = parent.getSessionFile()!;
+		const opened = SessionManager.open(source);
+		const child = independent ? opened.forkBranch(selected) : opened;
+		const branch = independent ? child.getSessionFile()! : child.createBranchedSession(selected)!;
+		expect(fs.existsSync(branch)).toBe(false);
+		expect(child.buildSessionContext().messages).toMatchObject([{ role: "custom", content: "original content" }]);
+		child.buildSessionProjection();
+		const before = fs.statSync(source);
+		const replacements = {
+			content: ["original content", "modified content"],
+			model: ["original-model", "modified-model"],
+			thinking: ['"high"', '"low "'],
+		};
+		const [original, changed] = replacements[target];
+		writeFileSync(source, readFileSync(source, "utf8").replace(original, changed));
+		fs.utimesSync(source, before.atime, before.mtime);
+		expect(fs.statSync(source).size).toBe(before.size);
+		expect(() => child.buildSessionProjection()).toThrow(/Journal (source generation|record) changed/);
+		expect(fs.existsSync(branch)).toBe(false);
+	},
+);
+
+it("retains cache hits when active bodies exceed the byte budget", () => {
+	const { source, manager } = fixture();
+	const content = "x".repeat(6 * 1024 * 1024);
+	const entries = Array.from({ length: 3 }, (_, index) => ({
+		type: "message",
+		id: `large-${index}`,
+		parentId: index ? `large-${index - 1}` : null,
+		timestamp: new Date(0).toISOString(),
+		message: { role: "user", content, timestamp: index },
+	}));
+	writeFileSync(source, `${[manager.getHeader(), ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+	const reopened = SessionManager.open(source);
+	reopened.buildSessionProjection().messages.find((message) => message.role === "user")!.content = "SDK mutation";
+	const read = vi.spyOn(fs, "readSync");
+	syncBuiltinESMExports();
+	expect(
+		reopened
+			.buildSessionContext()
+			.messages.filter((message) => message.role === "user")
+			.map((message) => message.content.length),
+	).toEqual([content.length, content.length, content.length]);
+	const bytes = read.mock.results.reduce(
+		(sum, result) => sum + (result.type === "return" ? Number(result.value) : 0),
+		0,
+	);
+	expect(bytes).toBeLessThan(7 * 1024 * 1024);
+});
+
+it.each([false, true])("reads an intact unlinked source but rejects hidden edits (edited=%s)", (edited) => {
+	const { source, manager } = fixture();
+	manager.appendMessage({ role: "user", content: "original request", timestamp: 1 });
+	manager.buildSessionProjection();
+	if (edited) {
+		const stats = fs.statSync(source);
+		writeFileSync(source, readFileSync(source, "utf8").replace("original request", "modified request"));
+		fs.utimesSync(source, stats.atime, stats.mtime);
+	}
+	unlinkSync(source);
+	if (edited) expect(() => manager.buildSessionProjection()).toThrow(/Journal (source generation|record) changed/);
+	else {
+		expect(manager.getEntriesRevision()).toBeGreaterThan(0);
+		expect(manager.buildSessionContext().messages.find((message) => message.role === "user")?.content).toBe(
+			"original request",
+		);
+	}
+});
+
+it.each([
+	{ raw: "-0", expected: -0 },
+	{ raw: "1e400", expected: Number.POSITIVE_INFINITY },
+])("preserves native JSON numeric values in warm projections ($raw)", ({ raw, expected }) => {
+	const { source, manager } = fixture();
+	writeFileSync(
+		source,
+		`${JSON.stringify(manager.getHeader())}\n{"type":"message","id":"result","parentId":null,"timestamp":"2026-09-30T00:00:00.000Z","message":{"role":"toolResult","toolCallId":"call","toolName":"read","content":[],"details":{"value":${raw}},"isError":false,"timestamp":0}}\n`,
+	);
+	const reopened = SessionManager.open(source);
+	for (let i = 0; i < 2; i++) {
+		const result = reopened.buildSessionContext().messages.find((message) => message.role === "toolResult")!;
+		const details = result.details as { value: number };
+		expect(Object.is(details.value, expected)).toBe(true);
+		details.value = 123;
+	}
+});
 
 it.each(["toString", "constructor", "__proto__"])("preserves an own %s field when branching", (key) => {
 	const { directory, source, manager, id } = fixture();
