@@ -117,6 +117,30 @@ The CLI loads `codemode`, `tool_search`, and MCP as built-in extensions. SDK ses
 
 See the focused examples for [models](../examples/sdk/02-custom-model.ts), [tools](../examples/sdk/05-tools.ts), [extensions](../examples/sdk/06-extensions.ts), and [full control](../examples/sdk/12-full-control.ts).
 
+### JSON selection with read
+
+`read` accepts `json: { path?, fields? }` to select part of a JSON file before paging and truncation:
+
+```typescript
+import { createReadTool } from "@earendil-works/pi-coding-agent";
+
+const read = createReadTool(process.cwd());
+const result = await read.execute("summary", {
+  path: "report.json",
+  json: { path: "/rows", fields: ["name", "status"] },
+});
+```
+
+- `path` is a JSON Pointer and defaults to the root (`""`). `/rows/0` selects the first array item. In keys, escape `~` as `~0` and `/` as `~1`.
+- `fields` keeps the listed immediate keys of the selected object, or of each object in a selected array. Keys such as `"a.b"` are literal names, not paths. Missing keys are omitted; `null`, `false`, and `0` values are kept. Array order and length stay the same, so a row without any listed key becomes `{}`.
+- Without `fields`, the whole selected value is returned, including arrays and scalars. `json: {}` pretty-prints the whole file.
+
+Invalid JSON, an invalid or missing pointer target, `json` on an image, and `fields` on anything other than an object or an array of objects produce tool errors.
+
+`offset` and `limit` count lines of the pretty-printed selection, and the usual 2000-line and 50KB limits apply. To continue, pass the same `json` options with the returned offset. A paged or truncated result can be a JSON fragment followed by a continuation notice.
+
+The whole file is still read and parsed with `JSON.parse`, so large numbers can lose precision and the last duplicate key wins. Selection is not a query language: it has no filters or computed values.
+
 ## Examples
 
 | Example | Purpose |
