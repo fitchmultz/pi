@@ -98,6 +98,40 @@ function buildSSEPayload({
 }
 
 describe("openai-codex streaming", () => {
+	it("preserves failed terminal usage and provider error codes", async () => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "test",
+			name: "test",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 },
+			contextWindow: 10000,
+			maxTokens: 1000,
+		};
+		const event = {
+			type: "response.failed",
+			response: {
+				id: "failed",
+				status: "failed",
+				error: { code: "server_error", message: "boom" },
+				usage: { input_tokens: 20, output_tokens: 7, total_tokens: 27, input_tokens_details: { cached_tokens: 2 } },
+			},
+		};
+		const result = await streamOpenAICodexResponses(model, normalizeContext({ messages: [] }), {
+			apiKey: mockToken(),
+			transport: "sse",
+			fetch: async () => new Response(`data: ${JSON.stringify(event)}\n\n`),
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("server_error: boom");
+		expect(result.responseId).toBe("failed");
+		expect(result.usage).toMatchObject({ input: 18, output: 7, cacheRead: 2, totalTokens: 27 });
+		expect(result.usage.cost.total).toBeGreaterThan(0);
+	});
+
 	it("streams SSE responses and forwards raw provider events", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
 		process.env.PI_CODING_AGENT_DIR = tempDir;
@@ -2041,9 +2075,10 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
-	it("sends only response input deltas in websocket-cached mode", async () => {
+	it.each([false, true])("sends cached deltas with retained-payload mutation: %s", async (mutatePayload) => {
 		const token = mockToken();
 		const sentBodies: unknown[] = [];
+		let retainedPayload: Record<string, unknown> | undefined;
 
 		class MockWebSocket {
 			static OPEN = 1;
@@ -2164,7 +2199,11 @@ describe("openai-codex streaming", () => {
 			apiKey: token,
 			sessionId: "session-1",
 			transport: "websocket-cached",
+			onPayload: (payload) => {
+				retainedPayload = payload as Record<string, unknown>;
+			},
 		}).result();
+		if (mutatePayload && retainedPayload) retainedPayload.instructions = "changed after dispatch";
 
 		const secondContext = normalizeContext({
 			...firstContext,

@@ -68,6 +68,38 @@ async function captureFirstTool(tool: Tool): Promise<NonNullable<AnthropicToolPa
 }
 
 describe("Anthropic strict tool schemas", () => {
+	it.each(["prefer", "require"] as const)(
+		"budgets strict unions without silently relaxing %s tools",
+		async (strict) => {
+			const tools = Array.from({ length: 17 }, (_, index) => ({
+				...createStrictTool(Type.Object({ value: Type.Optional(Type.String()) })),
+				name: `tool_${index}`,
+				...(index === 16 ? { constrainedSampling: { type: "json_schema" as const, strict } } : {}),
+			}));
+			let payload: AnthropicToolPayload | undefined;
+			const result = await streamAnthropic(
+				createModel(),
+				normalizeContext({
+					messages: [{ role: "user", content: "test", timestamp: 0 }],
+					tools,
+				}),
+				{
+					apiKey: "test-key",
+					onPayload: (value) => {
+						payload = value as AnthropicToolPayload;
+						throw new PayloadCaptured();
+					},
+				},
+			).result();
+			if (strict === "require") {
+				expect(payload).toBeUndefined();
+				expect(result.errorMessage).toContain("exceeds Anthropic's strict tool limits");
+			} else {
+				expect(payload?.tools?.filter((tool) => tool.strict)).toHaveLength(16);
+				expect(payload?.tools?.[16].strict).toBeUndefined();
+			}
+		},
+	);
 	it("only sends the full input schema for strict JSON-schema tools", async () => {
 		const legacyParameters = Type.Object(
 			{ value: Type.String() },

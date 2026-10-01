@@ -42,6 +42,15 @@ const model: Model<"openai-responses"> = {
 };
 
 describe("context token estimation", () => {
+	it("counts encrypted thinking and tool replay signatures without reported usage", () => {
+		const assistant = createAssistant(1, 0);
+		assistant.content = [
+			{ type: "thinking", thinking: "", thinkingSignature: "x".repeat(40_000) },
+			{ type: "toolCall", id: "call", name: "test", arguments: {}, thoughtSignature: "x".repeat(4_000) },
+		];
+		expect(estimateContextTokens([assistant]).tokens).toBe(11_002);
+	});
+
 	it("ignores stale assistant usage after a newer message is inserted before it", () => {
 		const context = normalizeContext({
 			systemPrompt: "system",

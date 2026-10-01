@@ -80,7 +80,7 @@ function shouldProxyHostname(hostname: string, port: number, env?: ProviderEnv):
 		return false;
 	}
 
-	const normalizedTargetHost = stripBrackets(hostname.toLowerCase());
+	const normalizedTargetHost = stripBrackets(hostname.toLowerCase()).replace(/\.$/, "");
 
 	return noProxy.split(/[,\s]/).every((entry) => {
 		const parsed = parseNoProxyEntry(entry);
@@ -92,7 +92,7 @@ function shouldProxyHostname(hostname: string, port: number, env?: ProviderEnv):
 			return true;
 		}
 
-		let domain = stripBrackets(parsed.host);
+		let domain = stripBrackets(parsed.host).replace(/\.$/, "");
 		if (domain.startsWith("*.")) {
 			domain = domain.slice(2);
 		} else if (domain.startsWith(".") || domain.startsWith("*")) {

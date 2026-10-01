@@ -13,6 +13,7 @@
 ### Fixed
 
 - Fixed managed restart signal delivery and waiting for extension-settled work, restored short socket paths on Termux, and rejected legacy launcher handoffs with relaunch instructions.
+- Fixed a provider's auth-check failure hiding healthy models or silently replacing saved and scoped provider selections.
 
 ## [1.0.0] - 2026-10-01
 

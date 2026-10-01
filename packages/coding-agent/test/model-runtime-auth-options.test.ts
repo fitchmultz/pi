@@ -70,6 +70,32 @@ describe("ModelRuntime auth options", () => {
 		expect(runtime.getError()).toBeUndefined();
 	});
 
+	it("publishes healthy availability and provider-local auth diagnostics", async () => {
+		const runtime = await ModelRuntime.create({
+			credentials: AuthStorage.inMemory({ anthropic: { type: "api_key", key: "key" } }),
+			modelsPath: null,
+		});
+		runtime.registerNativeProvider({
+			...runtime.getProvider("anthropic")!,
+			id: "broken",
+			getModels: () => [],
+			auth: {
+				apiKey: {
+					name: "broken",
+					check: async () => {
+						throw new Error("broken auth");
+					},
+					resolve: async () => undefined,
+				},
+			},
+		});
+		await runtime.refresh({ allowNetwork: false });
+		expect((await runtime.getAvailable()).some((model) => model.provider === "anthropic")).toBe(true);
+		expect(runtime.hasConfiguredAuth("anthropic")).toBe(true);
+		expect(runtime.getAuthCheckError("broken")?.message).toContain("broken");
+		expect(runtime.getError()).toContain('Provider "broken"');
+	});
+
 	it("projects provider-owned methods, names, and status", async () => {
 		const runtime = await ModelRuntime.create({ credentials: AuthStorage.inMemory(), modelsPath: null });
 		const options = authOptions(runtime);

@@ -14,6 +14,7 @@ v1.0.0. It is upstream plus the features below. Everything else follows upstream
 | Compact activity view (`compactView: false \| true \| "hybrid"`) | Small interactive-mode renderer patch | [settings.md](packages/coding-agent/docs/settings.md) |
 | `pi update --fork` | Updater that builds pinned `fitchmultz/pi` main and activates it through `scripts/install-fork.mjs` (`src/utils/fork-update.ts`, `package-manager-cli.ts`) | [Install and activate](#install-and-activate) |
 | Termux (Android) support | Installer compiler/environment handling, `test.sh`, and short Unix-socket paths for restart and the experimental server | [Install and activate](#install-and-activate) |
+| Provider correctness fixes | Provider-local auth availability and saved/scoped selection, OAuth cleanup, detached Codex continuation, Responses terminal usage, Anthropic strict budgets, schema validation, proxy exclusions, retry delays, and signature token estimates | [AI changelog](packages/ai/CHANGELOG.md), [coding-agent changelog](packages/coding-agent/CHANGELOG.md) |
 
 Owner-approved keeps still being ported (each lands with its own row): opt-in provider credential
 isolation (`ignoreStoredCredentials`), GPT-6 Astra Ultrafast pricing, slow-extension diagnostics,

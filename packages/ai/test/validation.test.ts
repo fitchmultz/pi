@@ -98,6 +98,21 @@ describe("validateToolArguments", () => {
 		}
 	});
 
+	it.each(["anyOf", "oneOf"])("omits optional nulls inside %s objects without erasing nullable values", (keyword) => {
+		const { tool, toolCall } = createToolCallWithPlainSchema(
+			{
+				[keyword]: [
+					{ type: "object", properties: { value: { type: "string" } }, additionalProperties: false },
+					{ type: "null" },
+				],
+			} as Tool["parameters"],
+			{ value: null },
+		);
+		expect(validateToolArguments(tool, toolCall)).toEqual({ value: {} });
+		toolCall.arguments = { value: null };
+		expect(validateToolArguments(tool, toolCall)).toEqual({ value: null });
+	});
+
 	it("treats null as omission for optional non-nullable properties", () => {
 		const tool: Tool = {
 			name: "echo",

@@ -7,6 +7,7 @@
 
 import { randomBytes } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
+import { raceWithAbortSignal } from "../../utils/abort.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "../../utils/oauth-page.ts";
 import { getProviderEnvValue } from "../../utils/provider-env.ts";
 import type { LoginOptions, OAuthAuth, OAuthCredential, ProviderAuthInteraction } from "../types.ts";
@@ -51,11 +52,13 @@ function randomValue(): string {
 }
 
 function authorizationResultFromCallback(url: URL, expectedState: string): AuthorizationResult {
-	const code = url.searchParams.get("code");
-	if (!code) throw new Error("Missing authorization code");
 	const state = url.searchParams.get("state");
 	if (!state) throw new Error("Missing OAuth state");
 	if (state !== expectedState) throw new Error("OAuth state mismatch");
+	const error = url.searchParams.get("error");
+	if (error) throw new Error(`ChatGPT authorization failed: ${error}`);
+	const code = url.searchParams.get("code");
+	if (!code) throw new Error("Missing authorization code");
 	const clientId = url.searchParams.get("client_id")?.trim();
 	if (!clientId) throw new Error("OpenAI OAuth registration callback did not contain an issued client ID");
 	return { code, clientId };
@@ -72,8 +75,6 @@ function authorizationResultFromManualInput(input: string, expectedState: string
 	if (url.origin !== expected.origin || url.pathname !== expected.pathname) {
 		throw new Error(`The pasted callback URL must start with ${REDIRECT_URI}`);
 	}
-	const error = url.searchParams.get("error");
-	if (error) throw new Error(`ChatGPT authorization failed: ${error}`);
 	return authorizationResultFromCallback(url, expectedState);
 }
 
@@ -91,6 +92,7 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
 			rejectResult = rejectAuthorization;
 		});
 
+		void result.catch(() => {});
 		const server = createServer((request, response) => {
 			try {
 				const url = new URL(request.url || "", REDIRECT_URI);
@@ -99,6 +101,10 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
 					return;
 				}
 
+				if (url.searchParams.get("state") !== expectedState) {
+					sendHtml(response, 400, oauthErrorHtml("OAuth state mismatch"));
+					return;
+				}
 				const error = url.searchParams.get("error");
 				if (error) {
 					sendHtml(response, 400, oauthErrorHtml("ChatGPT was not connected.", `Error: ${error}`));
@@ -248,39 +254,43 @@ async function loginOpenAIChatGPT(
 		});
 	}
 
-	const authorizationUrl = new URL(AUTHORIZE_URL);
-	authorizationUrl.search = new URLSearchParams({
-		client_id: DYNAMIC_CLIENT_ID,
-		agent_name_hint: AGENT_NAME_HINT,
-		ext_agent_host_id: hostId,
-		response_type: "code",
-		redirect_uri: REDIRECT_URI,
-		resource: RESOURCE,
-		scope: SCOPE,
-		state,
-		code_challenge: challenge,
-		code_challenge_method: "S256",
-		nonce,
-	}).toString();
-	interaction.notify({
-		type: "auth_url",
-		url: authorizationUrl.toString(),
-		instructions:
-			"Complete sign-in in your browser. If the callback does not complete, paste the final redirect URL here.",
-	});
-
 	const manualAbort = new AbortController();
-	const manualCode = interaction
-		.prompt({
-			type: "manual_code",
-			message: "Complete login in your browser, or paste the final redirect URL here:",
-			placeholder: REDIRECT_URI,
-			signal: AbortSignal.any([manualAbort.signal, interaction.signal]),
-		})
-		.then((input) => authorizationResultFromManualInput(input, state));
-
 	try {
-		const result = await (callback ? Promise.race([callback.result, manualCode]) : manualCode);
+		interaction.signal.throwIfAborted();
+		const authorizationUrl = new URL(AUTHORIZE_URL);
+		authorizationUrl.search = new URLSearchParams({
+			client_id: DYNAMIC_CLIENT_ID,
+			agent_name_hint: AGENT_NAME_HINT,
+			ext_agent_host_id: hostId,
+			response_type: "code",
+			redirect_uri: REDIRECT_URI,
+			resource: RESOURCE,
+			scope: SCOPE,
+			state,
+			code_challenge: challenge,
+			code_challenge_method: "S256",
+			nonce,
+		}).toString();
+		interaction.notify({
+			type: "auth_url",
+			url: authorizationUrl.toString(),
+			instructions:
+				"Complete sign-in in your browser. If the callback does not complete, paste the final redirect URL here.",
+		});
+
+		const manualCode = interaction
+			.prompt({
+				type: "manual_code",
+				message: "Complete login in your browser, or paste the final redirect URL here:",
+				placeholder: REDIRECT_URI,
+				signal: AbortSignal.any([manualAbort.signal, interaction.signal]),
+			})
+			.then((input) => authorizationResultFromManualInput(input, state));
+
+		const result = await raceWithAbortSignal(
+			callback ? Promise.race([callback.result, manualCode]) : manualCode,
+			interaction.signal,
+		);
 		interaction.notify({ type: "progress", message: "Exchanging authorization code for tokens..." });
 		return await exchangeAuthorizationCode(result.code, verifier, result.clientId, interaction.signal);
 	} catch (error) {

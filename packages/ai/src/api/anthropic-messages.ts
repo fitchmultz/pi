@@ -1203,6 +1203,10 @@ function buildParams(
 	}
 
 	const toolCacheControl = compat.supportsCacheControlOnTools ? cacheControl : undefined;
+	const strictTools = selectStrictTools(
+		nativeToolChanges ? getDeclaredTools(context.messages) : getCurrentTools(context.messages),
+		compat.supportsStrictTools,
+	);
 	if (nativeToolChanges) {
 		// Initial tools stay active with the cache breakpoint on the last one. Every later
 		// declaration is deferred and only surfaced by its `tool_addition` block; removed
@@ -1215,16 +1219,14 @@ function buildParams(
 				initialTools,
 				isOAuthToken,
 				compat.supportsEagerToolInputStreaming,
-				compat.supportsStrictTools,
+				strictTools,
 				toolCacheControl,
 			),
 			DEFERRED_TOOL_PLACEHOLDER,
-			...convertTools(
-				laterTools,
-				isOAuthToken,
-				compat.supportsEagerToolInputStreaming,
-				compat.supportsStrictTools,
-			).map((tool) => ({ ...tool, defer_loading: true })),
+			...convertTools(laterTools, isOAuthToken, compat.supportsEagerToolInputStreaming, strictTools).map((tool) => ({
+				...tool,
+				defer_loading: true,
+			})),
 		];
 	} else {
 		const tools = getCurrentTools(context.messages);
@@ -1233,7 +1235,7 @@ function buildParams(
 				tools,
 				isOAuthToken,
 				compat.supportsEagerToolInputStreaming,
-				compat.supportsStrictTools,
+				strictTools,
 				toolCacheControl,
 			);
 		}
@@ -1580,17 +1582,57 @@ const isAnthropicStrictUnsupportedKeyword: UnsupportedStrictSchemaKeywordCheck =
 	return false;
 };
 
+// Request-wide limits: https://platform.claude.com/docs/en/build-with-claude/structured-outputs#schema-complexity-limits
+// Strict conversion requires every property, so the 24 optional-parameter limit cannot bind.
+function countUnionParameters(schema: unknown): number {
+	if (typeof schema !== "object" || schema === null) return 0;
+	const { properties, items, anyOf } = schema as {
+		properties?: Record<string, unknown>;
+		items?: unknown;
+		anyOf?: unknown[];
+	};
+	let count = 0;
+	for (const child of [...Object.values(properties ?? {}), ...(items === undefined ? [] : [items])]) {
+		const { anyOf: union, type } = (child ?? {}) as { anyOf?: unknown; type?: unknown };
+		if (Array.isArray(union) || Array.isArray(type)) count++;
+		count += countUnionParameters(child);
+	}
+	for (const variant of anyOf ?? []) count += countUnionParameters(variant);
+	return count;
+}
+
+function selectStrictTools(tools: readonly Tool[], supported: boolean): Set<string> {
+	const selected = new Set<string>();
+	let unions = 0;
+	// Declaration order preserves earlier strict modes when native deferred tools are appended.
+	for (const tool of tools) {
+		if (resolveJsonSchemaStrictSampling(tool, supported, isAnthropicStrictUnsupportedKeyword) !== true) continue;
+		const cost = countUnionParameters(getJsonSchemaToolParameters(tool, true));
+		if (selected.size < 20 && unions + cost <= 16) {
+			selected.add(tool.name);
+			unions += cost;
+		} else if (
+			tool.constrainedSampling &&
+			tool.constrainedSampling.type === "json_schema" &&
+			tool.constrainedSampling.strict === "require"
+		) {
+			throw new Error(`Tool "${tool.name}" requires strict sampling, but exceeds Anthropic's strict tool limits.`);
+		}
+	}
+	return selected;
+}
+
 function convertTools(
 	tools: Tool[],
 	isOAuthToken: boolean,
 	supportsEagerToolInputStreaming: boolean,
-	supportsStrictTools: boolean,
+	strictTools: ReadonlySet<string>,
 	cacheControl?: CacheControlEphemeral,
 ): BetaTool[] {
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
-		const strict = resolveJsonSchemaStrictSampling(tool, supportsStrictTools, isAnthropicStrictUnsupportedKeyword);
+		const strict = strictTools.has(tool.name);
 		const parameters = getJsonSchemaToolParameters(tool, strict);
 		const schema = parameters as { properties?: unknown; required?: string[] };
 		const legacyInputSchema = {

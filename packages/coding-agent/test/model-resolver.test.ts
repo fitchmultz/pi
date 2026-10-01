@@ -15,6 +15,7 @@ import {
 	resolveCliModel,
 	resolveModelScope,
 	resolveModelScopeWithDiagnostics,
+	restoreModelFromSession,
 } from "../src/core/model-resolver.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -226,6 +227,8 @@ describe("resolveModelScopeWithDiagnostics", () => {
 		try {
 			const registry = {
 				getAvailable: () => allModels,
+				getModels: () => allModels,
+				getAuthCheckError: () => undefined,
 			} as unknown as Parameters<typeof resolveModelScopeWithDiagnostics>[1];
 
 			const result = await resolveModelScopeWithDiagnostics(["sonnet:high", "gpt-4o:invalid", "missing"], registry);
@@ -258,6 +261,8 @@ describe("resolveModelScopeWithDiagnostics", () => {
 		try {
 			const registry = {
 				getAvailable: () => allModels,
+				getModels: () => allModels,
+				getAuthCheckError: () => undefined,
 			} as unknown as Parameters<typeof resolveModelScope>[1];
 
 			const scopedModels = await resolveModelScope(["missing"], registry);
@@ -285,6 +290,8 @@ describe("resolveModelScopeWithDiagnostics", () => {
 		};
 		const registry = {
 			getAvailable: () => [...allModels, bracketedModel],
+			getModels: () => [...allModels, bracketedModel],
+			getAuthCheckError: () => undefined,
 		} as unknown as Parameters<typeof resolveModelScopeWithDiagnostics>[1];
 
 		const result = await resolveModelScopeWithDiagnostics(["custom/bracketed-model[1m]"], registry);
@@ -308,6 +315,8 @@ describe("resolveModelScopeWithDiagnostics", () => {
 		};
 		const registry = {
 			getAvailable: () => [...allModels, bracketedModel],
+			getModels: () => [...allModels, bracketedModel],
+			getAuthCheckError: () => undefined,
 		} as unknown as Parameters<typeof resolveModelScopeWithDiagnostics>[1];
 
 		const result = await resolveModelScopeWithDiagnostics(["custom/bracketed-model[1m]:high"], registry);
@@ -706,6 +715,32 @@ describe("resolveCliModel", () => {
 });
 
 describe("default model selection", () => {
+	test("retains saved and scoped provider selections when that provider's auth check fails", async () => {
+		const registry = {
+			getAvailable: async () => [mockModels[1]],
+			getAvailableSnapshot: () => [mockModels[1]],
+			getModels: () => mockModels,
+			getModel: () => mockModels[0],
+			hasConfiguredAuth: () => false,
+			getAuthCheckError: (provider: string) => (provider === "anthropic" ? new Error("auth failed") : undefined),
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
+		const initial = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: "anthropic",
+			defaultModelId: mockModels[0].id,
+			modelRuntime: registry,
+		});
+		expect(initial.model?.provider).toBe("anthropic");
+		expect(
+			(await restoreModelFromSession("anthropic", mockModels[0].id, mockModels[1], false, registry)).model?.provider,
+		).toBe("anthropic");
+		expect(
+			(await resolveModelScopeWithDiagnostics(["anthropic/*"], registry)).scopedModels.map(
+				(entry) => entry.model.provider,
+			),
+		).toEqual(["anthropic"]);
+	});
 	test("openai defaults track current models", () => {
 		expect(defaultModelPerProvider.openai).toBe("gpt-5.5");
 		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-6.1-sol");
@@ -816,6 +851,7 @@ describe("default model selection", () => {
 					? savedDeepSeekModel
 					: undefined,
 			hasConfiguredAuth: (provider: string) => provider === "spark-two",
+			getAuthCheckError: () => undefined,
 			getAvailableSnapshot: () => [localDeepSeekModel],
 		} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
 

@@ -353,6 +353,12 @@ export interface Models {
 }
 
 export interface MutableModels extends Models {
+	/** Global availability plus provider-local auth diagnostics. Storage failures still reject. */
+	getAvailability(options?: AuthOperationOptions): Promise<{
+		available: readonly Model<Api>[];
+		auth: ReadonlyMap<string, AuthCheck | undefined>;
+		errors: ReadonlyMap<string, Error>;
+	}>;
 	/** Upsert/replace by provider.id. Provider ids are unique. */
 	setProvider(provider: Provider): void;
 	deleteProvider(id: string): void;
@@ -679,7 +685,11 @@ class ModelsImpl implements MutableModels {
 		return raceWithAbortSignal(check, signal);
 	}
 
-	private async getAuthenticatedProviders(providerId: string | undefined, signal: AbortSignal) {
+	private async getAuthenticatedProviders(
+		providerId: string | undefined,
+		signal: AbortSignal,
+		errors = new Map<string, Error>(),
+	) {
 		signal.throwIfAborted();
 		const providers = providerId
 			? [this.providers.get(providerId)].filter((entry) => entry !== undefined)
@@ -687,17 +697,43 @@ class ModelsImpl implements MutableModels {
 		const checks = await Promise.all(
 			providers.map(async (provider) => {
 				const credential = await this.readCredential(provider.id, signal);
-				return { provider, credential, auth: await this.checkProviderAuth(provider, credential, signal) };
+				let auth: AuthCheck | undefined;
+				try {
+					auth = await this.checkProviderAuth(provider, credential, signal);
+				} catch (error) {
+					signal.throwIfAborted();
+					if (providerId !== undefined) throw error;
+					errors.set(provider.id, error instanceof Error ? error : new Error(String(error)));
+				}
+				return { provider, credential, auth };
 			}),
 		);
-		return checks.filter((entry) => entry.auth !== undefined);
+		return checks;
+	}
+
+	getAvailability(options?: AuthOperationOptions) {
+		const signal = operationSignal(options?.signal);
+		return raceWithAbortSignal(
+			(async () => {
+				const errors = new Map<string, Error>();
+				const checks = await this.getAuthenticatedProviders(undefined, signal, errors);
+				const available = checks.flatMap(({ provider, credential, auth }) => {
+					if (!auth) return [];
+					const models = provider.getModels();
+					return provider.filterModels?.(models, credential) ?? models;
+				});
+				return { available, auth: new Map(checks.map(({ provider, auth }) => [provider.id, auth])), errors };
+			})(),
+			signal,
+		);
 	}
 
 	getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]> {
 		const signal = operationSignal(options?.signal);
 		const available = (async () => {
 			const providers = await this.getAuthenticatedProviders(providerId, signal);
-			return providers.flatMap(({ provider, credential }) => {
+			return providers.flatMap(({ provider, credential, auth }) => {
+				if (!auth) return [];
 				const models = provider.getModels();
 				return provider.filterModels?.(models, credential) ?? models;
 			});
@@ -719,7 +755,8 @@ class ModelsImpl implements MutableModels {
 		const signal = operationSignal(options?.signal);
 		const available = (async () => {
 			const providers = await this.getAuthenticatedProviders(providerId, signal);
-			return providers.flatMap(({ provider, credential }) => {
+			return providers.flatMap(({ provider, credential, auth }) => {
+				if (!auth) return [];
 				const models = provider.getAllModels?.() ?? provider.getModels();
 				if (provider.filterAllModels) return provider.filterAllModels(models, credential);
 				if (!provider.filterModels) return models;

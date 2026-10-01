@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed a provider's auth-check failure hiding healthy providers; global availability now exposes provider-local diagnostics.
+- Fixed optional null tool arguments inside schema unions being coerced into values instead of omitted.
+- Fixed retained Codex payload objects mutating the cached continuation baseline.
+- Fixed failed Responses streams losing terminal usage, response IDs, and error details.
+- Fixed `NO_PROXY` exclusions not matching trailing DNS root dots.
+- Fixed fractional and overflowed zero retry delays becoming 60-second delays.
+- Fixed catalog generation reintroducing unsupported minimal reasoning for GPT-6.1 Sol.
+- Fixed context estimates omitting thinking and tool-call signatures.
+- Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
+- Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
+
 ## [1.0.0] - 2026-10-01
 
 ### Added

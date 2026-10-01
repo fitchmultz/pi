@@ -151,6 +151,12 @@ async function* createFailedEvents(): AsyncIterable<ResponseStreamEvent> {
 			id: "resp_failed",
 			status: "failed",
 			error: { code: "server_error", message: "boom" },
+			usage: {
+				input_tokens: 20,
+				output_tokens: 7,
+				total_tokens: 27,
+				input_tokens_details: { cached_tokens: 2 },
+			},
 		},
 	} as ResponseStreamEvent;
 }
@@ -445,5 +451,7 @@ describe("OpenAI Responses terminal event handling", () => {
 			"server_error: boom",
 		);
 		expect(output.rawStopReason).toBe("failed");
+		expect(output.responseId).toBe("resp_failed");
+		expect(output.usage).toMatchObject({ input: 18, output: 7, cacheRead: 2, totalTokens: 27 });
 	});
 });

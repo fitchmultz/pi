@@ -550,7 +550,10 @@ export async function processResponsesStream<TApi extends Api>(
 		}
 	};
 	const finalizeResponse = (
-		response: Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>["response"],
+		response: Extract<
+			ResponseStreamEvent,
+			{ type: "response.completed" | "response.incomplete" | "response.failed" }
+		>["response"],
 	): void => {
 		sawTerminalResponseEvent = true;
 		backfillReasoningSignatures(response.output ?? []);
@@ -745,8 +748,7 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "error") {
 			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
 		} else if (event.type === "response.failed") {
-			sawTerminalResponseEvent = true;
-			output.rawStopReason = event.response?.status;
+			finalizeResponse(event.response);
 			const error = event.response?.error;
 			const details = event.response?.incomplete_details;
 			const msg = error
