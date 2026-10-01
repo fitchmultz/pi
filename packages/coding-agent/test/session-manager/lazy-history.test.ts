@@ -254,6 +254,25 @@ it.each([
 	}
 });
 
+it("preserves exact UTF-16 metadata strings on append and reload", () => {
+	const { source, manager } = fixture();
+	const provider = `provider-${"x".repeat(20)}-\ud800`;
+	const model = `model-${"雪".repeat(20)}-\udfff`;
+	const text = `${"a".repeat(13)} 雪 \ud800 lone \udfff ${"text ".repeat(1000)}`;
+	const setting = manager.appendModelChange(provider, model);
+	const message = manager.appendMessage({ role: "user", content: text, timestamp: 1 });
+	const bytes = readFileSync(source);
+	for (const view of [manager, SessionManager.open(source)]) {
+		expect(view.getEntryMetadata(setting)).toMatchObject({ provider, modelId: model });
+		expect(view.getEntryMetadata(message)).toMatchObject({ preview: text.slice(0, 256) });
+		expect(view.buildSessionContext()).toMatchObject({
+			model: { provider, modelId: model },
+			messages: [{ role: "user", content: text }],
+		});
+	}
+	expect(readFileSync(source)).toEqual(bytes);
+});
+
 it.each(["toString", "constructor", "__proto__"])("preserves an own %s field when branching", (key) => {
 	const { directory, source, manager, id } = fixture();
 	const expected = {

@@ -263,6 +263,10 @@ export type SessionEntryMetadata = Readonly<
 export interface SessionMetadataQuery {
 	/** Omitted: physical journal order. String: root-to-entry ancestry. Null: empty branch. */
 	branchFrom?: string | null;
+	/** Visit newest entries first. Stop iteration early to avoid visiting older history. */
+	reverse?: boolean;
+	/** Maximum entries to visit, a non-negative safe integer. Omitted: no limit. */
+	limit?: number;
 }
 
 const metadataByEntry = new WeakMap<object, SessionEntryMetadata>();
@@ -409,6 +413,7 @@ function metadataProjection(): JsonProjectionOptions {
 	let messageHasText = false;
 	let customHasText = false;
 	return {
+		detachStrings: true,
 		onStart: () => {
 			blockHasText = messageHasText = customHasText = false;
 		},
@@ -548,6 +553,8 @@ function entryMetadata(raw: SessionEntry | Record<string, unknown>, sequence: nu
 	} else if (entry.type === "context_edit") {
 		result.omitted = entry.replacement === null;
 	}
+	if (typeof result.preview === "string" && result.preview.length >= 13)
+		result.preview = Buffer.from(result.preview, "utf16le").toString("utf16le");
 	for (const owner of [result, result.message as Record<string, unknown> | undefined]) {
 		if (!owner) continue;
 		if (owner.usage && typeof owner.usage === "object") {
@@ -658,6 +665,7 @@ export type ReadonlySessionManager = Pick<
 	| "iterateEntryMetadata"
 	| "getLabel"
 	| "getBranch"
+	| "getBranchState"
 	| "buildContextEntries"
 	| "buildSessionProjection"
 	| "getHeader"
@@ -839,6 +847,35 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
 	return { thinkingLevel, model };
 }
 
+interface SessionPathIndex {
+	revision: number;
+	leafId: string | null;
+	entries: SessionEntry[];
+	positions: Map<string, number>;
+	compactionIndex: number;
+	firstKeptIndex: number;
+	modelIndex: number;
+	thinkingIndex: number;
+}
+
+function extendSessionPath(path: SessionPathIndex, entry: SessionEntry): void {
+	const index = path.entries.length;
+	path.entries.push(entry);
+	path.positions.set(entry.id, index);
+	if (entry.type === "compaction") {
+		path.compactionIndex = index;
+		path.firstKeptIndex = path.positions.get(entry.firstKeptEntryId) ?? index;
+	} else if (entry.type === "thinking_level_change") {
+		path.thinkingIndex = index;
+	} else if (entry.type === "model_change") {
+		path.modelIndex = index;
+	} else if (entry.type === "message") {
+		const metadata = metadataByEntry.get(entry);
+		const role = metadata?.type === "message" ? metadata.message.role : entry.message.role;
+		if (role === "assistant") path.modelIndex = index;
+	}
+}
+
 /**
  * Project one selected session entry into LLM/runtime messages.
  * Plain custom entries are display/state entries and do not participate in context.
@@ -903,20 +940,19 @@ export function buildContextEntries(
 		return path;
 	}
 
-	const contextEntries: SessionEntry[] = [compaction];
-	let foundFirstKept = false;
-	for (let i = 0; i < compactionIdx; i++) {
-		const entry = path[i];
-		if (entry.id === compaction.firstKeptEntryId) {
-			foundFirstKept = true;
-		}
-		const metadata = getSessionEntryMetadata(entry);
-		if (foundFirstKept && !(metadata.type === "message" && metadata.message.role === "system")) {
-			contextEntries.push(entry);
-		}
+	const firstKeptIndex = path.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
+	return contextEntriesFromPath(path, compactionIdx, firstKeptIndex < 0 ? compactionIdx : firstKeptIndex);
+}
+
+function contextEntriesFromPath(path: SessionEntry[], compactionIndex: number, firstKeptIndex: number): SessionEntry[] {
+	if (compactionIndex < 0) return path.slice();
+	const entries = [path[compactionIndex]];
+	for (let i = firstKeptIndex; i < compactionIndex; i++) {
+		const metadata = getSessionEntryMetadata(path[i]);
+		if (!(metadata.type === "message" && metadata.message.role === "system")) entries.push(path[i]);
 	}
-	contextEntries.push(...path.slice(compactionIdx + 1));
-	return contextEntries;
+	for (let i = compactionIndex + 1; i < path.length; i++) entries.push(path[i]);
+	return entries;
 }
 
 /**
@@ -956,6 +992,14 @@ export function buildSessionProjection(
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
 	const contextEntries = buildContextEntries(entries, leafId, byId);
+	return projectSessionEntries(contextEntries, thinkingLevel, model);
+}
+
+function projectSessionEntries(
+	contextEntries: SessionEntry[],
+	thinkingLevel: string,
+	model: SessionContext["model"],
+): SessionProjection {
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
@@ -1399,6 +1443,9 @@ export class SessionManager {
 	private fileEntries: FileEntry[] = [];
 	private entriesRevision = 0;
 	private byId: Map<string, SessionEntry> = new Map();
+	private entrySequences = new WeakMap<SessionEntry, number>();
+	private usageByContribution = new Map<string, UsageEntry>();
+	private activePath: SessionPathIndex | undefined;
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
@@ -1508,6 +1555,9 @@ export class SessionManager {
 		this.projectionRecordBytes = 0;
 		this.entriesRevision++;
 		this.byId.clear();
+		this.entrySequences = new WeakMap();
+		this.usageByContribution.clear();
+		this.activePath = undefined;
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
@@ -1810,6 +1860,7 @@ export class SessionManager {
 		this.projectionRecords.clear();
 		this.projectionRecordBytes = 0;
 		this.projectionSource = undefined;
+		this.activePath = undefined;
 		for (let i = 0; i < this.fileEntries.length; i++) {
 			const entry = this.fileEntries[i]!;
 			const record = saved.get(entry.id)?.pop();
@@ -1823,8 +1874,7 @@ export class SessionManager {
 				continue;
 			}
 			const view = this._entryView(record, i);
-			this.fileEntries[i] = view;
-			if (view.type !== "session") this.byId.set(view.id, view);
+			this._replaceEntry(i, view);
 		}
 		this.leafId = leaf;
 		this._reuseJournalHandle(previousSource, source);
@@ -1832,13 +1882,24 @@ export class SessionManager {
 
 	private _buildIndex(): void {
 		this.entriesRevision++;
+		this.activePath = undefined;
 		this.byId.clear();
+		this.entrySequences = new WeakMap();
+		this.usageByContribution.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
-		for (const entry of this.fileEntries) {
+		for (let sequence = 0; sequence < this.fileEntries.length; sequence++) {
+			const entry = this.fileEntries[sequence];
 			if (entry.type === "session") continue;
 			this.byId.set(entry.id, entry);
+			if (!metadataByEntry.has(entry)) this.entrySequences.set(entry, sequence - 1);
+			if (
+				entry.type === "usage" &&
+				entry.contributionId !== undefined &&
+				!this.usageByContribution.has(entry.contributionId)
+			)
+				this.usageByContribution.set(entry.contributionId, entry);
 			this.leafId = entry.id;
 			if (entry.type === "label") {
 				if (entry.label) {
@@ -2047,7 +2108,8 @@ export class SessionManager {
 		this.failedAppendIndex = this.fileEntries.length - 1;
 		// Isolate this entry from another writer's partial record.
 		const json = JSON.stringify(entry);
-		pendingRecordDigests.set(entry, createHash("sha256").update(json).digest("hex"));
+		const digest = createHash("sha256").update(json).digest("hex");
+		pendingRecordDigests.set(entry, digest);
 		this._refreshJournal();
 		const before = statSync(this.sessionFile);
 		appendFileSync(this.sessionFile, `\n${json}\n`);
@@ -2078,19 +2140,50 @@ export class SessionManager {
 				line: 0,
 				value: projection.finish() as Record<string, unknown>,
 				fields: projection.fields,
-				digest: createHash("sha256").update(json).digest("hex"),
+				digest,
 			};
 			const view = this._entryView(record, this.fileEntries.length - 1) as SessionEntry;
-			this.fileEntries[this.fileEntries.length - 1] = view;
-			this.byId.set(view.id, view);
+			this._replaceEntry(this.fileEntries.length - 1, view);
 		}
 	}
 
+	/** Publication replaces a dirty entry with its lazy view without retaining the dirty body. */
+	private _replaceEntry(sequence: number, view: FileEntry): void {
+		const previous = this.fileEntries[sequence];
+		this.fileEntries[sequence] = view;
+		if (view.type === "session") return;
+		this.byId.set(view.id, view);
+		if (
+			view.type === "usage" &&
+			view.contributionId !== undefined &&
+			this.usageByContribution.get(view.contributionId) === previous
+		)
+			this.usageByContribution.set(view.contributionId, view);
+		const path = this.activePath;
+		const position = path?.positions.get(view.id);
+		if (path && position !== undefined && path.entries[position] === previous) path.entries[position] = view;
+	}
+
 	private _appendEntry(entry: SessionEntry): void {
+		const path = this.activePath;
+		if (path && (path.revision !== this.entriesRevision || path.leafId !== entry.parentId))
+			this.activePath = undefined;
 		this.fileEntries.push(entry);
 		this.entriesRevision++;
 		this.byId.set(entry.id, entry);
+		this.entrySequences.set(entry, this.fileEntries.length - 2);
+		if (
+			entry.type === "usage" &&
+			entry.contributionId !== undefined &&
+			!this.usageByContribution.has(entry.contributionId)
+		)
+			this.usageByContribution.set(entry.contributionId, entry);
 		this.leafId = entry.id;
+		if (this.activePath) {
+			extendSessionPath(this.activePath, entry);
+			this.activePath.revision = this.entriesRevision;
+			this.activePath.leafId = this.leafId;
+		}
 		if (entry.type === "label") {
 			if (entry.label) {
 				this.labelsById.set(entry.targetId, entry.label);
@@ -2180,10 +2273,9 @@ export class SessionManager {
 				throw new Error("Usage tokens and costs must be finite non-negative numbers");
 			// Snapshot persisted JSON, including omission of optional undefined fields.
 			usage = JSON.parse(JSON.stringify(usage)) as Usage;
-			const existing = this.fileEntries.find(
-				(entry) => entry.type === "usage" && entry.contributionId === contributionId,
-			);
-			if (existing?.type === "usage") {
+			this._refreshJournal();
+			const existing = this.usageByContribution.get(contributionId);
+			if (existing) {
 				if (
 					!isDeepStrictEqual(
 						{
@@ -2391,21 +2483,43 @@ export class SessionManager {
 	getEntryMetadata(id: string): SessionEntryMetadata | undefined {
 		this._refreshJournal();
 		const entry = this.byId.get(id);
-		return entry
-			? (metadataByEntry.get(entry) ?? entryMetadata(entry, this.fileEntries.indexOf(entry) - 1))
-			: undefined;
+		return entry ? (metadataByEntry.get(entry) ?? entryMetadata(entry, this.entrySequences.get(entry)!)) : undefined;
 	}
 
 	*iterateEntryMetadata(query: SessionMetadataQuery = {}): Iterable<SessionEntryMetadata> {
+		if (query.limit !== undefined && (!Number.isSafeInteger(query.limit) || query.limit < 0))
+			throw new Error("Session metadata limit must be a non-negative safe integer");
 		this._refreshJournal();
+		let remaining = query.limit ?? Infinity;
+		if (remaining === 0 || query.branchFrom === null) return;
+		let entries: FileEntry[];
+		let end: number;
 		if (query.branchFrom !== undefined) {
-			if (query.branchFrom === null) return;
-			for (const entry of this.getBranch(query.branchFrom)) yield getSessionEntryMetadata(entry);
-		} else {
-			for (let sequence = 1; sequence < this.fileEntries.length; sequence++) {
-				const entry = this.fileEntries[sequence]!;
-				if (entry.type !== "session") yield metadataByEntry.get(entry) ?? entryMetadata(entry, sequence - 1);
+			const path = this._getActivePath();
+			const position = path.positions.get(query.branchFrom);
+			if (position === undefined && query.reverse) {
+				let entry = this.byId.get(query.branchFrom);
+				while (entry && remaining-- > 0) {
+					yield metadataByEntry.get(entry) ?? entryMetadata(entry, this.entrySequences.get(entry)!);
+					entry = entry.parentId ? this.byId.get(entry.parentId) : undefined;
+				}
+				return;
 			}
+			entries = position === undefined ? this.getBranch(query.branchFrom) : path.entries;
+			end = position === undefined ? entries.length : position + 1;
+		} else {
+			entries = this.fileEntries;
+			end = entries.length;
+		}
+		for (
+			let index = query.reverse ? end - 1 : 0;
+			index >= 0 && index < end && remaining > 0;
+			index += query.reverse ? -1 : 1
+		) {
+			const entry = entries[index];
+			if (entry.type === "session") continue;
+			remaining--;
+			yield metadataByEntry.get(entry) ?? entryMetadata(entry, this.entrySequences.get(entry)!);
 		}
 	}
 
@@ -2457,15 +2571,48 @@ export class SessionManager {
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
 		this._refreshJournal();
-		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
-		let current = startId ? this.byId.get(startId) : undefined;
-		while (current) {
-			path.push(current);
-			current = current.parentId ? this.byId.get(current.parentId) : undefined;
-		}
-		path.reverse();
+		const active = this._getActivePath();
+		const position = startId ? active.positions.get(startId) : undefined;
+		if (position !== undefined) return active.entries.slice(0, position + 1);
+		return buildSessionPath([], startId, this.byId);
+	}
+
+	private _getActivePath(): SessionPathIndex {
+		if (this.activePath?.revision === this.entriesRevision && this.activePath.leafId === this.leafId)
+			return this.activePath;
+		const path: SessionPathIndex = {
+			revision: this.entriesRevision,
+			leafId: this.leafId,
+			entries: [],
+			positions: new Map(),
+			compactionIndex: -1,
+			firstKeptIndex: -1,
+			modelIndex: -1,
+			thinkingIndex: -1,
+		};
+		for (const entry of buildSessionPath([], this.leafId, this.byId)) extendSessionPath(path, entry);
+		this.activePath = path;
 		return path;
+	}
+
+	/**
+	 * O(1) after the first path query following navigation/reload.
+	 * Context starts at the newest compaction (including a retain-none reset), otherwise the root.
+	 * An assistant message, not just model_change, can supply the latest model.
+	 */
+	getBranchState(): {
+		contextStartId: string | null;
+		modelEntryId: string | null;
+		thinkingLevelEntryId: string | null;
+	} {
+		this._refreshJournal();
+		const path = this._getActivePath();
+		return {
+			contextStartId: path.entries[Math.max(0, path.compactionIndex)]?.id ?? null,
+			modelEntryId: path.entries[path.modelIndex]?.id ?? null,
+			thinkingLevelEntryId: path.entries[path.thinkingIndex]?.id ?? null,
+		};
 	}
 
 	/**
@@ -2473,7 +2620,9 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildContextEntries(): SessionEntry[] {
-		return buildContextEntries(this.getEntries(), this.leafId, this.byId);
+		this._refreshJournal();
+		const path = this._getActivePath();
+		return contextEntriesFromPath(path.entries, path.compactionIndex, path.firstKeptIndex);
 	}
 
 	/**
@@ -2484,7 +2633,10 @@ export class SessionManager {
 		const bodies = new Map<FileEntry, Record<string, unknown>>();
 		this.projectionBodies = bodies;
 		try {
-			const entries = this.getEntries();
+			this._refreshJournal();
+			const path = this._getActivePath();
+			const modelEntry = path.entries[path.modelIndex];
+			const thinkingEntry = path.entries[path.thinkingIndex];
 			const source = this.journalSource;
 			const cached = this.projectionSource;
 			if (
@@ -2498,17 +2650,6 @@ export class SessionManager {
 					source.ctimeMs !== cached.ctimeMs)
 			) {
 				const selected = new Set<FileEntry>(this.projectionRecords.keys());
-				let modelEntry: SessionEntry | undefined;
-				let thinkingEntry: SessionEntry | undefined;
-				for (const entry of buildSessionPath(entries, this.leafId, this.byId)) {
-					const metadata = getSessionEntryMetadata(entry);
-					if (
-						metadata.type === "model_change" ||
-						(metadata.type === "message" && metadata.message.role === "assistant")
-					)
-						modelEntry = entry;
-					if (metadata.type === "thinking_level_change") thinkingEntry = entry;
-				}
 				// Settings can precede compaction and need certification even without cached bodies.
 				for (const entry of [this.getHeader(), modelEntry, thinkingEntry]) if (entry) selected.add(entry);
 				verifyJournalRecords(
@@ -2519,7 +2660,14 @@ export class SessionManager {
 					}),
 				);
 			}
-			const projection = buildSessionProjection(entries, this.leafId, this.byId);
+			const { thinkingLevel, model } = getSessionContextSettings(
+				[modelEntry, thinkingEntry].filter((entry) => entry !== undefined),
+			);
+			const projection = projectSessionEntries(
+				contextEntriesFromPath(path.entries, path.compactionIndex, path.firstKeptIndex),
+				thinkingLevel,
+				model,
+			);
 			this._refreshJournal();
 			this.projectionSource = this.journalSource ? { ...this.journalSource } : undefined;
 			return projection;
