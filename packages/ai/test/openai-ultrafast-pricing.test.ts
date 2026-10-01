@@ -11,12 +11,20 @@ afterEach(() => vi.unstubAllGlobals());
 // #155: the terminal response, not the request or an earlier event, confirms Ultrafast.
 describe.each(["responses", "codex-sse", "codex-websocket"] as const)("Ultrafast pricing (%s)", (transport) => {
 	it.each([
-		["gpt-6-astra", "ultrafast", 6],
-		["gpt-6-astra", undefined, 1],
-		["gpt-6-astra", "default", 1],
-		["gpt-6-astra", "unknown", 1],
-		["gpt-6-sol-preview", "ultrafast", 1],
-	] as const)("prices %s with returned tier %s at %sx", async (id, tier, multiplier) => {
+		["gpt-6-astra", "ultrafast", 6, "ultrafast"],
+		["gpt-6-astra", undefined, 1, "ultrafast"],
+		["gpt-6-astra", "default", 1, "ultrafast"],
+		["gpt-6-astra", "unknown", 1, "ultrafast"],
+		["gpt-6-sol-preview", "ultrafast", 1, "ultrafast"],
+		["gpt-6-astra", "fast", 2, "ultrafast"],
+		["gpt-5.5", "fast", 2.5, "ultrafast"],
+		...(transport === "responses"
+			? []
+			: ([
+					["gpt-6-astra", "default", 2, "fast"],
+					["gpt-6-astra", undefined, 2, "fast"],
+				] as const)),
+	] as const)("prices %s with returned tier %s at %sx (requested %s)", async (id, tier, multiplier, requestTier) => {
 		const events = [
 			{ type: "response.created", response: { id: "offline", service_tier: "ultrafast" } },
 			{
@@ -73,7 +81,7 @@ describe.each(["responses", "codex-sse", "codex-websocket"] as const)("Ultrafast
 				? responsesStream(
 						{ ...base, api: "openai-responses", provider: "openai" } satisfies Model<"openai-responses">,
 						normalizeContext({ messages: [] }),
-						{ apiKey: "sk-test", fetch, serviceTier: "ultrafast" },
+						{ apiKey: "sk-test", fetch, serviceTier: requestTier },
 					)
 				: codexStream(
 						{
@@ -85,7 +93,7 @@ describe.each(["responses", "codex-sse", "codex-websocket"] as const)("Ultrafast
 						{
 							apiKey: token,
 							fetch,
-							serviceTier: "ultrafast",
+							serviceTier: requestTier,
 							transport: transport === "codex-sse" ? "sse" : "websocket",
 							env: {},
 						},

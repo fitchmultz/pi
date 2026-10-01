@@ -15,6 +15,7 @@
 ### Fixed
 
 - Fixed confirmed GPT-6 Astra Ultrafast cost estimates in OpenAI and legacy Codex Responses, including cached input and long-context pricing.
+- Fixed legacy Codex Responses Fast cost estimates to match priority pricing.
 - Fixed dotted Claude IDs from bundled and refreshed Cloudflare AI Gateway catalogs being sent unchanged to the `/anthropic` passthrough.
 
 ## [1.0.0] - 2026-10-01
