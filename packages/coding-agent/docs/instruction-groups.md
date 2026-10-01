@@ -5,10 +5,16 @@ Calling it without arguments lists available instruction groups. Calling it with
 `{ "enable": ["browser"] }` returns the group's **full** owner-provided instructions.
 Listing alone does not enable a group. Only subsequent model turns can use its tools.
 
-Discovery hides grouped declarations until enabled, but never changes permissions:
-it does not activate optional tools, bypass `--tools` or exclusions, change exposure,
-or make hidden tools callable. Available groups have at least one tool in the
-permitted declared or callable loadout. Direct and nested calls share the read gate.
+At prompt start, discovery deactivates selected tools in groups not yet enabled.
+Enabling restores only those previously selected tools for the next request; it does
+not activate optional tools, bypass `--tools` or exclusions, change exposure, or make
+hidden tools callable. Declarations are added at that request's position, preserving
+the earlier cache prefix instead of unhiding historical declarations. Available
+groups have at least one previously selected or callable tool. Direct and nested
+calls share the read gate.
+
+Suppression runs at prompt starts; another extension can add a tool mid-batch, which
+is a positional declaration change and does not rewrite the earlier cache prefix.
 `discover_tools` is model-only, so codemode cannot call it internally.
 
 The CLI loads this builtin by default. Disable it with `--exclude-tools discover_tools`,
@@ -74,12 +80,13 @@ must implement the collector contract to manage owners; otherwise owners remain 
 
 ## Persistence and request boundaries
 
-Only enabled names are stored in custom `pi:instruction-groups` session entries.
+Enabled names and the temporarily inactive selected tools are stored in custom
+`pi:instruction-groups` session entries.
 Full text is returned by discovery and appended to the system prompt on subsequent
 runs. Startup, resume, reload, and tree navigation replay the selected raw branch,
 not compacted context or abandoned branches. Requests consume only newly appended
 entries through public session APIs, without a full-history walk on every request.
-Declaration recalculation preserves active tool names and callable permissions.
+Replaying this state restores the same selection without activating optional tools.
 
 After compaction, a request-local hidden custom message is inserted immediately
 after the latest compaction summary. It restores full instructions for groups enabled

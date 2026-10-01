@@ -102,7 +102,8 @@ describe("on-demand instruction groups", () => {
 				(context) => {
 					expect(JSON.stringify(context.messages)).toContain(full);
 					expect(getCurrentTools(context.messages).map((tool) => tool.name)).toContain("browse");
-					for (const name of ["browse", "nested", "codemode"])
+					expect(JSON.stringify(getToolResult(harness, "browse").content)).toContain("not found");
+					for (const name of ["nested", "codemode"])
 						expect(JSON.stringify(getToolResult(harness, name).content)).toContain("prior turn");
 					expect(getToolResult(harness, "plain")).toMatchObject({
 						isError: false,
@@ -124,7 +125,10 @@ describe("on-demand instruction groups", () => {
 				expect(getToolResult(harness, name).isError).toBe(false);
 				expect(JSON.stringify(getToolResult(harness, name).content)).toContain("acted");
 			}
-			expect(harness.session.getActiveToolNames()).toEqual(active);
+			expect(harness.session.getActiveToolNames()).toEqual([
+				...active.filter((name) => name !== "browse"),
+				"browse",
+			]);
 			expect(harness.session.getCallableToolNames()).toEqual(callable);
 			expect(active).not.toContain("optional");
 			expect(callable).not.toContain("hidden");
@@ -155,7 +159,9 @@ describe("on-demand instruction groups", () => {
 		]);
 		await harness.session.prompt("list and invalid enables");
 		expect(getToolResult(harness, "discover_tools").isError).toBe(true);
-		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "custom")).toEqual([]);
+		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "custom")).toMatchObject([
+			{ data: { enabled: [], inactive: ["browse"] } },
+		]);
 	});
 
 	it("respects exclusions and allowlists, and keeps owners eager when discovery is inactive", async () => {
@@ -265,6 +271,16 @@ describe("on-demand instruction groups", () => {
 		harness.setResponses([done()]);
 		await harness.session.prompt("before");
 		const before = harness.sessionManager.getLeafId()!;
+		const pending = await setup({
+			sessionManager: SessionManager.inMemory(harness.tempDir, undefined, [
+				harness.sessionManager.getHeader()!,
+				...harness.sessionManager.getBranch(),
+			]),
+		});
+		pending.setResponses([discover(), done()]);
+		await pending.session.prompt("enable after resume");
+		expect(pending.session.getActiveToolNames()).toContain("browse");
+		expect(pending.session.getActiveToolNames()).not.toContain("optional");
 		harness.setResponses([discover(), done()]);
 		await harness.session.prompt("enable");
 		const after = harness.sessionManager.getLeafId()!;
@@ -277,6 +293,7 @@ describe("on-demand instruction groups", () => {
 			},
 		]);
 		await harness.session.prompt("old branch");
+		expect(harness.session.getActiveToolNames()).not.toContain("browse");
 		await harness.session.navigateTree(after);
 		harness.setResponses([
 			(context) => {
@@ -303,6 +320,7 @@ describe("on-demand instruction groups", () => {
 		]);
 		await restored.session.prompt("resumed");
 		expect(getToolResult(restored, "browse").isError).toBe(false);
+		expect(restored.session.getActiveToolNames()).not.toContain("optional");
 	});
 
 	it("repairs only groups enabled at each compaction boundary, including after resume", async () => {

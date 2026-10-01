@@ -22,6 +22,7 @@ const repairType = "pi:instruction-groups:compaction";
 export default function instructionGroups(pi: ExtensionAPI): void {
 	const groups = new Map<string, InstructionGroup>();
 	const enabled = new Set<string>();
+	const inactive = new Set<string>();
 	const ready = new Set<string>();
 	let permitted = new Set<string>();
 	let processedLeaf: string | null = null;
@@ -51,14 +52,21 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		for (const entry of pending.reverse()) {
 			if (entry.type === "compaction") {
 				boundary = { names: new Set(enabled), timestamp: Date.parse(entry.timestamp) };
-			} else if (entry.type === "custom" && entry.customType === stateType && Array.isArray(entry.data)) {
-				for (const name of entry.data) if (typeof name === "string") enabled.add(name);
+			} else if (entry.type === "custom" && entry.customType === stateType) {
+				const data = entry.data as { enabled?: unknown; inactive?: unknown } | null;
+				if (Array.isArray(data?.enabled))
+					for (const name of data.enabled) if (typeof name === "string") enabled.add(name);
+				if (Array.isArray(data?.inactive)) {
+					inactive.clear();
+					for (const name of data.inactive) if (typeof name === "string") inactive.add(name);
+				}
 			}
 		}
 		processedLeaf = leaf;
 	};
 	const restore = (ctx: ExtensionContext) => {
 		enabled.clear();
+		inactive.clear();
 		ready.clear();
 		boundary = undefined;
 		processedLeaf = null;
@@ -70,16 +78,17 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		name: "discover_tools",
 		label: "Discover instructions",
 		description:
-			"List available instruction groups, or enable groups to read their FULL instructions. Enabling never activates tools. Read the result before calling a group's tools in a later turn.",
+			"List available instruction groups, or enable groups to read their FULL instructions and restore their previously selected tools for the next request. Read the result before calling a group's tools in a later turn.",
 		exposure: "model-only",
 		parameters: Type.Object({ enable: Type.Optional(Type.Array(Type.String(), { uniqueItems: true })) }),
 		prepareLoadout(loadout) {
-			permitted = new Set([...loadout.declared, ...loadout.callable].map((tool) => tool.name));
-			return {
-				hiddenDeclarations: available()
-					.filter((group) => !enabled.has(group.name))
-					.flatMap((group) => group.tools),
-			};
+			const registered = new Set(loadout.registered.map((tool) => tool.name));
+			permitted = new Set([
+				...loadout.declared.map((tool) => tool.name),
+				...loadout.callable.map((tool) => tool.name),
+				...[...inactive].filter((name) => registered.has(name)),
+			]);
+			return undefined;
 		},
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const candidates = available();
@@ -91,12 +100,11 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 			const selected = candidates.filter((group) => requested.has(group.name));
 			const text = selected.map((group) => section(group, ctx)).join("\n\n");
 			if (selected.length) {
-				pi.appendEntry(
-					stateType,
-					selected.map((group) => group.name),
-				);
+				const restored = selected.flatMap((group) => group.tools.filter((name) => inactive.has(name)));
+				for (const name of restored) inactive.delete(name);
+				pi.appendEntry(stateType, { enabled: selected.map((group) => group.name), inactive: [...inactive] });
 				replay(ctx);
-				pi.setActiveTools(pi.getActiveTools());
+				pi.setActiveTools([...pi.getActiveTools(), ...restored]);
 			}
 			return {
 				content: [
@@ -139,8 +147,23 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 	pi.on("session_tree", (_event, ctx) => restore(ctx));
 	pi.on("turn_start", () => ready.clear());
 	pi.on("before_agent_start", (event, ctx) => {
+		// ponytail: prompt-start suppression only; use a loadout-selection hook if mid-batch suppression is needed.
 		if (!isManaged()) return;
 		replay(ctx);
+		const pending = new Set(
+			available()
+				.filter((group) => !enabled.has(group.name))
+				.flatMap((group) => group.tools),
+		);
+		const active = pi.getActiveTools();
+		const deferred = active.filter((name) => pending.has(name));
+		if (deferred.length) {
+			for (const name of deferred) inactive.add(name);
+			pi.appendEntry(stateType, { enabled: [], inactive: [...inactive] });
+			replay(ctx);
+			pi.setActiveTools(active.filter((name) => !pending.has(name)));
+			event.systemPromptOptions.selectedTools = pi.getActiveTools();
+		}
 		const text = available()
 			.filter((group) => enabled.has(group.name))
 			.map((group) => section(group, ctx))
