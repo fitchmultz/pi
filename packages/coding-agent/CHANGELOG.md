@@ -21,6 +21,8 @@
 
 ### Fixed
 
+- Fixed repeated persisted-history parsing during requests and idle background-job polling, with a bounded active-body cache, isolated projections, and source-change validation after local appends.
+- Fixed model selection querying the catalog once per saved response ([#10198](https://github.com/earendil-works/pi/issues/10198)) and quadratic merging of refreshed remote catalogs.
 - Fixed lazy tool registration losing permitted saved selections across resume or unrelated tool activation, while preserving deselection and configured restrictions.
 - Fixed MCP account changes and changed live definitions retaining stale callable bindings; uncertain tool-call failures now explain that the operation may have run.
 - Fixed settled legacy session conversion to group genuine receipts for synchronous provider input, preserve committed interrupted output and billing, and retain branch state, declaration order, durable steering, and distinct API/tool identities.

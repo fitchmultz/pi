@@ -77,8 +77,8 @@ it("reuses active journal bodies without exposing SDK mutations or concealing so
 			.messages.filter((message) => message.role === "user")
 			.map((message) => message.content),
 	).toEqual(["original request", "next request"]);
-	// Only the newly persisted body needs reading, not the saved prefix.
-	expect(read).toHaveBeenCalledTimes(1);
+	// One shared prefix verification plus the new body, not a parse/read of every saved entry.
+	expect(read.mock.calls.length).toBeLessThanOrEqual(2);
 	const saved = readFileSync(source, "utf8");
 	writeFileSync(source, saved.replace("original request", "modified request"));
 	expect(() => manager.buildSessionProjection()).toThrow("Journal source generation changed");
@@ -87,6 +87,113 @@ it("reuses active journal bodies without exposing SDK mutations or concealing so
 	truncateSync(source, 10);
 	unlinkSync(source);
 	expect(() => manager.buildSessionProjection()).toThrow("Journal source generation changed");
+});
+
+it.each([
+	{ timing: "before", target: "request", externalAppend: false, compacted: false },
+	{ timing: "before", target: "model", externalAppend: false, compacted: false },
+	{ timing: "during retry", target: "request", externalAppend: false, compacted: false },
+	{ timing: "during retry", target: "model", externalAppend: false, compacted: false },
+	{ timing: "during", target: "request", externalAppend: false, compacted: false },
+	{ timing: "during", target: "request", externalAppend: true, compacted: false },
+	{ timing: "during", target: "model", externalAppend: false, compacted: false },
+	{ timing: "during", target: "model", externalAppend: false, compacted: true },
+])(
+	"rejects $target edits $timing an append (external=$externalAppend, compacted=$compacted)",
+	({ timing, target, externalAppend, compacted }) => {
+		const { source, manager } = fixture();
+		manager.appendModelChange("catalog", "original-model");
+		const kept = manager.appendMessage({ role: "user", content: "original request", timestamp: 1 });
+		if (compacted) manager.appendCompaction("summary", kept, 10);
+		manager.buildSessionProjection();
+		const stats = fs.statSync(source);
+		const append = fs.appendFileSync;
+		const edit = () => {
+			const original = target === "model" ? "original-model" : "original request";
+			const changed = target === "model" ? "modified-model" : "modified request";
+			writeFileSync(source, readFileSync(source, "utf8").replace(original, changed));
+			fs.utimesSync(source, stats.atime, stats.mtime);
+			if (externalAppend)
+				append(
+					source,
+					`${JSON.stringify({ type: "session_info", id: "external", parentId: null, timestamp: new Date(0).toISOString(), name: "added" })}\n`,
+				);
+		};
+		if (timing === "during retry") {
+			vi.spyOn(fs, "appendFileSync").mockImplementationOnce(() => {
+				throw new Error("controlled append failure");
+			});
+			syncBuiltinESMExports();
+			expect(() => manager.appendCustomEntry("own-append", {})).toThrow("controlled append failure");
+		}
+		if (timing === "before") edit();
+		else {
+			vi.spyOn(fs, "appendFileSync").mockImplementationOnce((file, data, options) => {
+				append(file, data, options);
+				edit();
+			});
+			syncBuiltinESMExports();
+		}
+		expect(() => {
+			if (timing === "during retry") manager.flush();
+			else manager.appendCustomEntry("own-append", {});
+			manager.buildSessionProjection();
+		}).toThrow(/Journal (source generation|record) changed/);
+		const rejected = readFileSync(source);
+		if (timing === "before" || timing === "during retry") {
+			expect(() => manager.flush()).toThrow(/Journal (source generation|record) changed/);
+			expect(() => manager.appendCustomEntry("retry", {})).toThrow(/Journal (source generation|record) changed/);
+		} else manager.flush();
+		expect(() => manager.buildSessionProjection()).toThrow(/Journal (source generation|record) changed/);
+		expect(readFileSync(source)).toEqual(rejected);
+	},
+);
+
+it("retains cache hits when active bodies exceed the byte budget", () => {
+	const { source, manager } = fixture();
+	const content = "x".repeat(6 * 1024 * 1024);
+	const entries = Array.from({ length: 3 }, (_, index) => ({
+		type: "message",
+		id: `large-${index}`,
+		parentId: index ? `large-${index - 1}` : null,
+		timestamp: new Date(0).toISOString(),
+		message: { role: "user", content, timestamp: index },
+	}));
+	writeFileSync(source, `${[manager.getHeader(), ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+	const reopened = SessionManager.open(source);
+	reopened.buildSessionProjection().messages.find((message) => message.role === "user")!.content = "SDK mutation";
+	const read = vi.spyOn(fs, "readSync");
+	syncBuiltinESMExports();
+	expect(
+		reopened
+			.buildSessionContext()
+			.messages.filter((message) => message.role === "user")
+			.map((message) => message.content.length),
+	).toEqual([content.length, content.length, content.length]);
+	const bytes = read.mock.results.reduce(
+		(sum, result) => sum + (result.type === "return" ? Number(result.value) : 0),
+		0,
+	);
+	expect(bytes).toBeLessThan(7 * 1024 * 1024);
+});
+
+it.each([false, true])("reads an intact unlinked source but rejects hidden edits (edited=%s)", (edited) => {
+	const { source, manager } = fixture();
+	manager.appendMessage({ role: "user", content: "original request", timestamp: 1 });
+	manager.buildSessionProjection();
+	if (edited) {
+		const stats = fs.statSync(source);
+		writeFileSync(source, readFileSync(source, "utf8").replace("original request", "modified request"));
+		fs.utimesSync(source, stats.atime, stats.mtime);
+	}
+	unlinkSync(source);
+	if (edited) expect(() => manager.buildSessionProjection()).toThrow(/Journal (source generation|record) changed/);
+	else {
+		expect(manager.getEntriesRevision()).toBeGreaterThan(0);
+		expect(manager.buildSessionContext().messages.find((message) => message.role === "user")?.content).toBe(
+			"original request",
+		);
+	}
 });
 
 it.each([

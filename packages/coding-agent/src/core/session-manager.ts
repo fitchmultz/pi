@@ -61,6 +61,7 @@ import {
 	scanJournal,
 	scanJournalAsync,
 	transformJournalRecord,
+	verifyJournalRecords,
 } from "./session-journal.ts";
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -1379,6 +1380,7 @@ export class SessionManager {
 	/** Pristine active-context bodies only; SDK projections receive independently decoded values. */
 	private projectionRecords = new Map<FileEntry, Buffer>();
 	private projectionRecordBytes = 0;
+	private projectionSource: JournalSource | undefined;
 	private projectionBodies: Map<FileEntry, Record<string, unknown>> | undefined;
 
 	private constructor(
@@ -1609,18 +1611,13 @@ export class SessionManager {
 				: readJournalRecord(source, record);
 			if (value.id !== record.value.id || value.type !== record.value.type)
 				throw new Error("Session entry source changed");
-			if (!serialized) {
+			const remaining = 16 * 1024 * 1024 - this.projectionRecordBytes;
+			if (!serialized && record.end - record.start <= remaining) {
 				const body = serialize(value);
-				const bytes = body.length;
-				if (bytes <= 16 * 1024 * 1024) {
-					while (this.projectionRecordBytes + bytes > 16 * 1024 * 1024) {
-						const oldest = this.projectionRecords.keys().next().value;
-						if (!oldest) break;
-						this.projectionRecordBytes -= this.projectionRecords.get(oldest)!.length;
-						this.projectionRecords.delete(oldest);
-					}
+				if (body.length <= remaining) {
+					// Keep a stable prefix instead of evicting every hit on an over-budget sequential scan.
 					this.projectionRecords.set(entry, body);
-					this.projectionRecordBytes += bytes;
+					this.projectionRecordBytes += body.length;
 				}
 			}
 			const role = entryMessageRoles.get(entry);
@@ -1672,7 +1669,26 @@ export class SessionManager {
 			stats.ctimeMs === source.ctimeMs
 		)
 			return;
-		if (!sourceExists) throw new Error("Journal source generation changed");
+		if (!sourceExists) {
+			if (
+				stats.dev !== source.dev ||
+				stats.ino !== source.ino ||
+				stats.size !== source.size ||
+				stats.mtimeMs !== source.mtimeMs
+			)
+				throw new Error("Journal source generation changed");
+			// Unlink can change ctime alone. Certify the retained descriptor before adopting it.
+			verifyJournalRecords(
+				source,
+				this.fileEntries.flatMap((entry) => {
+					const location = this.recordsByEntry.get(entry);
+					return location ? [location.record] : [];
+				}),
+			);
+			this.journalSource = { ...source, ctimeMs: stats.ctimeMs };
+			this.decodedRecord = undefined;
+			return;
+		}
 		const scan = scanJournal(source.path, { ...metadataProjection(), policy: "tolerant", requireFinalLf: true });
 		const saved = new Map(scan.records.map((record) => [record.value.id, record]));
 		const savedDigests = new Set(scan.records.map((record) => record.digest));
@@ -1856,6 +1872,7 @@ export class SessionManager {
 						throw new Error(`Session file is not a valid ${APP_NAME} session: ${this.sessionFile}`);
 					const saved = new Map(scan.records.map((record) => [record.value.id, record]));
 					const pending = this.fileEntries.slice(this.failedAppendIndex);
+					this._refreshJournal();
 					for (const entry of pending) {
 						const record = saved.get(entry.id);
 						const expected =
@@ -1875,8 +1892,9 @@ export class SessionManager {
 					closeJournalSource(scan.source);
 				}
 			}
+			if (this.journalSource) this._refreshJournal();
+			else this._dropPersistedBodies();
 			this.failedAppendIndex = undefined;
-			this._dropPersistedBodies();
 		}
 	}
 
@@ -1935,6 +1953,7 @@ export class SessionManager {
 		// Isolate this entry from another writer's partial record.
 		const json = JSON.stringify(entry);
 		pendingRecordDigests.set(entry, createHash("sha256").update(json).digest("hex"));
+		this._refreshJournal();
 		const before = statSync(this.sessionFile);
 		appendFileSync(this.sessionFile, `\n${json}\n`);
 		this.failedAppendIndex = undefined;
@@ -1944,7 +1963,7 @@ export class SessionManager {
 			after.ino !== before.ino ||
 			after.size !== before.size + Buffer.byteLength(json) + 2
 		) {
-			this._dropPersistedBodies();
+			this._refreshJournal();
 		} else {
 			this.journalSource = {
 				path: this.sessionFile,
@@ -2367,13 +2386,52 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionProjection(): SessionProjection {
-		const entries = this.getEntries();
 		const bodies = new Map<FileEntry, Record<string, unknown>>();
 		this.projectionBodies = bodies;
 		try {
+			const entries = this.getEntries();
+			const source = this.journalSource;
+			const cached = this.projectionSource;
+			if (
+				source &&
+				(!cached ||
+					source.dev !== cached.dev ||
+					source.ino !== cached.ino ||
+					source.size !== cached.size ||
+					source.mtimeMs !== cached.mtimeMs ||
+					source.ctimeMs !== cached.ctimeMs)
+			) {
+				const selected = new Set<FileEntry>(this.projectionRecords.keys());
+				let modelEntry: SessionEntry | undefined;
+				let thinkingEntry: SessionEntry | undefined;
+				for (const entry of buildSessionPath(entries, this.leafId, this.byId)) {
+					const metadata = getSessionEntryMetadata(entry);
+					if (
+						metadata.type === "model_change" ||
+						(metadata.type === "message" && metadata.message.role === "assistant")
+					)
+						modelEntry = entry;
+					if (metadata.type === "thinking_level_change") thinkingEntry = entry;
+				}
+				// Settings can precede compaction and need certification even without cached bodies.
+				for (const entry of [this.getHeader(), modelEntry, thinkingEntry]) if (entry) selected.add(entry);
+				verifyJournalRecords(
+					source,
+					[...selected].flatMap((entry) => {
+						const location = this.recordsByEntry.get(entry);
+						return location ? [location.record] : [];
+					}),
+				);
+			}
 			const projection = buildSessionProjection(entries, this.leafId, this.byId);
 			this._refreshJournal();
+			this.projectionSource = this.journalSource ? { ...this.journalSource } : undefined;
 			return projection;
+		} catch (error) {
+			this.projectionRecords.clear();
+			this.projectionRecordBytes = 0;
+			this.projectionSource = undefined;
+			throw error;
 		} finally {
 			this.projectionBodies = undefined;
 			for (const [entry, body] of this.projectionRecords) {

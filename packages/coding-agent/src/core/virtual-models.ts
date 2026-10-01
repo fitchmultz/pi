@@ -122,31 +122,30 @@ export function findLatestResponse(messages: readonly AgentMessage[]): Assistant
  * `model_change`, because responses name the physical models it routed to. Otherwise the latest
  * physical response wins, as in sessions without virtual models. A virtual model that is no longer
  * registered does not hold, so the selection falls back to the physical model that answered last.
+ * Only the last model change can hold, so at most one catalog lookup is needed.
  */
 export function getBranchSelection(
 	branch: Iterable<SessionEntry | SessionEntryMetadata>,
 	getModel: (provider: string, modelId: string) => Model<Api> | undefined,
 ): { provider: string; modelId: string } | undefined {
-	const isVirtual = (provider: string, modelId: string) => {
-		const model = getModel(provider, modelId);
-		return model !== undefined && isVirtualModel(model);
-	};
-	let selection: { provider: string; modelId: string } | undefined;
+	let change: { provider: string; modelId: string } | undefined;
+	let response: { provider: string; modelId: string } | undefined;
 	for (const source of branch) {
 		const entry = "sequence" in source ? source : getSessionEntryMetadata(source);
 		if (entry.type === "model_change") {
-			selection = { provider: entry.provider, modelId: entry.modelId };
+			change = { provider: entry.provider, modelId: entry.modelId };
+			response = undefined;
 		} else if (
 			entry.type === "message" &&
 			entry.message.role === "assistant" &&
 			entry.message.api !== VIRTUAL_MODEL_API
 		) {
-			if (!selection || !isVirtual(selection.provider, selection.modelId)) {
-				selection = { provider: entry.message.provider!, modelId: entry.message.model! };
-			}
+			response = { provider: entry.message.provider!, modelId: entry.message.model! };
 		}
 	}
-	return selection;
+	if (!response) return change;
+	const model = change && getModel(change.provider, change.modelId);
+	return model && isVirtualModel(model) ? change : response;
 }
 
 /** Latest router state a session branch stores for a virtual model. */

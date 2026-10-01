@@ -553,6 +553,43 @@ function visitJournalRecord(
 	}
 }
 
+/** Hash cached records in shared chunks after a source change; an own append cannot certify the prefix. */
+export function verifyJournalRecords(source: JournalSource, records: readonly JournalRecord[]): void {
+	if (!records.length) return;
+	if (source.handle.closed) throw new Error("Journal source descriptor is closed");
+	const validate = () => {
+		const stats = existsSync(source.path) ? statSync(source.path) : fstatSync(source.handle.fd);
+		if (stats.dev !== source.dev || stats.ino !== source.ino || stats.size < source.size)
+			throw new Error("Journal source generation changed");
+	};
+	validate();
+	const stats = fstatSync(source.handle.fd);
+	if (stats.dev !== source.dev || stats.ino !== source.ino || stats.size < source.size)
+		throw new Error("Journal source generation changed");
+	const ordered = records.slice().sort((a, b) => a.start - b.start);
+	const end = ordered.at(-1)!.end;
+	const buffer = Buffer.allocUnsafe(64 * 1024);
+	let bufferStart = -1;
+	let bufferEnd = -1;
+	for (const record of ordered) {
+		const hash = createHash("sha256");
+		let position = record.start;
+		while (position < record.end) {
+			if (position < bufferStart || position >= bufferEnd) {
+				const count = readSync(source.handle.fd, buffer, 0, Math.min(buffer.length, end - position), position);
+				if (!count) throw new Error("Journal record truncated");
+				bufferStart = position;
+				bufferEnd = position + count;
+			}
+			const next = Math.min(record.end, bufferEnd);
+			hash.update(buffer.subarray(position - bufferStart, next - bufferStart));
+			position = next;
+		}
+		if (hash.digest("hex") !== record.digest) throw new Error("Journal record changed since indexing");
+	}
+	validate();
+}
+
 /** ponytail: requesting one full value still needs its consumer's heap; use selective metadata or paging for giant bodies. */
 export function readJournalRecord(
 	source: JournalSource,
