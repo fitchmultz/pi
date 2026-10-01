@@ -124,4 +124,13 @@ describe("visibleWidth", () => {
 		assert.strictEqual(visibleWidth(normalizeTerminalOutput("ำabc")), visibleWidth("ำabc"));
 		assert.strictEqual(visibleWidth(normalizeTerminalOutput("ຳabc")), visibleWidth("ຳabc"));
 	});
+
+	// Regression for fitchmultz/pi#46.
+	it("preserves Thai and Lao characters inside terminal hyperlink payloads", () => {
+		for (const terminator of ["\x07", "\x1b\\"]) {
+			const open = `\x1b]8;;https://example.com/กำ/ກຳ\t${terminator}`;
+			const close = `\x1b]8;;${terminator}`;
+			assert.strictEqual(normalizeTerminalOutput(`${open}กำ\tກຳ${close}`), `${open}กํา   ກໍາ${close}`);
+		}
+	});
 });

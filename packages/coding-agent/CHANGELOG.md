@@ -15,6 +15,11 @@
 - Fixed managed restart signal delivery and waiting for extension-settled work, restored short socket paths on Termux, and rejected legacy launcher handoffs with relaunch instructions.
 - Fixed enabling instruction groups rewriting earlier tool declarations on Responses and Codex; discovery now restores only previously selected tools with positional additions.
 - Fixed bundled CLI startup with background commands, repeated journal reads during completion monitoring, and silent fallback with an older `pi-change-working-dir` owner.
+- Fixed resized-image coordinate notes to use separate, unrounded x and y scales.
+- Fixed branch-summary budgets counting system declarations instead of conversation history.
+- Fixed empty quoted prompt-template arguments shifting later positional arguments.
+- Fixed piped stdin, file text, and an explicit CLI prompt being concatenated without separators.
+- Fixed whitespace-only combined CLI input starting an initial turn.
 
 ## [1.0.0] - 2026-10-01
 

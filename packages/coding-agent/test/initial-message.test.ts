@@ -16,10 +16,10 @@ describe("buildInitialMessage", () => {
 		const parsed = createArgs(["Summarize the text given"]);
 		const result = buildInitialMessage({
 			parsed,
-			stdinContent: "README contents\n",
+			stdinContent: "README contents",
 		});
 
-		expect(result.initialMessage).toBe("README contents\nSummarize the text given");
+		expect(result.initialMessage).toBe("README contents\n\nSummarize the text given");
 		expect(parsed.messages).toEqual([]);
 	});
 
@@ -42,7 +42,16 @@ describe("buildInitialMessage", () => {
 			fileText: "file\n",
 		});
 
-		expect(result.initialMessage).toBe("stdin\nfile\nExplain it");
+		expect(result.initialMessage).toBe("stdin\n\n\nfile\n\n\nExplain it");
 		expect(parsed.messages).toEqual(["Second message"]);
+	});
+
+	test("does not start a turn for whitespace-only combined input", () => {
+		const result = buildInitialMessage({
+			parsed: createArgs([" \t"]),
+			stdinContent: "\n ",
+			fileText: " \r\n",
+		});
+		expect(result.initialMessage).toBeUndefined();
 	});
 });
