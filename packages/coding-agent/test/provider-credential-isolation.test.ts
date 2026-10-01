@@ -5,6 +5,45 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 
 describe("provider credential isolation (#146)", () => {
+	it.each([undefined, "routing-placeholder"])(
+		"immediately replaces stored OAuth availability when isolation is enabled (fallback %s)",
+		async (apiKey) => {
+			const saved: OAuthCredential = {
+				type: "oauth",
+				access: "standalone",
+				refresh: "standalone",
+				expires: Date.now() + 3600000,
+			};
+			const credentials = AuthStorage.inMemory({ "openai-codex": saved });
+			const runtime = await ModelRuntime.create({ credentials, modelsPath: null, refreshOnCreate: false });
+			runtime.registerProvider("openai-codex", {
+				oauth: {
+					name: "Offline login",
+					login: async () => saved,
+					refreshToken: async (credential) => credential,
+					getApiKey: (credential) => credential.access,
+				},
+			});
+			await runtime.refresh({ allowNetwork: false, providers: ["openai-codex"] });
+			expect(runtime.isUsingOAuth("openai-codex")).toBe(true);
+			expect(runtime.hasConfiguredAuth("openai-codex")).toBe(true);
+			const inFlight = runtime.getAvailable();
+			runtime.registerProvider("openai-codex", { ignoreStoredCredentials: true, apiKey });
+			expect(runtime.isUsingOAuth("openai-codex")).toBe(false);
+			expect(runtime.hasConfiguredAuth("openai-codex")).toBe(apiKey !== undefined);
+			expect(runtime.getProviderAuthStatus("openai-codex")).toEqual(
+				apiKey ? { configured: true, source: "fallback" } : { configured: false },
+			);
+			expect(runtime.getAvailableSnapshot().some((model) => model.provider === "openai-codex")).toBe(
+				apiKey !== undefined,
+			);
+			await inFlight;
+			expect(runtime.isUsingOAuth("openai-codex")).toBe(false);
+			expect((await runtime.getAuth("openai-codex"))?.auth.apiKey).toBe(apiKey);
+			expect(await credentials.read("openai-codex")).toEqual(saved);
+		},
+	);
+
 	it.each(["api_key", "oauth"] as const)(
 		"isolates stored %s credentials throughout refresh and streaming",
 		async (type) => {

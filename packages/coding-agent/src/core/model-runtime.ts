@@ -954,6 +954,16 @@ export class ModelRuntime implements Models {
 			if (value !== undefined) (effective as Record<string, unknown>)[key] = value;
 		}
 		this.extensionProviders.set(providerId, effective);
+		if (effective.ignoreStoredCredentials === true) {
+			// A saved credential's old check must not survive isolation or an in-flight refresh.
+			++this.availabilityRefreshSeq;
+			this.providerAvailabilitySeq.set(providerId, (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1);
+			const configuredProviders = new Set(this.snapshot.configuredProviders);
+			const auth = new Map(this.snapshot.auth);
+			configuredProviders.delete(providerId);
+			auth.delete(providerId);
+			this.snapshot = { ...this.snapshot, configuredProviders, auth };
+		}
 		this.recomposeProvider(providerId);
 		this.updateModelSnapshot();
 		this.markProvisionallyConfigured(
