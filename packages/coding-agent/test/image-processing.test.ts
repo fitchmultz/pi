@@ -198,6 +198,6 @@ describe("formatDimensionNote", () => {
 		});
 		expect(note).toContain("original 2000x1000");
 		expect(note).toContain("displayed at 1000x500");
-		expect(note).toContain("2.00"); // scale factor
+		expect(note).toContain("Multiply x coordinates by 2000/1000 and y coordinates by 1000/500");
 	});
 });
