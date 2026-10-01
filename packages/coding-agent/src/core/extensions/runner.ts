@@ -220,6 +220,7 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
+// ponytail: attribute only the initial synchronous invocation; profile work after the first await separately.
 const SLOW_HANDLER_MS = 100;
 // A footer alone must not consume the TUI's entire 16 ms render interval.
 const SLOW_FOOTER_MS = 16;
@@ -243,7 +244,7 @@ function warnSlowCall(
 	report({
 		extensionPath: extension.path,
 		event,
-		error: `Non-fatal performance warning: ${event} took ${elapsed.toFixed(1)} ms (budget ${threshold} ms). This includes awaited time; no work was cancelled. Avoid full-history queries on hot paths. Further warnings for this extension and kind are suppressed until reload.`,
+		error: `Non-fatal performance warning: ${event} blocked the event loop for ${elapsed.toFixed(1)} ms ${event === "footer" ? "during render" : "before returning or awaiting"} (budget ${threshold} ms). Awaited work is not counted and nothing was cancelled. Avoid full-history queries on hot paths. Further warnings for this extension and kind are suppressed until reload.`,
 	});
 }
 
@@ -334,9 +335,17 @@ export async function emitProjectTrustEvent(
 		// A single extension may register multiple handlers for the same event.
 		// The first project_trust handler that returns yes/no wins; undecided falls through.
 		for (const handler of handlers) {
-			const started = performance.now();
 			try {
-				const handlerResult = (await handler(event, ctx)) as ProjectTrustEventResult;
+				let pending: unknown;
+				const started = performance.now();
+				try {
+					pending = handler(event, ctx);
+				} finally {
+					warnSlowCall(ext, event.type, performance.now() - started, SLOW_HANDLER_MS, (error) =>
+						errors.push(error),
+					);
+				}
+				const handlerResult = (await pending) as ProjectTrustEventResult;
 				if (handlerResult.trusted === "undecided") {
 					continue;
 				}
@@ -348,8 +357,6 @@ export async function emitProjectTrustEvent(
 					error: error instanceof Error ? error.message : String(error),
 					stack: error instanceof Error ? error.stack : undefined,
 				});
-			} finally {
-				warnSlowCall(ext, event.type, performance.now() - started, SLOW_HANDLER_MS, (error) => errors.push(error));
 			}
 		}
 	}
@@ -1013,9 +1020,11 @@ export class ExtensionRunner {
 		event: ExtensionEvent,
 		ctx: ExtensionContext,
 	): Promise<unknown> {
+		const scopedContext = this.withExtensionUI(ctx, extension);
+		let result: unknown;
 		const started = performance.now();
 		try {
-			return await handler(event, this.withExtensionUI(ctx, extension));
+			result = handler(event, scopedContext);
 		} finally {
 			warnSlowCall(
 				extension,
@@ -1025,6 +1034,7 @@ export class ExtensionRunner {
 				this.reportPerformanceWarning,
 			);
 		}
+		return await result;
 	}
 
 	/**

@@ -312,10 +312,13 @@ export interface ExtensionUIContext {
 export interface ContextUsage {
 	/**
 	 * "reported": provider usage anchors the retained conversation, including request-local hook
-	 * transformations; only later messages and pending prompt/tool changes are estimated.
+	 * transformations. Positive content deltas added by message_end handlers, later messages and
+	 * pending prompt/tool changes are estimated; removing response content keeps the provider baseline.
 	 * "estimated": heuristic-only count, including opaque reasoning/signatures and tool schemas.
-	 * Where a comparable response is available, its chars/token ratio is clamped to [1, 4].
+	 * Session-local chars/token calibration is 4 * request estimate / (input + cacheRead + cacheWrite),
+	 * clamped to [1, 4], default 4; zero input totals are skipped and output tokens are excluded.
 	 * "unknown": no matching response since compaction; tokens/percent are null (preflight still estimates).
+	 * Streaming-only events do not invalidate usage; streaming state is counted at message_end.
 	 * SDK callers must replace edited message/tool objects or arrays; unsignalled nested mutation
 	 * is not observed. Use AgentSession.refreshContext() after canonical journal changes.
 	 */
