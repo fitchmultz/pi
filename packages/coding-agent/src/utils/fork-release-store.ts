@@ -3,7 +3,7 @@ import { linkSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync 
 import { basename, dirname, join, resolve } from "node:path";
 
 /** Called under the selector lock, before any release-store mutation. */
-export function claimForkReleaseStore(releases: string, selector: string): void {
+export function claimForkReleaseStore(releases: string, selector: string): string {
 	// Resolve parent aliases, not the selector symlink pointing at a changing runtime.
 	const canonicalSelector = join(realpathSync(dirname(selector)), basename(selector));
 	const store = resolve(releases);
@@ -27,4 +27,5 @@ export function claimForkReleaseStore(releases: string, selector: string): void 
 			`Release store ${store} is owned by selector ${owner.trimEnd()}, not ${canonicalSelector}. Use a separate release store with --releases for this selector.`,
 		);
 	}
+	return canonicalSelector;
 }

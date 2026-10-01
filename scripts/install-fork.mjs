@@ -208,8 +208,8 @@ async function withMutationLock(releases, selector, action) {
 	try {
 		selectorTarget(selector);
 		selectorTarget(`${selector}.previous`);
-		claimForkReleaseStore(releases, selector);
-		return await action();
+		const ownerSelector = claimForkReleaseStore(releases, selector);
+		return await action(ownerSelector);
 	} finally {
 		await release();
 	}
@@ -251,23 +251,25 @@ function resolvedLink(link) {
 }
 
 export function pruneReleases({ releases, selector, keep }, livePaths = liveProcessPaths) {
-	return withMutationLock(releases, selector, () => {
+	return withMutationLock(releases, selector, (ownerSelector) => {
 		const selected = [selector, `${selector}.previous`].map(resolvedLink);
 		const live = livePaths();
 		const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
 		const validated = [];
 		for (const identity of readdirSync(releases)) {
 			const directory = join(releases, identity);
+			let receipt;
 			try {
-				readVerifiedRelease(directory);
+				receipt = readVerifiedRelease(directory).receipt;
 			} catch {
 				continue; // Legacy releases and installations still in progress have no valid receipt.
 			}
-			validated.push({ directory, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
+			validated.push({ directory, ownerSelector: receipt.ownerSelector, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
 		}
 		validated.sort((a, b) => b.validatedAt - a.validatedAt);
 		const removed = [];
-		for (const { directory } of validated.slice(keep)) {
+		for (const { directory, ownerSelector: releaseOwner } of validated.slice(keep)) {
+			if (releaseOwner !== ownerSelector) continue; // Pre-adoption releases have unknown ownership.
 			const real = realpathSync(directory);
 			if (selected.some((path) => path === real || path?.startsWith(`${real}/`)) || mentioned(directory) || mentioned(real)) {
 				continue;
@@ -282,7 +284,7 @@ export function pruneReleases({ releases, selector, keep }, livePaths = liveProc
 // The callback builds/installs/tests only a NEW candidate. The receipt is written
 // last, and is the only reusable success marker. Existing releases are never modified.
 export async function installRelease({ releases, receipt, selector, stage = false }, installAndValidate) {
-	return withMutationLock(releases, selector, async () => {
+	return withMutationLock(releases, selector, async (ownerSelector) => {
 		const identity = releaseIdentity(receipt);
 		const directory = releasePath(releases, identity);
 		mkdirSync(resolve(releases), { recursive: true });
@@ -300,7 +302,7 @@ export async function installRelease({ releases, receipt, selector, stage = fals
 		if (created) {
 			try {
 				await installAndValidate(directory);
-				writeFileSync(join(directory, receiptFile), `${JSON.stringify({ ...receipt, validated: true }, null, 2)}\n`, { flag: "wx" });
+				writeFileSync(join(directory, receiptFile), `${JSON.stringify({ ...receipt, validated: true, ownerSelector }, null, 2)}\n`, { flag: "wx" });
 				readVerifiedRelease(directory);
 			} catch (error) {
 				// This invocation owns this unselected, incomplete directory, not an active release.
@@ -331,7 +333,7 @@ and tmux. Termux also needs Go >=1.26 when Android blocks the compiler's fanotif
 --activate <identity>   Select an existing validated release, without rebuilding
 --rollback <identity>   Select an older validated release (same native operation)
 --prune --keep <count>  Delete validated releases older than the newest <count>,
-                        except selected, .previous and visibly running ones
+                        except legacy, selected, .previous and visibly running ones
 --releases <directory>  Default: ~/.local/share/pi-fork/releases
 --selector <symlink>    Default: ~/.local/share/npm-global/lib/node_modules/${codingAgentName}
 -h, --help              Show this help
@@ -347,6 +349,8 @@ abandoned lock must be removed only after confirming its updater/installer stopp
 Each store records one canonical owning selector in .owner-selector, adopting
 unowned existing stores without removing releases. Other selectors must use their
 own --releases directory; all mutations, including staging and pruning, refuse them.
+Only newly installed releases are stamped with ownership and eligible for pruning.
+Legacy releases without the matching owner stamp are kept until removed by hand.
 `);
 }
 

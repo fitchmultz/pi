@@ -242,16 +242,61 @@ test("native selection replaces the link inode and leaves no temporary selectors
 	assert.deepEqual(readdirSync(dirname(f.selector)).sort(), ["pi-coding-agent", "pi-coding-agent.previous"]);
 });
 
-function validatedRelease(f, commit, validatedAt) {
-	const directory = join(f.releases, releaseIdentity(receipt(commit)));
+function writePackageFixture(directory) {
 	const pkg = join(directory, "node_modules", name);
 	mkdirSync(join(pkg, "dist/bundle"), { recursive: true });
 	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name }));
 	writeFileSync(join(pkg, "dist/bundle/cli-worker.js"), "");
+}
+
+function validatedRelease(f, commit, validatedAt) {
+	const directory = join(f.releases, releaseIdentity(receipt(commit)));
+	writePackageFixture(directory);
 	writeFileSync(join(directory, "fork-release.json"), JSON.stringify({ ...receipt(commit), validated: true }));
 	utimesSync(join(directory, "fork-release.json"), validatedAt, validatedAt);
 	return { identity: basename(directory), directory };
 }
+
+async function stagedRelease(f, commit, validatedAt) {
+	const release = await installRelease({ ...f, receipt: receipt(commit), stage: true }, writePackageFixture);
+	utimesSync(join(release.directory, "fork-release.json"), validatedAt, validatedAt);
+	return { identity: basename(release.directory), directory: release.directory };
+}
+
+test("adopting a legacy two-selector store never prunes another selector's release", async (t) => {
+	const f = fixture(t);
+	const a = validatedRelease(f, "1", 1_000);
+	const b = validatedRelease(f, "2", 1_001);
+	rmSync(f.selector);
+	symlinkSync(join(a.directory, "node_modules", name), f.selector);
+	const secondSelector = join(f.root, "second-selector");
+	symlinkSync(join(b.directory, "node_modules", name), secondSelector);
+	const before = readFileSync(join(b.directory, "fork-release.json"));
+	assert.equal(existsSync(join(f.releases, ".owner-selector")), false);
+	assert.deepEqual(await pruneReleases({ ...f, keep: 0 }, () => ""), { kept: 2, removed: [] });
+	// Reusing an existing release must not convert it into an owned, prunable release.
+	await installRelease({ ...f, receipt: receipt("2"), stage: true }, () => assert.fail("must not rebuild"));
+	assert.deepEqual(await pruneReleases({ ...f, keep: 0 }, () => ""), { kept: 2, removed: [] });
+	assert.deepEqual(readFileSync(join(b.directory, "fork-release.json")), before);
+	assert.ok(existsSync(f.selector));
+	assert.ok(existsSync(secondSelector));
+	assert.ok(existsSync(a.directory));
+	assert.ok(existsSync(b.directory));
+});
+
+test("a nonexistent selector adopting a nonempty store prunes nothing pre-existing", async (t) => {
+	const f = fixture(t);
+	const legacy = validatedRelease(f, "1", 1_000);
+	const liveSelector = join(f.root, "live-selector");
+	symlinkSync(join(legacy.directory, "node_modules", name), liveSelector);
+	const typo = join(f.root, "nonexistent-selector");
+	assert.equal(existsSync(typo), false);
+	assert.equal(existsSync(join(f.releases, ".owner-selector")), false);
+	assert.deepEqual(await pruneReleases({ ...f, selector: typo, keep: 0 }, () => ""), { kept: 1, removed: [] });
+	assert.ok(existsSync(liveSelector));
+	assert.ok(existsSync(legacy.directory));
+	assert.equal(existsSync(typo), false);
+});
 
 test("a release store adopts one canonical selector and refuses another without deleting anything", async (t) => {
 	const f = fixture(t);
@@ -304,8 +349,11 @@ test("simultaneous first adopters with different selector locks cannot share a r
 
 test("prunes old validated releases except selected, previous and visibly running ones", async (t) => {
 	const f = fixture(t);
-	const [previous, selected, running, old, newer, newest] = ["1", "2", "3", "4", "5", "6"]
-		.map((commit, index) => validatedRelease(f, commit, 1_000 + index));
+	const releases = [];
+	for (const [index, commit] of ["1", "2", "3", "4", "5", "6"].entries()) {
+		releases.push(await stagedRelease(f, commit, 1_000 + index));
+	}
+	const [previous, selected, running, old, newer, newest] = releases;
 	await activateRelease(f.releases, previous.identity, f.selector);
 	await activateRelease(f.releases, selected.identity, f.selector);
 	const legacy = join(f.releases, "legacy-release");
@@ -338,8 +386,8 @@ test("prune is a separate operation and requires an explicit keep count", async 
 
 test("prune cannot delete a runtime selected after its protection snapshot", async (t) => {
 	const f = fixture(t);
-	const a = validatedRelease(f, "1", 1_000);
-	const b = validatedRelease(f, "2", 1_001);
+	const a = await stagedRelease(f, "1", 1_000);
+	const b = await stagedRelease(f, "2", 1_001);
 	await activateRelease(f.releases, a.identity, f.selector);
 	let activation;
 	await pruneReleases({ releases: f.releases, selector: f.selector, keep: 0 }, () => {

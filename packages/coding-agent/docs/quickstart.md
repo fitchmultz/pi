@@ -79,6 +79,11 @@ refused, even for staging or pruning. Use a separate `--releases` directory for
 another selector. `pi update --fork` uses the unchanged default store above and
 refuses it if another selector owns it.
 
+Only newly installed releases receive an ownership stamp in their receipt.
+Pruning requires that stamp to match the store's owner; existing releases are
+never assigned to the first claimant, even when reused or activated.
+Legacy releases are kept until removed by hand.
+
 Dependency installs and packing use an isolated environment and an empty temporary
 npm global configuration, not the native Node prefix's registry credentials or
 ambient provider keys and `NODE_OPTIONS`.
