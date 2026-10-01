@@ -216,6 +216,8 @@ interface CustomMessage<T = unknown> {
 
 Pi converts its content to a user message for model requests. `display` controls terminal rendering; `details` is not sent to the model.
 
+The [Instruction Groups](instruction-groups.md) builtin also inserts a request-local hidden custom message (`customType: "pi:instruction-groups:compaction"`) immediately after a compaction summary. It restores full instructions enabled at that boundary without adding a persisted message entry.
+
 ### BranchSummaryMessage
 
 ```typescript
