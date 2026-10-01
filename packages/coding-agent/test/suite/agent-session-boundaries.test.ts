@@ -822,7 +822,8 @@ describe("durable length recovery", () => {
 			);
 		expect(lengthResponses).toHaveLength(2);
 		expect(omittedIds).toEqual(expect.arrayContaining(lengthResponses.map((entry) => entry.id)));
-		expect(harness.faux.state.callCount).toBe(3);
+		// Nothing is old enough to summarize for the second recovery; the hook still compacts and the turn retries.
+		expect(harness.faux.state.callCount).toBe(4);
 	});
 
 	it("gives a distinct queued follow-up its own length-recovery budget", async () => {

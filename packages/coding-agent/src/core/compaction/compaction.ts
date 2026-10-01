@@ -935,6 +935,36 @@ export function prepareCompaction(
 	};
 }
 
+/**
+ * Offer overflow-recovery hooks the whole active window when prepareCompaction() finds no history
+ * older than keepRecentTokens, such as right after a reset. Hooks choose what to keep; callers must
+ * never run the default summarizer on this preparation.
+ */
+export function prepareCompactionForExtension(
+	pathEntries: SessionEntry[],
+	settings: CompactionSettings,
+): CompactionPreparation | undefined {
+	const projection = buildSessionProjection(pathEntries);
+	const firstKeptEntryId = projection.entries[0]?.sourceEntry.id;
+	if (!firstKeptEntryId) return undefined;
+	const sourceEntries = projection.entries.map((entry) => entry.sourceEntry);
+	const prevCompactionIndex = projection.entries.findIndex(
+		(entry) => entry.sourceEntry.type === "compaction" && entry.messages.length > 0,
+	);
+	const messagesToSummarize = projection.entries.flatMap(getMessagesFromProjectedEntryForCompaction);
+	return {
+		firstKeptEntryId,
+		messagesToSummarize,
+		turnPrefixMessages: [],
+		isSplitTurn: false,
+		tokensBefore: estimateProjectedContextTokens(projection, pathEntries).tokens,
+		previousSummary:
+			prevCompactionIndex >= 0 ? (sourceEntries[prevCompactionIndex] as CompactionEntry).summary : undefined,
+		fileOps: extractFileOperations(messagesToSummarize, sourceEntries, prevCompactionIndex),
+		settings,
+	};
+}
+
 // ============================================================================
 // Main compaction function
 // ============================================================================

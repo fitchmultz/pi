@@ -75,6 +75,7 @@ import {
 	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
+	prepareCompactionForExtension,
 	shouldCompact,
 } from "./compaction/index.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
@@ -2925,9 +2926,20 @@ export class AgentSession {
 		// Skip compaction checks if this assistant message is older than the latest
 		// compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const branch = this.sessionManager.getBranch();
+		const compactionEntry = getLatestCompactionEntry(branch);
+		const assistantEntryId = this._findPersistedMessageEntryId(assistantMessage);
+		const assistantIndex = assistantEntryId ? branch.findIndex((entry) => entry.id === assistantEntryId) : -1;
+		const entriesAfterAssistant = assistantIndex >= 0 ? branch.slice(assistantIndex + 1) : [];
+		const hasPostAssistantCompaction = entriesAfterAssistant.some((entry) => entry.type === "compaction");
+		const explicitOverflow = assistantMessage.stopReason === "error" && isContextOverflow(assistantMessage);
+		// A persisted overflow error uses active-path order: its provider timestamp can equal or
+		// precede a reset that completed just before the failed request.
 		const assistantIsFromBeforeCompaction =
-			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
+			compactionEntry !== null &&
+			(explicitOverflow && assistantIndex >= 0
+				? hasPostAssistantCompaction
+				: assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime());
 		if (assistantIsFromBeforeCompaction) {
 			return false;
 		}
@@ -2936,7 +2948,6 @@ export class AgentSession {
 		// A length stop is recoverable when output ended below the model's original desired limit,
 		// independent of the configured context size or any context-clamped provider request limit.
 		const currentProjection = this.sessionManager.buildSessionProjection();
-		const assistantEntryId = this._findPersistedMessageEntryId(assistantMessage);
 		const assistantIsProjected =
 			assistantEntryId === undefined ||
 			currentProjection.entries.some(
@@ -2944,9 +2955,6 @@ export class AgentSession {
 					entry.sourceEntry.id === assistantEntryId &&
 					entry.messages.some((message) => message.role === "assistant"),
 			);
-		const branch = this.sessionManager.getBranch();
-		const assistantIndex = assistantEntryId ? branch.findIndex((entry) => entry.id === assistantEntryId) : -1;
-		const entriesAfterAssistant = assistantIndex >= 0 ? branch.slice(assistantIndex + 1) : [];
 		const hasPostAssistantContextEdit = entriesAfterAssistant.some((entry) => entry.type === "context_edit");
 		const latestAssistantEdit = entriesAfterAssistant
 			.filter(
@@ -2954,11 +2962,8 @@ export class AgentSession {
 			)
 			.at(-1);
 		const assistantRetainedForExplicitRecovery =
-			assistantEntryId === undefined ||
-			(!entriesAfterAssistant.some((entry) => entry.type === "compaction") &&
-				latestAssistantEdit?.replacement !== null);
+			assistantEntryId === undefined || (!hasPostAssistantCompaction && latestAssistantEdit?.replacement !== null);
 		const assistantUsageMatchesProjection = assistantIsProjected && !hasPostAssistantContextEdit;
-		const explicitOverflow = assistantMessage.stopReason === "error" && isContextOverflow(assistantMessage);
 		const contextOverflow =
 			sameModel &&
 			((explicitOverflow && assistantRetainedForExplicitRecovery) ||
@@ -3066,7 +3071,13 @@ export class AgentSession {
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, settings);
+			const defaultPreparation = prepareCompaction(pathEntries, settings);
+			// Hooks can still recover an overflow when no history is old enough to summarize, e.g. right after a reset.
+			const preparation =
+				defaultPreparation ??
+				(reason === "overflow" && this._extensionRunner.hasHandlers("session_before_compact")
+					? prepareCompactionForExtension(pathEntries, settings)
+					: undefined);
 			if (!preparation) {
 				return false;
 			}
@@ -3116,6 +3127,10 @@ export class AgentSession {
 				usage = extensionCompaction.usage;
 				details = extensionCompaction.details;
 			} else {
+				if (!defaultPreparation) {
+					// Never summarize a whole window that the hooks declined, including the input being retried.
+					throw new Error("nothing is old enough to summarize, and no extension provided a compaction");
+				}
 				// Shared default summary generator, also used by manual compaction.
 				const compactResult = await this._runDefaultCompaction(
 					preparation,

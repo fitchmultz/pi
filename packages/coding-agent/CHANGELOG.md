@@ -10,6 +10,10 @@
 - Added optional `compactView` (off by default), `/compact-view`, and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Hybrid opens groups by default while keeping cards compact.
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 
+### Fixed
+
+- Fixed automatic overflow recovery through `session_before_compact` hooks when no history is old enough to summarize, such as an overflow right after a reset. Hooks now receive a whole-window preparation, Pi never runs its own summarizer on it, and a persisted overflow error is ordered by its session position instead of its provider timestamp. See [session_before_compact](docs/compaction.md#session_before_compact).
+
 ## [1.0.0] - 2026-10-01
 
 ### New Features
