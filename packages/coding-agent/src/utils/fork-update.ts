@@ -14,6 +14,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getPackageDir, isBunRuntime, PACKAGE_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./child-process.ts";
+import { claimForkReleaseStore } from "./fork-release-store.ts";
 
 /** Bootstrap a pinned fork checkout; the fork installer owns validation and atomic selection. */
 export async function runForkUpdate(): Promise<void> {
@@ -46,6 +47,7 @@ export async function runForkUpdate(): Promise<void> {
 		throw new Error(`Unsupported npm global layout: ${globalRoot}`);
 	}
 	const selector = join(globalRoot, PACKAGE_NAME);
+	const releases = join(homedir(), ".local/share/pi-fork/releases");
 	const bin = termux ? join(homedir(), ".local/bin/pi") : resolve(globalRoot, "../../bin/pi");
 	const validateSelector = (): void => {
 		try {
@@ -92,6 +94,7 @@ export async function runForkUpdate(): Promise<void> {
 	let temporary: string | undefined;
 	try {
 		validateSelector();
+		claimForkReleaseStore(releases, selector);
 		temporary = mkdtempSync(join(tmpdir(), "pi-fork-update-"));
 		const home = join(temporary, "home");
 		const source = join(temporary, "source");
@@ -149,7 +152,7 @@ export async function runForkUpdate(): Promise<void> {
 			"--selector",
 			selector,
 			"--releases",
-			join(homedir(), ".local/share/pi-fork/releases"),
+			releases,
 		]);
 		console.log(`Fork commit ${commit} is active. Rollback selector (when available): ${selector}.previous`);
 		console.log(

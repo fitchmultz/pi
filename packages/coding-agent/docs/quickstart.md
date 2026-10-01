@@ -72,6 +72,13 @@ not stolen based on age: after an unclean termination, remove an abandoned lock
 directory only after confirming every updater/installer using that selector has
 stopped.
 
+Each release store has one owning selector, recorded as a canonical path in
+`.owner-selector`. A store without that file (including existing fork stores) is
+adopted by the first mutation; its releases are preserved. Other selectors are
+refused, even for staging or pruning. Use a separate `--releases` directory for
+another selector. `pi update --fork` uses the unchanged default store above and
+refuses it if another selector owns it.
+
 Dependency installs and packing use an isolated environment and an empty temporary
 npm global configuration, not the native Node prefix's registry credentials or
 ambient provider keys and `NODE_OPTIONS`.

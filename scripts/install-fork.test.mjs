@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
-	readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync,
+	readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -191,21 +191,21 @@ test("a real child build failure cannot select or leave a reusable success recei
 		execFileSync(tools.node, ["-e", "process.exit(23)"], { cwd: directory, env: f.env });
 	}), /Command failed/);
 	assertPreserved(f);
-	assert.deepEqual(readdirSync(f.releases), []);
+	assert.deepEqual(readdirSync(f.releases), [".owner-selector"]);
 });
 
 test("a real npm install failure leaves the selector unchanged", async (t) => {
 	const f = fixture(t);
 	await assert.rejects(installRelease({ ...f, receipt: receipt() }, installFixture(f, { brokenTarball: true })), /Command failed/);
 	assertPreserved(f);
-	assert.deepEqual(readdirSync(f.releases), []);
+	assert.deepEqual(readdirSync(f.releases), [".owner-selector"]);
 });
 
 test("an installed CLI smoke failure leaves selector/config/journals intact", async (t) => {
 	const f = fixture(t);
 	await assert.rejects(installRelease({ ...f, receipt: receipt() }, installFixture(f, { brokenCli: true })), /Command failed/);
 	assertPreserved(f);
-	assert.deepEqual(readdirSync(f.releases), []);
+	assert.deepEqual(readdirSync(f.releases), [".owner-selector"]);
 });
 
 test("never overwrites an existing incomplete release or an unrelated selector file", async (t) => {
@@ -252,6 +252,55 @@ function validatedRelease(f, commit, validatedAt) {
 	utimesSync(join(directory, "fork-release.json"), validatedAt, validatedAt);
 	return { identity: basename(directory), directory };
 }
+
+test("a release store adopts one canonical selector and refuses another without deleting anything", async (t) => {
+	const f = fixture(t);
+	const a = validatedRelease(f, "1", 1_000);
+	const b = validatedRelease(f, "2", 1_001);
+	const alias = join(f.root, "npm-alias");
+	symlinkSync(join(f.root, "npm-global"), alias);
+	const aliasSelector = join(alias, "lib/node_modules", name);
+	await activateRelease(f.releases, a.identity, aliasSelector);
+	await activateRelease(f.releases, b.identity, f.selector);
+	const secondSelector = join(f.root, "second-selector");
+	symlinkSync(join(a.directory, "node_modules", name), secondSelector);
+	const before = readdirSync(f.releases).sort();
+	const refused = /owned by selector .*Use a separate release store/;
+	await assert.rejects(pruneReleases({ ...f, selector: secondSelector, keep: 0 }, () => ""), refused);
+	for (const stage of [false, true]) {
+		await assert.rejects(installRelease({ ...f, selector: secondSelector, receipt: receipt("3"), stage },
+			() => assert.fail("must not build")), refused);
+	}
+	for (const operation of ["--activate", "--rollback"]) {
+		await assert.rejects(main([operation, a.identity, "--releases", f.releases, "--selector", secondSelector]), refused);
+	}
+	assert.deepEqual(readdirSync(f.releases).sort(), before);
+	assert.equal(readFileSync(join(f.releases, ".owner-selector"), "utf8"),
+		`${join(realpathSync(dirname(f.selector)), basename(f.selector))}\n`);
+	assert.equal(readlinkSync(secondSelector), join(a.directory, "node_modules", name));
+	assert.equal(readlinkSync(f.selector), join(b.directory, "node_modules", name));
+	assert.ok(existsSync(a.directory));
+	assert.ok(existsSync(b.directory));
+});
+
+test("simultaneous first adopters with different selector locks cannot share a release store", async (t) => {
+	const f = fixture(t);
+	const candidate = validatedRelease(f, "1", 1_000);
+	const secondSelector = join(f.root, "second-selector");
+	symlinkSync(f.oldPackage, secondSelector);
+	const results = await Promise.all([f.selector, secondSelector].map((selector) => new Promise((resolve, reject) => {
+		const child = spawn(tools.node, [fileURLToPath(new URL("./install-fork.mjs", import.meta.url)),
+			"--activate", candidate.identity, "--releases", f.releases, "--selector", selector], { env: f.env });
+		let stderr = "";
+		child.stdout.resume();
+		child.stderr.on("data", (chunk) => { stderr += chunk; });
+		child.on("error", reject);
+		child.on("close", (status) => resolve({ status, stderr }));
+	})));
+	assert.deepEqual(results.map((result) => result.status).sort(), [0, 1]);
+	assert.match(results.find((result) => result.status === 1).stderr, /owned by selector .*Use a separate release store/);
+	assert.ok(existsSync(candidate.directory));
+});
 
 test("prunes old validated releases except selected, previous and visibly running ones", async (t) => {
 	const f = fixture(t);

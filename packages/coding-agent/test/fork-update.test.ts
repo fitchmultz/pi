@@ -5,12 +5,13 @@ import {
 	mkdtempSync,
 	readFileSync,
 	readlinkSync,
+	realpathSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PACKAGE_NAME } from "../src/config.ts";
@@ -185,6 +186,9 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 			platform === "android" ? join(dirname(process.execPath), "bash") : undefined,
 		);
 		expect(fetched).toBe(1);
+		expect(readFileSync(join(root, "real-home/.local/share/pi-fork/releases/.owner-selector"), "utf8")).toBe(
+			`${join(realpathSync(dirname(selector)), basename(selector))}\n`,
+		);
 		expect(existsSync(temporarySource!)).toBe(false);
 		expect(existsSync(`${selector}.lock`)).toBe(false);
 		expect(existsSync(join(process.env.HOME!, ".pi"))).toBe(false);
@@ -211,6 +215,18 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 		});
 		await expect(runForkUpdate()).rejects.toThrow("does not select this running Pi installation");
 		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it("refuses a store owned by another selector before fetching or changing the installation", async () => {
+		const releases = join(root, "real-home/.local/share/pi-fork/releases");
+		mkdirSync(releases, { recursive: true });
+		const owner = join(root, "other-selector");
+		writeFileSync(join(releases, ".owner-selector"), `${owner}\n`);
+		await expect(runForkUpdate()).rejects.toThrow(/owned by selector .*Use a separate release store/);
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+		expect(readlinkSync(selector)).toBe(oldPackage);
+		expect(readFileSync(join(releases, ".owner-selector"), "utf8")).toBe(`${owner}\n`);
 		expect(existsSync(`${selector}.lock`)).toBe(false);
 	});
 

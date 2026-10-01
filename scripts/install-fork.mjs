@@ -10,6 +10,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
+import { claimForkReleaseStore } from "../packages/coding-agent/src/utils/fork-release-store.ts";
 import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import { findPackageDirectories } from "./package-workspaces.mjs";
 
@@ -200,13 +201,14 @@ function replaceSymlink(target, selector) {
 	}
 }
 
-async function withMutationLock(selector, action) {
+async function withMutationLock(releases, selector, action) {
 	mkdirSync(dirname(selector), { recursive: true });
 	// Synchronous builds can block heartbeats. Never steal a lock based on age.
 	const release = await lockfile.lock(selector, { realpath: false, stale: Infinity, update: 1000 });
 	try {
 		selectorTarget(selector);
 		selectorTarget(`${selector}.previous`);
+		claimForkReleaseStore(releases, selector);
 		return await action();
 	} finally {
 		await release();
@@ -214,7 +216,7 @@ async function withMutationLock(selector, action) {
 }
 
 export function activateRelease(releases, identity, selector) {
-	return withMutationLock(selector, () => activateLockedRelease(releases, identity, selector));
+	return withMutationLock(releases, selector, () => activateLockedRelease(releases, identity, selector));
 }
 
 function activateLockedRelease(releases, identity, selector) {
@@ -249,7 +251,7 @@ function resolvedLink(link) {
 }
 
 export function pruneReleases({ releases, selector, keep }, livePaths = liveProcessPaths) {
-	return withMutationLock(selector, () => {
+	return withMutationLock(releases, selector, () => {
 		const selected = [selector, `${selector}.previous`].map(resolvedLink);
 		const live = livePaths();
 		const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
@@ -280,7 +282,7 @@ export function pruneReleases({ releases, selector, keep }, livePaths = liveProc
 // The callback builds/installs/tests only a NEW candidate. The receipt is written
 // last, and is the only reusable success marker. Existing releases are never modified.
 export async function installRelease({ releases, receipt, selector, stage = false }, installAndValidate) {
-	return withMutationLock(selector, async () => {
+	return withMutationLock(releases, selector, async () => {
 		const identity = releaseIdentity(receipt);
 		const directory = releasePath(releases, identity);
 		mkdirSync(resolve(releases), { recursive: true });
@@ -342,6 +344,9 @@ at <selector>.previous. Existing releases and user settings/auth/sessions are
 never edited. Running sessions keep their runtime until restarted.
 All release mutations share <selector>.lock. Concurrent operations fail; an
 abandoned lock must be removed only after confirming its updater/installer stopped.
+Each store records one canonical owning selector in .owner-selector, adopting
+unowned existing stores without removing releases. Other selectors must use their
+own --releases directory; all mutations, including staging and pruning, refuse them.
 `);
 }
 
