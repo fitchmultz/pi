@@ -502,7 +502,11 @@ function metadataProjection(): JsonProjectionOptions {
 	};
 }
 
-function entryMetadata(raw: SessionEntry | Record<string, unknown>, sequence: number): SessionEntryMetadata {
+function entryMetadata(
+	raw: SessionEntry | Record<string, unknown>,
+	sequence: number,
+	detached = false,
+): SessionEntryMetadata {
 	const entry = raw as Record<string, unknown>;
 	const result: Record<string, unknown> = { sequence };
 	for (const key of structuralFields) if (Object.hasOwn(entry, key)) result[key] = entry[key];
@@ -553,7 +557,7 @@ function entryMetadata(raw: SessionEntry | Record<string, unknown>, sequence: nu
 	} else if (entry.type === "context_edit") {
 		result.omitted = entry.replacement === null;
 	}
-	if (typeof result.preview === "string" && result.preview.length >= 13)
+	if (!detached && typeof result.preview === "string" && result.preview.length >= 13)
 		result.preview = Buffer.from(result.preview, "utf16le").toString("utf16le");
 	for (const owner of [result, result.message as Record<string, unknown> | undefined]) {
 		if (!owner) continue;
@@ -999,23 +1003,21 @@ function projectSessionEntries(
 	contextEntries: SessionEntry[],
 	thinkingLevel: string,
 	model: SessionContext["model"],
+	cloneMessages?: (source: SessionEntry, edit: ContextEditEntry | undefined) => boolean,
 ): SessionProjection {
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
 	}
-	const projectedEntries = contextEntries.map(
-		(sourceEntry, index): ProjectedSessionEntry => ({
+	const projectedEntries = contextEntries.map((sourceEntry, index): ProjectedSessionEntry => {
+		const edit = edits.get(sourceEntry.id);
+		// Older retained compactions do not contribute another checkpoint or summary.
+		const messages = sourceEntry.type === "compaction" && index > 0 ? [] : projectContextEntry(sourceEntry, edit);
+		return {
 			sourceEntry,
-			// buildContextEntries() may retain an older compaction entry because its
-			// raw ID lies inside the newest retained range. Only the newest compaction
-			// at index zero contributes a checkpoint and summary.
-			messages:
-				sourceEntry.type === "compaction" && index > 0
-					? []
-					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
-		}),
-	);
+			messages: messages.length && cloneMessages?.(sourceEntry, edit) ? structuredClone(messages) : messages,
+		};
+	});
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),
@@ -1647,7 +1649,7 @@ export class SessionManager {
 			const raw = { ...location.record.value, ...entryRewrites.get(entry) };
 			const role = entryMessageRoles.get(entry);
 			if (role) raw.message = { ...(raw.message as Record<string, unknown>), role };
-			metadataByEntry.set(entry, entryMetadata(raw, sequence - 1));
+			metadataByEntry.set(entry, entryMetadata(raw, sequence - 1, true));
 		}
 		this.decodedRecord = undefined;
 		this._buildIndex();
@@ -1672,7 +1674,7 @@ export class SessionManager {
 			}
 		}
 		this.recordsByEntry.set(view, { source, record });
-		if (view.type !== "session") metadataByEntry.set(view, entryMetadata(record.value, sequence - 1));
+		if (view.type !== "session") metadataByEntry.set(view, entryMetadata(record.value, sequence - 1, true));
 		return view as unknown as FileEntry;
 	}
 
@@ -1821,7 +1823,7 @@ export class SessionManager {
 			const entry = appendOnly ? existing.get(record.digest)?.shift() : undefined;
 			if (entry && this.recordsByEntry.has(entry)) {
 				this.recordsByEntry.set(entry, { source: scan.source, record });
-				if (entry.type !== "session") metadataByEntry.set(entry, entryMetadata(record.value, sequence - 1));
+				if (entry.type !== "session") metadataByEntry.set(entry, entryMetadata(record.value, sequence - 1, true));
 				return entry;
 			}
 			return this._entryView(record, sequence);
@@ -1870,7 +1872,7 @@ export class SessionManager {
 				entryRewrites.delete(entry);
 				entryDeletedFields.delete(entry);
 				entryMessageRoles.delete(entry);
-				if (entry.type !== "session") metadataByEntry.set(entry, entryMetadata(record.value, i - 1));
+				if (entry.type !== "session") metadataByEntry.set(entry, entryMetadata(record.value, i - 1, true));
 				continue;
 			}
 			const view = this._entryView(record, i);
@@ -2666,8 +2668,9 @@ export class SessionManager {
 	/**
 	 * Build the session context (what gets sent to the LLM).
 	 * Uses tree traversal from current leaf.
+	 * Request preparation isolates borrowed in-memory/dirty messages; saved bodies already decode fresh.
 	 */
-	buildSessionProjection(): SessionProjection {
+	buildSessionProjection(isolate = false): SessionProjection {
 		const bodies = new Map<FileEntry, Record<string, unknown>>();
 		this.projectionBodies = bodies;
 		try {
@@ -2705,6 +2708,10 @@ export class SessionManager {
 				contextEntriesFromPath(path.entries, path.compactionIndex, path.firstKeptIndex),
 				thinkingLevel,
 				model,
+				isolate
+					? (entry, edit) =>
+							!this.recordsByEntry.has(entry) || (edit !== undefined && !this.recordsByEntry.has(edit))
+					: undefined,
 			);
 			this._refreshJournal();
 			this.projectionSource = this.journalSource ? { ...this.journalSource } : undefined;

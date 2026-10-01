@@ -166,10 +166,10 @@ export class JsonTokenProjection {
 				break;
 			case "endKey":
 				this.readingKey = false;
-				this.key = this.detachString(this.key);
 				this.stack.at(-1)!.key = this.key;
+				// Object property names are internalized; only fields retains the parsed string itself.
 				if (this.stack.length === 1 && !this.fields.includes(this.key) && !this.keyTooLong)
-					this.fields.push(this.key);
+					this.fields.push(this.detachString(this.key));
 				break;
 			case "startObject":
 			case "startArray": {

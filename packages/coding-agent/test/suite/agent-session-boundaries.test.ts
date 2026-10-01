@@ -2,6 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BoundaryContextPreview } from "../../src/core/extensions/types.ts";
 import { createHarness as createSuiteHarness, getMessageText, type Harness } from "./harness.ts";
 
 async function createHarness(options?: Parameters<typeof createSuiteHarness>[0]): Promise<Harness> {
@@ -60,6 +61,43 @@ describe("AgentSession actionable boundaries", () => {
 			clones?.mockRestore();
 		}
 	});
+
+	it.each(["during", "after"] as const)(
+		"keeps unread previews at dispatch state when history changes %s dispatch",
+		async (when) => {
+			const started = deferred();
+			const release = deferred();
+			let preview: BoundaryContextPreview | undefined;
+			let observed = "";
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("turn_end", async (event) => {
+							preview = event.context;
+							started.resolve();
+							if (when === "during") {
+								await release.promise;
+								observed = JSON.stringify(preview.contextMessages);
+							}
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("done")]);
+			const prompt = harness.session.prompt("original");
+			await started.promise;
+			if (when === "after") await prompt;
+			harness.sessionManager.appendMessage({ role: "user", content: "later append", timestamp: 1 });
+			release.resolve();
+			await prompt;
+			if (when === "after") observed = JSON.stringify(preview!.contextMessages);
+			expect(observed).toContain("original");
+			expect(observed).toContain("done");
+			expect(observed).not.toContain("later append");
+			expect(JSON.stringify(harness.sessionManager.buildSessionProjection().messages)).toContain("later append");
+		},
+	);
 
 	it("isolates lazy entry, message and LLM previews and reads fresh pending queues for each handler", async () => {
 		const observations: string[] = [];

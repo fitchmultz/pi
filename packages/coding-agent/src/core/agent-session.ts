@@ -159,12 +159,13 @@ import { NestedToolCallRunner } from "./nested-tool-calls.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
-import type {
-	BranchSummaryEntry,
-	CompactionEntry,
-	SessionEntry,
-	SessionManager,
-	SessionProjection,
+import {
+	type BranchSummaryEntry,
+	buildSessionProjection,
+	type CompactionEntry,
+	type SessionEntry,
+	type SessionManager,
+	type SessionProjection,
 } from "./session-manager.ts";
 import { getLatestCustomEntry, SessionMetadataCursor } from "./session-metadata-cursor.ts";
 import type { CacheWarmingMode, SettingsManager } from "./settings-manager.ts";
@@ -207,6 +208,7 @@ interface ReportedUsagePrefix {
 	systemTokens: number;
 	estimatedTokens: number;
 	responseEntryId?: string;
+	responseTokensAdded?: number;
 }
 
 function sameValues(left: readonly unknown[], right: readonly unknown[]): boolean {
@@ -918,14 +920,14 @@ export class AgentSession {
 	}
 
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
-		const projection = this.sessionManager.buildSessionProjection();
+		const projection = this._buildSessionProjection();
 		// A virtual selection is checked in prepareRequest, against the model the request is routed to.
 		const model = this.model;
 		if (!model || isVirtualModel(model) || !this._exceedsCompactionThreshold(model, projection)) {
 			return { ...context, messages: projection.messages };
 		}
 		await this._runAutoCompaction("threshold", false);
-		return { ...context, messages: this.sessionManager.buildSessionProjection().messages };
+		return { ...context, messages: this._buildSessionProjection().messages };
 	}
 
 	private _installAgentRequestProjection(): void {
@@ -936,19 +938,10 @@ export class AgentSession {
 			const failed = this._failedResponse;
 			this._failedResponse = undefined;
 			const prepare = async () => {
-				const projection = this.sessionManager.buildSessionProjection();
-				// Persisted projections already decode fresh bodies; in-memory journals borrow theirs.
-				const messages = this.sessionManager.isPersisted()
-					? projection.messages
-					: structuredClone(projection.messages);
-				let index = 0;
-				for (const entry of projection.entries) {
-					for (const _message of entry.messages)
-						this._entryIdsByMessage.set(messages[index++]!, entry.sourceEntry.id);
-				}
+				const projection = this._buildSessionProjection(true);
 				const canonicalContext = {
 					...request.context,
-					messages: [...messages, ...structuredClone(this._pendingProviderMessages)],
+					messages: [...projection.messages, ...structuredClone(this._pendingProviderMessages)],
 					// Messages declare the provider-visible loadout; context.tools keeps executable implementations.
 					tools: this.agent.state.tools.slice(),
 				};
@@ -1108,13 +1101,15 @@ export class AgentSession {
 				),
 			)
 		) {
+			const estimate = estimateContextTokens(
+				this._runSystemPromptOptions?.forceSystemPrompt === undefined
+					? context.messages
+					: context.messages.filter((message) => message.role !== "system"),
+				options,
+			);
 			return {
-				...estimateContextTokens(
-					this._runSystemPromptOptions?.forceSystemPrompt === undefined
-						? context.messages
-						: context.messages.filter((message) => message.role !== "system"),
-					options,
-				),
+				...estimate,
+				tokens: estimate.tokens + (prefix.responseTokensAdded ?? 0),
 				source: "reported" as const,
 			};
 		}
@@ -1148,7 +1143,10 @@ export class AgentSession {
 			);
 			return {
 				...estimate,
-				tokens: Math.max(0, estimate.tokens + systemTokens - prefix.systemTokens),
+				tokens: Math.max(
+					0,
+					estimate.tokens + (prefix.responseTokensAdded ?? 0) + systemTokens - prefix.systemTokens,
+				),
 				source: "reported" as const,
 			};
 		}
@@ -1192,6 +1190,8 @@ export class AgentSession {
 		usageIndex?: number;
 	} {
 		let invalidated = false;
+		let messageIndices: Map<string | AgentMessage, number> | undefined;
+		let nextMessageIndex = messages.length - 1;
 		for (const entry of this.sessionManager.iterateEntryMetadata({
 			branchFrom: this.sessionManager.getLeafId(),
 			reverse: true,
@@ -1209,13 +1209,21 @@ export class AgentSession {
 				calculateContextTokens(message.usage!) <= 0
 			)
 				continue;
-			let usageIndex = messages.findLastIndex((message) => this._entryIdsByMessage.get(message) === entry.id);
-			if (usageIndex < 0) {
-				// In-memory SDK journals can supply their original entry message directly.
-				const source = this.sessionManager.getEntry(entry.id);
-				if (source?.type === "message") usageIndex = messages.indexOf(source.message);
+			messageIndices ??= new Map();
+			while (nextMessageIndex >= 0 && !messageIndices.has(entry.id)) {
+				const index = nextMessageIndex--;
+				const candidate = messages[index];
+				const id = this._entryIdsByMessage.get(candidate);
+				const key = id ?? (!this.sessionManager.isPersisted() ? candidate : undefined);
+				if (key !== undefined && !messageIndices.has(key)) messageIndices.set(key, index);
 			}
-			if (usageIndex >= 0)
+			let usageIndex = messageIndices.get(entry.id);
+			if (usageIndex === undefined && !this.sessionManager.isPersisted()) {
+				// Only in-memory entries can share their original SDK message identity.
+				const source = this.sessionManager.getEntry(entry.id);
+				if (source?.type === "message") usageIndex = messageIndices.get(source.message);
+			}
+			if (usageIndex !== undefined)
 				return { hasPostCompactionUsage: true, useReportedUsage: !invalidated, usageEntryId: entry.id, usageIndex };
 		}
 		return { hasPostCompactionUsage: true, useReportedUsage: false };
@@ -1326,12 +1334,16 @@ export class AgentSession {
 	// Event Subscription
 	// =========================================================================
 
-	private _refreshFinalizedContext(): void {
-		const projection = this.sessionManager.buildSessionProjection();
+	private _buildSessionProjection(isolate = false): SessionProjection {
+		const projection = this.sessionManager.buildSessionProjection(isolate);
 		for (const entry of projection.entries) {
 			for (const message of entry.messages) this._entryIdsByMessage.set(message, entry.sourceEntry.id);
 		}
-		this.agent.state.messages = projection.messages;
+		return projection;
+	}
+
+	private _refreshFinalizedContext(): void {
+		this.agent.state.messages = this._buildSessionProjection().messages;
 	}
 
 	private _applyBoundaryDrafts(manager: SessionManager, drafts: SessionBoundaryDraft[]): SessionEntry[] {
@@ -1408,7 +1420,11 @@ export class AgentSession {
 				drafts,
 				boundary,
 				() => {
-					snapshot.projection ??= this.sessionManager.buildSessionProjection();
+					snapshot.projection ??=
+						snapshot.revision === this.sessionManager.getEntriesRevision() &&
+						snapshot.leafId === this.sessionManager.getLeafId()
+							? this.sessionManager.buildSessionProjection()
+							: buildSessionProjection(snapshot.leafId ? this.sessionManager.getBranch(snapshot.leafId) : []);
 					return snapshot.projection;
 				},
 				this.sessionManager.isPersisted()
@@ -1619,8 +1635,9 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
-		if (event.type === "message_start" || event.type === "message_update" || event.type === "message_end")
-			this._messageStateRevision++;
+		if (event.type === "message_end") this._messageStateRevision++;
+		const receivedTokens =
+			event.type === "message_end" && event.message.role === "assistant" ? estimateTokens(event.message) : 0;
 		// Record the calls a tool made through ctx.executeTool() and their usage on its result message.
 		if (this._nestedToolCalls) {
 			if (event.type === "message_start" && event.message.role === "toolResult") {
@@ -1693,18 +1710,18 @@ export class AgentSession {
 						assistantMsg.stopReason !== "aborted" &&
 						calculateContextTokens(assistantMsg.usage) > 0
 					) {
-						this._reportedUsagePrefix = { ...prefix, responseEntryId: entryId };
-						this._charsPerToken.set(
-							`${prefix.provider}\0${prefix.api}\0${prefix.model}`,
-							Math.max(
-								1,
-								Math.min(
-									4,
-									((prefix.estimatedTokens + estimateTokens(assistantMsg)) * 4) /
-										calculateContextTokens(assistantMsg.usage),
-								),
-							),
-						);
+						this._reportedUsagePrefix = {
+							...prefix,
+							responseEntryId: entryId,
+							responseTokensAdded: Math.max(0, estimateTokens(assistantMsg) - receivedTokens),
+						};
+						const inputTokens =
+							assistantMsg.usage.input + assistantMsg.usage.cacheRead + assistantMsg.usage.cacheWrite;
+						if (inputTokens > 0)
+							this._charsPerToken.set(
+								`${prefix.provider}\0${prefix.api}\0${prefix.model}`,
+								Math.max(1, Math.min(4, (prefix.estimatedTokens * 4) / inputTokens)),
+							);
 					}
 					this._lastAssistantMessage = assistantMsg;
 					if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
@@ -3978,7 +3995,7 @@ export class AgentSession {
 			// Retain admitted input after the new boundary before compaction observers rebuild the transcript.
 			this._flushPendingProviderMessages();
 			this._refreshFinalizedContext();
-			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
+			const estimatedTokensAfter = estimateMessagesTokens(this.messages);
 
 			// Get the saved compaction entry for the extension event
 			const savedCompactionEntry = this.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
@@ -4322,7 +4339,7 @@ export class AgentSession {
 			// Retain admitted input after the new boundary before compaction observers rebuild the transcript.
 			this._flushPendingProviderMessages();
 			this._refreshFinalizedContext();
-			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
+			const estimatedTokensAfter = estimateMessagesTokens(this.messages);
 
 			// Get the saved compaction entry for the extension event
 			const savedCompactionEntry = this.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
