@@ -108,15 +108,19 @@ a staged release without selecting it. See [restart.md](packages/coding-agent/do
 
 `pi update --fork` does the fetch, build, stage and activate steps for you from the latest
 `fitchmultz/pi` main. It only updates an existing selector installation and leaves the previous
-release selectable at `<selector>.previous`. On Termux the selector is
+release selectable at `<selector>.previous`. Its selector is
+`$(npm root -g)/@earendil-works/pi-coding-agent`; on Termux it is
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` with `~/.local/bin/pi`.
 
 ### Cutover from the 0.99 fork
 
 Do the first 1.0 install from a fork checkout (`npm ci --ignore-scripts`,
-`npm run hydrate:model-data`, then `node scripts/install-fork.mjs`). A 0.99 `pi update --fork`
-holds `<selector>.lock` while it runs the 1.0 installer, which needs the same lock, so it fails with
-`Lock file is already being held` and changes nothing. Later updates can use `pi update --fork`.
+`npm run hydrate:model-data`, then
+`node scripts/install-fork.mjs --selector "$(npm root -g)/@earendil-works/pi-coding-agent"`, so it
+activates the selector that `pi` and `pi update --fork` use; on Termux omit `--selector`). A 0.99
+`pi update --fork` holds `<selector>.lock` while it runs the 1.0 installer, which needs the same
+lock, so it fails with `Lock file is already being held` and changes nothing. Later updates can use
+`pi update --fork`.
 
 Sessions started by the 0.99 fork must quit and relaunch to run on 1.0. `/restart` from such a
 session is refused by the new worker and stays on 0.99. Relaunch with `pi --session <path|id>`:
