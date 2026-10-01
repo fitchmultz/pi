@@ -211,6 +211,15 @@ export default function (pi: ExtensionAPI) {
 	let sandboxEnabled = false;
 	let sandboxInitialized = false;
 
+	pi.on("tool_call", (event) => {
+		if (sandboxEnabled && event.toolName === "background_command" && event.input.action === "start") {
+			return {
+				block: true,
+				reason: "Sandbox mode does not support detached background commands. Use sandboxed bash.",
+			};
+		}
+	});
+
 	pi.registerTool({
 		...localBash,
 		label: "bash (sandboxed)",

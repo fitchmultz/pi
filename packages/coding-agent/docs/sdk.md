@@ -59,6 +59,22 @@ See the checked [sessions example](../examples/sdk/11-sessions.ts) for creating,
 
 After a runtime replacement, subscriptions belong to the old `AgentSession` and must be rebound. See the [session runtime example](../examples/sdk/13-session-runtime.ts).
 
+<a id="background-commands"></a>
+
+### Background commands
+
+The CLI loads `builtin:background-command`. SDK hosts opt in by adding `createBackgroundCommandExtension()` to `DefaultResourceLoader.extensionFactories`, then calling `session.bindExtensions({})` to initialize resume monitoring. The tool registers active by default; explicit allowlists and saved tool selections are preserved.
+
+`background_command` accepts `action: "start" | "status" | "cancel"`. Start requires `command`; optional `cwd` resolves from the session working directory (including `~`), and `timeout` is seconds with no default. Cancel requires a job `id`. Status with an `id` returns a readable output tail capped at 16KB/100 lines. Without an `id`, it lists at most 20 jobs newest first, with `offset`, `nextOffset`, and optional `activeOnly` filtering. Negative offsets and invalid timeouts are rejected.
+
+Detached workers use the effective `shellPath`, `shellCommandPrefix`, shell environment, and current `PI_*` session metadata. Each writes its job record, atomic state, and unchanged raw log beneath `<sessionDir>/background-commands/<sessionId>/<jobId>/`. Paths are absolute. Jobs survive Pi exit and session disposal; resume discovers existing work without restarting it. Missing or inaccessible workers report an unknown outcome. Corrupt records do not hide healthy jobs. In-memory sessions retain job files but have no conversation to resume automatically.
+
+Completion messages enter after the entire foreground tool batch, during idle, or after resume. They include job ID, status, exit code when available, command preview, and `logFile`. Success omits output; other outcomes include up to 2KB/20 lines. Read `logFile` for the full output. Persisted notices and terminal status results acknowledge jobs across reload/resume; one process at a time owns delivery for a shared session. After a crashed delivery owner, its filesystem lease expires (normally about 10 seconds) before another process takes over.
+
+Cancelling the agent leaves jobs running and records completions without waking the model; new user input clears wake suppression. Cancelling the job stops its shell process tree. `waitForIdle()` does not wait for external jobs. Print/JSON invocations may exit before completion; use `bash` when the same invocation must consume the result. Session shutdown releases the completion monitor; a disposed SDK context is cleaned up on its next idle tick without stopping detached jobs.
+
+This tool supports native local execution only, not custom `BashOperations` backends or Bash cwd hooks. It honors `pi-change-working-dir` through the synchronous `pi-change-working-dir:resolve-execution-cwd` event: the owner's valid absolute cwd becomes the base for relative `cwd` parameters. The base is captured before worker admission; later directory changes affect only later calls. Owner errors and invalid replies reject the start instead of falling back to the session cwd. Overriding or excluding `bash` alone does not intercept this separate tool. Permission guards must also handle `background_command` with `action: "start"`. The shipped plan, sandbox, and SSH examples block background starts while their restrictions are active; status and cancellation remain available.
+
 ## Prompting
 
 `prompt()` handles extension commands and expands file-based prompt templates before ordinary user messages enter the agent. For an accepted agent run, it resolves after the run finishes, including automatic retries.

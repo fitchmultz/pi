@@ -138,7 +138,7 @@ Default enabled tools are `read`, `bash`, `edit`, and `write`, unless `defaultTo
 | `find` | Find paths using glob patterns |
 | `ls` | List directory contents |
 
-Built-in extensions also add the following tools. `codemode` and `tool_search` are off by default; the MCP extension turns them on when an MCP server needs them (see [MCP](mcp.md#exposure)). To enable them yourself, name them in `--tools` or `defaultTools`. `discover_tools` is active by default when its builtin is loaded, unless tool selection or exclusions disable it.
+Built-in extensions also add the following tools. `background_command` starts, inspects, and cancels [durable background shell commands](sdk.md#background-commands); it is enabled by default for new CLI sessions. `discover_tools` is active by default when its builtin is loaded. Explicit tool allowlists, saved selections, and exclusions still apply; `--no-extensions` disables both, and `--no-builtin-tools` does not disable extension tools. `codemode` and `tool_search` are off by default; the MCP extension turns them on when an MCP server needs them (see [MCP](mcp.md#exposure)). To enable them yourself, name them in `--tools` or `defaultTools`.
 
 | Built-in extension | Purpose |
 |---|---|

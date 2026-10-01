@@ -402,6 +402,7 @@ export {
 	type VirtualModelStateData,
 } from "./core/virtual-models.ts";
 // Built-in extensions. The CLI loads them; SDK sessions add them to their extension factories.
+export { createBackgroundCommandExtension } from "./extensions/background-command/index.ts";
 export { type CodemodeExtensionOptions, createCodemodeExtension } from "./extensions/codemode/index.ts";
 export type { CodemodeStoreEntryData, CodemodeToolDetails } from "./extensions/codemode/tool.ts";
 export {

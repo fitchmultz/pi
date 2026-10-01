@@ -21,7 +21,7 @@ import { extractTodoItems, isSafeCommand, markCompletedSteps, type TodoItem } fr
 // Tools
 const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
 const NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write"];
-const PLAN_MODE_DISABLED_TOOLS = new Set<string>(["edit", "write"]);
+const PLAN_MODE_DISABLED_TOOLS = new Set<string>(["edit", "write", "background_command"]);
 const PLAN_MANAGED_TOOLS = new Set<string>([...PLAN_MODE_TOOLS, ...NORMAL_MODE_TOOLS]);
 
 interface PlanModeState {
@@ -162,6 +162,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 	// Block destructive bash commands in plan mode
 	pi.on("tool_call", async (event) => {
+		if (planModeEnabled && event.toolName === "background_command" && event.input.action === "start") {
+			return { block: true, reason: "Plan mode: background commands are disabled. Use read-only bash." };
+		}
 		if (!planModeEnabled || event.toolName !== "bash") return;
 
 		const command = event.input.command as string;
