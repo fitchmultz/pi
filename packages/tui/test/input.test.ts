@@ -34,6 +34,37 @@ describe("Input component", () => {
 		assert.strictEqual(input.getValue(), "\\x");
 	});
 
+	// Regression for fitchmultz/pi#46.
+	it("keeps movement and editing on grapheme boundaries after setValue", () => {
+		for (const value of ["😀", "e\u0301", "👩‍💻"]) {
+			for (const [key, expected] of [
+				["x", `x${value}`],
+				["\x7f", value],
+				["\x1b[3~", ""],
+			]) {
+				const input = new Input();
+				input.handleInput("a");
+				input.setValue(value);
+				input.handleInput(key);
+				assert.strictEqual(input.getValue(), expected);
+			}
+			const input = new Input();
+			input.handleInput("a");
+			input.setValue(value);
+			input.handleInput("\x1b[C");
+			input.handleInput("x");
+			assert.strictEqual(input.getValue(), `${value}x`);
+		}
+	});
+
+	it("inserts printable xterm keys but not modified shortcuts", () => {
+		const input = new Input();
+		input.handleInput("\x1b[27;2;69~");
+		input.handleInput("\x1b[27;2;196~");
+		input.handleInput("\x1b[27;6;69~");
+		assert.strictEqual(input.getValue(), "EÄ");
+	});
+
 	describe("render", () => {
 		it("supports a custom prompt and styled placeholder", () => {
 			const input = new Input({

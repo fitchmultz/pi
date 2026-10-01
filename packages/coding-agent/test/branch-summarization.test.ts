@@ -7,7 +7,7 @@ import {
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { generateBranchSummary } from "../src/core/compaction/index.ts";
+import { generateBranchSummary, prepareBranchEntries } from "../src/core/compaction/index.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 
 const model: Model<"anthropic-messages"> = {
@@ -44,6 +44,24 @@ function response(content: AssistantMessage["content"]): AssistantMessage {
 }
 
 describe("branch summarization", () => {
+	it("budgets conversation without system declarations", () => {
+		const system: SessionEntry = {
+			type: "message",
+			id: "branch-system",
+			parentId: "branch-user",
+			timestamp: new Date(2).toISOString(),
+			message: {
+				role: "system",
+				content: "Tool and system declarations ".repeat(1000),
+				timestamp: 2,
+			},
+		};
+		const prepared = prepareBranchEntries([...entries, system], 100);
+		expect(prepared.messages).toEqual([{ role: "user", content: "Abandoned request", timestamp: 1 }]);
+		expect(prepared.totalTokens).toBeGreaterThan(0);
+		expect(prepared.totalTokens).toBeLessThan(100);
+	});
+
 	it("does not override tool choice for branch summaries", async () => {
 		let requestOptions: SimpleStreamOptions | undefined;
 		const streamFn: StreamFn = (_model, _context, options) => {

@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed input mouse placement with custom prompts and horizontally scrolled wide characters.
+- Fixed input cursor movement and editing splitting graphemes after replacing the value.
+- Fixed printable xterm modifyOtherKeys input being ignored.
+- Fixed literal and modified `+` key bindings.
+- Fixed Thai and Lao characters being changed inside terminal hyperlink payloads.
+
 ## [1.0.0] - 2026-10-01
 
 ### Added

@@ -6,6 +6,7 @@ import { SelectList, type SelectListTheme } from "../src/components/select-list.
 import { SettingsList, type SettingsListTheme } from "../src/components/settings-list.ts";
 import { Container, type TuiMouseEvent, type TuiMouseEventType } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
+import { stripTerminalSequences } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 function mouse(type: TuiMouseEventType, x: number, y: number, width = 80, height = 10): TuiMouseEvent {
@@ -83,14 +84,40 @@ class SubmenuHost extends Container {
 }
 
 describe("mouse-aware components", () => {
-	it("positions a single-line input cursor on press", () => {
-		const input = new Input();
-		input.setValue("hello");
-		input.render(20);
+	it("positions the input cursor using the visible prompt width", () => {
+		for (const { prompt, x, expected } of [
+			{ prompt: undefined, x: 4, expected: "heXllo" },
+			{ prompt: "", x: 2, expected: "heXllo" },
+			{ prompt: "Search: ", x: 8, expected: "Xhello" },
+			{ prompt: "\x1b[36m查找: \x1b[0m", x: 8, expected: "heXllo" },
+		]) {
+			const input = new Input({ prompt });
+			input.handleInput("hello");
+			assert.strictEqual(
+				stripTerminalSequences(input.render(20)[0]).trimEnd(),
+				`${stripTerminalSequences(prompt ?? "> ")}hello`,
+			);
+			assert.strictEqual(input.handleMouse(mouse("press", x, 0, 20, 1))?.handled, true);
+			input.handleInput("X");
+			assert.strictEqual(input.getValue(), expected);
+		}
+	});
 
-		assert.strictEqual(input.handleMouse(mouse("press", 4, 0, 20, 1))?.handled, true);
-		input.handleInput("X");
-		assert.strictEqual(input.getValue(), "heXllo");
+	it("positions the cursor at both ends of scrolled wide text", () => {
+		for (const { width, visible, hidden, endX, padding } of [
+			{ width: 8, visible: "再见", hidden: "你好吗世界", endX: 6, padding: " " },
+			{ width: 9, visible: "界再见", hidden: "你好吗世", endX: 8, padding: "" },
+		]) {
+			for (const atEnd of [false, true]) {
+				const input = new Input();
+				const value = "你好吗世界再见";
+				input.handleInput(value);
+				assert.deepStrictEqual(input.render(width), [`> ${visible}\x1b[7m \x1b[27m${padding}`]);
+				input.handleMouse(mouse("press", atEnd ? endX : 2, 0, width, 1));
+				input.handleInput("X");
+				assert.strictEqual(input.getValue(), atEnd ? `${value}X` : `${hidden}X${visible}`);
+			}
+		}
 	});
 
 	it("selects and activates list rows", () => {
