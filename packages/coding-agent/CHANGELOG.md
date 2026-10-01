@@ -10,6 +10,10 @@
 - Added optional `compactView` (off by default), `/compact-view`, and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Hybrid opens groups by default while keeping cards compact.
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 
+### Fixed
+
+- Fixed managed restart signal delivery and waiting for extension-settled work, restored short socket paths on Termux, and rejected legacy launcher handoffs with relaunch instructions.
+
 ## [1.0.0] - 2026-10-01
 
 ### New Features

@@ -12,7 +12,7 @@ From a Pi shell tool:
 pi restart --message "Verify the updated tool, then continue the task"
 ```
 
-The response says **Restart queued**, not ready or successfully activated. Pi waits for final idle: no streaming, running tools, automatic retry/compaction, or queued steering/follow-up messages. It runs `session_shutdown` handlers, exits gracefully, then starts the replacement.
+The response says **Restart queued**, not ready or successfully activated. Pi waits for final idle: no streaming, running tools, automatic retry/compaction, queued steering/follow-up messages, or unfinished `agent_settled` handlers and their deferred actions. It runs `session_shutdown` handlers, exits gracefully, then starts the replacement.
 
 In the TUI, `/restart` does the same. `/restart <text>` supplies a continuation. Without text, the replacement waits for input. Supplied text is sent once, labelled `[Restart continuation]`.
 
@@ -48,13 +48,17 @@ Readiness is signalled only after TUI initialization. If the selected worker can
 
 Readiness is not proof that every provider or tool works. Validate candidates first. Failures after readiness are not automatically rolled back or replayed, because work may already have had side effects.
 
+### Upgrading sessions started by the old fork
+
+Sessions started by the old 0.93 fork launcher must **quit and relaunch** using `pi -c` or `pi --session <file>` to use the new runtime. `/restart` from an old-launcher session stays on the old runtime: the new worker rejects its legacy handoff before opening a session, allowing the old launcher's startup rollback. There is no legacy-schema conversion or compatibility layer.
+
 Session history remains the authority. Original CLI options are retained except session-selection flags and consumed startup prompts/attachments; `--session` selects the saved journal. Extensions must persist their own state with ordinary session entries and shutdown handlers. In-memory queues and extension internals are not transferred: restart waits for runnable queues to drain and refuses pending next-turn context. This is a saved-session resume, not an in-memory snapshot or a migration facility.
 
 ## Scope and development
 
 Print, JSON and RPC modes do not expose the interactive control endpoint. SDK hosts and standalone binaries retain their existing lifecycle. Managed control remains available with `-ne`, which still disables ordinary extension discovery.
 
-The local socket lives inside a private temporary directory (a named pipe on Windows). It is recreated on reload/session replacement and removed on shutdown. It is not a security boundary against other code running as the same user. Extensions remain trusted code; see [Security](security.md).
+The local socket lives inside a private temporary directory (a named pipe on Windows). It is recreated on reload/session replacement and removed on shutdown. Long Unix socket paths fall back to a short temporary root: the Node runtime's sibling `tmp` directory on Android/Termux, `/tmp` elsewhere. If control cannot initialize on a fresh launch, Pi warns and remains usable without restart; a replacement launch fails so its parent can roll back. It is not a security boundary against other code running as the same user. Extensions remain trusted code; see [Security](security.md).
 
 The launcher stays loaded across worker replacements. Launcher changes require a full CLI launch. Source development uses `src/cli-launcher.ts`; `src/cli.ts` remains the ordinary worker entrypoint. The bundle emits these as `dist/bundle/cli.js` and `dist/bundle/cli-worker.js`. The installer helper `getRestartRuntimeWorker` remains exported from `dist/cli/launcher.js`.
 

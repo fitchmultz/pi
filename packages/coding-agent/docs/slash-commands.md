@@ -47,6 +47,7 @@ Review a session before exporting or sharing it. Sessions can contain prompts, t
 |---|---|
 | `/trust` | Save a project trust decision for future Pi processes |
 | `/reload` | Reload keybindings, extensions, skills, templates, themes, and context files |
+| `/restart [text]` | Queue a managed Node CLI restart on the same saved session; optional text continues afterward. See [Managed restarts](restart.md) |
 | `/hotkeys` | Show active keyboard shortcuts |
 | `/changelog` | Show changelog entries |
 | `/quit` | Quit Pi |

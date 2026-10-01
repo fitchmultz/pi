@@ -27,6 +27,26 @@ export type RestartWorkerMessage =
 	| { type: "pi:ready" }
 	| { type: "pi:restart"; request: RestartRequest; session: RestartSession };
 
+export function parseRestartHandoff(encoded: string): RestartHandoff {
+	const value: unknown = JSON.parse(encoded);
+	if (
+		!value ||
+		typeof value !== "object" ||
+		!("sessionFile" in value) ||
+		typeof value.sessionFile !== "string" ||
+		!("sessionId" in value) ||
+		typeof value.sessionId !== "string"
+	) {
+		throw new Error("This Pi was started by an older Pi launcher; quit and run pi -c to resume on the new runtime.");
+	}
+	const fields = value as Record<string, unknown>;
+	for (const key of ["message", "failure"] as const) {
+		if (fields[key] !== undefined && typeof fields[key] !== "string")
+			throw new Error(`Invalid restart handoff ${key}`);
+	}
+	return value as RestartHandoff;
+}
+
 export function parseRestartRequest(value: unknown): RestartRequest {
 	if (!value || typeof value !== "object" || Array.isArray(value))
 		throw new Error("Restart request must be an object");

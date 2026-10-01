@@ -2,15 +2,15 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { getRestartRuntimeWorker } from "../../cli/launcher.ts";
 import {
 	MANAGED_CLI_ENV,
 	MAX_RESTART_BYTES,
+	parseRestartHandoff,
 	parseRestartRequest,
 	RESTART_HANDOFF_ENV,
 	RESTART_SOCKET_ENV,
-	type RestartHandoff,
 	type RestartRequest,
 	type RestartWorkerMessage,
 } from "../../cli/restart-protocol.ts";
@@ -28,12 +28,23 @@ export interface ManagedRestart {
 	bindInput(check: () => RestartInputState): void;
 	ready(): Promise<void>;
 	start(): void;
-	interrupt(): void;
+	interrupt(reason?: string): void;
 	beginShutdown(source: "user" | "extension" | "signal"): boolean;
 	completeShutdown(): Promise<void>;
 }
 
 let install: ((pi: ExtensionAPI) => void) | undefined;
+
+/** Unix socket limits include the directory; Android's writable short temp root is next to its runtime. */
+export function getRestartSocketFallback(
+	directory: string,
+	platform = process.platform,
+	execPath = process.execPath,
+): string | undefined {
+	const maxBytes = platform === "linux" || platform === "android" ? 107 : 103;
+	if (platform === "win32" || Buffer.byteLength(join(directory, "s")) <= maxBytes) return undefined;
+	return platform === "android" ? posix.resolve(posix.dirname(execPath), "../tmp") : "/tmp";
+}
 
 /** Builtin factory; SDK, non-interactive modes and standalone binaries never initialize control. */
 export default function restartExtension(pi: ExtensionAPI): void {
@@ -52,8 +63,10 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	const encoded = process.env[RESTART_HANDOFF_ENV];
 	delete process.env[RESTART_HANDOFF_ENV];
 	delete process.env[RESTART_SOCKET_ENV];
-	if (process.env[MANAGED_CLI_ENV] !== "1" || !process.send || !process.connected) return undefined;
-	const handoff = encoded ? (JSON.parse(encoded) as RestartHandoff) : undefined;
+	const managed = process.env[MANAGED_CLI_ENV] === "1";
+	delete process.env[MANAGED_CLI_ENV];
+	if (!managed || !process.send || !process.connected) return undefined;
+	const handoff = encoded ? parseRestartHandoff(encoded) : undefined;
 	process.once("disconnect", () => process.kill(process.pid, "SIGTERM"));
 	process.channel?.unref();
 	let input = (): RestartInputState => ({ busy: true, pendingInput: false });
@@ -67,6 +80,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	let server: Server | undefined;
 	let directory: string | undefined;
 	let socketPath: string | undefined;
+	let startupWarning: (() => void) | undefined;
 	const sockets = new Set<Socket>();
 
 	const cancel = (reason?: string) => {
@@ -77,6 +91,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		if (requested && reason && ctx) ctx.ui.notify(`Restart cancelled: ${reason}`, "warning");
 	};
 	const cleanup = () => {
+		startupWarning = undefined;
 		clearTimeout(timer);
 		for (const socket of sockets) socket.destroy();
 		sockets.clear();
@@ -113,7 +128,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	};
 	const queue = (value: unknown): string => {
 		const request = parseRestartRequest(value);
-		if (!ctx || closing) throw new Error("Pi is not ready for restart requests");
+		if (!ctx || closing) throw new Error("Restart control is unavailable in this session");
 		if (pending || committed) throw new Error("A restart is already queued");
 		if (request.sessionId && request.sessionId !== ctx.sessionManager.getSessionId())
 			throw new Error("Restart request belongs to a different session");
@@ -140,40 +155,40 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			cleanup();
 			ctx = context;
 			api = pi;
-			if (handoff && !started && context.sessionManager.getSessionId() !== handoff.sessionId)
-				throw new Error("Restart session identity mismatch");
-			directory = mkdtempSync(join(tmpdir(), "pi-restart-"));
-			if (process.platform !== "win32" && Buffer.byteLength(join(directory, "s")) > 103) {
-				rmSync(directory, { recursive: true, force: true });
-				directory = mkdtempSync("/tmp/pi-restart-");
-			}
-			socketPath = process.platform === "win32" ? `\\\\.\\pipe\\pi-restart-${randomUUID()}` : join(directory, "s");
-			server = createServer((socket) => {
-				sockets.add(socket);
-				socket.on("close", () => sockets.delete(socket));
-				socket.on("error", () => {});
-				socket.setTimeout(5000, () => socket.destroy());
-				socket.setEncoding("utf8");
-				let text = "";
-				let handled = false;
-				socket.on("data", (chunk: string) => {
-					if (handled) return;
-					text += chunk;
-					if (!text.includes("\n") && Buffer.byteLength(text) <= MAX_RESTART_BYTES) return;
-					handled = true;
-					try {
-						if (Buffer.byteLength(text) > MAX_RESTART_BYTES) throw new Error("Restart request is too large");
-						socket.end(
-							`${JSON.stringify({ ok: true, message: queue(JSON.parse(text.slice(0, text.indexOf("\n")))) })}\n`,
-						);
-					} catch (error) {
-						socket.end(
-							`${JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) })}\n`,
-						);
-					}
-				});
-			});
 			try {
+				directory = mkdtempSync(join(tmpdir(), "pi-restart-"));
+				const shortTmp = getRestartSocketFallback(directory);
+				if (shortTmp) {
+					rmSync(directory, { recursive: true, force: true });
+					directory = mkdtempSync(join(shortTmp, "pi-restart-"));
+				}
+				socketPath =
+					process.platform === "win32" ? `\\\\.\\pipe\\pi-restart-${randomUUID()}` : join(directory, "s");
+				server = createServer((socket) => {
+					sockets.add(socket);
+					socket.on("close", () => sockets.delete(socket));
+					socket.on("error", () => {});
+					socket.setTimeout(5000, () => socket.destroy());
+					socket.setEncoding("utf8");
+					let text = "";
+					let handled = false;
+					socket.on("data", (chunk: string) => {
+						if (handled) return;
+						text += chunk;
+						if (!text.includes("\n") && Buffer.byteLength(text) <= MAX_RESTART_BYTES) return;
+						handled = true;
+						try {
+							if (Buffer.byteLength(text) > MAX_RESTART_BYTES) throw new Error("Restart request is too large");
+							socket.end(
+								`${JSON.stringify({ ok: true, message: queue(JSON.parse(text.slice(0, text.indexOf("\n")))) })}\n`,
+							);
+						} catch (error) {
+							socket.end(
+								`${JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) })}\n`,
+							);
+						}
+					});
+				});
 				await new Promise<void>((resolve, reject) => {
 					server!.once("error", reject);
 					server!.listen(socketPath, resolve);
@@ -181,7 +196,14 @@ export function createManagedRestart(): ManagedRestart | undefined {
 				process.env[RESTART_SOCKET_ENV] = socketPath;
 			} catch (error) {
 				cleanup();
-				throw error;
+				if (handoff) throw error;
+				const warn = () =>
+					context.ui.notify(
+						`Restart control is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+						"warning",
+					);
+				if (started) warn();
+				else startupWarning = warn;
 			}
 		});
 		pi.on("message_end", (event) => {
@@ -192,6 +214,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			if (event.aborted) cancel("compaction was interrupted.");
 		});
 		pi.on("before_agent_start", (event) => {
+			if (!ctx) return;
 			if (event.systemPromptOptions.forceSystemPrompt !== undefined)
 				event.systemPromptOptions.forceSystemPrompt += `\n\n${guidance}`;
 			else event.systemPromptOptions.sections.restart = guidance;
@@ -217,14 +240,16 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			input = check;
 		},
 		async ready() {
-			if (!ctx) throw new Error("Managed restart extension did not initialize");
-			if (handoff && ctx.sessionManager.getSessionId() !== handoff.sessionId)
+			if (handoff && !ctx) throw new Error("Managed restart extension did not initialize");
+			if (handoff && ctx?.sessionManager.getSessionId() !== handoff.sessionId)
 				throw new Error("Restart session identity mismatch");
 			await send({ type: "pi:ready" });
 		},
 		start() {
 			if (started) return;
 			started = true;
+			startupWarning?.();
+			startupWarning = undefined;
 			if (handoff?.failure) ctx?.ui.notify(handoff.failure, "warning");
 			if (handoff?.message || handoff?.failure) {
 				api?.sendUserMessage(
@@ -233,8 +258,8 @@ export function createManagedRestart(): ManagedRestart | undefined {
 				);
 			}
 		},
-		interrupt() {
-			cancel("the run was interrupted.");
+		interrupt(reason = "the run was interrupted.") {
+			cancel(reason);
 		},
 		beginShutdown(source) {
 			if (source !== "extension") cancel();

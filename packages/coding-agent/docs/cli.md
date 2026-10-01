@@ -14,6 +14,7 @@ pi list
 pi config [options]
 pi auth <check|print-api-key|print-bearer-token> [options]
 pi mcp <list|login|logout> [options]
+pi restart [--message <text>] [-e <extension> ...] [--runtime <package-dir>]
 ```
 
 <a id="modes"></a>
@@ -238,6 +239,12 @@ See [Configuration](configuration.md) for saved configuration, [Security](securi
   Shows the Pi version, then exits.
 
 Extensions may register additional long-form options. Unknown short options are rejected.
+
+## Restart Pi
+
+From a managed interactive Pi shell tool, `pi restart` queues a restart on the same saved session. It waits for final idle, including settled handlers and their deferred messages. `--message` submits a labelled continuation once; `-e` replaces the explicit extension list; `--runtime` pins a package containing `dist/bundle/cli-worker.js`.
+
+Run `pi restart --help` for examples and exit codes. Outside a managed interactive session it fails. See [Managed restarts](restart.md) for draft protection, staging, rollback and upgrading sessions started by an older fork launcher.
 
 ## Package commands
 

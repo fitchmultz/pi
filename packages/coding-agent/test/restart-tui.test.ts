@@ -44,7 +44,11 @@ function fixture() {
 		root,
 		log,
 		status,
-		extension(version: string, restartCommand?: string, holdWork = false) {
+		extension(
+			version: string,
+			options: { restartCommand?: string; holdWork?: boolean; settledFollowup?: boolean } = {},
+		) {
+			const { restartCommand, holdWork, settledFollowup } = options;
 			const path = join(root, `${version}.ts`);
 			writeFileSync(
 				path,
@@ -54,11 +58,17 @@ import { fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-work
 import { Type } from 'typebox';
 export default function(pi) {
  const faux = fauxProvider();
+ let queueSettledFollowup = false;
  pi.registerProvider('faux', { api: faux.api, baseUrl: faux.getModel().baseUrl, apiKey: 'faux-key', models: faux.models, streamSimple: faux.provider.streamSimple });
  const record = (event, ctx, extra = {}) => appendFileSync(${JSON.stringify(log)}, JSON.stringify({event, pid:process.pid, version:${JSON.stringify(version)}, sessionId:ctx.sessionManager.getSessionId(), sessionFile:ctx.sessionManager.getSessionFile(), endpoint:process.env.PI_RESTART_SOCKET, ...extra}) + '\\n');
  pi.registerTool({ name:'completed_work', label:'Completed work', description:'Records one completed side effect', parameters:Type.Object({}), async execute(_id,_args,signal,_update,ctx) { record('work',ctx); ${holdWork ? `while (!existsSync(${JSON.stringify(join(root, "release-work"))}) && !signal?.aborted) await new Promise(r=>setTimeout(r,10));` : ""} return {content:[{type:'text',text:'Completed'}],details:{}}; } });
  pi.on('session_start', (_event,ctx) => { record('start',ctx); });
- pi.on('before_agent_start', (event,ctx) => {
+ pi.on('before_agent_start', async (event,ctx) => {
+  if (${settledFollowup === true} && event.prompt === 'Deferred settled followup') {
+   record('deferred-start',ctx);
+   while (!existsSync(${JSON.stringify(join(root, "release-deferred"))})) await new Promise(r=>setTimeout(r,10));
+  }
+  queueSettledFollowup = ${settledFollowup === true} && event.prompt === 'Trigger settled followup';
   const resumed = event.prompt.startsWith('[Restart continuation]');
   record('prompt',ctx,{text:event.prompt});
   faux.setResponses(resumed ? [fauxAssistantMessage('Continuation handled')] : [
@@ -66,16 +76,40 @@ export default function(pi) {
    fauxAssistantMessage('Seed completed')
   ]);
  });
- pi.on('agent_settled', (_event,ctx) => record('settled',ctx,{calls:faux.state.callCount}));
+ pi.on('agent_settled', async (_event,ctx) => {
+  if (queueSettledFollowup) {
+   queueSettledFollowup = false;
+   record('settling',ctx);
+   while (!existsSync(${JSON.stringify(join(root, "release-settled"))})) await new Promise(r=>setTimeout(r,10));
+   pi.sendUserMessage('Deferred settled followup');
+   record('followup-queued',ctx);
+  }
+  record('settled',ctx,{calls:faux.state.callCount});
+ });
  pi.on('session_shutdown', async (_event,ctx) => { await new Promise(r=>setTimeout(r,50)); record('shutdown',ctx); });
 }
 `,
 			);
 			return path;
 		},
-		start(extension: string) {
+		start(extension: string, options: { env?: Record<string, string>; legacyHandoff?: unknown } = {}) {
 			if (!existsSync(cli)) throw new Error(`Build the coding-agent package first: missing ${cli}`);
 			const script = join(root, "launch.sh");
+			let entry = cli;
+			if (options.legacyHandoff !== undefined) {
+				entry = join(root, "legacy-parent.mjs");
+				writeFileSync(
+					entry,
+					`
+import {spawn} from 'node:child_process';
+const child = spawn(process.execPath, [${JSON.stringify(join(dirname(cli), "cli-worker.js"))}, ...process.argv.slice(2)], {
+ stdio:['inherit','inherit','inherit','ipc'],
+ env:{...process.env, PI_MANAGED_CLI:'1', PI_RESTART_HANDOFF:${JSON.stringify(JSON.stringify(options.legacyHandoff))}}
+});
+child.on('exit', code => {process.exitCode = code ?? 1;});
+`,
+				);
+			}
 			const command = [
 				"env",
 				"-i",
@@ -86,8 +120,9 @@ export default function(pi) {
 				"PI_TELEMETRY=0",
 				"TERM=xterm-256color",
 				"JITI_FS_CACHE=0",
+				...Object.entries(options.env ?? {}).map(([key, value]) => `${key}=${value}`),
 				process.execPath,
-				cli,
+				entry,
 				"--offline",
 				"-ne",
 				"-ns",
@@ -196,8 +231,8 @@ describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_
 					`import {appendFileSync} from 'node:fs'; appendFileSync(${JSON.stringify(join(f.root, "candidate-starts"))}, 'started\\n'); process.exit(17);`,
 				);
 			} else symlinkSync(resolve(dirname(cli), "../.."), candidate, "dir");
-			const command = `${quote(process.execPath)} ${quote(cli)} restart --runtime ${quote(candidate)} -e ${quote(v2)} --message 'Continue the task once'`;
-			const v1 = f.extension("v1", command);
+			const command = `test -z "$PI_MANAGED_CLI" && ${quote(process.execPath)} ${quote(cli)} restart --runtime ${quote(candidate)} -e ${quote(v2)} --message 'Continue the task once'`;
+			const v1 = f.extension("v1", { restartCommand: command });
 			f.start(v1);
 			await f.wait((r) => r.filter((x) => x.event === "settled").length === 2);
 			const receipts = f.read();
@@ -229,6 +264,7 @@ describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_
 				)
 				.filter((entry) => entry.type === "message" && entry.message?.role === "user");
 			expect(users).toHaveLength(2);
+			expect(f.screen()).not.toContain("To resume this session:");
 			if (rollback) {
 				expect(prompts[1].text).toContain("exited before becoming ready");
 				expect(readFileSync(join(f.root, "candidate-starts"), "utf8").trim().split("\n")).toHaveLength(1);
@@ -266,7 +302,7 @@ describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_
 		"waits for running work and cancels a queued restart on %s",
 		async (action) => {
 			const f = fixture();
-			f.start(f.extension("v1", undefined, true));
+			f.start(f.extension("v1", { holdWork: true }));
 			await f.wait((r) => r.some((x) => x.event === "work"));
 			const endpoint = f.read().find((r) => r.event === "prompt")!.endpoint;
 			expect(await requestRestart(endpoint, { message: "Must not run" })).toContain("Restart queued");
@@ -287,4 +323,73 @@ describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_
 		},
 		60_000,
 	);
+
+	it("waits for settled handlers and their deferred user messages before restarting", async () => {
+		const f = fixture();
+		f.start(f.extension("v1", { settledFollowup: true }));
+		await f.wait((r) => r.some((x) => x.event === "settled"));
+		f.keys("Trigger settled followup", "Enter");
+		await f.wait((r) => r.some((x) => x.event === "settling"));
+		const endpoint = f.read().find((r) => r.event === "prompt")!.endpoint;
+		expect(await requestRestart(endpoint, { message: "Continue after followup" })).toContain("Restart queued");
+		try {
+			await new Promise((r) => setTimeout(r, 300));
+			expect(f.read().filter((r) => r.event === "shutdown")).toHaveLength(0);
+		} finally {
+			writeFileSync(join(f.root, "release-settled"), "");
+		}
+		await f.wait((r) => r.some((x) => x.event === "deferred-start"));
+		try {
+			await new Promise((r) => setTimeout(r, 300));
+			expect(f.read().filter((r) => r.event === "shutdown")).toHaveLength(0);
+		} finally {
+			writeFileSync(join(f.root, "release-deferred"), "");
+		}
+		await f.wait((r) => r.filter((x) => x.event === "settled").length === 4);
+		const receipts = f.read();
+		expect(receipts.filter((r) => r.event === "prompt").map((r) => r.text)).toEqual([
+			"Seed prompt",
+			"Trigger settled followup",
+			"Deferred settled followup",
+			"[Restart continuation]\nContinue after followup",
+		]);
+		const originalPid = receipts.find((r) => r.event === "start")!.pid;
+		expect(receipts.findIndex((r) => r.event === "shutdown")).toBeGreaterThan(
+			receipts.findLastIndex((r) => r.event === "settled" && r.pid === originalPid),
+		);
+	}, 60_000);
+
+	it.each([
+		{ checkpoint: { session: { sessionId: "legacy-session", sessionFile: "/legacy/session" } } },
+		{ sessionId: "legacy-session", sessionFile: 7 },
+		{ sessionId: 7, sessionFile: "/legacy/session" },
+	])(
+		"rejects legacy handoff before session_start: %j",
+		async (legacyHandoff) => {
+			const f = fixture();
+			f.start(f.extension("v1"), { legacyHandoff });
+			await f.wait(() => existsSync(f.status));
+			expect(readFileSync(f.status, "utf8").trim()).toBe("1");
+			expect(f.screen()).toContain("older Pi launcher");
+			expect(f.screen()).toContain("quit and run pi -c");
+			expect(f.read()).toHaveLength(0);
+		},
+		60_000,
+	);
+
+	it("keeps a fresh Pi usable when its control socket cannot initialize", async () => {
+		const f = fixture();
+		const tempRoot = join(f.root, "blocked-temp-root");
+		writeFileSync(tempRoot, "");
+		f.start(f.extension("v1"), { env: { TMPDIR: tempRoot } });
+		await f.wait((r) => r.some((x) => x.event === "settled"));
+		expect(f.read().find((r) => r.event === "prompt")?.endpoint).toBeUndefined();
+		await expect.poll(() => f.screen(), { timeout: 5000 }).toContain("Restart control is unavailable");
+		f.keys("/restart", "Enter");
+		await expect.poll(() => f.screen()).toContain("Restart control is unavailable in this session");
+		f.keys("/quit", "Enter");
+		await f.wait(() => existsSync(f.status));
+		expect(readFileSync(f.status, "utf8").trim()).toBe("0");
+		expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
+	}, 60_000);
 });

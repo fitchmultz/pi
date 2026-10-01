@@ -659,8 +659,6 @@ export async function main(args: string[], options?: MainOptions) {
 			: undefined;
 	if (managedRestart) {
 		// Lifecycle control is always present in managed sessions, even with -ne.
-		const restartIndex = extensionFactories.findIndex((extension) => extension.name === "restart");
-		extensionFactories.splice(restartIndex, 1);
 		extensionFactories.push({ name: "restart", factory: restartExtension, hidden: true });
 	}
 	const shouldTakeOverStdout = appMode !== "interactive" && !isPlainRuntimeMetadataCommand(parsed);
