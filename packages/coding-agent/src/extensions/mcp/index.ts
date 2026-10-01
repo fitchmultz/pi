@@ -19,6 +19,7 @@ import type {
 	ExtensionFactory,
 	ToolDefinition,
 } from "../../core/extensions/types.ts";
+import { getLatestCustomEntry } from "../../core/session-metadata-cursor.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { CODEMODE_TOOL_NAME, isCodemodeTool } from "../codemode/tool.ts";
 import { isToolSearchTool, TOOL_SEARCH_TOOL_NAME } from "../tool-search/tool.ts";
@@ -291,9 +292,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			);
 			if (activate.length) {
 				pi.setActiveTools([...pi.getActiveTools(), ...activate], { preservePending: true });
-				const previous = sessionContext.sessionManager
-					.getBranch()
-					.findLast((entry) => entry.type === "custom" && entry.customType === "pi-tool-loadout");
+				const previous = getLatestCustomEntry(sessionContext.sessionManager, "pi-tool-loadout");
 				const pending =
 					previous?.type === "custom" && Array.isArray(previous.data)
 						? previous.data.filter(
@@ -310,9 +309,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 				pending: migration.pending.filter(({ server, tool }) => !known.has(`${server}\0${tool}`)),
 				features: [],
 			};
-			const saved = sessionContext.sessionManager
-				.getBranch()
-				.findLast((entry) => entry.type === "custom" && entry.customType === MCP_SELECTION_MIGRATION);
+			const saved = getLatestCustomEntry(sessionContext.sessionManager, MCP_SELECTION_MIGRATION);
 			if (saved?.type !== "custom" || !isDeepStrictEqual(saved.data, selectionMigration)) {
 				pi.appendEntry(MCP_SELECTION_MIGRATION, selectionMigration);
 			}

@@ -1806,19 +1806,19 @@ export class SessionManager {
 			...scan.records.map((record) => record.digest),
 			...dirty.map((entry) => pendingRecordDigests.get(entry) ?? entry.id),
 		];
-		const changed =
-			this.fileEntries.length !== order.length ||
-			this.fileEntries.some(
-				(entry, index) =>
-					(this.recordsByEntry.get(entry)?.record.digest ?? pendingRecordDigests.get(entry) ?? entry.id) !==
-					order[index],
-			);
+		const appendOnly = this.fileEntries.every(
+			(entry, index) =>
+				(this.recordsByEntry.get(entry)?.record.digest ?? pendingRecordDigests.get(entry) ?? entry.id) ===
+				order[index],
+		);
+		const changed = this.fileEntries.length !== order.length || !appendOnly;
 		const revision = this.entriesRevision;
 		const leaf = this.leafId;
 		this.journalSource = scan.source;
 		this.decodedRecord = undefined;
 		this.fileEntries = scan.records.map((record, sequence) => {
-			const entry = existing.get(record.digest)?.shift();
+			// A reordered/reconciled prefix must invalidate identity-based incremental consumers.
+			const entry = appendOnly ? existing.get(record.digest)?.shift() : undefined;
 			if (entry && this.recordsByEntry.has(entry)) {
 				this.recordsByEntry.set(entry, { source: scan.source, record });
 				if (entry.type !== "session") metadataByEntry.set(entry, entryMetadata(record.value, sequence - 1));
@@ -2427,9 +2427,10 @@ export class SessionManager {
 		) {
 			throw new Error("Context edit replacement must be null or contain string/array content");
 		}
+		this._refreshJournal();
 		const target = this.byId.get(targetId);
 		if (!target) throw new Error(`Entry ${targetId} not found`);
-		if (!this.getBranch().some((entry) => entry.id === targetId)) {
+		if (!this._getActivePath().positions.has(targetId)) {
 			throw new Error(`Entry ${targetId} is not on the active branch`);
 		}
 		const editable =
@@ -2623,6 +2624,43 @@ export class SessionManager {
 		this._refreshJournal();
 		const path = this._getActivePath();
 		return contextEntriesFromPath(path.entries, path.compactionIndex, path.firstKeptIndex);
+	}
+
+	/**
+	 * Internal boundary sandbox: copy only the context-bearing suffix and explicitly referenced
+	 * ancestors. Retaining an older range costs that range, not the archived prefix before it.
+	 * Entries borrow readonly bodies; callers must isolate messages before exposing a preview.
+	 */
+	createContextPreview(retainFrom: readonly string[], editTargets: readonly string[]): SessionManager {
+		this._refreshJournal();
+		const path = this._getActivePath();
+		let start = path.compactionIndex < 0 ? 0 : Math.min(path.compactionIndex, path.firstKeptIndex);
+		for (const id of retainFrom) {
+			const position = path.positions.get(id);
+			if (position !== undefined) start = Math.min(start, position);
+		}
+		const positions = new Set<number>([path.modelIndex, path.thinkingIndex]);
+		for (const id of editTargets) {
+			const position = path.positions.get(id);
+			if (position === undefined) {
+				throw new Error(this.byId.has(id) ? `Entry ${id} is not on the active branch` : `Entry ${id} not found`);
+			}
+			positions.add(position);
+		}
+		for (let i = start; i < path.entries.length; i++) positions.add(i);
+		let parentId: string | null = null;
+		const entries = [...positions]
+			.filter((position) => position >= 0)
+			.sort((a, b) => a - b)
+			.map((position) => {
+				const source = path.entries[position]!;
+				const entry = Object.defineProperties({}, Object.getOwnPropertyDescriptors(source)) as SessionEntry;
+				entry.parentId = parentId;
+				parentId = entry.id;
+				metadataByEntry.set(entry, { ...getSessionEntryMetadata(source), parentId: entry.parentId });
+				return entry;
+			});
+		return SessionManager.inMemory(this.cwd, undefined, [this.getHeader()!, ...entries]);
 	}
 
 	/**

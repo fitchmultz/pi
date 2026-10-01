@@ -34,6 +34,120 @@ describe("AgentSession actionable boundaries", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
+	it("does not clone unread boundary context between non-reading handlers", async () => {
+		let clones: ReturnType<typeof vi.spyOn> | undefined;
+		let count = -1;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", () => {
+						clones = vi.spyOn(globalThis, "structuredClone");
+					});
+					for (let i = 0; i < 4; i++) pi.on("turn_end", () => {});
+					pi.on("turn_end", () => {
+						count = clones!.mock.calls.length;
+						clones!.mockRestore();
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		try {
+			harness.setResponses([fauxAssistantMessage("done")]);
+			await harness.session.prompt("input");
+			expect(count).toBe(0);
+		} finally {
+			clones?.mockRestore();
+		}
+	});
+
+	it("isolates lazy entry, message and LLM previews and reads fresh pending queues for each handler", async () => {
+		const observations: string[] = [];
+		let first = true;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", (event) => {
+						if (!first) return;
+						pi.sendUserMessage("queued", { deliverAs: "followUp" });
+						const entry = event.context.contextEntries.find(
+							(entry) => entry.sourceEntry.type === "message" && entry.sourceEntry.message.role === "user",
+						)!;
+						if (entry.sourceEntry.type === "message" && entry.sourceEntry.message.role === "user")
+							entry.sourceEntry.message.content = "source mutation";
+						const user = event.context.contextMessages.find((message) => message.role === "user")!;
+						user.content = "message mutation";
+						const llmUser = event.context.llmMessages.find((message) => message.role === "user")!;
+						llmUser.content = "LLM mutation";
+					});
+					pi.on("turn_end", (event) => {
+						if (!first) return;
+						first = false;
+						observations.push(JSON.stringify(event.context));
+						const queued = event.context.pendingMessages[0];
+						if (queued?.role === "user") queued.content = "queue mutation";
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		let sent = "";
+		harness.setResponses([
+			fauxAssistantMessage("first"),
+			(context) => {
+				sent = JSON.stringify(context.messages);
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await harness.session.prompt("original input");
+		expect(observations).toHaveLength(1);
+		expect(observations[0]).toContain("queued");
+		expect(observations[0]).toContain("original input");
+		expect(observations[0]).not.toContain("mutation");
+		expect(sent).toContain("queued");
+		expect(sent).not.toContain("mutation");
+		expect(JSON.stringify(harness.sessionManager.buildSessionProjection())).not.toContain("mutation");
+	});
+
+	it("previews archived edit targets and an older retained range exactly as the committed projection", async () => {
+		let archived = "";
+		let preview: unknown;
+		const harness = await createHarness({
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", () => ({
+						entries: [
+							{ type: "context_edit", targetId: archived, replacement: { content: "edited archived input" } },
+							{ type: "compaction", summary: "new summary", firstKeptEntryId: archived },
+						],
+					}));
+					pi.on("turn_end", (event) => {
+						preview = structuredClone(event.context.contextMessages);
+						const source = event.context.contextEntries.find(
+							(entry) => entry.sourceEntry.id === archived,
+						)!.sourceEntry;
+						expect(source.parentId).toBe(harness.sessionManager.getEntry(archived)!.parentId);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.sessionManager.appendCustomEntry("before-archive", true);
+		archived = harness.sessionManager.appendMessage({ role: "user", content: "archived input", timestamp: 1 });
+		harness.sessionManager.appendCompaction("old summary", null, 100);
+		harness.session.refreshContext();
+		harness.setResponses([fauxAssistantMessage("done")]);
+		await harness.session.prompt("new input");
+		const committed = harness.sessionManager.buildSessionProjection().messages;
+		// Preview timestamps are generated before commit; content, ordering and roles are identical.
+		const content = (messages: unknown) =>
+			JSON.parse(JSON.stringify(messages), (key, value: unknown) => (key === "timestamp" ? undefined : value));
+		expect(content(preview)).toEqual(content(committed));
+		expect(JSON.stringify(preview)).toContain("edited archived input");
+		expect(JSON.stringify(preview)).not.toContain("old summary");
+	});
+
 	it("commits a retain-none turn_end compaction and explicitly continues once", async () => {
 		let handled = false;
 		const observedIds: string[] = [];

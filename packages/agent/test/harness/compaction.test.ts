@@ -391,7 +391,7 @@ describe("harness compaction", () => {
 			source: "estimated",
 		});
 		expect(estimateContextTokens([assistant], { model: { ...model, api: "openai-responses" } })).toMatchObject({
-			tokens: 2,
+			tokens: 5, // Visible text plus the opaque reasoning signature.
 			source: "estimated",
 			lastUsageIndex: null,
 		});

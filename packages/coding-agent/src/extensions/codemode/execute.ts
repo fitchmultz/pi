@@ -20,7 +20,8 @@ import {
 } from "@earendil-works/pi-codemode";
 import { getCodemodeWorkerUrl, getQuickJSWasmPath } from "../../config.ts";
 import type { ExtensionToolContext } from "../../core/extensions/types.ts";
-import type { SessionEntry } from "../../core/session-manager.ts";
+import type { ReadonlySessionManager } from "../../core/session-manager.ts";
+import { SessionMetadataCursor } from "../../core/session-metadata-cursor.ts";
 import { combineUsage } from "../../core/usage-totals.ts";
 import {
 	discoverMcpTools,
@@ -119,17 +120,25 @@ function isStoreEntryData(data: unknown): data is CodemodeStoreEntryData {
 	);
 }
 
-/** Values of `load()`: the `codemode-store` entries on the branch, applied from the root. */
-export function readCodemodeStore(branch: readonly SessionEntry[]): Record<string, unknown> {
-	const store = new Map<string, unknown>();
-	for (const entry of branch) {
-		if (entry.type !== "custom" || entry.customType !== CODEMODE_STORE_ENTRY_TYPE || !isStoreEntryData(entry.data)) {
-			continue;
-		}
-		for (const key of entry.data.delete) store.delete(key);
-		for (const [key, value] of Object.entries(entry.data.set)) store.set(key, value);
+const stores = new WeakMap<ReadonlySessionManager, { cursor: SessionMetadataCursor; values: Map<string, unknown> }>();
+
+/** Values of `load()`, incrementally replayed on the active branch. */
+export function readCodemodeStore(manager: ReadonlySessionManager): Record<string, unknown> {
+	let state = stores.get(manager);
+	if (!state) {
+		state = { cursor: new SessionMetadataCursor(), values: new Map() };
+		stores.set(manager, state);
 	}
-	return Object.fromEntries(store);
+	const { entries, reset } = state.cursor.read(manager, true);
+	if (reset) state.values.clear();
+	for (const metadata of entries) {
+		if (metadata.type !== "custom" || metadata.customType !== CODEMODE_STORE_ENTRY_TYPE) continue;
+		const entry = manager.getEntry(metadata.id);
+		if (entry?.type !== "custom" || !isStoreEntryData(entry.data)) continue;
+		for (const key of entry.data.delete) state.values.delete(key);
+		for (const [key, value] of Object.entries(entry.data.set)) state.values.set(key, value);
+	}
+	return Object.fromEntries(state.values);
 }
 
 /** Default token budget for script output. */
@@ -316,7 +325,7 @@ export async function executeCodemode(
 
 	let result: CodemodeResult;
 	try {
-		const store = ctx ? readCodemodeStore(ctx.sessionManager.getBranch()) : {};
+		const store = ctx ? readCodemodeStore(ctx.sessionManager) : {};
 		result = await sandbox.execute(code, { signal, store });
 	} finally {
 		await sandbox.close();

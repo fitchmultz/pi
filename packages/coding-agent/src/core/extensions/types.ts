@@ -309,7 +309,15 @@ export interface ExtensionUIContext {
 // ============================================================================
 
 export interface ContextUsage {
-	/** Whether token usage is provider-reported, estimated, or unavailable. */
+	/**
+	 * "reported": provider usage anchors the retained conversation, including request-local hook
+	 * transformations; only later messages and pending prompt/tool changes are estimated.
+	 * "estimated": heuristic-only count, including opaque reasoning/signatures and tool schemas.
+	 * Where a comparable response is available, its chars/token ratio is clamped to [1, 4].
+	 * "unknown": no matching response since compaction; tokens/percent are null (preflight still estimates).
+	 * SDK callers must replace edited message/tool objects or arrays; unsignalled nested mutation
+	 * is not observed. Use AgentSession.refreshContext() after canonical journal changes.
+	 */
 	source: "reported" | "estimated" | "unknown";
 	/** Estimated context tokens, or null if unknown (e.g. right after compaction, before next LLM response). */
 	tokens: number | null;
@@ -995,6 +1003,7 @@ export type SessionBoundaryDraft =
 	| ContextEditEntryDraft
 	| CompactionEntryDraft;
 
+/** Payloads are built on first access, independently for each handler. Pending queues are read per dispatch. */
 export interface BoundaryContextPreview {
 	contextEntries: ProjectedSessionEntry[];
 	contextMessages: AgentMessage[];

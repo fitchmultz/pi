@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { deserialize, serialize } from "node:v8";
 import {
 	type AfterToolCallContext,
 	type AfterToolCallResult,
@@ -67,7 +68,6 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
-import { Clone } from "typebox/value";
 import { ENV_SESSION_DIR, getAgentDir } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
@@ -152,22 +152,21 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { type BashExecutionMessage, type CustomMessage, convertToLlm, isMessagePreserved } from "./messages.ts";
+import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { NestedToolCallRunner } from "./nested-tool-calls.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
-import {
-	type BranchSummaryEntry,
-	type CompactionEntry,
-	type ContextEditEntry,
-	getLatestCompactionEntry,
-	type SessionEntry,
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	SessionEntry,
 	SessionManager,
-	type SessionProjection,
+	SessionProjection,
 } from "./session-manager.ts";
+import { getLatestCustomEntry, SessionMetadataCursor } from "./session-metadata-cursor.ts";
 import type { CacheWarmingMode, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { BUILTIN_PATH_PREFIX, createSyntheticSourceInfo, isSyntheticPath, type SourceInfo } from "./source-info.ts";
@@ -187,7 +186,7 @@ import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapp
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
 	findLatestResponse,
-	getBranchSelection,
+	getSessionSelection,
 	getVirtualModelState,
 	isVirtualModel,
 	VIRTUAL_MODEL_STATE_ENTRY,
@@ -203,31 +202,45 @@ interface ReportedUsagePrefix {
 	systemPrompt: string;
 	transcriptSystemPrompt: string;
 	toolKeys: string[];
-	canonicalConversation: unknown[];
-	conversationPreserved: boolean;
+	contextStartId: string | null;
+	conversationIds: (string | undefined)[];
 	systemTokens: number;
-	response?: AssistantMessage;
-	responseSnapshot?: unknown;
+	estimatedTokens: number;
+	responseEntryId?: string;
 }
 
-function isSameResponse(message: AgentMessage, response: AssistantMessage): boolean {
-	return (
-		message === response ||
-		(message.role === "assistant" &&
-			!!response.responseId &&
-			message.responseId === response.responseId &&
-			message.provider === response.provider &&
-			message.api === response.api &&
-			message.model === response.model)
-	);
+function sameValues(left: readonly unknown[], right: readonly unknown[]): boolean {
+	return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function snapshotProviderConversation(messages: AgentMessage[]): unknown[] {
-	return convertToLlm(messages.filter((message) => message.role !== "system")).map((message) => {
-		if (message.role !== "assistant") return JSON.parse(JSON.stringify({ ...message, timestamp: 0 }));
-		const { usage: _usage, ...response } = message;
-		return JSON.parse(JSON.stringify({ ...response, timestamp: 0 }));
-	});
+/** Small mutable prompt options, never the rendered prompt or message bodies. */
+function promptOptionInputs(options: NormalizedBuildSystemPromptOptions | undefined): unknown[] {
+	if (!options) return [];
+	return [
+		options,
+		options.customPrompt,
+		options.forceSystemPrompt,
+		options.cwd,
+		options.appendSystemPrompt,
+		options.selectedTools.length,
+		...options.selectedTools,
+		options.promptGuidelines.length,
+		...options.promptGuidelines,
+		Object.keys(options.sections).length,
+		...Object.entries(options.sections).flat(),
+		Object.keys(options.toolSnippets).length,
+		...Object.entries(options.toolSnippets).flat(),
+		Object.keys(options.toolGuidelines).length,
+		...Object.entries(options.toolGuidelines).flatMap(([name, guidelines]) => [
+			name,
+			guidelines.length,
+			...guidelines,
+		]),
+		options.contextFiles.length,
+		...options.contextFiles.flatMap((file) => [file.path, file.content]),
+		options.skills.length,
+		...options.skills.flatMap((skill) => [Object.keys(skill).length, ...Object.entries(skill).flat()]),
+	];
 }
 
 // ============================================================================
@@ -469,9 +482,8 @@ export class AgentSession {
 	private _backgroundCheckpointPaused = false;
 	private readonly _backgroundPending = new Set<string>();
 	private readonly _backgroundReceiptJobs = new WeakMap<SessionEntry, string[]>();
-	private _backgroundReceipts:
-		| { sessionId: string; sessionFile: string | undefined; revision: number; seen: Set<string> }
-		| undefined;
+	private readonly _backgroundReceiptCursor = new SessionMetadataCursor();
+	private readonly _backgroundReceipts = new Set<string>();
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -566,7 +578,10 @@ export class AgentSession {
 	private _providerRequestPrefix?: ReportedUsagePrefix;
 	private _pendingProviderMessages: AgentMessage[] = [];
 	private _skipNextProviderRequestPreflight = false;
-	private _contextUsageCache?: { inputs: unknown; prefix?: ReportedUsagePrefix; usage: ContextUsage };
+	private _messageStateRevision = 0;
+	private _contextUsageCache?: { inputs: unknown[]; usage: ContextUsage };
+	/** Latest comparable reported sample per model. Clamp chars/token to [1, 4]: never below chars/4 safety. */
+	private readonly _charsPerToken = new Map<string, number>();
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
 
@@ -617,6 +632,14 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		// SDK startup supplies an already projected transcript. Later projections map their own fresh messages.
+		let messageIndex = 0;
+		for (const entry of this.sessionManager.buildSessionProjection().entries) {
+			for (const _message of entry.messages) {
+				const message = this.messages[messageIndex++];
+				if (message) this._entryIdsByMessage.set(message, entry.sourceEntry.id);
+			}
+		}
 		const restoredSystem = getCurrentSystemMessage(this.messages);
 		this._baseSystemPromptBaseline = normalizeBuildSystemPromptOptions({
 			...this._baseSystemPromptOptions,
@@ -625,6 +648,9 @@ export class AgentSession {
 				: this._baseSystemPromptOptions.selectedTools,
 		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
+		// Hydrate branch-local state at startup, not on the first ordinary request.
+		getSessionSelection(this.sessionManager, (provider, id) => this._modelRuntime.getModel(provider, id));
+		getLatestCustomEntry(this.sessionManager, TOOL_LOADOUT_SELECTION);
 		this._startBackgroundCommandMonitor();
 	}
 
@@ -732,10 +758,7 @@ export class AgentSession {
 		const model = this.model;
 		if (!model) return;
 		const getModel = (provider: string, modelId: string) => this._modelRuntime.getModel(provider, modelId);
-		const recorded = getBranchSelection(
-			this.sessionManager.iterateEntryMetadata({ branchFrom: this.sessionManager.getLeafId() }),
-			getModel,
-		);
+		const recorded = getSessionSelection(this.sessionManager, getModel);
 		if (!recorded || (recorded.provider === model.provider && recorded.modelId === model.id)) return;
 		const recordedModel = getModel(recorded.provider, recorded.modelId);
 		if (!isVirtualModel(model) && !(recordedModel && isVirtualModel(recordedModel))) return;
@@ -914,12 +937,18 @@ export class AgentSession {
 			this._failedResponse = undefined;
 			const prepare = async () => {
 				const projection = this.sessionManager.buildSessionProjection();
+				// Persisted projections already decode fresh bodies; in-memory journals borrow theirs.
+				const messages = this.sessionManager.isPersisted()
+					? projection.messages
+					: structuredClone(projection.messages);
+				let index = 0;
 				for (const entry of projection.entries) {
-					for (const message of entry.messages) this._entryIdsByMessage.set(message, entry.sourceEntry.id);
+					for (const _message of entry.messages)
+						this._entryIdsByMessage.set(messages[index++]!, entry.sourceEntry.id);
 				}
 				const canonicalContext = {
 					...request.context,
-					messages: [...projection.messages, ...this._pendingProviderMessages],
+					messages: [...messages, ...structuredClone(this._pendingProviderMessages)],
 					// Messages declare the provider-visible loadout; context.tools keeps executable implementations.
 					tools: this.agent.state.tools.slice(),
 				};
@@ -960,7 +989,7 @@ export class AgentSession {
 			// start a turn; extension messages can follow them, e.g. from before_agent_start.
 			const lastResponse = context.messages.findLastIndex((message) => message.role === "assistant");
 			const userTurn = context.messages.slice(lastResponse + 1).some((message) => message.role === "user");
-			const state = getVirtualModelState(this.sessionManager.getBranch(), model.provider, model.id);
+			const state = getVirtualModelState(this.sessionManager, model.provider, model.id);
 			const route = await this._modelRuntime.resolveModel(model, convertToLlm(context.messages), {
 				reason: failed ? "retry" : userTurn ? "user" : "continuation",
 				thinkingLevel,
@@ -994,7 +1023,9 @@ export class AgentSession {
 			this._flushPendingProviderMessages();
 			this._refreshFinalizedContext();
 			const model = requestModel;
-			const canonicalConversation = snapshotProviderConversation(messages);
+			const conversationIds = this.messages
+				.filter((message) => message.role !== "system")
+				.map((message) => this._entryIdsByMessage.get(message));
 			const transcriptSystemPrompt = getCurrentSystemPrompt(messages);
 			// Project forced text before extension context handlers inspect the provider input.
 			const forced = this._runSystemPromptOptions?.forceSystemPrompt;
@@ -1011,12 +1042,6 @@ export class AgentSession {
 				];
 			}
 			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
-			const sent = snapshotProviderConversation(transformed);
-			let index = 0;
-			for (const message of sent) {
-				if (index === canonicalConversation.length) break;
-				if (isMessagePreserved(canonicalConversation[index], message)) index++;
-			}
 			this._providerRequestPrefix = model
 				? {
 						provider: model.provider,
@@ -1031,8 +1056,9 @@ export class AgentSession {
 									toToolDeclaration({ ...tool, constrainedSampling: tool.constrainedSampling || undefined }),
 								),
 							),
-						canonicalConversation,
-						conversationPreserved: index === canonicalConversation.length,
+						contextStartId: this.sessionManager.getBranchState().contextStartId,
+						conversationIds,
+						estimatedTokens: estimateMessagesTokens(transformed),
 						systemTokens: this._projectEstimatedMessages(transformed).reduce(
 							(sum, message) => sum + (message.role === "system" ? estimateTokens(message) : 0),
 							0,
@@ -1048,24 +1074,24 @@ export class AgentSession {
 		const usageState = this._getContextUsageState(context.messages, model);
 		const options = { model, useReportedUsage: usageState.useReportedUsage };
 		const prefix = this._reportedUsagePrefix;
-		const lastUsageIndex = estimateContextTokens(context.messages, { model }).lastUsageIndex;
+		const lastUsageIndex = usageState.usageIndex;
 		const conversationApplies =
 			options.useReportedUsage &&
-			prefix?.response &&
+			prefix &&
 			model &&
 			prefix.provider === model.provider &&
 			prefix.api === model.api &&
 			prefix.model === model.id &&
-			prefix.conversationPreserved &&
-			lastUsageIndex !== null &&
-			isSameResponse(context.messages[lastUsageIndex], prefix.response) &&
-			isDeepStrictEqual(
-				snapshotProviderConversation([context.messages[lastUsageIndex]])[0],
-				prefix.responseSnapshot,
-			) &&
-			isDeepStrictEqual(
-				snapshotProviderConversation(context.messages.slice(0, lastUsageIndex)),
-				prefix.canonicalConversation,
+			prefix.responseEntryId === usageState.usageEntryId &&
+			prefix.contextStartId === this.sessionManager.getBranchState().contextStartId &&
+			lastUsageIndex !== undefined &&
+			prefix.conversationIds.every((id) => id !== undefined) &&
+			sameValues(
+				prefix.conversationIds,
+				context.messages
+					.slice(0, lastUsageIndex)
+					.filter((message) => message.role !== "system")
+					.map((message) => this._entryIdsByMessage.get(message)),
 			);
 		const pending = this._getPendingSystemPromptOptions();
 		const systemPrompt = pending ? buildSystemPrompt(pending) : getCurrentSystemPrompt(context.messages);
@@ -1082,12 +1108,15 @@ export class AgentSession {
 				),
 			)
 		) {
-			return estimateContextTokens(
-				this._runSystemPromptOptions?.forceSystemPrompt === undefined
-					? context.messages
-					: context.messages.filter((message) => message.role !== "system"),
-				options,
-			);
+			return {
+				...estimateContextTokens(
+					this._runSystemPromptOptions?.forceSystemPrompt === undefined
+						? context.messages
+						: context.messages.filter((message) => message.role !== "system"),
+					options,
+				),
+				source: "reported" as const,
+			};
 		}
 		const current = getCurrentSystemMessage(context.messages);
 		const desired = pending ? buildSystemPromptState(pending) : undefined;
@@ -1120,20 +1149,26 @@ export class AgentSession {
 			return {
 				...estimate,
 				tokens: Math.max(0, estimate.tokens + systemTokens - prefix.systemTokens),
-				source: "estimated" as const,
+				source: "reported" as const,
 			};
 		}
 		const fullEstimate = estimateContextTokens(estimatedMessages, { ...options, useReportedUsage: false });
+		const charsPerToken = model ? this._charsPerToken.get(`${model.provider}\0${model.api}\0${model.id}`) : undefined;
+		if (charsPerToken && (prefix || !options.useReportedUsage || forced !== undefined)) {
+			fullEstimate.tokens = Math.ceil((fullEstimate.tokens * 4) / charsPerToken);
+			fullEstimate.trailingTokens = fullEstimate.tokens;
+		}
 		if (forced !== undefined || prefix !== undefined || !options.useReportedUsage) return fullEstimate;
 		const historicalEstimate = estimateContextTokens(context.messages, options);
 		return historicalEstimate.tokens > fullEstimate.tokens
-			? { ...historicalEstimate, source: "estimated" as const }
+			? { ...historicalEstimate, source: "reported" as const }
 			: fullEstimate;
 	}
 
 	private _flushPendingProviderMessages(): void {
 		while (this._pendingProviderMessages.length > 0) {
 			const message = this._pendingProviderMessages.shift()!;
+			this._messageStateRevision++;
 			let id: string | undefined;
 			if (message.role === "custom")
 				id = this.sessionManager.appendCustomMessageEntry(
@@ -1153,38 +1188,35 @@ export class AgentSession {
 	): {
 		hasPostCompactionUsage: boolean;
 		useReportedUsage: boolean;
+		usageEntryId?: string;
+		usageIndex?: number;
 	} {
-		const pending = new Set(this._pendingProviderMessages);
-		const unmapped = messages.filter((message) => !pending.has(message) && !this._entryIdsByMessage.has(message));
-		if (unmapped.length) {
-			const stateMessages = new Set(this.agent.state.messages);
-			const stateMessage = unmapped.find((message) => stateMessages.has(message));
-			if (stateMessage) this._findPersistedMessageEntryId(stateMessage);
-		}
-		const persistedIds = new Set(
-			messages.filter((message) => !pending.has(message)).map((message) => this._entryIdsByMessage.get(message)),
-		);
 		let invalidated = false;
-		const branch = [...this.sessionManager.iterateEntryMetadata({ branchFrom: this.sessionManager.getLeafId() })];
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i];
+		for (const entry of this.sessionManager.iterateEntryMetadata({
+			branchFrom: this.sessionManager.getLeafId(),
+			reverse: true,
+		})) {
 			if (entry.type === "compaction") return { hasPostCompactionUsage: false, useReportedUsage: false };
 			if (entry.type === "context_edit") invalidated = true;
-			if (model && entry.type === "message" && entry.message.role === "assistant") {
-				const message = entry.message;
-				const entryId = entry.id;
-				if (
-					message.provider === model.provider &&
-					message.api === model.api &&
-					message.model === model.id &&
-					message.stopReason !== "aborted" &&
-					message.stopReason !== "error" &&
-					calculateContextTokens(message.usage!) > 0 &&
-					persistedIds.has(entryId)
-				) {
-					return { hasPostCompactionUsage: true, useReportedUsage: !invalidated };
-				}
+			if (!model || entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const message = entry.message;
+			if (
+				message.provider !== model.provider ||
+				message.api !== model.api ||
+				message.model !== model.id ||
+				message.stopReason === "aborted" ||
+				message.stopReason === "error" ||
+				calculateContextTokens(message.usage!) <= 0
+			)
+				continue;
+			let usageIndex = messages.findLastIndex((message) => this._entryIdsByMessage.get(message) === entry.id);
+			if (usageIndex < 0) {
+				// In-memory SDK journals can supply their original entry message directly.
+				const source = this.sessionManager.getEntry(entry.id);
+				if (source?.type === "message") usageIndex = messages.indexOf(source.message);
 			}
+			if (usageIndex >= 0)
+				return { hasPostCompactionUsage: true, useReportedUsage: !invalidated, usageEntryId: entry.id, usageIndex };
 		}
 		return { hasPostCompactionUsage: true, useReportedUsage: false };
 	}
@@ -1322,10 +1354,13 @@ export class AgentSession {
 					entryId = manager.appendContextEdit(draft.targetId, draft.replacement);
 					break;
 				case "compaction": {
-					const tokensBefore = estimateProjectedContextTokens(
-						manager.buildSessionProjection(),
-						manager.getBranch(),
-					).tokens;
+					const projection = manager.buildSessionProjection();
+					const recentEntries: SessionEntry[] = [];
+					for (const entry of manager.iterateEntryMetadata({ branchFrom: manager.getLeafId(), reverse: true })) {
+						recentEntries.push(manager.getEntry(entry.id)!);
+						if (entry.type === "compaction") break;
+					}
+					const tokensBefore = estimateProjectedContextTokens(projection, recentEntries.reverse()).tokens;
 					entryId = manager.appendCompaction(
 						draft.summary,
 						draft.firstKeptEntryId,
@@ -1344,9 +1379,12 @@ export class AgentSession {
 	}
 
 	private _createBoundaryPreviewManager(drafts: SessionBoundaryDraft[]): SessionManager {
-		const header = this.sessionManager.getHeader();
-		if (!header) throw new Error("Session header is missing");
-		const manager = SessionManager.inMemory(this._cwd, undefined, [header, ...this.sessionManager.getBranch()]);
+		const manager = this.sessionManager.createContextPreview(
+			drafts.flatMap((draft) =>
+				draft.type === "compaction" && draft.firstKeptEntryId ? [draft.firstKeptEntryId] : [],
+			),
+			drafts.flatMap((draft) => (draft.type === "context_edit" ? [draft.targetId] : [])),
+		);
 		this._applyBoundaryDrafts(manager, drafts);
 		return manager;
 	}
@@ -1357,56 +1395,128 @@ export class AgentSession {
 
 	private _createBoundaryContextBuilder(boundary: "turn_end" | "agent_before_settle") {
 		let cached:
-			| { sessionFile: string; revision: number; leafId: string | null; projection: SessionProjection }
+			| { revision: number; leafId: string | null; projection?: SessionProjection; serialized?: Buffer }
 			| undefined;
 		return (drafts: SessionBoundaryDraft[]): BoundaryContextPreview => {
-			const sessionFile = this.sessionManager.getSessionFile();
-			if (drafts.length || !sessionFile) return this._buildBoundaryContext(drafts, boundary);
+			// Validate drafts eagerly, so a non-reading handler cannot commit invalid entries.
+			if (drafts.length) return this._buildBoundaryContext(drafts, boundary);
 			const revision = this.sessionManager.getEntriesRevision();
 			const leafId = this.sessionManager.getLeafId();
-			if (
-				!cached ||
-				cached.sessionFile !== sessionFile ||
-				cached.revision !== revision ||
-				cached.leafId !== leafId
-			) {
-				cached = { sessionFile, revision, leafId, projection: this.sessionManager.buildSessionProjection() };
-			}
-			// Handlers may mutate a preview, but cannot change the next handler's canonical context.
-			const entryMessages = structuredClone(cached.projection.entries.map((entry) => entry.messages));
-			const projection = {
-				...cached.projection,
-				entries: cached.projection.entries.map((entry, index) => ({ ...entry, messages: entryMessages[index]! })),
-				messages: entryMessages.flat(),
-			};
-			return this._buildBoundaryContext(drafts, boundary, projection);
+			if (!cached || cached.revision !== revision || cached.leafId !== leafId) cached = { revision, leafId };
+			const snapshot = cached;
+			return this._buildBoundaryContext(
+				drafts,
+				boundary,
+				() => {
+					snapshot.projection ??= this.sessionManager.buildSessionProjection();
+					return snapshot.projection;
+				},
+				this.sessionManager.isPersisted()
+					? (messages) => {
+							snapshot.serialized ??= serialize(messages);
+							return deserialize(snapshot.serialized) as AgentMessage[][];
+						}
+					: undefined,
+			);
 		};
 	}
 
 	private _buildBoundaryContext(
 		drafts: SessionBoundaryDraft[],
 		boundary: "turn_end" | "agent_before_settle",
-		projection = drafts.length
-			? this._createBoundaryPreviewManager(drafts).buildSessionProjection()
-			: this.sessionManager.buildSessionProjection(),
+		getProjection?: () => SessionProjection,
+		cloneMessages?: (messages: AgentMessage[][]) => AgentMessage[][],
 	): BoundaryContextPreview {
-		const pendingMessages = this._getPendingBoundaryMessages();
-		const llmMessages = convertToLlm(projection.messages);
-		const finalRole = llmMessages[llmMessages.length - 1]?.role;
-		const hasNonSystemContext = llmMessages.some((message) => message.role !== "system");
-		const contextCanContinue = hasNonSystemContext && finalRole !== "assistant";
+		const draftProjection = drafts.length
+			? this._createBoundaryPreviewManager(drafts).buildSessionProjection()
+			: undefined;
+		let projection: SessionProjection | undefined;
+		const isolatedProjection = () => {
+			if (projection) return projection;
+			const canonical = draftProjection ?? getProjection?.() ?? this.sessionManager.buildSessionProjection();
+			const entryMessages = canonical.entries.map((entry) => entry.messages);
+			// Persisted JSON previews reuse serialized bytes, never another handler's mutable messages.
+			// SDK/draft messages retain structuredClone's richer input contract.
+			const messages = cloneMessages ? cloneMessages(entryMessages) : structuredClone(entryMessages);
+			projection = {
+				...canonical,
+				entries: canonical.entries.map((entry, index) => {
+					let sourceEntry: SessionEntry | undefined;
+					const source = draftProjection
+						? (this.sessionManager.getEntry(entry.sourceEntry.id) ?? entry.sourceEntry)
+						: entry.sourceEntry;
+					return {
+						messages: messages[index]!,
+						get sourceEntry() {
+							sourceEntry ??= structuredClone(source);
+							return sourceEntry;
+						},
+						set sourceEntry(value) {
+							sourceEntry = value;
+						},
+					};
+				}),
+				messages: messages.flat(),
+			};
+			return projection;
+		};
+		let contextEntries: BoundaryContextPreview["contextEntries"] | undefined;
+		let contextMessages: AgentMessage[] | undefined;
+		let llmMessages: BoundaryContextPreview["llmMessages"] | undefined;
+		const pending = this._getPendingBoundaryMessages();
+		let pendingMessages: AgentMessage[] | undefined;
+		const queued = this.agent.hasQueuedMessages();
 		const pendingCustomContext = this._pendingCustomMessages.length > 0;
+		let canContinue: boolean | undefined;
 		return {
-			contextEntries: projection.entries,
-			contextMessages: projection.messages,
-			llmMessages,
-			pendingMessages,
-			canContinue:
-				contextCanContinue ||
-				pendingCustomContext ||
-				(boundary === "turn_end"
-					? this.agent.hasQueuedMessages()
-					: finalRole === "assistant" && this.agent.hasQueuedMessages()),
+			get contextEntries() {
+				contextEntries ??= isolatedProjection().entries;
+				return contextEntries;
+			},
+			set contextEntries(value) {
+				contextEntries = value;
+			},
+			get contextMessages() {
+				contextMessages ??= isolatedProjection().messages;
+				return contextMessages;
+			},
+			set contextMessages(value) {
+				contextMessages = value;
+			},
+			get llmMessages() {
+				llmMessages ??= convertToLlm(isolatedProjection().messages);
+				return llmMessages;
+			},
+			set llmMessages(value) {
+				llmMessages = value;
+			},
+			get pendingMessages() {
+				pendingMessages ??= structuredClone(pending);
+				return pendingMessages;
+			},
+			set pendingMessages(value) {
+				pendingMessages = value;
+			},
+			get canContinue() {
+				if (canContinue !== undefined) return canContinue;
+				const messages = draftProjection?.messages ?? getProjection?.().messages ?? isolatedProjection().messages;
+				// Conversion only drops excluded bash messages and converts the custom roles to user.
+				const final = messages.findLast(
+					(message) => message.role !== "bashExecution" || !message.excludeFromContext,
+				);
+				const hasContext = messages.some(
+					(message) =>
+						message.role !== "system" && (message.role !== "bashExecution" || !message.excludeFromContext),
+				);
+				canContinue =
+					(hasContext && final?.role !== "assistant") ||
+					pendingCustomContext ||
+					(boundary === "turn_end" ? queued : final?.role === "assistant" && queued);
+				return canContinue;
+			},
+			set canContinue(value) {
+				canContinue = value;
+			},
 		};
 	}
 
@@ -1509,6 +1619,8 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "message_start" || event.type === "message_update" || event.type === "message_end")
+			this._messageStateRevision++;
 		// Record the calls a tool made through ctx.executeTool() and their usage on its result message.
 		if (this._nestedToolCalls) {
 			if (event.type === "message_start" && event.message.role === "toolResult") {
@@ -1533,10 +1645,6 @@ export class AgentSession {
 
 		if (event.type === "message_end" && event.message.role === "assistant")
 			this._skipNextProviderRequestPreflight = false;
-		const responseSnapshot =
-			event.type === "message_end" && event.message.role === "assistant"
-				? snapshotProviderConversation([event.message])[0]
-				: undefined;
 		// Emit to extensions first, then notify public listeners.
 		await this._emitExtensionEvent(event);
 		try {
@@ -1585,11 +1693,18 @@ export class AgentSession {
 						assistantMsg.stopReason !== "aborted" &&
 						calculateContextTokens(assistantMsg.usage) > 0
 					) {
-						this._reportedUsagePrefix = {
-							...prefix,
-							response: assistantMsg,
-							responseSnapshot,
-						};
+						this._reportedUsagePrefix = { ...prefix, responseEntryId: entryId };
+						this._charsPerToken.set(
+							`${prefix.provider}\0${prefix.api}\0${prefix.model}`,
+							Math.max(
+								1,
+								Math.min(
+									4,
+									((prefix.estimatedTokens + estimateTokens(assistantMsg)) * 4) /
+										calculateContextTokens(assistantMsg.usage),
+								),
+							),
+						);
 					}
 					this._lastAssistantMessage = assistantMsg;
 					if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
@@ -1640,17 +1755,7 @@ export class AgentSession {
 		if (this._pendingProviderMessages.includes(message)) return undefined;
 		const mapped = this._entryIdsByMessage.get(message);
 		if (mapped) return mapped;
-		const messageIndex = this.agent.state.messages.indexOf(message);
-		if (messageIndex < 0) return undefined;
-		const projection = this.sessionManager.buildSessionProjection();
-		let projectedIndex = 0;
-		for (const entry of projection.entries) {
-			for (let i = 0; i < entry.messages.length; i++) {
-				const current = this.agent.state.messages[projectedIndex++];
-				if (current) this._entryIdsByMessage.set(current, entry.sourceEntry.id);
-			}
-		}
-		return this._entryIdsByMessage.get(message);
+		return undefined;
 	}
 
 	private _omitRecoveryAttempt(message: AssistantMessage, toolResults: AgentMessage[] = []): void {
@@ -2202,18 +2307,14 @@ export class AgentSession {
 
 	private _recordToolSelection(): void {
 		const names = [...this.getActiveToolNames(), ...this._pendingActiveToolNames];
-		const previous = this.sessionManager
-			.getBranch()
-			.findLast((entry) => entry.type === "custom" && entry.customType === TOOL_LOADOUT_SELECTION);
+		const previous = getLatestCustomEntry(this.sessionManager, TOOL_LOADOUT_SELECTION);
 		if (previous?.type === "custom" && JSON.stringify(previous.data) === JSON.stringify(names)) return;
 		this.sessionManager.appendCustomEntry(TOOL_LOADOUT_SELECTION, names);
 	}
 
 	/** Restore the callable selection without discarding pending prompt edits. */
 	private _restoreToolsFromTranscript(): void {
-		const selection = this.sessionManager
-			.getBranch()
-			.findLast((entry) => entry.type === "custom" && entry.customType === TOOL_LOADOUT_SELECTION);
+		const selection = getLatestCustomEntry(this.sessionManager, TOOL_LOADOUT_SELECTION);
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		const selected =
 			selection?.type === "custom" &&
@@ -3995,15 +4096,35 @@ export class AgentSession {
 		// Skip compaction checks if this assistant message is older than the latest
 		// compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const branch = this.sessionManager.getBranch();
-		const compactionEntry = getLatestCompactionEntry(branch);
+		const contextStartId = this.sessionManager.getBranchState().contextStartId;
+		const contextStart = contextStartId ? this.sessionManager.getEntryMetadata(contextStartId) : undefined;
+		const compactionEntry = contextStart?.type === "compaction" ? contextStart : undefined;
 		const assistantEntryId = this._findPersistedMessageEntryId(assistantMessage);
-		const assistantIndex = assistantEntryId ? branch.findIndex((entry) => entry.id === assistantEntryId) : -1;
-		// Explicit errors use journal order: provider timestamps can precede a just-completed reset.
+		let hasPostAssistantContextEdit = false;
+		let hasPostAssistantCompaction = false;
+		let latestAssistantOmitted: boolean | undefined;
+		if (assistantEntryId) {
+			for (const entry of this.sessionManager.iterateEntryMetadata({
+				branchFrom: this.sessionManager.getLeafId(),
+				reverse: true,
+			})) {
+				if (entry.id === assistantEntryId) break;
+				if (entry.type === "compaction") {
+					hasPostAssistantCompaction = true;
+					break;
+				}
+				if (entry.type === "context_edit") {
+					hasPostAssistantContextEdit = true;
+					if (entry.targetId === assistantEntryId && latestAssistantOmitted === undefined)
+						latestAssistantOmitted = entry.omitted;
+				}
+			}
+		}
+		// Explicit errors use active-path order: provider timestamps can precede a just-completed reset.
 		const assistantIsFromBeforeCompaction =
-			compactionEntry !== null &&
-			(assistantIndex >= 0 && assistantMessage.stopReason === "error" && isContextOverflow(assistantMessage)
-				? assistantIndex < branch.findIndex((entry) => entry.id === compactionEntry.id)
+			compactionEntry !== undefined &&
+			(assistantEntryId && assistantMessage.stopReason === "error" && isContextOverflow(assistantMessage)
+				? hasPostAssistantCompaction
 				: assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime());
 		if (assistantIsFromBeforeCompaction) {
 			return false;
@@ -4020,17 +4141,8 @@ export class AgentSession {
 					entry.sourceEntry.id === assistantEntryId &&
 					entry.messages.some((message) => message.role === "assistant"),
 			);
-		const entriesAfterAssistant = assistantIndex >= 0 ? branch.slice(assistantIndex + 1) : [];
-		const hasPostAssistantContextEdit = entriesAfterAssistant.some((entry) => entry.type === "context_edit");
-		const latestAssistantEdit = entriesAfterAssistant
-			.filter(
-				(entry): entry is ContextEditEntry => entry.type === "context_edit" && entry.targetId === assistantEntryId,
-			)
-			.at(-1);
 		const assistantRetainedForExplicitRecovery =
-			assistantEntryId === undefined ||
-			(!entriesAfterAssistant.some((entry) => entry.type === "compaction") &&
-				latestAssistantEdit?.replacement !== null);
+			assistantEntryId === undefined || (!hasPostAssistantCompaction && !latestAssistantOmitted);
 		const assistantUsageMatchesProjection = assistantIsProjected && !hasPostAssistantContextEdit;
 		const explicitOverflow = assistantMessage.stopReason === "error" && isContextOverflow(assistantMessage);
 		const contextOverflow =
@@ -4109,7 +4221,8 @@ export class AgentSession {
 				return false;
 			}
 
-			const pathEntries = this.sessionManager.getBranch();
+			// Default preparation needs the current retained range, not the archived prefix.
+			const pathEntries = this.sessionManager.createContextPreview([], []).getBranch();
 			const defaultPreparation = prepareCompaction(pathEntries, settings);
 			const preparation =
 				defaultPreparation ??
@@ -4127,10 +4240,18 @@ export class AgentSession {
 			let extensionCompaction: CompactionResult | undefined;
 
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
+				const manager = this.sessionManager;
+				let branch: SessionEntry[] | undefined;
 				const extensionResult = (await this._extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
-					branchEntries: pathEntries,
+					get branchEntries() {
+						branch ??= manager.getBranch();
+						return branch;
+					},
+					set branchEntries(value) {
+						branch = value;
+					},
 					customInstructions: undefined,
 					reason,
 					willRetry,
@@ -4934,50 +5055,43 @@ export class AgentSession {
 				(atTurnEnd && (this._agentRunAbortRequested || this._promptAbortController?.signal.aborted))
 			)
 				return;
-			const sessionId = this.sessionManager.getSessionId();
-			const sessionFile = this.sessionManager.getSessionFile();
-			const revision = this.sessionManager.getEntriesRevision();
-			let receipts = this._backgroundReceipts;
-			if (
-				!receipts ||
-				receipts.sessionId !== sessionId ||
-				receipts.sessionFile !== sessionFile ||
-				receipts.revision !== revision
-			) {
-				const seen = new Set<string>();
-				for (const metadata of this.sessionManager.iterateEntryMetadata()) {
-					const notice = metadata.type === "custom_message" && metadata.customType === BACKGROUND_COMMAND_NOTICE;
-					const result =
-						metadata.type === "message" &&
-						metadata.message.role === "toolResult" &&
-						metadata.message.toolName === "background_command" &&
-						!metadata.message.isError;
-					if (!notice && !result) continue;
-					const entry = this.sessionManager.getEntry(metadata.id);
-					if (!entry) continue;
-					let ids = this._backgroundReceiptJobs.get(entry);
-					if (!ids) {
-						ids = [];
-						if (entry.type === "custom_message") {
-							const details = entry.details as { jobIds?: string[] } | undefined;
-							ids.push(...(details?.jobIds ?? []));
-						} else if (entry.type === "message") {
-							const details = (entry.message as ToolResultMessage).details as
-								| BackgroundCommandToolDetails
-								| undefined;
-							if (details)
-								for (const job of "jobs" in details ? details.jobs : [details]) {
-									if (job.id && backgroundCommandFinished(job)) ids.push(job.id);
-								}
-						}
-						this._backgroundReceiptJobs.set(entry, ids);
-					}
-					for (const id of ids) seen.add(id);
-				}
-				receipts = { sessionId, sessionFile, revision, seen };
-				this._backgroundReceipts = receipts;
+			if (jobs.length === 0) {
+				clearInterval(this._backgroundTimer);
+				this._backgroundTimer = undefined;
+				return;
 			}
-			const seen = receipts.seen;
+			const { entries, reset } = this._backgroundReceiptCursor.read(this.sessionManager);
+			const seen = this._backgroundReceipts;
+			if (reset) seen.clear();
+			for (const metadata of entries) {
+				const notice = metadata.type === "custom_message" && metadata.customType === BACKGROUND_COMMAND_NOTICE;
+				const result =
+					metadata.type === "message" &&
+					metadata.message.role === "toolResult" &&
+					metadata.message.toolName === "background_command" &&
+					!metadata.message.isError;
+				if (!notice && !result) continue;
+				const entry = this.sessionManager.getEntry(metadata.id);
+				if (!entry) continue;
+				let ids = this._backgroundReceiptJobs.get(entry);
+				if (!ids) {
+					ids = [];
+					if (entry.type === "custom_message") {
+						const details = entry.details as { jobIds?: string[] } | undefined;
+						ids.push(...(details?.jobIds ?? []));
+					} else if (entry.type === "message") {
+						const details = (entry.message as ToolResultMessage).details as
+							| BackgroundCommandToolDetails
+							| undefined;
+						if (details)
+							for (const job of "jobs" in details ? details.jobs : [details]) {
+								if (job.id && backgroundCommandFinished(job)) ids.push(job.id);
+							}
+					}
+					this._backgroundReceiptJobs.set(entry, ids);
+				}
+				for (const id of ids) seen.add(id);
+			}
 			for (const id of seen) this._backgroundPending.delete(id);
 			if (jobs.every((job) => backgroundCommandFinished(job) && seen.has(job.id))) {
 				clearInterval(this._backgroundTimer);
@@ -5443,22 +5557,39 @@ export class AgentSession {
 		};
 	}
 
+	/**
+	 * Cached by journal/configuration state and shallow message/tool identities, not payload size.
+	 * Treat SDK messages/tools as immutable: replace an object/array to invalidate, or refreshContext()
+	 * after journal edits. Unsignalled nested edits inside an existing object are not observed.
+	 */
 	getContextUsage(): ContextUsage | undefined {
 		const model = this._limitsModel();
 		if (!model || model.contextWindow <= 0) return undefined;
-		const usageState = this._getContextUsageState(this.messages);
-		const inputs = {
-			model: [model.provider, model.api, model.id, model.contextWindow],
-			messages: this.messages,
-			tools: this.agent.state.tools,
-			basePrompt: this._baseSystemPromptOptions,
-			baseline: this._baseSystemPromptBaseline,
-			runPrompt: this._runSystemPromptOptions,
-			usageState,
-		};
+		const inputs = [
+			this.sessionManager.getEntriesRevision(),
+			this.sessionManager.getLeafId(),
+			this._messageStateRevision,
+			this.messages,
+			this.messages.length,
+			...this.messages,
+			this.agent.state.tools,
+			this.agent.state.tools.length,
+			...this.agent.state.tools,
+			this._hiddenDeclarations,
+			this._pendingProviderMessages.length,
+			...this._pendingProviderMessages,
+			model.provider,
+			model.api,
+			model.id,
+			model.contextWindow,
+			this._reportedUsagePrefix,
+			...promptOptionInputs(this._baseSystemPromptOptions),
+			...promptOptionInputs(this._baseSystemPromptBaseline),
+			...promptOptionInputs(this._runSystemPromptOptions),
+		];
 		const cached = this._contextUsageCache;
-		if (cached && cached.prefix === this._reportedUsagePrefix && isDeepStrictEqual(cached.inputs, inputs))
-			return { ...cached.usage };
+		if (cached && sameValues(cached.inputs, inputs)) return { ...cached.usage };
+		const usageState = this._getContextUsageState(this.messages, model);
 		const estimate = usageState.hasPostCompactionUsage ? this._estimateContextTokens() : undefined;
 		const usage: ContextUsage = estimate
 			? {
@@ -5468,7 +5599,7 @@ export class AgentSession {
 					percent: (estimate.tokens / model.contextWindow) * 100,
 				}
 			: { tokens: null, contextWindow: model.contextWindow, percent: null, source: "unknown" };
-		this._contextUsageCache = { inputs: Clone(inputs), prefix: this._reportedUsagePrefix, usage };
+		this._contextUsageCache = { inputs, usage };
 		return { ...usage };
 	}
 
@@ -5546,11 +5677,10 @@ export class AgentSession {
 		// The active projection can omit completed answers after compaction; /copy still owns the raw branch.
 		let lastAssistant = this.messages.findLast(isEligibleAssistant);
 		if (!lastAssistant) {
-			const branch = Array.from(
-				this.sessionManager.iterateEntryMetadata({ branchFrom: this.sessionManager.getLeafId() }),
-			);
-			for (let i = branch.length - 1; i >= 0; i--) {
-				const metadata = branch[i]!;
+			for (const metadata of this.sessionManager.iterateEntryMetadata({
+				branchFrom: this.sessionManager.getLeafId(),
+				reverse: true,
+			})) {
 				if (metadata.type !== "message" || metadata.message.role !== "assistant") continue;
 				const entry = this.sessionManager.getEntry(metadata.id)!;
 				if (entry.type === "message" && isEligibleAssistant(entry.message)) {

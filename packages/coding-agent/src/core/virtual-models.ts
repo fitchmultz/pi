@@ -23,7 +23,13 @@ import {
 	type Provider,
 	type ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { getSessionEntryMetadata, type SessionEntry, type SessionEntryMetadata } from "./session-manager.ts";
+import {
+	getSessionEntryMetadata,
+	type ReadonlySessionManager,
+	type SessionEntry,
+	type SessionEntryMetadata,
+} from "./session-manager.ts";
+import { SessionMetadataCursor } from "./session-metadata-cursor.ts";
 
 /** API id of virtual catalog entries. Requests for it fail unless routed first. */
 export const VIRTUAL_MODEL_API = "pi-virtual";
@@ -148,15 +154,62 @@ export function getBranchSelection(
 	return model && isVirtualModel(model) ? change : response;
 }
 
-/** Latest router state a session branch stores for a virtual model. */
-export function getVirtualModelState(branch: readonly SessionEntry[], provider: string, modelId: string): unknown {
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (entry.type !== "custom" || entry.customType !== VIRTUAL_MODEL_STATE_ENTRY) continue;
-		const data = entry.data as VirtualModelStateData | undefined;
-		if (data?.provider === provider && data.modelId === modelId) return data.state;
+interface BranchModelState {
+	cursor: SessionMetadataCursor;
+	change?: SessionEntryMetadata;
+	response?: SessionEntryMetadata;
+	states: Map<string, string>;
+}
+const branchStates = new WeakMap<ReadonlySessionManager, BranchModelState>();
+
+function readBranchModelState(manager: ReadonlySessionManager): BranchModelState {
+	let state = branchStates.get(manager);
+	if (!state) {
+		state = { cursor: new SessionMetadataCursor(), states: new Map() };
+		branchStates.set(manager, state);
 	}
-	return undefined;
+	const { entries, reset } = state.cursor.read(manager, true);
+	if (reset) {
+		state.change = undefined;
+		state.response = undefined;
+		state.states.clear();
+	}
+	for (const entry of entries) {
+		if (entry.type === "model_change") {
+			state.change = entry;
+			state.response = undefined;
+		} else if (
+			entry.type === "message" &&
+			entry.message.role === "assistant" &&
+			entry.message.api !== VIRTUAL_MODEL_API
+		)
+			state.response = entry;
+		else if (entry.type === "custom" && entry.customType === VIRTUAL_MODEL_STATE_ENTRY) {
+			const source = manager.getEntry(entry.id);
+			const data = source?.type === "custom" ? (source.data as VirtualModelStateData | undefined) : undefined;
+			if (data) state.states.set(`${data.provider}\0${data.modelId}`, entry.id);
+		}
+	}
+	return state;
+}
+
+/** Incremental counterpart of getBranchSelection for live sessions. */
+export function getSessionSelection(
+	manager: ReadonlySessionManager,
+	getModel: (provider: string, modelId: string) => Model<Api> | undefined,
+): { provider: string; modelId: string } | undefined {
+	const state = readBranchModelState(manager);
+	return getBranchSelection(
+		[state.change, state.response].filter((entry) => entry !== undefined),
+		getModel,
+	);
+}
+
+/** Latest router state, incrementally replayed on the active branch. */
+export function getVirtualModelState(manager: ReadonlySessionManager, provider: string, modelId: string): unknown {
+	const id = readBranchModelState(manager).states.get(`${provider}\0${modelId}`);
+	const entry = id ? manager.getEntry(id) : undefined;
+	return entry?.type === "custom" ? (entry.data as VirtualModelStateData | undefined)?.state : undefined;
 }
 
 /** Build the catalog entry of a virtual model. */

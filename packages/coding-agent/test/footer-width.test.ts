@@ -1,7 +1,9 @@
+import { fauxAssistantMessage, type Usage } from "@earendil-works/pi-ai";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -27,43 +29,28 @@ function createSession(options: {
 	usingSubscription?: boolean;
 	routedModel?: { model: { id: string }; thinkingLevel?: string };
 }): AgentSession {
-	const usage = options.usage;
-	const entries: Array<Record<string, unknown>> = [];
-
-	if (usage !== undefined) {
-		entries.push({
-			type: "message",
-			message: {
-				role: "assistant",
-				usage,
-			},
+	const manager = SessionManager.inMemory("/tmp/project");
+	const fullUsage = (value: AssistantUsage): Usage => ({
+		...value,
+		totalTokens: value.input + value.output + value.cacheRead + value.cacheWrite,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...value.cost },
+	});
+	if (options.usage) manager.appendMessage({ ...fauxAssistantMessage("answer"), usage: fullUsage(options.usage) });
+	if (options.branchUsage)
+		manager.branchWithSummary(manager.getLeafId(), "summary", undefined, undefined, fullUsage(options.branchUsage));
+	if (options.compactionUsage)
+		manager.appendCompaction("summary", null, 0, undefined, undefined, fullUsage(options.compactionUsage));
+	if (options.toolUsage)
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call",
+			toolName: "tool",
+			content: [],
+			isError: false,
+			timestamp: 0,
+			usage: fullUsage(options.toolUsage),
 		});
-	}
-
-	if (options.branchUsage !== undefined) {
-		entries.push({
-			type: "branch_summary",
-			usage: options.branchUsage,
-		});
-	}
-
-	if (options.compactionUsage !== undefined) {
-		entries.push({
-			type: "compaction",
-			usage: options.compactionUsage,
-		});
-	}
-
-	if (options.toolUsage !== undefined) {
-		entries.push({
-			type: "message",
-			message: {
-				role: "toolResult",
-				usage: options.toolUsage,
-			},
-		});
-	}
-
+	manager.appendSessionInfo(options.sessionName);
 	const session = {
 		state: {
 			model: {
@@ -74,16 +61,7 @@ function createSession(options: {
 			},
 			thinkingLevel: options.thinkingLevel ?? "off",
 		},
-		sessionManager: {
-			getEntries: () => entries,
-			iterateEntryMetadata: () => entries,
-			getEntriesRevision: () => entries.length,
-			getEntryCount: () => entries.length,
-			getSessionId: () => "test-session",
-			getLeafId: () => null,
-			getSessionName: () => options.sessionName,
-			getCwd: () => "/tmp/project",
-		},
+		sessionManager: manager,
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
 		routedModel: options.routedModel,
 		modelRuntime: {
@@ -218,8 +196,35 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 		expect(stripAnsi(footer.render(120)[1])).toContain("$0.500");
 
-		session.sessionManager.getEntries().push({ type: "message", message: { role: "assistant", usage } } as never);
+		session.sessionManager.appendMessage({
+			...fauxAssistantMessage("next"),
+			usage: { ...usage, totalTokens: 11, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.5 } },
+		});
 		expect(stripAnsi(footer.render(120)[1])).toContain("$1.000");
+		session.sessionManager.resetLeaf();
+		expect(stripAnsi(footer.render(120)[1])).toContain("$1.000");
+		session.sessionManager.newSession();
+		session.sessionManager.appendSessionInfo("fresh session");
+		expect(stripAnsi(footer.render(120)[1])).not.toContain("$");
+		expect(stripAnsi(footer.render(120)[0])).toContain("fresh session");
+	});
+
+	it("marks heuristic usage and refreshes context independently of journal appends", () => {
+		const session = createSession({ sessionName: "context" });
+		let context = {
+			tokens: 24_600,
+			contextWindow: 200_000,
+			percent: 12.3,
+			source: "estimated" as "estimated" | "reported" | "unknown",
+		};
+		session.getContextUsage = () => context;
+		const footer = new FooterComponent(session, createFooterData(1));
+		expect(stripAnsi(footer.render(80)[1])).toContain("~12.3%/200k");
+		context = { ...context, source: "reported", percent: 15 };
+		expect(stripAnsi(footer.render(80)[1])).toContain("15.0%/200k");
+		expect(stripAnsi(footer.render(80)[1])).not.toContain("~");
+		for (const width of [20, 40, 80])
+			for (const line of footer.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 	});
 
 	it("shows the latest cache hit rate when cache usage is present", () => {

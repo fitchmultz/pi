@@ -59,9 +59,10 @@ export function estimateMessageTokens(message: Message, includeTools = true): nu
 		if (block.type === "text") {
 			chars += block.text.length;
 		} else if (block.type === "thinking") {
-			chars += block.thinking.length;
+			// Signatures also carry redacted thinking and encrypted Responses reasoning.
+			chars += block.thinking.length + (block.thinkingSignature?.length ?? 0);
 		} else {
-			chars += block.name.length + safeJsonStringify(block.arguments).length;
+			chars += block.name.length + safeJsonStringify(block.arguments).length + (block.thoughtSignature?.length ?? 0);
 		}
 	}
 	return Math.ceil(chars / CHARS_PER_TOKEN);
