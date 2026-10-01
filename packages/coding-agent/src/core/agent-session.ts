@@ -416,6 +416,7 @@ export class AgentSession {
 	private _abortDuringBeforeSettle = false;
 	private _isEmittingAgentSettled = false;
 	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
+	private _settledActionCount = 0;
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
@@ -1060,9 +1061,11 @@ export class AgentSession {
 
 		const deferred = this._deferredSettledActions.splice(0);
 		if (deferred.length > 0) {
+			this._settledActionCount += deferred.length;
 			try {
 				for (const action of deferred) await action();
 			} finally {
+				this._settledActionCount -= deferred.length;
 				this._resolveIdleWaitIfIdle();
 			}
 			return;
@@ -1434,6 +1437,11 @@ export class AgentSession {
 	/** Whether the session has no active agent run, compaction, branch summary, retry, or queued continuation. */
 	get isIdle(): boolean {
 		return !this._isAgentRunActive && !this.isCompacting;
+	}
+
+	/** Settled handlers and their deferred prompts may still be awaiting work while isIdle is true. */
+	get isSettling(): boolean {
+		return this._isEmittingAgentSettled || this._deferredSettledActions.length > 0 || this._settledActionCount > 0;
 	}
 
 	/** Current effective system prompt, including changes not yet sent to the model. */

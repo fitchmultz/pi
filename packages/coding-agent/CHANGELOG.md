@@ -6,6 +6,10 @@
 
 - Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle saved-session resume, staged runtime and extension activation, and one-shot startup rollback. See [Managed restarts](docs/restart.md).
 
+### Fixed
+
+- Fixed managed restart signal delivery and waiting for extension-settled work, restored short socket paths on Termux, and rejected legacy launcher handoffs with relaunch instructions.
+
 ## [1.0.0] - 2026-10-01
 
 ### New Features

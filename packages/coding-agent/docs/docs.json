@@ -36,6 +36,10 @@
               "path": "sessions.md"
             },
             {
+              "title": "Restart Pi",
+              "path": "restart.md"
+            },
+            {
               "title": "Run Pi Safely",
               "path": "security.md"
             },

@@ -80,7 +80,8 @@ export async function superviseCli(
 	const removers = signals.map((signal) => {
 		const handler = () => {
 			stopping = signal;
-			child?.kill(signal);
+			// The terminal already delivers SIGINT/SIGHUP to the foreground process group.
+			if (signal === "SIGTERM") child?.kill(signal);
 		};
 		process.on(signal, handler);
 		return () => process.off(signal, handler);
@@ -148,7 +149,8 @@ export async function superviseCli(
 			clearTimeout(timeout);
 			clearTimeout(killTimeout);
 			child = undefined;
-			if (stopping) return 128 + constants.signals[stopping];
+			const exitCode = result.signal ? 128 + constants.signals[result.signal] : timedOut ? 1 : (result.code ?? 1);
+			if (stopping) return exitCode;
 			if (restart && result.code === 0 && !result.signal) {
 				const previous: Launch = {
 					...launch,
@@ -184,7 +186,7 @@ export async function superviseCli(
 			}
 			if (!ready && fallback && handoff) {
 				const failure = timedOut
-					? "Updated Pi did not become ready within 60 seconds."
+					? `Updated Pi did not become ready within ${(options.startupTimeoutMs ?? 60_000) / 1000} seconds.`
 					: "Updated Pi exited before becoming ready.";
 				console.error(`${failure} Returning to the previous launch configuration once.`);
 				launch = fallback;
@@ -192,9 +194,9 @@ export async function superviseCli(
 				handoff = { ...handoff, failure };
 				continue;
 			}
-			return result.signal ? 128 + constants.signals[result.signal] : timedOut ? 1 : (result.code ?? 1);
+			return exitCode;
 		}
-		return 1;
+		return stopping ? 128 + constants.signals[stopping] : 1;
 	} finally {
 		for (const remove of removers) remove();
 		process.off("exit", killChild);

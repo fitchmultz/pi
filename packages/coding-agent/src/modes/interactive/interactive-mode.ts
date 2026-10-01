@@ -666,6 +666,7 @@ export class InteractiveMode {
 		options.managedRestart?.bindInput(() => ({
 			busy:
 				this.session.isBashRunning ||
+				this.session.isSettling ||
 				process.stdin.isPaused() ||
 				this.editorContainer.children[0] !== this.editor ||
 				this.renderer.hasOverlayEntries,
@@ -1146,7 +1147,7 @@ export class InteractiveMode {
 	 */
 	async run(): Promise<void> {
 		await this.init();
-		await this.options.managedRestart?.ready();
+		await this.options?.managedRestart?.ready();
 
 		if (!process.env.PI_OFFLINE) {
 			const controller = new AbortController();
@@ -1250,7 +1251,7 @@ export class InteractiveMode {
 			}
 		}
 
-		this.options.managedRestart?.start();
+		this.options?.managedRestart?.start();
 
 		// Main interactive loop
 		while (true) {
@@ -3638,7 +3639,7 @@ export class InteractiveMode {
 			}
 
 			case "compaction_end": {
-				if (event.aborted) this.options.managedRestart?.interrupt();
+				if (event.aborted) this.options?.managedRestart?.interrupt();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -3704,7 +3705,7 @@ export class InteractiveMode {
 			}
 
 			case "auto_retry_end": {
-				if (!event.success) this.options.managedRestart?.interrupt();
+				if (!event.success) this.options?.managedRestart?.interrupt("automatic retry failed or was cancelled.");
 				// Restore escape handler
 				if (this.retryEscapeHandler) {
 					this.defaultEditor.onEscape = this.retryEscapeHandler;
@@ -4228,7 +4229,7 @@ export class InteractiveMode {
 	private isShuttingDown = false;
 
 	private async shutdown(options?: { fromSignal?: boolean; fromExtension?: boolean }): Promise<void> {
-		const restarting = this.options.managedRestart?.beginShutdown(
+		const restarting = this.options?.managedRestart?.beginShutdown(
 			options?.fromSignal ? "signal" : options?.fromExtension ? "extension" : "user",
 		);
 		if (this.isShuttingDown) return;
@@ -4263,10 +4264,10 @@ export class InteractiveMode {
 
 		this.stop();
 		await this.runtimeHost.dispose();
-		await this.options.managedRestart?.completeShutdown();
+		await this.options?.managedRestart?.completeShutdown();
 
 		const resumeCommand = formatResumeCommand(this.sessionManager);
-		if (resumeCommand) {
+		if (resumeCommand && !restarting) {
 			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
 		}
 
@@ -4677,7 +4678,7 @@ export class InteractiveMode {
 	}
 
 	private restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
-		if (options?.abort) this.options.managedRestart?.interrupt();
+		if (options?.abort) this.options?.managedRestart?.interrupt();
 		const { steering, followUp } = this.clearAllQueues();
 		const allQueued = [...steering, ...followUp];
 		if (allQueued.length === 0) {

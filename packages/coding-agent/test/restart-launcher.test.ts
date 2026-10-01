@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,6 +76,57 @@ function readable(path: string): boolean {
 }
 
 describe("managed restart launcher", () => {
+	it.skipIf(process.platform === "win32").each(["SIGINT", "SIGHUP", "SIGTERM"] as const)(
+		"allows a worker to close gracefully after %s without duplicate delivery",
+		async (signal) => {
+			const f = fixture();
+			const runtime = f.release(
+				"A",
+				`
+process.once(${JSON.stringify(signal)}, () => {
+ console.log('Signal handled once');
+ setTimeout(() => { console.log('Graceful close done'); process.exit(0); }, 150);
+});
+process.send({type:'pi:ready'}, () => console.log('Worker ready'));
+setInterval(() => {}, 1000);
+`,
+			);
+			const parent = join(f.root, "parent.mjs");
+			writeFileSync(
+				parent,
+				`
+import { superviseCli } from ${JSON.stringify(new URL("../src/cli/launcher.ts", import.meta.url).href)};
+process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(runtime))}, [], {execArgv:[]});
+`,
+			);
+			const child = spawn(process.execPath, [parent], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+			let output = "";
+			child.stdout.on("data", (chunk: Buffer) => {
+				output += chunk.toString();
+			});
+			child.stderr.on("data", (chunk: Buffer) => {
+				output += chunk.toString();
+			});
+			const exited = new Promise<number | null>((resolve, reject) => {
+				child.once("error", reject);
+				child.once("close", (code) => resolve(code));
+			});
+			try {
+				await expect.poll(() => output, { timeout: 5000 }).toContain("Worker ready");
+				process.kill(signal === "SIGTERM" ? child.pid! : -child.pid!, signal);
+				expect(await exited).toBe(0);
+				expect(output).toContain("Graceful close done");
+				expect(output.split("Signal handled once")).toHaveLength(2);
+				expect(f.read()).toHaveLength(1);
+			} finally {
+				try {
+					process.kill(-child.pid!, "SIGKILL");
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ESRCH") console.error(error);
+				}
+			}
+		},
+	);
 	it("retains parsed options without replaying startup text or session selection", () => {
 		expect(
 			getRestartArgs(
@@ -177,6 +229,7 @@ describe("managed restart launcher", () => {
 			message: "Continue once",
 			failure: expect.any(String),
 		});
+		if (body.includes("setInterval")) expect(receipts[2].handoff?.failure).toContain("within 0.2 seconds");
 	});
 	it("stops if the exact previous worker also fails", async () => {
 		const f = fixture();
