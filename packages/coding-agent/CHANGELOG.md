@@ -14,6 +14,7 @@
 
 - Fixed managed restart signal delivery and waiting for extension-settled work, restored short socket paths on Termux, and rejected legacy launcher handoffs with relaunch instructions.
 - Fixed enabling instruction groups rewriting earlier tool declarations on Responses and Codex; discovery now restores only previously selected tools with positional additions.
+- Fixed bundled CLI startup with background commands, repeated journal reads during completion monitoring, and silent fallback with an older `pi-change-working-dir` owner.
 
 ## [1.0.0] - 2026-10-01
 

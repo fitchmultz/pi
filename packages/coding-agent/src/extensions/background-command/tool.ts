@@ -1,9 +1,10 @@
-import { statSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "../../core/extensions/types.ts";
+import type { SourceInfo } from "../../core/source-info.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { getShellEnv } from "../../utils/shell.ts";
 import {
@@ -98,6 +99,15 @@ export function createBackgroundCommandTool(
 						)
 							throw new Error(invalid);
 						baseCwd = result.cwd;
+					} else if (
+						pi.getAllTools().some((tool) => tool.name === "change_dir" && isDirectoryOwner(tool.sourceInfo)) ||
+						pi
+							.getCommands()
+							.some((command) => /^cwd(?::\d+)?$/.test(command.name) && isDirectoryOwner(command.sourceInfo))
+					) {
+						throw new Error(
+							"Update pi-change-working-dir and restart Pi before starting background commands; the loaded owner cannot resolve its execution directory.",
+						);
 					}
 					if (!params.command?.trim()) throw new Error("start requires command");
 					const cwd = resolvePath(params.cwd ?? ".", baseCwd);
@@ -193,4 +203,21 @@ export function createBackgroundCommandTool(
 			);
 		},
 	};
+}
+
+function isDirectoryOwner(source: SourceInfo): boolean {
+	if (
+		/^(?:npm:pi-change-working-dir|git:github\.com\/fitchmultz\/pi-change-working-dir(?:\.git)?)(?:@.+)?$/.test(
+			source.source,
+		)
+	)
+		return true;
+	return [source.baseDir, isAbsolute(source.path) ? dirname(source.path) : undefined].some((directory) => {
+		if (!directory || !isAbsolute(directory)) return false;
+		try {
+			return JSON.parse(readFileSync(join(directory, "package.json"), "utf8")).name === "pi-change-working-dir";
+		} catch {
+			return false;
+		}
+	});
 }

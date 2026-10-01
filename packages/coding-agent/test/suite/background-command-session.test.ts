@@ -1,9 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { Type } from "typebox";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext, ExtensionFactory } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import backgroundCommand, { BACKGROUND_COMMAND_NOTICE } from "../../src/extensions/background-command/index.ts";
@@ -17,7 +19,7 @@ import {
 	startBackgroundCommand,
 } from "../../src/extensions/background-command/jobs.ts";
 import { getShellEnv } from "../../src/utils/shell.ts";
-import { createHarness, getMessageText, getToolResult, type Harness } from "./harness.ts";
+import { createHarness, getMessageText, getToolResult, type Harness, type HarnessOptions } from "./harness.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 async function until(condition: () => boolean) {
@@ -37,7 +39,7 @@ const jobFrom = (h: Harness) =>
 describe("background command extension delivery", () => {
 	const harnesses: Harness[] = [];
 	const roots: string[] = [];
-	async function harness(owner?: SessionManager, extensions: ExtensionFactory[] = []) {
+	async function harness(owner?: SessionManager, extensions: NonNullable<HarnessOptions["extensionFactories"]> = []) {
 		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-background-session-")));
 		roots.push(root);
 		const h = await createHarness({
@@ -74,9 +76,36 @@ describe("background command extension delivery", () => {
 			h.cleanup();
 		}
 		for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+		vi.restoreAllMocks();
+		syncBuiltinESMExports();
 		expect(failures).toEqual([]);
 	});
 
+	it("reads the journal once per delivery lease, not on later turns or idle writes", async () => {
+		const h = await harness();
+		h.sessionManager.appendCustomEntry("large-history", "history ".repeat(16_384));
+		const read = vi.spyOn(fs, "readFileSync");
+		syncBuiltinESMExports();
+		const reads = () => read.mock.calls.filter(([file]) => file === h.sessionManager.getSessionFile()).length;
+		const { command, release } = held(h);
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Launched"),
+		]);
+		await h.session.prompt("Start");
+		expect(reads()).toBe(1);
+		h.sessionManager.appendCustomEntry("unrelated", { value: true });
+		await delay(1100);
+		h.setResponses([fauxAssistantMessage("Another turn")]);
+		await h.session.prompt("Continue");
+		expect(reads()).toBe(1);
+		h.setResponses([fauxAssistantMessage("Completion consumed")]);
+		await finish(h, release);
+		await until(() => notices(h).length === 1 && h.session.isIdle);
+		expect(reads()).toBe(1);
+	});
 	it("delivers after the whole foreground batch, once across reload", async () => {
 		const h = await harness();
 		const { command, release } = held(h);
@@ -345,6 +374,52 @@ describe("background command extension delivery", () => {
 		expect(getMessageText(getToolResult(h, "background_command"))).toContain(message);
 		expect(listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))).toEqual([]);
 	});
+	it.each([
+		{ route: "tool", identifiable: true },
+		{ route: "command", identifiable: true },
+		{ route: "tool", identifiable: false },
+		{ route: "command", identifiable: false },
+	])(
+		"checks silent directory-owner provenance via $route (identifiable=$identifiable)",
+		async ({ route, identifiable }) => {
+			const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-cwd-owner-")));
+			roots.push(root);
+			writeFileSync(
+				join(root, "package.json"),
+				JSON.stringify({ name: identifiable ? "pi-change-working-dir" : "unrelated-extension" }),
+			);
+			const owner: ExtensionFactory = (pi) => {
+				if (route === "tool") {
+					pi.registerTool({
+						name: "change_dir",
+						label: "Change directory",
+						description: "Legacy directory owner",
+						parameters: Type.Object({}),
+						defaultActive: false,
+						execute: async () => ({ content: [], details: undefined }),
+					});
+				} else {
+					pi.registerCommand("cwd", { description: "Legacy directory owner", handler: async () => {} });
+				}
+			};
+			const h = await harness(undefined, [{ factory: owner, path: join(root, "index.ts") }]);
+			h.setResponses([
+				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command: "printf safe" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Done"),
+			]);
+			await h.session.prompt("Start");
+			const result = getToolResult(h, "background_command");
+			expect(result.isError).toBe(identifiable);
+			if (identifiable) {
+				expect(getMessageText(result)).toContain("Update pi-change-working-dir and restart Pi");
+				expect(listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))).toEqual([]);
+			} else {
+				expect(jobFrom(h).cwd).toBe(h.tempDir);
+			}
+		},
+	);
 	it("lists newest first with capped pagination and activeOnly filtering", async () => {
 		const h = await harness();
 		const root = backgroundCommandDirectory(h.sessionManager);

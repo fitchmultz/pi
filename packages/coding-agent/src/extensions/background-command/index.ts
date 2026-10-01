@@ -7,7 +7,6 @@ import type {
 	ExtensionFactory,
 } from "../../core/extensions/types.ts";
 import { type FileEntry, parseSessionEntries } from "../../core/session-manager.ts";
-import { getFileRevision } from "../../utils/paths.ts";
 import {
 	backgroundCommandDirectory,
 	backgroundCommandFinished,
@@ -27,7 +26,6 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 		let release: (() => void) | undefined;
 		let root: string | undefined;
 		let ownerKey: string | undefined;
-		let journalRevision: string | undefined;
 		let wakeSuppressed = false;
 		let stopped = false;
 		const seen = new Set<string>();
@@ -74,7 +72,6 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 				root = backgroundCommandDirectory(owner);
 				seen.clear();
 				pending.clear();
-				journalRevision = undefined;
 			}
 			stopped = false;
 			context = ctx;
@@ -98,13 +95,8 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 					if ((error as NodeJS.ErrnoException).code === "ELOCKED") return;
 					throw error;
 				}
-			}
-			const journal = ctx.sessionManager.getSessionFile();
-			const revision = journal && getFileRevision(journal);
-			if (journal && revision && revision !== journalRevision) {
-				// ponytail: changed journals are read in full; use an incremental reader if very large sessions need it.
-				receipts(parseSessionEntries(readFileSync(journal, "utf8")));
-				journalRevision = revision;
+				const journal = ctx.sessionManager.getSessionFile();
+				if (journal && existsSync(journal)) receipts(parseSessionEntries(readFileSync(journal, "utf8")));
 			}
 			receipts(ctx.sessionManager.getEntries());
 			const jobs = listBackgroundCommands(root);

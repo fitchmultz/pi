@@ -4,7 +4,10 @@ import { runBackgroundCommandWorker } from "./extensions/background-command/jobs
 import { main } from "./main.ts";
 
 if (process.argv[2] === "--internal-background-command") {
-	await runBackgroundCommandWorker(process.argv[3]);
+	runBackgroundCommandWorker(process.argv[3]).catch((error) => {
+		console.error(error instanceof Error ? error.message : error);
+		process.exitCode = 1;
+	});
 } else {
 	setupCli();
 	main(process.argv.slice(2));
