@@ -93,6 +93,84 @@ describe("live RPC/TUI ownership", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("answers concurrent RPC dialogs in order across detach and reattach", async () => {
+		const harness = await createHarness({ settings: { quietStartup: true, theme: "dark", tuiMode: "regular" } });
+		const { terminal, screen, detach } = await start(harness, true);
+		const ui = harness.session.extensionRunner.getUIContext();
+		const answers: string[] = [];
+		const first = ui.input("FIRST-QUESTION").then((value) => {
+			answers.push(`first: ${value}`);
+		});
+		const second = ui.input("SECOND-QUESTION").then((value) => {
+			answers.push(`second: ${value}`);
+		});
+		const custom = ui.custom<string>((_tui, _theme, _keys, done) => ({
+			render: () => ["LAST-CUSTOM"],
+			invalidate: () => {},
+			handleInput: () => done("custom answer"),
+		}));
+		send({ type: "attach_tui" });
+		await vi.waitFor(async () => expect(await screen()).toContain("FIRST-QUESTION"));
+		expect(await screen()).not.toContain("SECOND-QUESTION");
+		expect(await screen()).not.toContain("LAST-CUSTOM");
+		detach();
+		await vi.waitFor(() => expect(io.onLine).toBeDefined());
+		expect(answers).toEqual([]);
+		send({ type: "attach_tui" });
+		await vi.waitFor(async () => expect(await screen()).toContain("FIRST-QUESTION"));
+		terminal.sendInput("one");
+		terminal.sendInput("\r");
+		await first;
+		await vi.waitFor(async () => expect(await screen()).toContain("SECOND-QUESTION"));
+		expect(answers).toEqual(["first: one"]);
+		terminal.sendInput("two");
+		terminal.sendInput("\r");
+		await second;
+		expect(answers).toEqual(["first: one", "second: two"]);
+		await vi.waitFor(async () => expect(await screen()).toContain("LAST-CUSTOM"));
+		terminal.sendInput("\r");
+		await expect(custom).resolves.toBe("custom answer");
+		detach();
+		await vi.waitFor(() => expect(io.onLine).toBeDefined());
+	});
+
+	it("advances after dialog abort, cancellation and timeout without queueing custom overlays", async () => {
+		const harness = await createHarness({ settings: { quietStartup: true, theme: "dark", tuiMode: "regular" } });
+		const { terminal, screen, detach } = await start(harness, true);
+		const ui = harness.session.extensionRunner.getUIContext();
+		const controller = new AbortController();
+		const aborted = ui.select("ABORT-ME", ["continue"], { signal: controller.signal });
+		const cancelled = ui.input("CANCEL-ME");
+		send({ type: "attach_tui" });
+		await vi.waitFor(async () => expect(await screen()).toContain("ABORT-ME"));
+		const overlay = ui.custom<string>(
+			(_tui, _theme, _keys, done) => ({
+				render: () => ["CUSTOM-OVERLAY"],
+				invalidate: () => {},
+				handleInput: () => done("overlay answer"),
+			}),
+			{ overlay: true },
+		);
+		await vi.waitFor(async () => expect(await screen()).toContain("CUSTOM-OVERLAY"));
+		terminal.sendInput("\r");
+		await expect(overlay).resolves.toBe("overlay answer");
+		controller.abort();
+		await expect(aborted).resolves.toBeUndefined();
+		await vi.waitFor(async () => expect(await screen()).toContain("CANCEL-ME"));
+		const timedOut = ui.confirm("TIMEOUT-ME", "not answered", { timeout: 1000 });
+		const last = ui.input("AFTER-TIMEOUT");
+		terminal.sendInput("\x1b");
+		await expect(cancelled).resolves.toBeUndefined();
+		await vi.waitFor(async () => expect(await screen()).toContain("TIMEOUT-ME"));
+		await expect(timedOut).resolves.toBe(false);
+		await vi.waitFor(async () => expect(await screen()).toContain("AFTER-TIMEOUT"));
+		terminal.sendInput("last");
+		terminal.sendInput("\r");
+		await expect(last).resolves.toBe("last");
+		detach();
+		await vi.waitFor(() => expect(io.onLine).toBeDefined());
+	});
+
 	it("rejects pipe attachment without breaking RPC or creating custom terminal components", async () => {
 		const harness = await createHarness();
 		await start(harness, false);
