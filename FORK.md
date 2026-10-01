@@ -111,10 +111,10 @@ a staged release without selecting it. See [restart.md](packages/coding-agent/do
 release selectable at `<selector>.previous`. On Termux the selector is
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` with `~/.local/bin/pi`.
 
-### Cutover from the 0.93 fork
+### Cutover from the 0.99 fork
 
-Sessions started by the 0.93 fork must quit and relaunch (`pi -c` or `pi --session <file>`) to run
-on 1.0. `/restart` from such a session is refused by the new worker and stays on 0.93. Keep the 0.93
+Sessions started by the 0.99 fork must quit and relaunch (`pi -c` or `pi --session <file>`) to run
+on 1.0. `/restart` from such a session is refused by the new worker and stays on 0.99. Keep the 0.99
 release on disk until the new release is verified; to roll back, `--rollback` (or flip the selector
 to `<selector>.previous`) and fully relaunch.
 

@@ -15,7 +15,6 @@ import {
 	resolveCliModel,
 	resolveModelScope,
 	resolveModelScopeWithDiagnostics,
-	restoreModelFromSession,
 } from "../src/core/model-resolver.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -732,9 +731,6 @@ describe("default model selection", () => {
 			modelRuntime: registry,
 		});
 		expect(initial.model?.provider).toBe("anthropic");
-		expect(
-			(await restoreModelFromSession("anthropic", mockModels[0].id, mockModels[1], false, registry)).model?.provider,
-		).toBe("anthropic");
 		expect(
 			(await resolveModelScopeWithDiagnostics(["anthropic/*"], registry)).scopedModels.map(
 				(entry) => entry.model.provider,

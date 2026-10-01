@@ -9,21 +9,13 @@
 - Added live POSIX PTY RPC-to-TUI handoff via `attach_tui`, token-framed `SIGUSR2` return, and pending extension UI transfer without restarting the session. Ordinary pipe RPC is unchanged.
 - Added JSON selection to the `read` tool. `json: { path?, fields? }` selects a JSON Pointer target and, optionally, immediate object keys before paging and output limits. See [JSON selection with read](docs/sdk.md#json-selection-with-read).
 - Added the replaceable `discover_tools` builtin for full on-demand extension instructions, with deferred activation, prior-turn read gating, and branch-aware persistence and compaction repair. SDK hosts can opt in with `instructionGroupsExtension`.
-- Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle saved-session resume, staged runtime and extension activation, and one-shot startup rollback. See [Managed restarts](docs/restart.md).
+- Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle saved-session resume, staged runtime and extension activation, and one-shot startup rollback. Restarts requested by an older fork launcher are refused with relaunch instructions. See [Managed restarts](docs/restart.md).
 - Added optional `compactView` (off by default), `/compact-view`, and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Hybrid opens groups by default while keeping cards compact.
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 - Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
 
 ### Fixed
 
-- Fixed concurrent fork installation, activation, rollback, and pruning bypassing the updater's selector lock and potentially deleting the selected runtime.
-- Fixed isolated fork builds reading native-prefix npm configuration and standalone package packing inheriting ambient credentials and `NODE_OPTIONS`.
-
-### Fixed
-
-- Fixed managed restart signal delivery and waiting for extension-settled work, restored short socket paths on Termux, and rejected legacy launcher handoffs with relaunch instructions.
-- Fixed enabling instruction groups rewriting earlier tool declarations on Responses and Codex; discovery now restores only previously selected tools with positional additions.
-- Fixed bundled CLI startup with background commands, repeated journal reads during completion monitoring, and silent fallback with an older `pi-change-working-dir` owner.
 - Fixed resized-image coordinate notes to use separate, unrounded x and y scales.
 - Fixed branch-summary budgets counting system declarations instead of conversation history.
 - Fixed empty quoted prompt-template arguments shifting later positional arguments.

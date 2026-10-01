@@ -432,7 +432,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			const detach = () => {
 				if (frontend === "rpc" && !transitioning) return;
 				returnRequested = true;
-				void activateRpcFrontend().catch(() => shutdown(1));
+				void activateRpcFrontend().catch((error: unknown) => shutdown(1, undefined, error));
 			};
 			process.on("SIGUSR2", detach);
 			signalCleanupHandlers.push(() => process.off("SIGUSR2", detach));
@@ -801,10 +801,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			headerFactoryPending = false;
 			if (!interactiveRunStarted) {
 				interactiveRunStarted = true;
-				void interactiveMode.runHosted().catch(() => shutdown(1));
+				void interactiveMode.runHosted().catch((error: unknown) => shutdown(1, undefined, error));
 			}
-		} catch {
-			await shutdown(1);
+		} catch (error) {
+			await shutdown(1, undefined, error);
 		} finally {
 			transitioning = false;
 		}
@@ -832,7 +832,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		attachInput();
 	}
 
-	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<never> {
+	async function shutdown(exitCode = 0, signal?: NodeJS.Signals, error?: unknown): Promise<never> {
 		if (shuttingDown) {
 			process.exit(exitCode);
 		}
@@ -853,6 +853,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		if (signal !== "SIGTERM") {
 			await flushRawStdout();
 		}
+		// TUI handoff failures are reported only after the terminal is restored.
+		if (error !== undefined) console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
 		process.exit(exitCode);
 	}
 

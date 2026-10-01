@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
+import chalk from "chalk";
 import { getRestartRuntimeWorker } from "../../cli/launcher.ts";
 import {
 	MANAGED_CLI_ENV,
@@ -11,6 +12,7 @@ import {
 	parseRestartRequest,
 	RESTART_HANDOFF_ENV,
 	RESTART_SOCKET_ENV,
+	type RestartHandoff,
 	type RestartRequest,
 	type RestartWorkerMessage,
 } from "../../cli/restart-protocol.ts";
@@ -66,7 +68,14 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	const managed = process.env[MANAGED_CLI_ENV] === "1";
 	delete process.env[MANAGED_CLI_ENV];
 	if (!managed || !process.send || !process.connected) return undefined;
-	const handoff = encoded ? parseRestartHandoff(encoded) : undefined;
+	let handoff: RestartHandoff | undefined;
+	try {
+		handoff = encoded ? parseRestartHandoff(encoded) : undefined;
+	} catch (error) {
+		// Startup error, not a crash: print the relaunch instruction without a stack trace.
+		console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
+		process.exit(1);
+	}
 	process.once("disconnect", () => process.kill(process.pid, "SIGTERM"));
 	process.channel?.unref();
 	let input = (): RestartInputState => ({ busy: true, pendingInput: false });
@@ -251,9 +260,9 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			startupWarning?.();
 			startupWarning = undefined;
 			if (handoff?.failure) ctx?.ui.notify(handoff.failure, "warning");
-			if (handoff?.message || handoff?.failure) {
+			if (handoff?.message) {
 				api?.sendUserMessage(
-					`[Restart continuation]\n${handoff.failure ? `${handoff.failure}\n\n` : ""}${handoff.message ?? "Diagnose the startup failure; the previous runtime was restored."}`,
+					`[Restart continuation]\n${handoff.failure ? `${handoff.failure}\n\n` : ""}${handoff.message}`,
 					{ expandPromptTemplates: false },
 				);
 			}

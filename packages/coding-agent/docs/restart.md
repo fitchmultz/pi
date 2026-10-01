@@ -44,15 +44,15 @@ Without a pin, each restart re-resolves the original invocation path, including 
 
 ## Startup recovery
 
-Readiness is signalled only after TUI initialization. If the selected worker cannot start, exits before readiness (even with exit 0), or is not ready within 60 seconds, the launcher starts the **exact previous worker and arguments once**, resuming the same saved session with the previous explicit extensions and pin policy. The labelled continuation includes the startup failure notice, even when no message was supplied. If recovery also fails, Pi stops; it never loops.
+Readiness is signalled only after TUI initialization. If the selected worker cannot start, exits before readiness (even with exit 0), or is not ready within 60 seconds, the launcher starts the **exact previous worker and arguments once**, resuming the same saved session with the previous explicit extensions and pin policy. The startup failure is shown as a warning; when a message was supplied, the labelled continuation also includes it. Without a message, no model turn starts. If recovery also fails, Pi stops; it never loops.
 
 Readiness is not proof that every provider or tool works. Validate candidates first. Failures after readiness are not automatically rolled back or replayed, because work may already have had side effects.
 
-### Upgrading sessions started by the old fork
+### Upgrading sessions started by the 0.99 fork
 
-Sessions started by the old 0.93 fork launcher must **quit and relaunch** using `pi -c` or `pi --session <file>` to use the new runtime. `/restart` from an old-launcher session stays on the old runtime: the new worker rejects its legacy handoff before opening a session, allowing the old launcher's startup rollback. There is no legacy-schema conversion or compatibility layer.
+Sessions started by the 0.99 fork launcher must **quit and relaunch** using `pi -c` or `pi --session <file>` to use the new runtime. Do not `/restart` across the cutover: the new worker rejects the legacy handoff before opening a session, and the old launcher rolls back to the old runtime. In fullscreen mode the old TUI can hide that error. There is no legacy-schema conversion or compatibility layer.
 
-Session history remains the authority. Original CLI options are retained except session-selection flags and consumed startup prompts/attachments; `--session` selects the saved journal. Extensions must persist their own state with ordinary session entries and shutdown handlers. In-memory queues and extension internals are not transferred: restart waits for runnable queues to drain and refuses pending next-turn context. This is a saved-session resume, not an in-memory snapshot or a migration facility.
+Session history remains the authority. Original CLI options are retained except session-selection flags, consumed startup prompts/attachments, and `--model`/`--provider`/`--thinking`; `--session` selects the saved journal, and the session restores its current model and thinking level. With `--api-key`, the launch model is kept because the key applies to it. Extensions must persist their own state with ordinary session entries and shutdown handlers. In-memory queues and extension internals are not transferred: restart waits for runnable queues to drain and refuses pending next-turn context. This is a saved-session resume, not an in-memory snapshot or a migration facility.
 
 ## Scope and development
 

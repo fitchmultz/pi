@@ -207,7 +207,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// If session has data, try to restore model from it
 	if (!model && hasExistingSession && sessionModel) {
 		const restoredModel = modelRuntime.getModel(sessionModel.provider, sessionModel.modelId);
-		if (restoredModel && modelRuntime.hasConfiguredAuth(restoredModel.provider)) {
+		// A failed auth check is not missing auth; keep the session's provider instead of silently switching.
+		if (
+			restoredModel &&
+			(modelRuntime.hasConfiguredAuth(restoredModel.provider) ||
+				modelRuntime.getAuthCheckError(restoredModel.provider))
+		) {
 			model = restoredModel;
 		}
 		if (!model) {

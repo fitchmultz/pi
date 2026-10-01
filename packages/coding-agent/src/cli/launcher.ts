@@ -48,7 +48,13 @@ export function getRestartArgs(args: string[], extensions?: string[]): string[] 
 		"--fork",
 		"--name",
 		"-n",
+		"--thinking",
 	]);
+	// The resumed session restores its current model; a runtime --api-key still needs the launch model.
+	if (parseArgs(args).apiKey === undefined) {
+		replaced.add("--model");
+		replaced.add("--provider");
+	}
 	if (extensions) {
 		replaced.add("--extension");
 		replaced.add("-e");

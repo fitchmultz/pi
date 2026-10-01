@@ -127,7 +127,7 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 			}
 		},
 	);
-	it("retains parsed options without replaying startup text or session selection", () => {
+	it("retains parsed options without replaying startup text, session selection, or the launch model", () => {
 		expect(
 			getRestartArgs(
 				[
@@ -141,6 +141,10 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 					"name",
 					"--model",
 					"faux/faux-1",
+					"--provider",
+					"faux",
+					"--thinking",
+					"high",
 					"--custom",
 					"flag value",
 					"-e",
@@ -152,7 +156,14 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 				],
 				["/new.ts"],
 			),
-		).toEqual(["--model", "faux/faux-1", "--custom", "flag value", "-e", "/new.ts"]);
+		).toEqual(["--custom", "flag value", "-e", "/new.ts"]);
+		// A runtime API key applies to the launch model, so that model is kept.
+		expect(getRestartArgs(["--api-key", "key", "--model", "faux/faux-1", "--thinking", "high"])).toEqual([
+			"--api-key",
+			"key",
+			"--model",
+			"faux/faux-1",
+		]);
 	});
 	it("validates requests and resolves local paths, preserving builtin extension names", () => {
 		expect(
