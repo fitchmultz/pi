@@ -2367,6 +2367,11 @@ export class AgentSession {
 		return this._steeringMessages.length + this._followUpMessages.length;
 	}
 
+	/** Context waiting for a future user prompt is not persisted until that prompt arrives. */
+	get hasPendingNextTurnMessages(): boolean {
+		return this._pendingNextTurnMessages.length > 0;
+	}
+
 	/** Get pending steering messages (read-only) */
 	getSteeringMessages(): readonly string[] {
 		return this._steeringMessages;

@@ -68,7 +68,7 @@ export function normalizeSessionName(value: string): string | undefined {
 	return name.length > 0 ? name : undefined;
 }
 
-export function parseArgs(args: string[]): Args {
+export function parseArgs(args: string[], onOption?: (option: string, tokens: string[]) => void): Args {
 	const result: Args = {
 		messages: [],
 		fileArgs: [],
@@ -77,6 +77,7 @@ export function parseArgs(args: string[]): Args {
 	};
 
 	for (let i = 0; i < args.length; i++) {
+		const start = i;
 		const arg = args[i];
 
 		if (arg === "--") {
@@ -253,6 +254,7 @@ export function parseArgs(args: string[]): Args {
 		} else if (!arg.startsWith("-")) {
 			result.messages.push(arg);
 		}
+		if (arg.startsWith("-")) onOption?.(arg, args.slice(start, i + 1));
 	}
 
 	return result;

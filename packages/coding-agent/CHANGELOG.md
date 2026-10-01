@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle saved-session resume, staged runtime and extension activation, and one-shot startup rollback. See [Managed restarts](docs/restart.md).
+
 ## [1.0.0] - 2026-10-01
 
 ### New Features

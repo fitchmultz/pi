@@ -63,6 +63,7 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { builtInExtensions } from "./extensions/index.ts";
 import { loadMcpCommand } from "./extensions/mcp/cli.lazy.ts";
+import restartExtension, { createManagedRestart } from "./extensions/restart/index.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
@@ -649,6 +650,19 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
+	const managedRestart =
+		appMode === "interactive" &&
+		!parsed.help &&
+		parsed.listModels === undefined &&
+		!isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK)
+			? createManagedRestart()
+			: undefined;
+	if (managedRestart) {
+		// Lifecycle control is always present in managed sessions, even with -ne.
+		const restartIndex = extensionFactories.findIndex((extension) => extension.name === "restart");
+		extensionFactories.splice(restartIndex, 1);
+		extensionFactories.push({ name: "restart", factory: restartExtension, hidden: true });
+	}
 	const shouldTakeOverStdout = appMode !== "interactive" && !isPlainRuntimeMetadataCommand(parsed);
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
@@ -949,6 +963,7 @@ export async function main(args: string[], options?: MainOptions) {
 		await runRpcMode(runtime);
 	} else if (appMode === "interactive") {
 		const interactiveMode = new InteractiveMode(runtime, {
+			managedRestart,
 			migratedProviders,
 			startupDiagnostics,
 			modelFallbackMessage,
