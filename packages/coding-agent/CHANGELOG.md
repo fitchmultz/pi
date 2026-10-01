@@ -13,6 +13,15 @@
 ### Fixed
 
 - Fixed managed restart signal delivery and waiting for extension-settled work, restored short socket paths on Termux, and rejected legacy launcher handoffs with relaunch instructions.
+- Fixed failed credential saves truncating auth.json by atomically replacing the resolved target while preserving file permissions and best-effort ownership.
+- Fixed symlink aliases of auth.json using separate credential locks.
+- Fixed failed settings saves truncating settings.json and concurrent first writers computing changes before locking.
+- Fixed settings setters discarding unrelated runtime overrides and other processes' per-model preferences.
+- Fixed HTML exports overwriting the session journal through the same path, a symlink, or a hardlink.
+- Fixed edit execution and previews silently decoding non-UTF-8 files with replacement characters.
+- Fixed fuzzy edits changing untouched Unicode characters, trailing spaces, and literal carriage returns; ambiguous Unicode boundaries are rejected.
+- Fixed shell spill logs being created with permissions that expose output to other users.
+- Fixed failed session migration and whole-file rewrites truncating the existing journal.
 
 ## [1.0.0] - 2026-10-01
 

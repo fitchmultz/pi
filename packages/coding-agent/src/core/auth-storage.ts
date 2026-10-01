@@ -10,6 +10,7 @@ import lockfile from "proper-lockfile";
 import { setTimeout as sleep } from "timers/promises";
 import { getAgentDir } from "../config.ts";
 import { raceWithAbortSignal } from "../utils/abort.ts";
+import { atomicWriteFileSync, resolveFileTarget } from "../utils/atomic-file.ts";
 import { getFileRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
@@ -20,9 +21,6 @@ type LockResult<T> = {
 	result: T;
 	next?: string;
 };
-
-// The mode applies only on creation so administrator-managed modes and ACLs remain intact.
-const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
 type AuthFileReload = {
 	controller: AbortController;
@@ -62,7 +60,11 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 	private ensureFileExists(): void {
 		if (!existsSync(this.authPath)) {
-			writeFileSync(this.authPath, "{}", AUTH_FILE_WRITE_OPTIONS);
+			try {
+				writeFileSync(resolveFileTarget(this.authPath), "{}", { encoding: "utf8", mode: 0o600, flag: "wx" });
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			}
 		}
 	}
 
@@ -73,7 +75,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
-				return lockfile.lockSync(path, { realpath: false });
+				return lockfile.lockSync(path);
 			} catch (error) {
 				const code =
 					typeof error === "object" && error !== null && "code" in error
@@ -103,7 +105,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
+				atomicWriteFileSync(this.authPath, next);
 			}
 			return result;
 		} finally {
@@ -126,7 +128,6 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			let release: (() => Promise<void>) | undefined;
 			try {
 				release = await lockfile.lock(this.authPath, {
-					realpath: false,
 					retries: 0,
 					stale: staleMs,
 					onCompromised,
@@ -184,7 +185,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			throwIfCompromised();
 			options?.signal?.throwIfAborted();
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
+				atomicWriteFileSync(this.authPath, next);
 			}
 			throwIfCompromised();
 			return result;

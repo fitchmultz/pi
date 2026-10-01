@@ -7,10 +7,11 @@ import type {
 	WheelScrollLines,
 } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "fs";
+import { basename, dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { atomicWriteFileSync, resolveFileTarget } from "../utils/atomic-file.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
@@ -274,7 +275,11 @@ export interface SettingsManagerCreateOptions {
 }
 
 export interface SettingsStorage {
-	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
+	withLock(
+		scope: SettingsScope,
+		fn: (current: string | undefined) => string | undefined,
+		options?: { readOnly?: boolean },
+	): void;
 }
 
 export interface SettingsError {
@@ -331,28 +336,27 @@ export class FileSettingsStorage implements SettingsStorage {
 		throw (lastError as Error) ?? new Error("Failed to acquire settings lock");
 	}
 
-	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
+	withLock(
+		scope: SettingsScope,
+		fn: (current: string | undefined) => string | undefined,
+		options: { readOnly?: boolean } = {},
+	): void {
 		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
 		const dir = dirname(path);
 
 		let release: (() => void) | undefined;
 		try {
-			// Only create directory and lock if file exists or we need to write
-			const fileExists = existsSync(path);
-			if (fileExists) {
-				release = this.acquireLockSyncWithRetry(path);
+			if (!options.readOnly) mkdirSync(dir, { recursive: true });
+			if (!options.readOnly || existsSync(path)) {
+				const target = resolveFileTarget(path);
+				const lockPath = join(realpathSync(dirname(target)), basename(target));
+				release = this.acquireLockSyncWithRetry(lockPath);
 			}
-			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
+			const current = existsSync(path) ? readFileSync(path, "utf-8") : undefined;
 			const next = fn(current);
 			if (next !== undefined) {
-				// Only create directory when we actually need to write
-				if (!existsSync(dir)) {
-					mkdirSync(dir, { recursive: true });
-				}
-				if (!release) {
-					release = this.acquireLockSyncWithRetry(path);
-				}
-				writeFileSync(path, next, "utf-8");
+				if (options.readOnly) throw new Error("Cannot write settings in read-only mode");
+				atomicWriteFileSync(path, next);
 			}
 		} finally {
 			if (release) {
@@ -479,10 +483,14 @@ export class SettingsManager {
 		}
 
 		let content: string | undefined;
-		storage.withLock(scope, (current) => {
-			content = current;
-			return undefined;
-		});
+		storage.withLock(
+			scope,
+			(current) => {
+				content = current;
+				return undefined;
+			},
+			{ readOnly: true },
+		);
 
 		if (!content) {
 			return {};
@@ -640,8 +648,21 @@ export class SettingsManager {
 		this.settings = deepMergeSettings(this.settings, overrides);
 	}
 
+	private refreshSetting(field: keyof Settings, nestedKey?: string): void {
+		let value: unknown = deepMergeSettings(this.globalSettings, this.projectSettings)[field];
+		if (nestedKey !== undefined) {
+			const nested = { ...(this.settings[field] as Record<string, unknown>) };
+			const replacement = (value as Record<string, unknown> | undefined)?.[nestedKey];
+			if (replacement === undefined) delete nested[nestedKey];
+			else nested[nestedKey] = replacement;
+			value = nested;
+		}
+		(this.settings as Record<string, unknown>)[field] = value;
+	}
+
 	/** Mark a global field as modified during this session */
 	private markModified(field: keyof Settings, nestedKey?: string): void {
+		this.refreshSetting(field, nestedKey);
 		this.modifiedFields.add(field);
 		if (nestedKey) {
 			if (!this.modifiedNestedFields.has(field)) {
@@ -697,17 +718,9 @@ export class SettingsManager {
 			});
 	}
 
-	private cloneModifiedNestedFields(source: Map<keyof Settings, Set<string>>): Map<keyof Settings, Set<string>> {
-		const snapshot = new Map<keyof Settings, Set<string>>();
-		for (const [key, value] of source.entries()) {
-			snapshot.set(key, new Set(value));
-		}
-		return snapshot;
-	}
-
 	private persistScopedSettings(
 		scope: SettingsScope,
-		snapshotSettings: Settings,
+		scopedSettings: Settings,
 		modifiedFields: Set<keyof Settings>,
 		modifiedNestedFields: Map<keyof Settings, Set<string>>,
 	): void {
@@ -717,16 +730,22 @@ export class SettingsManager {
 				: {};
 			const mergedSettings: Settings = { ...currentFileSettings };
 			for (const field of modifiedFields) {
-				const value = snapshotSettings[field];
-				if (modifiedNestedFields.has(field) && typeof value === "object" && value !== null) {
+				const value = scopedSettings[field];
+				if (
+					modifiedNestedFields.has(field) &&
+					(value === undefined || (typeof value === "object" && value !== null))
+				) {
 					const nestedModified = modifiedNestedFields.get(field)!;
 					const baseNested = (currentFileSettings[field] as Record<string, unknown>) ?? {};
-					const inMemoryNested = value as Record<string, unknown>;
+					const inMemoryNested = (value ?? {}) as Record<string, unknown>;
 					const mergedNested = { ...baseNested };
 					for (const nestedKey of nestedModified) {
 						mergedNested[nestedKey] = inMemoryNested[nestedKey];
 					}
-					(mergedSettings as Record<string, unknown>)[field] = mergedNested;
+					(mergedSettings as Record<string, unknown>)[field] =
+						value === undefined && Object.values(mergedNested).every((entry) => entry === undefined)
+							? undefined
+							: mergedNested;
 				} else {
 					(mergedSettings as Record<string, unknown>)[field] = value;
 				}
@@ -737,35 +756,32 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
-
 		if (this.globalSettingsLoadError) {
 			return;
 		}
 
-		const snapshotGlobalSettings = structuredClone(this.globalSettings);
-		const modifiedFields = new Set(this.modifiedFields);
-		const modifiedNestedFields = this.cloneModifiedNestedFields(this.modifiedNestedFields);
-
 		this.enqueueWrite("global", () => {
-			this.persistScopedSettings("global", snapshotGlobalSettings, modifiedFields, modifiedNestedFields);
+			if (this.modifiedFields.size === 0) return;
+			this.persistScopedSettings("global", this.globalSettings, this.modifiedFields, this.modifiedNestedFields);
 		});
 	}
 
 	private saveProjectSettings(settings: Settings): void {
 		this.assertProjectTrustedForWrite();
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 
 		if (this.projectSettingsLoadError) {
 			return;
 		}
 
-		const snapshotProjectSettings = structuredClone(this.projectSettings);
-		const modifiedFields = new Set(this.modifiedProjectFields);
-		const modifiedNestedFields = this.cloneModifiedNestedFields(this.modifiedProjectNestedFields);
 		this.enqueueWrite("project", () => {
-			this.persistScopedSettings("project", snapshotProjectSettings, modifiedFields, modifiedNestedFields);
+			if (this.modifiedProjectFields.size === 0) return;
+			this.persistScopedSettings(
+				"project",
+				this.projectSettings,
+				this.modifiedProjectFields,
+				this.modifiedProjectNestedFields,
+			);
 		});
 	}
 
@@ -775,6 +791,7 @@ export class SettingsManager {
 		update(projectSettings);
 		this.markProjectModified(field);
 		this.saveProjectSettings(projectSettings);
+		this.refreshSetting(field);
 	}
 
 	async flush(): Promise<void> {
@@ -890,17 +907,19 @@ export class SettingsManager {
 			this.globalSettings.modelThinkingLevels = {};
 		}
 		this.globalSettings.modelThinkingLevels[`${provider}/${modelId}`] = level;
-		this.markModified("modelThinkingLevels");
+		this.markModified("modelThinkingLevels", `${provider}/${modelId}`);
 		this.save();
 	}
 
 	removeModelThinkingLevel(provider: string, modelId: string): void {
-		if (!this.globalSettings.modelThinkingLevels) return;
-		delete this.globalSettings.modelThinkingLevels[`${provider}/${modelId}`];
-		if (Object.keys(this.globalSettings.modelThinkingLevels).length === 0) {
+		delete this.globalSettings.modelThinkingLevels?.[`${provider}/${modelId}`];
+		if (
+			this.globalSettings.modelThinkingLevels &&
+			Object.keys(this.globalSettings.modelThinkingLevels).length === 0
+		) {
 			delete this.globalSettings.modelThinkingLevels;
 		}
-		this.markModified("modelThinkingLevels");
+		this.markModified("modelThinkingLevels", `${provider}/${modelId}`);
 		this.save();
 	}
 

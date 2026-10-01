@@ -254,7 +254,7 @@ export class OutputAccumulator {
 			return;
 		}
 		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
-		this.tempFileStream = createWriteStream(this.tempFilePath);
+		this.tempFileStream = createWriteStream(this.tempFilePath, { flags: "wx", mode: 0o600 });
 		for (const chunk of this.rawChunks) {
 			this.tempFileStream.write(chunk);
 		}
