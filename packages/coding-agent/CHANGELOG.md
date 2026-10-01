@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
+
 ## [1.0.0] - 2026-10-01
 
 ### New Features

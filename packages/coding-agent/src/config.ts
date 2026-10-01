@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync, readFileSync, realpathSync } from "f
 import { createRequire } from "module";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
 import { stripBom } from "./utils/text.ts";
@@ -509,6 +509,30 @@ export function resolveCodemodeWorkerSpecifier(
 export function getCodemodeWorkerSpecifier(): string | URL | undefined {
 	const runtime = isBunBinary ? "bun-binary" : isBundledNode ? "bundled-node" : "unbundled";
 	return resolveCodemodeWorkerSpecifier(runtime, import.meta.url);
+}
+
+/** Resolve executable code from this runtime, not the PI_PACKAGE_DIR asset override. */
+export function getBackgroundCommandWorker(): { command: string; args: string[]; cwd: string } {
+	const cwd = isBunBinary ? dirname(process.execPath) : findNodePackageDir(__dirname);
+	if (isBunBinary) return { command: process.execPath, args: ["--internal-background-command"], cwd };
+	if (isBundledNode) {
+		return {
+			command: process.execPath,
+			args: [fileURLToPath(new URL("./background-command-worker.js", import.meta.url))],
+			cwd,
+		};
+	}
+	const source = __filename.endsWith(".ts");
+	return {
+		command: process.execPath,
+		args: [
+			...(source && !isBunRuntime
+				? ["--import", pathToFileURL(join(cwd, "src", "experimental", "source-resolver.ts")).href]
+				: []),
+			join(cwd, source ? "src" : "dist", "extensions", "background-command", source ? "worker.ts" : "worker.js"),
+		],
+		cwd,
+	};
 }
 
 // =============================================================================

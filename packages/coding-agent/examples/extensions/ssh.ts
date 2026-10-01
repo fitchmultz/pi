@@ -125,6 +125,15 @@ export default function (pi: ExtensionAPI) {
 
 	const getSsh = () => resolvedSsh;
 
+	pi.on("tool_call", (event) => {
+		if (getSsh() && event.toolName === "background_command" && event.input.action === "start") {
+			return {
+				block: true,
+				reason: "SSH mode does not support local background commands. Use bash for remote execution.",
+			};
+		}
+	});
+
 	pi.registerTool({
 		...localRead,
 		async execute(id, params, signal, onUpdate, _ctx) {
