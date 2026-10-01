@@ -1,6 +1,6 @@
 import type { AgentState } from "@earendil-works/pi-agent-core";
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { basename, join } from "path";
+import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
+import { basename, join, resolve } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
@@ -229,6 +229,14 @@ function preRenderCustomTools(
 	return renderedTools;
 }
 
+function assertNotSessionJournal(inputPath: string, outputPath: string): void {
+	const input = statSync(inputPath);
+	const output = statSync(outputPath, { throwIfNoEntry: false });
+	if (resolve(inputPath) === resolve(outputPath) || (output && input.dev === output.dev && input.ino === output.ino)) {
+		throw new Error("Cannot export HTML over the session journal");
+	}
+}
+
 /**
  * Export session to HTML using SessionManager and AgentState.
  * Used by TUI's /export command.
@@ -277,6 +285,7 @@ export async function exportSessionToHtml(
 		outputPath = `${APP_NAME}-session-${sessionBasename}.html`;
 	}
 
+	assertNotSessionJournal(sessionFile, outputPath);
 	writeFileSync(outputPath, html, "utf8");
 	return outputPath;
 }
@@ -311,6 +320,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
 	}
 
+	assertNotSessionJournal(resolvedInputPath, outputPath);
 	writeFileSync(outputPath, html, "utf8");
 	return outputPath;
 }

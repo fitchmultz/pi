@@ -26,6 +26,15 @@
 - Fixed confirmed GPT-6 Astra Ultrafast cost estimates in OpenAI and legacy Codex Responses, including cached input and long-context pricing.
 - Fixed legacy Codex Responses Fast cost estimates to match priority pricing.
 - Fixed dotted Claude IDs from bundled and refreshed Cloudflare AI Gateway catalogs being sent unchanged to the `/anthropic` passthrough.
+- Fixed failed credential saves truncating auth.json by atomically replacing the resolved target while preserving file permissions and best-effort ownership.
+- Fixed symlink aliases of auth.json using separate credential locks.
+- Fixed failed settings saves truncating settings.json and concurrent first writers computing changes before locking.
+- Fixed settings setters discarding unrelated runtime overrides and other processes' per-model preferences.
+- Fixed HTML exports overwriting the session journal through the same path, a symlink, or a hardlink.
+- Fixed edit execution and previews silently decoding non-UTF-8 files with replacement characters.
+- Fixed fuzzy edits changing untouched Unicode characters, trailing spaces, and literal carriage returns; ambiguous Unicode boundaries are rejected.
+- Fixed shell spill logs being created with permissions that expose output to other users.
+- Fixed failed session migration and whole-file rewrites truncating the existing journal.
 
 ## [1.0.0] - 2026-10-01
 

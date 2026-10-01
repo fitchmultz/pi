@@ -15,6 +15,7 @@ v1.0.0. It is upstream plus the features below. Everything else follows upstream
 | `pi update --fork` | Updater that builds pinned `fitchmultz/pi` main and activates it through `scripts/install-fork.mjs` (`src/utils/fork-update.ts`, `package-manager-cli.ts`) | [Install and activate](#install-and-activate) |
 | Termux (Android) support | Installer compiler/environment handling, `test.sh`, and short Unix-socket paths for restart and the experimental server | [Install and activate](#install-and-activate) |
 | Overflow recovery through compaction hooks when nothing is old enough to summarize (Posthorse early and after-reset rollover) | Small core patch: `prepareCompactionForExtension()` (`src/core/compaction/compaction.ts`) plus overflow handling in `_runAutoCompaction()` and `_checkCompaction()` (`src/core/agent-session.ts`) | [compaction.md](packages/coding-agent/docs/compaction.md#session_before_compact) |
+| File and credential safety | Atomic auth/settings/journal rewrites, canonical credential locks, UTF-8 and boundary-safe edits, HTML journal guard, and private shell spill logs | [Changelog](packages/coding-agent/CHANGELOG.md#unreleased) |
 
 Owner-approved keeps still being ported (each lands with its own row): opt-in provider credential
 isolation (`ignoreStoredCredentials`), GPT-6 Astra Ultrafast pricing, slow-extension diagnostics,
