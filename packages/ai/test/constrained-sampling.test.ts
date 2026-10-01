@@ -153,54 +153,6 @@ describe("constrained tool sampling", () => {
 		});
 	});
 
-	it("converts nested object and array anyOf branches to strict schemas", () => {
-		const parameters = Type.Object({
-			action: Type.Union([
-				Type.Object({
-					kind: Type.Literal("lookup"),
-					count: Type.Optional(Type.Number()),
-					nullable: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-				}),
-				Type.Array(Type.Object({ query: Type.String(), limit: Type.Optional(Type.Number()) })),
-			]),
-		});
-		const original = JSON.stringify(parameters);
-		const strict = makeStrictJsonSchema(parameters);
-		expect(strict).toMatchObject({
-			additionalProperties: false,
-			required: ["action"],
-			properties: {
-				action: {
-					anyOf: [
-						{
-							type: "object",
-							additionalProperties: false,
-							required: ["kind", "count", "nullable"],
-							properties: {
-								count: { anyOf: [{ type: "number" }, { type: "null" }] },
-								nullable: { anyOf: [{ type: "string" }, { type: "null" }] },
-							},
-						},
-						{
-							type: "array",
-							items: {
-								additionalProperties: false,
-								required: ["query", "limit"],
-								properties: { limit: { anyOf: [{ type: "number" }, { type: "null" }] } },
-							},
-						},
-					],
-				},
-			},
-		});
-		expect(JSON.stringify(parameters)).toBe(original);
-		expect(
-			convertResponsesTools([
-				makeTool({ parameters, constrainedSampling: { type: "json_schema", strict: "require" } }),
-			])[0],
-		).toMatchObject({ type: "function", strict: true, parameters: strict });
-	});
-
 	it("falls back or rejects schemas that cannot be safely converted", () => {
 		const cases: Array<{ parameters: Tool["parameters"]; error: string }> = [
 			{
@@ -212,19 +164,10 @@ describe("constrained tool sampling", () => {
 				error: "allOf schemas are unsupported",
 			},
 			{
-				parameters: Type.Union([Type.Object({ nested: Type.String() }), Type.Null()]),
-				error: "root anyOf schemas are unsupported",
-			},
-			{
-				parameters: {
-					type: "object",
-					anyOf: [{ type: "object", properties: { nested: { type: "string" } } }],
-				} as Tool["parameters"],
-				error: "root anyOf schemas are unsupported",
-			},
-			{
-				parameters: Type.Object({ values: Type.Array(Type.String(), { uniqueItems: true }) }),
-				error: "uniqueItems schemas are unsupported",
+				parameters: Type.Object({
+					value: Type.Union([Type.Object({ nested: Type.String() }), Type.Null()]),
+				}),
+				error: "object and array unions are unsupported",
 			},
 			{
 				parameters: {
@@ -255,10 +198,10 @@ describe("constrained tool sampling", () => {
 		}
 	});
 
-	it.each(["ctc_1", "fc_legacy"])("replays grammar calls as custom Responses items from %s", (itemId) => {
+	it("replays grammar calls as custom Responses items", () => {
 		const replayedToolCall: ToolCall = {
 			type: "toolCall",
-			id: `call_1|${itemId}`,
+			id: "call_1|ctc_1",
 			name: "sample_tool",
 			arguments: { payload: "abc" },
 		};
@@ -276,7 +219,7 @@ describe("constrained tool sampling", () => {
 				},
 				{
 					role: "toolResult",
-					toolCallId: `call_1|${itemId}`,
+					toolCallId: "call_1|ctc_1",
 					toolName: "sample_tool",
 					content: [{ type: "text", text: "done" }],
 					isError: false,
@@ -301,7 +244,7 @@ describe("constrained tool sampling", () => {
 
 		expect(messages).toContainEqual({
 			type: "custom_tool_call",
-			id: itemId.startsWith("ctc_") ? itemId : undefined,
+			id: "ctc_1",
 			call_id: "call_1",
 			name: "sample_tool",
 			input: "abc",
@@ -311,6 +254,40 @@ describe("constrained tool sampling", () => {
 			call_id: "call_1",
 			output: "done",
 		});
+	});
+
+	// earendil-works/radius#115: a gateway forwards another model's history as a foreign provider.
+	it("drops foreign item ids when replaying grammar calls as custom Responses items", () => {
+		const context = normalizeContext({
+			messages: [
+				{
+					role: "assistant",
+					api: "pi-messages",
+					provider: "radius",
+					model: "gpt-other",
+					content: [{ type: "toolCall", id: "call_1|ctc_1", name: "sample_tool", arguments: { payload: "abc" } }],
+					usage: makeUsage(),
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_1|ctc_1",
+					toolName: "sample_tool",
+					content: [{ type: "text", text: "done" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			],
+		});
+
+		const messages = convertResponsesMessages(makeModel(), context, new Set(["openai"]), {
+			grammarToolInputProperties: new Map([["sample_tool", "payload"]]),
+		});
+
+		const call = messages.find((item) => "type" in item && item.type === "custom_tool_call");
+		expect(call).toMatchObject({ type: "custom_tool_call", call_id: "call_1", input: "abc" });
+		expect(call && "id" in call ? call.id : undefined).toBeUndefined();
 	});
 
 	it("keeps grammar input JSON deltas append-only", () => {

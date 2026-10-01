@@ -11,7 +11,11 @@ If a dialog method includes a `timeout` field, the agent-side will auto-resolve 
 
 ## Limitations
 
-In pipe-based RPC, some `ExtensionUIContext` methods are unsupported or degraded because they require direct terminal UI access:
+These limitations apply to ordinary pipe-based RPC. A POSIX PTY-backed RPC session can use [live terminal handoff](rpc.md#live-terminal-handoff): pending dialogs transfer to the TUI, and unanswered dialogs survive detachment. An RPC answer dismisses the corresponding native dialog. Dialog abort signals and original timeout deadlines remain effective across ownership changes.
+
+On PTYs, `custom()` emits `{"type":"extension_ui_request","id":"...","method":"custom"}` and waits for attachment. The factory runs in the TUI, and its `done(result)` resolves the original call. RPC responses cannot answer custom components; detach preserves them for reattachment. Other terminal UI setters configure the hosted TUI without activating it; editor factories are instantiated only while attached. The terminal title is not changed while RPC owns output.
+
+Some `ExtensionUIContext` methods are not supported or degraded in RPC mode because they require direct terminal UI access:
 
 - `custom()` returns `undefined`.
 - `onTerminalInput()` returns a no-op unsubscribe function.
@@ -22,9 +26,7 @@ In pipe-based RPC, some `ExtensionUIContext` methods are unsupported or degraded
 - `getAllThemes()` returns `[]`, and `getTheme()` returns `undefined`.
 - `setTheme()` returns `{ success: false, error: "Theme switching not supported in RPC mode" }`.
 
-Note: `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget methods are functional via the extension UI sub-protocol. Use `ctx.mode === "tui"` to guard TUI-specific features like `custom()` that require a real terminal.
-
-On a PTY, Pi preserves TUI-specific methods before attachment and changes `ctx.mode` with frontend ownership. Standard dialogs move between RPC and TUI without resolving. A pending custom component requires [`attach_tui`](rpc-commands.md#attach_tui).
+Note: `ctx.mode` follows ownership (`"rpc"` or `"tui"`) on PTY-backed sessions. In ordinary pipe-based RPC, `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget methods are functional via the extension UI sub-protocol. Use `ctx.mode === "tui"` to guard TUI-specific features like `custom()` that require a real terminal.
 
 ## Requests from Pi
 
@@ -95,16 +97,6 @@ Open a multi-line text editor with optional prefilled content.
 ```
 
 Expected response: `extension_ui_response` with `value` (the edited text) or `cancelled: true`.
-
-### custom
-
-PTY-backed RPC emits this when a TUI-only component is pending:
-
-```json
-{"type":"extension_ui_request","id":"uuid-custom","method":"custom"}
-```
-
-It has no RPC response. Use `attach_tui` to continue the same interaction. `get_state.pendingExtensionUIRequests` retains unresolved blocking requests for reconnection.
 
 ### notify
 

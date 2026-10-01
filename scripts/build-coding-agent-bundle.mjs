@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -145,11 +145,11 @@ function outputBytes(metafiles) {
 for (const entry of [
 	join(codingAgentDistDir, "cli.js"),
 	join(codingAgentDistDir, "cli-launcher.js"),
-	join(codingAgentDistDir, "background-command-worker.js"),
 	join(codingAgentDistDir, "index.js"),
 	join(codingAgentDistDir, "rpc-entry.js"),
 	join(codingAgentDistDir, "utils", "image-resize-worker.js"),
 	join(codingAgentDistDir, "extensions", "codemode", "worker.js"),
+	join(codingAgentDistDir, "extensions", "background-command", "worker.js"),
 	join(aiDistDir, "api", "bedrock-converse-stream.js"),
 	join(aiDistDir, "auth", "oauth", "anthropic.js"),
 ]) {
@@ -166,8 +166,7 @@ const mainResult = await build({
 	entryNames: "[name]",
 	entryPoints: {
 		cli: join(codingAgentDistDir, "cli-launcher.js"),
-		"background-command-worker": join(codingAgentDistDir, "background-command-worker.js"),
-		"cli-runtime": join(codingAgentDistDir, "cli.js"),
+		"cli-worker": join(codingAgentDistDir, "cli.js"),
 		index: join(codingAgentDistDir, "index.js"),
 		"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
 	},
@@ -191,6 +190,7 @@ const lazyEntryPoints = {
 	anthropic: join(aiDistDir, "auth", "oauth", "anthropic.js"),
 	"bedrock-converse-stream": join(aiDistDir, "api", "bedrock-converse-stream.js"),
 	"codemode-worker": join(codingAgentDistDir, "extensions", "codemode", "worker.js"),
+	"background-command-worker": join(codingAgentDistDir, "extensions", "background-command", "worker.js"),
 	"github-copilot": join(aiDistDir, "auth", "oauth", "github-copilot.js"),
 	"image-resize-worker": join(codingAgentDistDir, "utils", "image-resize-worker.js"),
 	"kimi-coding": join(aiDistDir, "auth", "oauth", "kimi-coding.js"),
@@ -229,18 +229,10 @@ if (dirname(configOutput) !== dirname(bedrockLoaderOutput)) {
 }
 
 validateExternalImports([mainResult.metafile, lazyResult.metafile]);
-// The CLI remains the restart supervisor; only its worker enables compile caching.
-const cliWorker = `#!/usr/bin/env node
-import { createRequire, enableCompileCache } from "node:module";
-
-enableCompileCache();
-createRequire(import.meta.url)("./cli-runtime.js");
-`;
-writeFileSync(join(bundleDir, "cli-worker.js"), cliWorker);
 chmodSync(join(bundleDir, "cli.js"), 0o755);
 chmodSync(join(bundleDir, "rpc-entry.js"), 0o755);
 
 const files =
-	new Set([...Object.keys(mainResult.metafile.outputs), ...Object.keys(lazyResult.metafile.outputs)]).size + 1;
-const mib = (outputBytes([mainResult.metafile, lazyResult.metafile]) + cliWorker.length) / (1024 * 1024);
+	new Set([...Object.keys(mainResult.metafile.outputs), ...Object.keys(lazyResult.metafile.outputs)]).size;
+const mib = outputBytes([mainResult.metafile, lazyResult.metafile]) / (1024 * 1024);
 console.log(`Built ${relative(repoRoot, bundleDir)} (${files} files, ${mib.toFixed(1)} MiB)`);

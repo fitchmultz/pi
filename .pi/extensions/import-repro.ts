@@ -1,9 +1,9 @@
 /**
- * Import a pi session shared as a gist or in a historical issue-analysis
- * comment, then switch to it.
+ * Import a pi session shared as a gist by the issue-analysis CI workflow
+ * (.github/workflows/issue-analysis.yml) and switch to it.
  *
- * CI-exported sessions may use a high-entropy checkout directory. This command
- * rewrites the recorded cwd to the local checkout, installs the session file into the
+ * The CI job runs in a high-entropy checkout directory; this command rewrites
+ * the recorded cwd to the local checkout, installs the session file into the
  * current session directory, and switches to it.
  *
  * Usage:
@@ -282,7 +282,7 @@ async function fetchGistSession(gistId: string): Promise<{ header: SessionHeader
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("ir", {
-		description: "Import a shared session from a gist, local file, or issue with a CI gist comment",
+		description: "Import a CI issue-analysis session from a gist ID, share URL, or issue URL and switch to it",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const ref = args.trim();
 			if (!ref) {
@@ -290,7 +290,6 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			let notificationContext = ctx;
 			try {
 				const targetCwd = ctx.sessionManager.getCwd();
 				const sessionDir = ctx.sessionManager.getSessionDir();
@@ -332,7 +331,6 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`Imported session ${decoded.header.id} (cwd ${decoded.header.cwd} -> ${targetCwd})`, "info");
 				await ctx.switchSession(destination, {
 					withSession: async (nextCtx) => {
-						notificationContext = nextCtx;
 						if (!platformNotice) return;
 						await nextCtx.sendMessage(
 							{
@@ -346,7 +344,7 @@ export default function (pi: ExtensionAPI) {
 					},
 				});
 			} catch (error) {
-				notificationContext.ui.notify(`ir: ${error instanceof Error ? error.message : String(error)}`, "error");
+				ctx.ui.notify(`ir: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		},
 	});

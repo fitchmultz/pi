@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { FullscreenExitOutput, TuiMode } from "../src/core/settings-manager.ts";
-import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import {
 	BranchSummaryStatusIndicator,
 	CompactionStatusIndicator,
@@ -109,115 +108,77 @@ describe("createInteractiveTui", () => {
 		}
 	});
 
-	it.each<FullscreenExitOutput>(["resume-hint", "transcript"])(
-		"restores the expected screen on fullscreen %s exit",
-		async (exitOutput) => {
-			const terminal = new RecordingTerminal(40, 8);
-			const renderer = createInteractiveTui({
-				tuiMode: "regular",
-				showHardwareCursor: false,
-				logDirectory: "/tmp",
-				terminal,
-			});
-			let stableUi: TUI;
-			const invalidatedModes: TuiMode[] = [];
-			const component: Component & { focused: boolean } = {
-				focused: false,
-				render: () => ["content"],
-				invalidate: () => invalidatedModes.push(stableUi.mode),
-			};
-			const chatContainer = new ChatContainer();
-			chatContainer.addChild(component);
-			const headerContainer = new Container();
-			const loadedResourcesContainer = new Container();
-			const documentContainer = new Container();
-			documentContainer.children = [headerContainer, loadedResourcesContainer, chatContainer];
-			renderer.addChild(documentContainer);
-			renderer.setFocus(component);
+	it("replaces the renderer and restores the previous screen for resume-hint exits", async () => {
+		const terminal = new RecordingTerminal(40, 8);
+		const renderer = createInteractiveTui({
+			tuiMode: "regular",
+			showHardwareCursor: false,
+			logDirectory: "/tmp",
+			terminal,
+		});
+		let stableUi: TUI;
+		const invalidatedModes: TuiMode[] = [];
+		const component: Component & { focused: boolean } = {
+			focused: false,
+			render: () => ["content"],
+			invalidate: () => invalidatedModes.push(stableUi.mode),
+		};
+		renderer.addChild(component);
+		renderer.setFocus(component);
 
-			type SwitchContext = {
-				runtimeHost: {
-					session: {
-						settingsManager: {
-							getFullscreenCopyOnSelect: () => boolean;
-							getFullscreenWheelScrollLines: () => WheelScrollLines;
-						};
+		type SwitchContext = {
+			runtimeHost: {
+				session: {
+					settingsManager: {
+						getFullscreenCopyOnSelect: () => boolean;
+						getFullscreenWheelScrollLines: () => WheelScrollLines;
 					};
 				};
-				renderer: ReturnType<typeof createInteractiveTui>;
-				ui: TUI;
-				chatViewport: {
-					root: Component;
-					setInverted: (inverted: boolean) => void;
-					transcript: { setFollow: (direction: "start" | "end") => void };
-				};
-				chatContainer: ChatContainer;
-				documentContainer: Container;
-				headerContainer: Container;
-				loadedResourcesContainer: Container;
-				renderWidgets: () => void;
-				transcriptOrder: "oldest-first" | "newest-first";
-				options: { tuiMode?: TuiMode };
-				themeController: { rebindTui: () => void };
-				extensionTerminalInputSubscriptions: Set<never>;
 			};
-			const context = Object.assign(Object.create(InteractiveMode.prototype), {
-				runtimeHost: {
-					session: {
-						settingsManager: {
-							getFullscreenCopyOnSelect: () => true,
-							getFullscreenWheelScrollLines: () => "auto",
-						},
-					},
+			renderer: ReturnType<typeof createInteractiveTui>;
+			ui: TUI;
+			fullscreenLayoutRoot: Component;
+			options: { tuiMode?: TuiMode };
+			themeController: { rebindTui: () => void };
+			extensionTerminalInputSubscriptions: Set<never>;
+		};
+		const context = Object.assign(Object.create(InteractiveMode.prototype), {
+			runtimeHost: {
+				session: {
+					settingsManager: { getFullscreenCopyOnSelect: () => true, getFullscreenWheelScrollLines: () => "auto" },
 				},
-				renderer,
-				ui: undefined as unknown as TUI,
-				chatViewport: { root: documentContainer, setInverted: () => {}, transcript: { setFollow: () => {} } },
-				chatContainer,
-				documentContainer,
-				headerContainer,
-				loadedResourcesContainer,
-				renderWidgets: () => {},
-				transcriptOrder: "oldest-first" as const,
-				options: { tuiMode: "regular" as TuiMode },
-				themeController: { rebindTui: () => {} },
-				extensionTerminalInputSubscriptions: new Set<never>(),
-			}) as SwitchContext;
-			stableUi = createInteractiveTuiReference(() => context.renderer);
-			context.ui = stableUi;
-			const { stopInteractiveTui, switchTuiMode } = InteractiveMode.prototype as unknown as {
-				stopInteractiveTui(this: SwitchContext, fullscreenExitOutput: FullscreenExitOutput): void;
-				switchTuiMode(this: SwitchContext, mode: TuiMode, restoreProgress?: boolean): boolean;
-			};
+			},
+			renderer,
+			ui: undefined as unknown as TUI,
+			fullscreenLayoutRoot: component,
+			options: { tuiMode: "regular" as TuiMode },
+			themeController: { rebindTui: () => {} },
+			extensionTerminalInputSubscriptions: new Set<never>(),
+		}) as SwitchContext;
+		stableUi = createInteractiveTuiReference(() => context.renderer);
+		context.ui = stableUi;
+		const { stopInteractiveTui, switchTuiMode } = InteractiveMode.prototype as unknown as {
+			stopInteractiveTui(this: SwitchContext, fullscreenExitOutput: FullscreenExitOutput): void;
+			switchTuiMode(this: SwitchContext, mode: TuiMode, restoreProgress?: boolean): boolean;
+		};
 
-			renderer.start();
-			await terminal.waitForRender();
-			expect(switchTuiMode.call(context, "fullscreen", false)).toBe(true);
-			await terminal.waitForRender();
+		renderer.start();
+		await terminal.waitForRender();
+		expect(switchTuiMode.call(context, "fullscreen", false)).toBe(true);
+		await terminal.waitForRender();
 
-			expect(stableUi.mode).toBe("fullscreen");
-			expect(context.renderer.children).toEqual([documentContainer]);
-			expect(context.renderer.getFocusedComponent()).toBe(component);
-			expect(component.focused).toBe(true);
-			expect(invalidatedModes).toEqual(["fullscreen"]);
-			expect([terminal.startCount, terminal.stopCount]).toEqual([2, 1]);
+		expect(stableUi.mode).toBe("fullscreen");
+		expect(context.renderer.children).toEqual([component]);
+		expect(context.renderer.getFocusedComponent()).toBe(component);
+		expect(component.focused).toBe(true);
+		expect(invalidatedModes).toEqual(["fullscreen"]);
+		expect([terminal.startCount, terminal.stopCount]).toEqual([2, 1]);
 
-			const writesBeforeExit = terminal.writes.length;
-			stopInteractiveTui.call(context, exitOutput);
-			await terminal.waitForRender();
+		stopInteractiveTui.call(context, "resume-hint");
 
-			expect(stableUi.mode).toBe(exitOutput === "transcript" ? "regular" : "fullscreen");
-			const exitWrites = terminal.writes.slice(writesBeforeExit).join("");
-			if (exitOutput === "transcript") {
-				const altExit = exitWrites.indexOf("\x1b[?1049l");
-				expect(altExit).toBeGreaterThanOrEqual(0);
-				expect(exitWrites.slice(altExit + "\x1b[?1049l".length)).toContain("content");
-				expect([terminal.startCount, terminal.stopCount]).toEqual([2, 3]);
-			} else {
-				expect([terminal.startCount, terminal.stopCount]).toEqual([2, 2]);
-			}
-		},
-	);
+		expect(stableUi.mode).toBe("fullscreen");
+		expect([terminal.startCount, terminal.stopCount]).toEqual([2, 2]);
+	});
 });
 
 describe("InteractiveMode right-click paste", () => {

@@ -56,13 +56,13 @@ interface ToolCall {
   type: "toolCall";
   id: string;
   name: string;
-  arguments: JsonObject;
+  arguments: Record<string, any>;
   thoughtSignature?: string;
   namespace?: string;
 }
 ```
 
-`thoughtSignature` is provider-specific. `namespace` identifies an OpenAI Responses namespace for dynamically loaded or namespaced calls. Pi's callable tool references use public names. [On-demand instruction groups](instruction-groups.md) expose full extension-owned instructions without widening callable permissions.
+`thoughtSignature` is provider-specific. `namespace` identifies an OpenAI Responses namespace for dynamically loaded or namespaced tools.
 
 ## Usage
 
@@ -87,7 +87,7 @@ interface Usage {
 }
 ```
 
-When present, `reasoning` is already included in `output`; do not add it again. `cacheWrite1h` is the subset of `cacheWrite` written with one-hour retention. See [Task cost measurement](task-cost.md) for offline whole-task accounting and the distinction between recorded estimates and actual billing.
+When present, `reasoning` is already included in `output`; do not add it again. `cacheWrite1h` is the subset of `cacheWrite` written with one-hour retention.
 
 ## Base messages
 
@@ -100,11 +100,12 @@ interface SystemMessage {
   sections?: Record<string, string | null>;
   toolsAdded?: Tool[];
   toolsRemoved?: ToolReference[];
+  replace?: boolean;
   timestamp: number;
 }
 ```
 
-The leading system message declares the initial prompt and tools. Later system messages can append instructions, replace or remove named prompt sections, and add or remove tools. Replaying them in order yields the current state.
+The leading system message declares the initial prompt and tools. Later system messages can append instructions, replace or remove named prompt sections, and add or remove tools. Replaying them in order yields the current state. A message with `replace: true` discards the earlier state and establishes a complete new baseline.
 
 ### UserMessage
 
@@ -134,8 +135,6 @@ interface AssistantMessage {
   deferred?: DeferredHandle;
   errorMessage?: string;
   rawStopReason?: string;
-  thinkingLevel?: ModelThinkingLevel;
-  webSearch?: ResponsesWebSearchMetadata;
   endTurn?: boolean;
   timestamp: number;
 }
@@ -143,7 +142,7 @@ interface AssistantMessage {
 
 `responseModel` records a concrete provider response model when it differs from the requested model. `responseId`, `providerThinkingLevel`, `diagnostics`, and `rawStopReason` preserve provider or runtime details.
 
-`thinkingLevel` is the requested Pi thinking level. `webSearch` records provider-reported hosted web actions and citations, not fetched page content. `"pending"` appears during streaming; it is not a durable native execution snapshot. `"deferred"` remains a provider stop reason, but conversion refuses unfinished deferred legacy responses.
+`"pending"` is used for a partial assistant message while it streams. The completed message in `message_end` has a terminal stop reason, and Pi does not persist `"pending"` assistant messages in session JSONL.
 
 A `"deferred"` response has a `DeferredHandle` with the provider data needed to retrieve it:
 
@@ -162,24 +161,19 @@ interface DeferredHandle {
 ### ToolResultMessage
 
 ```typescript
-type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails> extends true ? {
+interface ToolResultMessage<TDetails = any> {
   role: "toolResult";
   toolCallId: string;
   toolName: string;
-  nestedCalls?: NestedToolCalls;
   content: (TextContent | ImageContent)[];
-  details?: JsonRepresentation<TDetails>;
+  details?: TDetails;
   usage?: Usage;
   isError: boolean;
   timestamp: number;
-} : never;
+}
 ```
 
-`details` is JSON-compatible tool-specific data. `nestedCalls` has `{ calls: NestedToolCallRecord[], complete: boolean }`; each record names a nested tool and its status, but not its result. It is not model input. Optional `usage` reports nested model work and contributes to full-session statistics, separately from the main model call.
-
-### Provider request diagnostics
-
-Assistant diagnostics are redacted provider/runtime observations, not model input. A request's timing, transport, service-tier, and byte-count observations do not establish network receipt, billed tokens, or provider cache hits. Codex WebSocket transport failures can retain `provider_transport_failure` diagnostics; see [Codex WebSocket recovery](websocket-recovery.md).
+`details` is tool-specific. Optional `usage` reports nested model work performed by the tool and contributes to full-session statistics, but it is not part of the main model-call usage.
 
 ## Coding-agent messages
 
@@ -221,6 +215,8 @@ interface CustomMessage<T = unknown> {
 ```
 
 Pi converts its content to a user message for model requests. `display` controls terminal rendering; `details` is not sent to the model.
+
+The [Instruction Groups](instruction-groups.md) builtin also inserts a request-local hidden custom message (`customType: "pi:instruction-groups:compaction"`) immediately after a compaction summary. It restores full instructions enabled at that boundary without adding a persisted message entry.
 
 ### BranchSummaryMessage
 

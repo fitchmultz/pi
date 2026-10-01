@@ -9,8 +9,6 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 | Command | Description |
 |---|---|
 | `/settings` | Open settings |
-| `/compact-view [on\|off\|toggle]` | Group tools and updates into Activity rows; remember the default for future starts |
-| `/topview [on\|off]` | Toggle newest-first conversation display; temporarily uses fullscreen |
 | `/model [provider/model]` | Select a model |
 | `/thinking [level]` | Set the thinking level |
 | `/scoped-models` | Configure the models used by interactive cycling |
@@ -48,8 +46,8 @@ Review a session before exporting or sharing it. Sessions can contain prompts, t
 | Command | Description |
 |---|---|
 | `/trust` | Save a project trust decision for future Pi processes |
-| `/reload` | Refresh settings and resources and reinitialize cached extension code |
-| `/restart [text]` | Restart the Node CLI worker and resume this session; optional text continues the agent |
+| `/reload` | Reload keybindings, extensions, skills, templates, themes, and context files |
+| `/restart [text]` | Queue a managed Node CLI restart on the same saved session; optional text continues afterward. See [Managed restarts](restart.md) |
 | `/hotkeys` | Show active keyboard shortcuts |
 | `/changelog` | Show changelog entries |
 | `/quit` | Quit Pi |
@@ -60,4 +58,4 @@ Review a session before exporting or sharing it. Sessions can contain prompts, t
 - Each prompt template is available under its template name.
 - Skills are available as `/skill:name` when skill commands are enabled.
 
-Use `/reload` after changing extension code or resources. Use [Managed Restarts](restart.md) for core changes or a clean process; already-loaded dependencies may also require a restart. See [Extensions](extensions.md), [Prompt Templates](prompt-templates.md), and [Skills](skills.md) for their loading and naming rules.
+Use `/reload` after adding or changing a discovered command resource. See [Extensions](extensions.md), [Prompt Templates](prompt-templates.md), and [Skills](skills.md) for their loading and naming rules.

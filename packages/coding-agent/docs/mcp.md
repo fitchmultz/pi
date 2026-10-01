@@ -1,16 +1,37 @@
 # MCP Servers
 
-Pi connects to [Model Context Protocol](https://modelcontextprotocol.io) servers over stdio or streamable HTTP. Every server connects lazily by default, including servers with `direct` exposure. Set `connection: "eager"` only for servers that should connect at session startup.
+Pi connects to [Model Context Protocol](https://modelcontextprotocol.io) servers over stdio or streamable HTTP and makes their tools and resources available to the model.
+
+## Quick setup
+
+Add a local stdio server, check the connection, then start Pi:
+
+```bash
+pi mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
+pi mcp list
+pi
+```
+
+For a remote server:
+
+```bash
+pi mcp add docs --url https://example.com/mcp --bearer-token-env-var DOCS_TOKEN
+pi mcp list
+```
+
+These commands add user-level servers by default. Add `--local` or `-l` to write the project configuration instead:
+
+```bash
+pi mcp add -l tools --env API_KEY='${TOOLS_KEY}' -- uvx tools-mcp
+```
+
+Use `/mcp` inside an interactive session to inspect connections, sign in, reconnect, change exposure, or enable and disable servers. Run `/reload` after adding, removing, or changing a server outside the session.
 
 ## Configure servers
 
-Pi reads these files in order:
+Pi reads user-level servers from `~/.pi/agent/mcp.json` and project servers from `.pi/mcp.json`. Project configuration is read only after [project trust](security.md#understand-project-trust) is granted. A project entry replaces a user-level entry with the same name.
 
-1. `~/.config/mcp/mcp.json` (shared configuration)
-2. `~/.pi/agent/mcp.json` (Pi global configuration)
-3. `.pi/mcp.json` in a trusted project
-
-Later sources replace the **whole entry** with the same server name; fields are not merged. Project configuration is ignored until the project is trusted, because stdio entries run commands.
+The format matches other MCP clients:
 
 ```json
 {
@@ -22,159 +43,145 @@ Later sources replace the **whole entry** with the same server name; fields are 
     "docs": {
       "url": "https://example.com/mcp",
       "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" },
-      "exposure": "direct"
-    },
-    "startup": {
-      "url": "https://example.com/startup/mcp",
-      "connection": "eager"
+      "description": "Search and read the product documentation"
     }
   }
 }
 ```
 
-- stdio entries take `command`, `args`, `env`, and `cwd`. `command` is one executable, not a shell string. Relative `cwd` resolves against the session directory; a leading `~/` in `command`, an argument, or `cwd` names the home directory.
-- HTTP entries take `url`, `headers`, and `oauth` (see [Sign in with OAuth](#sign-in-with-oauth)). Legacy SSE is not supported. `type` is optional; when supplied, use `stdio`, `http`, or `streamable-http`.
-- `env`, `headers`, and `oauth.clientSecret` values accept `${NAME}` environment references or a whole-value `!command`. A header command must print the complete header, for example `"Authorization": "!echo Bearer $(gh auth token)"`.
-- `connection` is `lazy` (default) or `eager`, independently of [exposure](#exposure). `description` supplies a short server description for discovery.
-- `timeout` is the per-request timeout in seconds (default 60); progress notifications reset it. `enabled: false` keeps an entry without connecting.
-- Server names contain only letters, digits, `_`, and `-`. Invalid entries are reported and skipped without stopping other servers.
+Stdio servers use `command`, `args`, `env`, and `cwd`. Relative `cwd` values resolve against the session directory. A leading `~/` in `command`, an argument, or `cwd` names the home directory.
 
-Use `pi mcp add` and `pi mcp remove` for Pi-owned files:
+HTTP servers use `url`, `headers`, and `oauth` (see [Authenticate with OAuth](#authenticate-with-oauth)). The legacy SSE transport is not supported.
 
-```sh
-pi mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
-pi mcp add docs --url https://example.com/mcp --bearer-token-env-var DOCS_TOKEN --exposure direct
-pi mcp add startup --url https://example.com/startup/mcp --connection eager
-pi mcp add -l tools --env API_KEY='${TOOLS_KEY}' -- uvx tools-mcp
-pi mcp remove docs
-```
+Both server types support:
 
-`add` replaces an existing entry in its destination. Add `-l` for the project file; otherwise commands edit the global Pi file. Pi never edits the shared file. Changing an inherited shared entry in `/mcp` copies that whole entry into Pi's global file and applies the change there. To stop using an inherited server, disable it in `/mcp`; removing a Pi override exposes the shared entry again.
+- `timeout`: per-request timeout in seconds (default 60). Progress notifications reset it.
+- `enabled: false`: keep the entry without connecting to it.
+- `exposure` and `toolExposure`: control how tools reach the model (see [Control tool exposure](#control-tool-exposure)).
+- `description`: what the server offers, in a sentence. It lists the server in the system prompt (see [Control tool exposure](#control-tool-exposure)), tool search ranks the server's tools by it, and codemode's `describeNamespace()` returns it. Without it, the first line of the server instructions is used once the server connects.
 
-Pi-owned config files may be symlinks to writable dotfiles. Management and import update the real file under its lock and leave the link intact, preserving unrelated settings, indentation, and permissions. Dangling links, nonregular or read-only targets, and links to the shared source are refused.
+Keep personal servers and servers with credentials in the user-level file. Use the project file only for servers the project requires, and only in trusted projects.
 
-After adding or editing entries outside a session, run `/reload` or start a new session.
+### Configuration rules
 
-## Connections and catalogs
+- Server names may contain only letters, digits, `_`, and `-`. Tools are named `mcp__<server>__<tool>`, with every character other than letters, digits, and `_` replaced by `_`; tools of a server whose names then collide all get a hash suffix. Server names that differ only in `-` and `_` count as the same server: a second one is rejected, and a `mcp.json` server overrides a registered one.
+- `type` is optional. A `command` selects stdio and a `url` selects streamable HTTP. When present, `type` must be `stdio`, `http`, or `streamable-http`.
+- `sse` is rejected. Servers that document an SSE endpoint often also provide streamable HTTP, commonly at `/mcp` instead of `/sse`.
+- `command` is one executable and `args` contains its arguments. It is not a shell command string.
+- `env` and `headers` values can use environment variables such as `${GITHUB_TOKEN}`. They can also run a command with `!command`, but the command must make up the whole value, for example `"Authorization": "!echo Bearer $(gh auth token)"`.
+- Invalid entries are reported and skipped without preventing other servers from connecting.
 
-Startup restores matching cached tool, resource, and prompt descriptors and assigned tool names from `~/.pi/agent/mcp-catalog.json` without starting lazy processes, opening server connections, executing secret commands, or starting browser consent. A cold server has no tool schemas yet; discover it by server or namespace before calling it. Eager servers connect at startup; the first prompt waits up to 10 seconds for eager servers with direct tools.
+`pi mcp add` and `pi mcp remove` cover common changes from a shell. See [MCP commands](cli.md#mcp-commands) for their options.
 
-Catalogs and live bindings are bound to the profile name, working directory, transport configuration, resolved environment-backed credentials, and OAuth grant identity. The store retains the eight most recently saved identities per profile, so discovery in another project does not immediately replace your catalog. OAuth refresh preserves the account's catalog identity; sign-in, grant import, and logout change it. Stale metadata is withdrawn before calls are admitted.
+### Inspect or change a server
 
-For stdio, identity includes the effective working directory and environment, except known inherited Pi routing and shell/terminal bookkeeping. Explicit `env` values always count; set a bookkeeping field there if your server uses it as configuration. Credential-agent, executable-path, mise, and unknown environment inputs remain included.
+`/mcp` lists configured servers with their state, tool count, exposure, and configuration source. Servers that need attention appear first. Select a server to inspect its tools and connection details, reconnect, sign in or out, change exposure, or enable and disable it.
 
-Credentials supplied by opaque `!command` expressions cannot be identified without executing them, so those profiles **skip cached restore** and require live discovery. Status and global search do not execute the commands to fill that gap. Command-backed headers and stdio environment values resolve when constructing a transport; live connections retain those resolved values until reconnect. Observable environment-backed inputs remain checked even alongside command-backed values. Once connected through a native transport, an unchanged resolved credential preserves tool bindings through reconnect; a changed credential revokes prepared calls.
+Exposure and enabled-state changes are saved to the file that defines the server without replacing unrelated content. Disabled servers remain listed. Outside the interactive TUI, `/mcp` prints server status; `/mcp login <server>`, `/mcp logout <server>`, and `/mcp reconnect <server>` perform those actions directly.
 
-Lazy connections close after 10 minutes without an active request and reconnect on use. Their cached descriptors remain available. Eager connections stay open until shutdown or an explicit management action. Running sessions notice external native CLI sign-in or logout on the next turn; eager profiles attempt reconnection then, while lazy profiles wait for discovery or use. A dropped connection reconnects on the next call. Tool-list and prompt-list notifications update descriptors; withdrawn tools become unreachable and withdrawn prompt commands are removed.
+Shell commands work without a session: `pi mcp add`, `pi mcp remove`, `pi mcp list`, `pi mcp login`, and `pi mcp logout`. Shell commands do not load extensions.
 
-HTTP connection setup retries transient network errors and statuses 408, 429, and 5xx except 501 twice. Resource and prompt reads retry a transient HTTP error once. An expired HTTP session confirmed by 404 can be recreated. Tool calls with an uncertain outcome are never automatically replayed: a timeout, cancellation, or dropped response may mean the operation ran. Check the server's state before repeating a write.
+### Diagnose connection problems
 
-Server logging notifications go to `~/.pi/agent/mcp.log`; the file rotates to `mcp.log.1` past 5 MB. Stopping stdio closes stdin, then sends SIGTERM and finally SIGKILL to the whole process group, including wrappers such as `npx` and `uvx`.
+Run `pi mcp list` to connect to every enabled server and print its state, tools, and errors. It exits with status 1 when an entry is invalid or an enabled server is not connected. `/mcp` shows the full connection error and the tail of stderr from a failed stdio server.
 
-## Discover and call tools
+Pi reports configuration errors, failed connections, and required sign-ins once after startup. Server logging notifications are appended to `~/.pi/agent/mcp.log` as `<time> [<server>] <level> <logger>: <message>`. The file moves to `mcp.log.1` after it grows past 5 MB.
 
-Each server has namespace `mcp__<server>`. Native tool names are `mcp__<server>__<tool>`, sanitized to provider-compatible characters and shortened or disambiguated with a hash suffix when needed. Use names returned by discovery rather than guessing them.
+Pi connects every enabled server in the background when a session starts. A server's tools appear once it connects; the `codemode` description does not list them, so it does not change when servers connect. The first prompt waits up to 10 seconds only for servers with `direct` tools, which must be declared in its request. Other servers are waited for when they are needed: a codemode script waits for the servers it names (`mcp__<server>`) and, when it calls `searchTools()` or reads `ALL_TOOLS`, for all of them; `tool_search` and the resource tools also wait for all of them. HTTP network errors and transient statuses (408, 429, and 5xx) are retried twice. A dropped connection is shown as disconnected and reconnects on the next call. When a server announces a changed tool list, new tools are added and withdrawn tools become unreachable.
 
-Global `tool_search` and `searchTools()` inspect registered metadata and matching cached catalogs only. They do not connect undiscovered servers and report incomplete coverage when catalogs are missing. A server-scoped or namespace-scoped search connects only that server, without starting browser consent:
+Stopping a stdio server closes its stdin, sends SIGTERM, then sends SIGKILL to its process group. This also stops servers launched through wrappers such as `npx` or `uvx`.
 
-```json
-{ "query": "search documents", "server": "docs", "limit": 3 }
-```
+## Migrate configuration from another client
 
-Pass this to `tool_search` to make matching deferred tools available from the next model call. For a cold direct server, scoped discovery registers its permitted direct tools even if no deferred matches are returned. `namespace: "mcp__docs"` is an alternative to `server: "docs"`; do not supply both. Canonical namespaces, raw server names, and unambiguous normalized aliases are accepted; ambiguous aliases fail.
+Move the converted entry under `mcpServers` in `mcp.json`, then run `pi mcp list` to validate it.
 
-Codemode can discover and call in one script:
+| Client | Conversion |
+|---|---|
+| Claude Desktop, Claude Code, or Cursor | Copy the existing `mcpServers` entry. |
+| VS Code | Move an entry from the top-level `servers` object and replace `${input:...}` prompts with `${NAME}` environment variables. |
+| Codex | Convert `[mcp_servers.<name>]` TOML fields such as `command`, `args`, `env`, and `url` to JSON. |
+| OpenCode | Convert `"type": "local"` to a stdio entry, split its `command` array into `command` and `args`, rename `environment` to `env`, and replace `{env:NAME}` with `${NAME}`. Convert `"type": "remote"` to a URL entry. |
 
-```js
-const matches = await searchTools("search documents", { server: "docs", limit: 3 });
-if (!matches.length) throw new Error("No matching tool");
-// This example assumes the best match accepts { query: string }.
-const result = await callTool(matches[0].name, { query: "MCP" });
-text(result.structuredContent ?? result.content);
-```
+## Authenticate with OAuth
 
-The argument `{ query: "MCP" }` is illustrative; use the selected tool's schema. `tools` and `ALL_TOOLS` are snapshots taken when the script starts. Use `callTool(name, args)` for tools discovered later in that same script. `await describeNamespace("docs")` discovers that server and returns `{ name, description?, instructions?, tools }`; `describeTool(name)` reads a currently callable tool's declaration without discovering a server.
-
-The deferred native `mcp_discover` tool exposes coverage directly: `{}` is cache-only; `{ server: "docs" }` discovers that server. Its result contains `servers`, `complete`, and `undiscovered`.
-
-## Manage servers
-
-`/mcp` opens the server manager in the TUI and prints status in other modes. Opening it does not connect dormant servers. It shows configured sources, cached counts, live state, and errors. Select a server to connect or reconnect, sign in or out, inspect cached tools and prompts, change exposure, or enable or disable it. Extension-server changes are session-local; configuration changes are saved to Pi-owned files.
-
-```text
-/mcp reconnect docs
-/mcp login sentry
-/mcp logout sentry
-/mcp prompts docs
-```
-
-From a shell:
-
-```sh
-pi mcp list --json            # Configuration and matching catalogs only
-pi mcp list --connect --json  # Probe every enabled server, then close the connections
-pi mcp login sentry
-pi mcp logout sentry
-```
-
-Ordinary `list` reports `configured`, `cached`, or `disabled`, not a health check. It reports `cache-error` if reading a catalog fails and exits with 1 for configuration or catalog errors. `--connect` also exits with 1 if an enabled server cannot connect or its catalog cannot be saved, and refreshes successful catalogs. Shell commands do not load extensions; they see configuration-file servers only. See [MCP commands](cli.md#mcp-commands) for options.
-
-## Sign in with OAuth
-
-HTTP servers without an `Authorization` header use OAuth when challenged:
+Remote servers that use OAuth, such as Sentry, need no credentials in `mcp.json`:
 
 ```json
-{ "mcpServers": { "sentry": { "url": "https://mcp.sentry.dev/mcp" } } }
+{
+  "mcpServers": {
+    "sentry": { "url": "https://mcp.sentry.dev/mcp" }
+  }
+}
 ```
 
-Discovery can report `needs-auth`, but never opens a consent page. Sign in explicitly with `/mcp login sentry`, the manager's **Sign in**, or `pi mcp login sentry`. Pi opens the authorization URL and listens on a temporary loopback callback. If the browser runs on another machine, paste the **full redirect URL**, including `code` and `state`, into the sign-in screen. A shell login accepts pasted URLs when stdin is a terminal and otherwise waits for the loopback callback.
+When the server rejects an unauthenticated connection, `/mcp` shows that it needs sign-in. Select "Sign in", run `/mcp login sentry`, or run `pi mcp login sentry`. Pi opens the authorization page and waits for approval. If the browser runs on another machine, such as over SSH, paste its redirected URL into the sign-in screen. A running session uses the new credentials on its next turn.
 
-The deferred `mcp_auth` tool supports the same flow in non-interactive model workflows:
+Pi registers itself with the authorization server, stores tokens in `~/.pi/agent/mcp-auth.json`, and refreshes access tokens when they expire or the server rejects them. If a server later requests additional scope, Pi asks for sign-in again. Signing out deletes the stored credentials.
 
-1. `{ "action": "begin", "server": "sentry" }` opens the browser and returns `state: "pending"`, `id`, `authorizationUrl`, and `redirectUrl`. On a remote host, open `authorizationUrl` in your local browser.
-2. `{ "action": "complete", "id": "<returned id>" }` uses the captured callback, waiting if necessary. If the local browser cannot reach the remote host, use `{ "action": "complete", "id": "<returned id>", "redirectUrl": "<full browser redirect URL>" }` instead. Pi validates the callback address, state, and issuer before committing the grant. If the pasted URL fails the initial callback-address, state, or code checks, the flow stays pending; correct the URL and retry with the same `id` before expiry. Cancelling a waiting `complete` call cancels its flow.
-3. `{ "action": "cancel", "id": "<returned id>" }` discards the pending flow and closes its listener. Pending flows expire after five minutes and are discarded on session shutdown or reload.
+Credentials belong to a server name and URL. Servers with the same URL under different names, such as one per account, sign in separately; servers with the same name and URL in different `mcp.json` files share one sign-in.
 
-`begin` alone does not save tokens. `complete` returns `state: "signed-in"` after storing the grant; it does not connect unrelated servers or discover the newly signed-in profile's tools. Discover that profile next. UI and shell login also reconnect the selected server.
-
-Native grants live in `~/.pi/agent/mcp-auth.json`, bound to the configured profile, endpoint, and client identity. Pi serializes refresh, completion, logout, and import for that identity, including across processes. Pending PKCE secrets and OAuth state stay in the owning runtime. Stored URL-keyed credentials from older Pi versions and adapter credentials are not an automatic fallback. Separate profiles for the same URL do not share grants or catalogs.
-
-Pi supports dynamic client registration, pre-registered clients, and HTTPS client metadata documents (`oauth.clientMetadataUrl`). Configure a fixed client when needed:
+OAuth applies to HTTP servers without an `Authorization` header. For a server that does not support dynamic client registration, configure a registered client:
 
 ```json
 {
   "mcpServers": {
     "example": {
       "url": "https://mcp.example.com/mcp",
-      "oauth": {
-        "clientId": "my-client",
-        "clientSecret": "${EXAMPLE_SECRET}",
-        "callbackPort": 8765
-      }
+      "oauth": { "clientId": "my-client", "clientSecret": "${EXAMPLE_SECRET}", "callbackPort": 8765 }
     }
   }
 }
 ```
 
-`clientSecret` is optional. `callbackPort` sets `http://127.0.0.1:<port>/callback`; `callbackUrl` supplies another registered HTTP loopback URI on `localhost`, `127.0.0.1`, or `[::1]`, without credentials, query, or fragment. A new callback URL without a port gets `callbackPort` or a free port appended. A stored registration fixes its exact redirect URI, including host, path, and port; Pi does not silently substitute another address if it cannot listen there.
+The redirect URI must match the registered URI. `callbackPort` uses `http://127.0.0.1:<port>/callback`. To use another URI, set `callbackUrl`; it must use HTTP on `localhost`, `127.0.0.1`, or `[::1]`. Pi sends it exactly as written. When `callbackUrl` omits a port, Pi uses `callbackPort` or a free port and adds it to the URI, as allowed for loopback redirects by RFC 8252. `clientSecret` is optional and can use an environment variable or command.
 
-`scope` supplies space-separated scopes to request. Pi stores the actual grant, which may be narrower. Further consent requests include prior requested and granted scopes plus unresolved server challenges; partial consent leaves authorized operations usable. The server decides scope hierarchies and operation permissions. Refresh happens automatically for expired or rejected access tokens, but a request denied with `insufficient_scope` is not refreshed or replayed. Additional consent requires explicit sign-in again. Logout deletes the profile's grant and withdraws its old account metadata.
+Set `scope` to a space-separated list for servers that do not advertise their required scopes. Otherwise, Pi requests the advertised scopes. Later scope requests are added to the configured value.
 
-## Exposure
+Pi registers as `pi`. Some servers only accept registrations from known clients. Set `clientName` to send another name:
 
-`exposure` controls how tools are reached, not when a server connects:
+```json
+{
+  "mcpServers": {
+    "figma": { "url": "https://mcp.figma.com/mcp", "oauth": { "clientName": "Claude Code" } }
+  }
+}
+```
 
-| Exposure | Behavior |
-|---|---|
-| `codemode` (default) | Deferred native tools, callable from codemode; Pi activates codemode unless `autoEnableCodemode` is false |
-| `codemode-deferred` | Deferred native tools, callable from codemode; Pi activates codemode unless disabled |
-| `deferred` | Deferred tools loaded by `tool_search` for direct calls; Pi activates tool search |
-| `direct` | Declared and callable when discovered and selected; a cold lazy server activates tool search for scoped discovery |
-| `hidden` | Registered tools cannot be called |
+The name is only sent when Pi registers a client. To register again under a new name, sign out first.
 
-Both native codemode exposures keep MCP schemas out of the inline codemode description. The model receives a bounded server inventory; scoped search and `describeNamespace()` supply current schemas and usage instructions. This keeps a connection or idle cleanup from rewriting codemode's tool description.
+Pi finds the authorization server through the server's protected resource metadata (RFC 9728) and checks that the authorization server's metadata names the expected issuer (RFC 8414). Some servers advertise the wrong authorization server or none, so sign-in opens a page that does not exist. Set `authServerMetadataUrl` to the metadata document of the right authorization server:
 
-`toolExposure` overrides individual raw server tool names. An exact name wins; otherwise the first matching `*` pattern wins:
+```json
+{
+  "mcpServers": {
+    "example": {
+      "url": "https://mcp.example.com/mcp",
+      "oauth": { "authServerMetadataUrl": "https://example.okta.com/.well-known/openid-configuration" }
+    }
+  }
+}
+```
+
+Pi uses that document instead of discovery and trusts it as configured, so only point it at a document you trust. The URL must use HTTPS, except on `localhost`, `127.0.0.1`, or `[::1]`.
+
+## Control tool exposure
+
+Each server tool is registered as `mcp__<server>__<tool>`. The server's `exposure` determines how the model reaches it:
+
+| Exposure | Behavior | Typical use |
+|---|---|---|
+| `codemode` (default) | Callable from [`codemode`](cli.md#tools) scripts, but neither declared to the model nor listed in the codemode description. Scripts find tools with `searchTools()`, `describeTool()`, or `ALL_TOOLS`. | General MCP servers, especially when scripts should combine or filter calls. |
+| `deferred` | Not declared until [`tool_search`](cli.md#tools) loads a match for the next model call. | Large servers whose tools should be called directly after discovery. |
+| `direct` | Declared to the model like a built-in tool and also callable from codemode. | Small, frequently used tool sets. |
+| `hidden` | Registered but unreachable. | Servers or tools that should remain unavailable. |
+
+`codemode-deferred` is accepted as an alias for `codemode`.
+
+Servers with `codemode` or `deferred` tools are listed in the `mcp_servers` section of the system prompt, with how their tools are reached and one line from the configured `description` or, once connected, from the server instructions. Pi updates the section when a prompt starts, after waiting for servers with `direct` tools. When it changed, for example because a server connected and its summary became available, Pi appends the new section to the conversation instead of changing tool declarations, so earlier messages stay cached. `describeNamespace()` and the `namespace` option of `searchTools()` accept `mcp__dev-radius`, `mcp__dev_radius`, `dev-radius`, or `dev_radius`.
+
+Pi activates `codemode` when a server with `codemode` exposure connects. It activates `tool_search` for a server with `deferred` exposure. To make the model see a tool without searching, give it `direct` exposure with `toolExposure`.
+
+`toolExposure` overrides the server exposure for individual tools. Keys are exact server tool names or patterns where `*` matches any characters. Exact names win over patterns; among patterns, the first match wins. A server with `hidden` exposure can expose only selected tools:
 
 ```json
 {
@@ -192,79 +199,62 @@ Both native codemode exposures keep MCP schemas out of the inline codemode descr
 }
 ```
 
-Deferred tools are reachable through codemode or tool search, subject to configured tool restrictions. Direct tools are callable only while selected. Native saved selections survive `/tree`, resume, and fork; missing permitted names wait for lazy registration, and explicitly deselected tools stay deselected. Adapter `mcp-tool-selection` entries map selected raw server/tool pairs to actual native names as they are discovered, and map gateway/script features to tool search/codemode. This does not make adapter scripts or tool names interchangeable with native ones.
+`pi mcp list` marks tools whose exposure differs from their server. The Tools view in `/mcp` also shows the effective exposure.
 
-To keep codemode active without MCP, set `"defaultTools": ["+codemode"]`. Set `"autoEnableCodemode": false` at the top level of `mcp.json` to disable its automatic activation; higher-precedence configuration wins. Pi warns when neither codemode nor tool search can reach configured indirect tools.
+Tools with `codemode` or `deferred` exposure can be reached through either indirect mechanism: codemode scripts can call them, and `tool_search` can load them. Codemode calls do not depend on the active tool set, so they remain available after `/tree`, resume, and fork. Tools loaded by `tool_search` are recorded in the transcript and remain declared on that branch.
 
-Catalog reuse and stable descriptions avoid unnecessary declaration churn. A migration, changed schema, account, tool selection, provider, or context boundary can still change the request prefix and cause a cache miss. These controls are not a guarantee of provider cache hits.
+To keep `codemode` active without MCP servers, add `"defaultTools": ["+codemode"]` to [settings](settings.md#tools). To prevent automatic codemode activation, set `"autoEnableCodemode": false` beside `mcpServers`. A project value overrides the user-level value. Pi warns once when neither `codemode` nor `tool_search` is active and non-direct tools cannot be called.
 
-## Results and permissions
+Text results over 20 KB reach the model with their middle removed around a `…N chars truncated…` marker. The full text is saved to a temporary file named in the result. Codemode scripts receive the complete result and can reduce it before returning output to the model.
 
-Direct calls and codemode calls use Pi's argument validation, live tool admission, and `tool_call`/`tool_result` hooks. A cached definition that changes on reconnection must be rediscovered before execution; account changes revoke old bindings. Codemode calls carry `parentToolCallId`. Server annotations are unverified permission hints, available through `pi.getAllTools()`; resource tools are marked read-only.
-
-When structured data is retained, codemode receives the complete **hook-permitted** MCP `CallToolResult`: `content`, optional `structuredContent`, and `isError`, without the server's top-level `_meta`. An MCP `isError` result resolves as data in scripts and is an error for direct model calls. `image(result.content[0])` can forward an image block.
-
-After all result hooks, Pi saves the permitted tool or resource result as private JSON (mode `0600`). The model sees its path; script results also carry `fullResultPath` when structured content remains. Model-facing text over 20 KiB keeps its start and end around an omission marker. Read the JSON artifact for complete data, including structured fields and permitted binary blobs; it is not a separate unredacted server response. A hook that replaces only `content` drops stale `structuredContent`. File-save failures are reported rather than claiming an artifact exists.
-
-For a result shaped as `{ structuredContent: { rows: [...] }, ... }`, call `read` with:
+When the saved text is one JSON document, `read` can select from it before paging and output limits. For a payload shaped as `{ "rows": [...] }`:
 
 ```json
 {
-  "path": "/tmp/pi-mcp-<result>.json",
-  "json": { "path": "/structuredContent/rows", "fields": ["name", "status"] },
+  "path": "/tmp/pi-mcp-<id>.txt",
+  "json": { "path": "/rows", "fields": ["name", "status"] },
   "limit": 100
 }
 ```
 
-Use the actual returned path and payload shape. JSON selection happens before paging and output limits; continue with the same selectors and the returned offset. See [JSON selection with read](sdk.md#json-selection-with-read). Binary resource files are also derived from the final permitted payload.
+Use the actual path and payload shape, and continue with the same `json` options and the returned offset. See [JSON selection with read](sdk.md#json-selection-with-read).
 
-## Resources and prompts
+Codemode scripts receive the complete MCP `CallToolResult`, including `content`, `structuredContent`, and `isError`. A result with `isError` resolves inside scripts but is reported as an error for direct calls. `image(result.content[0])` forwards an image block. Server instructions are not part of any tool description; scripts read them with `describeNamespace("mcp__<server>")`, which also returns the server's tool names.
 
-`list_mcp_resources` and `list_mcp_resource_templates` accept `server` and optional `cursor`. A scoped call connects only that server and returns one page with `nextCursor`. Without `server`, they connect eligible servers and follow every page; partial failures appear in `errors`. `read_mcp_resource` requires `server` and `uri`, returning `{ server, uri, contents }` to scripts and text, images, or saved binaries to the model. Cold resource-only servers can be discovered through these tools too.
+## Use resources
 
-Resource tools reach enabled servers whose server-level exposure is not `hidden`; their exposure is the widest of those servers (`direct`, then codemode, codemode-deferred, deferred). Listings omit resource icons and MCP Apps (`ui://` or `text/html;profile=mcp-app`), which Pi does not render.
+When a connected server offers [resources](https://modelcontextprotocol.io/specification/2025-11-25/server/resources), Pi adds the resource tools used by Codex and OpenCode:
 
-MCP prompts register cached slash commands, normally `/mcp__<server>__<prompt>`, with the same name sanitization and collision suffixing as tools. `/mcp prompts [server]` lists cached commands without connecting; use `/mcp reconnect <server>` to discover a cold prompt catalog. Running a prompt command connects only its owner, verifies the current account and prompt, and sends the returned content as a user message. Multiple messages retain role labels; they do not inject assistant transcript entries.
+- `list_mcp_resources` lists resources as JSON: `{ server?, resources: [{ server, uri, name, ... }], nextCursor? }`. With `server`, it lists one page; `cursor` continues with the next page. Without `server`, it lists every resource from every server.
+- `list_mcp_resource_templates` lists URI templates for resources the servers do not list directly.
+- `read_mcp_resource` reads a resource by `server` and `uri`. Text reaches the model as text and images as images. Other binary resources are saved to temporary files, and the model receives the path. Scripts receive `{ server, uri, contents }`.
 
-Arguments can be positional in the advertised order or `name=value`, with quoting and escapes:
+These tools reach every enabled, non-hidden server with resources. Their exposure is the widest exposure among those servers: `direct`, then `codemode` or `deferred`. Resource links in tool results identify `read_mcp_resource` and the server.
 
-```text
-/mcp__docs__summarize topic="native MCP" style=brief
-```
+Resources for MCP Apps, identified by `ui://` URIs or `text/html;profile=mcp-app`, are omitted because Pi does not render them. Resource icons are also omitted.
 
-Missing required arguments, extra positional arguments, and unfinished quotes fail before fetching. Disabled, hidden, withdrawn, or old-account prompts cannot run. A cached prompt from an old account is refused before starting a server transport.
+Reading and listing resources is retried once after a transient HTTP error (408, 429, or 5xx). Tool calls are not retried because the server may already have performed them.
 
-## Import adapter configuration
+## Permissions
 
-`pi mcp import-adapter` is explicit, copy-only migration. It never runs as a discovery or authentication fallback. Supply expanded source files in increasing precedence order; later adapter entries merge partial overrides before conversion to native whole entries:
+Every MCP call passes through Pi's tool pipeline. Extension `tool_call` and `tool_result` handlers, including permission gates, therefore apply to MCP tools. Calls made from codemode scripts carry the codemode call ID as `parentToolCallId`.
 
-```sh
-pi mcp import-adapter --config /path/base.json --config /path/override.json --dry-run
-pi mcp import-adapter --config /path/base.json --config /path/override.json
-```
+`pi.getAllTools()` reports the annotations declared by each server: `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`. Permission extensions can use these hints to decide which calls require confirmation (see [Tool exposure](extensions.md#tool-exposure)). Resource tools are marked read-only.
 
-Import targets Pi's global `mcp.json`, rejects existing destination entries and native grants, and leaves all source files intact. It translates supported stdio/HTTP settings and secret-reference syntax without executing commands. Adapter entries default to native `codemode-deferred`; lifecycle `eager`/`keep-alive` maps to `connection: "eager"`, and other supported lazy lifecycles map to `lazy`. Unsupported transports, implicit imports, nonempty adapter global settings, tool filtering/approval policies, or unsupported OAuth flows fail rather than being silently discarded. Translate those settings explicitly before importing.
+## Extensions and SDK
 
-Grants are optional. For a JSON export containing adapter `AuthEntry` objects keyed by exact profile name, use:
+### Add servers from extensions
 
-```sh
-pi mcp import-adapter --config /path/adapter.json --credentials /path/grants.json --adapter-stopped --dry-run
-pi mcp import-adapter --config /path/adapter.json --credentials /path/grants.json --adapter-stopped
-```
+Extensions can add servers for the current session with `pi.registerMcpServer(name, config)`, using the same shape as an `mcpServers` entry (see [MCP servers in extensions](extensions.md#mcp-servers)). Registered servers connect like configured servers and appear in `/mcp` with the extension as their source.
 
-On macOS, `--keychain` is an explicit read-only alternative to `--credentials`; it is never accessed by default. Stop **all adapter sessions and other hosts using those grants**, pass `--adapter-stopped`, and keep those users stopped after copying. Rotating refresh tokens cannot be used as independent copies. To run native and adapter clients independently, sign in separately instead.
+Changes to enabled state or exposure apply only to the current session. A file-configured server with the same name takes precedence, and `/mcp` lists the overridden registration. `pi mcp` shell commands do not load extensions and only see file-configured servers.
 
-Dry-run validates the explicitly requested credentials as well as configuration, without destination writes. Grant import checks the profile endpoint, issuer, client, and exact registered callback, and verifies copied data. It never overwrites grants or deletes adapter credentials. If config is copied but a grant write fails, the error says so; inspect native destinations before retrying. Source preservation does not make copied rotating grants safe for simultaneous use.
+### Replace the built-in MCP support
 
-<a id="other-mcp-extensions"></a>
-<a id="sdk"></a>
+An installed extension that registers `/mcp`, such as `pi-mcp-adapter`, replaces the built-in MCP support for sessions. Pi then does not read `mcp.json` or connect its servers in a session, and `/mcp` belongs to the extension. Remove the extension to restore the built-in behavior. To disable built-in MCP support without a replacement, disable `mcp` under Built-in in `pi config`, or set `"extensions": ["-builtin:mcp"]` in [settings](settings.md#resources).
 
-## Extensions and SDK hosts
+An extension that registers `codemode` or `tool_search` similarly replaces the built-in tool with that name. Shell-level `pi mcp` commands always use the built-in implementation.
 
-`pi.registerMcpServer(name, config)` adds a session-local server with the same lazy default and explicit `connection: "eager"` option. File configuration takes precedence over registrations of the same name. See [MCP extension APIs](extensions.md#mcp-servers).
+### Use MCP from the SDK
 
-An extension that owns `/mcp`, such as `pi-mcp-adapter`, replaces the built-in session connector. Remove or disable it to use native MCP; shell `pi mcp` remains native. Disable native sessions explicitly with `"extensions": ["-builtin:mcp"]` or **Built-in** in `pi config`. Tools named `codemode` or `tool_search` likewise replace the corresponding builtin.
-
-SDK sessions opt into `createMcpExtension()`, codemode, and tool search through the resource loader, then bind extensions. See [SDK](sdk.md#codemode-mcp). Standalone `@earendil-works/pi-mcp` clients connect when the host calls `client.connect()`; CLI lifecycle settings do not govern them.
-
-Native support covers these tool, resource, prompt, result, and browser OAuth workflows. MCP Apps are unsupported. Separately managed ATB/TARS adapter hosts are outside the CLI migration. Importing does not disable or remove an adapter, alter Pi's extension settings, install a runtime, or prove parity for deployed profiles. Before a future cutover, qualify the chosen installed revision against the actual profiles and workflows; expect changed native names and possible initial cache misses.
+SDK sessions do not load built-in extensions. Add the MCP extension, the codemode extension for `codemode` servers, and the tool-search extension for `deferred` servers to the resource loader. See [Codemode and MCP](sdk.md#codemode-mcp).

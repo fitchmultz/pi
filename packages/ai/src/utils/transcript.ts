@@ -1,5 +1,4 @@
 import type { Context, Message, SystemMessage, Tool, ToolReference, TranscriptContext } from "../types.ts";
-import { estimateProviderInputTokens } from "./estimate.ts";
 import { contentText, getSystemMessageText } from "./text.ts";
 
 export type { TranscriptContext } from "../types.ts";
@@ -112,109 +111,12 @@ export function collapseSystemMessages(context: TranscriptContext): TranscriptCo
 	return { messages: head ? [head, ...messages] : messages } as TranscriptContext;
 }
 
-/** Keep supported positional updates; rebuild declarations on schema changes or retention pressure. */
+/** Keep later system messages in place when the model accepts them; otherwise collapse them. */
 export function resolveTranscript(
 	context: TranscriptContext,
 	supportsMidConvoSystemMessages: boolean | undefined,
-	retainTools?: "all" | "descriptions",
-	inputBudget?: {
-		contextWindow: number;
-		tools: "inline" | "current" | "declared";
-		transform: (messages: Message[]) => Message[];
-	},
 ): TranscriptContext {
-	if (!supportsMidConvoSystemMessages) return collapseSystemMessages(context);
-	const retained = retainTools ? retainToolDeclarations(context, retainTools === "all") : context;
-	if (inputBudget && inputBudget.contextWindow > 0) {
-		const tools =
-			inputBudget.tools === "inline"
-				? undefined
-				: inputBudget.tools === "declared"
-					? getDeclaredTools(retained.messages, "first")
-					: getCurrentTools(retained.messages);
-		if (estimateProviderInputTokens(inputBudget.transform(retained.messages), tools) > inputBudget.contextWindow) {
-			const rebuilt = rebaselineToolDeclarations(context, context.messages.length - 1);
-			if (
-				estimateProviderInputTokens(
-					inputBudget.transform(rebuilt.messages),
-					inputBudget.tools === "inline" ? undefined : getCurrentTools(rebuilt.messages),
-				) <= inputBudget.contextWindow
-			)
-				return rebuilt;
-		}
-	}
-	return retained;
-}
-
-/** Reset declarations, not positional instructions or conversation content. */
-function rebaselineToolDeclarations(context: TranscriptContext, index: number): TranscriptContext {
-	const history = context.messages.slice(0, index + 1);
-	const prefix = history.map((message) =>
-		message.role === "system" ? { ...message, toolsAdded: undefined, toolsRemoved: undefined } : message,
-	);
-	const initial = getInitialSystemMessage(prefix);
-	const head: SystemMessage = {
-		...(initial ?? { role: "system", content: "", timestamp: 0 }),
-		toolsAdded: getCurrentTools(history),
-	};
-	return {
-		messages: [head, ...prefix.slice(initial ? 1 : 0), ...context.messages.slice(index + 1)],
-	} as TranscriptContext;
-}
-
-/** Wire-only projection. The host must still reject calls outside its current active tool set. */
-function retainToolDeclarations(context: TranscriptContext, retainRemovals: boolean): TranscriptContext {
-	const declared = new Map<string, Tool>();
-	let lastSchemaChange = -1;
-	for (const [index, message] of context.messages.entries()) {
-		if (message.role !== "system") continue;
-		for (const tool of message.toolsAdded ?? []) {
-			const previous = declared.get(tool.name);
-			if (previous && !declarationsEqual({ ...previous, description: tool.description }, tool))
-				lastSchemaChange = index;
-			declared.set(tool.name, tool);
-		}
-	}
-	if (lastSchemaChange >= 0) context = rebaselineToolDeclarations(context, lastSchemaChange);
-	declared.clear();
-	const descriptions = new Map<string, string>();
-	const active = new Set<string>();
-	const messages = context.messages.map((message): Message => {
-		if (message.role !== "system") return message;
-		const notices: string[] = [];
-		const additions = new Set((message.toolsAdded ?? []).map((tool) => tool.name));
-		const toolsRemoved = message.toolsRemoved?.filter((tool) => {
-			if (additions.has(tool.name)) return false;
-			active.delete(tool.name);
-			if (!retainRemovals) return true;
-			notices.push(
-				`Tool ${tool.name} is no longer available. Do not call it; the executor will reject calls to it.`,
-			);
-			return false;
-		});
-		const toolsAdded = message.toolsAdded?.flatMap((tool): Tool[] => {
-			const previous = declared.get(tool.name);
-			const wasActive = active.has(tool.name);
-			const previousDescription = descriptions.get(tool.name);
-			descriptions.set(tool.name, tool.description);
-			active.add(tool.name);
-			if (!previous) {
-				declared.set(tool.name, tool);
-				return [tool];
-			}
-			if (previousDescription !== tool.description)
-				notices.push(`Updated description for tool ${tool.name}:\n${tool.description}`);
-			if (!wasActive && retainRemovals) notices.push(`Tool ${tool.name} is available again.`);
-			return !retainRemovals && !wasActive ? [previous] : [];
-		});
-		return {
-			...message,
-			content: [contentText(message.content), ...notices].filter(Boolean).join("\n\n"),
-			toolsAdded,
-			toolsRemoved,
-		};
-	});
-	return { messages } as TranscriptContext;
+	return supportsMidConvoSystemMessages ? context : collapseSystemMessages(context);
 }
 
 /** Strip executable and display-only fields from a tool before transcript comparison or persistence. */
@@ -265,13 +167,11 @@ export function getToolStateChanges(previous: readonly Tool[], current: readonly
 }
 
 /** Every definition referenced by transcript tool state, in first-declaration order. */
-export function getDeclaredTools(messages: TranscriptMessages, version: "first" | "latest" = "latest"): Tool[] {
+export function getDeclaredTools(messages: TranscriptMessages): Tool[] {
 	const definitions = new Map<string, Tool>();
 	for (const message of messages) {
 		if (!isSystemMessage(message)) continue;
-		for (const tool of message.toolsAdded ?? []) {
-			if (version === "latest" || !definitions.has(tool.name)) definitions.set(tool.name, tool);
-		}
+		for (const tool of message.toolsAdded ?? []) definitions.set(tool.name, tool);
 	}
 	return [...definitions.values()];
 }

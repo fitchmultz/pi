@@ -45,15 +45,6 @@ export interface CredentialInfo {
 /** Optional cancellation for public auth and credential operations. */
 export interface AuthOperationOptions {
 	signal?: AbortSignal;
-	/** Availability enumeration only: one observation from the same credential read and check per provider. */
-	onAuthResult?: (providerId: string, observation: ProviderAuthObservation) => void;
-}
-
-/** Non-secret availability observation. Provider check errors are isolated; storage/cancellation still reject. */
-export interface ProviderAuthObservation {
-	stored: boolean;
-	auth: AuthCheck | undefined;
-	error: Error | undefined;
 }
 
 /**
@@ -164,8 +155,6 @@ export type AuthEvent =
  */
 export interface AuthInteraction {
 	signal?: AbortSignal;
-	/** Anthropic OAuth: false skips binding a loopback listener and uses manual code entry. */
-	localCallbackServer?: boolean;
 
 	prompt(prompt: AuthPrompt): Promise<string>;
 	notify(event: AuthEvent): void;

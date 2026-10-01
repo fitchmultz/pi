@@ -353,6 +353,12 @@ export interface Models {
 }
 
 export interface MutableModels extends Models {
+	/** Global availability plus provider-local auth diagnostics. Storage failures still reject. */
+	getAvailability(options?: AuthOperationOptions): Promise<{
+		available: readonly Model<Api>[];
+		auth: ReadonlyMap<string, AuthCheck | undefined>;
+		errors: ReadonlyMap<string, Error>;
+	}>;
 	/** Upsert/replace by provider.id. Provider ids are unique. */
 	setProvider(provider: Provider): void;
 	deleteProvider(id: string): void;
@@ -664,12 +670,8 @@ class ModelsImpl implements MutableModels {
 			}
 		}
 
-		try {
-			const resolution = await apiKey.resolve({ ctx: this.authContext, credential, signal });
-			return resolution ? { source: resolution.source, type: "api_key" } : undefined;
-		} catch (error) {
-			throw new ModelsError("auth", `API key auth check failed for provider ${provider.id}`, { cause: error });
-		}
+		const resolution = await resolveProviderAuth(provider, this.credentials, this.authContext, { signal });
+		return resolution ? { source: resolution.source, type: "api_key" } : undefined;
 	}
 
 	checkAuth(providerId: string, options?: AuthOperationOptions): Promise<AuthCheck | undefined> {
@@ -686,7 +688,7 @@ class ModelsImpl implements MutableModels {
 	private async getAuthenticatedProviders(
 		providerId: string | undefined,
 		signal: AbortSignal,
-		options?: AuthOperationOptions,
+		errors = new Map<string, Error>(),
 	) {
 		signal.throwIfAborted();
 		const providers = providerId
@@ -696,26 +698,42 @@ class ModelsImpl implements MutableModels {
 			providers.map(async (provider) => {
 				const credential = await this.readCredential(provider.id, signal);
 				let auth: AuthCheck | undefined;
-				let error: Error | undefined;
 				try {
 					auth = await this.checkProviderAuth(provider, credential, signal);
-				} catch (cause) {
+				} catch (error) {
 					signal.throwIfAborted();
-					error = cause instanceof Error ? cause : new Error(String(cause));
+					if (providerId !== undefined) throw error;
+					errors.set(provider.id, error instanceof Error ? error : new Error(String(error)));
 				}
-				signal.throwIfAborted();
-				options?.onAuthResult?.(provider.id, { stored: credential !== undefined, auth, error });
 				return { provider, credential, auth };
 			}),
 		);
-		return checks.filter((entry) => entry.auth !== undefined);
+		return checks;
+	}
+
+	getAvailability(options?: AuthOperationOptions) {
+		const signal = operationSignal(options?.signal);
+		return raceWithAbortSignal(
+			(async () => {
+				const errors = new Map<string, Error>();
+				const checks = await this.getAuthenticatedProviders(undefined, signal, errors);
+				const available = checks.flatMap(({ provider, credential, auth }) => {
+					if (!auth) return [];
+					const models = provider.getModels();
+					return provider.filterModels?.(models, credential) ?? models;
+				});
+				return { available, auth: new Map(checks.map(({ provider, auth }) => [provider.id, auth])), errors };
+			})(),
+			signal,
+		);
 	}
 
 	getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]> {
 		const signal = operationSignal(options?.signal);
 		const available = (async () => {
-			const providers = await this.getAuthenticatedProviders(providerId, signal, options);
-			return providers.flatMap(({ provider, credential }) => {
+			const providers = await this.getAuthenticatedProviders(providerId, signal);
+			return providers.flatMap(({ provider, credential, auth }) => {
+				if (!auth) return [];
 				const models = provider.getModels();
 				return provider.filterModels?.(models, credential) ?? models;
 			});
@@ -736,8 +754,9 @@ class ModelsImpl implements MutableModels {
 	getAllAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly AnyModel[]> {
 		const signal = operationSignal(options?.signal);
 		const available = (async () => {
-			const providers = await this.getAuthenticatedProviders(providerId, signal, options);
-			return providers.flatMap(({ provider, credential }) => {
+			const providers = await this.getAuthenticatedProviders(providerId, signal);
+			return providers.flatMap(({ provider, credential, auth }) => {
+				if (!auth) return [];
 				const models = provider.getAllModels?.() ?? provider.getModels();
 				if (provider.filterAllModels) return provider.filterAllModels(models, credential);
 				if (!provider.filterModels) return models;
@@ -883,7 +902,6 @@ class ModelsImpl implements MutableModels {
 		const requestOptions = { ...providerOptions, apiKey, headers, env } as Omit<TOptions, "transformHeaders"> &
 			ProviderRequestOptions<TModel>;
 
-		options?.signal?.throwIfAborted();
 		return { requestModel, requestOptions };
 	}
 
@@ -893,18 +911,14 @@ class ModelsImpl implements MutableModels {
 		options?: ModelsApiStreamOptions<TApi>,
 	): AssistantMessageEventStream {
 		const transcript = normalizeContext(context);
-		return lazyStream(
-			model,
-			async () => {
-				const provider = this.requireChatProvider(model);
-				const { requestModel, requestOptions } = await this.applyAuth(
-					model,
-					options as ModelsApiStreamOptions<Api> | undefined,
-				);
-				return provider.stream(requestModel, transcript, requestOptions as ApiStreamOptions<TApi>);
-			},
-			options?.signal,
-		);
+		return lazyStream(model, async () => {
+			const provider = this.requireChatProvider(model);
+			const { requestModel, requestOptions } = await this.applyAuth(
+				model,
+				options as ModelsApiStreamOptions<Api> | undefined,
+			);
+			return provider.stream(requestModel, transcript, requestOptions as ApiStreamOptions<TApi>);
+		});
 	}
 
 	async complete<TApi extends Api>(
@@ -917,15 +931,11 @@ class ModelsImpl implements MutableModels {
 
 	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
 		const transcript = normalizeContext(context);
-		return lazyStream(
-			model,
-			async () => {
-				const provider = this.requireChatProvider(model);
-				const { requestModel, requestOptions } = await this.applyAuth(model, options);
-				return provider.streamSimple(requestModel, transcript, requestOptions as SimpleStreamOptions);
-			},
-			options?.signal,
-		);
+		return lazyStream(model, async () => {
+			const provider = this.requireChatProvider(model);
+			const { requestModel, requestOptions } = await this.applyAuth(model, options);
+			return provider.streamSimple(requestModel, transcript, requestOptions as SimpleStreamOptions);
+		});
 	}
 
 	async completeSimple(
@@ -941,18 +951,14 @@ class ModelsImpl implements MutableModels {
 		handle: DeferredHandle,
 		options?: ModelsDeferredFetchOptions,
 	): AssistantMessageEventStream {
-		return lazyStream(
-			model,
-			async () => {
-				const provider = this.requireChatProvider(model);
-				if (!provider.fetchDeferred) {
-					throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
-				}
-				const { requestModel, requestOptions } = await this.applyAuth(model, options);
-				return provider.fetchDeferred(requestModel, handle, requestOptions as DeferredFetchOptions);
-			},
-			options?.signal,
-		);
+		return lazyStream(model, async () => {
+			const provider = this.requireChatProvider(model);
+			if (!provider.fetchDeferred) {
+				throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
+			}
+			const { requestModel, requestOptions } = await this.applyAuth(model, options);
+			return provider.fetchDeferred(requestModel, handle, requestOptions as DeferredFetchOptions);
+		});
 	}
 
 	async fetchDeferred(
@@ -1151,20 +1157,16 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 
 	if (streams.some((entry) => entry.fetchDeferred !== undefined)) {
 		provider.fetchDeferred = (model, handle, options) =>
-			lazyStream(
-				model,
-				async () => {
-					const implementation = apiFor(model);
-					if (!implementation?.fetchDeferred) {
-						throw new ModelsError(
-							"provider",
-							`Provider ${input.id} does not support deferred responses for "${model.api}"`,
-						);
-					}
-					return implementation.fetchDeferred(model, handle, options);
-				},
-				options?.signal,
-			);
+			lazyStream(model, async () => {
+				const implementation = apiFor(model);
+				if (!implementation?.fetchDeferred) {
+					throw new ModelsError(
+						"provider",
+						`Provider ${input.id} does not support deferred responses for "${model.api}"`,
+					);
+				}
+				return implementation.fetchDeferred(model, handle, options);
+			});
 	}
 	if (streams.some((entry) => entry.cancelDeferred !== undefined)) {
 		provider.cancelDeferred = async (model, handle, options) => {

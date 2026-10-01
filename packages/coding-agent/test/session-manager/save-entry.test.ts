@@ -1,16 +1,17 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { type CustomEntry, SessionManager } from "../../src/core/session-manager.ts";
 
 describe("SessionManager.saveCustomEntry", () => {
 	it("saves custom entries and includes them in tree traversal", () => {
 		const session = SessionManager.inMemory();
 
+		// Save a message
 		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+
+		// Save a custom entry
 		const customId = session.appendCustomEntry("my_data", { foo: "bar" });
+
+		// Save another message
 		const msg2Id = session.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "hi" }],
@@ -29,77 +30,26 @@ describe("SessionManager.saveCustomEntry", () => {
 			timestamp: 2,
 		});
 
+		// Custom entry should be in entries
 		const entries = session.getEntries();
 		expect(entries).toHaveLength(3);
 
-		const customEntry = entries.find((entry) => entry.type === "custom") as CustomEntry;
+		const customEntry = entries.find((e) => e.type === "custom") as CustomEntry;
 		expect(customEntry).toBeDefined();
 		expect(customEntry.customType).toBe("my_data");
 		expect(customEntry.data).toEqual({ foo: "bar" });
 		expect(customEntry.id).toBe(customId);
 		expect(customEntry.parentId).toBe(msgId);
 
+		// Tree structure should be correct
 		const path = session.getBranch();
 		expect(path).toHaveLength(3);
 		expect(path[0].id).toBe(msgId);
 		expect(path[1].id).toBe(customId);
 		expect(path[2].id).toBe(msg2Id);
 
-		expect(session.buildSessionContext().messages).toHaveLength(2);
-	});
-});
-
-describe("SessionManager session names", () => {
-	it("reads the latest file-wide name without copying the entry list", () => {
-		const session = SessionManager.inMemory();
-		const entries = vi.spyOn(session, "getEntries");
-		expect(session.getSessionName()).toBeUndefined();
-		const first = session.appendSessionInfo(" Original ");
-		session.appendCustomEntry("later", {});
-		expect(session.getSessionName()).toBe("Original");
-		session.appendSessionInfo("Renamed\nbranch");
-		session.branch(first);
-		expect(session.getSessionName()).toBe("Renamed branch");
-		session.appendSessionInfo(" \n ");
-		expect(session.getSessionName()).toBeUndefined();
-		expect(entries).not.toHaveBeenCalled();
-	});
-});
-
-describe("SessionManager compaction boundaries", () => {
-	it("restores retain-none compaction without deleting earlier transcript entries", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-context-window-"));
-		try {
-			const session = SessionManager.create("/test/project", dir);
-			session.appendMessage({ role: "user", content: "old request", timestamp: 1 });
-			session.appendMessage(fauxAssistantMessage("old response"));
-			const compactionId = session.appendCompaction("continue here", null, 1234);
-			session.appendMessage({ role: "user", content: "new request", timestamp: 2 });
-
-			const file = session.getSessionFile();
-			expect(file).toBeDefined();
-			const restored = SessionManager.open(file!, dir);
-
-			expect(restored.getEntries()).toHaveLength(4);
-			expect(restored.getEntry(compactionId)).toMatchObject({
-				type: "compaction",
-				summary: "continue here",
-				firstKeptEntryId: compactionId,
-			});
-			expect(restored.buildSessionContext().messages.map((message) => message.role)).toEqual([
-				"compactionSummary",
-				"user",
-			]);
-
-			const forkFile = restored.createBranchedSession(restored.getLeafId()!);
-			const fork = SessionManager.open(forkFile!, dir);
-			expect(fork.getEntries()).toEqual(restored.getEntries());
-			expect(fork.buildSessionContext().messages).toEqual([
-				expect.objectContaining({ role: "compactionSummary", summary: "continue here" }),
-				expect.objectContaining({ role: "user", content: "new request" }),
-			]);
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
+		// buildSessionContext should work (custom entries skipped in messages)
+		const ctx = session.buildSessionContext();
+		expect(ctx.messages).toHaveLength(2); // only message entries
 	});
 });

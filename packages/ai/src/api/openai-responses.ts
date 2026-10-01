@@ -21,19 +21,11 @@ import { headersToRecord } from "../utils/headers.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getCurrentTools, getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import {
-	convertResponsesMessages,
-	convertResponsesTools,
-	getInitialResponsesEffort,
-	processResponsesStream,
-	resolveResponsesEffort,
-	resolveResponsesTranscript,
-	supportsPositionalResponsesEffort,
-} from "./openai-responses-shared.ts";
+import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
@@ -89,10 +81,6 @@ function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEn
 
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {
-		supportsAllowedTools:
-			model.compat?.supportsAllowedTools ??
-			(model.provider === "openai" && /^https:\/\/api\.openai\.com(?:\/|$)/.test(model.baseUrl)),
-		supportsReasoningEffortUpdates: model.compat?.supportsReasoningEffortUpdates ?? false,
 		supportsDeveloperRole: model.compat?.supportsDeveloperRole ?? true,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		sessionAffinityFormat: model.compat?.sessionAffinityFormat ?? detectSessionAffinityFormat(model),
@@ -142,11 +130,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 	options?: OpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveResponsesTranscript(
-		model,
-		context,
-		getCompat(model).supportsMidConvoSystemMessages,
-	);
+	const normalizedContext = resolveTranscript(context, getCompat(model).supportsMidConvoSystemMessages);
 
 	// Start async processing
 	(async () => {
@@ -187,33 +171,6 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				cacheSessionId,
 			);
 			let params = buildParams(model, normalizedContext, options, compat, grammarToolInputProperties);
-			if (supportsPositionalResponsesEffort(model, { ...model.samplingParams, ...options?.samplingParams }))
-				output.providerThinkingLevel = resolveResponsesEffort(model, options?.reasoningEffort);
-			const activeTools = getCurrentTools(context.messages);
-			if (
-				compat.supportsAllowedTools &&
-				(!options?.toolChoice || options.toolChoice === "auto") &&
-				getDeclaredTools(normalizedContext.messages).some(
-					(tool) => !activeTools.some((active) => active.name === tool.name),
-				)
-			) {
-				params.tool_choice =
-					activeTools.length === 0
-						? "none"
-						: {
-								type: "allowed_tools",
-								mode: "auto",
-								tools: activeTools.map((tool) => ({
-									type:
-										tool.constrainedSampling &&
-										tool.constrainedSampling.type === "grammar" &&
-										compat.supportsOpenAIGrammarTools
-											? "custom"
-											: "function",
-									name: tool.name,
-								})),
-							};
-			}
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
@@ -237,6 +194,9 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			await processResponsesStream(openaiStream, output, stream, model, {
 				onProviderStreamEvent: options?.onProviderStreamEvent,
 				serviceTier: options?.serviceTier,
+				// Ultrafast pricing requires terminal confirmation, not just a requested tier.
+				resolveServiceTier: (returned, requested) =>
+					returned ?? (requested === "ultrafast" ? undefined : requested),
 				grammarToolInputProperties,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			});
@@ -356,10 +316,7 @@ function buildParams(
 		context.messages,
 		compat.supportsAdditionalTools || compat.supportsToolSearch,
 	);
-	const positional = supportsPositionalResponsesEffort(model, { ...model.samplingParams, ...options?.samplingParams });
-	const effort = positional ? resolveResponsesEffort(model, options?.reasoningEffort) : undefined;
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
-		reasoningEffort: effort,
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
 		supportsAdditionalTools: compat.supportsAdditionalTools,
@@ -424,11 +381,6 @@ function buildParams(
 		if (model.provider === "xai") params.include = ["reasoning.encrypted_content"];
 	}
 
-	if (effort !== undefined)
-		params.reasoning = {
-			...params.reasoning,
-			effort: getInitialResponsesEffort(model, context, effort) as NonNullable<typeof params.reasoning>["effort"],
-		};
 	// Last so custom keys override the named request fields. Per-request keys override model defaults.
 	Object.assign(params, model.samplingParams, options?.samplingParams);
 

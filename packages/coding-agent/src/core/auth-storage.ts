@@ -3,18 +3,16 @@
  * Provider auth orchestration belongs to ModelRuntime and pi-ai Models.
  */
 
-import { execFileSync } from "node:child_process";
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
-import { constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { access, chmod, lstat, mkdtemp, realpath, rename, rm, writeFile } from "fs/promises";
-import { basename, dirname, join } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { setTimeout as sleep } from "timers/promises";
 import { getAgentDir } from "../config.ts";
 import { raceWithAbortSignal } from "../utils/abort.ts";
+import { atomicWriteFileSync, resolveFileTarget } from "../utils/atomic-file.ts";
 import { getFileRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
-import { CheckpointActivity } from "./checkpoint.ts";
 import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
 
 type AuthStorageData = Record<string, Credential>;
@@ -23,95 +21,6 @@ type LockResult<T> = {
 	result: T;
 	next?: string;
 };
-
-// The mode applies only on creation so administrator-managed modes and ACLs remain intact.
-const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
-
-async function publishStoredFile(path: string, content: string, signal?: AbortSignal): Promise<void> {
-	// Resolve the parent separately if a mutation removed the file after locking it.
-	// This also preserves symlinked parent/.. traversal when recreating the file.
-	const target = await realpath(path).catch(async (error: NodeJS.ErrnoException) => {
-		if (error.code !== "ENOENT") throw error;
-		const entry = await lstat(path).catch((cause: NodeJS.ErrnoException) => {
-			if (cause.code === "ENOENT") return undefined;
-			throw cause;
-		});
-		if (entry) throw error; // Never replace a dangling symlink.
-		return join(await realpath(dirname(path)), basename(path));
-	});
-	const previous = await lstat(target).catch((error: NodeJS.ErrnoException) => {
-		if (error.code === "ENOENT") return undefined;
-		throw error;
-	});
-	if (previous) {
-		if (!previous.isFile()) throw new Error(`Cannot save a non-regular file: ${target}`);
-		await access(target, constants.W_OK);
-	}
-	signal?.throwIfAborted();
-	const stageDir = await mkdtemp(join(dirname(target), ".pi-auth-"));
-	try {
-		// A parent ACL must not grant access to the temporary copy of the credentials.
-		if (process.platform === "darwin") execFileSync("/bin/chmod", ["-N", stageDir]);
-		// Keep mkdtemp's zero ACL mask while restoring owner access and removing inherited defaults.
-		if (process.platform === "linux") {
-			execFileSync("/usr/bin/setfacl", ["-n", "-m", "u::rwx", "-k", stageDir]);
-			if ((await lstat(stageDir)).mode & 0o077) throw new Error("Staging directory permissions widened");
-		}
-		const stage = join(stageDir, "file");
-		if (previous) {
-			if (process.platform === "win32") {
-				await writeFile(stage, "", { flag: "wx", mode: 0o600 });
-				const source = target.replaceAll("'", "''");
-				const destination = stage.replaceAll("'", "''");
-				const script = `$ErrorActionPreference = 'Stop'; $acl = Get-Acl -LiteralPath '${source}'; Set-Acl -LiteralPath '${destination}' -AclObject $acl`;
-				const powershell = join(
-					process.env.SystemRoot ?? "C:\\Windows",
-					"System32",
-					"WindowsPowerShell",
-					"v1.0",
-					"powershell.exe",
-				);
-				execFileSync(
-					powershell,
-					["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-					{ windowsHide: true },
-				);
-			} else {
-				if (process.platform === "linux") {
-					// An empty sibling inherits the parent's setgid group even if repairing stageDir clears its setgid bit.
-					const sibling = `${stageDir}.file`;
-					try {
-						await writeFile(sibling, "", { flag: "wx", mode: 0o600 });
-						await rename(sibling, stage);
-					} finally {
-						await rm(sibling, { force: true }).catch(() => {});
-					}
-					execFileSync("/usr/bin/setfacl", ["-b", stage]);
-					await chmod(stage, 0o600);
-				}
-				// Linux security labels are extended attributes; -p alone does not copy them.
-				execFileSync(
-					"/bin/cp",
-					process.platform === "linux" ? ["-p", "--preserve=xattr", target, stage] : ["-p", target, stage],
-				);
-				const staged = await lstat(stage);
-				if (
-					staged.uid !== previous.uid ||
-					staged.gid !== previous.gid ||
-					(staged.mode & 0o7777) !== (previous.mode & 0o7777)
-				) {
-					throw new Error(`Could not preserve file ownership and mode: ${target}`);
-				}
-			}
-		}
-		signal?.throwIfAborted();
-		await writeFile(stage, content, { encoding: "utf-8", mode: 0o600, flag: previous ? "w" : "wx", signal });
-		signal?.throwIfAborted();
-		await rename(stage, target);
-	} finally {
-		await rm(stageDir, { recursive: true, force: true }).catch(() => {});
-	}
-}
 
 type AuthFileReload = {
 	controller: AbortController;
@@ -136,9 +45,6 @@ export interface AuthStorageBackend {
 }
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
-	// Read caches can share an in-flight reload across backend instances. Own actual locks,
-	// not just callers racing those reads against cancellation. Also used by FileModelsStore.
-	static readonly checkpointActivity = new CheckpointActivity();
 	private authPath: string;
 
 	constructor(authPath: string = join(getAgentDir(), "auth.json")) {
@@ -154,7 +60,11 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 	private ensureFileExists(): void {
 		if (!existsSync(this.authPath)) {
-			writeFileSync(this.authPath, "{}", AUTH_FILE_WRITE_OPTIONS);
+			try {
+				writeFileSync(resolveFileTarget(this.authPath), "{}", { encoding: "utf8", mode: 0o600, flag: "wx" });
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			}
 		}
 	}
 
@@ -186,7 +96,6 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	}
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
-		FileAuthStorageBackend.checkpointActivity.invalidate();
 		this.ensureParentDir();
 		this.ensureFileExists();
 
@@ -196,7 +105,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
+				atomicWriteFileSync(this.authPath, next);
 			}
 			return result;
 		} finally {
@@ -246,14 +155,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		}
 	}
 
-	withLockAsync<T>(
-		fn: (current: string | undefined) => Promise<LockResult<T>>,
-		options?: AuthOperationOptions,
-	): Promise<T> {
-		return FileAuthStorageBackend.checkpointActivity.run(() => this.runWithLockAsync(fn, options));
-	}
-
-	private async runWithLockAsync<T>(
+	async withLockAsync<T>(
 		fn: (current: string | undefined) => Promise<LockResult<T>>,
 		options?: AuthOperationOptions,
 	): Promise<T> {
@@ -283,7 +185,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			throwIfCompromised();
 			options?.signal?.throwIfAborted();
 			if (next !== undefined) {
-				await publishStoredFile(this.authPath, next, options?.signal);
+				atomicWriteFileSync(this.authPath, next);
 			}
 			throwIfCompromised();
 			return result;

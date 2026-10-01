@@ -339,23 +339,21 @@ describe("Anthropic raw SSE parsing", () => {
 			{ client: createFakeAnthropicClient(createSseResponse(events)) },
 		).result();
 
-		expect(result.diagnostics?.filter((diagnostic) => diagnostic.type === "anthropic_input_transformations")).toEqual(
-			[
-				{
-					type: "anthropic_input_transformations",
-					timestamp: expect.any(Number),
-					details: {
-						transformations: [
-							{
-								type: "thinking_dropped",
-								path: "messages.3.content.0",
-								reason: "model_binding_mismatch",
-							},
-						],
-					},
+		expect(result.diagnostics).toEqual([
+			{
+				type: "anthropic_input_transformations",
+				timestamp: expect.any(Number),
+				details: {
+					transformations: [
+						{
+							type: "thinking_dropped",
+							path: "messages.3.content.0",
+							reason: "model_binding_mismatch",
+						},
+					],
 				},
-			],
-		);
+			},
+		]);
 	});
 	it("repairs malformed SSE JSON and malformed streamed tool JSON", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");

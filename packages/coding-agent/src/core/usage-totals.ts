@@ -1,5 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai/compat";
-import { getSessionEntryMetadata, type SessionEntry, type SessionEntryMetadata } from "./session-manager.ts";
+import type { SessionEntry } from "./session-manager.ts";
 
 export interface UsageTotals {
 	input: number;
@@ -58,13 +58,10 @@ export interface UsageCostBreakdownEntry {
 }
 
 /** Group model-attributed usage by model and all other usage into a separate bucket. */
-export function getUsageCostBreakdown(
-	entries: Iterable<SessionEntry | SessionEntryMetadata>,
-): UsageCostBreakdownEntry[] {
+export function getUsageCostBreakdown(entries: SessionEntry[]): UsageCostBreakdownEntry[] {
 	const totalsByKey = new Map<string, UsageTotals>();
 
-	for (const source of entries) {
-		const entry = "sequence" in source ? source : getSessionEntryMetadata(source);
+	for (const entry of entries) {
 		let key: string | undefined;
 		let usage: Usage | undefined;
 		if (entry.type === "message" && entry.message.role === "assistant") {

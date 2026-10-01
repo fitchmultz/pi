@@ -1,18 +1,12 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { JsonObject } from "@earendil-works/pi-ai";
 import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import {
-	type CompactionEntry,
-	type ModelChangeEntry,
-	type SessionEntry,
-	SessionManager,
-	type SessionMessageEntry,
-	type SessionTreeNode,
+import type {
+	ModelChangeEntry,
+	SessionEntry,
+	SessionMessageEntry,
+	SessionTreeNode,
 } from "../src/core/session-manager.ts";
 import { TreeSelectorComponent } from "../src/modes/interactive/components/tree-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -65,11 +59,7 @@ function assistantMessage(id: string, parentId: string | null, text: string): Se
 }
 
 // Helper to create a tool-call-only assistant message (filtered out in default mode)
-function toolCallOnlyAssistant(
-	id: string,
-	parentId: string | null,
-	args: JsonObject = { path: "test.ts" },
-): SessionMessageEntry {
+function toolCallOnlyAssistant(id: string, parentId: string | null): SessionMessageEntry {
 	return {
 		type: "message",
 		id,
@@ -77,7 +67,7 @@ function toolCallOnlyAssistant(
 		timestamp: new Date().toISOString(),
 		message: {
 			role: "assistant",
-			content: [{ type: "toolCall", id: `tc-${id}`, name: "read", arguments: args }],
+			content: [{ type: "toolCall", id: `tc-${id}`, name: "read", arguments: { path: "test.ts" } }],
 			api: "anthropic-messages",
 			provider: "anthropic",
 			model: "claude-sonnet-4",
@@ -136,74 +126,6 @@ function buildTree(entries: Array<SessionEntry>): SessionTreeNode[] {
 }
 
 describe("TreeSelectorComponent", () => {
-	test("searches a saved Bash command beyond its bounded preview", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-tree-command-"));
-		try {
-			const manager = SessionManager.create(directory, directory);
-			manager.appendMessage({ role: "user", content: "start", timestamp: 1 });
-			const id = manager.appendMessage({
-				role: "bashExecution",
-				command: `${"prefix ".repeat(60)}needle`,
-				output: "",
-				exitCode: 0,
-				cancelled: false,
-				truncated: false,
-				timestamp: 2,
-			});
-			const selector = new TreeSelectorComponent(
-				manager.getTree(),
-				id,
-				24,
-				() => {},
-				() => {},
-			);
-			selector.handleInput("needle");
-			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(id);
-		} finally {
-			rmSync(directory, { recursive: true, force: true });
-		}
-	});
-	for (const scenario of [
-		{
-			json: { path: "/rows", fields: ["name", "status"] },
-			expected: '[read: report.txt json={"path":"/rows","fields":["name","status"]}:2-4]',
-		},
-		{ json: undefined, expected: "[read: report.txt:2-4]" },
-	]) {
-		test(`renders the selected read label as ${scenario.expected}`, () => {
-			const call = toolCallOnlyAssistant("read-call", null, {
-				path: "report.txt",
-				...(scenario.json === undefined ? {} : { json: scenario.json }),
-				offset: 2,
-				limit: 3,
-			});
-			const result: SessionMessageEntry = {
-				type: "message",
-				id: "read-result",
-				parentId: call.id,
-				timestamp: new Date().toISOString(),
-				message: {
-					role: "toolResult",
-					toolCallId: "tc-read-call",
-					toolName: "read",
-					content: [],
-					isError: false,
-					timestamp: Date.now(),
-				},
-			};
-			const selector = new TreeSelectorComponent(
-				buildTree([call, result]),
-				result.id,
-				24,
-				() => {},
-				() => {},
-			);
-
-			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(result.id);
-			expect(selector.render(160).map(stripVTControlCharacters).join("\n")).toContain(scenario.expected);
-		});
-	}
-
 	describe("initial selection with metadata entries", () => {
 		test("focuses nearest visible ancestor when currentLeafId is a model_change with sibling branch", () => {
 			// Tree structure:
@@ -361,43 +283,6 @@ describe("TreeSelectorComponent", () => {
 			// (since that's what we navigated to via parent traversal)
 			selector.handleInput("\x04"); // Ctrl+D
 			expect(list.getSelectedNode()?.entry.id).toBe("user-2");
-		});
-	});
-
-	describe("compaction", () => {
-		test("renders, searches, and copies the persisted summary", () => {
-			const boundary: CompactionEntry = {
-				type: "compaction",
-				id: "window-2",
-				parentId: "user-1",
-				timestamp: new Date().toISOString(),
-				tokensBefore: 42_000,
-				summary: "resume checkout investigation",
-				firstKeptEntryId: "user-1",
-			};
-			const tree = buildTree([
-				userMessage("user-1", null, "start"),
-				boundary,
-				assistantMessage("asst-1", "window-2", "continued"),
-			]);
-			const selector = new TreeSelectorComponent(
-				tree,
-				"asst-1",
-				24,
-				() => {},
-				() => {},
-			);
-
-			expect(selector.render(100).map(stripVTControlCharacters).join("\n")).toContain("[compaction: 42k tokens]");
-			selector.handleInput("compaction");
-			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("window-2");
-
-			let copied: string | undefined;
-			selector.onCopy = (text) => {
-				copied = text;
-			};
-			selector.getTreeList().copySelected();
-			expect(copied).toBe("resume checkout investigation");
 		});
 	});
 

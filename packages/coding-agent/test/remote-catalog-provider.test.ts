@@ -72,6 +72,45 @@ async function refreshProvider(
 afterEach(() => vi.restoreAllMocks());
 
 describe("remote catalog provider", () => {
+	// #127: newer pi.dev overlays must not reintroduce the invalid dotted passthrough ID.
+	it("normalizes fetched and restored Cloudflare Claude IDs before merging with the baseline", async () => {
+		const baseline: Model<"anthropic-messages"> = {
+			...model("claude-opus-4-6"),
+			api: "anthropic-messages",
+			compat: undefined,
+			provider: "cloudflare-ai-gateway",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/account/gateway/anthropic",
+		};
+		const dynamic = { ...baseline, id: "claude-opus-4.6", name: "Updated Claude" };
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify([dynamic])));
+		const makeProvider = () =>
+			withRemoteCatalog(
+				createProvider({
+					id: "cloudflare-ai-gateway",
+					auth: { apiKey: { name: "Offline", resolve: async () => ({ auth: {} }) } },
+					models: [baseline],
+					api: {
+						stream: () => {
+							throw new Error("unused");
+						},
+						streamSimple: () => {
+							throw new Error("unused");
+						},
+					},
+				}),
+			);
+		const store = new InMemoryModelsStore();
+		const provider = makeProvider();
+		await refreshProvider(provider, store);
+		expect(provider.getModels().map(({ id, name }) => ({ id, name }))).toEqual([
+			{ id: "claude-opus-4-6", name: "Updated Claude" },
+		]);
+		const restored = makeProvider();
+		await refreshProvider(restored, store, { allowNetwork: false });
+		expect(restored.getModels()).toEqual(provider.getModels());
+		expect(restored.getAllModels?.()).toEqual(provider.getModels());
+	});
+
 	it("parses keyed catalogs, sends version headers, observes the refresh TTL, and supports forced refreshes", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			async () =>
@@ -142,81 +181,6 @@ describe("remote catalog provider", () => {
 		expect(models.getModel("test-provider", "flux")).toBeUndefined();
 		const stored = await store.read(provider.id);
 		expect(stored?.models.map((entry) => entry.id)).toEqual(["chat", "flux", "jev"]);
-	});
-
-	it("normalizes Cloudflare Anthropic IDs for network and restored catalogs without merging different model types", async () => {
-		const id = "anthropic/claude-opus-4.6";
-		const chat = {
-			...model(id),
-			api: "anthropic-messages" as const,
-			compat: undefined,
-			provider: "cloudflare-ai-gateway",
-		};
-		const image = {
-			...model(id),
-			type: "image" as const,
-			api: "openrouter-images" as const,
-			output: ["image" as const],
-			provider: chat.provider,
-		};
-		const baseline = createProvider({
-			id: chat.provider,
-			models: [{ ...chat, id: "anthropic/claude-opus-4-6", name: "static" }],
-			auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
-			api: {
-				stream: () => {
-					throw new Error("unused");
-				},
-				streamSimple: () => {
-					throw new Error("unused");
-				},
-			},
-		});
-		vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response(JSON.stringify({ models: [chat, image, { ...chat, id: 42 }] })),
-		);
-		const store = new InMemoryModelsStore();
-		const network = withRemoteCatalog(baseline);
-		await refreshProvider(network, store);
-		const restored = withRemoteCatalog(baseline);
-		await refreshProvider(restored, store, { allowNetwork: false });
-		for (const provider of [network, restored]) {
-			expect(provider.getModels().map((entry) => entry.id)).toEqual(["anthropic/claude-opus-4-6"]);
-			expect(provider.getModels()[0].name).toBe(id);
-			expect(provider.getAllModels?.().map((entry) => [entry.type ?? "chat", entry.id])).toEqual([
-				["chat", "anthropic/claude-opus-4-6"],
-				["image", id],
-			]);
-		}
-	});
-
-	it("merges a large restored overlay in linear work while retaining replacement and append order", async () => {
-		let idReads = 0;
-		const baseline = Array.from({ length: 500 }, (_, index) => {
-			const entry = model(`model-${index}`);
-			return Object.defineProperty(entry, "id", {
-				enumerable: true,
-				get: () => {
-					idReads++;
-					return `model-${index}`;
-				},
-			});
-		});
-		const overlay = Array.from({ length: 500 }, (_, index) => ({
-			...model(`model-${index + 250}`),
-			name: `remote-${index + 250}`,
-		}));
-		const store = new InMemoryModelsStore();
-		await store.write("test-provider", { models: overlay });
-		const provider = withRemoteCatalog({ ...testProvider(), getModels: () => baseline });
-		await refreshProvider(provider, store, { allowNetwork: false });
-		idReads = 0;
-		const merged = provider.getModels();
-		expect(merged.map((entry) => entry.id)).toEqual(Array.from({ length: 750 }, (_, index) => `model-${index}`));
-		expect(merged[249].name).toBe("model-249");
-		expect(merged[250].name).toBe("remote-250");
-		expect(merged[749].name).toBe("remote-749");
-		expect(idReads).toBeLessThanOrEqual(1500);
 	});
 
 	it("prefers the newer of the generated and remote catalogs", async () => {

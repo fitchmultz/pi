@@ -14,8 +14,6 @@ import {
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { CacheWarmingAction } from "../cache-warmer.ts";
-import { CheckpointActivity } from "../checkpoint.ts";
-import type { CompactionSettings } from "../compaction/index.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -82,8 +80,6 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionBoundaryDraft,
-	SessionCheckpointEvent,
-	SessionCheckpointResult,
 	SessionShutdownEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -192,7 +188,6 @@ type RunnerEmitEvent = Exclude<
 	| MessageEndEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
-	| SessionCheckpointEvent
 	| TurnEndEvent
 	| AgentBeforeSettleEvent
 >;
@@ -220,32 +215,45 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
-// ponytail: attribute only the initial synchronous invocation; profile work after the first await separately.
-const SLOW_HANDLER_MS = 100;
-// A footer alone must not consume the TUI's entire 16 ms render interval.
-const SLOW_FOOTER_MS = 16;
 const slowWarnings = new WeakMap<Extension, Set<string>>();
 
 function warnSlowCall(
 	extension: Extension,
-	event: string,
+	kind: string,
 	elapsed: number,
-	threshold: number,
+	budget: number,
 	report: ExtensionErrorListener,
 ): void {
-	if (elapsed <= threshold) return;
-	let warned = slowWarnings.get(extension);
-	if (!warned) {
-		warned = new Set();
-		slowWarnings.set(extension, warned);
+	if (elapsed <= budget) return;
+	const warned = slowWarnings.get(extension) ?? new Set<string>();
+	if (warned.has(kind)) return;
+	warned.add(kind);
+	slowWarnings.set(extension, warned);
+	try {
+		report({
+			extensionPath: extension.path,
+			event: kind,
+			error: `Non-fatal performance warning: ${kind} blocked the event loop for ${elapsed.toFixed(1)} ms (budget ${budget} ms). Awaited work is not counted; nothing was cancelled. Further warnings for this extension and kind are suppressed until reload.`,
+		});
+	} catch {
+		// Diagnostic listeners must not change handler or render results.
 	}
-	if (warned.has(event)) return;
-	warned.add(event);
-	report({
-		extensionPath: extension.path,
-		event,
-		error: `Non-fatal performance warning: ${event} blocked the event loop for ${elapsed.toFixed(1)} ms ${event === "footer" ? "during render" : "before returning or awaiting"} (budget ${threshold} ms). Awaited work is not counted and nothing was cancelled. Avoid full-history queries on hot paths. Further warnings for this extension and kind are suppressed until reload.`,
-	});
+}
+
+// ponytail: time only the initial synchronous invocation; profile work after the first await separately.
+function invokeHandler(
+	extension: Extension,
+	handler: (...args: unknown[]) => Promise<unknown>,
+	event: ExtensionEvent,
+	ctx: ExtensionContext | ProjectTrustContext,
+	report: ExtensionErrorListener,
+): Promise<unknown> {
+	const started = performance.now();
+	try {
+		return handler(event, ctx);
+	} finally {
+		warnSlowCall(extension, event.type, performance.now() - started, 100, report);
+	}
 }
 
 type BoundaryBaseEvent =
@@ -336,16 +344,9 @@ export async function emitProjectTrustEvent(
 		// The first project_trust handler that returns yes/no wins; undecided falls through.
 		for (const handler of handlers) {
 			try {
-				let pending: unknown;
-				const started = performance.now();
-				try {
-					pending = handler(event, ctx);
-				} finally {
-					warnSlowCall(ext, event.type, performance.now() - started, SLOW_HANDLER_MS, (error) =>
-						errors.push(error),
-					);
-				}
-				const handlerResult = (await pending) as ProjectTrustEventResult;
+				const handlerResult = (await invokeHandler(ext, handler, event, ctx, (error) =>
+					errors.push(error),
+				)) as ProjectTrustEventResult;
 				if (handlerResult.trusted === "undecided") {
 					continue;
 				}
@@ -397,6 +398,7 @@ const noOpUIContext: ExtensionUIContext = {
 };
 
 export class ExtensionRunner {
+	private readonly extensionUIContexts = new WeakMap<ExtensionUIContext, Map<Extension, ExtensionUIContext>>();
 	private extensions: Extension[];
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
@@ -413,12 +415,7 @@ export class ExtensionRunner {
 	private waitForIdleFn: () => Promise<void> = async () => {};
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
-	private isBashRunningFn: () => boolean = () => false;
-	private hasPendingSteeringMessagesFn: () => boolean = () => false;
-	private getPendingNextTurnCountFn: () => number = () => 0;
-	private getPendingInputCountFn: () => number = () => 0;
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
-	private getCompactionSettingsFn!: () => CompactionSettings;
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () =>
@@ -438,42 +435,6 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
-	/** Keyed by base UI: interactive shortcuts pass their own UI, distinct from the prompt-tracked runner UI. */
-	private extensionUIContexts = new WeakMap<ExtensionUIContext, Map<Extension, ExtensionUIContext>>();
-	private reportPerformanceWarning: ExtensionErrorListener = (error) => {
-		try {
-			this.emitError(error);
-		} catch {
-			// A diagnostic listener must not replace an extension's result or error.
-		}
-	};
-
-	readonly checkpointActivity: CheckpointActivity;
-
-	/** Optional persistence barrier; legacy persisted entries need no hook. Never run shutdown to save. */
-	prepareCheckpoint(event: SessionCheckpointEvent): Promise<string[]> {
-		return this.checkpointActivity.run(() => this.prepareCheckpointHandlers(event));
-	}
-
-	private async prepareCheckpointHandlers(event: SessionCheckpointEvent): Promise<string[]> {
-		const blockers: string[] = [];
-		const ctx = this.createContext();
-		for (const { ext: extension, handlers } of snapshotEventHandlers(this.extensions, "session_checkpoint")) {
-			if (handlers.length === 0 && extension.handlers.get("session_shutdown")?.length) {
-				blockers.push(`Extension requires shutdown: ${extension.path}`);
-			}
-			for (const handler of handlers) {
-				event.signal.throwIfAborted();
-				// Unlike notification events, a failed persistence barrier rejects the checkpoint.
-				const result = (await this.callHandler(extension, handler, event, ctx)) as
-					| SessionCheckpointResult
-					| undefined;
-				if (result?.sleepReady !== true)
-					blockers.push(`Extension not resumable: ${extension.path}${result?.reason ? `: ${result.reason}` : ""}`);
-			}
-		}
-		return blockers;
-	}
 
 	constructor(
 		extensions: Extension[],
@@ -484,7 +445,6 @@ export class ExtensionRunner {
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
-		this.checkpointActivity = runtime.checkpointActivity ??= new CheckpointActivity();
 		this.uiContext = noOpUIContext;
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
@@ -506,7 +466,6 @@ export class ExtensionRunner {
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
-		this.runtime.recordUsage = actions.recordUsage;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setLabel = actions.setLabel;
@@ -529,13 +488,8 @@ export class ExtensionRunner {
 		this.getSignalFn = contextActions.getSignal;
 		this.abortFn = contextActions.abort;
 		this.hasPendingMessagesFn = contextActions.hasPendingMessages;
-		this.isBashRunningFn = contextActions.isBashRunning ?? (() => false);
-		this.hasPendingSteeringMessagesFn = contextActions.hasPendingSteeringMessages ?? (() => false);
-		this.getPendingNextTurnCountFn = contextActions.getPendingNextTurnCount ?? (() => 0);
-		this.getPendingInputCountFn = contextActions.getPendingInputCount ?? (() => 0);
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
-		this.getCompactionSettingsFn = contextActions.getCompactionSettings;
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 		this.getSystemPromptOptionsFn =
@@ -691,7 +645,7 @@ export class ExtensionRunner {
 		};
 
 		try {
-			return this.checkpointActivity.run(run).finally(finish);
+			return run().finally(finish);
 		} catch (err) {
 			finish();
 			throw err;
@@ -710,13 +664,6 @@ export class ExtensionRunner {
 
 	hasUI(): boolean {
 		return this.uiContext !== noOpUIContext;
-	}
-
-	resolveBashCwd(cwd: string): string {
-		for (const extension of this.extensions) {
-			for (const hook of extension.bashCwdHooks ?? []) cwd = hook(cwd);
-		}
-		return cwd;
 	}
 
 	getExtensionPaths(): string[] {
@@ -808,7 +755,7 @@ export class ExtensionRunner {
 				}
 				extensionShortcuts.set(normalizedKey, {
 					...shortcut,
-					handler: (ctx) => shortcut.handler(this.withExtensionUI(ctx, ext)),
+					handler: (ctx) => shortcut.handler(this.scopeContext(ctx, ext.path)),
 				});
 			}
 		}
@@ -902,10 +849,7 @@ export class ExtensionRunner {
 
 		for (const ext of this.extensions) {
 			for (const command of ext.commands.values()) {
-				commands.push({
-					...command,
-					handler: (args, ctx) => command.handler(args, this.withExtensionUI(ctx, ext)),
-				});
+				commands.push(command);
 				counts.set(command.name, (counts.get(command.name) ?? 0) + 1);
 			}
 		}
@@ -949,33 +893,27 @@ export class ExtensionRunner {
 	}
 
 	getCommand(name: string): ResolvedCommand | undefined {
-		return this.resolveRegisteredCommands().find((command) => command.invocationName === name);
+		const command = this.resolveRegisteredCommands().find((command) => command.invocationName === name);
+		return command
+			? {
+					...command,
+					handler: (args, ctx) => command.handler(args, this.scopeContext(ctx, command.sourceInfo.path)),
+				}
+			: undefined;
 	}
 
-	/**
-	 * Request a graceful shutdown. Called by extension tools and event handlers.
-	 * The actual shutdown behavior is provided by the mode via bindExtensions().
-	 */
-	shutdown(): void {
-		this.shutdownHandler();
-	}
-
-	getActiveTools(): string[] {
-		this.assertActive();
-		return this.runtime.getActiveTools();
-	}
-
-	private withExtensionUI<T extends ExtensionContext>(ctx: T, extension: Extension): T {
-		const runner = this;
+	/** Attribute custom footer rendering to the extension that installed it. */
+	scopeContext<T extends ExtensionContext>(ctx: T, extensionPath: string): T {
+		const extension = this.extensions.find((entry) => entry.path === extensionPath);
+		if (!extension) return ctx;
 		return new Proxy(ctx, {
-			get(target, key, receiver) {
+			get: (target, key, receiver) => {
 				if (key !== "ui") return Reflect.get(target, key, receiver);
-				runner.assertActive();
 				const base = ctx.ui;
-				let wrappers = runner.extensionUIContexts.get(base);
+				let wrappers = this.extensionUIContexts.get(base);
 				if (!wrappers) {
 					wrappers = new Map();
-					runner.extensionUIContexts.set(base, wrappers);
+					this.extensionUIContexts.set(base, wrappers);
 				}
 				let ui = wrappers.get(extension);
 				if (!ui) {
@@ -986,18 +924,19 @@ export class ExtensionRunner {
 								? (...args) => {
 										const component = factory(...args);
 										return {
-											render(width) {
+											render: (width) => {
 												const started = performance.now();
 												try {
 													return component.render(width);
 												} finally {
-													warnSlowCall(
-														extension,
-														"footer",
-														performance.now() - started,
-														SLOW_FOOTER_MS,
-														// Do not mutate the UI tree during its render pass.
-														(error) => queueMicrotask(() => runner.reportPerformanceWarning(error)),
+													warnSlowCall(extension, "footer", performance.now() - started, 16, (error) =>
+														queueMicrotask(() => {
+															try {
+																this.emitError(error);
+															} catch {
+																// Rendering diagnostics remain non-fatal.
+															}
+														}),
 													);
 												}
 											},
@@ -1019,27 +958,28 @@ export class ExtensionRunner {
 		});
 	}
 
-	private async callHandler(
+	private callHandler(
 		extension: Extension,
 		handler: (...args: unknown[]) => Promise<unknown>,
 		event: ExtensionEvent,
 		ctx: ExtensionContext,
 	): Promise<unknown> {
-		const scopedContext = this.withExtensionUI(ctx, extension);
-		let result: unknown;
-		const started = performance.now();
-		try {
-			result = handler(event, scopedContext);
-		} finally {
-			warnSlowCall(
-				extension,
-				event.type,
-				performance.now() - started,
-				SLOW_HANDLER_MS,
-				this.reportPerformanceWarning,
-			);
-		}
-		return await result;
+		return invokeHandler(extension, handler, event, this.scopeContext(ctx, extension.path), (error) =>
+			this.emitError(error),
+		);
+	}
+
+	/**
+	 * Request a graceful shutdown. Called by extension tools and event handlers.
+	 * The actual shutdown behavior is provided by the mode via bindExtensions().
+	 */
+	shutdown(): void {
+		this.shutdownHandler();
+	}
+
+	getActiveTools(): string[] {
+		this.assertActive();
+		return this.runtime.getActiveTools();
 	}
 
 	/**
@@ -1103,22 +1043,6 @@ export class ExtensionRunner {
 				runner.assertActive();
 				runner.abortFn();
 			},
-			isBashRunning: () => {
-				runner.assertActive();
-				return runner.isBashRunningFn();
-			},
-			hasPendingSteeringMessages: () => {
-				runner.assertActive();
-				return runner.hasPendingSteeringMessagesFn();
-			},
-			getPendingNextTurnCount: () => {
-				runner.assertActive();
-				return runner.getPendingNextTurnCountFn();
-			},
-			getPendingInputCount: () => {
-				runner.assertActive();
-				return runner.getPendingInputCountFn();
-			},
 			hasPendingMessages: () => {
 				runner.assertActive();
 				return runner.hasPendingMessagesFn();
@@ -1126,10 +1050,6 @@ export class ExtensionRunner {
 			shutdown: () => {
 				runner.assertActive();
 				runner.shutdownHandler();
-			},
-			getCompactionSettings: () => {
-				runner.assertActive();
-				return runner.getCompactionSettingsFn();
 			},
 			getContextUsage: () => {
 				runner.assertActive();
@@ -1150,16 +1070,10 @@ export class ExtensionRunner {
 	 * Create the context for executing the tool call `toolCallId`: the extension context plus
 	 * `tools` and `executeTool()`. `signal` is the default signal of nested calls.
 	 */
-	createToolContext(
-		toolCallId: string,
-		signal: AbortSignal | undefined,
-		extensionPath?: string,
-	): ExtensionToolContext {
+	createToolContext(toolCallId: string, signal: AbortSignal | undefined): ExtensionToolContext {
 		const runner = this;
-		const extension = this.extensions.find((ext) => ext.path === extensionPath);
-		const ctx = this.createContext();
 		// createContext() returns a fresh object, so adding properties does not affect other contexts.
-		return Object.defineProperties((extension ? this.withExtensionUI(ctx, extension) : ctx) as ExtensionToolContext, {
+		return Object.defineProperties(this.createContext() as ExtensionToolContext, {
 			tools: {
 				get() {
 					runner.assertActive();
@@ -1500,8 +1414,6 @@ export class ExtensionRunner {
 	 * handlers then see the full transcript and their output is used as returned.
 	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
-		// Request preparation owns these messages; each canonical projection decodes fresh bodies.
-		if (!this.hasHandlers("context") && !this.hasHandlers("context_with_system")) return messages;
 		const ctx = this.createContext();
 		let currentMessages = structuredClone(messages);
 

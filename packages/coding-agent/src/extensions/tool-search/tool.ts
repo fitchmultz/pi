@@ -16,13 +16,6 @@ import type {
 	ToolInfo,
 	ToolNamespace,
 } from "../../core/extensions/types.ts";
-import {
-	discoverMcpTools,
-	formatMcpDiscoveryCoverage,
-	isMcpDiscoveryTool,
-	type McpDiscoveryReport,
-	resolveToolNamespace,
-} from "../mcp/discovery.ts";
 
 export const TOOL_SEARCH_TOOL_NAME = "tool_search";
 export const DEFAULT_TOOL_SEARCH_LIMIT = 8;
@@ -109,7 +102,8 @@ function schemaText(schema: unknown, parts: string[]): void {
 
 /**
  * Search text of a tool: the name, the name with `_`
- * as spaces, the description, schema descriptions and property names, and namespace metadata.
+ * as spaces, the description, schema descriptions and property names, and the namespace with its
+ * description and instructions.
  */
 export function createToolSearchDocument(
 	tool: Pick<ToolInfo, "name" | "description" | "parameters">,
@@ -117,10 +111,7 @@ export function createToolSearchDocument(
 ): ToolSearchDocument {
 	const parts = [tool.name, tool.name.replaceAll("_", " "), tool.description];
 	schemaText(tool.parameters, parts);
-	if (namespace) {
-		parts.push(namespace.name, namespace.description ?? "");
-		if (namespace.instructions) parts.push(namespace.instructions);
-	}
+	if (namespace) parts.push(namespace.name, namespace.description ?? "", namespace.instructions ?? "");
 	return { name: tool.name, text: parts.filter((part) => part.trim()).join(" ") };
 }
 
@@ -167,8 +158,6 @@ export class Bm25Ranker implements ToolRanker {
 
 export const toolSearchSchema = Type.Object({
 	query: Type.String({ description: "Search query for deferred tools." }),
-	namespace: Type.Optional(Type.String({ description: "Search one namespace; discover only that MCP server." })),
-	server: Type.Optional(Type.String({ description: "MCP server name or namespace alias to discover and search." })),
 	limit: Type.Optional(
 		Type.Number({ description: `Maximum number of tools to return. Defaults to ${DEFAULT_TOOL_SEARCH_LIMIT}.` }),
 	),
@@ -189,7 +178,6 @@ export interface ToolSearchResultTool {
 export interface ToolSearchToolDetails {
 	/** Tools loaded by this call. */
 	loaded: string[];
-	coverage?: McpDiscoveryReport;
 }
 
 export interface ToolSearchToolOptions {
@@ -213,31 +201,22 @@ function searchAndLoad(
 	tools: NonNullable<ToolSearchToolOptions["tools"]>,
 	query: string,
 	limit: number,
-	namespace?: string,
-	callable?: ReadonlySet<string>,
 ): ToolSearchResultTool[] {
 	const active = tools.getActiveTools();
-	const candidates = tools
-		.getAllTools()
-		.filter(
-			(tool) =>
-				isSearchable(tool.exposure) &&
-				!isMcpDiscoveryTool(tool) &&
-				!active.includes(tool.name) &&
-				(!callable || callable.has(tool.name)) &&
-				(namespace === undefined || tool.namespace?.name === namespace),
-		);
+	const candidates = tools.getAllTools().filter((tool) => isSearchable(tool.exposure) && !active.includes(tool.name));
 	const documents = candidates.map((tool) => createToolSearchDocument(tool, tool.namespace));
 	const matches = new Bm25Ranker().rank(query, documents, limit);
-	if (matches.length > 0)
-		tools.setActiveTools([...active, ...matches.map((match) => match.name)], { preservePending: true });
+	if (matches.length > 0) tools.setActiveTools([...active, ...matches.map((match) => match.name)]);
 	return matches.map((match) => ({
 		name: match.name,
 		description: candidates.find((tool) => tool.name === match.name)?.description ?? "",
 	}));
 }
 
-/** Upstream's stable description: connecting or refreshing servers does not redeclare search. */
+/**
+ * The `tool_search` description. It does not list the searchable tools or their namespaces, so it
+ * stays the same while tools are registered, for example when MCP servers connect.
+ */
 export const TOOL_SEARCH_DESCRIPTION = `# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nSome of the tools, such as tools of MCP servers, may not have been provided to you upfront, and you should use this tool (\`${TOOL_SEARCH_TOOL_NAME}\`) to search for the required tools. For MCP tool discovery, always use \`${TOOL_SEARCH_TOOL_NAME}\`.`;
 
 export function createToolSearchToolDefinition(
@@ -251,65 +230,18 @@ export function createToolSearchToolDefinition(
 		parameters: toolSearchSchema,
 		// Searching is not something scripts need; it changes what the model sees.
 		exposure: "model-only",
-		async execute(_toolCallId, { query, limit, namespace, server }, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, { query, limit }) {
 			if (query.trim() === "") throw new Error("query must not be empty");
 			const max = limit ?? DEFAULT_TOOL_SEARCH_LIMIT;
 			if (!Number.isInteger(max) || max <= 0) throw new Error("limit must be a positive integer");
-			if (namespace !== undefined && server !== undefined)
-				throw new Error("Use either namespace or server, not both");
-			const scope = namespace ?? server;
-			if (scope !== undefined && scope.trim() === "") throw new Error("namespace/server must not be empty");
-			const previouslyActive = new Set(options.tools?.getActiveTools());
-			let coverage = await discoverMcpTools(ctx, undefined, signal);
-			const resolvedScope =
-				scope === undefined
-					? undefined
-					: (resolveToolNamespace(
-							[
-								...(coverage?.servers.map((entry) => entry.namespace) ?? []),
-								...(options.tools
-									?.getAllTools()
-									.flatMap((tool) => (tool.namespace ? [tool.namespace.name] : [])) ?? []),
-							],
-							scope,
-						) ?? scope);
-			const target = coverage?.servers.find((entry) => entry.namespace === resolvedScope);
-			if (target) coverage = await discoverMcpTools(ctx, target.name, signal);
-			const tools = options.tools
-				? searchAndLoad(
-						options.tools,
-						query,
-						max,
-						resolvedScope,
-						ctx ? new Set(ctx.tools.map((tool) => tool.name)) : undefined,
-					)
-				: [];
-			const active = new Set(options.tools?.getActiveTools());
-			const direct = target
-				? (options.tools
-						?.getAllTools()
-						.filter(
-							(tool) =>
-								tool.exposure === "direct" &&
-								tool.namespace?.name === resolvedScope &&
-								!previouslyActive.has(tool.name) &&
-								active.has(tool.name),
-						) ?? [])
-				: [];
+			const tools = options.tools ? searchAndLoad(options.tools, query, max) : [];
 			const text =
 				tools.length === 0
-					? target && direct.length
-						? `Discovered ${target.name}. Direct tools are available from your next call:\n${direct.map((tool) => `- ${tool.name}: ${tool.description.trim().split(/\r?\n/)[0]}`).join("\n")}`
-						: "No matching tools found."
+					? "No matching tools found."
 					: `Loaded ${tools.length} tool${tools.length === 1 ? "" : "s"}. They are available from your next call:\n${tools
 							.map((tool) => `- ${tool.name}: ${tool.description.trim().split(/\r?\n/)[0]}`)
 							.join("\n")}`;
-			const footer =
-				scope === undefined && coverage?.complete === false ? `\n\n${formatMcpDiscoveryCoverage(coverage)}` : "";
-			return {
-				content: [{ type: "text", text: text + footer }],
-				details: { loaded: [...tools, ...direct].map((tool) => tool.name), ...(coverage ? { coverage } : {}) },
-			};
+			return { content: [{ type: "text", text }], details: { loaded: tools.map((tool) => tool.name) } };
 		},
 	};
 }

@@ -168,20 +168,6 @@ class PendingMessageQueue {
 		return drained;
 	}
 
-	take(predicate: (message: AgentMessage) => boolean): AgentMessage[] {
-		const taken: AgentMessage[] = [];
-		this.messages = this.messages.filter((message) => {
-			if (!predicate(message)) return true;
-			taken.push(message);
-			return false;
-		});
-		return taken;
-	}
-
-	snapshot(): AgentMessage[] {
-		return this.messages.slice();
-	}
-
 	clear(): void {
 		this.messages = [];
 	}
@@ -208,14 +194,6 @@ export class Agent {
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	public streamFunction: StreamFn;
-	/** Close new requests without aborting responses already in flight. */
-	public requestAdmissionSignal?: AbortSignal;
-	/** Shared admission boundary for agent turns and host-owned requests such as summaries. */
-	public readonly streamResponse: StreamFn = (model, context, options) => {
-		this.requestAdmissionSignal?.throwIfAborted();
-		options?.signal?.throwIfAborted();
-		return this.streamFunction(model, context, options);
-	};
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
@@ -229,8 +207,6 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
 	public finishTurn?: FinishTurn;
-	/** Awaited after every turn-end listener, before the next request can start. */
-	public afterTurn?: (signal: AbortSignal) => Promise<void>;
 	public prepareRequest?: PrepareRequest;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
@@ -301,14 +277,6 @@ export class Agent {
 		return this._state;
 	}
 
-	get selectedModel(): Model<string> | undefined {
-		return this._state.model === DEFAULT_MODEL ? undefined : this._state.model;
-	}
-
-	set selectedModel(model: Model<string> | undefined) {
-		this._state.model = model ?? DEFAULT_MODEL;
-	}
-
 	/** Controls how queued steering messages are drained. */
 	set steeringMode(mode: QueueMode) {
 		this.steeringQueue.mode = mode;
@@ -351,21 +319,6 @@ export class Agent {
 	clearAllQueues(): void {
 		this.clearSteeringQueue();
 		this.clearFollowUpQueue();
-	}
-
-	/** Remove matching queued messages, steering first, preserving unmatched order and queue modes. */
-	takeQueuedMessages(predicate: (message: AgentMessage) => boolean): AgentMessage[] {
-		return [...this.steeringQueue.take(predicate), ...this.followUpQueue.take(predicate)];
-	}
-
-	/** Non-consuming complete queue snapshot, including image content. */
-	getQueuedMessages(): { steering: AgentMessage[]; followUp: AgentMessage[] } {
-		return { steering: this.steeringQueue.snapshot(), followUp: this.followUpQueue.snapshot() };
-	}
-
-	/** Returns true when steering messages await delivery, excluding follow-ups. */
-	hasQueuedSteeringMessages(): boolean {
-		return this.steeringQueue.hasItems();
 	}
 
 	/** Returns true when either queue still contains pending messages. */
@@ -428,7 +381,7 @@ export class Agent {
 	}
 
 	/** Continue from the current transcript. The last message must be a user or tool-result message. */
-	async continue(options?: { drainQueuedInput?: boolean }): Promise<void> {
+	async continue(): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
 		}
@@ -438,7 +391,7 @@ export class Agent {
 			throw new Error("No messages to continue from");
 		}
 
-		if (options?.drainQueuedInput !== false && lastMessage.role !== "user" && lastMessage.role !== "toolResult") {
+		if (lastMessage.role === "assistant") {
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
 				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
@@ -450,8 +403,7 @@ export class Agent {
 				await this.runPromptMessages(queuedFollowUps);
 				return;
 			}
-		}
-		if (lastMessage.role === "assistant") {
+
 			throw new Error("Cannot continue from message role: assistant");
 		}
 
@@ -488,7 +440,7 @@ export class Agent {
 				this.createLoopConfig(options),
 				(event) => this.processEvents(event),
 				signal,
-				this.streamResponse,
+				this.streamFunction,
 			);
 		});
 	}
@@ -500,7 +452,7 @@ export class Agent {
 				this.createLoopConfig(),
 				(event) => this.processEvents(event),
 				signal,
-				this.streamResponse,
+				this.streamFunction,
 			);
 		});
 	}
@@ -525,7 +477,6 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
-			getTools: () => this._state.tools,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			finishTurn: this.finishTurn,
@@ -543,15 +494,13 @@ export class Agent {
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
-				if (this.signal?.aborted || this.requestAdmissionSignal?.aborted) return [];
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
 				return this.steeringQueue.drain();
 			},
-			getFollowUpMessages: async () =>
-				this.signal?.aborted || this.requestAdmissionSignal?.aborted ? [] : this.followUpQueue.drain(),
+			getFollowUpMessages: async () => this.followUpQueue.drain(),
 		};
 	}
 
@@ -574,11 +523,7 @@ export class Agent {
 		try {
 			await executor(abortController.signal);
 		} catch (error) {
-			if (this.requestAdmissionSignal?.aborted && error === this.requestAdmissionSignal.reason) {
-				await this.processEvents({ type: "agent_end", messages: [] });
-			} else {
-				await this.handleRunFailure(error, abortController.signal.aborted);
-			}
+			await this.handleRunFailure(error, abortController.signal.aborted);
 		} finally {
 			this.finishRun();
 		}
@@ -664,6 +609,5 @@ export class Agent {
 		for (const listener of this.listeners) {
 			await listener(event, signal);
 		}
-		if (event.type === "turn_end") await this.afterTurn?.(signal);
 	}
 }

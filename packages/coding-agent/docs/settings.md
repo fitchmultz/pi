@@ -18,8 +18,6 @@ This reference lists user-configurable settings, their types, defaults, and purp
 | `showCacheMissNotices` | boolean | `false` | Show notices for significant cache misses, successful cache warming, compaction usage, and provider recovery. |
 | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"streaming"` | Keep eligible provider prompt caches warm during active runs or, with `"idle"`, between runs. Global setting only. |
 
-Cache miss notices report tokens not read from cache relative to the smaller of the previous and current prompts, separately from any actual decline in cached reads. Dollar amounts are estimated extra cost, not a billing adjustment. Notices and `/session` list observed changes, not proven causes: model changes, service tier changes, tool definition or instruction size changes, new connections, full resends after delta requests, and idle gaps beyond the known cache lifetime (five minutes when unknown). Provider-supplied reasons are shown as plain text when available; unavailable diagnostics are omitted, and dropped thinking blocks are grouped by reason with a count. Otherwise unexplained misses are `unclassified`. Multiple observations can apply to one miss. Equal-size instruction or tool edits cannot be detected from byte counts alone. Idle detection uses the configured model and retention lifetime; journals do not retain per-request lifetime overrides.
-
 Cache warming runs only when the model declares a cache lifetime and Pi estimates at least $0.05 in avoided cache-miss cost. Refresh usage counts toward session totals but does not enter model context. `/session` shows the next decision; extensions can override it with `cache_warming_decision`. See [Prompt Cache Lifetimes](models.md#prompt-cache-lifetimes).
 
 See [Choose a Model](models.md) for model selection and thinking controls.
@@ -39,11 +37,13 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `defaultTools` | `string[]` | `read`, `bash`, `background_command`, `edit`, `write` | Tools enabled at startup. Plain names replace the defaults; `+name` adds a tool and `-name` removes one. An empty array disables all built-in tools but not extension or SDK tools. |
-| `codemode.mode` | `"on"` \| `"only"` | `"on"` | How the `codemode` tool presents tools while it is active. `on`: declared tools get their `codemode` declaration appended to their description, and `codemode` lists only tools that are not declared (MCP `codemode` exposure). `only`: `codemode` lists every tool scripts can call, and active built-in and extension tools are hidden from the model, so it reaches them through `codemode`. |
+| `defaultTools` | `string[]` | `read`, `bash`, `edit`, `write` | Tools enabled at startup. Plain names replace the defaults; `+name` adds a tool and `-name` removes one. An empty array disables all built-in tools but not extension or SDK tools. |
+| `codemode.mode` | `"on"` \| `"only"` | `"on"` | How the `codemode` tool presents tools while it is active. `on`: declared tools get a note on calling them from scripts appended to their description, and `codemode` lists only tools that are not declared. `only`: `codemode` lists every tool scripts can call, and active built-in and extension tools are hidden from the model, so it reaches them through `codemode`. |
 | `codemode.inlineBudget` | number | `3000` | Estimated tokens (characters / 4) the `codemode` tool's description may spend on tool declarations. Tools that do not fit are left out and found with `searchTools()`. `0` lists only namespaces. |
 
-Available built-in tools are `read`, `bash`, `background_command`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. `defaultTools` can also name `codemode` and `tool_search`, which built-in extensions register inactive, and other extension tools registered inactive.
+The `builtin:background-command` extension registers `background_command` active by default. Use `"defaultTools": ["-background_command"]` to disable the tool, or `"extensions": ["-builtin:background-command"]` to disable the extension and its completion monitor. Plain `defaultTools` lists replace the complete selection. [Background commands](sdk.md#background-commands) use `shellPath` and `shellCommandPrefix` and store artifacts in the session directory.
+
+Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. `defaultTools` can also name `codemode` and `tool_search`, which built-in extensions register inactive, and other extension tools registered inactive.
 
 A list of only `+name` and `-name` entries changes the inherited selection instead of replacing it. For example, this enables `codemode` next to the default tools:
 
@@ -54,6 +54,8 @@ A list of only `+name` and `-name` entries changes the inherited selection inste
 ```
 
 This replaces `bash` with `powershell` and enables `grep`: `["-bash", "+powershell", "+grep"]`. Project settings apply on top of user settings: a project list with only `+name` and `-name` entries changes the user's selection, and a project list with a plain name replaces it. In one list, plain names form the selection, and `+name` and `-name` then apply in order.
+
+`/reload` enables tools newly added to `defaultTools`. It does not disable tools removed from it or re-enable unchanged tools you turned off. `--tools`, `--no-tools`, and `--no-builtin-tools` override `defaultTools`, also on reload.
 
 CLI tool options override this setting for one invocation; `--tools` does not accept `+name` or `-name`. See [Command Line](cli.md#tools).
 
@@ -90,9 +92,9 @@ See [Compaction Reference](compaction.md) for trigger, summarization, and valida
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `theme` | string | `"system"` | Built-in or custom theme name. `system` derives colors from the terminal theme. |
-| `quietStartup` | boolean | `false` | Hide the startup header. |
-| `compactView` | boolean | `false` | Group tools and operational updates behind Activity rows. Global default for new interactive instances; project settings cannot override it. |
-| `tuiMode` | `"regular" \| "fullscreen"` | `"regular"` | Interactive terminal UI mode. |
+| `quietStartup` | boolean \| `"header"` | `false` | `true` hides the startup header and loaded-resource listing. `"header"` keeps the header (version and key hints) but hides the model scope line and loaded-resource listing. |
+| `compactView` | boolean \| `"hybrid"` | `false` | Group tools and operational updates behind Activity rows. Global default for new interactive instances; project settings cannot override it. |
+| `tuiMode` | `"regular" \| "fullscreen"` | `"fullscreen"` | Interactive terminal UI mode. |
 | `fullscreenExitOutput` | `"transcript" \| "resume-hint"` | `"transcript"` | Output printed when fullscreen mode exits. |
 | `fullscreenScrollbar` | `"auto" \| "always" \| "hidden"` | `"auto"` | Fullscreen transcript scrollbar behavior. |
 | `fullscreenCopyOnSelect` | boolean | `true` | Copy selected text automatically in fullscreen mode. |
@@ -117,11 +119,13 @@ See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and p
 
 ### Compact view
 
-`/compact-view [on|off|toggle]` and `/settings` → **Compact view** update this UI and remember the default for future starts. Other running instances keep their own choice, including after `/reload`.
+`/compact-view [on|off|hybrid|toggle]` and `/settings` → **Compact view** update this UI immediately and save the preference for future starts. Other running instances keep their choice, including after `/reload`.
 
-User and assistant text remain visible. Intervening tools, shell commands, custom messages/entries, and routine notices form collapsed **Activity** groups with live counts and running/failure status. Fullscreen clicks open groups and individual details; inner controls keep their own behavior. Ctrl+O (`app.tools.expand`) expands or collapses all groups and output in either terminal mode. Later updates retain that choice. Input dialogs, the working indicator, warnings, and errors remain outside the groups.
+`true` (**on**) starts Activity groups collapsed. `"hybrid"` starts them expanded while keeping individual cards compact; clicking a heading still toggles that group. The settings selector cycles **off → on → hybrid**. Ctrl+O expands full output; toggling back restores the mode's group default.
 
-Enabling compact view collapses existing groups and cards. Disabling it restores ordinary presentation without expanding everything. Visible thinking separates groups; hidden thinking does not. This changes presentation only; `/compact` remains the context-compaction command.
+User and assistant text stay visible. Tools, shell commands, custom messages/entries, and routine notices form **Activity** groups with live call/update counts and running/failure status. Fullscreen clicks open groups and individual cards; inner controls keep their behavior. Ctrl+O (`app.tools.expand`) expands or collapses all groups and details in either terminal mode. Expanded cards retain full output, nested codemode calls, and supported images.
+
+Enabling on collapses existing groups and cards; enabling hybrid opens groups but keeps cards compact. Disabling it restores normal presentation without expanding everything. Visible thinking separates groups; hidden thinking does not. Input dialogs, the working indicator, warnings, and errors stay outside groups. Presentation changes do not alter model context or saved results; `/compact` remains the context-compaction command.
 
 ## Network and retries
 
@@ -140,10 +144,6 @@ Enabling compact view collapses existing groups and cards. Disabling it restores
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Maximum server-requested delay in milliseconds. Set to `0` to disable the limit. |
 
 Keep `retry.provider.maxRetries` at `0` unless provider-level retries are required. Provider retries can delay Pi from handling quota and usage-limit errors itself.
-
-Direct `openai` Responses requests use HTTP streaming; selecting a WebSocket transport does not enable direct OpenAI Responses WebSockets. Transport preferences apply only where the provider implements them.
-
-For `openai-codex`, recovery reconnects before falling back and returns to WebSockets after temporary HTTP recovery. See [Codex WebSocket recovery](websocket-recovery.md).
 
 ## Shell
 
@@ -170,7 +170,7 @@ Resource paths in user settings resolve from the agent directory. Paths in proje
 
 Resource arrays support glob exclusions with `!pattern`, exact inclusion with `+path`, and exact exclusion with `-path`. Pi loads resources listed in both user-level and project settings.
 
-The built-in extensions are named `builtin:mcp`, `builtin:llama.cpp`, `builtin:codemode`, and `builtin:tool-search` in `extensions`. They load by default; `-builtin:mcp` disables one. A `+builtin:<name>` or `-builtin:<name>` entry in project settings overrides the user setting. `pi config` lists them under Built-in. `--no-extensions` disables them too, and `-e builtin:<name>` loads one explicitly.
+The built-in extensions are named `builtin:background-command`, `builtin:mcp`, `builtin:llama.cpp`, `builtin:codemode`, and `builtin:tool-search` in `extensions`. They load by default; `-builtin:mcp` disables one. A `+builtin:<name>` or `-builtin:<name>` entry in project settings overrides the user setting. `pi config` lists them under Built-in. `--no-extensions` disables them too, and `-e builtin:<name>` loads one explicitly.
 
 ## Updates, telemetry, and warnings
 

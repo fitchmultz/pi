@@ -13,9 +13,8 @@ pi update [target] [options]
 pi list
 pi config [options]
 pi auth <check|print-api-key|print-bearer-token> [options]
-pi mcp <add|remove|list|login|logout|import-adapter> [options]
-pi restart [options]
-pi convert-session SOURCE NEW_PATH
+pi mcp <list|login|logout> [options]
+pi restart [--message <text>] [-e <extension> ...] [--runtime <package-dir>]
 ```
 
 <a id="modes"></a>
@@ -60,10 +59,10 @@ RPC mode rejects `@file` arguments. JSON and RPC modes reserve stdout for protoc
 pi --model sonnet:high
 ```
 
-See [Choose a Model](models.md) for model selection and [Provider Authentication](providers.md) for credentials.
+See [Choose a Model](models.md) for model selection and [Providers](providers.md) for credentials.
 
 - `--provider <name>`<br>
-  Restricts `--model` lookup to one provider.
+  Restricts `--model` lookup to one provider. It requires `--model`.
 - `--model <pattern>`<br>
   Selects by exact ID or fuzzy ID/name match. It accepts `provider/id` and an optional `:<thinking>` suffix.
 - `--api-key <key>`<br>
@@ -91,10 +90,6 @@ See [Sessions and Context](sessions.md) for resuming, forking, naming, and stori
   Opens the session selector.
 - `--session <path|id>`<br>
   Opens by file path, exact ID, or partial ID. Pi searches the current project first and offers to fork a cross-project match.
-- `--session-cwd <path>`<br>
-  Uses an existing directory for this `--session` invocation without changing its saved file, ID, history, or header. See [session cwd overrides](sessions.md#overriding-a-saved-sessions-working-directory).
-- `--checkpoint <path>`<br>
-  Restores exact session selection and pending queues from a [working-session checkpoint](checkpoint.md).
 - `--session-id <id>`<br>
   Opens the exact project session ID or creates it if absent. IDs accept letters, numbers, `.`, `_`, and `-`.
 - `--fork <path|id>`<br>
@@ -109,8 +104,6 @@ See [Sessions and Context](sessions.md) for resuming, forking, naming, and stori
 Constraints:
 
 - Session IDs must start and end with a letter or number.
-- `--session-cwd` requires `--session` and cannot combine with `--fork`, `--continue`, `--resume`, `--session-id`, or `--no-session`.
-- `--checkpoint` cannot combine with startup prompts or session/model/tool selection overrides.
 - `--fork` cannot be combined with `--session`, `--continue`, `--resume`, or `--no-session`.
 - `--session-id` cannot be combined with `--session`, `--continue`, or `--resume`. Combine it with `--fork` to choose the new ID.
 
@@ -133,13 +126,12 @@ See [Settings](settings.md#tools) for configuring the default tool selection.
 - `-nt`, `--no-tools`<br>
   Starts with all built-in, extension, and custom tools disabled.
 
-Default enabled tools are `read`, `bash`, `background_command`, `edit`, and `write`, unless `defaultTools` changes them. `--tools` replaces the whole selection, so name every tool you want; `defaultTools` also accepts `+name` and `-name` to change the defaults instead.
+Default enabled tools are `read`, `bash`, `edit`, and `write`, unless `defaultTools` changes them. `--tools` replaces the whole selection, so name every tool you want; `defaultTools` also accepts `+name` and `-name` to change the defaults instead.
 
 | Built-in | Purpose |
 |---|---|
-| `read` | Read text files and images, or [select JSON before truncation](sdk.md#json-selection-with-read) |
+| `read` | Read text files and supported images, or [select JSON before truncation](sdk.md#json-selection-with-read) |
 | `bash` | Run shell commands |
-| `background_command` | Start, inspect, or cancel [durable background shell commands](sdk.md#background-commands) |
 | `powershell` | Run PowerShell commands on Windows |
 | `edit` | Apply exact text replacements to an existing file |
 | `write` | Create or overwrite a file |
@@ -147,14 +139,16 @@ Default enabled tools are `read`, `bash`, `background_command`, `edit`, and `wri
 | `find` | Find paths using glob patterns |
 | `ls` | List directory contents |
 
-Saved sessions retain their tool selection. An explicit `--tools` list replaces the entire selection, including on resume.
-
-Built-in extensions add two more tools. They are off by default; the MCP extension turns them on when an MCP server needs them (see [MCP](mcp.md#exposure)). To enable them yourself, name them in `--tools` or `defaultTools`.
+Built-in extensions also add the following tools. `background_command` starts, inspects, and cancels [durable background shell commands](sdk.md#background-commands); it is enabled by default for new CLI sessions. `discover_tools` is active by default when its builtin is loaded. Explicit tool allowlists, saved selections, and exclusions still apply; `--no-extensions` disables both, and `--no-builtin-tools` does not disable extension tools. `codemode` and `tool_search` are off by default; the MCP extension turns them on when an MCP server needs them (see [MCP](mcp.md#exposure)). To enable them yourself, name them in `--tools` or `defaultTools`.
 
 | Built-in extension | Purpose |
 |---|---|
+| `background_command` | Start, inspect, and cancel durable background shell commands that survive Pi exit and report completion later |
 | `codemode` | Run JavaScript that calls the other tools, for example in parallel with `Promise.allSettled`; only the script's output reaches the model |
 | `tool_search` | Search tools that are not declared to the model (`codemode` and `deferred` exposure, such as MCP tools) and declare the matches for the next call |
+| `discover_tools` | List instruction groups or enable their full instructions before using grouped tools in a later turn; never activates tools |
+
+See [Instruction Groups](instruction-groups.md) for owner registration, persistence, and eager fallback when discovery is inactive.
 
 ### Enable codemode
 
@@ -172,37 +166,15 @@ This keeps `read`, `bash`, `edit`, and `write` and adds `codemode`. For one invo
 pi --tools read,bash,edit,write,codemode
 ```
 
-Codemode is useful without MCP: scripts can run several tool calls in parallel, filter large output before it reaches the model, and call classifier models such as TypeSafe's Jev through `models.classify()` (see [Classifier models](models.md#use-classifier-models)).
+Codemode is useful without MCP: scripts can run several tool calls in parallel, filter large output before it reaches the model, call classifier models such as TypeSafe's Jev through `models.classify()` (see [Classifier models](models.md#use-classifier-models)), and generate images through `models.generateImages()` (see [Image models](models.md#use-image-models)).
 
 ### How codemode works
 
-Codemode scripts run in a QuickJS sandbox that can only reach the other tools, through `tools.<name>(args)`; `ALL_TOOLS` lists them. Output comes from `text(value)`, `image(dataUrlOrImageContent)`, `console.*`, and a top-level `return value`; `exit()` ends the script early. The result starts with `Script completed` or `Script failed`, the wall time, and the output; a failed script keeps its partial output, followed by `Script error:` and the error.
-
-A script may start with an options line such as `// @options: {"max_output_tokens": 2000, "timeout_ms": 60000}`. `max_output_tokens` (default 10000) limits the output: longer output keeps its start and end, and the full text is written to a temp file whose path is included in the result. `timeout_ms` is a hard deadline, unset by default.
-
-While `codemode` is active, `codemode.mode` in [settings](settings.md#tools) decides how the other tools are presented. With `on` (default) declared tools keep being declared and their descriptions show how to call them from scripts. With `only` they are hidden from the model and listed in the `codemode` description instead, so the model calls them through scripts.
-
-The `codemode` description lists non-deferred callable tools with their TypeScript declarations, grouped by namespace. Declarations share a budget of 3000 estimated tokens (`codemode.inlineBudget` in [settings](settings.md#tools)); namespaces indicate whether their inline declarations are complete. Native deferred MCP schemas stay out of this description; direct MCP tools can appear in `codemode.mode: "only"`. Scripts find tools with `await searchTools(query, { limit, namespace })` or `{ server }`, and read current declarations with `await describeTool(name)`. `await describeNamespace(name)` returns `{ name, description?, instructions?, tools }`.
-
-Global search is cache-only for native MCP and reports missing catalog coverage. A scoped search discovers only that server, without starting browser consent. `tools` and `ALL_TOOLS` remain the script's initial snapshot; `callTool(name, args)` can call newly discovered tools in the same script:
-
-```js
-const matches = await searchTools("search", { server: "docs", limit: 3 });
-// This example assumes the best match accepts { query: string }.
-if (matches.length) text(await callTool(matches[0].name, { query: "MCP" }));
-```
-
-The arguments are illustrative; use the selected tool's schema. See [MCP discovery](mcp.md#discover-and-call-tools).
-
-Tools with an output schema resolve to structured values: `bash` to `{ output, truncated, full_output_path?, exit_code, wall_time_seconds }`, also for non-zero exit codes, and MCP tools to their `CallToolResult`. Other tools resolve to their text output. The `output` of `bash` is not limited to the 2000 lines or 50KB the model sees: it holds up to 1 MiB, and longer output keeps its first and last 512 KiB around an omission marker, with `truncated` set and the full output in `full_output_path`.
-
-`store(key, value)` and `load(key)` keep JSON values across `codemode` calls: each successful script that stores values appends a `codemode-store` custom entry to the session, so resumed sessions keep the values and each branch sees only the values written on its path. Scripts can also use `models`: `getModelsOfType`, `getAvailableOfType`, and `getModelOfType` list the model catalog, and `classify(model, context)` runs a classifier model with the session's credentials, at most four at a time per script.
+Scripts run in a QuickJS sandbox and reach the other tools through `tools.<name>(args)`. [Codemode](codemode.md) describes the script API, how tools are listed and found, the `store()` and `models` globals, and the limits.
 
 ### Tool search
 
-`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`, or let native MCP activate it when needed. It ranks deferred tools not yet declared and declares matches for the next model call. Use `{ query, server: "docs" }` or `{ query, namespace: "mcp__docs" }` for cold scoped MCP discovery; an unscoped search reads cached coverage only. Scoped discovery also registers permitted direct tools. Loaded selections survive `/tree`, resume, and fork on that branch without overriding tool restrictions.
-
-Optional full instructions are owned by extensions; see [Instruction Groups](instruction-groups.md). Discovering a group does not grant tools beyond the existing allowlist. The built-in `discover_tools`, when installed, uses the owner event bus to opt into full instructions; stock clients retain eager instructions when the owner is unavailable.
+`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`. It uses the same ranking as `searchTools()` over tools that are not declared yet and declares the matches for the next model call. Loaded tools are recorded in the session like other tool changes, so they stay declared on that branch.
 
 <a id="resource-options"></a>
 
@@ -252,7 +224,7 @@ See [Configuration](configuration.md) for saved configuration, [Security](securi
 - `--append-system-prompt <text|path>`<br>
   Appends text or an existing file to the system prompt and is repeatable.
 - `--tui-mode <mode>`<br>
-  Uses `regular` or `fullscreen` terminal mode.
+  Uses `fullscreen` (default) or `regular` terminal mode.
 - `--verbose`<br>
   Shows verbose interactive startup information, overriding `quietStartup`.
 - `-a`, `--approve`<br>
@@ -267,6 +239,12 @@ See [Configuration](configuration.md) for saved configuration, [Security](securi
   Shows the Pi version, then exits.
 
 Extensions may register additional long-form options. Unknown short options are rejected.
+
+## Restart Pi
+
+From a managed interactive Pi shell tool, `pi restart` queues a restart on the same saved session. It waits for final idle, including settled handlers and their deferred messages. `--message` submits a labelled continuation once; `-e` replaces the explicit extension list; `--runtime` pins a package containing `dist/bundle/cli-worker.js`.
+
+Run `pi restart --help` for examples and exit codes. Outside a managed interactive session it fails. See [Managed restarts](restart.md) for draft protection, staging, rollback and upgrading sessions started by an older fork launcher.
 
 ## Package commands
 
@@ -294,40 +272,28 @@ Running `pi update` without a target updates Pi itself.
 | Task | Command |
 |---|---|
 | Update Pi | `pi update` |
-| Update an immutable fork installation to latest `fitchmultz/pi` main | `pi update --fork` |
+| Build, validate, and select latest fitchmultz/pi main | `pi update --fork` |
 | Update all installed packages | `pi update --extensions` |
 | Update one installed package | `pi update <source>` |
 | Refresh model catalogs | `pi update --models` |
 | Update Pi and all installed packages | `pi update --all` |
 
-Add `--force` to reinstall Pi when the selected update includes Pi (except `--fork`).
+Add `--force` to reinstall Pi when the selected update includes Pi.
 
-`pi update --fork` fetches main once into a temporary checkout, prints the pinned
-commit, hydrates model data, and runs that commit's immutable installer. It builds
-and validates a new release before atomically selecting it; the previous runtime
-is retained at the package selector's `.previous` sibling. Settings, credentials,
-extensions, and sessions are unchanged. Build/download/validation failures do not
-select a candidate. Temporary source and dependency files are removed on normal
-success or failure. This executes trusted code from `fitchmultz/pi`, not an npm
-release, and requires network access to GitHub, npm, and model catalog sources.
+`--fork` is a separate update path for [immutable fork installations](quickstart.md#fork-installation),
+not an alias for `--self` or `--all`. It requires macOS/Linux/Termux arm64/x64,
+Node.js >=22.19 (not Bun) with adjacent npm, Git, bash, tar, gzip, tmux, and network
+access. macOS/Linux use the active npm global prefix; Termux uses
+`~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` and
+`~/.local/bin/pi`. Ordinary npm directories, Windows, and other install layouts
+are refused before downloading.
 
-Supported platforms are **macOS/Linux/Termux arm64/x64 with an existing immutable
-fork package symlink**. macOS/Linux use the active npm global prefix and its
-`<prefix>/bin/pi`. Termux uses `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent`
-and `~/.local/bin/pi`, without changing npm's system prefix. The executable symlink
-must point through the package selector to `dist/bundle/cli.js`. Node >=22.19 with
-adjacent npm, Git (supporting `git archive --mtime`), bash, tar, gzip, and tmux are required.
-Windows, Bun, ordinary npm package directories, standalone/managed installers,
-other package managers, and mismatched/non-writable prefixes fail explicitly;
-they are not migrated. No existing checkout is needed for subsequent updates.
-See [fork setup and rollback](https://github.com/fitchmultz/pi/blob/main/FORK.md#immutable-installation-and-activation)
-for initial setup on another machine.
-
-`--fork` cannot combine with positional targets, other update targets, or
-`--force`. Exit status is 0 on success/help, 1 on invalid options or failure.
-After success, fully relaunch `pi`, or use `pi restart` from a selector-following
-session and verify the loaded runtime. An explicitly pinned runtime stays pinned;
-updating does not restart running sessions automatically.
+The fetched commit is pinned before building. Builds use an isolated home, and
+selection changes only after validation succeeds. Extensions, settings,
+credentials, and running sessions are unchanged. Relaunch Pi or use a managed
+restart to load the selected release. `--fork` cannot combine with another update
+target, a source, `--extension`, or `--force`. Exit status is `0` on success/help
+and `1` for invalid options or a failed update.
 
 ### Aliases and command options
 
@@ -337,28 +303,13 @@ updating does not restart running sessions automatically.
 - `-a`, `--approve` trusts project-local files for one command. `-na`, `--no-approve` ignores trust-gated project-local files.
 - Append `-h` or `--help` to a command for its exact usage and option constraints.
 
-## Restart the running session
-
-From a Pi shell tool, `pi restart --message "Continue the task"` queues a managed restart of the Node CLI worker. Without `--runtime`, it follows the originally invoked installation selector or retains an earlier explicit runtime. `--runtime <package-dir>` selects and pins a separately staged worker for later restarts. Repeated `-e <path>` options replace the explicit extension list; omitting `-e` preserves it, including extension-discovery restrictions.
-
-The command acknowledges queueing. Verify the replacement runtime after startup. Keep previous runtime and extension files intact for rollback. See [Managed Restarts](restart.md) for the idle boundary, readiness, and recovery contract.
-
-## Convert a legacy session
-
-```sh
-pi convert-session SOURCE NEW_PATH
-pi --session NEW_PATH
-```
-
-Stop every writer of `SOURCE` first. Conversion reads a settled legacy journal and writes an exclusive new copy; it never overwrites the destination or changes the original. Unsafe or uncertain in-flight work is refused rather than replayed. Resuming the converted session starts a fresh provider request, not a live continuation. `pi convert-session --help` lists exact usage and exit codes.
-
 ## Credential commands
 
 ```sh
 pi auth check --provider openai --json
 ```
 
-Authentication commands require `--provider <provider>` or `--model <model>`. See [Provider Authentication](providers.md) for supported methods.
+Authentication commands require `--provider <provider>` or `--model <model>`. See [Providers](providers.md) for supported methods.
 
 | Command | Description |
 |---|---|
@@ -384,13 +335,12 @@ These commands work outside a session, so agents can run them through `bash`. Se
 | Command | Description |
 |---|---|
 | `pi mcp add <server> [options] -- <command> [args...]` | Add or replace a stdio server in `mcp.json`; `--env KEY=VALUE` (repeatable) and `--cwd <dir>` set its environment and working directory. Arguments after the command are passed to it |
-| `pi mcp add <server> [options] --url <url>` | Add or replace a streamable HTTP server; `--header KEY=VALUE` (repeatable), `--bearer-token-env-var <NAME>` (sends `Authorization: Bearer ${NAME}`), `--oauth-client-id`, `--oauth-client-secret`, and `--oauth-callback-port` configure authentication |
+| `pi mcp add <server> [options] --url <url>` | Add or replace a streamable HTTP server; `--header KEY=VALUE` (repeatable), `--bearer-token-env-var <NAME>` (sends `Authorization: Bearer ${NAME}`), `--oauth-client-id`, `--oauth-client-secret`, `--oauth-callback-port`, and `--oauth-client-name` configure authentication |
 | `pi mcp remove <server>` | Remove a server from `mcp.json`; stored OAuth credentials are kept |
-| `pi mcp list [--json] [--connect]` | Read configuration and matching catalogs without connecting; `--connect` probes every enabled server and refreshes catalogs. Exit with `1` for configuration or catalog errors, or a failed enabled server when probing |
+| `pi mcp list [--json]` | Connect to every enabled server and print its state, tools, and errors; exit with `1` when a config entry is invalid or an enabled server is not connected |
 | `pi mcp login <server> [--timeout <seconds>]` | Sign in to an OAuth server: open the authorization page and wait for the browser (default 300 seconds); a terminal also accepts the pasted redirect URL |
 | `pi mcp logout <server>` | Delete the stored OAuth credentials of a server |
-| `pi mcp import-adapter --config <path> [--config <override>] [--dry-run]` | Copy supported adapter entries into Pi's global file without overwriting native entries. Optional grants require `--credentials <path>` or macOS `--keychain`, plus `--adapter-stopped`; see [import guidance](mcp.md#import-adapter-configuration) |
 
-`add` and `remove` change `~/.pi/agent/mcp.json`, or `.pi/mcp.json` in the current directory with `--local` (`-l`). They never edit the shared `~/.config/mcp/mcp.json`. `add` also takes `--exposure <mode>` and `--connection lazy|eager` (default lazy, including direct exposure). It does not connect; use `list` to inspect configuration or `list --connect` for a live probe.
+`add` and `remove` change `~/.pi/agent/mcp.json`, or `.pi/mcp.json` in the current directory with `--local` (`-l`). `add` also takes `--exposure <mode>` (see [Exposure](mcp.md#exposure)) and `--description <text>` and does not connect; run `pi mcp list` to check the server.
 
 Project `.pi/mcp.json` files are only read for projects that are already trusted.

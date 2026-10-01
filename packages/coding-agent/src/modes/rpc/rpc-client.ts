@@ -12,7 +12,7 @@ import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { JsonAgentSessionEvent } from "../json-event.ts";
-import { attachJsonlRecordReader, serializeJsonLine } from "./jsonl.ts";
+import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
 // ============================================================================
@@ -104,8 +104,7 @@ export class RpcClient {
 			process.stderr.write(data);
 		});
 
-		// close follows stdout/stderr EOF, so buffered final responses are delivered before exit rejection.
-		childProcess.once("close", (code, signal) => {
+		childProcess.once("exit", (code, signal) => {
 			if (this.process !== childProcess) return;
 			const error = this.createProcessExitError(code, signal);
 			this.exitError = error;
@@ -124,21 +123,11 @@ export class RpcClient {
 			this.exitError = stdinError;
 			this.rejectPendingRequests(stdinError);
 		});
-		childProcess.stdout?.on("error", (error) => {
-			if (this.process !== childProcess) return;
-			const stdoutError = new Error(`Agent process stdout error: ${error.message}. Stderr: ${this.stderr}`);
-			this.exitError = stdoutError;
-			this.rejectPendingRequests(stdoutError);
-		});
 
-		this.stopReadingStdout = attachJsonlRecordReader(
-			childProcess.stdout!,
-			(record) => this.handleRecord(record),
-			(error) => {
-				// Preserve recovery after a non-protocol line, but retain malformed/truncated diagnostics.
-				this.stderr += `${error.message.slice(0, 2000)}\n`;
-			},
-		);
+		// Set up strict JSONL reader for stdout.
+		this.stopReadingStdout = attachJsonlLineReader(childProcess.stdout!, (line) => {
+			this.handleLine(line);
+		});
 
 		// Wait a moment for process to initialize
 		await new Promise((resolve) => setTimeout(resolve, 100));
@@ -476,18 +465,30 @@ export class RpcClient {
 	// =========================================================================
 
 	/**
-	 * Wait for the host session to become idle, including prompt preparation and continuations.
-	 * Resolves immediately if already idle. Timeout does not abort the running operation.
+	 * Wait for agent to become idle (no streaming).
+	 * Resolves when agent_settled event is received.
 	 */
-	async waitForIdle(timeout = 60000): Promise<void> {
-		await this.send({ type: "wait_for_idle" }, timeout);
+	waitForIdle(timeout = 60000): Promise<void> {
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => {
+				unsubscribe();
+				reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
+			}, timeout);
+
+			const unsubscribe = this.onEvent((event) => {
+				if (event.type === "agent_settled") {
+					clearTimeout(timer);
+					unsubscribe();
+					resolve();
+				}
+			});
+		});
 	}
 
 	/**
 	 * Collect events until agent becomes idle.
 	 */
 	collectEvents(timeout = 60000): Promise<JsonAgentSessionEvent[]> {
-		// ponytail: explicit full-event collection needs the caller's heap; onEvent avoids retaining the feed.
 		return new Promise((resolve, reject) => {
 			const events: JsonAgentSessionEvent[] = [];
 			const timer = setTimeout(() => {
@@ -510,31 +511,24 @@ export class RpcClient {
 	 * Send prompt and wait for completion, returning all events.
 	 */
 	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<JsonAgentSessionEvent[]> {
-		const events: JsonAgentSessionEvent[] = [];
-		const unsubscribe = this.onEvent((event) => events.push(event));
-		const deadline = Date.now() + timeout;
-		try {
-			const response = await this.send({ type: "prompt", message, images }, timeout);
-			if (this.getData<{ disposition: PromptDisposition }>(response).disposition !== "handled") {
-				await this.waitForIdle(Math.max(0, deadline - Date.now()));
-			}
-			return events;
-		} finally {
-			unsubscribe();
-		}
+		const eventsPromise = this.collectEvents(timeout);
+		await this.prompt(message, images);
+		return eventsPromise;
 	}
 
 	// =========================================================================
 	// Internal
 	// =========================================================================
 
-	private handleRecord(data: Record<string, unknown>): void {
+	private handleLine(line: string): void {
 		try {
-			if (data.type === "response") {
-				const id = typeof data.id === "string" ? data.id : undefined;
-				const pending = id === undefined ? undefined : this.pendingRequests.get(id);
-				if (id !== undefined) this.pendingRequests.delete(id);
-				pending?.resolve(data as RpcResponse);
+			const data = JSON.parse(line);
+
+			// Check if it's a response to a pending request
+			if (data.type === "response" && data.id && this.pendingRequests.has(data.id)) {
+				const pending = this.pendingRequests.get(data.id)!;
+				this.pendingRequests.delete(data.id);
+				pending.resolve(data as RpcResponse);
 				return;
 			}
 
@@ -544,7 +538,7 @@ export class RpcClient {
 				listener(data as JsonAgentSessionEvent);
 			}
 		} catch {
-			// A throwing event listener must not stop reception of later records.
+			// Ignore non-JSON lines
 		}
 	}
 
@@ -559,7 +553,7 @@ export class RpcClient {
 		this.pendingRequests.clear();
 	}
 
-	private async send(command: RpcCommandBody, timeout = 30000): Promise<RpcResponse> {
+	private async send(command: RpcCommandBody): Promise<RpcResponse> {
 		const childProcess = this.process;
 		const stdin = childProcess?.stdin;
 		if (!childProcess || !stdin) {
@@ -583,23 +577,18 @@ export class RpcClient {
 		const fullCommand = { ...command, id } as RpcCommand;
 
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
+			const timeout = setTimeout(() => {
 				this.pendingRequests.delete(id);
-				const target = command.type === "wait_for_idle" ? "agent to become idle" : `response to ${command.type}`;
-				reject(new Error(`Timeout waiting for ${target}. Stderr: ${this.stderr}`));
-			}, timeout);
+				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
+			}, 30000);
 
 			this.pendingRequests.set(id, {
 				resolve: (response) => {
-					clearTimeout(timer);
-					if (response.success) {
-						resolve(response);
-					} else {
-						reject(new Error(response.error));
-					}
+					clearTimeout(timeout);
+					resolve(response);
 				},
 				reject: (error) => {
-					clearTimeout(timer);
+					clearTimeout(timeout);
 					reject(error);
 				},
 			});
@@ -616,6 +605,10 @@ export class RpcClient {
 	}
 
 	private getData<T>(response: RpcResponse): T {
+		if (!response.success) {
+			const errorResponse = response as Extract<RpcResponse, { success: false }>;
+			throw new Error(errorResponse.error);
+		}
 		// Type assertion: we trust response.data matches T based on the command sent.
 		// This is safe because each public method specifies the correct T for its command.
 		const successResponse = response as Extract<RpcResponse, { success: true; data: unknown }>;

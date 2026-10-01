@@ -1018,40 +1018,6 @@ describe("Agent", () => {
 		expect(requests[1]).toContain("follow-up");
 	});
 
-	it.each([true, false])(
-		"respects drainQueuedInput=%s for explicit context continuation",
-		async (drainQueuedInput) => {
-			const requests: string[][] = [];
-			const agent = new Agent({
-				initialState: {
-					messages: [
-						createUserMessage("existing"),
-						{ role: "system", content: "continue this context", timestamp: Date.now() },
-					],
-				},
-				streamFn: (_model, context) => {
-					requests.push(
-						context.messages.flatMap((message) =>
-							message.role === "user" && typeof message.content === "string" ? [message.content] : [],
-						),
-					);
-					const stream = new MockAssistantStream();
-					queueMicrotask(() =>
-						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") }),
-					);
-					return stream;
-				},
-			});
-			agent.followUp(createUserMessage("follow-up"));
-
-			await agent.continue({ drainQueuedInput });
-
-			expect(requests).toHaveLength(drainQueuedInput ? 1 : 2);
-			expect(requests[0].includes("follow-up")).toBe(drainQueuedInput);
-			expect(requests.at(-1)).toContain("follow-up");
-		},
-	);
-
 	it.each([
 		{ mode: "one-at-a-time" as const, expectedRequests: 2 },
 		{ mode: "all" as const, expectedRequests: 1 },

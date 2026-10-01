@@ -25,8 +25,6 @@ export interface Args {
 	name?: string;
 	noSession?: boolean;
 	session?: string;
-	checkpoint?: string;
-	sessionCwd?: string;
 	sessionId?: string;
 	fork?: string;
 	sessionDir?: string;
@@ -133,25 +131,8 @@ export function parseArgs(args: string[], onOption?: (option: string, tokens: st
 			}
 		} else if (arg === "--no-session") {
 			result.noSession = true;
-		} else if (arg === "--checkpoint") {
-			const value = args[i + 1];
-			if (!value || value.startsWith("-"))
-				result.diagnostics.push({ type: "error", message: "--checkpoint requires a path" });
-			else result.checkpoint = args[++i];
 		} else if (arg === "--session" && i + 1 < args.length) {
 			result.session = args[++i];
-		} else if (arg === "--session-cwd") {
-			const value = args[i + 1];
-			if (value === undefined || value.startsWith("-")) {
-				result.diagnostics.push({ type: "error", message: "--session-cwd requires a path" });
-			} else {
-				i++;
-				if (value.length === 0) {
-					result.diagnostics.push({ type: "error", message: "--session-cwd requires a non-empty path" });
-				} else {
-					result.sessionCwd = value;
-				}
-			}
 		} else if (arg === "--session-id" && i + 1 < args.length) {
 			result.sessionId = args[++i];
 		} else if (arg === "--fork" && i + 1 < args.length) {
@@ -290,7 +271,7 @@ export function printHelp(extensionFlags?: ExtensionFlag[]): void {
 					})
 					.join("\n")}\n`
 			: "";
-	console.log(`${chalk.bold(APP_NAME)} - AI coding assistant with file and shell tools
+	console.log(`${chalk.bold(APP_NAME)} - AI coding assistant with read, bash, edit, write tools
 
 ${chalk.bold("Usage:")}
   ${APP_NAME} [options] [--] [@files...] [messages...]
@@ -304,13 +285,11 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} list                      List installed extensions from settings
   ${APP_NAME} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
   ${APP_NAME} auth <command>            Print credentials or check provider readiness
-  ${APP_NAME} restart [options]         Queue a managed restart from a Pi shell tool (Node CLI)
   ${APP_NAME} mcp <command>             Check MCP servers, sign in to or out of OAuth servers
-  ${APP_NAME} convert-session <in> <out> Convert settled legacy history into a new file
-  ${APP_NAME} <command> --help          Show command-specific help
+  ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list/config/auth/mcp
 
 ${chalk.bold("Options:")}
-  --provider <name>              Provider name (default: google)
+  --provider <name>              Provider to search for --model (requires --model)
   --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
@@ -319,10 +298,7 @@ ${chalk.bold("Options:")}
   --print, -p                    Non-interactive mode: process prompt and exit
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
-  --checkpoint <path>            Restore a native working-session checkpoint without replay
   --session <path|id>            Use specific session file or partial UUID
-  --session-cwd <path>           Override --session working directory for this run (existing directory)
-                                 Not with --fork, --continue, --resume, --session-id, or --no-session
   --session-id <id>              Use exact project session ID, creating it if missing
   --fork <path|id>               Fork specific session file or partial UUID into a new session
   --session-dir <dir>            Directory for session storage and lookup
@@ -350,7 +326,7 @@ ${chalk.bold("Options:")}
   --export <file>                Export session file to HTML and exit
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
-  --tui-mode <mode>              TUI mode: regular (default) or fullscreen
+  --tui-mode <mode>              TUI mode: fullscreen (default) or regular
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
@@ -474,14 +450,13 @@ ${chalk.bold("Environment Variables:")}
   PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
 
 ${chalk.bold("Built-in Tool Names:")}
-  read               - Read file contents
-  bash               - Execute bash commands
-  background_command - Start, inspect, or cancel durable background shell commands
-  powershell         - Execute PowerShell commands on Windows
-  edit               - Edit files with find/replace
-  write              - Write files (creates/overwrites)
-  grep               - Search file contents (read-only, off by default)
-  find               - Find files by glob pattern (read-only, off by default)
-  ls                 - List directory contents (read-only, off by default)
+  read       - Read file contents
+  bash       - Execute bash commands
+  powershell - Execute PowerShell commands on Windows
+  edit       - Edit files with find/replace
+  write      - Write files (creates/overwrites)
+  grep       - Search file contents (read-only, off by default)
+  find       - Find files by glob pattern (read-only, off by default)
+  ls         - List directory contents (read-only, off by default)
 `);
 }

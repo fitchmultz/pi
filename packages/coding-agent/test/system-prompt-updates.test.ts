@@ -7,7 +7,6 @@ import {
 	fauxToolCall,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
-	getCurrentTools,
 	getSystemMessageText,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
@@ -24,7 +23,6 @@ import {
 } from "../src/core/system-prompt.ts";
 import type { ExtensionFactory } from "../src/index.ts";
 import { createHarness } from "./suite/harness.ts";
-import { createTestResourceLoader } from "./utilities.ts";
 
 describe("system prompt updates", () => {
 	test("declares the prompt and tools once and reuses them across resume", async () => {
@@ -48,13 +46,7 @@ describe("system prompt updates", () => {
 			if (head?.role !== "system") throw new Error("expected system message");
 			expect(head.content).toBe("");
 			expect(Object.keys(head.sections ?? {})).toEqual(["preamble", "tools", "rules", "docs", "cwd"]);
-			expect(head.toolsAdded?.map((tool) => tool.name)).toEqual([
-				"read",
-				"bash",
-				"background_command",
-				"edit",
-				"write",
-			]);
+			expect(head.toolsAdded?.map((tool) => tool.name)).toEqual(["read", "bash", "edit", "write"]);
 			expect(getSystemMessageText(head)).toBe(harness.session.systemPrompt);
 		} finally {
 			harness.cleanup();
@@ -175,135 +167,6 @@ describe("system prompt updates", () => {
 		}
 	});
 
-	test("restores structured state and tool selection across rollover and regenerates forced requests", async () => {
-		let force = false;
-		const harness = await createHarness({
-			settings: { compaction: { enabled: false } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", (event) => {
-						if (!force) return;
-						event.systemPromptOptions.selectedTools = ["read"];
-						return { systemPrompt: "Exact checkpoint prompt." };
-					});
-				},
-			],
-		});
-		try {
-			const requests: TranscriptContext[] = [];
-			harness.setResponses(
-				["base", "forced", "continued"].map((text) => (context: TranscriptContext) => {
-					requests.push(context);
-					return fauxAssistantMessage(text);
-				}),
-			);
-			await harness.session.prompt("base");
-			const baseLeaf = harness.sessionManager.getLeafId()!;
-			force = true;
-			await harness.session.prompt("force");
-			harness.sessionManager.appendCompaction("Continue the task", null, 0);
-			harness.session.refreshContext();
-			const windowLeaf = harness.sessionManager.getLeafId()!;
-			expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Exact checkpoint prompt.");
-			expect(getCurrentSystemMessage(harness.session.messages)?.sections?.preamble).toBeDefined();
-			expect(getCurrentTools(harness.session.messages).map((tool) => tool.name)).toEqual(["read"]);
-			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "compactionSummary"]);
-			await harness.session.navigateTree(baseLeaf);
-			expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "background_command", "edit", "write"]);
-			await harness.session.navigateTree(windowLeaf);
-			expect(harness.session.getActiveToolNames()).toEqual(["read"]);
-			expect(harness.session.systemPrompt).toBe(getCurrentSystemPrompt(harness.session.messages));
-			await harness.session.prompt("continue");
-			expect(getCurrentSystemPrompt(requests[1].messages)).toBe("Exact checkpoint prompt.");
-			expect(getCurrentSystemPrompt(requests[2].messages)).toBe("Exact checkpoint prompt.");
-			expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Exact checkpoint prompt.");
-			expect(getCurrentSystemMessage(harness.session.messages)?.sections?.preamble).toBeDefined();
-			expect(harness.session.messages.filter((message) => message.role === "system")).toHaveLength(1);
-		} finally {
-			harness.cleanup();
-		}
-	});
-
-	test("keeps request-only forced guidance across rollover and tool loading while allowing context decoration", async () => {
-		const harness = await createHarness({
-			tools: [],
-			settings: { compaction: { enabled: false } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", (event) => {
-						event.systemPromptOptions.sections.policy = "Structured policy.";
-						return { systemPrompt: "Exact child guidance." };
-					});
-					pi.on("context", (event) => ({
-						messages: [...event.messages, { role: "system", content: "Context addition.", timestamp: 0 }],
-					}));
-					pi.on("turn_end", (event) =>
-						event.toolResults.some((result) => result.toolName === "load")
-							? { entries: [{ type: "compaction", summary: "Continue here.", firstKeptEntryId: null }] }
-							: undefined,
-					);
-					pi.registerTool({
-						name: "load",
-						label: "Load",
-						description: "Load a final tool and start a fresh window",
-						parameters: Type.Object({}),
-						async execute() {
-							pi.registerTool({
-								name: "structured_output",
-								label: "Output",
-								description: "Deliver the result",
-								parameters: Type.Object({ answer: Type.String() }),
-								async execute(_id, params) {
-									return {
-										content: [{ type: "text", text: params.answer }],
-										details: undefined,
-										terminate: true,
-									};
-								},
-							});
-							pi.setActiveTools(["structured_output"]);
-							return { content: [], details: undefined };
-						},
-					});
-				},
-			],
-		});
-		try {
-			const requests: TranscriptContext[] = [];
-			const prompts: string[] = [];
-			harness.setResponses(
-				[fauxToolCall("load", {}), fauxToolCall("structured_output", { answer: "done" })].map(
-					(call) => (context: TranscriptContext) => {
-						requests.push(context);
-						prompts.push(harness.session.systemPrompt);
-						return fauxAssistantMessage([call], { stopReason: "toolUse" });
-					},
-				),
-			);
-			await harness.session.prompt("start");
-			expect(requests).toHaveLength(2);
-			expect(prompts).toEqual(["Exact child guidance.", "Exact child guidance."]);
-			for (const request of requests) {
-				expect(getCurrentSystemPrompt(request.messages)).toBe("Exact child guidance.\n\nContext addition.");
-				expect(request.messages.filter((message) => message.role === "system")).toHaveLength(2);
-			}
-			expect(getCurrentTools(requests[0].messages).map((tool) => tool.name)).toEqual(["load"]);
-			expect(getCurrentTools(requests[1].messages).map((tool) => tool.name)).toEqual(["structured_output"]);
-			expect(JSON.stringify(requests[1].messages)).toContain("Continue here.");
-			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
-			expect(harness.session.messages.at(-1)).toMatchObject({
-				role: "toolResult",
-				toolName: "structured_output",
-				isError: false,
-			});
-			expect(getCurrentSystemPrompt(harness.session.messages)).toContain("Structured policy.");
-			expect(getCurrentSystemPrompt(harness.session.messages)).not.toContain("Exact child guidance.");
-			expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionContext().messages);
-		} finally {
-			harness.cleanup();
-		}
-	});
-
 	test("setActiveTools emits prompt sections and tool changes before the next request", async () => {
 		const extension: ExtensionFactory = (pi) => {
 			for (const name of ["first", "second"]) {
@@ -405,126 +268,6 @@ describe("system prompt updates", () => {
 			expect(update?.toolsRemoved).toEqual([{ name: "first" }]);
 			expect(update?.toolsAdded).toBeUndefined();
 			expect(harness.session.getActiveToolNames()).toEqual(["second"]);
-		} finally {
-			harness.cleanup();
-		}
-	});
-
-	test("restores checkpoint prompt and executable tools on file-backed SDK resume after rollover", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-window-resume-"));
-		const tools: AgentTool[] = ["first", "second"].map((name) => ({
-			name,
-			label: name,
-			description: `${name} tool`,
-			parameters: Type.Object({}),
-			execute: async () => ({ content: [], details: {} }),
-		}));
-		const resourceLoader = { ...createTestResourceLoader(), getSystemPrompt: () => "Persistent runtime guidance" };
-		const harness = await createHarness({
-			tools,
-			initialActiveToolNames: ["first"],
-			resourceLoader,
-			sessionManager: SessionManager.create(directory, directory),
-			settings: { compaction: { enabled: false } },
-		});
-		try {
-			harness.setResponses([fauxAssistantMessage("old first answer"), fauxAssistantMessage("old second answer")]);
-			await harness.session.prompt("old first input");
-			harness.session.setActiveToolsByName(["second"]);
-			await harness.session.prompt("old second input");
-			const prompt = harness.session.agent.state.systemPrompt;
-			harness.sessionManager.appendCompaction("continue here", null, 0);
-			harness.session.refreshContext();
-			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "compactionSummary"]);
-			expect(harness.session.agent.state.systemPrompt).toBe(prompt);
-			const { session: resumed } = await createAgentSession({
-				cwd: harness.tempDir,
-				agentDir: directory,
-				model: harness.getModel(),
-				modelRuntime: harness.session.modelRuntime,
-				settingsManager: harness.settingsManager,
-				resourceLoader,
-				customTools: tools,
-				sessionManager: SessionManager.open(harness.session.sessionFile!),
-			});
-			try {
-				expect(resumed.messages.map((message) => message.role)).toEqual(["system", "compactionSummary"]);
-				expect(resumed.agent.state.systemPrompt).toBe(prompt);
-				expect(resumed.systemPrompt).toBe(prompt);
-				expect(resumed.getActiveToolNames()).toEqual(["second"]);
-				expect(JSON.stringify(resumed.messages)).not.toContain("old first");
-				expect(JSON.stringify(resumed.messages)).not.toContain("old second");
-				let request: TranscriptContext | undefined;
-				harness.setResponses([
-					(context) => {
-						request = context;
-						return fauxAssistantMessage("resumed");
-					},
-				]);
-				await resumed.prompt("new input");
-				expect(getCurrentTools(request?.messages ?? []).map((tool) => tool.name)).toEqual(["second"]);
-				expect(getCurrentSystemPrompt(request?.messages ?? [])).toBe(prompt);
-				expect(JSON.stringify(request?.messages)).toContain("continue here");
-				expect(JSON.stringify(request?.messages)).not.toContain("old first");
-				expect(resumed.messages.filter((message) => message.role === "system")).toHaveLength(1);
-			} finally {
-				resumed.dispose();
-			}
-		} finally {
-			harness.cleanup();
-			rmSync(directory, { recursive: true, force: true });
-		}
-	});
-
-	test("retains the complete prompt when preflight rollover checkpoints the base of a pending patch", async () => {
-		let turn = 0;
-		const harness = await createHarness({
-			tools: [],
-			models: [{ id: "small", contextWindow: 20_000, maxTokens: 1000 }],
-			settings: { compaction: { reserveTokens: 5000 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", (event) => {
-						event.systemPromptOptions.sections.policy = ++turn === 1 ? "first policy" : "second policy";
-					});
-					pi.on("session_before_compact", (event, ctx) => {
-						pi.appendEntry("posthorse-boundary", {});
-						return {
-							compaction: {
-								summary: "",
-								firstKeptEntryId: ctx.sessionManager.getLeafId()!,
-								tokensBefore: event.preparation.tokensBefore,
-							},
-						};
-					});
-				},
-			],
-		});
-		try {
-			const requests: Array<{ context: TranscriptContext; prompt: string }> = [];
-			harness.setResponses([
-				fauxAssistantMessage("first"),
-				(context) => {
-					requests.push({ context, prompt: harness.session.systemPrompt });
-					return fauxAssistantMessage("second");
-				},
-			]);
-			await harness.session.prompt("a".repeat(36_000));
-			await harness.session.prompt("b".repeat(28_000));
-			expect(requests).toHaveLength(1);
-			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
-			expect(getCurrentSystemPrompt(requests[0].context.messages)).toBe(requests[0].prompt);
-			expect(requests[0].prompt).toContain("second policy");
-			expect(requests[0].prompt).toContain("<cwd>");
-			expect(getCurrentTools(requests[0].context.messages)).toEqual([]);
-			expect(getCurrentSystemPrompt(harness.sessionManager.buildSessionContext().messages)).toBe(requests[0].prompt);
-			expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionContext().messages);
-			const branch = harness.sessionManager.getBranch();
-			const boundary = branch.findIndex((entry) => entry.type === "compaction");
-			expect(
-				branch.slice(boundary + 1).filter((entry) => entry.type === "message" && entry.message.role === "system")
-					.length,
-			).toBeGreaterThan(0);
 		} finally {
 			harness.cleanup();
 		}

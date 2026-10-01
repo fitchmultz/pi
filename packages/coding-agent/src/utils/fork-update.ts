@@ -1,9 +1,20 @@
-import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import {
+	accessSync,
+	constants,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readlinkSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getPackageDir, isBunRuntime, PACKAGE_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./child-process.ts";
+import { claimForkReleaseStore } from "./fork-release-store.ts";
 
 /** Bootstrap a pinned fork checkout; the fork installer owns validation and atomic selection. */
 export async function runForkUpdate(): Promise<void> {
@@ -36,31 +47,35 @@ export async function runForkUpdate(): Promise<void> {
 		throw new Error(`Unsupported npm global layout: ${globalRoot}`);
 	}
 	const selector = join(globalRoot, PACKAGE_NAME);
+	const releases = join(homedir(), ".local/share/pi-fork/releases");
 	const bin = termux ? join(homedir(), ".local/bin/pi") : resolve(globalRoot, "../../bin/pi");
-	try {
-		if (!lstatSync(selector).isSymbolicLink()) {
+	const validateSelector = (): void => {
+		try {
+			if (!lstatSync(selector).isSymbolicLink()) {
+				throw new Error(
+					"the package must already be an immutable fork selector symlink; ordinary npm directories are not migrated",
+				);
+			}
+			if (realpathSync(selector) !== realpathSync(getPackageDir())) {
+				throw new Error("the package selector does not select this running Pi installation");
+			}
+			if (resolve(dirname(bin), readlinkSync(bin)) !== join(selector, "dist/bundle/cli.js")) {
+				throw new Error(`${bin} must point through the package selector to dist/bundle/cli.js`);
+			}
+			accessSync(dirname(selector), constants.W_OK);
+			try {
+				if (!lstatSync(`${selector}.previous`).isSymbolicLink())
+					throw new Error("the .previous backup is not a symlink");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		} catch (error) {
 			throw new Error(
-				"the package must already be an immutable fork selector symlink; ordinary npm directories are not migrated",
+				`Cannot safely update ${selector}: ${error instanceof Error ? error.message : String(error)}. Initial setup: https://github.com/fitchmultz/pi/blob/main/packages/coding-agent/docs/quickstart.md#fork-installation (the installation was not changed).`,
 			);
 		}
-		if (realpathSync(selector) !== realpathSync(getPackageDir())) {
-			throw new Error("the package selector does not select this running Pi installation");
-		}
-		if (resolve(dirname(bin), readlinkSync(bin)) !== join(selector, "dist/bundle/cli.js")) {
-			throw new Error(`${bin} must point through the package selector to dist/bundle/cli.js`);
-		}
-		accessSync(dirname(selector), constants.W_OK);
-		try {
-			if (!lstatSync(`${selector}.previous`).isSymbolicLink())
-				throw new Error("the .previous backup is not a symlink");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
-	} catch (error) {
-		throw new Error(
-			`Cannot safely update ${selector}: ${error instanceof Error ? error.message : String(error)}. Initial setup: https://github.com/fitchmultz/pi/blob/main/FORK.md#immutable-installation-and-activation (the installation was not changed).`,
-		);
-	}
+	};
+	validateSelector();
 	for (const [command, args] of [
 		["git", ["--version"]],
 		["bash", ["--version"]],
@@ -71,14 +86,22 @@ export async function runForkUpdate(): Promise<void> {
 		capture(command, [...args]);
 	}
 
-	const releaseLock = await lockfile.lock(selector, { realpath: false });
+	let releaseLock: (() => Promise<void>) | undefined = await lockfile.lock(selector, {
+		realpath: false,
+		stale: Infinity,
+		update: 1000,
+	});
 	let temporary: string | undefined;
 	try {
+		validateSelector();
+		claimForkReleaseStore(releases, selector);
 		temporary = mkdtempSync(join(tmpdir(), "pi-fork-update-"));
 		const home = join(temporary, "home");
 		const source = join(temporary, "source");
 		mkdirSync(join(home, "tmp"), { recursive: true });
 		mkdirSync(source);
+		const npmGlobalConfig = join(home, "npm-globalconfig");
+		writeFileSync(npmGlobalConfig, "");
 		// Do not expose real settings, credentials, Git hooks/config, or npm lifecycle hooks to the build.
 		const env: NodeJS.ProcessEnv = {
 			PATH: `${dirname(node)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -96,6 +119,7 @@ export async function runForkUpdate(): Promise<void> {
 			GIT_TERMINAL_PROMPT: "0",
 			npm_config_cache: join(home, "npm-cache"),
 			npm_config_userconfig: join(home, ".npmrc"),
+			npm_config_globalconfig: npmGlobalConfig,
 			...(termux
 				? {
 						PREFIX: process.env.PREFIX,
@@ -117,6 +141,10 @@ export async function runForkUpdate(): Promise<void> {
 		await run("git", ["checkout", "--detach", commit]);
 		await run(node, [npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
 		await run(node, [npm, "run", "hydrate:model-data"]);
+		// The installer revalidates and locks all release mutations itself. Hand off
+		// ownership rather than allowing a child to bypass the shared selector lock.
+		await releaseLock();
+		releaseLock = undefined;
 		await run(node, [
 			join(source, "scripts/install-fork.mjs"),
 			"--ref",
@@ -124,7 +152,7 @@ export async function runForkUpdate(): Promise<void> {
 			"--selector",
 			selector,
 			"--releases",
-			join(homedir(), ".local/share/pi-fork/releases"),
+			releases,
 		]);
 		console.log(`Fork commit ${commit} is active. Rollback selector (when available): ${selector}.previous`);
 		console.log(
@@ -134,7 +162,7 @@ export async function runForkUpdate(): Promise<void> {
 		try {
 			if (temporary) rmSync(temporary, { recursive: true, force: true });
 		} finally {
-			await releaseLock();
+			await releaseLock?.();
 		}
 	}
 }

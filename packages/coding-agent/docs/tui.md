@@ -19,8 +19,6 @@ These APIs receive Pi’s active theme and keybindings where needed. Do not crea
 
 ## Understand the component model
 
-<a id="line-width"></a>
-
 A component renders an array of terminal lines for an available width. It can optionally handle keyboard and mouse input, and it must invalidate cached output when its state or theme-dependent content changes.
 
 Every rendered line must fit within the supplied width. Measure visible terminal columns rather than string length because ANSI escapes, wide characters, emoji, and combining characters change display width.
@@ -65,13 +63,11 @@ Regular mode leaves mouse input to the terminal because the terminal owns scroll
 
 ## Use custom screens and overlays
 
-`ctx.ui.custom()` temporarily gives one component control of the interactive area and resolves when that component calls the supplied completion callback. Blocking custom UI owns keyboard focus before an async factory finishes. Calling `done()` releases input ownership immediately; unfinished factory work remains live for checkpoint purposes. A component returned after completion is disposed without mounting.
+`ctx.ui.custom()` temporarily gives one component control of the interactive area and resolves when that component calls the supplied completion callback.
 
 Pass `overlay: true` to draw above existing content. Overlay options control size, anchors, offsets, margins, and responsive visibility. An overlay handle can change focus or temporarily hide and show the overlay with `setHidden()` while the interaction remains active.
 
-Static overlay options retain `nonCapturing` and responsive `visible` behavior during factory work. A functional `overlayOptions` runs once afterward, so it can use initialized state; until then the pending overlay provisionally owns input. Completion preserves its stack entry and options object, including getters and mutations. Passive/invisible results release provisional focus without taking focus from a child. Default width and `onHandle` are evaluated after factory completion. Closing an overlay removes only its own entry.
-
-Focused overlays retain input ownership across ordinary renders and temporary replacement custom UI. If another component should receive input while an overlay remains visible, explicitly release or redirect focus through the handle.
+Focused overlays retain input ownership across ordinary renders. If another component should receive input while an overlay remains visible, explicitly release or redirect focus through the handle.
 
 Treat each custom component instance as belonging to one interaction. Create a new instance when starting that interaction again.
 
@@ -113,7 +109,7 @@ Rendering runs on the interactive path. Cache expensive layout and highlighting 
 
 Keep the default view compact and reveal detail through expansion or a dedicated screen. For custom tool rendering, handle partial results and reuse the previous component when it can be updated safely.
 
-In [compact view](settings.md#compact-view), `ToolRenderContext.compactView` and `MessageRenderOptions.compactView` are optional hints; absence means ordinary view. Tool slots receive the hint through context, not result options. When compact and unexpanded, render short tool output and one actual content row for custom status messages. Native tool cards enforce a two-terminal-row cap and hide inline images; custom messages are not truncated. Keep full details available when expanded and preserve inner click controls.
+In [compact view](settings.md#compact-view) (`true` or `"hybrid"`), Activity groups start collapsed for on and expanded for hybrid; both use the same compact cards. Clicking a heading toggles its group, and Ctrl+O expands full output. In these modes, `MessageRenderOptions.compactView` is an optional density hint; absence means normal view. Custom status renderers can use one content row when compact and unexpanded, keeping full details when expanded. Core does not truncate custom messages. Native tool cards reuse their existing renderers with a two-terminal-row preview and image placeholders; expansion reveals full content and images. Inner mouse controls retain priority over card expansion.
 
 Use `PI_TUI_WRITE_LOG` to capture the raw ANSI stream when diagnosing rendering problems. Test narrow widths, wide characters, resize events, theme changes, focus transitions, and both regular and fullscreen modes.
 

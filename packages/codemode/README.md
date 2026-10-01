@@ -46,8 +46,6 @@ await sandbox.close();
 - `store(key, value)` and `load(key)` read and write JSON values synchronously. See [Store](#store).
 - Nothing else: no timers, `fetch`, `process`, `require`, modules, or `WebAssembly`. `eval` and `Function` work but only produce more code inside the same VM.
 
-The coding agent adds host helpers such as `searchTools()`, `describeTool()`, `describeNamespace()`, and `callTool()`. Scoped native MCP discovery can register tools during a script; use `callTool()` for those tools because `tools` and `ALL_TOOLS` retain the initial snapshot. These helpers are not supplied by a standalone sandbox unless its host injects them. See [coding-agent codemode](../coding-agent/docs/cli.md#how-codemode-works).
-
 `timeoutMs: Infinity` disables the deadline; the script then runs until it settles or `signal` aborts it. A script that waits on a promise nothing can settle (no tool call pending, and the VM has no timers or I/O) fails right away instead of hanging.
 
 `memoryLimitBytes` caps the VM's heap. Allocations beyond it fail inside the script as `InternalError: out of memory`.
@@ -93,6 +91,10 @@ const sandbox = new CodemodeSandbox({
 	workerUrl: new URL("./codemode-worker.js", import.meta.url),
 });
 ```
+
+`workerUrl` accepts a URL or string. For a Bun compiled executable, include the worker as an
+additional build entrypoint and pass its relative source path as a string, for example
+`"./src/codemode-worker.ts"`; Bun resolves that form from its embedded module graph.
 
 ## Declarations for the model
 

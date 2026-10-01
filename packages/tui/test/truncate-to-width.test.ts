@@ -118,19 +118,19 @@ describe("visibleWidth", () => {
 		assert.strictEqual(visibleWidth("ກຳ"), 2);
 	});
 
-	it("preserves Thai and Lao inside terminal sequences while normalizing visible text", () => {
-		for (const terminator of ["\x07", "\x1b\\"]) {
-			const open = `\x1b]8;;https://example.test/กำ/ກຳ${terminator}`;
-			const close = `\x1b]8;;${terminator}`;
-			assert.strictEqual(normalizeTerminalOutput(`${open}กำ ກຳ${close}`), `${open}กํา ກໍາ${close}`);
-			assert.strictEqual(normalizeTerminalOutput(`${open}กำ\tກຳ${close}`), `${open}กํา   ກໍາ${close}`);
-		}
-	});
-
 	it("normalizes Thai and Lao AM vowels only for terminal output", () => {
 		assert.strictEqual(normalizeTerminalOutput("ำ"), "ํา");
 		assert.strictEqual(normalizeTerminalOutput("ຳ"), "ໍາ");
 		assert.strictEqual(visibleWidth(normalizeTerminalOutput("ำabc")), visibleWidth("ำabc"));
 		assert.strictEqual(visibleWidth(normalizeTerminalOutput("ຳabc")), visibleWidth("ຳabc"));
+	});
+
+	// Regression for fitchmultz/pi#46.
+	it("preserves Thai and Lao characters inside terminal hyperlink payloads", () => {
+		for (const terminator of ["\x07", "\x1b\\"]) {
+			const open = `\x1b]8;;https://example.com/กำ/ກຳ\t${terminator}`;
+			const close = `\x1b]8;;${terminator}`;
+			assert.strictEqual(normalizeTerminalOutput(`${open}กำ\tກຳ${close}`), `${open}กํา   ກໍາ${close}`);
+		}
 	});
 });

@@ -1,26 +1,16 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BACKGROUND_CONTEXT, createReadTool as createHarnessReadTool } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { Check } from "typebox/value";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createReadTool, type ReadToolInput } from "../src/core/tools/read.ts";
-
-const invocation = {
-	invocationId: "read-json",
-	operationId: "read-json",
-	turnId: "read-json",
-	getMemo: async () => undefined,
-	setMemo: async () => {},
-};
+import { createReadTool, createReadToolDefinition, type ReadToolInput } from "../src/core/tools/read.ts";
 
 function textOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n");
 }
 
-it("exposes the same optional JSON selection schema through both read factories", () => {
-	const schemas = [createHarnessReadTool().parameters, createReadTool(process.cwd()).parameters];
+it("exposes the same optional JSON selection schema through the read definition and wrapper", () => {
+	const schemas = [createReadToolDefinition(process.cwd()).parameters, createReadTool(process.cwd()).parameters];
 	expect(schemas[0].properties.json).toEqual(schemas[1].properties.json);
 	for (const schema of schemas) {
 		expect(schema.properties.json).toMatchObject({
@@ -34,7 +24,7 @@ it("exposes the same optional JSON selection schema through both read factories"
 	}
 });
 
-describe.each(["coding-agent", "agent harness"])("%s read JSON selection", (runtime) => {
+describe("read JSON selection", () => {
 	let directory: string;
 	let path: string;
 
@@ -46,15 +36,7 @@ describe.each(["coding-agent", "agent harness"])("%s read JSON selection", (runt
 	afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
 	function read(input: ReadToolInput) {
-		if (runtime === "coding-agent") return createReadTool(directory).execute("read-json", input);
-		return createHarnessReadTool().execute(
-			"read-json",
-			input,
-			() => {},
-			{ env: new NodeExecutionEnv({ cwd: directory }) },
-			invocation,
-			BACKGROUND_CONTEXT,
-		);
+		return createReadTool(directory).execute("read-json", input);
 	}
 
 	it("leaves unselected text unchanged and pretty-prints the whole document for json:{}", async () => {
@@ -120,7 +102,7 @@ describe.each(["coding-agent", "agent harness"])("%s read JSON selection", (runt
 		const source = '\uFEFF{"rows":[{"id":0}]}';
 		writeFileSync(path, source);
 		expect(textOutput(await read({ path, json: { path: "/rows/0" } }))).toBe('{\n  "id": 0\n}');
-		expect(textOutput(await read({ path }))).toBe(runtime === "agent harness" ? source.slice(1) : source);
+		expect(textOutput(await read({ path }))).toBe(source);
 	});
 
 	it("supports scalar JSON selections without fields and empty field lists on objects", async () => {

@@ -2,6 +2,7 @@ import type { Op } from "@earendil-works/chord/delta";
 import { fauxAssistantMessage, fauxText, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import {
 	type CommitPublication,
+	defineTool,
 	type Harness,
 	LiveDoc,
 	type LiveState,
@@ -11,6 +12,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { chatSetup, openChat, waitFor } from "./chat-support.ts";
+import { addTool } from "./harness-support.ts";
 import { context, documentChanges } from "./session-support.ts";
 
 type Action = (api: ToolExecutionApi) => void | Promise<void>;
@@ -23,24 +25,27 @@ async function drive(outputLimits: ToolRegistration["outputLimits"] = {}) {
 	const setup = chatSetup();
 	const actions: ((api: ToolExecutionApi) => Promise<boolean>)[] = [];
 	let wake: (() => void) | undefined;
-	setup.registry.tools.add({
-		name: "drive",
-		description: "Driven by the test",
-		parameters: Type.Object({}),
-		outputLimits,
-		execute: async (_args, api, callContext) => {
-			for (;;) {
-				while (actions.length === 0) {
-					await new Promise<void>((resolve, reject) => {
-						wake = resolve;
-						const signal = callContext.abortSignal!;
-						signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-					});
+	addTool(
+		setup.registry,
+		defineTool({
+			name: "drive",
+			description: "Driven by the test",
+			parameters: Type.Object({}),
+			outputLimits,
+			execute: async (_args, api, callContext) => {
+				for (;;) {
+					while (actions.length === 0) {
+						await new Promise<void>((resolve, reject) => {
+							wake = resolve;
+							const signal = callContext.abortSignal!;
+							signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+						});
+					}
+					if (!(await actions.shift()!(api))) return {};
 				}
-				if (!(await actions.shift()!(api))) return {};
-			}
-		},
-	});
+			},
+		}),
+	);
 	setup.faux.setResponses([
 		fauxAssistantMessage([fauxToolCall("drive", {}, { id: "c1" })], { stopReason: "toolUse" }),
 		fauxAssistantMessage([fauxText("done")]),
@@ -94,12 +99,15 @@ function isOutput(op: Op): boolean {
 describe("pi.live deltas", () => {
 	it("hands a generation over to its tool round and starts a tool with one field write each", async () => {
 		const setup = chatSetup();
-		setup.registry.tools.add({
-			name: "noop",
-			description: "noop",
-			parameters: Type.Object({}),
-			execute: async () => ({ content: [] }),
-		});
+		addTool(
+			setup.registry,
+			defineTool({
+				name: "noop",
+				description: "noop",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [] }),
+			}),
+		);
 		setup.faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("noop", {}, { id: "c1" })], { stopReason: "toolUse" }),
 			fauxAssistantMessage([fauxText("done")]),
@@ -116,7 +124,6 @@ describe("pi.live deltas", () => {
 		const id = (kind: string) => tasks.items.filter((task) => task.kind === kind).map((task) => task.id);
 		const [firstGeneration, secondGeneration] = id("pi.generation").sort((a, b) => a - b);
 		const [tool] = id("pi.tool");
-		const [postTools] = id("pi.post-tools");
 		const entries = await root.entries({}, 10, undefined, context);
 		const result = entries.items.find((entry) => entry.kind === "pi.tool-result")!.id;
 		expect(commits).toEqual([
@@ -124,9 +131,8 @@ describe("pi.live deltas", () => {
 			[["s", ["run"], { taskId: firstGeneration, inputs: [expect.any(Number)] }]],
 			// request
 			[["s", ["generation"], { attempt: 1 }]],
-			// handover to the tool round
+			// the generation starts its tool round and keeps the run
 			expect.arrayContaining([
-				["s", ["run", "taskId"], postTools],
 				["d", ["generation"]],
 				["s", ["tools"], [{ callId: "c1", name: "noop", taskId: tool, status: "pending" }]],
 			]),
@@ -137,7 +143,7 @@ describe("pi.live deltas", () => {
 				["s", ["tools", 0, "status"], "done"],
 				["s", ["tools", 0, "entry"], result],
 			]),
-			// post-tools hands over to the next generation
+			// the generation's tools phase hands the run to the next generation
 			expect.arrayContaining([
 				["d", ["tools"]],
 				["s", ["run", "taskId"], secondGeneration],
@@ -149,7 +155,7 @@ describe("pi.live deltas", () => {
 				["d", ["generation"]],
 			]),
 		]);
-		expect(commits[2]).toHaveLength(3);
+		expect(commits[2]).toHaveLength(2);
 		expect(commits[4]).toHaveLength(2);
 		expect(commits[5]).toHaveLength(2);
 		await harness.close(context);
@@ -290,17 +296,20 @@ describe("pi.live deltas", () => {
 		}
 		const setup = chatSetup();
 		for (const name of ["first", "second"]) {
-			setup.registry.tools.add({
-				name,
-				description: name,
-				parameters: Type.Object({}),
-				execute: async (_args, api) => {
-					api.output(`${name} output\n`);
-					await new Promise((resolve) => setTimeout(resolve, 150));
-					api.output(`${name} more\n`);
-					return {};
-				},
-			});
+			addTool(
+				setup.registry,
+				defineTool({
+					name,
+					description: name,
+					parameters: Type.Object({}),
+					execute: async (_args, api) => {
+						api.output(`${name} output\n`);
+						await new Promise((resolve) => setTimeout(resolve, 150));
+						api.output(`${name} more\n`);
+						return {};
+					},
+				}),
+			);
 		}
 		setup.faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("first", {}, { id: "a" }), fauxToolCall("second", {}, { id: "b" })], {
@@ -308,8 +317,8 @@ describe("pi.live deltas", () => {
 			}),
 			fauxAssistantMessage([fauxText("done")]),
 		]);
+		setup.settings.toolExecution = "sequential";
 		const { harness, root } = await openChat(new RecordingStorage(), setup);
-		await root.setToolExecution("sequential", context);
 		const values = new Map<number, LiveState>();
 		harness.subscribeCommits((publication) => {
 			for (const change of documentChanges(publication)) {
@@ -333,13 +342,16 @@ describe("pi.live deltas", () => {
 
 	it("starts calls the request did not offer as done and marks a faulted tool's slot done without an entry", async () => {
 		const setup = chatSetup();
-		setup.registry.tools.add({
-			name: "bad",
-			description: "bad",
-			parameters: Type.Object({}),
-			// Not strict JSON: the result commit throws and the scheduler faults the task.
-			execute: async () => ({ content: [], details: { fn: (() => 1) as never } }),
-		});
+		addTool(
+			setup.registry,
+			defineTool({
+				name: "bad",
+				description: "bad",
+				parameters: Type.Object({}),
+				// Not strict JSON: the result commit throws and the scheduler faults the task.
+				execute: async () => ({ content: [], details: { fn: (() => 1) as never } }),
+			}),
+		);
 		setup.faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("ghost", {}, { id: "g" }), fauxToolCall("bad", {}, { id: "b" })], {
 				stopReason: "toolUse",
@@ -370,14 +382,17 @@ describe("pi.live deltas", () => {
 		await harness.close(context);
 	});
 
-	it("commits the tool-calling answer, its tool tasks, post-tools, and the tool round in one commit", async () => {
+	it("commits the tool-calling answer, its tool tasks, the generation's wait, and the tool round in one commit", async () => {
 		const setup = chatSetup();
-		setup.registry.tools.add({
-			name: "noop",
-			description: "noop",
-			parameters: Type.Object({}),
-			execute: async () => ({ content: [] }),
-		});
+		addTool(
+			setup.registry,
+			defineTool({
+				name: "noop",
+				description: "noop",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [] }),
+			}),
+		);
 		setup.faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("noop", {}, { id: "a" }), fauxToolCall("noop", {}, { id: "b" })], {
 				stopReason: "toolUse",
@@ -398,7 +413,7 @@ describe("pi.live deltas", () => {
 		const kinds = changes.flatMap((change) =>
 			change.type === "entry" ? [change.value.kind] : change.type === "task" ? [change.value.kind] : [],
 		);
-		expect(kinds.sort()).toEqual(["pi.assistant", "pi.generation", "pi.post-tools", "pi.tool", "pi.tool"]);
+		expect(kinds.sort()).toEqual(["pi.assistant", "pi.generation", "pi.tool", "pi.tool"]);
 		await harness.close(context);
 	});
 

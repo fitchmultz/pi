@@ -1,8 +1,6 @@
 # Session File Format
 
-Sessions are stored as JSONL (JSON Lines) files. Each nonempty line is a JSON object with a `type` field; readers should ignore blank separator lines. Session entries form a tree structure via `id`/`parentId` fields, enabling in-place branching without creating new files.
-
-Pi indexes structural metadata and byte ranges from a captured file descriptor and end offset. Historical payloads remain in the journal and load on demand. The index is derived; it is never a second session authority. Live readers commit newline-terminated records only; sealed readers can inspect a valid unterminated final record. Strict accounting and conversion reject malformed records, including malformed ignored values. Read-only inspection never repairs a source; opening a writable manager may migrate old versions or terminate a tail.
+Sessions are stored as JSONL (JSON Lines) files. Each line is a JSON object with a `type` field. Session entries form a tree structure via `id`/`parentId` fields, enabling in-place branching without creating new files.
 
 For programmatic creation, persistence, and tree navigation, see the [`SessionManager` API](sdk.md#sessionmanager-api).
 
@@ -29,7 +27,7 @@ Sessions have a version field in the header:
 - **Version 2**: Tree structure with `id`/`parentId` linking
 - **Version 3**: Renamed `hookMessage` role to `custom` (extensions unification)
 
-Ordinary v1/v2 sessions migrate to v3 when loaded. Legacy fork journals containing retired runtime fields require a separate, one-time copy conversion; they are not silently resumed.
+Existing sessions are automatically migrated to the current version (v3) when loaded.
 
 ## Source Files
 
@@ -79,13 +77,14 @@ For sessions with a parent (created via `/fork`, `/clone`, or `newSession({ pare
 
 ### SessionMessageEntry
 
-A message in the conversation. The `message` field contains an [`AgentMessage`](message-types.md). System messages carry named prompt sections and public-name tool declarations. Replay additions/removals in order; `toolsRemoved` contains `{ name }` references, not strings or namespace pairs. A legacy journal with retired native execution fields requires [copy conversion](#convert-a-legacy-fork-session).
+A message in the conversation. The `message` field contains an `AgentMessage`. System messages carry the prompt and tool loadout: the first request of a session persists one with every prompt section and tool declaration, and later changes persist as system messages that patch `sections` by name (`null` removes one) and list `toolsAdded`/`toolsRemoved`. Replaying them in order yields the current prompt and tools; there is no separate prompt state entry.
 
 ```json
-{"type":"message","id":"a0b1c2d3","parentId":null,"timestamp":"2024-12-03T14:00:00.000Z","message":{"role":"system","content":"","sections":{"preamble":"You are a coding assistant."},"toolsAdded":[{"name":"read","description":"Read a file","parameters":{}}],"timestamp":1733234400000}}
+{"type":"message","id":"a0b1c2d3","parentId":null,"timestamp":"2024-12-03T14:00:00.000Z","message":{"role":"system","content":"","sections":{"preamble":"You are an expert coding assistant...","tools":"<tools>\n- read: ...\n</tools>","cwd":"/project"},"toolsAdded":[{"name":"read","description":"...","parameters":{}}],"timestamp":1733234400000}}
+{"type":"message","id":"d4e5f6g7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:04:00.000Z","message":{"role":"system","content":"","sections":{"skills":"<skills>...</skills>"},"toolsRemoved":[{"name":"write"}],"timestamp":1733234640000}}
 ```
 
-Sessions created before system messages existed have no leading system message; the first request declares the current prompt as a later system message.
+Sessions created before system messages existed have no leading system message; the first request declares the current prompt as a later system message, which replays the same way.
 
 ```json
 {"type":"message","id":"a1b2c3d4","parentId":"prev1234","timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"user","content":"Hello","timestamp":1733234401000}}
@@ -119,19 +118,17 @@ Records model-attributed usage that is not an assistant message and does not par
 {"type":"usage","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:08:00.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":50000,"cacheWrite":0,"totalTokens":50000,"cost":{"input":0,"output":0,"cacheRead":0.015,"cacheWrite":0,"total":0.015}}}
 ```
 
-Usage entries contribute to session token/cost totals. The first usage entry saves a file-backed journal, including earlier deferred entries, even before the first assistant response. Copied branches containing usage are saved immediately. Pi hides usage entries from the conversation tree; accept unknown `kind` values.
-
-Optional `contributionId` is an idempotency key separate from the entry ID. `pi.recordUsage({ id, kind, provider, model, usage, note? })` persists it with the contribution. Identical repeats anywhere in the journal are no-ops; conflicts throw. Resume/forks retain IDs on copied entries; omitted entries do not reserve their IDs in a fork. Unrelated journals have independent IDs. There is no second accounting store.
+Usage entries contribute to session token and cost totals. Pi hides them from the conversation tree. Consumers should treat unknown `kind` values as normal usage rather than rejecting them.
 
 ### CompactionEntry
 
-Created when context is compacted. Stores a summary of earlier messages and, when available, a complete system prompt/tool checkpoint.
+Created when context is compacted. Stores a summary of earlier messages and a complete system prompt/tool checkpoint.
 
 ```json
 {"type":"compaction","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:10:00.000Z","summary":"User discussed X, Y, Z...","firstKeptEntryId":"c3d4e5f6","tokensBefore":50000,"systemMessage":{"role":"system","content":"You are a coding assistant.","toolsAdded":[],"timestamp":1733235000000}}
 ```
 
-`firstKeptEntryId` is required. It identifies the first entry retained from before the compaction entry. When rebuilding context, Pi replaces older entries with the compaction summary and keeps the range beginning at this entry. A summary-free extension handoff can use public compaction hooks without a separate context-window entry.
+`firstKeptEntryId` is required. It identifies the first entry retained from before the compaction entry. When rebuilding context, Pi replaces older summarized entries with the compaction summary and keeps the range beginning at this entry. A retain-none compaction stores its own ID in this field, so no preceding entries are retained.
 
 Optional fields:
 - `systemMessage`: The replayed prompt sections and tool declarations at the compaction boundary; it becomes the leading system message of the compacted context, and system messages among the kept entries are dropped in its favor. It is absent on older session entries.
@@ -147,7 +144,7 @@ Append-only edit of one earlier context-producing entry. It changes only future 
 {"type":"context_edit","id":"g6h7i8j9","parentId":"f6g7h8i9","timestamp":"2024-12-03T14:11:00.000Z","targetId":"c3d4e5f6","replacement":null}
 ```
 
-Targets may be user, assistant, tool-result, or custom-message entries. `replacement: null` omits the target from model context. A non-null `replacement` has `{ content }` and replaces only the target message content. String replacements for assistant and tool-result entries are normalized to one text block because those roles require content arrays. If several edits target the same entry, the latest edit on the active branch wins. Edits are branch-relative: navigating to a point before the edit reveals the target's original contribution again.
+Targets may be user, assistant, tool-result, or custom-message entries. `replacement: null` omits the target from model context. A non-null `replacement` replaces only the target message content. String replacements for assistant and tool-result entries are normalized to one text block because those roles require content arrays. If several edits target the same entry, the latest edit on the active branch wins. Edits are branch-relative: navigating to a point before the edit reveals the target's original contribution again.
 
 ### BranchSummaryEntry
 
@@ -172,7 +169,7 @@ Extension state persistence. Does NOT participate in LLM context.
 {"type":"custom","id":"h8i9j0k1","parentId":"g7h8i9j0","timestamp":"2024-12-03T14:20:00.000Z","customType":"my-extension","data":{"count":42}}
 ```
 
-Use `customType` to identify your extension's entries on reload. The first custom entry saves a file-backed session even before an assistant response, including earlier deferred entries; copied branches containing custom entries are saved immediately. Interactive mode can render custom entries via `pi.registerEntryRenderer(customType, renderer)`, but they still do not participate in LLM context.
+Use `customType` to identify your extension's entries on reload. Interactive mode can render custom entries via `pi.registerEntryRenderer(customType, renderer)`, but they still do not participate in LLM context.
 
 Pi stores [virtual model](virtual-models.md) router state as custom entries with `customType` `pi.virtual-model-state` and `data` `{ provider, modelId, state }`.
 
@@ -226,59 +223,71 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 
 ## Context Building
 
-`buildContextEntries()` walks the active tree branch, applies the latest compaction boundary, and keeps entries from `firstKeptEntryId` onward plus later entries. `buildSessionContext()` converts retained message, compaction, branch-summary, and custom-message entries into model context. Usage and custom state entries do not enter model context. `context_edit` changes a target's future context contribution without rewriting its raw journal entry. The compaction's `systemMessage`, when present, supplies the complete prompt/tool checkpoint rather than replaying pre-compaction system messages.
+`buildContextEntries()` walks from the current leaf to the root, producing the active entry list while honoring compaction:
 
-Repeated projections retain at most 16 MiB of pristine serialized active journal bodies. Each projection receives independent values; SDK or extension mutations never alter a later request. After a source generation changes, including an ordinary local append, cached records are hash-checked in shared chunks before reuse. Changed or truncated history is refused rather than hidden by the cache; inactive bodies are released.
+1. Collects all entries on the path
+2. If one or more `CompactionEntry` values are on the path, uses the latest one:
+   - Includes the compaction entry first
+   - Includes non-system entries from `firstKeptEntryId` up to, but not including, the compaction entry
+   - Includes entries after the compaction entry
+3. Preserves non-message entries in the selected range so interactive mode can render them
 
-`forkBranch(leafId)` creates an independent selected-branch manager without moving the source leaf. Several sibling copies can reuse one open source index. Copies preserve context entry IDs and branch-local edits, rechain removed label entries, remap label-based compaction boundaries, and recreate resolved labels. Native writers derive output offsets and digests while copying. Before adopting that index, they verify every published record digest and LF separator in bounded chunks, including header and settings records. Initial writes and repair rewrites use the same verification. This adds one output hashing pass but avoids reparsing unchanged output; a mismatch rebuilds the index from the published file rather than trusting matching file stats. Each persistent child remains a separate JSONL copy with exclusive publication and file fsync; no shared journal or parent-directory fsync is introduced.
+`buildSessionProjection()` then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. The raw selected entries are not modified.
 
-## Persistence failures
+`buildSessionContext()` builds on that projection to produce the message list for the LLM:
 
-Appends accept entries in memory before journal I/O. An I/O error retains the entry, ID, parent, leaf, revision, and indexes; do not append again to retry saving. `flush()` and later appends retry missing entries without replacing the journal, preserving entries saved by other writers. An incomplete final line is terminated and skipped during parsing; entries already saved are not duplicated. A saved ID with different content refuses the retry and retains the accepted entry. Errors propagate until saving succeeds.
+1. Extracts current model and thinking level settings from the full path
+2. Converts selected entries to messages:
+   - `message` -> stored `AgentMessage`
+   - `compaction` -> complete system checkpoint followed by `compactionSummary`
+   - `branch_summary` -> `branchSummary`
+   - `custom_message` -> `CustomMessage`
+   - `context_edit` -> no context message of its own
+   - `usage` and `custom` -> no context message
 
-Full rewrites stage a complete sibling temporary file and rename only after writes/close succeed. Journals opened through symlinks replace the resolved target while preserving the alias and permission mode. Failed staging preserves old bytes and removes temporary output. Full rewrites need a writable journal and parent; new journals retain exclusive collision protection.
+The compaction summary replaces entries before `firstKeptEntryId`. Pre-compaction system messages are folded into the complete checkpoint rather than replayed from the retained range. Retained non-system entries and all entries after the compaction remain available to the LLM.
 
-`flush()` changes no entries/revisions/leaf and emits no events. It is a no-op for in-memory sessions and deferred journals with no assistant response, usage, or custom entry. Session replacement flushes failed persistence first. Retain the process after failed saving; this is not a filesystem freeze or power-loss guarantee.
-
-`getEntriesRevision()` changes on append or session replacement, not leaf-only navigation; use it for file-wide derived-data caches. Session listing methods accept optional abort signals. See the exported [`SessionManager`](../src/core/session-manager.ts) declarations for signatures.
-
-## Convert a legacy fork session
-
-Use `pi convert-session SOURCE.jsonl NEW_PATH.jsonl` for a settled v3 legacy fork journal. It writes a distinct new file and preserves the original; it does not load extensions or contact providers or execute tools. Resume with `pi --session NEW_PATH.jsonl`, which starts a fresh provider request rather than resuming an in-flight response. Existing output is never overwritten. Stop the original writer first; conversion refuses changed source bytes.
-
-Native response snapshots are coalesced by provider, API, model, and response ID only when a unique final response exists on every affected branch. The first snapshot's concurrent-receipt metadata controls legacy boundary selection. Causal reordering across a compaction, context window, or context edit, and causal reordering on branched histories, are refused. Histories without concurrent receipt metadata still support branches. Legacy context windows become compaction boundaries where safe, carrying retained calls and receipts without billing them again.
-
-For synchronous provider input, real tool results follow their effective assistant's calls in call order, including calls carried into a new window. Other contributions stay in their relative order. Original receipt IDs, content, details, and usage remain on the live results; archival metadata at their old positions preserves chronological branch state and branch-summary references. Conversion checks that receipt grouping preserves each branch's retained model contributions and refuses relocation through a fork that requires branch-specific receipts.
-
-Tool declarations recorded on results become empty system messages at the original receipt position, with every child branch continuing after the declaration. They remain there when the receipt moves, preserving the order of tool additions and removals. Colliding namespace/name identities receive deterministic, distinct public names used consistently by declarations, calls, results, and removals. The reversible name mapping, original declarations, response snapshots, and ordering metadata are archived in custom `legacy-conversion-*` entries, outside model input and billing.
-
-An error or aborted assistant with provably committed calls retains its original failure, ID, and full usage. A separate zero-usage assistant projection presents only committed output and its genuine results to the provider, excluding unsigned partial output and trailing interrupted reasoning. Calls require recorded execution-start proof or a valid authoritative response item; uncommitted or malformed obligations are refused. Call-free failures keep native provider skip behavior. No tool executes during conversion.
-
-Historical steering statuses are preserved, never changed to `applied` or delivered again. Queued records without a steering ID and accepted/unknown outcomes require the exact user message to be journaled once on the same branch, after the event, followed by a completed different response. Applied steering requires its durable input; failed steering remains an archived failure.
-
-Conversion refuses unfinished or deferred responses, missing/mismatched tool results, unjournaled or unresolved steering, unsupported boundary/edit reconstruction, malformed references and unsupported entry types. Do not replay refused work. This copy conversion is separate from live [working-session checkpoints](checkpoint.md), which preserve exact accepted queues and selection.
-
-## Metadata inspection example
-
-Metadata inspection avoids loading unrelated payloads. Use the readonly manager supplied by an extension context or SDK host:
+## Parsing Example
 
 ```typescript
-import type { ReadonlySessionManager } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "fs";
 
-function inspectSession(manager: ReadonlySessionManager) {
-  for (const entry of manager.iterateEntryMetadata()) {
-    console.log(entry.id, entry.parentId, entry.type, entry.preview);
-    if (entry.type === "usage") {
-      console.log(entry.provider, entry.model, entry.usage.totalTokens);
-    }
+const lines = readFileSync("session.jsonl", "utf8").trim().split("\n");
+
+for (const line of lines) {
+  const entry = JSON.parse(line);
+
+  switch (entry.type) {
+    case "session":
+      console.log(`Session v${entry.version ?? 1}: ${entry.id}`);
+      break;
+    case "message":
+      console.log(`[${entry.id}] ${entry.message.role}: ${JSON.stringify(entry.message.content)}`);
+      break;
+    case "compaction":
+      console.log(`[${entry.id}] Compaction: ${entry.tokensBefore} tokens summarized`);
+      break;
+    case "branch_summary":
+      console.log(`[${entry.id}] Branch from ${entry.fromId}`);
+      break;
+    case "usage":
+      console.log(`[${entry.id}] Usage (${entry.kind}): ${entry.usage.totalTokens} tokens`);
+      break;
+    case "custom":
+      console.log(`[${entry.id}] Custom (${entry.customType}): ${JSON.stringify(entry.data)}`);
+      break;
+    case "custom_message":
+      console.log(`[${entry.id}] Extension message (${entry.customType}): ${entry.content}`);
+      break;
+    case "label":
+      console.log(`[${entry.id}] Label "${entry.label}" on ${entry.targetId}`);
+      break;
+    case "model_change":
+      console.log(`[${entry.id}] Model: ${entry.provider}/${entry.modelId}`);
+      break;
+    case "thinking_level_change":
+      console.log(`[${entry.id}] Thinking: ${entry.thinkingLevel}`);
+      break;
   }
-
-  // Load one explicitly requested complete entry, not the whole journal.
-  const selected = manager.getLeafId();
-  if (selected !== null) return manager.getEntry(selected);
 }
 ```
-
-`getEntry()` and shallow entry collections preserve enumerable optional fields and complete serialization. Reading a payload or serializing an entry requests its full value; that individual value must fit the caller's memory.
-
-`SessionManager.list()` and `listAll()` return metadata and a bounded `firstMessagePreview` for ordinary picker rendering and ID lookup. Their enumerable `firstMessage` and `allMessagesText` fields load complete text on the first successful access and cache it for that listing snapshot; enumerating or serializing those values is an explicit full-text request. Failed reads are never cached. Picker searches retain the complete existing fuzzy, quoted-phrase, and JavaScript regular-expression behavior, including matches across messages. Full-text access and search require enough consumer memory and remain subject to JavaScript's string-size limit. They never substitute cropped text. The picker shows catchable read failures and keeps healthy matches; clearing the query restores ordinary metadata browsing.

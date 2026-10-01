@@ -36,7 +36,6 @@ export {
 export {
 	type CancelledNotification,
 	type ClientCapabilities,
-	type GetPromptResult,
 	type Implementation,
 	type InitializeParams,
 	type InitializeResult,
@@ -45,8 +44,6 @@ export {
 	type ListResourceTemplatesResult,
 	type ListToolsResult,
 	type ProgressNotification,
-	type Prompt,
-	type PromptArgument,
 	type ReadResourceResult,
 	type Resource,
 	type ResourceTemplate,

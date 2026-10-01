@@ -158,7 +158,6 @@ export function filterAndSortSessions(
 	query: string,
 	sortMode: SortMode,
 	nameFilter: NameFilter = "all",
-	onError?: (session: SessionInfo, error: unknown) => void,
 ): SessionInfo[] {
 	const nameFiltered =
 		nameFilter === "all" ? sessions : sessions.filter((session) => matchesNameFilter(session, nameFilter));
@@ -168,23 +167,28 @@ export function filterAndSortSessions(
 	const parsed = parseSearchQuery(query);
 	if (parsed.error) return [];
 
-	const scored: { session: SessionInfo; score: number }[] = [];
-	for (const s of nameFiltered) {
-		try {
+	// Recent mode: filter only, keep incoming order.
+	if (sortMode === "recent") {
+		const filtered: SessionInfo[] = [];
+		for (const s of nameFiltered) {
 			const res = matchSession(s, parsed);
-			if (res.matches) scored.push({ session: s, score: res.score });
-		} catch (error) {
-			if (!onError) throw error;
-			onError(s, error);
+			if (res.matches) filtered.push(s);
 		}
+		return filtered;
 	}
 
-	// Recent mode keeps incoming order; relevance sorts by score, then modified desc.
-	if (sortMode !== "recent")
-		scored.sort((a, b) => {
-			if (a.score !== b.score) return a.score - b.score;
-			return b.session.modified.getTime() - a.session.modified.getTime();
-		});
+	// Relevance mode: sort by score, tie-break by modified desc.
+	const scored: { session: SessionInfo; score: number }[] = [];
+	for (const s of nameFiltered) {
+		const res = matchSession(s, parsed);
+		if (!res.matches) continue;
+		scored.push({ session: s, score: res.score });
+	}
+
+	scored.sort((a, b) => {
+		if (a.score !== b.score) return a.score - b.score;
+		return b.session.modified.getTime() - a.session.modified.getTime();
+	});
 
 	return scored.map((r) => r.session);
 }

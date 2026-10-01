@@ -13,13 +13,12 @@ import type {
 	ResponseStreamEvent,
 	ResponseToolSearchOutputItemParam,
 } from "openai/resources/responses/responses.js";
-import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { calculateCost } from "../models.ts";
 import type {
 	Api,
 	AssistantMessage,
 	ImageContent,
 	Model,
-	ModelThinkingLevel,
 	StopReason,
 	StreamOptions,
 	SystemMessage,
@@ -31,13 +30,12 @@ import type {
 	TranscriptContext,
 	Usage,
 } from "../types.ts";
-import { assertContextFits } from "../utils/estimate.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
-import { getInitialSystemMessage, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
 	type GrammarToolInputJsonBuffer,
@@ -110,7 +108,6 @@ function convertToolResultOutput<TApi extends Api>(
 }
 
 export interface OpenAIResponsesStreamOptions {
-	responseError?: (response: Extract<ResponseStreamEvent, { type: "response.failed" }>["response"]) => Error;
 	onProviderStreamEvent?: StreamOptions["onProviderStreamEvent"];
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
@@ -125,8 +122,6 @@ export interface OpenAIResponsesStreamOptions {
 }
 
 export interface ConvertResponsesMessagesOptions {
-	/** Effective effort for this request; historical changes are replayed positionally. */
-	reasoningEffort?: string;
 	includeSystemPrompt?: boolean;
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	/** Whether later system messages are sent in place; otherwise they are folded into the leading prompt. */
@@ -186,11 +181,6 @@ export function convertResponsesMessages<TApi extends Api>(
 		normalizedContext.messages,
 		(options?.supportsAdditionalTools ?? false) || (options?.supportsToolSearch ?? false),
 	);
-	assertContextFits(
-		model,
-		transformedMessages,
-		transcriptTools.anchorsAdditions ? undefined : transcriptTools.requestTools,
-	);
 	const appendSystemToolAdditions = (message: SystemMessage, seed: string): void => {
 		const tools = transcriptTools.anchorsAdditions ? (message.toolsAdded ?? []) : [];
 		if (tools.length === 0) return;
@@ -224,20 +214,6 @@ export function convertResponsesMessages<TApi extends Api>(
 	const compat = model.compat as { supportsDeveloperRole?: boolean } | undefined;
 	const instructionRole = model.reasoning && compat?.supportsDeveloperRole !== false ? "developer" : "system";
 
-	let activeEffort =
-		options?.reasoningEffort === undefined
-			? undefined
-			: getInitialResponsesEffort(model, context, options.reasoningEffort);
-	const updateEffort = (effort: string): void => {
-		if (effort === activeEffort) return;
-		const update: ResponseInputItem = {
-			type: "configuration_update",
-			reasoning: { effort: effort as "low" | "medium" | "high" | "xhigh" | "max" },
-		};
-		if (messages.at(-1)?.type === "configuration_update") messages[messages.length - 1] = update;
-		else messages.push(update);
-		activeEffort = effort;
-	};
 	let msgIndex = 0;
 	let sourceIndex = 0;
 	for (const msg of transformedMessages) {
@@ -318,14 +294,13 @@ export function convertResponsesMessages<TApi extends Api>(
 					let itemId: string | undefined = itemIdRaw;
 
 					// For different-model messages, set id to undefined to avoid pairing validation.
-					// OpenAI tracks which fc_xxx IDs were paired with rs_xxx reasoning items.
+					// OpenAI tracks which item IDs were paired with rs_xxx reasoning items.
 					// By omitting the id, we avoid triggering that validation (like cross-provider does).
-					// When replaying custom-tool calls as a function_call, also drop non-fc_* ids such as
-					// ctc_* custom-tool ids because function_call item ids must be fc_*.
-					if (
-						(isDifferentModel && itemId?.startsWith("fc_")) ||
-						!itemId?.startsWith(customInputProperty === undefined ? "fc_" : "ctc_")
-					) {
+					// Also drop ids that do not match the replayed item type: function_call ids must be fc_*
+					// and custom_tool_call ids must be ctc_*. Foreign tool call ids are normalized to fc_*, and
+					// a call can switch between the two types when grammar tool support differs.
+					const itemIdPrefix = customInputProperty === undefined ? "fc_" : "ctc_";
+					if (isDifferentModel || !itemId?.startsWith(itemIdPrefix)) {
 						itemId = undefined;
 					}
 
@@ -353,13 +328,6 @@ export function convertResponsesMessages<TApi extends Api>(
 				}
 			}
 			if (output.length === 0) continue;
-			if (
-				activeEffort !== undefined &&
-				isSameModel &&
-				msg.providerThinkingLevel !== undefined &&
-				msg.timestamp >= (getInitialSystemMessage(context.messages)?.timestamp ?? 0)
-			)
-				updateEffort(msg.providerThinkingLevel);
 			messages.push(...output);
 		} else if (msg.role === "toolResult") {
 			const [callId] = msg.toolCallId.split("|");
@@ -382,74 +350,7 @@ export function convertResponsesMessages<TApi extends Api>(
 		if (!isLeadingSystemMessage) msgIndex++;
 	}
 
-	if (options?.reasoningEffort !== undefined) updateEffort(options.reasoningEffort);
 	return messages;
-}
-
-/** Shared wire projection; upstream encoders still own additive loading. */
-export function resolveResponsesTranscript(
-	model: Model<Api>,
-	context: TranscriptContext,
-	supportsMidConvoSystemMessages?: boolean,
-): TranscriptContext {
-	return resolveTranscript(context, supportsMidConvoSystemMessages, "all", {
-		contextWindow: model.contextWindow,
-		tools: "declared",
-		transform: (messages) => transformMessages(messages, model),
-	});
-}
-
-export function getInitialResponsesEffort(model: Model<Api>, context: TranscriptContext, current: string): string {
-	const boundary = getInitialSystemMessage(context.messages)?.timestamp ?? 0;
-	for (const message of context.messages) {
-		if (
-			message.role === "assistant" &&
-			message.api === model.api &&
-			message.provider === model.provider &&
-			message.model === model.id &&
-			message.timestamp >= boundary &&
-			message.stopReason !== "error" &&
-			message.stopReason !== "aborted" &&
-			message.providerThinkingLevel !== undefined
-		)
-			return message.providerThinkingLevel;
-	}
-	return current;
-}
-
-/** Only standard, stateless single-agent GPT-6 requests support positional effort. */
-export function supportsPositionalResponsesEffort(
-	model: Model<"openai-responses" | "openai-codex-responses">,
-	params?: Record<string, unknown>,
-): boolean {
-	const knownRoute =
-		["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"].includes(model.id) &&
-		((model.provider === "openai" && /^https:\/\/api\.openai\.com(?:\/|$)/.test(model.baseUrl)) ||
-			(model.provider === "openai-codex" && /^https:\/\/chatgpt\.com(?:\/|$)/.test(model.baseUrl)));
-	const reasoning = params?.reasoning as { mode?: string; effort?: unknown } | undefined;
-	return (
-		model.reasoning &&
-		(model.compat?.supportsReasoningEffortUpdates ?? knownRoute) &&
-		(!reasoning?.mode || reasoning.mode === "standard") &&
-		reasoning?.effort === undefined &&
-		!params?.context_management &&
-		params?.truncation !== "auto" &&
-		!params?.multi_agent &&
-		!params?.agent &&
-		!params?.agents
-	);
-}
-
-export function resolveResponsesEffort(
-	model: Model<"openai-responses" | "openai-codex-responses">,
-	requested?: ModelThinkingLevel | "none",
-): string | undefined {
-	if (!model.reasoning) return undefined;
-	if (requested !== undefined) {
-		const level = clampThinkingLevel(model, requested === "none" ? "off" : requested);
-		return model.thinkingLevelMap?.[level] ?? (level === "off" ? "none" : level);
-	}
-	return model.thinkingLevelMap?.off === null ? "medium" : (model.thinkingLevelMap?.off ?? "none");
 }
 
 // =============================================================================
@@ -537,32 +438,6 @@ export async function processResponsesStream<TApi extends Api>(
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
 	let sawTerminalResponseEvent = false;
-	// Keep hosted results outside content: they are not calls for the local agent to execute.
-	const recordWebSearchItem = (item: ResponseOutputItem): void => {
-		if (item.type === "web_search_call") {
-			output.webSearch ??= {};
-			output.webSearch.calls ??= [];
-			const calls = output.webSearch.calls;
-			const index = calls.findIndex((call) => call.id === item.id);
-			if (index < 0) calls.push(item);
-			else calls[index] = item;
-		} else if (item.type === "message") {
-			const citations = (item.content ?? []).flatMap((part, contentIndex) =>
-				part.type === "output_text"
-					? (part.annotations ?? [])
-							.filter((annotation) => annotation.type === "url_citation")
-							.map((annotation) => ({ itemId: item.id, contentIndex, annotation }))
-					: [],
-			);
-			if (citations.length === 0) return;
-			output.webSearch ??= {};
-			const metadata = output.webSearch;
-			metadata.citations = [
-				...(metadata.citations ?? []).filter((citation) => citation.itemId !== item.id),
-				...citations,
-			];
-		}
-	};
 	const outputSlots = new Map<number, ResponsesOutputSlot>();
 	const reasoningBlocksById = new Map<string, ThinkingContent>();
 	const applyMessagePhaseStopReason = (item: ResponseOutputItem): void => {
@@ -587,7 +462,7 @@ export async function processResponsesStream<TApi extends Api>(
 		});
 	};
 	const createSlot = (outputIndex: number, item: ResponseOutputItem): ResponsesOutputSlot | undefined => {
-		if (item.type === "reasoning" || item.type === "compaction") {
+		if (item.type === "reasoning") {
 			const block: ThinkingContent = { type: "thinking", thinking: "" };
 			output.content.push(block);
 			const slot = {
@@ -675,10 +550,12 @@ export async function processResponsesStream<TApi extends Api>(
 		}
 	};
 	const finalizeResponse = (
-		response: Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>["response"],
+		response: Extract<
+			ResponseStreamEvent,
+			{ type: "response.completed" | "response.incomplete" | "response.failed" }
+		>["response"],
 	): void => {
 		sawTerminalResponseEvent = true;
-		for (const item of response.output ?? []) recordWebSearchItem(item);
 		backfillReasoningSignatures(response.output ?? []);
 		if (response?.id) {
 			output.responseId = response.id;
@@ -702,11 +579,9 @@ export async function processResponsesStream<TApi extends Api>(
 		}
 		calculateCost(model, output.usage);
 		if (options?.applyServiceTierPricing) {
-			// Ultrafast pricing requires provider confirmation, never a request-only estimate.
-			const requestServiceTier = options.serviceTier === "ultrafast" ? undefined : options.serviceTier;
 			const serviceTier = options.resolveServiceTier
-				? options.resolveServiceTier(response?.service_tier, requestServiceTier)
-				: (response?.service_tier ?? requestServiceTier);
+				? options.resolveServiceTier(response?.service_tier, options.serviceTier)
+				: (response?.service_tier ?? options.serviceTier);
 			options.applyServiceTierPricing(output.usage, serviceTier);
 		}
 		// Map status to stop reason. For incomplete responses, retain the provider's
@@ -810,13 +685,12 @@ export async function processResponsesStream<TApi extends Api>(
 			pushToolCallDelta(slot, appendCustomToolCallInput(slot.block, event.input, true));
 		} else if (event.type === "response.output_item.done") {
 			const item = event.item;
-			recordWebSearchItem(item);
 			applyMessagePhaseStopReason(item);
 			const slot = getOrCreateSlot(event.output_index, item);
 
-			if ((item.type === "reasoning" || item.type === "compaction") && slot?.type === "thinking") {
-				const summaryText = item.type === "reasoning" ? item.summary?.map((s) => s.text).join("\n\n") || "" : "";
-				const contentText = item.type === "reasoning" ? item.content?.map((c) => c.text).join("\n\n") || "" : "";
+			if (item.type === "reasoning" && slot?.type === "thinking") {
+				const summaryText = item.summary?.map((s) => s.text).join("\n\n") || "";
+				const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
 				slot.block.thinking = summaryText || contentText || slot.block.thinking;
 				slot.block.thinkingSignature = JSON.stringify(item);
 				reasoningBlocksById.set(item.id, slot.block);
@@ -875,7 +749,6 @@ export async function processResponsesStream<TApi extends Api>(
 			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
 		} else if (event.type === "response.failed") {
 			finalizeResponse(event.response);
-			if (options?.responseError) throw options.responseError(event.response);
 			const error = event.response?.error;
 			const details = event.response?.incomplete_details;
 			const msg = error

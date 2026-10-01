@@ -1,12 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { CheckpointActivity } from "../src/core/checkpoint.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type SubmitContext = {
-	checkpointUIActivity: CheckpointActivity;
-	checkpointCallback: <Args extends unknown[], Result>(
-		callback: (...args: Args) => Result | Promise<Result>,
-	) => (...args: Args) => Promise<Result>;
 	defaultEditor: { onSubmit?: (text: string) => void };
 	editor: {
 		addToHistory?: (text: string) => void;
@@ -16,7 +11,6 @@ type SubmitContext = {
 		isCompacting: boolean;
 		isStreaming: boolean;
 		isBashRunning: boolean;
-		notifyCheckpointStateChanged(): void;
 		prompt: (text: string, options?: unknown) => Promise<void>;
 	};
 	flushPendingBashComponents: () => void;
@@ -44,8 +38,6 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown as Interac
 
 function createSubmitContext(): SubmitContext {
 	return {
-		checkpointUIActivity: new CheckpointActivity(),
-		checkpointCallback: Reflect.get(InteractiveMode.prototype, "checkpointCallback"),
 		defaultEditor: {},
 		editor: {
 			addToHistory: vi.fn(),
@@ -55,7 +47,6 @@ function createSubmitContext(): SubmitContext {
 			isCompacting: false,
 			isStreaming: false,
 			isBashRunning: false,
-			notifyCheckpointStateChanged: vi.fn(),
 			prompt: vi.fn(async () => {}),
 		},
 		flushPendingBashComponents: vi.fn(),

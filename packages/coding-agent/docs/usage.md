@@ -22,8 +22,6 @@ To include files or images:
 
 Pi shows each tool call and result while it works. Press `Ctrl+O` to expand or collapse tool output. Press `Ctrl+T` to show or hide thinking blocks.
 
-Use `/compact-view` to group tools and operational updates behind Activity rows while keeping conversation text visible. Ctrl+O expands the groups and their output. See [compact view](settings.md#compact-view).
-
 The startup header lists the instructions and resources Pi loaded. The editor border indicates the current thinking level. The footer updates as the model uses context and reports usage.
 
 Pi does not ask before every tool call. Review commands and changed files, and use a sandbox for untrusted or unattended work. See [Security](security.md).
@@ -39,7 +37,7 @@ You can send more input while Pi is working:
 | Return queued messages to the editor | Press `Alt+Up` |
 | Stop the current task | Press `Escape` |
 
-On supported Responses WebSocket routes, a message sent with `Enter` steers the live response. Other routes queue it for the next turn. A follow-up sent with `Alt+Enter` waits until Pi finishes the current task. Aborting returns queued messages to the editor.
+A message sent with `Enter` waits until the current response and its tool calls finish, then guides the next response. A follow-up sent with `Alt+Enter` waits until Pi finishes the current task. Aborting returns queued messages to the editor.
 
 Windows Terminal reserves some Alt shortcuts. See [Terminal Setup](terminal-setup.md) for the Windows alternatives.
 
@@ -65,7 +63,7 @@ Pi saves sessions automatically unless session persistence is disabled.
 
 Use `/tree`, `/fork`, or `/clone` when you want to explore another approach without losing existing work. Use `/compact` to reduce the conversation history sent to the model. See [Sessions and Context](sessions.md) for these workflows.
 
-After leaving Pi, run `pi --continue` from the same folder to resume its most recent session. Use `/restart [text]` for a [managed restart](restart.md) after a staged runtime or extension update.
+After leaving Pi, run `pi --continue` from the same folder to resume its most recent session.
 
 ## Run a terminal command
 
@@ -85,11 +83,7 @@ Use `/share` to upload the session and get a viewer link. With Radius authentica
 
 ## Adjust the terminal
 
-Regular mode uses the terminal's normal scrollback. Fullscreen mode keeps the editor and status area fixed while the transcript scrolls within the terminal window. Choose a mode through `/settings` or `--tui-mode`.
-
-Use `/topview` to toggle the inverted layout, or `/topview on` and `/topview off` to choose explicitly. The footer becomes a header, with the message editor and its surrounding widgets and status areas above the newest-first conversation. The dock, conversation blocks, and expanded Activity items reverse order; text lines within each component stay in their original order. Native Markdown and controls are preserved. New activity stays at the top of the transcript until you scroll away.
-
-Top view temporarily uses fullscreen. Turning it off restores the normal editor/footer placement and the previous terminal mode. The TUI mode setting shows that restore mode; choosing fullscreen there saves that preference. Use `/topview off` before choosing regular mode in settings. The choice lasts for the current Pi process, including reloads and session switches, and does not change saved history or model context. New Pi processes start oldest-first.
+Fullscreen mode, the default, keeps the editor and status area fixed while the transcript scrolls within the terminal window. Regular mode uses the terminal's normal scrollback. Choose a mode through `/settings` or `--tui-mode`.
 
 Terminal support for mouse input, keyboard shortcuts, and inline images varies. See [Terminal Setup](terminal-setup.md) for platform-specific configuration and [Keybindings](keybindings.md) for every configurable shortcut. Run `/hotkeys` to inspect the shortcuts active in your current session.
 

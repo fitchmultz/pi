@@ -38,20 +38,6 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("prompt structure", () => {
-		test.each([
-			["linux", "/tmp/literal\\directory", "/tmp/literal\\directory"],
-			["darwin", "/tmp/literal\\directory", "/tmp/literal\\directory"],
-			["win32", "C:\\Users\\project", "C:/Users/project"],
-		])("renders the working directory on %s", (platform, cwd, expected) => {
-			const originalPlatform = process.platform;
-			try {
-				Object.defineProperty(process, "platform", { value: platform });
-				expect(buildSystemPrompt({ cwd })).toContain(`<cwd>\n${expected}\n</cwd>`);
-			} finally {
-				Object.defineProperty(process, "platform", { value: originalPlatform });
-			}
-		});
-
 		test("keeps the default and custom prompt prefixes exact", () => {
 			const defaultPrompt = buildSystemPrompt({ cwd: "/tmp", selectedTools: [], contextFiles: [], skills: [] });
 			const customPrompt = buildSystemPrompt({
@@ -122,7 +108,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain(expected);
 		});
 
-		test("scopes pi documentation reads to version-matched contracts under absolute base paths", () => {
+		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
 				skills: [],
@@ -133,10 +119,6 @@ describe("buildSystemPrompt", () => {
 				"- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory",
 			);
 			expect(prompt).toContain("environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md)");
-			expect(prompt).toContain("version-matched documentation and examples for the affected APIs and behavior");
-			expect(prompt).toContain("Follow references needed to establish those contracts");
-			expect(prompt).toContain("use relevant sections of long references");
-			expect(prompt).not.toContain("Always read pi .md files completely");
 		});
 	});
 

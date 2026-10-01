@@ -7,6 +7,7 @@ import {
 	type TuiMouseEvent,
 	truncateToWidth,
 } from "@earendil-works/pi-tui";
+import type { CompactView } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { AssistantMessageComponent } from "./assistant-message.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
@@ -16,21 +17,7 @@ import { CustomEntryComponent } from "./custom-entry.ts";
 import { CustomMessageComponent } from "./custom-message.ts";
 import { ToolExecutionComponent } from "./tool-execution.ts";
 
-/** Reverse component blocks, keeping each block's leading spacing and rendered lines intact. */
-function newestFirst(children: readonly Component[]): Component[] {
-	const blocks: Component[][] = [];
-	let block: Component[] = [];
-	for (const child of children) {
-		block.push(child);
-		if (!(child instanceof Spacer)) {
-			blocks.push(block);
-			block = [];
-		}
-	}
-	return [...blocks.reverse().flat(), ...block];
-}
-
-class ActivityComponent extends Container {
+class Activity extends Container {
 	readonly content = new Container();
 	private expanded: boolean;
 	private readonly heading = new Text("", 0, 0);
@@ -62,9 +49,7 @@ class ActivityComponent extends Container {
 				if (status === "running") running++;
 				if (status === "error") failed++;
 				if (status === "cancelled") cancelled++;
-			} else if (!(child instanceof Spacer)) {
-				updates++;
-			}
+			} else if (!(child instanceof Spacer)) updates++;
 		}
 		const counts = [
 			calls ? `${calls} call${calls === 1 ? "" : "s"}` : "",
@@ -81,13 +66,12 @@ class ActivityComponent extends Container {
 	}
 }
 
-/** Keep transcript children flat for insertion, live updates and settings; group only their presentation. */
+/** Group presentation only: transcript children stay available for insertion and live updates. */
 export class ChatContainer extends Container {
-	private compactView = false;
-	private transcriptOrder: "oldest-first" | "newest-first" = "oldest-first";
+	private compactView: CompactView = false;
 	private expanded = false;
 	private readonly activity = new WeakSet<Component>();
-	private groups = new Map<Component, ActivityComponent>();
+	private groups = new Map<Component, Activity>();
 	private readonly presentation = new Container();
 
 	addActivity(component: Component): void {
@@ -95,17 +79,14 @@ export class ChatContainer extends Container {
 		this.addChild(component);
 	}
 
-	setCompactView(compactView: boolean): void {
+	setCompactView(compactView: CompactView): void {
 		this.compactView = compactView;
-	}
-
-	setTranscriptOrder(order: "oldest-first" | "newest-first"): void {
-		this.transcriptOrder = order;
+		this.setExpanded(this.expanded);
 	}
 
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
-		for (const group of this.groups.values()) group.setExpanded(expanded);
+		for (const group of this.groups.values()) group.setExpanded(expanded || this.compactView === "hybrid");
 	}
 
 	override clear(): void {
@@ -115,21 +96,16 @@ export class ChatContainer extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (!this.compactView) {
-			if (this.transcriptOrder === "oldest-first") return super.render(width);
-			this.presentation.children = newestFirst(this.children);
-			return this.presentation.render(width);
-		}
+		if (!this.compactView) return super.render(width);
 		this.presentation.clear();
-		const groups = new Map<Component, ActivityComponent>();
-		let group: ActivityComponent | undefined;
+		const groups = new Map<Component, Activity>();
+		let group: Activity | undefined;
 		let spacers: Component[] = [];
 		for (const child of this.children) {
 			if (child instanceof Spacer) {
 				spacers.push(child);
 				continue;
 			}
-			// Empty/hidden-thinking assistant events must not break an operational run.
 			if (child instanceof AssistantMessageComponent && child.render(width).length === 0) continue;
 			if (
 				this.activity.has(child) ||
@@ -141,7 +117,7 @@ export class ChatContainer extends Container {
 				child instanceof CompactionSummaryMessageComponent
 			) {
 				if (!group) {
-					group = this.groups.get(child) ?? new ActivityComponent(this.expanded);
+					group = this.groups.get(child) ?? new Activity(this.expanded || this.compactView === "hybrid");
 					group.content.clear();
 					groups.set(child, group);
 					this.presentation.addChild(group);
@@ -155,18 +131,10 @@ export class ChatContainer extends Container {
 		}
 		this.presentation.children.push(...spacers);
 		this.groups = groups;
-		if (this.transcriptOrder === "newest-first") {
-			this.presentation.children = newestFirst(this.presentation.children);
-			for (const activity of groups.values()) {
-				activity.content.children = newestFirst(activity.content.children);
-			}
-		}
 		return this.presentation.render(width);
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
-		return this.compactView || this.transcriptOrder === "newest-first"
-			? this.presentation.handleMouse(event)
-			: super.handleMouse(event);
+		return this.compactView ? this.presentation.handleMouse(event) : super.handleMouse(event);
 	}
 }

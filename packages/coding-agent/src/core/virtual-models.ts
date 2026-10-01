@@ -23,8 +23,7 @@ import {
 	type Provider,
 	type ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import type { ReadonlySessionManager } from "./session-manager.ts";
-import { SessionMetadataCursor } from "./session-metadata-cursor.ts";
+import type { SessionEntry } from "./session-manager.ts";
 
 /** API id of virtual catalog entries. Requests for it fail unless routed first. */
 export const VIRTUAL_MODEL_API = "pi-virtual";
@@ -118,64 +117,53 @@ export function findLatestResponse(messages: readonly AgentMessage[]): Assistant
 	return undefined;
 }
 
-interface BranchModelState {
-	cursor: SessionMetadataCursor;
-	change?: { provider: string; modelId: string };
-	response?: { provider: string; modelId: string };
-	states: Map<string, string>;
-}
-const branchStates = new WeakMap<ReadonlySessionManager, BranchModelState>();
-
-function readBranchModelState(manager: ReadonlySessionManager): BranchModelState {
-	let state = branchStates.get(manager);
-	if (!state) {
-		state = { cursor: new SessionMetadataCursor(), states: new Map() };
-		branchStates.set(manager, state);
-	}
-	const { entries, reset } = state.cursor.read(manager, true);
-	if (reset) {
-		state.change = undefined;
-		state.response = undefined;
-		state.states.clear();
-	}
-	for (const entry of entries) {
-		if (entry.type === "model_change") {
-			state.change = { provider: entry.provider, modelId: entry.modelId };
-			state.response = undefined;
-		} else if (
-			entry.type === "message" &&
-			entry.message.role === "assistant" &&
-			entry.message.api !== VIRTUAL_MODEL_API
-		)
-			state.response = { provider: entry.message.provider!, modelId: entry.message.model! };
-		else if (entry.type === "custom" && entry.customType === VIRTUAL_MODEL_STATE_ENTRY) {
-			const source = manager.getEntry(entry.id);
-			const data = source?.type === "custom" ? (source.data as VirtualModelStateData | undefined) : undefined;
-			if (data) state.states.set(`${data.provider}\0${data.modelId}`, entry.id);
-		}
-	}
-	return state;
-}
-
 /**
- * Incremental branch selection. A still-registered virtual model holds until the next model change;
- * otherwise the latest physical response wins. Resolve the catalog live, with at most one lookup.
+ * The model selection a session branch records. A virtual `model_change` holds until the next
+ * `model_change`, because responses name the physical models it routed to. Otherwise the latest
+ * physical response wins, as in sessions without virtual models. A virtual model that is no longer
+ * registered does not hold, so the selection falls back to the physical model that answered last.
+ *
+ * Only the last `model_change` can hold, so this looks up at most one model in the catalog.
  */
-export function getSessionSelection(
-	manager: ReadonlySessionManager,
+export function getBranchSelection(
+	branch: readonly SessionEntry[],
 	getModel: (provider: string, modelId: string) => Model<Api> | undefined,
 ): { provider: string; modelId: string } | undefined {
-	const { change, response } = readBranchModelState(manager);
-	const model = response && change && getModel(change.provider, change.modelId);
-	const selection = response && !(model && isVirtualModel(model)) ? response : change;
-	return selection ? { ...selection } : undefined;
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry.type === "model_change") {
+			return { provider: entry.provider, modelId: entry.modelId };
+		}
+		if (entry.type === "message" && entry.message.role === "assistant" && !isVirtualModel(entry.message)) {
+			const response = { provider: entry.message.provider, modelId: entry.message.model };
+			const change = findLastModelChange(branch, i);
+			const model = change && getModel(change.provider, change.modelId);
+			return change && model && isVirtualModel(model) ? change : response;
+		}
+	}
+	return undefined;
 }
 
-/** Latest router state, incrementally replayed on the active branch. */
-export function getVirtualModelState(manager: ReadonlySessionManager, provider: string, modelId: string): unknown {
-	const id = readBranchModelState(manager).states.get(`${provider}\0${modelId}`);
-	const entry = id ? manager.getEntry(id) : undefined;
-	return entry?.type === "custom" ? (entry.data as VirtualModelStateData | undefined)?.state : undefined;
+function findLastModelChange(
+	branch: readonly SessionEntry[],
+	before: number,
+): { provider: string; modelId: string } | undefined {
+	for (let i = before - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry.type === "model_change") return { provider: entry.provider, modelId: entry.modelId };
+	}
+	return undefined;
+}
+
+/** Latest router state a session branch stores for a virtual model. */
+export function getVirtualModelState(branch: readonly SessionEntry[], provider: string, modelId: string): unknown {
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry.type !== "custom" || entry.customType !== VIRTUAL_MODEL_STATE_ENTRY) continue;
+		const data = entry.data as VirtualModelStateData | undefined;
+		if (data?.provider === provider && data.modelId === modelId) return data.state;
+	}
+	return undefined;
 }
 
 /** Build the catalog entry of a virtual model. */

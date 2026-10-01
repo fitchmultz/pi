@@ -20,7 +20,6 @@ import type {
 import type {
 	AnyModel,
 	Api,
-	ApiKeyAuth,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	ClassifierApi,
@@ -57,11 +56,9 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
-import type { AgentSessionEvent } from "../agent-session.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
-import type { CheckpointActivity, CheckpointBoundary } from "../checkpoint.ts";
-import type { CompactionPreparation, CompactionResult, CompactionSettings } from "../compaction/index.ts";
+import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
@@ -79,13 +76,11 @@ import type {
 	ReadonlySessionManager,
 	SessionEntry,
 	SessionManager,
-	UsageEntry,
 } from "../session-manager.ts";
 import type { Settings } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
-import type { BackgroundCommandToolDetails, BackgroundCommandToolInput } from "../tools/background-command.ts";
 import type { BashOperations } from "../tools/bash.ts";
 import type { EditToolDetails } from "../tools/edit.ts";
 import type {
@@ -201,8 +196,7 @@ export interface ExtensionUIContext {
 	 *
 	 * The factory receives a FooterDataProvider for data not otherwise accessible:
 	 * git branch and extension statuses from setStatus(). Context usage is on
-	 * ctx.getContextUsage(), model info on ctx.model. Accumulate billing stats from metadata
-	 * outside render(); getEntries() and getBranch() return full history, not a bounded window.
+	 * ctx.getContextUsage(), token stats on ctx.sessionManager.getEntries(), model info on ctx.model.
 	 */
 	setFooter(
 		factory:
@@ -310,19 +304,6 @@ export interface ExtensionUIContext {
 // ============================================================================
 
 export interface ContextUsage {
-	/**
-	 * "reported": provider usage anchors the retained conversation, including request-local hook
-	 * transformations. Positive content deltas added by message_end handlers, later messages and
-	 * pending prompt/tool changes are estimated; removing response content keeps the provider baseline.
-	 * "estimated": heuristic-only count, including opaque reasoning/signatures and tool schemas.
-	 * Session-local chars/token calibration is 4 * request estimate / (input + cacheRead + cacheWrite),
-	 * clamped to [1, 4], default 4; zero input totals are skipped and output tokens are excluded.
-	 * "unknown": no matching response since compaction; tokens/percent are null (preflight still estimates).
-	 * Streaming-only events do not invalidate usage; streaming state is counted at message_end.
-	 * SDK callers must replace edited message/tool objects or arrays; unsignalled nested mutation
-	 * is not observed. Use AgentSession.refreshContext() after canonical journal changes.
-	 */
-	source: "reported" | "estimated" | "unknown";
 	/** Estimated context tokens, or null if unknown (e.g. right after compaction, before next LLM response). */
 	tokens: number | null;
 	contextWindow: number;
@@ -373,16 +354,10 @@ export interface ExtensionContext {
 	abort(): void;
 	/** Whether there are queued messages waiting */
 	hasPendingMessages(): boolean;
-	isBashRunning(): boolean;
-	hasPendingSteeringMessages(): boolean;
-	getPendingNextTurnCount(): number;
-	getPendingInputCount(): number;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
-	/** Effective compaction settings for the active model. */
-	getCompactionSettings(): CompactionSettings;
 	/** Trigger compaction without awaiting completion. */
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
@@ -467,7 +442,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 export interface ReplacedSessionContext extends ExtensionCommandContext {
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; persistOnCancel?: boolean },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void>;
 
 	sendUserMessage(
@@ -510,8 +485,6 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	isPartial: boolean;
 	/** Whether the result view is expanded. */
 	expanded: boolean;
-	/** Optional compact-density presentation; does not change execution. */
-	compactView?: boolean;
 	/** Whether inline images are currently shown in the TUI. */
 	showImages: boolean;
 	/** Whether the current result is an error. */
@@ -554,9 +527,12 @@ export interface ToolAnnotations {
 export interface ToolNamespace {
 	/** For example `mcp__docs`. */
 	name: string;
-	/** Shown once above the group's tools. */
+	/** Short summary shown once with the group in model-facing tool listings. */
 	description?: string;
-	/** Usage instructions returned by codemode's describeNamespace(), outside tool declarations. */
+	/**
+	 * Longer usage guidance, such as MCP server instructions. Not part of tool listings; tools that
+	 * describe the namespace on request (codemode's `describeNamespace()`) return it.
+	 */
 	instructions?: string;
 }
 
@@ -577,9 +553,8 @@ export interface ToolLoadoutChanges {
 	/** Model-facing descriptions of declared tools, by tool name. */
 	descriptions?: Readonly<Record<string, string>>;
 	/**
-	 * Declared tools whose declarations new requests leave out. They stay active and callable;
-	 * visibility does not grant or revoke execution permission. The saved selection survives `/tree`
-	 * and resume independently of declarations already sent in earlier requests.
+	 * Declared tools whose declarations requests leave out. They stay active and callable, and the
+	 * transcript still declares them, so the active set survives `/tree` and resume.
 	 */
 	hiddenDeclarations?: readonly string[];
 }
@@ -819,22 +794,6 @@ export interface SessionShutdownEvent {
 	targetSessionFile?: string;
 }
 
-/** Awaited after session settlement/turn persistence and input quiescence, before the artifact is captured. */
-export interface SessionCheckpointEvent {
-	type: "session_checkpoint";
-	boundary: CheckpointBoundary;
-	/** Aborted on release/cancellation. Undo temporary extension quiescence when this aborts. */
-	signal: AbortSignal;
-	/** Call BEFORE accepting new background work or mutating state while the receipt is held. */
-	invalidate(): void;
-}
-
-export interface SessionCheckpointResult {
-	/** All extension state is persisted/reconstructible and live callbacks are quiesced until release. */
-	sleepReady: boolean;
-	reason?: string;
-}
-
 /** Preparation data for tree navigation */
 export interface TreePreparation {
 	targetId: string;
@@ -875,7 +834,6 @@ export type SessionEvent =
 	| SessionCompactEvent
 	| SessionCompactFailedEvent
 	| SessionShutdownEvent
-	| SessionCheckpointEvent
 	| SessionBeforeTreeEvent
 	| SessionTreeEvent;
 
@@ -956,15 +914,6 @@ export interface AgentStartEvent {
 }
 
 /** Fired when an agent loop ends */
-export type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
-export type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
-export type SummarizationRetryScheduledEvent = Extract<AgentSessionEvent, { type: "summarization_retry_scheduled" }>;
-export type SummarizationRetryAttemptStartEvent = Extract<
-	AgentSessionEvent,
-	{ type: "summarization_retry_attempt_start" }
->;
-export type SummarizationRetryFinishedEvent = Extract<AgentSessionEvent, { type: "summarization_retry_finished" }>;
-
 export interface AgentEndEvent {
 	type: "agent_end";
 	messages: AgentMessage[];
@@ -1007,7 +956,6 @@ export type SessionBoundaryDraft =
 	| ContextEditEntryDraft
 	| CompactionEntryDraft;
 
-/** Payloads are built on first access, independently for each handler. Pending queues are read per dispatch. */
 export interface BoundaryContextPreview {
 	contextEntries: ProjectedSessionEntry[];
 	contextMessages: AgentMessage[];
@@ -1202,11 +1150,6 @@ interface ToolCallEventBase {
 	parentToolCallId?: string;
 }
 
-export interface BackgroundCommandToolCallEvent extends ToolCallEventBase {
-	toolName: "background_command";
-	input: BackgroundCommandToolInput;
-}
-
 export interface BashToolCallEvent extends ToolCallEventBase {
 	toolName: "bash";
 	input: BashToolInput;
@@ -1259,7 +1202,6 @@ export interface CustomToolCallEvent extends ToolCallEventBase {
  * Later `tool_call` handlers see earlier mutations. No re-validation is performed after mutation.
  */
 export type ToolCallEvent =
-	| BackgroundCommandToolCallEvent
 	| BashToolCallEvent
 	| PowerShellToolCallEvent
 	| ReadToolCallEvent
@@ -1286,11 +1228,6 @@ interface ToolResultEventBase {
 	isError: boolean;
 	/** Usage from the tool execution itself, if available. */
 	usage?: Usage;
-}
-
-export interface BackgroundCommandToolResultEvent extends ToolResultEventBase {
-	toolName: "background_command";
-	details: BackgroundCommandToolDetails | undefined;
 }
 
 export interface BashToolResultEvent extends ToolResultEventBase {
@@ -1340,7 +1277,6 @@ export interface CustomToolResultEvent extends ToolResultEventBase {
 
 /** Fired after a tool executes. Can modify result. */
 export type ToolResultEvent =
-	| BackgroundCommandToolResultEvent
 	| BashToolResultEvent
 	| PowerShellToolResultEvent
 	| ReadToolResultEvent
@@ -1352,9 +1288,6 @@ export type ToolResultEvent =
 	| CustomToolResultEvent;
 
 // Type guards for ToolResultEvent
-export function isBackgroundCommandToolResult(e: ToolResultEvent): e is BackgroundCommandToolResultEvent {
-	return e.toolName === "background_command";
-}
 export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
 	return e.toolName === "bash";
 }
@@ -1400,10 +1333,6 @@ export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
  * Note: Direct narrowing via `event.toolName === "bash"` doesn't work because
  * CustomToolCallEvent.toolName is `string` which overlaps with all literals.
  */
-export function isToolCallEventType(
-	toolName: "background_command",
-	event: ToolCallEvent,
-): event is BackgroundCommandToolCallEvent;
 export function isToolCallEventType(toolName: "bash", event: ToolCallEvent): event is BashToolCallEvent;
 export function isToolCallEventType(toolName: "powershell", event: ToolCallEvent): event is PowerShellToolCallEvent;
 export function isToolCallEventType(toolName: "read", event: ToolCallEvent): event is ReadToolCallEvent;
@@ -1435,11 +1364,6 @@ export type ExtensionEvent =
 	| ProviderStreamEvent
 	| BeforeAgentStartEvent
 	| AgentStartEvent
-	| AutoRetryStartEvent
-	| AutoRetryEndEvent
-	| SummarizationRetryScheduledEvent
-	| SummarizationRetryAttemptStartEvent
-	| SummarizationRetryFinishedEvent
 	| AgentEndEvent
 	| AgentBeforeSettleEvent
 	| AgentSettledEvent
@@ -1557,6 +1481,7 @@ export interface SessionBeforeTreeResult {
 // ============================================================================
 
 export interface MessageRenderOptions {
+	/** Compact transcript density; independent of expansion. */
 	compactView?: boolean;
 	expanded: boolean;
 	/** Horizontal padding configured by the outputPad setting. */
@@ -1611,19 +1536,10 @@ export interface ResolvedCommand extends RegisteredCommand {
 // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
-/** Model-attributed usage recorded exactly once per ID in a session journal. */
-export interface UsageContribution extends Pick<UsageEntry, "kind" | "provider" | "model" | "usage" | "note"> {
-	id: string;
-}
-
 /**
  * ExtensionAPI passed to extension factory functions.
  */
-export type BashCwdHook = (cwd: string) => string;
-
 export interface ExtensionAPI {
-	/** Resolve the working directory for built-in Bash and background commands. */
-	registerBashCwdHook(hook: BashCwdHook): void;
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================
@@ -1650,10 +1566,6 @@ export interface ExtensionAPI {
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): () => void;
 	on(event: "session_compact_failed", handler: ExtensionHandler<SessionCompactFailedEvent>): () => void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): () => void;
-	on(
-		event: "session_checkpoint",
-		handler: ExtensionHandler<SessionCheckpointEvent, SessionCheckpointResult>,
-	): () => void;
 	on(event: "mcp_servers_change", handler: ExtensionHandler<McpServersChangeEvent>): () => void;
 	on(
 		event: "session_before_tree",
@@ -1679,14 +1591,6 @@ export interface ExtensionAPI {
 	): () => void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): () => void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): () => void;
-	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>): () => void;
-	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): () => void;
-	on(event: "summarization_retry_scheduled", handler: ExtensionHandler<SummarizationRetryScheduledEvent>): () => void;
-	on(
-		event: "summarization_retry_attempt_start",
-		handler: ExtensionHandler<SummarizationRetryAttemptStartEvent>,
-	): () => void;
-	on(event: "summarization_retry_finished", handler: ExtensionHandler<SummarizationRetryFinishedEvent>): () => void;
 	on(
 		event: "agent_before_settle",
 		handler: ExtensionHandler<AgentBeforeSettleEvent, AgentBeforeSettleEventResult>,
@@ -1724,9 +1628,6 @@ export interface ExtensionAPI {
 
 	/** Register a custom command. */
 	registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void;
-
-	/** Remove a command registered by this extension. */
-	unregisterCommand(name: string): void;
 
 	/** Register a keyboard shortcut. */
 	registerShortcut(
@@ -1776,7 +1677,7 @@ export interface ExtensionAPI {
 	/** Send a custom message to the session. */
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; persistOnCancel?: boolean },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): void;
 
 	/**
@@ -1791,9 +1692,6 @@ export interface ExtensionAPI {
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
-
-	/** Record once per journal/ID. Identical repeats are no-ops; conflicting payloads throw. */
-	recordUsage(contribution: UsageContribution): void;
 
 	// =========================================================================
 	// Session Metadata
@@ -1821,11 +1719,10 @@ export interface ExtensionAPI {
 	getSettings(): Settings;
 
 	/**
-	 * Set the active tools by name. Missing names wait for lazy registration under current policy;
-	 * `hidden` tools are never activated. preservePending retains missing selections when adding or
-	 * updating other tools. Tools with `codemode` or `deferred` exposure stay callable whether active or not.
+	 * Set the active tools by name. Unknown and `hidden` tools are ignored. Tools with `codemode` or
+	 * `deferred` exposure stay callable from codemode scripts whether active or not.
 	 */
-	setActiveTools(toolNames: string[], options?: { preservePending?: boolean }): void;
+	setActiveTools(toolNames: string[]): void;
 
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
@@ -1929,8 +1826,8 @@ export interface ExtensionAPI {
 
 	/**
 	 * Register an MCP server for this session, with the same config as an `mcpServers` entry in
-	 * `mcp.json`. The server connects on first use, or at registration when `connection` is `eager`.
-	 * Registering a name again
+	 * `mcp.json`. The server connects next to the configured servers: on `session_start` when
+	 * registered during extension load, right away when registered later. Registering a name again
 	 * replaces the extension's earlier registration.
 	 *
 	 * The registration is not saved; register again on every load. A server of the same name in
@@ -1979,16 +1876,17 @@ export interface ExtensionVirtualModel<TState = unknown> extends Omit<VirtualMod
 
 /** Configuration for registering a provider via pi.registerProvider(). */
 export interface ProviderConfig {
+	/**
+	 * Ignore saved credentials for request authentication, availability, and catalog refresh.
+	 * Explicit request/runtime keys and /login or /logout retain their normal behavior.
+	 */
+	ignoreStoredCredentials?: boolean;
 	/** Display name for the provider in UI. */
 	name?: string;
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
 	/** API key literal, env interpolation ($ENV_VAR or ${ENV_VAR}), or leading !command. Required when defining models (unless oauth provided). */
 	apiKey?: string;
-	/** Ignore stored credentials and use this provider's explicit or ambient authentication. */
-	ignoreStoredCredentials?: boolean;
-	/** Ambient credentials supplied by the provider environment. */
-	ambientAuth?: { check: NonNullable<ApiKeyAuth["check"]>; resolve: ApiKeyAuth["resolve"] };
 	/** API type. Required at provider or model level when defining models. */
 	api?: Api;
 	/**
@@ -2156,7 +2054,7 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; persistOnCancel?: boolean },
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 ) => void;
 
 export type SendUserMessageHandler = (
@@ -2186,7 +2084,7 @@ export type GetSettingsHandler = () => Settings;
 
 export type GetCommandsHandler = () => SlashCommandInfo[];
 
-export type SetActiveToolsHandler = ExtensionAPI["setActiveTools"];
+export type SetActiveToolsHandler = (toolNames: string[]) => void;
 
 export type RefreshToolsHandler = () => void;
 
@@ -2203,7 +2101,6 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
  * Contains flag values (defaults set during registration, CLI values set after).
  */
 export interface ExtensionRuntimeState {
-	checkpointActivity: CheckpointActivity;
 	flagValues: Map<string, boolean | string>;
 	/** Legacy provider-config registrations queued during extension loading, processed when runner binds. */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
@@ -2242,7 +2139,6 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
-	recordUsage: ExtensionAPI["recordUsage"];
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;
 	setLabel: SetLabelHandler;
@@ -2269,13 +2165,8 @@ export interface ExtensionContextActions {
 	getSignal: () => AbortSignal | undefined;
 	abort: () => void;
 	hasPendingMessages: () => boolean;
-	isBashRunning?: () => boolean;
-	hasPendingSteeringMessages?: () => boolean;
-	getPendingNextTurnCount?: () => number;
-	getPendingInputCount?: () => number;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
-	getCompactionSettings: () => CompactionSettings;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;
@@ -2324,7 +2215,6 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
 
 /** Loaded extension with all registered items. */
 export interface Extension {
-	bashCwdHooks?: BashCwdHook[];
 	path: string;
 	resolvedPath: string;
 	hidden?: boolean;

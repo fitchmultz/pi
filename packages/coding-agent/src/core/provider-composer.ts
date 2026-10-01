@@ -88,16 +88,11 @@ export type ProviderModelConfig = ProviderChatModelConfig | ProviderImageModelCo
 
 /** Input type for the extension registerProvider API. */
 export interface ProviderConfigInput {
+	/** Ignore saved credentials for auth and catalog refresh; explicit keys and login/logout remain unchanged. */
+	ignoreStoredCredentials?: boolean;
 	name?: string;
 	baseUrl?: string;
 	apiKey?: string;
-	/** Ignore this provider's stored credentials for resolution, not explicit runtime/request keys or login/logout. */
-	ignoreStoredCredentials?: boolean;
-	ambientAuth?: {
-		check: NonNullable<ApiKeyAuth["check"]>;
-		resolve: ApiKeyAuth["resolve"];
-	};
-
 	api?: Api;
 	streamSimple?: (
 		model: Model<Api>,
@@ -411,22 +406,18 @@ function composeApiKeyAuth(
 	const inherited = base?.auth.apiKey;
 	const rawKey = configuredApiKey(config, extension);
 	const oauth = extension?.oauth ?? base?.auth.oauth;
-	const ambient = extension?.ambientAuth;
-	// Ambient resolution does not introduce API-key login on OAuth-only providers.
-	const oauthOnly = !inherited && rawKey === undefined && oauth;
-	if (oauthOnly && !ambient) return undefined;
+	// OAuth-only providers get no fabricated API-key login method.
+	if (!inherited && rawKey === undefined && oauth) return undefined;
 	const rawHeaders = configuredHeaders(config, extension);
 	const authHeader = extension?.authHeader ?? config?.authHeader ?? false;
 	return {
 		name: inherited?.name ?? "API key",
 		login:
 			inherited?.login ??
-			(oauthOnly
-				? undefined
-				: async (interaction: AuthInteraction) => ({
-						type: "api_key",
-						key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
-					})),
+			(async (interaction: AuthInteraction) => ({
+				type: "api_key",
+				key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
+			})),
 		check: async (input) => {
 			if (input.credential) {
 				if (inherited?.check) return inherited.check(input);
@@ -442,7 +433,6 @@ function composeApiKeyAuth(
 				}
 				return { type: "api_key", source: "configured API key" };
 			}
-			if (ambient) return ambient.check(input);
 			if (inherited?.check) return inherited.check(input);
 			const resolved = await inherited?.resolve(input);
 			return resolved ? { type: "api_key", source: resolved.source } : undefined;
@@ -462,8 +452,7 @@ function composeApiKeyAuth(
 					? await inherited.resolve({ ...input, credential: { type: "api_key", key } })
 					: { auth: { apiKey: key }, source: "configured API key" };
 			} else {
-				// An installed resolver owns ambient auth, including an unconfigured result.
-				result = ambient ? await ambient.resolve(input) : await inherited?.resolve(input);
+				result = await inherited?.resolve(input);
 			}
 			if (!result) return undefined;
 			const explicitEnv = { ...(input.credential?.env ?? {}), ...(result.env ?? {}) };
@@ -580,25 +569,21 @@ export function composeModelProvider(
 		options: StreamOptions | undefined,
 		simple: boolean,
 	): AssistantMessageEventStream =>
-		lazyStream(
-			model,
-			async () => {
-				if (extension?.streamSimple && model.api === extension.api) {
-					return extension.streamSimple(model, context, options as SimpleStreamOptions);
-				}
-				if (base && supportsBaseApi(model)) {
-					return simple
-						? base.streamSimple(model, context, options as SimpleStreamOptions)
-						: base.stream(model, context, options);
-				}
-				const api = getApiProvider(model.api);
-				if (!api) throw new Error(`No API provider registered for api: ${model.api}`);
+		lazyStream(model, async () => {
+			if (extension?.streamSimple && model.api === extension.api) {
+				return extension.streamSimple(model, context, options as SimpleStreamOptions);
+			}
+			if (base && supportsBaseApi(model)) {
 				return simple
-					? api.streamSimple(model, context, options as SimpleStreamOptions)
-					: api.stream(model, context, options);
-			},
-			options?.signal,
-		);
+					? base.streamSimple(model, context, options as SimpleStreamOptions)
+					: base.stream(model, context, options);
+			}
+			const api = getApiProvider(model.api);
+			if (!api) throw new Error(`No API provider registered for api: ${model.api}`);
+			return simple
+				? api.streamSimple(model, context, options as SimpleStreamOptions)
+				: api.stream(model, context, options);
+		});
 
 	const provider: Provider = {
 		id: providerId,

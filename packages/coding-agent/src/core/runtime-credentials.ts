@@ -10,7 +10,6 @@ export class RuntimeCredentials implements CredentialStore {
 	}
 
 	setRuntimeApiKey(providerId: string, apiKey: string): void {
-		if (!apiKey) throw new Error("Runtime API key must not be empty.");
 		this.overrides.set(providerId, apiKey);
 	}
 

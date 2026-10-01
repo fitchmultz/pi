@@ -170,7 +170,6 @@ function formatAuthor(author?: GhMetadata["author"]): string | undefined {
 }
 
 export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
-	let requestGeneration = 0;
 	const setWidget = (ctx: ExtensionContext, match: PromptMatch, metadata?: GhMetadata) => {
 		ctx.ui.setWidget("prompt-url", (_tui, thm) => {
 			const displayTarget = metadata?.displayUrl ?? match.target;
@@ -210,11 +209,9 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 	};
 
 	const updatePromptContext = (ctx: ExtensionContext, match: PromptMatch) => {
-		const generation = ++requestGeneration;
 		setWidget(ctx, match);
 		applySessionName(ctx, match);
 		void fetchGhMetadata(pi, match.kind, match.target, ctx.cwd).then((meta) => {
-			if (generation !== requestGeneration) return;
 			setWidget(ctx, match, meta);
 			applySessionName(ctx, match, meta);
 		});
@@ -230,8 +227,8 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 		updatePromptContext(ctx, match);
 	});
 
-	pi.on("session_shutdown", () => {
-		requestGeneration++;
+	pi.on("session_switch", async (_event, ctx) => {
+		rebuildFromSession(ctx);
 	});
 
 	const getUserText = (content: string | { type: string; text?: string }[] | undefined): string => {
@@ -268,7 +265,6 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
-		requestGeneration++;
 		rebuildFromSession(ctx);
 	});
 }

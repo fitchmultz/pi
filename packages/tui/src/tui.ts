@@ -298,13 +298,6 @@ export interface OverlayBounds {
 export interface OverlayHandle {
 	/** Permanently remove the overlay (cannot be shown again) */
 	hide(): void;
-	/**
-	 * Replace the options object without changing stack order.
-	 * If non-capturing or invisible, release focus and saved focus references to this overlay.
-	 * If newly capturing, focus only when the previous focus target is still active.
-	 * No-op after hide().
-	 */
-	updateOptions(options?: OverlayOptions): void;
 	/** Temporarily hide or show the overlay */
 	setHidden(hidden: boolean): void;
 	/** Check if overlay is temporarily hidden */
@@ -515,8 +508,7 @@ export abstract class TuiBase extends Container implements TUI {
 	private showHardwareCursor = false;
 	private clearOnShrink = false;
 	protected fullRedrawCount = 0;
-	protected stopped = true;
-	private hasStarted = false;
+	protected stopped = false;
 	/**
 	 * Color queries waiting for their DA1 reply, oldest first. Terminals answer in order, so color
 	 * replies belong to the oldest one. Queries stay here after a timeout to collect late replies.
@@ -732,9 +724,8 @@ export abstract class TuiBase extends Container implements TUI {
 			focusOrder: ++this.focusOrderCounter,
 		};
 		this.overlayStack.push(entry);
-		// Remember initial eligibility even if the options object is mutated before completion.
-		let capturing = !entry.options?.nonCapturing && this.isOverlayVisible(entry);
-		if (capturing) {
+		// Only focus if overlay is actually visible
+		if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
 			this.setFocus(component);
 		}
 		this.hideTerminalCursor();
@@ -757,26 +748,6 @@ export abstract class TuiBase extends Container implements TUI {
 					this.requestRender();
 				}
 			},
-			updateOptions: (options) => {
-				if (!this.overlayStack.includes(entry)) return;
-				entry.options = options;
-				const nextCapturing = !entry.options?.nonCapturing && this.isOverlayVisible(entry);
-				if (!nextCapturing) {
-					this.clearOverlayFocusRestoreFor(entry);
-					// Children must not restore provisional focus to a now-passive parent.
-					this.retargetOverlayPreFocus(entry);
-					if (this.focusedComponent === component) {
-						const topVisible = this.getTopmostVisibleOverlay();
-						this.setFocus(topVisible?.component ?? entry.preFocus);
-					}
-				} else if (!capturing && this.focusedComponent === entry.preFocus) {
-					// Factory-initialized static visibility may now allow focus. Do not steal
-					// it from a child overlay or replacement opened while this entry waited.
-					this.setFocus(component);
-				}
-				capturing = nextCapturing;
-				this.requestRender();
-			},
 			setHidden: (hidden: boolean) => {
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
@@ -790,7 +761,7 @@ export abstract class TuiBase extends Container implements TUI {
 					}
 				} else {
 					// Restore focus to this overlay when showing (if it's actually visible)
-					if (!entry.options?.nonCapturing && this.isOverlayVisible(entry)) {
+					if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
 						entry.focusOrder = ++this.focusOrderCounter;
 						this.setFocus(component);
 					}
@@ -943,9 +914,6 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	start(): void {
-		const restarting = this.hasStarted;
-		this.hasStarted = true;
-		this.renderRequested = false;
 		this.stopped = false;
 		this.beforeTerminalStart();
 		this.terminal.start(
@@ -958,7 +926,7 @@ export abstract class TuiBase extends Container implements TUI {
 			this.terminal.write("\x1b[?2031h");
 		}
 		this.queryCellSize();
-		this.requestRender(restarting);
+		this.requestRender();
 	}
 
 	addInputListener(listener: TuiInputListener): () => void {
@@ -1001,7 +969,6 @@ export abstract class TuiBase extends Container implements TUI {
 
 	stop(options: TuiStopOptions = {}): void {
 		this.stopped = true;
-		this.renderRequested = false;
 		this.cancelRenderTimer();
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
@@ -1021,7 +988,6 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	requestRender(force = false): void {
-		if (this.stopped) return;
 		if (force) {
 			this.resetRenderState();
 			this.requestImmediateRender();

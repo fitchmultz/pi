@@ -1,15 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { createWriteStream, type WriteStream } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { finished } from "node:stream/promises";
-import { ShellDecoder, type ShellSource } from "@earendil-works/pi-agent-core/node";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "./truncate.ts";
 
 export interface OutputAccumulatorOptions {
 	maxLines?: number;
 	maxBytes?: number;
-	fullOutputMaxBytes?: number;
 	tempFilePrefix?: string;
 }
 
@@ -45,11 +43,8 @@ export class OutputAccumulator {
 	private readonly maxLines: number;
 	private readonly maxBytes: number;
 	private readonly maxRollingBytes: number;
-	private readonly fullOutputMaxBytes: number;
-	private readonly head: Buffer;
-	private headBytes = 0;
 	private readonly tempFilePrefix: string;
-	private readonly decoder = new ShellDecoder();
+	private readonly decoder = new TextDecoder();
 
 	private rawChunks: Buffer[] = [];
 	private tailText = "";
@@ -65,24 +60,21 @@ export class OutputAccumulator {
 
 	private tempFilePath: string | undefined;
 	private tempFileStream: WriteStream | undefined;
-	private tempFileCompletion: Promise<void> | undefined;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-		this.fullOutputMaxBytes = options.fullOutputMaxBytes ?? 0;
-		this.head = Buffer.alloc(Math.floor(this.fullOutputMaxBytes / 2));
-		this.maxRollingBytes = Math.max(this.maxBytes * 2, Math.ceil(this.fullOutputMaxBytes / 2), 1);
+		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
 	}
 
-	append(data: Buffer, source: ShellSource): void {
+	append(data: Buffer): void {
 		if (this.finished) {
 			throw new Error("Cannot append to a finished output accumulator");
 		}
 
 		this.totalRawBytes += data.length;
-		this.appendDecodedText(this.decoder.push(data, source));
+		this.appendDecodedText(this.decoder.decode(data, { stream: true }));
 
 		if (this.tempFileStream || this.shouldUseTempFile()) {
 			this.ensureTempFile();
@@ -92,18 +84,12 @@ export class OutputAccumulator {
 		}
 	}
 
-	end(source: ShellSource): void {
-		if (this.finished) return;
-		this.appendDecodedText(this.decoder.end(source));
-		if (this.shouldUseTempFile()) this.ensureTempFile();
-	}
-
 	finish(): void {
 		if (this.finished) {
 			return;
 		}
 		this.finished = true;
-		this.appendDecodedText(this.decoder.finish());
+		this.appendDecodedText(this.decoder.decode());
 		if (this.shouldUseTempFile()) {
 			this.ensureTempFile();
 		}
@@ -147,27 +133,53 @@ export class OutputAccumulator {
 		const stream = this.tempFileStream;
 		this.tempFileStream = undefined;
 
-		stream.end();
-		await this.tempFileCompletion;
+		await new Promise<void>((resolve, reject) => {
+			const onError = (error: Error) => {
+				stream.off("finish", onFinish);
+				reject(error);
+			};
+			const onFinish = () => {
+				stream.off("error", onError);
+				resolve();
+			};
+			stream.once("error", onError);
+			stream.once("finish", onFinish);
+			stream.end();
+		});
 	}
 
 	/**
-	 * Source-aware decoded output for programmatic callers. Call after `finish()` and
-	 * `closeTempFile()`. Longer output keeps its first and last halves around an omission marker;
-	 * the spill file separately preserves the original bytes in callback order.
+	 * The complete output, for callers that can take more than the display snapshot. Call after
+	 * `finish()` and `closeTempFile()`. Output longer than `maxBytes` raw bytes keeps its first and
+	 * last `maxBytes / 2` bytes around an omission marker.
 	 */
-	getFullOutput(): FullOutput {
-		if (this.totalDecodedBytes <= this.fullOutputMaxBytes) {
-			return { content: this.tailText, truncated: false };
+	async readFullOutput(maxBytes: number): Promise<FullOutput> {
+		if (!this.tempFilePath) {
+			return { content: new TextDecoder().decode(Buffer.concat(this.rawChunks)), truncated: false };
 		}
-		const headText = this.head.subarray(0, this.headBytes).toString("utf-8");
-		const tail = Buffer.from(this.tailText, "utf-8");
-		const tailBytes = this.fullOutputMaxBytes - this.head.length;
-		let tailStart = Math.max(0, tail.length - tailBytes);
-		while (tailStart < tail.length && (tail[tailStart] & 0xc0) === 0x80) tailStart++;
-		const tailText = tail.subarray(tailStart).toString("utf-8");
-		const omitted = this.totalDecodedBytes - this.headBytes - (tail.length - tailStart);
-		return { content: `${headText}\n\n[... ${omitted} bytes omitted ...]\n\n${tailText}`, truncated: true };
+		const file = await open(this.tempFilePath, "r");
+		try {
+			const size = (await file.stat()).size;
+			if (size <= maxBytes) {
+				return { content: new TextDecoder().decode(await file.readFile()), truncated: false };
+			}
+			const headBytes = Math.floor(maxBytes / 2);
+			const tailBytes = maxBytes - headBytes;
+			const head = Buffer.alloc(headBytes);
+			const tail = Buffer.alloc(tailBytes);
+			await file.read(head, 0, headBytes, 0);
+			await file.read(tail, 0, tailBytes, size - tailBytes);
+			// Cut at character boundaries: streaming decode holds back an incomplete trailing sequence,
+			// and the tail skips leading continuation bytes.
+			const headText = new TextDecoder().decode(head, { stream: true });
+			let tailStart = 0;
+			while (tailStart < tail.length && (tail[tailStart] & 0xc0) === 0x80) tailStart++;
+			const tailText = new TextDecoder().decode(tail.subarray(tailStart));
+			const omitted = size - headBytes - tailBytes;
+			return { content: `${headText}\n\n[... ${omitted} bytes omitted ...]\n\n${tailText}`, truncated: true };
+		} finally {
+			await file.close();
+		}
 	}
 
 	getLastLineBytes(): number {
@@ -180,8 +192,6 @@ export class OutputAccumulator {
 		}
 
 		const bytes = byteLength(text);
-		const headLimit = this.head.length - this.totalDecodedBytes;
-		if (headLimit > 0) this.headBytes += this.head.write(text, this.headBytes, headLimit, "utf-8");
 		this.totalDecodedBytes += bytes;
 		this.tailText += text;
 		this.tailBytes += bytes;
@@ -245,9 +255,6 @@ export class OutputAccumulator {
 		}
 		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
 		this.tempFileStream = createWriteStream(this.tempFilePath, { flags: "wx", mode: 0o600 });
-		this.tempFileCompletion = finished(this.tempFileStream, { cleanup: true });
-		// Retain early storage failures for closeTempFile without an unhandled rejection.
-		void this.tempFileCompletion.catch(() => {});
 		for (const chunk of this.rawChunks) {
 			this.tempFileStream.write(chunk);
 		}

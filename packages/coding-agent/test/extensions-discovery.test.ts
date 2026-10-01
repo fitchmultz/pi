@@ -1,10 +1,9 @@
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
+import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -68,50 +67,6 @@ describe("extensions discovery", () => {
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-	});
-
-	it("loads provider subpaths through the built modular loader for both package namespaces", () => {
-		const extensionPaths = ["@earendil-works", "@mariozechner"].map((scope, index) => {
-			const extensionPath = path.join(extensionsDir, `provider-import-${index}.ts`);
-			fs.writeFileSync(
-				extensionPath,
-				`
-				import assert from "node:assert/strict";
-				import { ANTHROPIC_MODELS } from "${scope}/pi-ai/providers/anthropic.models";
-				import { anthropicProvider } from "${scope}/pi-ai/providers/anthropic";
-				import { getBuiltinModel, getBuiltinModels } from "${scope}/pi-ai/providers/all";
-				import * as oauth from "${scope}/pi-ai/oauth";
-				export default function(pi) {
-					const model = Object.values(ANTHROPIC_MODELS)[0];
-					assert.ok(model);
-					assert.equal(getBuiltinModel("anthropic", model.id).id, model.id);
-					assert.ok(getBuiltinModels("anthropic").some(candidate => candidate.id === model.id));
-					assert.equal(typeof anthropicProvider, "function");
-					assert.ok(oauth);
-					pi.registerCommand("test", { handler: async () => {} });
-				}
-			`,
-			);
-			return extensionPath;
-		});
-		// Source-mode virtual modules bypass getAliases; use the compiled loader in plain Node.
-		const loaderUrl = pathToFileURL(path.resolve(__dirname, "../dist/core/extensions/loader.js")).href;
-		const checkPath = path.join(tempDir, "check.mjs");
-		fs.writeFileSync(
-			checkPath,
-			`
-			import assert from "node:assert/strict";
-			import { loadExtensions } from ${JSON.stringify(loaderUrl)};
-			const result = await loadExtensions(process.argv.slice(2), process.cwd());
-			assert.deepEqual(result.errors, []);
-			assert.deepEqual(result.extensions.map(extension => [...extension.commands.keys()]), [["test"], ["test"]]);
-		`,
-		);
-		execFileSync(process.execPath, [checkPath, ...extensionPaths], {
-			cwd: tempDir,
-			env: { ...process.env, HOME: tempDir, PI_CODING_AGENT_DIR: tempDir, PI_OFFLINE: "1", NODE_OPTIONS: "" },
-			timeout: 30_000,
-		});
 	});
 
 	it("does not infer package ownership from ancestor manifests", async () => {
@@ -589,6 +544,7 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(explicitPath, extensionCodeWithTool("explicit"));
 
 		// Use loadExtensions directly to skip discovery
+		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
 		const result = await loadExtensions([explicitPath], tempDir);
 
 		expect(result.errors).toHaveLength(0);
@@ -602,6 +558,7 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCode);
 
 		// Use loadExtensions directly with empty paths
+		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
 		const result = await loadExtensions([], tempDir);
 
 		expect(result.errors).toHaveLength(0);

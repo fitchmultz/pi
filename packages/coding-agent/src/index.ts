@@ -1,5 +1,3 @@
-export { publishLocalFile } from "@earendil-works/pi-agent-core/node";
-
 // Core session management
 
 export { type Args, parseArgs } from "./cli/args.ts";
@@ -26,29 +24,7 @@ export {
 	type SessionStats,
 } from "./core/agent-session.ts";
 export { readStoredCredential } from "./core/auth-storage.ts";
-export type { BackgroundCommandJob, BackgroundCommandOwner } from "./core/background-command.ts";
 export type { CacheWarmingDecision, CacheWarmingStatus } from "./core/cache-warmer.ts";
-export {
-	type CheckpointBoundary,
-	type CheckpointExitWriter,
-	type CheckpointFile,
-	type CheckpointFileHold,
-	type CheckpointHold,
-	type CheckpointOptions,
-	openSessionCheckpoint,
-	openSessionCheckpointFile,
-	readSessionCheckpoint,
-	readSessionCheckpointState,
-	restoreSessionCheckpoint,
-	type SessionCheckpoint,
-	type SessionCheckpointQueues,
-	type SessionCheckpointState,
-	type ShutdownCheckpoint,
-	type ShutdownCheckpointFile,
-	validateSessionCheckpointFile,
-	writeCheckpointFile,
-	writeSessionCheckpoint,
-} from "./core/checkpoint.ts";
 // Compaction
 export {
 	type BranchPreparation,
@@ -87,11 +63,6 @@ export type {
 	AgentToolUpdateCallback,
 	AppKeybinding,
 	AutocompleteProviderFactory,
-	AutoRetryEndEvent,
-	AutoRetryStartEvent,
-	BackgroundCommandToolCallEvent,
-	BackgroundCommandToolResultEvent,
-	BashCwdHook,
 	BashToolCallEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -184,8 +155,6 @@ export type {
 	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
 	SessionBoundaryDraft,
-	SessionCheckpointEvent,
-	SessionCheckpointResult,
 	SessionCompactEvent,
 	SessionCompactFailedEvent,
 	SessionInfoChangedEvent,
@@ -195,9 +164,6 @@ export type {
 	SlashCommandInfo,
 	SlashCommandSource,
 	SourceInfo,
-	SummarizationRetryAttemptStartEvent,
-	SummarizationRetryFinishedEvent,
-	SummarizationRetryScheduledEvent,
 	TerminalInputHandler,
 	ThinkingLevelSelectEvent,
 	ToolAnnotations,
@@ -222,7 +188,6 @@ export type {
 	UIPromptEndEvent,
 	UIPromptKind,
 	UIPromptStartEvent,
-	UsageContribution,
 	UserBashEvent,
 	UserBashEventResult,
 	WidgetPlacement,
@@ -234,7 +199,6 @@ export {
 	defineTool,
 	discoverAndLoadExtensions,
 	ExtensionRunner,
-	isBackgroundCommandToolResult,
 	isBashToolResult,
 	isEditToolResult,
 	isFindToolResult,
@@ -294,7 +258,6 @@ export {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
-	createBackgroundCommandTool,
 	createBashTool,
 	// Tool factories (for custom cwd)
 	createCodingTools,
@@ -308,7 +271,6 @@ export {
 	createWriteTool,
 	type PromptTemplate,
 } from "./core/sdk.ts";
-export { convertSessionFile } from "./core/session-conversion.ts";
 export {
 	type BranchSummaryEntry,
 	buildContextEntries,
@@ -327,23 +289,18 @@ export {
 	type NewSessionOptions,
 	type ProjectedSessionEntry,
 	parseSessionEntries,
-	type ReadonlySessionManager,
 	type SessionContext,
 	type SessionEntry,
 	type SessionEntryBase,
-	type SessionEntryMetadata,
 	type SessionHeader,
 	type SessionInfo,
 	type SessionInfoEntry,
 	SessionManager,
 	type SessionMessageEntry,
-	type SessionMessageMetadata,
-	type SessionMetadataQuery,
 	type SessionProjection,
 	type SessionTreeNode,
 	sessionEntryToContextMessages,
 	type ThinkingLevelChangeEntry,
-	type UsageEntry,
 } from "./core/session-manager.ts";
 export {
 	type CacheWarmingMode,
@@ -353,6 +310,7 @@ export {
 	type FullscreenExitOutput,
 	type ImageSettings,
 	type PackageSource,
+	type QuietStartup,
 	type RetrySettings,
 	SettingsManager,
 	type SettingsManagerCreateOptions,
@@ -372,16 +330,12 @@ export { createSyntheticSourceInfo } from "./core/source-info.ts";
 export { type EditDiffResult, generateDiffString, generateUnifiedPatch } from "./core/tools/edit-diff.ts";
 // Tools
 export {
-	type BackgroundCommandToolDetails,
-	type BackgroundCommandToolInput,
-	type BackgroundCommandToolOptions,
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
 	type BashToolDetails,
 	type BashToolInput,
 	type BashToolOptions,
-	createBackgroundCommandToolDefinition,
 	createBashToolDefinition,
 	createEditToolDefinition,
 	createFindToolDefinition,
@@ -407,7 +361,6 @@ export {
 	type GrepToolDetails,
 	type GrepToolInput,
 	type GrepToolOptions,
-	getFileMutationQueueKey,
 	type LsOperations,
 	type LsToolDetails,
 	type LsToolInput,
@@ -449,9 +402,14 @@ export {
 	type VirtualModelStateData,
 } from "./core/virtual-models.ts";
 // Built-in extensions. The CLI loads them; SDK sessions add them to their extension factories.
+export { createBackgroundCommandExtension } from "./extensions/background-command/index.ts";
 export { type CodemodeExtensionOptions, createCodemodeExtension } from "./extensions/codemode/index.ts";
 export type { CodemodeStoreEntryData, CodemodeToolDetails } from "./extensions/codemode/tool.ts";
-export { default as instructionGroupsExtension } from "./extensions/instruction-groups.ts";
+export {
+	default as instructionGroupsExtension,
+	type InstructionGroup,
+	type InstructionGroupCollector,
+} from "./extensions/instruction-groups/index.ts";
 export type { LoadedMcpConfig, McpExposure, McpServerConfig, McpServerEntry } from "./extensions/mcp/config.ts";
 export { createMcpExtension, type McpExtensionOptions, type McpTransportFactory } from "./extensions/mcp/index.ts";
 export { createToolSearchExtension } from "./extensions/tool-search/index.ts";
@@ -470,8 +428,10 @@ export {
 	type RpcEventListener,
 	type RpcExtensionUIRequest,
 	type RpcExtensionUIResponse,
+	type RpcModeOptions,
 	type RpcResponse,
 	type RpcSessionState,
+	type RpcTuiDetachedEvent,
 	runPrintMode,
 	runRpcMode,
 } from "./modes/index.ts";

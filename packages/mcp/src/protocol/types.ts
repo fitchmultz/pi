@@ -1,4 +1,4 @@
-import type { BlobResourceContents, ContentAnnotations, ContentBlock, TextResourceContents } from "./content.ts";
+import type { BlobResourceContents, ContentAnnotations, TextResourceContents } from "./content.ts";
 import type { JsonRpcId } from "./jsonrpc.ts";
 
 export const LATEST_PROTOCOL_VERSION = "2025-11-25";
@@ -128,22 +128,4 @@ export interface ListResourceTemplatesResult {
 export interface ReadResourceResult {
 	contents: (TextResourceContents | BlobResourceContents)[];
 	_meta?: Record<string, unknown>;
-}
-
-export interface PromptArgument {
-	name: string;
-	description?: string;
-	required?: boolean;
-}
-
-export interface Prompt {
-	name: string;
-	title?: string;
-	description?: string;
-	arguments?: PromptArgument[];
-}
-
-export interface GetPromptResult {
-	description?: string;
-	messages: { role: "user" | "assistant"; content: ContentBlock }[];
 }

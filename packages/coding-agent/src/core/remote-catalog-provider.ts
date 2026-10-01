@@ -6,6 +6,7 @@ import {
 	type ModelType,
 	type Provider,
 } from "@earendil-works/pi-ai";
+import { normalizeCloudflareModelId } from "@earendil-works/pi-ai/api/cloudflare";
 import { VERSION } from "../config.ts";
 import { fetchWithRetry } from "../utils/management-http.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
@@ -30,15 +31,11 @@ function isSupportedModelType(model: { type?: unknown }): boolean {
 
 function mergeModels<TModel extends AnyModel>(baseline: readonly TModel[], dynamic: readonly TModel[]): TModel[] {
 	const merged = new Map<string, TModel>();
-	for (const model of [...baseline, ...dynamic]) merged.set(`${getModelType(model)}\0${model.id}`, model);
+	for (const model of [...baseline, ...dynamic]) {
+		const id = normalizeCloudflareModelId(model.provider, model.api, model.id);
+		merged.set(`${getModelType(model)}\0${id}`, id === model.id ? model : { ...model, id });
+	}
 	return [...merged.values()];
-}
-
-// Cloudflare forwards Anthropic IDs unchanged; remote catalogs may use dotted versions.
-function withCloudflareAnthropicModelId<TModel extends AnyModel>(model: TModel): TModel {
-	return model.provider === "cloudflare-ai-gateway" && isModelType(model, "chat") && model.api === "anthropic-messages"
-		? { ...model, id: model.id.replaceAll(".", "-") }
-		: model;
 }
 
 function parseCatalog(providerId: string, value: unknown): AnyModel[] {
@@ -51,10 +48,7 @@ function parseCatalog(providerId: string, value: unknown): AnyModel[] {
 				: undefined;
 	if (!entries) throw new Error(`Invalid model catalog for provider "${providerId}"`);
 	return entries
-		.filter(
-			(entry): entry is Record<string, unknown> =>
-				typeof entry === "object" && entry !== null && "id" in entry && typeof entry.id === "string",
-		)
+		.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && "id" in entry)
 		.filter(isSupportedModelType)
 		.map((model) => ({ ...model, provider: providerId }) as AnyModel);
 }
@@ -80,13 +74,9 @@ export function withRemoteCatalog(
 		getModels: () =>
 			mergeModels(
 				provider.getModels(),
-				dynamicModels.filter((model) => isModelType(model, "chat")).map(withCloudflareAnthropicModelId),
+				dynamicModels.filter((model) => isModelType(model, "chat")),
 			),
-		getAllModels: () =>
-			mergeModels(
-				provider.getAllModels?.() ?? provider.getModels(),
-				dynamicModels.map(withCloudflareAnthropicModelId),
-			),
+		getAllModels: () => mergeModels(provider.getAllModels?.() ?? provider.getModels(), dynamicModels),
 		refreshModels: async (context) => {
 			const stored = context.stored;
 			const restored = remoteModels(stored, localGeneratedAt).filter((model) => model.provider === provider.id);

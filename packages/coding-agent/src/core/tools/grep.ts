@@ -6,7 +6,7 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
-import { isInsideGitRepo, resolveToCwd } from "./path-utils.ts";
+import { resolveToCwd } from "./path-utils.ts";
 import { grepRenderers } from "./renderers/grep.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import {
@@ -59,17 +59,7 @@ export interface GrepOperations {
 
 const defaultGrepOperations: GrepOperations = {
 	isDirectory: async (p) => (await fsStat(p)).isDirectory(),
-	readFile: async (p) => {
-		const bytes = await fsReadFile(p);
-		// Match ripgrep's automatic decoding of BOM-marked UTF-16 text.
-		const encoding =
-			bytes[0] === 0xff && bytes[1] === 0xfe
-				? "utf-16le"
-				: bytes[0] === 0xfe && bytes[1] === 0xff
-					? "utf-16be"
-					: "utf-8";
-		return new TextDecoder(encoding).decode(bytes);
-	},
+	readFile: (p) => fsReadFile(p, "utf-8"),
 };
 
 export interface GrepToolOptions {
@@ -148,7 +138,7 @@ export function createGrepToolDefinition(
 							if (isDirectory) {
 								const relative = path.relative(searchPath, filePath);
 								if (relative && !relative.startsWith("..")) {
-									return relative.split(path.sep).join("/");
+									return relative.replace(/\\/g, "/");
 								}
 							}
 							return path.basename(filePath);
@@ -160,7 +150,7 @@ export function createGrepToolDefinition(
 							if (!lines) {
 								try {
 									const content = await ops.readFile(filePath);
-									lines = content.split("\n");
+									lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 								} catch {
 									lines = [];
 								}
@@ -170,7 +160,6 @@ export function createGrepToolDefinition(
 						};
 
 						const args: string[] = ["--json", "--line-number", "--color=never", "--hidden"];
-						if (!(await isInsideGitRepo(searchPath))) args.push("--no-require-git");
 						if (ignoreCase) args.push("--ignore-case");
 						if (literal) args.push("--fixed-strings");
 						if (glob) args.push("--glob", glob);

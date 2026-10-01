@@ -7,7 +7,6 @@ import {
 	McpClient,
 	McpError,
 	McpTimeoutError,
-	type ServerCapabilities,
 } from "../src/index.ts";
 import { createInMemoryTransportPair, type InMemoryTransport } from "../src/testing/index.ts";
 
@@ -17,9 +16,7 @@ interface TestServer {
 	setHandler(method: string, handler: (request: JsonRpcRequest) => unknown | Promise<unknown>): void;
 }
 
-async function createServer(
-	capabilities: ServerCapabilities = { tools: { listChanged: true } },
-): Promise<{ clientTransport: InMemoryTransport; server: TestServer }> {
+async function createServer(): Promise<{ clientTransport: InMemoryTransport; server: TestServer }> {
 	const pair = createInMemoryTransportPair();
 	const handlers = new Map<string, (request: JsonRpcRequest) => unknown | Promise<unknown>>();
 	const messages: JsonRpcMessage[] = [];
@@ -52,15 +49,15 @@ async function createServer(
 	};
 	server.setHandler("initialize", () => ({
 		protocolVersion: LATEST_PROTOCOL_VERSION,
-		capabilities,
+		capabilities: { tools: { listChanged: true } },
 		serverInfo: { name: "test-server", version: "1.0.0" },
 		instructions: "Use test tools.",
 	}));
 	return { clientTransport: pair.client, server };
 }
 
-async function connect(capabilities?: ServerCapabilities): Promise<{ client: McpClient; server: TestServer }> {
-	const { clientTransport, server } = await createServer(capabilities);
+async function connect(): Promise<{ client: McpClient; server: TestServer }> {
+	const { clientTransport, server } = await createServer();
 	const client = new McpClient({ name: "test-client", version: "2.0.0" });
 	await client.connect(clientTransport);
 	return { client, server };
@@ -112,6 +109,8 @@ describe("McpClient", () => {
 								annotations: { readOnlyHint: true },
 							},
 						],
+						// Some servers end pagination with an empty cursor instead of omitting it.
+						nextCursor: "",
 					};
 		});
 		expect(await client.listTools()).toEqual([
@@ -124,189 +123,6 @@ describe("McpClient", () => {
 			},
 		]);
 		await client.close();
-	});
-
-	it("paginates prompt definitions and sends string arguments unchanged to prompts/get", async () => {
-		const { client, server } = await connect({ prompts: { listChanged: true } });
-		server.setHandler("prompts/list", (request) =>
-			(request.params as { cursor?: string } | undefined)?.cursor === undefined
-				? {
-						prompts: [
-							{
-								name: "brief",
-								title: "Brief",
-								description: "Summarize a subject",
-								arguments: [
-									{ name: "subject", description: "Subject to summarize", required: true },
-									{ name: "detail", required: false },
-								],
-							},
-						],
-						nextCursor: "page-2",
-					}
-				: { prompts: [{ name: "welcome" }] },
-		);
-		expect(await client.listPrompts()).toEqual([
-			{
-				name: "brief",
-				title: "Brief",
-				description: "Summarize a subject",
-				arguments: [
-					{ name: "subject", description: "Subject to summarize", required: true },
-					{ name: "detail", required: false },
-				],
-			},
-			{ name: "welcome" },
-		]);
-		expect(server.messages.filter((message) => "method" in message && message.method === "prompts/list")).toEqual([
-			{ jsonrpc: "2.0", id: 2, method: "prompts/list" },
-			{ jsonrpc: "2.0", id: 3, method: "prompts/list", params: { cursor: "page-2" } },
-		]);
-		server.setHandler("prompts/get", () => ({
-			description: "Prepared brief",
-			messages: [
-				{ role: "user", content: { type: "text", text: "Summarize the subject" } },
-				{
-					role: "assistant",
-					content: { type: "resource", resource: { uri: "docs://brief", text: "Reference notes" } },
-				},
-			],
-		}));
-		const args = Object.fromEntries([
-			["subject", "a=b 日本語"],
-			["detail", ""],
-			["__proto__", "safe"],
-		]);
-		expect(await client.getPrompt("brief", args)).toEqual({
-			description: "Prepared brief",
-			messages: [
-				{ role: "user", content: { type: "text", text: "Summarize the subject" } },
-				{
-					role: "assistant",
-					content: { type: "resource", resource: { uri: "docs://brief", text: "Reference notes" } },
-				},
-			],
-		});
-		await client.getPrompt("welcome");
-		expect(server.messages.filter((message) => "method" in message && message.method === "prompts/get")).toEqual([
-			{
-				jsonrpc: "2.0",
-				id: 4,
-				method: "prompts/get",
-				params: { name: "brief", arguments: { subject: "a=b 日本語", detail: "", ["__proto__"]: "safe" } },
-			},
-			{ jsonrpc: "2.0", id: 5, method: "prompts/get", params: { name: "welcome" } },
-		]);
-		await client.close();
-	});
-
-	it.each([
-		{ label: "missing name", prompt: {} },
-		{ label: "non-string title", prompt: { name: "brief", title: 7 } },
-		{ label: "non-string description", prompt: { name: "brief", description: 7 } },
-		{ label: "non-array arguments", prompt: { name: "brief", arguments: {} } },
-		{ label: "null argument", prompt: { name: "brief", arguments: [null] } },
-		{ label: "non-string argument name", prompt: { name: "brief", arguments: [{ name: 7 }] } },
-		{ label: "non-boolean required", prompt: { name: "brief", arguments: [{ name: "subject", required: "yes" }] } },
-		{
-			label: "non-string argument description",
-			prompt: { name: "brief", arguments: [{ name: "subject", description: 7 }] },
-		},
-	])("rejects prompt definitions with $label at the wire boundary", async ({ prompt }) => {
-		const { client, server } = await connect({ prompts: {} });
-		server.setHandler("prompts/list", () => ({ prompts: [prompt] }));
-		try {
-			await expect(client.listPrompts()).rejects.toMatchObject({
-				name: "McpError",
-				code: -32600,
-				message: "Invalid entry in MCP prompts/list result",
-			});
-		} finally {
-			await client.close();
-		}
-	});
-
-	it("accepts the protocol content variants in prompt messages", async () => {
-		const { client, server } = await connect({ prompts: {} });
-		server.setHandler("prompts/get", () => ({
-			messages: [
-				{ role: "user", content: { type: "image", data: "AAAA", mimeType: "image/png" } },
-				{ role: "assistant", content: { type: "audio", data: "AAAA", mimeType: "audio/wav" } },
-				{ role: "user", content: { type: "resource_link", uri: "docs://brief", name: "brief" } },
-				{
-					role: "assistant",
-					content: {
-						type: "resource",
-						resource: { uri: "docs://pdf", blob: "JVBERg==", mimeType: "application/pdf" },
-					},
-				},
-			],
-		}));
-		expect(await client.getPrompt("media")).toEqual({
-			messages: [
-				{ role: "user", content: { type: "image", data: "AAAA", mimeType: "image/png" } },
-				{ role: "assistant", content: { type: "audio", data: "AAAA", mimeType: "audio/wav" } },
-				{ role: "user", content: { type: "resource_link", uri: "docs://brief", name: "brief" } },
-				{
-					role: "assistant",
-					content: {
-						type: "resource",
-						resource: { uri: "docs://pdf", blob: "JVBERg==", mimeType: "application/pdf" },
-					},
-				},
-			],
-		});
-		await client.close();
-	});
-
-	// PromptMessage and ContentBlock require valid roles and payloads, not just a string `type`.
-	it.each([
-		{ label: "system role", message: { role: "system", content: { type: "text", text: "unsafe" } } },
-		{ label: "missing role", message: { content: { type: "text", text: "unsafe" } } },
-		{ label: "null content", message: { role: "user", content: null } },
-		{ label: "unknown content type", message: { role: "user", content: { type: "unknown" } } },
-		{ label: "missing text", message: { role: "user", content: { type: "text" } } },
-		{ label: "non-string text", message: { role: "user", content: { type: "text", text: 7 } } },
-		{ label: "missing image data", message: { role: "user", content: { type: "image", mimeType: "image/png" } } },
-		{ label: "missing image MIME type", message: { role: "user", content: { type: "image", data: "AAAA" } } },
-		{
-			label: "non-string audio data",
-			message: { role: "assistant", content: { type: "audio", data: 7, mimeType: "audio/wav" } },
-		},
-		{ label: "missing audio MIME type", message: { role: "assistant", content: { type: "audio", data: "AAAA" } } },
-		{
-			label: "missing resource link URI",
-			message: { role: "user", content: { type: "resource_link", name: "brief" } },
-		},
-		{
-			label: "missing resource link name",
-			message: { role: "user", content: { type: "resource_link", uri: "docs://brief" } },
-		},
-		{ label: "missing embedded resource", message: { role: "user", content: { type: "resource" } } },
-		{
-			label: "missing embedded resource contents",
-			message: { role: "user", content: { type: "resource", resource: { uri: "docs://brief" } } },
-		},
-		{
-			label: "missing embedded resource URI",
-			message: { role: "user", content: { type: "resource", resource: { text: "notes" } } },
-		},
-		{
-			label: "non-string embedded blob",
-			message: { role: "user", content: { type: "resource", resource: { uri: "docs://brief", blob: 7 } } },
-		},
-	])("rejects prompt messages with $label at the wire boundary", async ({ message }) => {
-		const { client, server } = await connect({ prompts: {} });
-		server.setHandler("prompts/get", () => ({ messages: [message] }));
-		try {
-			await expect(client.getPrompt("broken")).rejects.toMatchObject({
-				name: "McpError",
-				code: -32600,
-				message: "Invalid MCP prompts/get result",
-			});
-		} finally {
-			await client.close();
-		}
 	});
 
 	it("lists and reads resources", async () => {
@@ -455,23 +271,12 @@ describe("McpClient", () => {
 		expect(rejected.connectionState).toBe("closed");
 	});
 
-	it("defaults omitted tool content but rejects malformed result payloads", async () => {
+	it("defaults missing tool result content to an empty list", async () => {
 		const { client, server } = await connect();
 		server.setHandler("tools/call", () => ({ structuredContent: { ok: true } }));
 		expect(await client.callTool("structured")).toEqual({ content: [], structuredContent: { ok: true } });
-		for (const result of [
-			{ content: "not a list" },
-			{ content: [{ type: "text", text: 7 }] },
-			{ content: [{ type: "resource", resource: { uri: "docs://broken" } }] },
-			{ content: [], isError: "true" },
-		]) {
-			server.setHandler("tools/call", () => result);
-			await expect(client.callTool("broken")).rejects.toMatchObject({
-				name: "McpError",
-				code: -32600,
-				message: "Invalid MCP tools/call result",
-			});
-		}
+		server.setHandler("tools/call", () => ({ content: "not a list" }));
+		await expect(client.callTool("broken")).rejects.toThrow("Invalid MCP tools/call result");
 		await client.close();
 	});
 

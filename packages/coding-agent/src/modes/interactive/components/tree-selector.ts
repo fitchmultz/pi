@@ -12,12 +12,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import {
-	getSessionEntryMetadata,
-	getSessionToolCallArguments,
-	type SessionEntry,
-	type SessionTreeNode,
-} from "../../../core/session-manager.ts";
+import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { formatKeyText, keyHint } from "./keybinding-hints.ts";
@@ -105,8 +100,7 @@ export type FilterMode = "default" | "no-tools" | "user-only" | "labeled-only" |
 /** Tool call info for lookup */
 interface ToolCallInfo {
 	name: string;
-	entry: SessionEntry;
-	index: number;
+	arguments: Record<string, unknown>;
 }
 
 class TreeList implements Component {
@@ -257,11 +251,18 @@ class TreeList implements Component {
 		while (stack.length > 0) {
 			const [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild] = stack.pop()!;
 
-			// Retain call locations, not historical argument bodies.
-			const entry = getSessionEntryMetadata(node.entry);
+			// Extract tool calls from assistant messages for later lookup
+			const entry = node.entry;
 			if (entry.type === "message" && entry.message.role === "assistant") {
-				for (const call of entry.message.toolCalls ?? [])
-					this.toolCallMap.set(call.id, { name: call.name, entry: node.entry, index: call.index });
+				const content = (entry.message as { content?: unknown }).content;
+				if (Array.isArray(content)) {
+					for (const block of content) {
+						if (typeof block === "object" && block !== null && "type" in block && block.type === "toolCall") {
+							const tc = block as { id: string; name: string; arguments: Record<string, unknown> };
+							this.toolCallMap.set(tc.id, { name: tc.name, arguments: tc.arguments });
+						}
+					}
+				}
 			}
 
 			result.push({ node, indent, showConnector, isLast, gutters, isVirtualRootChild });
@@ -336,15 +337,15 @@ class TreeList implements Component {
 		const searchTokens = this.searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
 
 		this.filteredNodes = this.flatNodes.filter((flatNode) => {
-			const entry = getSessionEntryMetadata(flatNode.node.entry);
+			const entry = flatNode.node.entry;
 			if (entry.type === "usage") return false;
 			const isCurrentLeaf = entry.id === this.currentLeafId;
 
 			// Skip assistant messages with only tool calls (no text) unless error/aborted
 			// Always show current leaf so active position is visible
 			if (entry.type === "message" && entry.message.role === "assistant" && !isCurrentLeaf) {
-				const msg = entry.message;
-				const hasText = msg.hasText;
+				const msg = entry.message as { stopReason?: string; content?: unknown };
+				const hasText = this.hasTextContent(msg.content);
 				const isErrorOrAborted = msg.stopReason && msg.stopReason !== "stop" && msg.stopReason !== "toolUse";
 				// Only hide if no text AND not an error/aborted message
 				if (!hasText && !isErrorOrAborted) {
@@ -559,7 +560,7 @@ class TreeList implements Component {
 
 	/** Get searchable text content from a node */
 	private getSearchableText(node: SessionTreeNode): string {
-		const entry = getSessionEntryMetadata(node.entry);
+		const entry = node.entry;
 		const parts: string[] = [];
 
 		if (node.label) {
@@ -568,28 +569,31 @@ class TreeList implements Component {
 
 		switch (entry.type) {
 			case "message": {
-				parts.push(entry.message.role, entry.preview ?? "");
-				const source = node.entry;
-				if (
-					source.type === "message" &&
-					entry.message.role === "bashExecution" &&
-					source.message.role === "bashExecution"
-				)
-					parts.push(source.message.command);
+				const msg = entry.message;
+				parts.push(msg.role);
+				if ("content" in msg && msg.content) {
+					parts.push(this.extractContent(msg.content));
+				}
+				if (msg.role === "bashExecution") {
+					const bashMsg = msg as { command?: string };
+					if (bashMsg.command) parts.push(bashMsg.command);
+				}
 				break;
 			}
 			case "custom_message": {
 				parts.push(entry.customType);
-				const source = node.entry;
-				if (source.type === "custom_message")
-					parts.push(typeof source.content === "string" ? source.content : this.extractContent(source.content));
+				if (typeof entry.content === "string") {
+					parts.push(entry.content);
+				} else {
+					parts.push(this.extractContent(entry.content));
+				}
 				break;
 			}
 			case "compaction":
 				parts.push("compaction");
 				break;
 			case "branch_summary":
-				parts.push("branch summary", node.entry.type === "branch_summary" ? node.entry.summary : "");
+				parts.push("branch summary", entry.summary);
 				break;
 			case "session_info":
 				parts.push("title");
@@ -605,7 +609,7 @@ class TreeList implements Component {
 				parts.push("custom", entry.customType);
 				break;
 			case "context_edit":
-				parts.push("context edit", entry.omitted ? "omit" : "replace", entry.targetId);
+				parts.push("context edit", entry.replacement === null ? "omit" : "replace", entry.targetId);
 				break;
 			case "label":
 				parts.push("label", entry.label ?? "");
@@ -767,7 +771,7 @@ class TreeList implements Component {
 	}
 
 	private getEntryDisplayText(node: SessionTreeNode, isSelected: boolean): string {
-		const entry = getSessionEntryMetadata(node.entry);
+		const entry = node.entry;
 		let result: string;
 
 		const normalize = (s: string) => s.replace(/[\n\t]/g, " ").trim();
@@ -777,16 +781,18 @@ class TreeList implements Component {
 				const msg = entry.message;
 				const role = msg.role;
 				if (role === "user") {
-					const content = normalize((entry.preview ?? "").slice(0, 200));
+					const msgWithContent = msg as { content?: unknown };
+					const content = normalize(this.extractContent(msgWithContent.content));
 					result = theme.fg("accent", "user: ") + content;
 				} else if (role === "assistant") {
-					const textContent = msg.hasText ? normalize((entry.preview ?? "").slice(0, 200)) : "";
+					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
+					const textContent = normalize(this.extractContent(msgWithContent.content));
 					if (textContent) {
 						result = theme.fg("success", "assistant: ") + textContent;
-					} else if (msg.stopReason === "aborted") {
+					} else if (msgWithContent.stopReason === "aborted") {
 						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(aborted)");
-					} else if (entry.preview) {
-						const errMsg = normalize(entry.preview).slice(0, 80);
+					} else if (msgWithContent.errorMessage) {
+						const errMsg = normalize(msgWithContent.errorMessage).slice(0, 80);
 						result = theme.fg("success", "assistant: ") + theme.fg("error", errMsg);
 					} else {
 						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(no content)");
@@ -795,25 +801,26 @@ class TreeList implements Component {
 					const toolMsg = msg as { toolCallId?: string; toolName?: string };
 					const toolCall = toolMsg.toolCallId ? this.toolCallMap.get(toolMsg.toolCallId) : undefined;
 					if (toolCall) {
-						result = theme.fg(
-							"muted",
-							this.formatToolCall(
-								toolCall.name,
-								getSessionToolCallArguments(toolCall.entry, toolCall.index, toolCall.name),
-							),
-						);
+						result = theme.fg("muted", this.formatToolCall(toolCall.name, toolCall.arguments));
 					} else {
 						result = theme.fg("muted", `[${toolMsg.toolName ?? "tool"}]`);
 					}
 				} else if (role === "bashExecution") {
-					result = theme.fg("dim", `[bash]: ${normalize(entry.preview ?? "")}`);
+					const bashMsg = msg as { command?: string };
+					result = theme.fg("dim", `[bash]: ${normalize(bashMsg.command ?? "")}`);
 				} else {
 					result = theme.fg("dim", `[${role}]`);
 				}
 				break;
 			}
 			case "custom_message": {
-				const content = entry.preview ?? "";
+				const content =
+					typeof entry.content === "string"
+						? entry.content
+						: entry.content
+								.filter((c): c is { type: "text"; text: string } => c.type === "text")
+								.map((c) => c.text)
+								.join("");
 				result = theme.fg("customMessageLabel", `[${entry.customType}]: `) + normalize(content);
 				break;
 			}
@@ -823,7 +830,7 @@ class TreeList implements Component {
 				break;
 			}
 			case "branch_summary":
-				result = theme.fg("warning", `[branch summary]: `) + normalize(entry.preview ?? "");
+				result = theme.fg("warning", `[branch summary]: `) + normalize(entry.summary);
 				break;
 			case "model_change":
 				result = theme.fg("dim", `[model: ${entry.modelId}]`);
@@ -835,7 +842,7 @@ class TreeList implements Component {
 				result = theme.fg("dim", `[custom: ${entry.customType}]`);
 				break;
 			case "context_edit":
-				result = theme.fg("dim", `[context ${entry.omitted ? "omit" : "replace"}: ${entry.targetId}]`);
+				result = theme.fg("dim", `[context ${entry.replacement === null ? "omit" : "replace"}: ${entry.targetId}]`);
 				break;
 			case "label":
 				result = theme.fg("dim", `[label: ${entry.label ?? "(cleared)"}]`);
@@ -923,6 +930,19 @@ class TreeList implements Component {
 		return text?.trim() ? text : undefined;
 	}
 
+	private hasTextContent(content: unknown): boolean {
+		if (typeof content === "string") return content.trim().length > 0;
+		if (Array.isArray(content)) {
+			for (const c of content) {
+				if (typeof c === "object" && c !== null && "type" in c && c.type === "text") {
+					const text = (c as { text?: string }).text;
+					if (text && text.trim().length > 0) return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	private formatToolCall(name: string, args: Record<string, unknown>): string {
 		const shortenPath = (p: string): string => {
 			const home = process.env.HOME || process.env.USERPROFILE || "";
@@ -936,7 +956,6 @@ class TreeList implements Component {
 				const offset = args.offset as number | undefined;
 				const limit = args.limit as number | undefined;
 				let display = path;
-				if (args.json !== undefined) display += ` json=${JSON.stringify(args.json)}`;
 				if (offset !== undefined || limit !== undefined) {
 					const start = offset ?? 1;
 					const end = limit !== undefined ? start + limit - 1 : "";

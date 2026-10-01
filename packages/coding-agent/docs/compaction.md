@@ -34,11 +34,9 @@ contextTokens > contextWindow - reserveTokens
 
 By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
 
-Before a new user prompt, Pi checks whether the last assistant response calls for compaction. Before a subsequent assistant response, `prepareNextTurnWithContext` checks the session projection against the selected model's compaction threshold. For a virtual model, `prepareRequest` checks the projection against the routed model. After a run, `_checkCompaction` checks overflow or a recoverable length stop and may compact before a fresh retry; it also checks the threshold after a completed response. These are compaction policy checks, not a guarantee that every provider request fits the model's physical context window.
+During a multi-turn agent run, Pi checks the canonical projected context after tools finish and their results are appended, before starting the next assistant response. If the threshold is crossed, Pi compacts during `prepareNextTurn`, then performs the existing catch-up steering poll before `turn_start`. It skips this between-turn check when the completed tool batch terminates the run and no queued message requires another response. Pi also checks before a new user prompt and performs final-attempt overflow recovery after the low-level run ends.
 
-`session_before_compact` lets an extension cancel compaction or provide a custom result. Posthorse can supply a summary-free handoff at this upstream hook (an empty `summary`, selected kept boundary, and its own continuation state), without a separate native `context_window` entry or API. It can also receive early and post-reset overflow requests for which stock compaction cannot find a cut. If the extension declines those requests, Pi does not call the default summarizer. Manual `/compact` remains a summarization command unless an extension handles it.
-
-An overflow or recoverable length stop can retry after compaction; threshold compaction does not replay a completed response. Do not assume a checkpoint or external background job is replayed by compaction.
+A provider context-overflow error or an early final `stopReason: "length"` can select one compact-and-retry recovery attempt. Length responses with tool calls retain their synthetic failed tool results and follow the ordinary tool/queue scheduler rather than forcing the run to end.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
 
@@ -93,11 +91,11 @@ persist final assistant response
 → extension/public turn_end
 → extension/public agent_end
 → append context_edit omissions for the selected attempt
-→ for overflow/length: prepare the summary, run session_before_compact, and append compaction on success
+→ for overflow/length: run session_before_compact and append compaction on success
 → start the retry as a fresh run
 ```
 
-If recovery compaction fails or is cancelled, Pi keeps the omission edits, appends no compaction, and schedules no internal retry. Existing queued work remains governed by ordinary queued-input rules. `agent_before_settle` sees the repaired projection after recovery processing. Raw transcript history, exports, billing totals, and history-search extensions can still inspect the omitted attempt.
+If recovery compaction fails or is cancelled, Pi keeps the omission edits, appends no compaction, and schedules no internal retry. Existing queued work remains governed by ordinary steering and follow-up rules. `agent_before_settle` sees the repaired projection after recovery processing. Raw transcript history, exports, billing totals, and history-search extensions can still inspect the omitted attempt.
 
 ### Split user-message spans
 
@@ -298,6 +296,8 @@ Extensions can intercept and customize both compaction and branch summarization.
 ### session_before_compact
 
 Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file.
+
+Overflow recovery (`reason: "overflow"`) also fires this event when no history is older than `keepRecentTokens`, for example on an overflow right after a reset. The preparation then covers the whole active window: `firstKeptEntryId` names the first active entry and `messagesToSummarize` holds every active message. Return a compaction to recover. If no handler does, Pi skips its own summarizer, appends no compaction, schedules no retry, and reports the failed recovery through `session_compact_failed`. Threshold compaction and `/compact` still skip a window with nothing old enough to summarize.
 
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {

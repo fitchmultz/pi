@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildBaseOptions } from "../src/api/simple-options.ts";
 import type { AssistantMessage, Model, Usage } from "../src/types.ts";
-import { assertContextFits, estimateContextTokens } from "../src/utils/estimate.ts";
+import { estimateContextTokens } from "../src/utils/estimate.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 function createUsage(totalTokens: number): Usage {
@@ -42,21 +42,13 @@ const model: Model<"openai-responses"> = {
 };
 
 describe("context token estimation", () => {
-	it("counts opaque reasoning signatures, tool-call signatures and schemas in fallback and output limits", () => {
+	it("counts encrypted thinking and tool replay signatures without reported usage", () => {
 		const assistant = createAssistant(1, 0);
 		assistant.content = [
-			{ type: "thinking", thinking: "", thinkingSignature: "x".repeat(16_000) },
-			{ type: "toolCall", id: "call", name: "run", arguments: {}, thoughtSignature: "y".repeat(4000) },
+			{ type: "thinking", thinking: "", thinkingSignature: "x".repeat(40_000) },
+			{ type: "toolCall", id: "call", name: "test", arguments: {}, thoughtSignature: "x".repeat(4_000) },
 		];
-		const context = normalizeContext({ messages: [assistant] });
-		expect(estimateContextTokens(context).tokens).toBe(5002);
-		expect(buildBaseOptions(model, context).maxTokens).toBe(902);
-		const withSchema = normalizeContext({
-			messages: [assistant],
-			tools: [{ name: "run", description: "Lookup", parameters: { type: "object", description: "z".repeat(4000) } }],
-		});
-		expect(estimateContextTokens(withSchema).tokens).toBeGreaterThanOrEqual(6002);
-		expect(() => assertContextFits({ contextWindow: 6000 }, withSchema)).toThrow("exceeds the context window");
+		expect(estimateContextTokens([assistant]).tokens).toBe(11_002);
 	});
 
 	it("ignores stale assistant usage after a newer message is inserted before it", () => {

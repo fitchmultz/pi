@@ -34,6 +34,11 @@ export class CustomEntryComponent extends Container {
 		}
 	}
 
+	override invalidate(): void {
+		super.invalidate();
+		this.rebuild();
+	}
+
 	setCompactView(compactView: boolean): void {
 		this.compactView = compactView;
 	}
@@ -52,11 +57,6 @@ export class CustomEntryComponent extends Container {
 				height: event.height,
 			},
 		};
-	}
-
-	override invalidate(): void {
-		super.invalidate();
-		this.rebuild();
 	}
 
 	private rebuild(): void {

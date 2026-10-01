@@ -1,9 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
-import { chmod, lstat, mkdir, rename, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, rename, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname, join } from "node:path";
-import { publishLocalFileExclusiveSync } from "@earendil-works/pi-agent-core/node";
 import { DEFAULT_MAX_FRAME_LENGTH } from "@earendil-works/pi-protocol";
 import type { ByteConnection, ByteConnectionAcceptor } from "../../connection.ts";
 import type { ServerListener } from "../../listener.ts";
@@ -75,7 +74,7 @@ class UnixListener implements ServerListener {
 			const stats = await lstat(ownedBindPath);
 			if (!stats.isSocket()) throw new Error(`Unix listener path is not a socket after binding: ${ownedBindPath}`);
 			this.socketIdentity = { dev: stats.dev, ino: stats.ino };
-			publishLocalFileExclusiveSync(ownedBindPath, this.path);
+			await link(ownedBindPath, this.path);
 			await setSocketMode(this.path, this.mode);
 			await removePath(ownedBindPath);
 			this.ownedBindPath = undefined;

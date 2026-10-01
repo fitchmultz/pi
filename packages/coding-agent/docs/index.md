@@ -13,7 +13,7 @@ If Pi is already installed, choose what you want to do:
 - [Use Pi interactively](usage.md) to add files, run commands, direct ongoing work, and export results.
 - [Choose a model](models.md) or connect a subscription, API key, local model, or compatible endpoint.
 - [Continue or branch a session](sessions.md) to resume work or explore another approach without losing history.
-- [Restart Pi](restart.md) to activate staged runtime or extension code while retaining the session.
+- [Restart Pi](restart.md) to activate a staged runtime or extensions and continue the same saved session.
 - [Configure Pi](configuration.md) for your preferences, working folders, instructions, and reusable resources.
 - [Understand how Pi works](how-pi-works.md), including tools, context, sessions, and the agent loop.
 
@@ -28,13 +28,10 @@ Use the [Quickstart customization chooser](quickstart.md#choose-how-to-customize
 - Use [JSON event stream mode](json.md) to consume structured events from one run.
 - Use [RPC mode](rpc.md) to control a separate Pi process.
 - Use the [TypeScript SDK](sdk.md) to run Pi inside an application.
-- Use [working-session checkpoints](checkpoint.md) to preserve native selection and accepted queues.
-
-For this fork's upstream sync and immutable installation, see [FORK.md](../../../FORK.md). Development readiness measurements are covered in [Startup Profiling](profiling.md).
 
 ## Find reference and setup information
 
-Use the reference pages to look up [CLI options](cli.md), [settings](settings.md), [provider authentication](providers.md), [keybindings](keybindings.md), and [environment variables](environment-variables.md).
+Use the reference pages to look up [CLI options](cli.md), [settings](settings.md), [providers](providers.md), [keybindings](keybindings.md), and [environment variables](environment-variables.md).
 
 For platform-specific help, see [Terminal Setup](terminal-setup.md), [Windows](windows.md), [tmux](tmux.md), [Termux on Android](termux.md), or [Containerization](containerization.md).
 

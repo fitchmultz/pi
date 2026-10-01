@@ -12,33 +12,25 @@ function json(response: ServerResponse, status: number, body: unknown, headers: 
 	response.writeHead(status, { "content-type": "application/json", ...headers }).end(JSON.stringify(body));
 }
 
-/** MCP server protected by OAuth, with its own authorization server (discovery, DCR, PKCE, refresh). */
-export interface OAuthMcpServerOptions {
-	scopesSupported?: string[];
-	grantScope?: string;
-	writeScope?: string;
-	/** A server-owned scope hierarchy, independent of literal requested tokens. */
-	writeGrant?: string;
-	challengeStatus?: 401 | 403;
-	callbackIssuer?: "exact" | "trailing-slash" | "empty";
-}
-
-export async function startOAuthMcpServer(options: OAuthMcpServerOptions = {}) {
+/**
+ * MCP server protected by OAuth, with its own authorization server (discovery, DCR, PKCE, refresh).
+ * `iss` is sent as the `iss` parameter of authorization responses (RFC 9207).
+ */
+export async function startOAuthMcpServer(options: { iss?: string } = {}) {
 	const log: string[] = [];
-	const validTokens = new Map<string, string | undefined>();
-	const refreshTokens = new Map<string, string | undefined>();
+	const registrations: Record<string, unknown>[] = [];
+	const validTokens = new Set<string>();
+	const refreshTokens = new Set<string>();
 	const challenges = new Map<string, string>();
 	let issued = 0;
-	let writes = 0;
-	let grantScope = options.grantScope;
 	let origin = "";
 
-	const issueTokens = (scope?: string) => {
+	const issueTokens = () => {
 		issued++;
 		const tokens = { access_token: `access-${issued}`, refresh_token: `refresh-${issued}` };
-		validTokens.set(tokens.access_token, scope);
-		refreshTokens.set(tokens.refresh_token, scope);
-		return { ...tokens, token_type: "Bearer", expires_in: 3600, ...(scope === undefined ? {} : { scope }) };
+		validTokens.add(tokens.access_token);
+		refreshTokens.add(tokens.refresh_token);
+		return { ...tokens, token_type: "Bearer", expires_in: 3600 };
 	};
 
 	const handleMcp = async (request: IncomingMessage, response: ServerResponse) => {
@@ -56,11 +48,7 @@ export async function startOAuthMcpServer(options: OAuthMcpServerOptions = {}) {
 				.end();
 			return;
 		}
-		const message = JSON.parse(await readBody(request)) as {
-			id?: number;
-			method: string;
-			params?: { name?: string };
-		};
+		const message = JSON.parse(await readBody(request)) as { id?: number; method: string; params?: unknown };
 		if (message.id === undefined) {
 			response.writeHead(202).end();
 			return;
@@ -73,27 +61,8 @@ export async function startOAuthMcpServer(options: OAuthMcpServerOptions = {}) {
 				serverInfo: { name: "issues", version: "1.0.0" },
 			};
 		} else if (message.method === "tools/list") {
-			result = {
-				tools: (options.writeScope ? ["whoami", "write"] : ["whoami"]).map((name) => ({
-					name,
-					inputSchema: { type: "object", properties: {} },
-				})),
-			};
+			result = { tools: [{ name: "whoami", inputSchema: { type: "object", properties: {} } }] };
 		} else if (message.method === "tools/call") {
-			if (message.params?.name === "write" && options.writeScope) {
-				const scopes = validTokens.get(token)?.split(/\s+/) ?? [];
-				if (!scopes.includes(options.writeScope) && !scopes.includes(options.writeGrant ?? options.writeScope)) {
-					log.push(`write denied ${token}`);
-					response
-						.writeHead(options.challengeStatus ?? 403, {
-							"www-authenticate": `Bearer error="insufficient_scope", scope="${options.writeScope}", resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`,
-						})
-						.end();
-					return;
-				}
-				writes++;
-				log.push(`write ${token}`);
-			}
 			log.push(`call ${token}`);
 			result = { content: [{ type: "text", text: `token ${token}` }] };
 		} else {
@@ -108,11 +77,7 @@ export async function startOAuthMcpServer(options: OAuthMcpServerOptions = {}) {
 			case "/mcp":
 				return handleMcp(request, response);
 			case "/.well-known/oauth-protected-resource/mcp":
-				return json(response, 200, {
-					resource: `${origin}/mcp`,
-					authorization_servers: [origin],
-					scopes_supported: options.scopesSupported,
-				});
+				return json(response, 200, { resource: `${origin}/mcp`, authorization_servers: [origin] });
 			case "/.well-known/oauth-authorization-server":
 				return json(response, 200, {
 					issuer: origin,
@@ -126,6 +91,7 @@ export async function startOAuthMcpServer(options: OAuthMcpServerOptions = {}) {
 			case "/register": {
 				const metadata = JSON.parse(await readBody(request)) as Record<string, unknown>;
 				log.push("register");
+				registrations.push(metadata);
 				return json(response, 201, { ...metadata, client_id: "client-1" });
 			}
 			case "/authorize": {
@@ -134,14 +100,7 @@ export async function startOAuthMcpServer(options: OAuthMcpServerOptions = {}) {
 				const redirect = new URL(url.searchParams.get("redirect_uri") ?? "");
 				redirect.searchParams.set("code", code);
 				redirect.searchParams.set("state", url.searchParams.get("state") ?? "");
-				if (options.callbackIssuer !== undefined) {
-					redirect.searchParams.set(
-						"iss",
-						options.callbackIssuer === "empty"
-							? ""
-							: `${origin}${options.callbackIssuer === "trailing-slash" ? "/" : ""}`,
-					);
-				}
+				if (options.iss) redirect.searchParams.set("iss", options.iss);
 				response.writeHead(302, { location: redirect.href }).end();
 				return;
 			}
@@ -155,14 +114,12 @@ export async function startOAuthMcpServer(options: OAuthMcpServerOptions = {}) {
 					if (!challenge || challenge !== verifier) return json(response, 400, { error: "invalid_grant" });
 					challenges.delete(params.get("code") ?? "");
 					log.push("token code");
-					return json(response, 200, issueTokens(grantScope));
+					return json(response, 200, issueTokens());
 				}
 				const refresh = params.get("refresh_token") ?? "";
-				if (!refreshTokens.has(refresh)) return json(response, 400, { error: "invalid_grant" });
-				const scope = refreshTokens.get(refresh);
-				refreshTokens.delete(refresh);
+				if (!refreshTokens.delete(refresh)) return json(response, 400, { error: "invalid_grant" });
 				log.push("token refresh");
-				return json(response, 200, issueTokens(scope));
+				return json(response, 200, issueTokens());
 			}
 			default:
 				response.writeHead(404).end();
@@ -181,10 +138,8 @@ export async function startOAuthMcpServer(options: OAuthMcpServerOptions = {}) {
 	return {
 		url: `${origin}/mcp`,
 		log,
-		writes: () => writes,
-		setGrantScope: (scope: string) => {
-			grantScope = scope;
-		},
+		/** Client metadata of dynamic client registrations. */
+		registrations,
 		/** Simulates access token expiry. */
 		expireAccessTokens: () => validTokens.clear(),
 		close: () =>

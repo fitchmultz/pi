@@ -484,43 +484,12 @@ describe("openai-responses provider defaults", () => {
 		// GPT-6 models report Fast mode as "fast" even when "priority" is requested (#10034)
 		["gpt-6-luna", "priority", "fast", 2],
 		["gpt-6-luna", "fast", "fast", 2],
-		["gpt-6-astra", "ultrafast", "ultrafast", 6, 272_000],
-		["gpt-6-astra", "ultrafast", "ultrafast", 6, 272_001],
-		["gpt-6-astra", undefined, "ultrafast", 6],
-		["gpt-6-astra", "ultrafast", "default", 1],
-		["gpt-6-astra", "ultrafast", undefined, 1],
-		["gpt-6-astra", "ultrafast", null, 1],
-		["gpt-6-astra", "ultrafast", "future-tier", 1],
-		["gpt-6-sol", "ultrafast", "ultrafast", 1],
-		["gpt-6-astra-preview", "ultrafast", "ultrafast", 1],
-		["gpt-6-astra", "priority", undefined, 2],
-		["gpt-6-astra", "flex", undefined, 0.5],
-		["gpt-6-astra", "priority", "default", 1],
-		["gpt-6-astra", "ultrafast", "ultrafast", 6, 272_001, "chatgpt-test-token"],
-		["gpt-6-astra", "ultrafast", undefined, 1, 100_000, "chatgpt-test-token"],
 	] as const)(
 		"applies %s cost multiplier for requested %s and returned %s service tier",
-		async (
-			modelId,
-			serviceTier,
-			responseServiceTier,
-			multiplier,
-			tokenCount: number = 100_000,
-			apiKey: string = "sk-test-key",
-		) => {
-			const model = {
-				...getModel("openai", modelId === "gpt-6-astra-preview" ? "gpt-6-astra" : modelId),
-				id: modelId,
-			};
-			const rates =
-				modelId === "gpt-6-astra"
-					? tokenCount > 272_000
-						? { input: 20, cacheRead: 2, cacheWrite: 25, output: 75 }
-						: { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 }
-					: model.cost;
-			const providerEvents: unknown[] = [];
-			let payload: unknown;
-			let wirePayload: unknown;
+		async (modelId, serviceTier, responseServiceTier, multiplier) => {
+			const model = getModel("openai", modelId);
+			const tokenCount = 100_000;
+			const tokenScale = tokenCount / 1_000_000;
 			const sse = `${[
 				`data: ${JSON.stringify({
 					type: "response.completed",
@@ -529,21 +498,20 @@ describe("openai-responses provider defaults", () => {
 						service_tier: responseServiceTier,
 						usage: {
 							input_tokens: tokenCount,
-							output_tokens: 1_000,
-							total_tokens: tokenCount + 1_000,
-							input_tokens_details: { cached_tokens: 10_000, cache_write_tokens: 5_000 },
+							output_tokens: tokenCount,
+							total_tokens: tokenCount * 2,
+							input_tokens_details: { cached_tokens: 0 },
 						},
 					},
 				})}`,
 			].join("\n\n")}\n\n`;
 
-			vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
-				wirePayload = JSON.parse(String(init?.body));
-				return new Response(sse, {
+			vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(sse, {
 					status: 200,
 					headers: { "content-type": "text/event-stream" },
-				});
-			});
+				}),
+			);
 
 			const stream = streamOpenAIResponses(
 				model,
@@ -551,35 +519,15 @@ describe("openai-responses provider defaults", () => {
 					systemPrompt: "sys",
 					messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 				}),
-				{
-					apiKey,
-					serviceTier,
-					onPayload: (value) => {
-						payload = value;
-					},
-					onProviderStreamEvent: (event) => {
-						providerEvents.push(event);
-					},
-				},
+				{ apiKey: "sk-test-key", serviceTier },
 			);
 
 			const result = await stream.result();
 
-			expect(result.stopReason).toBe("stop");
-			expect((payload as { service_tier?: string }).service_tier).toBe(serviceTier);
-			expect(wirePayload).toEqual(payload);
-			expect(providerEvents).toEqual([JSON.parse(sse.slice(6))]);
-			const expected = {
-				input: (rates.input * (tokenCount - 15_000) * multiplier) / 1_000_000,
-				output: (rates.output * 1_000 * multiplier) / 1_000_000,
-				cacheRead: (rates.cacheRead * 10_000 * multiplier) / 1_000_000,
-				cacheWrite: (rates.cacheWrite * 5_000 * multiplier) / 1_000_000,
-			};
-			for (const component of ["input", "output", "cacheRead", "cacheWrite"] as const) {
-				expect(result.usage.cost[component]).toBeCloseTo(expected[component], 12);
-			}
+			expect(result.usage.cost.input).toBeCloseTo(model.cost.input * multiplier * tokenScale, 12);
+			expect(result.usage.cost.output).toBeCloseTo(model.cost.output * multiplier * tokenScale, 12);
 			expect(result.usage.cost.total).toBeCloseTo(
-				expected.input + expected.output + expected.cacheRead + expected.cacheWrite,
+				(model.cost.input + model.cost.output) * multiplier * tokenScale,
 				12,
 			);
 		},

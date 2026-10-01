@@ -1,7 +1,13 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type AuthType, type CredentialStore, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
+import { createAgentSession } from "../src/core/sdk.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 
 function authOptions(runtime: ModelRuntime, type?: AuthType) {
 	return runtime
@@ -68,6 +74,71 @@ describe("ModelRuntime auth options", () => {
 		failReads = false;
 		await runtime.getAvailable();
 		expect(runtime.getError()).toBeUndefined();
+	});
+
+	it("publishes healthy availability and provider-local auth diagnostics", async () => {
+		const runtime = await ModelRuntime.create({
+			credentials: AuthStorage.inMemory({ anthropic: { type: "api_key", key: "key" } }),
+			modelsPath: null,
+		});
+		runtime.registerNativeProvider({
+			...runtime.getProvider("anthropic")!,
+			id: "broken",
+			getModels: () => [],
+			auth: {
+				apiKey: {
+					name: "broken",
+					check: async () => {
+						throw new Error("broken auth");
+					},
+					resolve: async () => undefined,
+				},
+			},
+		});
+		await runtime.refresh({ allowNetwork: false });
+		expect((await runtime.getAvailable()).some((model) => model.provider === "anthropic")).toBe(true);
+		expect(runtime.hasConfiguredAuth("anthropic")).toBe(true);
+		expect(runtime.getAuthCheckError("broken")?.message).toContain("broken");
+		expect(runtime.getError()).toContain('Provider "broken"');
+	});
+
+	it("resumes a saved session on a provider whose auth check failed", async () => {
+		const runtime = await ModelRuntime.create({ credentials: AuthStorage.inMemory(), modelsPath: null });
+		const anthropic = runtime.getProvider("anthropic")!;
+		const model = { ...anthropic.getModels()[0]!, provider: "broken" };
+		runtime.registerNativeProvider({
+			...anthropic,
+			id: "broken",
+			getModels: () => [model],
+			auth: {
+				apiKey: {
+					name: "broken",
+					check: async () => {
+						throw new Error("broken auth");
+					},
+					resolve: async () => undefined,
+				},
+			},
+		});
+		await runtime.refresh({ allowNetwork: false });
+		const dir = mkdtempSync(join(tmpdir(), "pi-auth-resume-"));
+		try {
+			const sessionManager = SessionManager.inMemory(dir);
+			sessionManager.appendModelChange("broken", model.id);
+			sessionManager.appendMessage({ role: "user", content: "hi", timestamp: Date.now() });
+			const { session, modelFallbackMessage } = await createAgentSession({
+				cwd: dir,
+				agentDir: dir,
+				modelRuntime: runtime,
+				sessionManager,
+				settingsManager: SettingsManager.inMemory(),
+			});
+			expect(session.model?.provider).toBe("broken");
+			expect(modelFallbackMessage).toBeUndefined();
+			session.dispose();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("projects provider-owned methods, names, and status", async () => {

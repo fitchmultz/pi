@@ -3,7 +3,6 @@
  *
  * Demonstrates delegating tool operations to a remote machine via SSH.
  * When --ssh is provided, read/write/edit/bash run on the remote.
- * Background starts are blocked: detached workers cannot serialize the SSH backend.
  *
  * Usage:
  *   pi -e ./ssh.ts --ssh user@host
@@ -23,7 +22,6 @@ import {
 	createReadTool,
 	createWriteTool,
 	type EditOperations,
-	isToolCallEventType,
 	type ReadOperations,
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
@@ -83,17 +81,10 @@ function createRemoteEditOps(remote: string, remoteCwd: string, localCwd: string
 function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string): BashOperations {
 	const toRemote = (p: string) => p.replace(localCwd, remoteCwd);
 	return {
-		exec: (command, cwd, { onData, onEnd, signal, timeout }) =>
+		exec: (command, cwd, { onData, signal, timeout }) =>
 			new Promise((resolve, reject) => {
 				const cmd = `cd ${JSON.stringify(toRemote(cwd))} && ${command}`;
 				const child = spawn("ssh", [remote, cmd], { stdio: ["ignore", "pipe", "pipe"] });
-				let settled = false;
-				const ended = new Set<"stdout" | "stderr">();
-				const end = (source: "stdout" | "stderr") => {
-					if (ended.has(source)) return;
-					ended.add(source);
-					onEnd(source);
-				};
 				let timedOut = false;
 				const timer = timeout
 					? setTimeout(() => {
@@ -101,44 +92,21 @@ function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string
 							child.kill();
 						}, timeout * 1000)
 					: undefined;
+				child.stdout.on("data", onData);
+				child.stderr.on("data", onData);
+				child.on("error", (e) => {
+					if (timer) clearTimeout(timer);
+					reject(e);
+				});
 				const onAbort = () => child.kill();
-				const finish = (error?: Error, code: number | null = null) => {
-					if (settled) return;
-					settled = true;
+				signal?.addEventListener("abort", onAbort, { once: true });
+				child.on("close", (code) => {
 					if (timer) clearTimeout(timer);
 					signal?.removeEventListener("abort", onAbort);
-					child.stdout.removeListener("data", onStdout);
-					child.stderr.removeListener("data", onStderr);
-					child.stdout.removeListener("end", onStdoutEnd);
-					child.stderr.removeListener("end", onStderrEnd);
-					if (error) child.kill();
-					child.stdout.destroy();
-					child.stderr.destroy();
-					try {
-						end("stdout");
-						end("stderr");
-					} catch (e) {
-						reject(e);
-						return;
-					}
-					if (error) reject(error);
-					else if (signal?.aborted) reject(new Error("aborted"));
+					if (signal?.aborted) reject(new Error("aborted"));
 					else if (timedOut) reject(new Error(`timeout:${timeout}`));
 					else resolve({ exitCode: code });
-				};
-				const onStdout = (data: Buffer) => onData(data, "stdout");
-				const onStderr = (data: Buffer) => onData(data, "stderr");
-				const onStdoutEnd = () => end("stdout");
-				const onStderrEnd = () => end("stderr");
-				child.stdout.on("data", onStdout);
-				child.stderr.on("data", onStderr);
-				child.stdout.once("end", onStdoutEnd);
-				child.stderr.once("end", onStderrEnd);
-				child.stdout.on("error", finish);
-				child.stderr.on("error", finish);
-				child.on("error", finish);
-				signal?.addEventListener("abort", onAbort, { once: true });
-				child.on("close", (code) => finish(undefined, code));
+				});
 			}),
 	};
 }
@@ -157,10 +125,12 @@ export default function (pi: ExtensionAPI) {
 
 	const getSsh = () => resolvedSsh;
 
-	// Detached workers execute locally; they cannot serialize this custom SSH backend.
 	pi.on("tool_call", (event) => {
-		if (getSsh() && isToolCallEventType("background_command", event) && event.input.action === "start") {
-			return { block: true, reason: "Background commands do not support SSH mode. Use the remote bash tool." };
+		if (getSsh() && event.toolName === "background_command" && event.input.action === "start") {
+			return {
+				block: true,
+				reason: "SSH mode does not support local background commands. Use bash for remote execution.",
+			};
 		}
 	});
 

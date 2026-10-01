@@ -7,6 +7,7 @@
 
 import { randomBytes } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
+import { raceWithAbortSignal } from "../../utils/abort.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "../../utils/oauth-page.ts";
 import { getProviderEnvValue } from "../../utils/provider-env.ts";
 import type { LoginOptions, OAuthAuth, OAuthCredential, ProviderAuthInteraction } from "../types.ts";
@@ -51,11 +52,13 @@ function randomValue(): string {
 }
 
 function authorizationResultFromCallback(url: URL, expectedState: string): AuthorizationResult {
-	const code = url.searchParams.get("code");
-	if (!code) throw new Error("Missing authorization code");
 	const state = url.searchParams.get("state");
 	if (!state) throw new Error("Missing OAuth state");
 	if (state !== expectedState) throw new Error("OAuth state mismatch");
+	const error = url.searchParams.get("error");
+	if (error) throw new Error(`ChatGPT authorization failed: ${error}`);
+	const code = url.searchParams.get("code");
+	if (!code) throw new Error("Missing authorization code");
 	const clientId = url.searchParams.get("client_id")?.trim();
 	if (!clientId) throw new Error("OpenAI OAuth registration callback did not contain an issued client ID");
 	return { code, clientId };
@@ -72,8 +75,6 @@ function authorizationResultFromManualInput(input: string, expectedState: string
 	if (url.origin !== expected.origin || url.pathname !== expected.pathname) {
 		throw new Error(`The pasted callback URL must start with ${REDIRECT_URI}`);
 	}
-	const error = url.searchParams.get("error");
-	if (error) throw new Error(`ChatGPT authorization failed: ${error}`);
 	return authorizationResultFromCallback(url, expectedState);
 }
 
@@ -90,9 +91,8 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
 			resolveResult = resolveAuthorization;
 			rejectResult = rejectAuthorization;
 		});
-		// Setup may fail before the login starts waiting for this result.
-		void result.catch(() => {});
 
+		void result.catch(() => {});
 		const server = createServer((request, response) => {
 			try {
 				const url = new URL(request.url || "", REDIRECT_URI);
@@ -100,11 +100,11 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
 					sendHtml(response, 404, oauthErrorHtml("Callback route not found."));
 					return;
 				}
+
 				if (url.searchParams.get("state") !== expectedState) {
 					sendHtml(response, 400, oauthErrorHtml("OAuth state mismatch"));
 					return;
 				}
-
 				const error = url.searchParams.get("error");
 				if (error) {
 					sendHtml(response, 400, oauthErrorHtml("ChatGPT was not connected.", `Error: ${error}`));
@@ -256,6 +256,7 @@ async function loginOpenAIChatGPT(
 
 	const manualAbort = new AbortController();
 	try {
+		interaction.signal.throwIfAborted();
 		const authorizationUrl = new URL(AUTHORIZE_URL);
 		authorizationUrl.search = new URLSearchParams({
 			client_id: DYNAMIC_CLIENT_ID,
@@ -286,7 +287,10 @@ async function loginOpenAIChatGPT(
 			})
 			.then((input) => authorizationResultFromManualInput(input, state));
 
-		const result = await (callback ? Promise.race([callback.result, manualCode]) : manualCode);
+		const result = await raceWithAbortSignal(
+			callback ? Promise.race([callback.result, manualCode]) : manualCode,
+			interaction.signal,
+		);
 		interaction.notify({ type: "progress", message: "Exchanging authorization code for tokens..." });
 		return await exchangeAuthorizationCode(result.code, verifier, result.clientId, interaction.signal);
 	} catch (error) {

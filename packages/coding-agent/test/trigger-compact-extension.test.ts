@@ -1,6 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
 import triggerCompactExtension from "../examples/extensions/trigger-compact.ts";
-import { DEFAULT_COMPACTION_SETTINGS } from "../src/core/compaction/index.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "../src/core/extensions/index.ts";
 
 function createContext(tokens: number | null, compact = vi.fn()): ExtensionContext {
@@ -14,22 +13,12 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		model: undefined,
 		scopedModels: [],
 		isIdle: () => true,
-		isBashRunning: () => false,
-		hasPendingSteeringMessages: () => false,
-		getPendingNextTurnCount: () => 0,
-		getPendingInputCount: () => 0,
 		isProjectTrusted: () => true,
 		signal: undefined,
 		abort: vi.fn(),
 		hasPendingMessages: () => false,
 		shutdown: vi.fn(),
-		getContextUsage: () => ({
-			tokens,
-			contextWindow: 200_000,
-			percent: tokens === null ? null : tokens / 2000,
-			source: tokens === null ? "unknown" : "reported",
-		}),
-		getCompactionSettings: () => ({ ...DEFAULT_COMPACTION_SETTINGS }),
+		getContextUsage: () => ({ tokens, contextWindow: 200_000, percent: tokens === null ? null : tokens / 2000 }),
 		compact,
 		getSystemPrompt: () => "",
 	};

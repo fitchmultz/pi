@@ -7,7 +7,6 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -102,11 +101,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					stream.push({ type: "start", partial: createAssistantMessage("") });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({
-								type: "error",
-								reason: "aborted",
-								error: { ...createAssistantMessage("Aborted"), stopReason: "aborted" },
-							});
+							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -142,8 +137,8 @@ describe("AgentSession concurrent prompt guard", () => {
 		// Start first prompt (don't await, it will block until abort)
 		const firstPrompt = session.prompt("First message");
 
-		// Wait for the Agent's abort signal, not just the session's prompt preparation.
-		await expect.poll(() => session.agent.state.isStreaming).toBe(true);
+		// Wait a tick for isStreaming to be set
+		await new Promise((resolve) => setTimeout(resolve, 10));
 
 		// Verify we're streaming
 		expect(session.isStreaming).toBe(true);
@@ -163,7 +158,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		// Start first prompt
 		const firstPrompt = session.prompt("First message");
-		await expect.poll(() => session.agent.state.isStreaming).toBe(true);
+		await new Promise((resolve) => setTimeout(resolve, 10));
 
 		// steer should work while streaming
 		await expect(session.steer("Steering message")).resolves.toBe("queued");
@@ -179,7 +174,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		// Start first prompt
 		const firstPrompt = session.prompt("First message");
-		await expect.poll(() => session.agent.state.isStreaming).toBe(true);
+		await new Promise((resolve) => setTimeout(resolve, 10));
 
 		// followUp should work while streaming
 		await expect(session.followUp("Follow-up message")).resolves.toBe("queued");
@@ -231,11 +226,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					stream.push({ type: "start", partial: createAssistantMessage("") });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({
-								type: "error",
-								reason: "aborted",
-								error: { ...createAssistantMessage("Aborted"), stopReason: "aborted" },
-							});
+							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -278,7 +269,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		});
 
 		const firstPrompt = session.prompt("First message");
-		await expect.poll(() => session.agent.state.isStreaming).toBe(true);
+		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(session.isStreaming).toBe(true);
 
 		const pi = (
@@ -301,13 +292,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.abort();
 		await firstPrompt.catch(() => {});
 
-		expect(sawSteeringMessage).toBe(false);
-		expect(session.getSteeringMessages()).toEqual(["Steer from extension"]);
-		expect(session.pendingMessageCount).toBe(1);
-
-		await session.agent.continue();
 		expect(sawSteeringMessage).toBe(true);
-		await expect.poll(() => session.pendingMessageCount).toBe(0);
 	});
 
 	it("should allow prompt() after previous completes", async () => {
@@ -505,7 +490,6 @@ describe("AgentSession concurrent prompt guard", () => {
 
 	it("should persist message_end events in order with slow extension handlers", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
-		const requests: Array<{ prompt: string; tools: string[] }> = [];
 		const tool = {
 			name: "dummy",
 			description: "Dummy tool",
@@ -531,10 +515,6 @@ describe("AgentSession concurrent prompt guard", () => {
 				tools: [tool],
 			},
 			streamFn: async (_model, context) => {
-				requests.push({
-					prompt: getCurrentSystemPrompt(context.messages),
-					tools: getCurrentTools(context.messages).map((tool) => tool.name),
-				});
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					const hasToolResult = context.messages.some((message) => message.role === "toolResult");
@@ -647,16 +627,13 @@ describe("AgentSession concurrent prompt guard", () => {
 		await new Promise((resolve) => setTimeout(resolve, 100));
 
 		const messageEntries = sessionManager.getEntries().filter((entry) => entry.type === "message");
-		// A stable prompt/loadout needs no second system entry between the ordered results.
 		expect(messageEntries.map((entry) => entry.message.role)).toEqual([
 			"system",
 			"user",
 			"assistant",
 			"toolResult",
+			"system",
 			"assistant",
 		]);
-		expect(requests.map((request) => request.tools)).toEqual([["dummy"], ["dummy"]]);
-		expect(requests[0].prompt).not.toBe("");
-		expect(requests[1].prompt).toBe(requests[0].prompt);
 	});
 });

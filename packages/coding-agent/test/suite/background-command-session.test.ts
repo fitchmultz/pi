@@ -1,18 +1,15 @@
-import fs, { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { getApiProvider, registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ENV_SESSION_DIR } from "../../src/config.ts";
-import type { AgentSession } from "../../src/core/agent-session.ts";
-import { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
+import type { ExtensionContext, ExtensionFactory } from "../../src/core/extensions/types.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
+import backgroundCommand, { BACKGROUND_COMMAND_NOTICE } from "../../src/extensions/background-command/index.ts";
 import {
-	BACKGROUND_COMMAND_NOTICE,
-	BACKGROUND_COMMAND_RUN_STATE,
 	type BackgroundCommandJob,
 	backgroundCommandDirectory,
 	backgroundCommandFinished,
@@ -20,14 +17,9 @@ import {
 	listBackgroundCommands,
 	readBackgroundCommand,
 	startBackgroundCommand,
-} from "../../src/core/background-command.ts";
-import { createAgentSession } from "../../src/core/sdk.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
-import { SettingsManager } from "../../src/core/settings-manager.ts";
-import { runPrintMode } from "../../src/modes/print-mode.ts";
+} from "../../src/extensions/background-command/jobs.ts";
 import { getShellEnv } from "../../src/utils/shell.ts";
-import { createTestResourceLoader } from "../utilities.ts";
-import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
+import { createHarness, getMessageText, getToolResult, type Harness, type HarnessOptions } from "./harness.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 async function until(condition: () => boolean) {
@@ -35,187 +27,136 @@ async function until(condition: () => boolean) {
 		if (condition()) return;
 		await delay(25);
 	}
-	throw new Error("Timed out waiting for native background completion");
+	throw new Error("Timed out waiting for background completion");
 }
-function jobFrom(messages: AgentMessage[]): BackgroundCommandJob & { guidance?: string } {
-	const result = [...messages]
-		.reverse()
-		.find((message) => message.role === "toolResult" && message.toolName === "background_command");
-	if (!result || result.role !== "toolResult" || result.isError) throw new Error(JSON.stringify(result));
-	return JSON.parse(getMessageText(result));
-}
-function notices(session: AgentSession) {
-	return session.sessionManager
+const notices = (h: Harness) =>
+	h.sessionManager
 		.getEntries()
 		.filter((entry) => entry.type === "custom_message" && entry.customType === BACKGROUND_COMMAND_NOTICE);
-}
+const jobFrom = (h: Harness) =>
+	JSON.parse(getMessageText(getToolResult(h, "background_command"))) as BackgroundCommandJob;
 
-describe("session-owned background completion", () => {
+describe("background command extension delivery", () => {
 	const harnesses: Harness[] = [];
-	const sessions: AgentSession[] = [];
 	const roots: string[] = [];
-	async function harness(options: HarnessOptions = {}) {
+	async function harness(owner?: SessionManager, extensions: NonNullable<HarnessOptions["extensionFactories"]> = []) {
 		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-background-session-")));
 		roots.push(root);
 		const h = await createHarness({
+			extensionFactories: [backgroundCommand, ...extensions],
+			sessionManager: owner ?? SessionManager.create(root, join(root, "sessions")),
 			settings: { compaction: { enabled: false }, retry: { enabled: false } },
-			sessionManager: SessionManager.create(root, join(root, "sessions")),
-			...options,
 		});
 		harnesses.push(h);
+		await h.session.bindExtensions({ mode: "rpc" });
 		return h;
 	}
-	function held(h: Harness) {
-		const release = join(h.tempDir, "release");
+	async function finish(h: Harness, release: string) {
+		writeFileSync(release, "go");
+		await until(() =>
+			backgroundCommandFinished(readBackgroundCommand(backgroundCommandDirectory(h.sessionManager), jobFrom(h).id)),
+		);
+	}
+	const held = (h: Harness, suffix = "") => {
+		const release = join(h.tempDir, `release${suffix}`);
 		return {
 			release,
 			command: `while [ ! -f ${quote(release)} ]; do sleep 0.02; done; printf 'background result\\n'; exit 7`,
 		};
-	}
-	async function finish(h: Harness, job: BackgroundCommandJob, release: string) {
-		writeFileSync(release, "go");
-		await until(() =>
-			backgroundCommandFinished(readBackgroundCommand(backgroundCommandDirectory(h.sessionManager), job.id)),
-		);
-	}
+	};
 	afterEach(async () => {
-		// Faux callbacks surface thrown assertions as provider errors; fail the test after cleanup.
-		const failures = [...sessions, ...harnesses.map((h) => h.session)].flatMap((session) =>
-			session.sessionManager
-				.getEntries()
-				.flatMap((entry) =>
-					entry.type === "message" &&
-					entry.message.role === "assistant" &&
-					entry.message.stopReason === "error" &&
-					entry.message.errorMessage !== "503 Service Unavailable"
-						? [entry.message.errorMessage]
-						: [],
-				),
+		const failures = harnesses.flatMap((h) =>
+			h.session.messages.filter((message) => message.role === "assistant" && message.stopReason === "error"),
 		);
-		for (const session of sessions.splice(0)) session.dispose();
 		for (const h of harnesses.splice(0)) {
-			h.session.dispose();
-			for (const job of listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))) {
+			await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			for (const job of listBackgroundCommands(backgroundCommandDirectory(h.sessionManager)))
 				if (!backgroundCommandFinished(job))
 					await cancelBackgroundCommand(backgroundCommandDirectory(h.sessionManager), job.id);
-			}
 			h.cleanup();
-			unregisterApiProviders(h.faux.api);
 		}
 		for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 		vi.restoreAllMocks();
 		syncBuiltinESMExports();
-		vi.unstubAllEnvs();
 		expect(failures).toEqual([]);
 	});
 
-	it("does not reread acknowledged history on idle ticks or unrelated appends", async () => {
+	it("reads the journal once per delivery lease, not on later turns or idle writes", async () => {
 		const h = await harness();
-		h.sessionManager.appendCustomEntry("seed", {});
-		for (let i = 0; i < 20; i++) {
-			h.sessionManager.appendCustomMessageEntry(BACKGROUND_COMMAND_NOTICE, "old output ".repeat(4000), true, {
-				jobIds: [`old-${i}`],
-			});
-		}
-		// PR #162: the monitor can cache receipts before worker startup finishes.
-		const read = vi.spyOn(fs, "readSync");
+		h.sessionManager.appendCustomEntry("large-history", "history ".repeat(16_384));
+		const read = vi.spyOn(fs, "readFileSync");
 		syncBuiltinESMExports();
-		const { release, command } = held(h);
-		const job = await startBackgroundCommand(backgroundCommandDirectory(h.sessionManager), command, {
-			command,
-			cwd: h.tempDir,
-			env: getShellEnv(),
-		});
-		await until(() => read.mock.calls.length >= 20);
-		read.mockClear();
-		await delay(1100);
-		expect(read).not.toHaveBeenCalled();
-		h.sessionManager.appendCustomEntry("unrelated", { value: true });
-		await delay(1100);
-		expect(read).not.toHaveBeenCalled();
-		// A receipt published by another writer must still suppress a duplicate completion.
-		appendFileSync(
-			h.sessionManager.getSessionFile()!,
-			`${JSON.stringify({
-				type: "custom_message",
-				id: "external-acknowledgement",
-				parentId: h.sessionManager.getLeafId(),
-				timestamp: new Date().toISOString(),
-				customType: BACKGROUND_COMMAND_NOTICE,
-				content: "Acknowledged externally",
-				display: true,
-				details: { jobIds: [job.id] },
-			})}\n`,
-		);
-		await finish(h, job, release);
-		await delay(1100);
-		expect(notices(h.session)).toHaveLength(21);
-		expect(h.faux.state.callCount).toBe(0);
-	});
-
-	it.each(["SDK", "TUI"])("delivers after the whole foreground batch in %s", async (mode) => {
-		const h = await harness();
-		if (mode === "TUI") h.session.setExtensionMode("tui");
-		const { release, command } = held(h);
-		expect(h.session.getActiveToolNames()).toContain("background_command");
-		expect(h.session.getAllTools().find((tool) => tool.name === "background_command")?.sourceInfo.source).toBe(
-			"builtin",
-		);
+		const reads = () => read.mock.calls.filter(([file]) => file === h.sessionManager.getSessionFile()).length;
+		const { command, release } = held(h);
 		h.setResponses([
 			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
 				stopReason: "toolUse",
 			}),
-			async (context) => {
-				const job = jobFrom(context.messages);
-				expect(job.status).toBe("running");
-				expect(job.guidance).toBeUndefined();
-				await finish(h, job, release);
+			fauxAssistantMessage("Launched"),
+		]);
+		await h.session.prompt("Start");
+		expect(reads()).toBe(1);
+		h.sessionManager.appendCustomEntry("unrelated", { value: true });
+		await delay(1100);
+		h.setResponses([fauxAssistantMessage("Another turn")]);
+		await h.session.prompt("Continue");
+		expect(reads()).toBe(1);
+		h.setResponses([fauxAssistantMessage("Completion consumed")]);
+		await finish(h, release);
+		await until(() => notices(h).length === 1 && h.session.isIdle);
+		expect(reads()).toBe(1);
+	});
+	it("delivers after the whole foreground batch, once across reload", async () => {
+		const h = await harness();
+		const { command, release } = held(h);
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+				stopReason: "toolUse",
+			}),
+			async () => {
+				expect(jobFrom(h).cwd).toBe(h.tempDir);
+				await finish(h, release);
 				return fauxAssistantMessage(
 					[fauxToolCall("bash", { command: "printf first" }), fauxToolCall("bash", { command: "printf second" })],
 					{ stopReason: "toolUse" },
 				);
 			},
 			(context) => {
-				const notice = context.messages.findIndex(
-					(message) => message.role === "user" && JSON.stringify(message).includes("Background commands finished"),
+				const index = context.messages.findIndex((message) =>
+					getMessageText(message).startsWith("Background commands finished:"),
 				);
-				expect(notice).toBeGreaterThan(2);
-				expect(context.messages.slice(notice - 2, notice).map((message) => message.role)).toEqual([
+				expect(context.messages.slice(index - 2, index).map((message) => message.role)).toEqual([
 					"toolResult",
 					"toolResult",
 				]);
-				expect(getMessageText(context.messages[notice])).toContain('"exitCode":7');
-				expect(getMessageText(context.messages[notice])).toContain("Output tail:\nbackground result\n");
-				return fauxAssistantMessage("Completion consumed");
+				expect(getMessageText(context.messages[index])).toContain('"exitCode":7');
+				return fauxAssistantMessage("Consumed");
 			},
 		]);
-		await h.session.prompt("Run a long check");
+		await h.session.prompt("Start");
 		expect(h.faux.state.callCount).toBe(3);
-		expect(notices(h.session)).toHaveLength(1);
+		expect(notices(h)).toHaveLength(1);
 		await h.session.reload();
 		await delay(1100);
-		expect(notices(h.session)).toHaveLength(1);
+		expect(notices(h)).toHaveLength(1);
 		expect(h.faux.state.callCount).toBe(3);
 	});
-
 	it.each([
-		{ name: "success", exitCode: 0, output: "full successful output\n".repeat(200) },
+		{ name: "success", exitCode: 0, output: "successful output\n".repeat(200) },
 		{ name: "failure lines", exitCode: 7, output: "diagnostic line\n".repeat(200) },
 		{ name: "failure bytes", exitCode: 7, output: `${"😀".repeat(5000)}\n` },
-	])("keeps automatic $name completion compact and raw output intact", async ({ exitCode, output }) => {
+	])("keeps automatic $name compact and raw logs intact", async ({ exitCode, output }) => {
 		const h = await harness();
 		const release = join(h.tempDir, "release");
 		const source = join(h.tempDir, "output");
 		writeFileSync(source, output);
 		const command = `while [ ! -f ${quote(release)} ]; do sleep 0.02; done; cat ${quote(source)}; exit ${exitCode}`;
-		let job: BackgroundCommandJob;
 		h.setResponses([
 			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
 				stopReason: "toolUse",
 			}),
-			async (context) => {
-				job = jobFrom(context.messages);
-				await finish(h, job, release);
+			async () => {
+				await finish(h, release);
 				return fauxAssistantMessage(fauxToolCall("bash", { command: "printf foreground" }), {
 					stopReason: "toolUse",
 				});
@@ -224,6 +165,14 @@ describe("session-owned background completion", () => {
 				const text = getMessageText(context.messages.at(-1));
 				expect(text).toMatch(/^Background commands finished:\n/);
 				const [summary, excerpt] = text.slice("Background commands finished:\n".length).split("\nOutput tail:\n");
+				const job = jobFrom(h);
+				expect(JSON.parse(summary)).toEqual({
+					id: job.id,
+					status: exitCode === 0 ? "succeeded" : "failed",
+					exitCode,
+					commandPreview: command.slice(0, 160),
+					logFile: job.logFile,
+				});
 				if (exitCode === 0) expect(excerpt).toBeUndefined();
 				else {
 					expect(excerpt.length).toBeGreaterThan(0);
@@ -232,500 +181,297 @@ describe("session-owned background completion", () => {
 					expect(excerpt).not.toContain("\uFFFD");
 					expect(output.trimEnd().endsWith(excerpt.trimEnd())).toBe(true);
 				}
-				expect(JSON.parse(summary)).toEqual({
-					id: job.id,
-					status: exitCode === 0 ? "succeeded" : "failed",
-					exitCode,
-					commandPreview: command.slice(0, 160),
-					logFile: job.logFile,
-				});
 				expect(readFileSync(job.logFile, "utf8")).toBe(output);
-				return fauxAssistantMessage("Completion consumed");
-			},
-		]);
-		await h.session.prompt("Run a verbose job");
-		expect(notices(h.session)).toHaveLength(1);
-		expect(notices(h.session)[0]).toMatchObject({ details: { jobIds: [job!.id] } });
-	});
-
-	it.each(["missing", "unreadable"])(
-		"delivers a healthy completion beside a partial job with %s output",
-		async (kind) => {
-			const h = await harness();
-			const { release, command } = held(h);
-			const broken = "00000000-0000-4000-8000-000000000003";
-			const brokenLog = join(backgroundCommandDirectory(h.sessionManager), broken, "output.log");
-			h.setResponses([
-				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
-					stopReason: "toolUse",
-				}),
-				() => {
-					mkdirSync(join(backgroundCommandDirectory(h.sessionManager), broken));
-					if (kind === "unreadable") {
-						writeFileSync(brokenLog, "unreadable");
-						const open = fs.openSync;
-						vi.spyOn(fs, "openSync").mockImplementation((file, flags, mode) => {
-							if (file === brokenLog) throw Object.assign(new Error("denied"), { code: "EACCES" });
-							return open(file, flags, mode);
-						});
-						syncBuiltinESMExports();
-					}
-					return fauxAssistantMessage("Launched");
-				},
-				fauxAssistantMessage("Partial record reported"),
-				fauxAssistantMessage("Healthy result delivered"),
-			]);
-			await h.session.prompt("Start");
-			expect(notices(h.session)).toHaveLength(1);
-			expect(JSON.stringify(notices(h.session))).toContain("Cannot read background job record");
-			if (kind === "unreadable") expect(JSON.stringify(notices(h.session))).toContain("Output unavailable");
-			const job = listBackgroundCommands(backgroundCommandDirectory(h.sessionManager)).find(
-				(job) => job.id !== broken,
-			)!;
-			await finish(h, job, release);
-			await until(() => notices(h.session).length === 2 && h.session.isIdle);
-			expect(JSON.stringify(notices(h.session))).toContain("background result");
-			expect(h.faux.state.callCount).toBe(4);
-		},
-	);
-
-	it.each(["agent", "setting", "environment"])("freezes the SDK %s root for unsaved job monitoring", async (kind) => {
-		const h = await harness();
-		const agentDir = join(h.tempDir, "sdk-agent");
-		const sessionDir = kind === "agent" ? join(agentDir, "sessions") : join(h.tempDir, "custom-sessions");
-		if (kind === "environment") vi.stubEnv(ENV_SESSION_DIR, relative(process.cwd(), sessionDir));
-		const owner = SessionManager.inMemory(h.tempDir);
-		const { session } = await createAgentSession({
-			agentDir,
-			sessionManager: owner,
-			modelRuntime: h.session.modelRuntime,
-			model: h.getModel(),
-			settingsManager:
-				kind === "setting"
-					? SettingsManager.inMemory({
-							sessionDir: relative(process.cwd(), sessionDir),
-							compaction: { enabled: false },
-						})
-					: h.settingsManager,
-			resourceLoader: createTestResourceLoader(),
-		});
-		sessions.push(session);
-		const { release, command } = held(h);
-		h.setResponses([
-			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command, timeout: 10 }), {
-				stopReason: "toolUse",
-			}),
-			(context) => {
-				const job = jobFrom(context.messages);
-				expect(job.logFile.startsWith(join(sessionDir, "background-commands", owner.getSessionId()))).toBe(true);
-				expect(job.guidance).toBeUndefined();
-				// Model the SDK host changing its process cwd after launching the worker.
-				vi.spyOn(process, "cwd").mockReturnValue(h.tempDir);
-				writeFileSync(release, "go");
-				return fauxAssistantMessage("Started");
-			},
-			fauxAssistantMessage("SDK completion consumed"),
-		]);
-		await session.prompt("Start");
-		await until(() => notices(session).length === 1 && session.isIdle);
-		expect(owner.getSessionFile()).toBeUndefined();
-		expect(h.faux.state.callCount).toBe(3);
-	});
-
-	it("lets user steering run before a completed command", async () => {
-		const h = await harness();
-		const { release, command } = held(h);
-		h.setResponses([
-			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
-				stopReason: "toolUse",
-			}),
-			async (context) => {
-				await finish(h, jobFrom(context.messages), release);
-				await h.session.steer("User amendment");
-				return fauxAssistantMessage(fauxToolCall("bash", { command: "printf first" }), { stopReason: "toolUse" });
-			},
-			(context) => {
-				expect(JSON.stringify(context.messages.at(-1))).toContain("User amendment");
-				expect(notices(h.session)).toHaveLength(0);
-				return fauxAssistantMessage(fauxToolCall("bash", { command: "printf amendment" }), {
-					stopReason: "toolUse",
-				});
-			},
-			(context) => {
-				expect(JSON.stringify(context.messages.at(-1))).toContain("Background commands finished");
-				return fauxAssistantMessage("Done");
+				return fauxAssistantMessage("Consumed");
 			},
 		]);
 		await h.session.prompt("Start");
-		expect(h.faux.state.callCount).toBe(4);
+		expect(notices(h)).toHaveLength(1);
 	});
-
-	it("delivers later jobs at tool boundaries inside an idle completion wakeup", async () => {
-		const h = await harness();
-		const first = held(h);
-		const secondRelease = join(h.tempDir, "second-release");
-		const secondCommand = `while [ ! -f ${quote(secondRelease)} ]; do sleep 0.02; done; printf 'second completion\\n'`;
-		h.setResponses([
-			fauxAssistantMessage(
-				[
-					fauxToolCall("background_command", { action: "start", command: first.command }),
-					fauxToolCall("background_command", { action: "start", command: secondCommand }),
-				],
-				{ stopReason: "toolUse" },
-			),
-			fauxAssistantMessage("Launched both jobs"),
-			async () => {
-				const second = listBackgroundCommands(backgroundCommandDirectory(h.sessionManager)).find(
-					(job) => job.command === secondCommand,
-				)!;
-				await finish(h, second, secondRelease);
-				return fauxAssistantMessage(fauxToolCall("bash", { command: "printf foreground" }), {
-					stopReason: "toolUse",
-				});
-			},
-			(context) => {
-				expect(notices(h.session)).toHaveLength(2);
-				const second = listBackgroundCommands(backgroundCommandDirectory(h.sessionManager)).find(
-					(job) => job.command === secondCommand,
-				)!;
-				expect(JSON.parse(getMessageText(context.messages.at(-1)).split("\n")[1])).toMatchObject({
-					id: second.id,
-					status: "succeeded",
-					logFile: second.logFile,
-				});
-				return fauxAssistantMessage("Both consumed");
-			},
-		]);
-		await h.session.prompt("Start");
-		const firstJob = listBackgroundCommands(backgroundCommandDirectory(h.sessionManager)).find(
-			(job) => job.command === first.command,
-		)!;
-		await finish(h, firstJob, first.release);
-		await until(() => h.faux.state.callCount === 4 && h.session.isIdle);
-		expect(notices(h.session)).toHaveLength(2);
-	});
-
-	it("plain SDK resume discovers existing work without replay or widening saved tools", async () => {
-		const oldTools = ["read", "bash", "edit", "write"];
-		const h = await harness({ initialActiveToolNames: oldTools });
-		h.setResponses([fauxAssistantMessage("Saved before the tool was enabled")]);
-		await h.session.prompt("Seed");
-		const { release, command } = held(h);
-		const job = await startBackgroundCommand(backgroundCommandDirectory(h.sessionManager), command, {
-			command,
-			cwd: h.tempDir,
-			env: getShellEnv(),
-		});
-		h.session.dispose();
-		await finish(h, job, release);
-		h.setResponses([fauxAssistantMessage("Recovered completion")]);
-		const { session } = await createAgentSession({
-			sessionManager: SessionManager.open(h.session.sessionFile!),
-			modelRuntime: h.session.modelRuntime,
-			model: h.getModel(),
-			settingsManager: h.settingsManager,
-			resourceLoader: createTestResourceLoader(),
-		});
-		sessions.push(session);
-		await until(() => notices(session).length === 1 && session.isIdle);
-		expect(h.faux.state.callCount).toBe(2); // One seed response and one completion response.
-		expect(session.getActiveToolNames()).toEqual(oldTools);
-		expect(readBackgroundCommand(backgroundCommandDirectory(session.sessionManager), job.id).pid).toBe(job.pid);
-		expect(listBackgroundCommands(backgroundCommandDirectory(session.sessionManager))).toHaveLength(1);
-	});
-
-	it.each(["status", "activeOnly"])(
-		"terminal %s acknowledgement does not swallow a later completion",
-		async (selection) => {
-			const h = await harness();
-			const { release, command } = held(h);
-			h.setResponses([
-				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
-					stopReason: "toolUse",
-				}),
-				fauxAssistantMessage(fauxToolCall("background_command", { action: "status", activeOnly: true }), {
-					stopReason: "toolUse",
-				}),
-				async () => {
-					const job = listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))[0];
-					await finish(h, job, release);
-					return fauxAssistantMessage(
-						fauxToolCall("background_command", { action: "status", activeOnly: selection === "activeOnly" }),
-						{ stopReason: "toolUse" },
-					);
-				},
-				fauxAssistantMessage("Done"),
-			]);
-			await h.session.prompt("Start");
-			await delay(1100);
-			expect(notices(h.session)).toHaveLength(selection === "status" ? 0 : 1);
-			expect(h.faux.state.callCount).toBe(4);
-		},
-	);
-
-	it.each(["agent", "retry", "boundary"])(
-		"persists %s cancellation across reload and resume without waking",
-		async (phase) => {
-			const h = await harness({
-				settings: { compaction: { enabled: false }, retry: { enabled: true, maxRetries: 2, baseDelayMs: 10 } },
-			});
-			const { release, command } = held(h);
-			let queuedAtCancellation = 0;
-			if (phase === "boundary")
-				h.session.subscribe((event) => {
-					if (event.type === "turn_end" && h.faux.state.callCount === 2) {
-						queuedAtCancellation = h.session.pendingCustomMessageCount;
-						void h.session.abort();
-					}
-				});
-			if (phase === "retry")
-				h.session.subscribe((event) => {
-					if (event.type === "auto_retry_start") void h.session.abort();
-				});
-			h.setResponses([
-				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
-					stopReason: "toolUse",
-				}),
-				async (context) => {
-					if (phase === "boundary") await finish(h, jobFrom(context.messages), release);
-					if (phase === "agent") void h.session.abort();
-					return phase === "retry"
-						? fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 Service Unavailable" })
-						: fauxAssistantMessage("Cancelled");
-				},
-			]);
-			await h.session.prompt("Start");
-			if (phase === "boundary") expect(queuedAtCancellation).toBe(1);
-			expect(h.sessionManager.getEntries()).toContainEqual(
-				expect.objectContaining({ type: "custom", customType: BACKGROUND_COMMAND_RUN_STATE, data: true }),
-			);
-			const provider = getApiProvider(h.faux.api)!;
-			await h.session.reload();
-			registerApiProvider(provider, h.faux.api);
-			h.session.dispose();
-			const { session } = await createAgentSession({
-				sessionManager: SessionManager.open(h.session.sessionFile!),
-				modelRuntime: h.session.modelRuntime,
-				model: h.getModel(),
-				settingsManager: h.settingsManager,
-				resourceLoader: createTestResourceLoader(),
-			});
-			sessions.push(session);
-			const job = listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))[0];
-			await finish(h, job, release);
-			await until(() => notices(session).length === 1);
-			expect(h.faux.state.callCount).toBe(2);
-			h.setResponses([
-				(context) => {
-					expect(JSON.stringify(context.messages)).toContain("Background commands finished");
-					expect(JSON.stringify(context.messages.at(-1))).toContain("Continue");
-					return fauxAssistantMessage("Continued by user");
-				},
-			]);
-			await session.prompt("Continue");
-			expect(notices(session)).toHaveLength(1);
-		},
-	);
-
-	it.each(["print", "rpc"] as const)(
-		"defers %s resume until mode binding and queued startup input is consumed",
-		async (mode) => {
-			const h = await harness();
-			const { release, command } = held(h);
-			h.setResponses([
-				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
-					stopReason: "toolUse",
-				}),
-				fauxAssistantMessage("Launched"),
-			]);
-			await h.session.prompt("Start");
-			h.session.dispose();
-			const job = listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))[0];
-			await finish(h, job, release);
-			const { session } = await createAgentSession({
-				sessionManager: SessionManager.open(h.session.sessionFile!),
-				modelRuntime: h.session.modelRuntime,
-				model: h.getModel(),
-				settingsManager: h.settingsManager,
-				resourceLoader: createTestResourceLoader(),
-				deferBackgroundCommandNotifications: true,
-			});
-			sessions.push(session);
-			await delay(1100);
-			expect(notices(session)).toHaveLength(0);
-			let queued = 1;
-			await session.bindExtensions({ mode, getQueuedInputCount: () => queued });
-			await delay(1100);
-			expect(notices(session)).toHaveLength(0);
-			h.setResponses([
-				(context) => {
-					expect(JSON.stringify(context.messages.at(-1))).toContain("Startup input");
-					expect(notices(session)).toHaveLength(0);
-					return fauxAssistantMessage("Startup consumed");
-				},
-				fauxAssistantMessage("Completion consumed"),
-			]);
-			queued--;
-			await session.prompt("Startup input");
-			expect(notices(session)).toHaveLength(1);
-		},
-	);
-
-	it.each(["text", "json"] as const)("native %s print consumes startup input before completions", async (mode) => {
+	it("wakes an idle session and resumes finished work without replay or duplicate delivery", async () => {
 		const h = await harness();
 		const { command, release } = held(h);
 		h.setResponses([
 			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
 				stopReason: "toolUse",
 			}),
-			async (context) => {
-				const job = jobFrom(context.messages);
-				expect(job.guidance).toContain("This is a one-shot print/JSON invocation");
-				expect(job.guidance).toContain("will not wait automatically");
-				await finish(h, job, release);
-				return fauxAssistantMessage("First prompt done");
-			},
-			(context) => {
-				expect(JSON.stringify(context.messages.at(-1))).toContain("Second prompt");
-				expect(notices(h.session)).toHaveLength(0);
-				return fauxAssistantMessage("Second prompt done");
-			},
-			fauxAssistantMessage("Completion consumed"),
-		]);
-		const runtime = new AgentSessionRuntime(
-			h.session,
-			{
-				cwd: h.tempDir,
-				agentDir: h.tempDir,
-				modelRuntime: h.session.modelRuntime,
-				settingsManager: h.settingsManager,
-				resourceLoader: h.session.resourceLoader,
-				diagnostics: [],
-			},
-			async () => {
-				throw new Error("Session replacement was not requested");
-			},
-		);
-		const output: string[] = [];
-		const stdout = vi
-			.spyOn(process.stdout, "write")
-			.mockImplementation(
-				(
-					chunk: string | Uint8Array,
-					encoding?: BufferEncoding | ((error?: Error | null) => void),
-					callback?: (error?: Error | null) => void,
-				) => {
-					output.push(String(chunk));
-					if (typeof encoding === "function") encoding();
-					else callback?.();
-					return true;
-				},
-			);
-		try {
-			expect(
-				await runPrintMode(runtime, { mode, initialMessage: "First prompt", messages: ["Second prompt"] }),
-			).toBe(0);
-		} finally {
-			stdout.mockRestore();
-		}
-		expect(output.join("")).toContain("Completion consumed");
-		expect(h.faux.state.callCount).toBe(4);
-		expect(notices(h.session)).toHaveLength(1);
-	});
-
-	it("waits for user Bash and includes its persisted result in the idle wakeup", async () => {
-		const h = await harness();
-		const { release, command } = held(h);
-		const bashRelease = join(h.tempDir, "bash-release");
-		h.setResponses([
-			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
-				stopReason: "toolUse",
-			}),
 			fauxAssistantMessage("Launched"),
-			(context) => {
-				expect(h.session.isBashRunning).toBe(false);
-				expect(JSON.stringify(context.messages)).toContain("User shell result");
-				return fauxAssistantMessage("Completion consumed");
-			},
+			fauxAssistantMessage("Idle completion consumed"),
 		]);
 		await h.session.prompt("Start");
-		const bash = h.session.executeBash(
-			`while [ ! -f ${quote(bashRelease)} ]; do sleep 0.02; done; printf 'User shell result'`,
-		);
-		await finish(h, listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))[0], release);
-		await delay(1100);
-		expect(notices(h.session)).toHaveLength(0);
-		writeFileSync(bashRelease, "go");
-		await bash;
-		await until(() => notices(h.session).length === 1 && h.session.isIdle);
+		await finish(h, release);
+		await until(() => notices(h).length === 1 && h.session.isIdle);
 		expect(h.faux.state.callCount).toBe(3);
+		const second = held(h, "second");
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command: second.command }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Launched second"),
+		]);
+		await h.session.prompt("Another");
+		const job = jobFrom(h);
+		h.session.dispose();
+		writeFileSync(second.release, "go");
+		const root = backgroundCommandDirectory(h.sessionManager);
+		await until(() => backgroundCommandFinished(readBackgroundCommand(root, job.id)));
+		const resumed = await harness(SessionManager.open(h.sessionManager.getSessionFile()!));
+		resumed.setResponses([fauxAssistantMessage("Recovered completion")]);
+		await until(() => notices(resumed).length === 2 && resumed.session.isIdle);
+		expect(resumed.faux.state.callCount).toBe(1);
+		expect(readBackgroundCommand(root, job.id).pid).toBe(job.pid);
+		expect(listBackgroundCommands(root)).toHaveLength(2);
+		const other = await harness(SessionManager.open(h.sessionManager.getSessionFile()!));
+		await delay(1100);
+		expect(other.faux.state.callCount).toBe(0);
+		expect(notices(other)).toHaveLength(2);
 	});
-
-	it("pauses native notifications while checkpoint-held and waits for input after checkpoint restore", async () => {
+	it("retains completions after agent cancellation without waking until user input", async () => {
 		const h = await harness();
-		const { release, command } = held(h);
+		const { command, release } = held(h);
 		h.setResponses([
 			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
 				stopReason: "toolUse",
 			}),
-			fauxAssistantMessage("Launched"),
+			async () => {
+				void h.session.abort();
+				return fauxAssistantMessage("Cancelled");
+			},
 		]);
 		await h.session.prompt("Start");
-		const hold = await h.session.acquireCheckpoint({ quiesce: () => () => {} });
-		const revision = h.sessionManager.getEntriesRevision();
-		await finish(h, listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))[0], release);
-		await delay(1100);
-		expect(hold.sleepBlockers.some((reason) => reason.includes("background"))).toBe(false);
-		expect(h.sessionManager.getEntriesRevision()).toBe(revision);
-		hold.release();
-		h.session.dispose();
-		const { session } = await createAgentSession({
-			checkpoint: hold.checkpoint,
-			modelRuntime: h.session.modelRuntime,
-			settingsManager: h.settingsManager,
-			resourceLoader: createTestResourceLoader(),
-		});
-		sessions.push(session);
-		await delay(1100);
-		expect(notices(session)).toHaveLength(0);
-		h.setResponses([fauxAssistantMessage("User resumed"), fauxAssistantMessage("Completion consumed")]);
-		await session.prompt("Continue");
-		expect(notices(session)).toHaveLength(1);
+		await finish(h, release);
+		await until(() => notices(h).length === 1);
+		expect(h.faux.state.callCount).toBe(2);
+		h.setResponses([fauxAssistantMessage("Continued")]);
+		await h.session.prompt("Continue");
+		expect(notices(h)).toHaveLength(1);
 	});
-
-	it("uses effective shell settings, session cwd, and current Bash metadata", async () => {
-		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-background-settings-")));
-		roots.push(root);
-		const shell = join(root, "shell");
-		writeFileSync(shell, '#!/bin/sh\nexport BACKGROUND_SHELL=effective\nexec /bin/bash "$@"\n', { mode: 0o755 });
-		const h = await harness({
-			settings: {
-				shellPath: shell,
-				shellCommandPrefix: "export BACKGROUND_PREFIX=effective",
-				compaction: { enabled: false },
-			},
-		});
-		const session = h.session;
-		const command =
-			'pwd; printf \'%s %s %s %s\' "$BACKGROUND_SHELL" "$BACKGROUND_PREFIX" "$PI_SESSION_ID" "$PI_MODEL"';
+	it.skipIf(process.platform === "win32")(
+		"uses effective shell settings, relative cwd, and session metadata",
+		async () => {
+			const h = await harness();
+			const shell = join(h.tempDir, "shell");
+			writeFileSync(shell, '#!/bin/sh\nexport BACKGROUND_SHELL=effective\nexec /bin/bash "$@"\n', { mode: 0o755 });
+			mkdirSync(join(h.tempDir, "child"));
+			h.settingsManager.setShellPath(shell);
+			h.settingsManager.setShellCommandPrefix("export BACKGROUND_PREFIX=effective");
+			h.setResponses([
+				fauxAssistantMessage(
+					fauxToolCall("background_command", {
+						action: "start",
+						cwd: "child",
+						command:
+							'pwd; printf "%s %s %s %s" "$BACKGROUND_SHELL" "$BACKGROUND_PREFIX" "$PI_SESSION_ID" "$PI_MODEL"',
+					}),
+					{ stopReason: "toolUse" },
+				),
+				async () => {
+					const job = jobFrom(h);
+					await until(() =>
+						backgroundCommandFinished(
+							readBackgroundCommand(backgroundCommandDirectory(h.sessionManager), job.id),
+						),
+					);
+					expect(readFileSync(job.logFile, "utf8")).toBe(
+						`${realpathSync(join(h.tempDir, "child"))}\neffective effective ${h.sessionManager.getSessionId()} ${h.getModel().id}`,
+					);
+					return fauxAssistantMessage(fauxToolCall("background_command", { action: "status", id: job.id }), {
+						stopReason: "toolUse",
+					});
+				},
+				fauxAssistantMessage("Inspected"),
+			]);
+			await h.session.prompt("Start");
+			expect(notices(h)).toHaveLength(0);
+		},
+	);
+	it("captures the directory owner's reply before awaiting worker admission", async () => {
+		let manager: ExtensionContext["sessionManager"] | undefined;
+		let current = "";
+		let directoryA = "";
+		let directoryB = "";
+		let switched = false;
+		const owner: ExtensionFactory = (pi) => {
+			pi.on("session_start", (_event, ctx) => {
+				manager = ctx.sessionManager;
+				directoryA = join(ctx.cwd, "A");
+				directoryB = join(ctx.cwd, "B");
+				mkdirSync(join(directoryA, "child"), { recursive: true });
+				mkdirSync(directoryB);
+				current = directoryA;
+			});
+			pi.events.on("pi-change-working-dir:resolve-execution-cwd", (value) => {
+				const request = value as { sessionManager: ExtensionContext["sessionManager"]; result?: unknown };
+				if (request.sessionManager !== manager) return;
+				request.result = { cwd: current };
+				if (!switched) {
+					switched = true;
+					queueMicrotask(() => {
+						current = directoryB;
+					});
+				}
+			});
+		};
+		const h = await harness(undefined, [owner]);
 		h.setResponses([
-			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command: "pwd", cwd: "child" }), {
 				stopReason: "toolUse",
 			}),
-			async (context) => {
-				const job = jobFrom(context.messages);
+			async () => {
+				const job = jobFrom(h);
+				expect(current).toBe(directoryB);
+				expect(job.cwd).toBe(join(directoryA, "child"));
 				await until(() =>
 					backgroundCommandFinished(readBackgroundCommand(backgroundCommandDirectory(h.sessionManager), job.id)),
 				);
-				expect(readFileSync(job.logFile, "utf8")).toBe(
-					`${realpathSync(h.tempDir)}\neffective effective ${session.sessionId} ${h.getModel().id}`,
+				expect(readFileSync(job.logFile, "utf8")).toBe(`${realpathSync(join(directoryA, "child"))}\n`);
+				return fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command: "pwd" }), {
+					stopReason: "toolUse",
+				});
+			},
+			async () => {
+				const job = jobFrom(h);
+				expect(job.cwd).toBe(directoryB);
+				await until(() =>
+					backgroundCommandFinished(readBackgroundCommand(backgroundCommandDirectory(h.sessionManager), job.id)),
 				);
+				expect(readFileSync(job.logFile, "utf8")).toBe(`${realpathSync(directoryB)}\n`);
 				return fauxAssistantMessage(fauxToolCall("background_command", { action: "status", id: job.id }), {
 					stopReason: "toolUse",
 				});
 			},
-			fauxAssistantMessage("Done"),
+			fauxAssistantMessage("Inspected"),
 		]);
-		await session.prompt("Start");
+		await h.session.prompt("Start in the owner's directory");
+	});
+	it.each([
+		{ result: { error: "Selected directory is unavailable" }, message: "Selected directory is unavailable" },
+		{ result: { cwd: "/unused", error: 42 }, message: "invalid execution directory" },
+		{ result: { cwd: "relative" }, message: "invalid execution directory" },
+		{ result: { cwd: "/nul\0" }, message: "invalid execution directory" },
+		{ result: null, message: "invalid execution directory" },
+		{ result: [], message: "invalid execution directory" },
+	])("fails closed on an invalid/error directory-owner reply: $result", async ({ result, message }) => {
+		let manager: ExtensionContext["sessionManager"] | undefined;
+		const owner: ExtensionFactory = (pi) => {
+			pi.on("session_start", (_event, ctx) => {
+				manager = ctx.sessionManager;
+			});
+			pi.events.on("pi-change-working-dir:resolve-execution-cwd", (value) => {
+				const request = value as { sessionManager: ExtensionContext["sessionManager"]; result?: unknown };
+				if (request.sessionManager === manager) request.result = result;
+			});
+		};
+		const h = await harness(undefined, [owner]);
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command: "pwd" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Rejected"),
+		]);
+		await h.session.prompt("Start");
+		expect(getToolResult(h, "background_command").isError).toBe(true);
+		expect(getMessageText(getToolResult(h, "background_command"))).toContain(message);
+		expect(listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))).toEqual([]);
+	});
+	it.each([
+		{ route: "tool", identifiable: true },
+		{ route: "command", identifiable: true },
+		{ route: "tool", identifiable: false },
+		{ route: "command", identifiable: false },
+	])(
+		"checks silent directory-owner provenance via $route (identifiable=$identifiable)",
+		async ({ route, identifiable }) => {
+			const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-cwd-owner-")));
+			roots.push(root);
+			writeFileSync(
+				join(root, "package.json"),
+				JSON.stringify({ name: identifiable ? "pi-change-working-dir" : "unrelated-extension" }),
+			);
+			const owner: ExtensionFactory = (pi) => {
+				if (route === "tool") {
+					pi.registerTool({
+						name: "change_dir",
+						label: "Change directory",
+						description: "Legacy directory owner",
+						parameters: Type.Object({}),
+						defaultActive: false,
+						execute: async () => ({ content: [], details: undefined }),
+					});
+				} else {
+					pi.registerCommand("cwd", { description: "Legacy directory owner", handler: async () => {} });
+				}
+			};
+			const h = await harness(undefined, [{ factory: owner, path: join(root, "index.ts") }]);
+			h.setResponses([
+				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command: "printf safe" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Done"),
+			]);
+			await h.session.prompt("Start");
+			const result = getToolResult(h, "background_command");
+			expect(result.isError).toBe(identifiable);
+			if (identifiable) {
+				expect(getMessageText(result)).toContain("Update pi-change-working-dir and restart Pi");
+				expect(listBackgroundCommands(backgroundCommandDirectory(h.sessionManager))).toEqual([]);
+			} else {
+				expect(jobFrom(h).cwd).toBe(h.tempDir);
+			}
+		},
+	);
+	it("lists newest first with capped pagination and activeOnly filtering", async () => {
+		const h = await harness();
+		const root = backgroundCommandDirectory(h.sessionManager);
+		for (let i = 0; i < 23; i++) {
+			const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+			const directory = join(root, id);
+			mkdirSync(directory, { recursive: true });
+			writeFileSync(
+				join(directory, "job.json"),
+				JSON.stringify({
+					job: {
+						id,
+						command: `job ${i}`,
+						cwd: h.tempDir,
+						createdAt: new Date(i * 1000).toISOString(),
+						logFile: join(directory, "output.log"),
+						status: "succeeded",
+						exitCode: 0,
+					},
+				}),
+			);
+		}
+		await startBackgroundCommand(root, "sleep 600", { command: "sleep 600", cwd: h.tempDir, env: getShellEnv() });
+		const snapshots: { jobs: { commandPreview: string }[]; total: number; nextOffset: number | null }[] = [];
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "status" }), { stopReason: "toolUse" }),
+			() => {
+				snapshots.push(JSON.parse(getMessageText(getToolResult(h, "background_command"))));
+				return fauxAssistantMessage(fauxToolCall("background_command", { action: "status", offset: 20 }), {
+					stopReason: "toolUse",
+				});
+			},
+			() => {
+				snapshots.push(JSON.parse(getMessageText(getToolResult(h, "background_command"))));
+				return fauxAssistantMessage(fauxToolCall("background_command", { action: "status", activeOnly: true }), {
+					stopReason: "toolUse",
+				});
+			},
+			() => {
+				snapshots.push(JSON.parse(getMessageText(getToolResult(h, "background_command"))));
+				return fauxAssistantMessage("Listed");
+			},
+		]);
+		await h.session.prompt("List");
+		expect(snapshots[0]).toMatchObject({ total: 24, nextOffset: 20 });
+		expect(snapshots[0].jobs.map((job) => job.commandPreview)).toEqual([
+			"sleep 600",
+			...Array.from({ length: 19 }, (_, i) => `job ${22 - i}`),
+		]);
+		expect(snapshots[1]).toMatchObject({ total: 24, nextOffset: null });
+		expect(snapshots[1].jobs.map((job) => job.commandPreview)).toEqual(["job 3", "job 2", "job 1", "job 0"]);
+		expect(snapshots[2]).toMatchObject({ total: 1, nextOffset: null });
+		expect(snapshots[2].jobs.map((job) => job.commandPreview)).toEqual(["sleep 600"]);
 	});
 });

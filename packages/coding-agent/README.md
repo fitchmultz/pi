@@ -18,8 +18,6 @@ Ask Pi to create the prompt templates, skills, extensions, and themes you need, 
 
 ## Getting started
 
-For this fork's verified installation and upstream-sync workflow, see [FORK.md](../../FORK.md). The commands below install stock upstream Pi.
-
 Install the command-line interface with npm:
 
 ```bash
@@ -56,7 +54,7 @@ npm install --ignore-scripts
 ./pi-test.sh
 ```
 
-`pi-test.sh` can be called from any directory and preserves the caller's working directory. See [Startup Profiling](docs/profiling.md) for readiness and CPU measurements.
+`pi-test.sh` can be called from any directory and preserves the caller's working directory.
 
 Before submitting changes, run:
 

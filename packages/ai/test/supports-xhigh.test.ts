@@ -114,7 +114,7 @@ describe("getSupportedThinkingLevels", () => {
 		const expected = {
 			openai: ["low", "medium", "high", "xhigh", "max"],
 			"azure-openai-responses": ["low", "medium", "high", "xhigh", "max"],
-			"openai-codex": ["low", "medium", "high", "xhigh", "max"],
+			"openai-codex": ["minimal", "low", "medium", "high", "xhigh", "max"],
 		} as const;
 		for (const [provider, levels] of Object.entries(expected)) {
 			const model = getModel(provider as keyof typeof expected, "gpt-6.1-sol");
@@ -132,9 +132,6 @@ describe("getSupportedThinkingLevels", () => {
 		for (const provider of ["openai", "openai-codex"] as const) {
 			const model = getModel(provider, modelId);
 			expect(model).toMatchObject({
-				id: modelId,
-				provider,
-				api: provider === "openai" ? "openai-responses" : "openai-codex-responses",
 				input: ["text", "image"],
 				cost: {
 					...cost,
@@ -157,18 +154,6 @@ describe("getSupportedThinkingLevels", () => {
 					supportsToolSearch: true,
 				},
 			});
-			if (modelId === "gpt-6.1-sol") {
-				expect(getSupportedThinkingLevels(model)).toEqual(["low", "medium", "high", "xhigh", "max"]);
-				expect(model.thinkingLevelMap).toEqual({
-					off: null,
-					minimal: null,
-					low: "low",
-					medium: "medium",
-					high: "high",
-					xhigh: "xhigh",
-					max: "max",
-				});
-			}
 		}
 	});
 

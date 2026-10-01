@@ -45,9 +45,8 @@ export function spawnProcessSync(
  * the grace timer is re-armed on every chunk, so an actively writing descendant keeps
  * us reading, while a quiet inherited handle (e.g. a Windows daemonized descendant
  * that never lets `close` fire) still releases us after the grace elapses.
- * Cancellation stops draining inherited output once the child itself has exited.
  */
-export function waitForChildProcess(child: ChildProcess, signal?: AbortSignal): Promise<number | null> {
+export function waitForChildProcess(child: ChildProcess): Promise<number | null> {
 	return new Promise((resolve, reject) => {
 		let settled = false;
 		let exited = false;
@@ -57,7 +56,6 @@ export function waitForChildProcess(child: ChildProcess, signal?: AbortSignal): 
 		let stderrEnded = child.stderr === null;
 
 		const cleanup = () => {
-			signal?.removeEventListener("abort", maybeFinalizeAfterExit);
 			if (postExitTimer) {
 				clearTimeout(postExitTimer);
 				postExitTimer = undefined;
@@ -82,7 +80,7 @@ export function waitForChildProcess(child: ChildProcess, signal?: AbortSignal): 
 
 		const maybeFinalizeAfterExit = () => {
 			if (!exited || settled) return;
-			if (signal?.aborted || (stdoutEnded && stderrEnded)) {
+			if (stdoutEnded && stderrEnded) {
 				finalize(exitCode);
 			}
 		};
@@ -135,6 +133,5 @@ export function waitForChildProcess(child: ChildProcess, signal?: AbortSignal): 
 		child.once("error", onError);
 		child.once("exit", onExit);
 		child.once("close", onClose);
-		signal?.addEventListener("abort", maybeFinalizeAfterExit, { once: true });
 	});
 }

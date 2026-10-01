@@ -5,11 +5,14 @@ import { createInMemoryTransportPair } from "@earendil-works/pi-mcp/testing";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionFactory } from "../../src/core/extensions/types.ts";
+import type { SessionManager } from "../../src/core/session-manager.ts";
 import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
 import type { McpExposure, McpServerEntry } from "../../src/extensions/mcp/config.ts";
-import { createMcpExtension } from "../../src/extensions/mcp/index.ts";
+import { createMcpExtension, MCP_SERVERS_SECTION } from "../../src/extensions/mcp/index.ts";
 import { createMcpToolName } from "../../src/extensions/mcp/tools.ts";
 import { createToolSearchExtension } from "../../src/extensions/tool-search/index.ts";
+import { TOOL_SEARCH_DESCRIPTION } from "../../src/extensions/tool-search/tool.ts";
+import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
 import {
 	createHarness,
 	createTestUiContext,
@@ -42,8 +45,20 @@ const SERVER_TOOLS = [
 	{ name: "shot", description: "Returns an image.", inputSchema: { type: "object", properties: {} } },
 ];
 
-/** Minimal MCP server over an in-memory transport. Records the tool calls it receives. */
-function createFakeServer(calls: string[], listTools: () => unknown[] = () => SERVER_TOOLS, resources = false) {
+/**
+ * Minimal MCP server over an in-memory transport. Records the tool calls it receives.
+ * `initializeDelayMs` delays the answer to `initialize`; `Infinity` never answers.
+ */
+function createFakeServer(
+	calls: string[],
+	options: {
+		listTools?: () => unknown[];
+		resources?: boolean;
+		instructions?: string;
+		initializeDelayMs?: number;
+	} = {},
+) {
+	const { listTools = () => SERVER_TOOLS, resources = false, instructions, initializeDelayMs = 0 } = options;
 	const pair = createInMemoryTransportPair();
 	const respond = (request: JsonRpcRequest): unknown => {
 		switch (request.method) {
@@ -52,6 +67,7 @@ function createFakeServer(calls: string[], listTools: () => unknown[] = () => SE
 					protocolVersion: LATEST_PROTOCOL_VERSION,
 					capabilities: { tools: {}, ...(resources ? { resources: {} } : {}) },
 					serverInfo: { name: "docs", version: "1.0.0" },
+					...(instructions ? { instructions } : {}),
 				};
 			case "tools/list":
 				return { tools: listTools() };
@@ -93,9 +109,9 @@ function createFakeServer(calls: string[], listTools: () => unknown[] = () => SE
 	pair.server.onMessage((message) => {
 		if (!("id" in message) || !("method" in message)) return;
 		const request = message as JsonRpcRequest;
-		queueMicrotask(() => {
-			void pair.server.send({ jsonrpc: "2.0", id: request.id, result: respond(request) });
-		});
+		const send = () => void pair.server.send({ jsonrpc: "2.0", id: request.id, result: respond(request) });
+		if (request.method !== "initialize" || initializeDelayMs === 0) queueMicrotask(send);
+		else if (Number.isFinite(initializeDelayMs)) setTimeout(send, initializeDelayMs);
 	});
 	return pair;
 }
@@ -103,12 +119,8 @@ function createFakeServer(calls: string[], listTools: () => unknown[] = () => SE
 describe("AgentSession MCP integration", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(async () => {
-		while (harnesses.length > 0) {
-			const harness = harnesses.pop()!;
-			await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-			harness.cleanup();
-		}
+	afterEach(() => {
+		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
 	async function setup(
@@ -121,6 +133,8 @@ describe("AgentSession MCP integration", () => {
 			toolExposure?: Record<string, McpExposure>;
 			resources?: boolean;
 			withoutToolSearch?: boolean;
+			description?: string;
+			instructions?: string;
 		} = {},
 	) {
 		const {
@@ -129,6 +143,8 @@ describe("AgentSession MCP integration", () => {
 			toolExposure,
 			resources,
 			withoutToolSearch,
+			description,
+			instructions,
 			...configOptions
 		} = options;
 		const calls: string[] = [];
@@ -138,9 +154,9 @@ describe("AgentSession MCP integration", () => {
 			name: "docs",
 			config: {
 				url: "http://unused.invalid",
-				connection: "eager",
 				exposure,
 				...(toolExposure ? { toolExposure } : {}),
+				...(description ? { description } : {}),
 			},
 			source: "test",
 		};
@@ -155,7 +171,7 @@ describe("AgentSession MCP integration", () => {
 				createMcpExtension({
 					loadConfig: () => ({ servers: [entry], errors: [], ...configOptions }),
 					createTransport: () => {
-						const pair = createFakeServer(calls, listTools, resources);
+						const pair = createFakeServer(calls, { listTools, resources, instructions });
 						servers.push(pair.server);
 						void pair.server.start();
 						return pair.client;
@@ -167,6 +183,7 @@ describe("AgentSession MCP integration", () => {
 		await harness.session.bindExtensions({
 			uiContext: createTestUiContext({ notify: (message) => notifications.push(message) }),
 		});
+		// The first prompt waits only for servers with direct tools; wait for the others here.
 		await vi.waitFor(() =>
 			expect(harness.session.getAllTools().some((tool) => tool.name === "mcp__docs__search")).toBe(true),
 		);
@@ -179,9 +196,19 @@ describe("AgentSession MCP integration", () => {
 			.flatMap((message) => (message.toolsAdded ?? []).map((tool) => tool.name));
 	}
 
+	/** The `mcp_servers` prompt section as the model currently has it. */
+	function serversSection(harness: Harness): string | null | undefined {
+		let section: string | null | undefined;
+		for (const message of harness.session.messages) {
+			if (message.role === "system" && message.sections && MCP_SERVERS_SECTION in message.sections) {
+				section = message.sections[MCP_SERVERS_SECTION];
+			}
+		}
+		return section;
+	}
+
 	function nestedToolNames(harness: Harness): string[] {
-		// Discovery and sign-in have separate owner-boundary coverage; these assertions concern business tools.
-		return harness.session.getCallableToolNames().filter((name) => name !== "mcp_discover" && name !== "mcp_auth");
+		return harness.session.getCallableToolNames();
 	}
 
 	it("exposes codemode-only MCP tools through codemode and hides them from the model", async () => {
@@ -220,8 +247,10 @@ describe("AgentSession MCP integration", () => {
 		expect(harness.session.getActiveToolNames()).toEqual(["codemode"]);
 		expect(declaredToolNames(harness)).toEqual(["codemode"]);
 		expect(nestedToolNames(harness)).toEqual([searchName, "mcp__docs__fail", "mcp__docs__shot"]);
+		// The description lists neither the server nor its tools; scripts search for them.
 		const codemode = harness.session.agent.state.tools.find((tool) => tool.name === "codemode");
-		expect(codemode?.description).not.toContain("### `mcp__docs__search`");
+		expect(codemode?.description).not.toContain("mcp__docs");
+		expect(codemode?.description).not.toContain("Shared MCP Types:");
 
 		const result = toolResult(harness, "codemode");
 		expect(result.isError).toBe(false);
@@ -254,8 +283,25 @@ describe("AgentSession MCP integration", () => {
 
 		expect(harness.session.getActiveToolNames()).toEqual(["codemode"]);
 		expect(nestedToolNames(harness)).toContain(searchName);
-		const codemode = harness.session.agent.state.tools.find((tool) => tool.name === "codemode");
-		expect(codemode?.description).not.toContain(`${searchName}(args: {`);
+	});
+
+	// Regression: #10239.
+	it.each([false, true])("routes tools whose names differ only in - and _ (reverse: %s)", async (reverse) => {
+		const tools = [
+			{ name: "read-file", description: "dashed", inputSchema: { type: "object", properties: {} } },
+			{ name: "read_file", description: "underscored", inputSchema: { type: "object", properties: {} } },
+		];
+		if (reverse) tools.reverse();
+		const { harness, calls } = await setup("codemode", () => [...tools, ...SERVER_TOOLS]);
+		const code = `for (const query of ["dashed", "underscored"]) await tools[(await searchTools(query))[0].name]({});`;
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("codemode", { code })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("go");
+
+		expect(calls).toEqual(["read-file:{}", "read_file:{}"]);
 	});
 
 	it("rejects direct model calls to codemode-only MCP tools", async () => {
@@ -291,7 +337,7 @@ describe("AgentSession MCP integration", () => {
 		expect(annotations.get("mcp__docs__fail")).toEqual({ destructiveHint: true, readOnlyHint: false });
 		expect(annotations.get("mcp__docs__search")).toBeUndefined();
 		const result = toolResult(harness, "mcp__docs__search");
-		expect(result.content[0]).toEqual({ type: "text", text: "direct guide\ndirect faq" });
+		expect(getMessageText(result)).toBe("direct guide\ndirect faq");
 	});
 
 	it.each(["direct", "codemode"] as const)(
@@ -320,22 +366,6 @@ describe("AgentSession MCP integration", () => {
 			tools = SERVER_TOOLS;
 			await listChanged();
 			expect(reachable()).toContain("mcp__docs__fail");
-
-			if (exposure === "direct") {
-				harness.session.setActiveToolsByName(["mcp__docs__search"]);
-				tools = SERVER_TOOLS.filter((tool) => tool.name !== "fail");
-				await listChanged();
-				tools = SERVER_TOOLS;
-				await listChanged();
-				expect(harness.session.getActiveToolNames()).toEqual(["mcp__docs__search"]);
-
-				harness.session.setActiveToolsByName(["mcp__docs__search", "mcp__docs__fail"]);
-				tools = SERVER_TOOLS.filter((tool) => tool.name !== "fail");
-				await listChanged();
-				tools = SERVER_TOOLS;
-				await listChanged();
-				expect(harness.session.getActiveToolNames()).toContain("mcp__docs__fail");
-			}
 		},
 	);
 
@@ -362,16 +392,10 @@ describe("AgentSession MCP integration", () => {
 		expect(harness.session.getActiveToolNames()).toEqual(
 			expect.arrayContaining(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]),
 		);
-		expect(
-			JSON.parse(getMessageText({ content: toolResult(harness, "list_mcp_resources").content.slice(0, 1) })),
-		).toEqual({
+		expect(JSON.parse(getMessageText(toolResult(harness, "list_mcp_resources")))).toEqual({
 			resources: [{ server: "docs", uri: "docs://intro", name: "intro", mimeType: "text/markdown" }],
 		});
-		expect(
-			JSON.parse(
-				getMessageText({ content: toolResult(harness, "list_mcp_resource_templates").content.slice(0, 1) }),
-			),
-		).toEqual({
+		expect(JSON.parse(getMessageText(toolResult(harness, "list_mcp_resource_templates")))).toEqual({
 			server: "docs",
 			resourceTemplates: [{ server: "docs", uriTemplate: "docs://pages/{slug}", name: "page" }],
 		});
@@ -379,7 +403,7 @@ describe("AgentSession MCP integration", () => {
 			(message): message is ToolResultMessage =>
 				message.role === "toolResult" && message.toolName === "read_mcp_resource",
 		);
-		expect(results[0].content[0]).toEqual({ type: "text", text: "# docs://pages/setup" });
+		expect(getMessageText(results[0])).toBe("# docs://pages/setup");
 		expect(results[1].isError).toBe(true);
 		expect(getMessageText(results[1])).toBe('MCP server "nope" has no resources. Servers with resources: docs');
 		expect(calls).toEqual(["read:docs://pages/setup"]);
@@ -422,36 +446,60 @@ return { uris: listed.resources.map((r) => r.uri), text: read.contents[0].text }
 		expect(declaredToolNames(harness)).toEqual(["codemode", "mcp__docs__search"]);
 		expect(nestedToolNames(harness)).toEqual(["mcp__docs__search", "mcp__docs__shot"]);
 		const codemode = harness.session.agent.state.tools.find((tool) => tool.name === "codemode");
-		expect(codemode?.description).not.toContain("### `mcp__docs__shot`");
+		expect(codemode?.description).not.toContain("mcp__docs__shot");
 		expect(codemode?.description).not.toContain("mcp__docs__fail");
 	});
 
-	it("keeps codemode-deferred MCP tools callable from codemode but out of its description", async () => {
-		const { harness, calls } = await setup("codemode-deferred");
-		const searchName = createMcpToolName("docs", "search");
+	it("describes the server with its configured description and returns its instructions to scripts", async () => {
+		const { harness } = await setup("codemode", undefined, {
+			description: "Search the product docs",
+			instructions: "Always search before reading.",
+			builtInTools: ["tool_search"],
+		});
 		harness.setResponses([
 			fauxAssistantMessage(
 				[
 					fauxToolCall("codemode", {
-						code: `return (await tools.${searchName}({ query: "d" })).structuredContent;`,
+						code: `const docs = await describeNamespace("mcp__docs");
+const aliases = await Promise.all(["docs", "mcp__docs"].map((name) => describeNamespace(name)));
+return { docs, sameForAliases: aliases.every((alias) => JSON.stringify(alias) === JSON.stringify(docs)), none: await describeNamespace("mcp__nope") };`,
 					}),
 				],
-				{
-					stopReason: "toolUse",
-				},
+				{ stopReason: "toolUse" },
 			),
 			fauxAssistantMessage("done"),
 		]);
 
 		await harness.session.prompt("go");
 
-		expect(harness.session.getActiveToolNames()).toEqual(["codemode"]);
-		const codemode = harness.session.agent.state.tools.find((tool) => tool.name === "codemode");
-		expect(codemode?.description).not.toContain(searchName);
-		const result = toolResult(harness, "codemode");
-		expect(result.isError).toBe(false);
-		expect(JSON.parse((result.content[1] as { text: string }).text)).toEqual({ hits: ["d guide", "d faq"] });
-		expect(calls).toEqual(['search:{"query":"d"}']);
+		// The instructions stay out of every tool description.
+		const description = (name: string) =>
+			harness.session.agent.state.tools.find((tool) => tool.name === name)?.description ?? "";
+		expect(description("codemode")).not.toContain("mcp__docs");
+		expect(description("tool_search")).toBe(TOOL_SEARCH_DESCRIPTION);
+		for (const name of ["codemode", "tool_search"]) expect(description(name)).not.toContain("Always search");
+		expect(JSON.parse(getMessageText(toolResult(harness, "codemode")).split("\n").at(-1) ?? "")).toEqual({
+			docs: {
+				name: "mcp__docs",
+				description: "Search the product docs",
+				instructions: "Always search before reading.",
+				tools: ["mcp__docs__search", "mcp__docs__fail", "mcp__docs__shot"],
+			},
+			sameForAliases: true,
+		});
+		// The system prompt lists the server with its configured description rather than its instructions.
+		expect(serversSection(harness)).toContain("- mcp__docs (codemode): Search the product docs");
+	});
+
+	it("lists servers by the first line of their instructions without a configured description", async () => {
+		const { harness } = await setup("deferred", undefined, { instructions: "Docs search.\nLong guidance." });
+		harness.setResponses([fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("go");
+
+		const section = serversSection(harness);
+		expect(section).toContain("- mcp__docs (tool_search): Docs search.\n");
+		expect(section).not.toContain("Long guidance");
 	});
 
 	it("does not activate codemode when autoEnableCodemode is false", async () => {
@@ -481,10 +529,7 @@ return { uris: listed.resources.map((r) => r.uri), text: read.contents[0].text }
 		await harness.session.prompt("go");
 
 		expect(harness.session.getActiveToolNames()).toEqual(["tool_search", "mcp__docs__search"]);
-		expect(toolResult(harness, "mcp__docs__search").content[0]).toEqual({
-			type: "text",
-			text: "loaded guide\nloaded faq",
-		});
+		expect(getMessageText(toolResult(harness, "mcp__docs__search"))).toBe("loaded guide\nloaded faq");
 		expect(notifications).toEqual([]);
 	});
 
@@ -531,36 +576,196 @@ return { uris: listed.resources.map((r) => r.uri), text: read.contents[0].text }
 		expect(harness.session.getActiveToolNames()).toEqual([]);
 	});
 
-	it("does not hold the first prompt for explicitly eager codemode servers that are still connecting", async () => {
-		const entry: McpServerEntry = {
-			name: "slow",
-			config: { url: "http://unused.invalid", connection: "eager" },
-			source: "test",
-		};
+	/** A server named `slow` whose answer to `initialize` takes `initializeDelayMs`, without waiting for it. */
+	async function setupSlow(
+		config: {
+			exposure?: McpExposure;
+			toolExposure?: Record<string, McpExposure>;
+			name?: string;
+			instructions?: string;
+		},
+		initializeDelayMs: number,
+		startupWaitMs?: number,
+	) {
+		const calls: string[] = [];
+		const notifications: string[] = [];
+		const { name = "slow", instructions, ...serverConfig } = config;
+		const entry: McpServerEntry = { name, config: { url: "http://unused.invalid", ...serverConfig }, source: "test" };
 		const harness = await createHarness({
 			initialActiveToolNames: [],
 			extensionFactories: [
 				createCodemodeExtension(),
+				createToolSearchExtension(),
 				createMcpExtension({
 					loadConfig: () => ({ servers: [entry], errors: [] }),
-					// The server never answers `initialize`.
 					createTransport: () => {
-						const pair = createInMemoryTransportPair();
+						const pair = createFakeServer(calls, { initializeDelayMs, instructions });
 						void pair.server.start();
 						return pair.client;
 					},
-					startupWaitMs: 20,
+					...(startupWaitMs === undefined ? {} : { startupWaitMs }),
 				}),
 			],
 		});
 		harnesses.push(harness);
-		await harness.session.bindExtensions({});
+		await harness.session.bindExtensions({
+			uiContext: createTestUiContext({ notify: (message) => notifications.push(message) }),
+		});
+		return { harness, calls, notifications };
+	}
+
+	it("does not hold the first prompt for codemode servers that are still connecting", async () => {
+		// The server never answers `initialize`.
+		const { harness } = await setupSlow({}, Number.POSITIVE_INFINITY);
 		harness.setResponses([fauxAssistantMessage("ready")]);
 
 		await harness.session.prompt("start");
 
 		expect(getAssistantTexts(harness)).toEqual(["ready"]);
-		expect(harness.session.getActiveToolNames()).toEqual(["codemode"]);
+		// Codemode is activated from the config, before the server connects.
+		expect(declaredToolNames(harness)).toEqual(["codemode"]);
+	});
+
+	it("keeps the codemode description unchanged when the server connects", async () => {
+		const { harness } = await setupSlow({}, 20);
+		const description = () => harness.session.agent.state.tools.find((tool) => tool.name === "codemode")?.description;
+		const before = description();
+		expect(before).toBeDefined();
+		await vi.waitFor(() => expect(harness.session.getCallableToolNames()).toContain("mcp__slow__search"));
+		expect(description()).toBe(before);
+	});
+
+	it("lists a server before it connects and appends its summary with the next prompt", async () => {
+		const { harness } = await setupSlow({ instructions: "Slow docs.\nMore." }, 30);
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+
+		await harness.session.prompt("first");
+		await vi.waitFor(() => expect(harness.session.getCallableToolNames()).toContain("mcp__slow__search"));
+		await harness.session.prompt("second");
+
+		const systemMessages = harness.session.messages.filter(
+			(message): message is SystemMessage => message.role === "system",
+		);
+		// The first request lists the server by name; its summary follows as an appended patch.
+		expect(systemMessages).toHaveLength(2);
+		expect(systemMessages[0].sections?.[MCP_SERVERS_SECTION]).toContain("- mcp__slow (codemode)\n");
+		expect(systemMessages[1].sections).toEqual({
+			[MCP_SERVERS_SECTION]: expect.stringContaining("- mcp__slow (codemode): Slow docs."),
+		});
+		expect(harness.session.messages.indexOf(systemMessages[1])).toBeGreaterThan(
+			harness.session.messages.findIndex((message) => message.role === "assistant"),
+		);
+	});
+
+	it("waits for servers with direct tools before listing the servers", async () => {
+		const { harness } = await setupSlow(
+			{ exposure: "direct", toolExposure: { shot: "codemode" }, instructions: "Slow docs." },
+			30,
+		);
+		harness.setResponses([fauxAssistantMessage("ready")]);
+
+		await harness.session.prompt("start");
+
+		expect(serversSection(harness)).toContain("- mcp__slow (codemode): Slow docs.");
+	});
+
+	it("leaves servers with only direct tools out of the servers section", async () => {
+		const { harness } = await setupSlow({ exposure: "direct" }, 0);
+		harness.setResponses([fauxAssistantMessage("ready")]);
+
+		await harness.session.prompt("start");
+
+		expect(serversSection(harness)).toBeUndefined();
+	});
+
+	it("waits for the servers a codemode script names", async () => {
+		const { harness, calls } = await setupSlow({}, 30);
+		harness.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall("codemode", {
+						code: `return (await tools.mcp__slow__search({ query: "q" })).structuredContent;`,
+					}),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("go");
+
+		const result = toolResult(harness, "codemode");
+		expect(result.isError).toBe(false);
+		expect(JSON.parse(getMessageText(result).split("\n").at(-1) ?? "")).toEqual({ hits: ["q guide", "q faq"] });
+		expect(calls).toEqual(['search:{"query":"q"}']);
+	});
+
+	it("waits for servers whose script identifiers differ from their names", async () => {
+		const { harness, calls } = await setupSlow({ name: "slow-docs" }, 30);
+		harness.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall("codemode", {
+						code: `await tools.mcp__slow_docs__search({ query: "q" }); return (await describeNamespace("slow_docs")).name;`,
+					}),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("go");
+
+		expect(toolResult(harness, "codemode").isError).toBe(false);
+		expect(getMessageText(toolResult(harness, "codemode")).split("\n").at(-1)).toBe("mcp__slow_docs");
+		expect(calls).toEqual(['search:{"query":"q"}']);
+	});
+
+	it("does not wait for servers a codemode script does not name", async () => {
+		const { harness } = await setupSlow({}, Number.POSITIVE_INFINITY);
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("codemode", { code: "return 1 + 1;" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("go");
+
+		expect(getMessageText(toolResult(harness, "codemode")).split("\n").at(-1)).toBe("2");
+	});
+
+	it("waits for servers before tool_search searches", async () => {
+		const { harness } = await setupSlow({ exposure: "deferred" }, 30);
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("tool_search", { query: "search the docs", limit: 1 })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage([fauxToolCall("mcp__slow__search", { query: "late" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("go");
+
+		expect(getMessageText(toolResult(harness, "mcp__slow__search"))).toBe("late guide\nlate faq");
+	});
+
+	it("holds the first prompt for servers with direct tools", async () => {
+		const { harness } = await setupSlow({ exposure: "direct" }, 30);
+		harness.setResponses([fauxAssistantMessage("ready")]);
+
+		await harness.session.prompt("start");
+
+		expect(declaredToolNames(harness)).toContain("mcp__slow__search");
+	});
+
+	it("holds the first prompt for servers with direct tools only up to startupWaitMs", async () => {
+		const { harness, notifications } = await setupSlow({ exposure: "direct" }, Number.POSITIVE_INFINITY, 20);
+		harness.setResponses([fauxAssistantMessage("ready")]);
+
+		await harness.session.prompt("start");
+
+		expect(getAssistantTexts(harness)).toEqual(["ready"]);
+		expect(harness.session.getActiveToolNames()).toEqual([]);
+		expect(notifications).toEqual(["MCP servers are still connecting; their tools become available once connected."]);
 	});
 
 	it("does not let codemode call itself or inactive direct tools", async () => {
@@ -573,7 +778,7 @@ return { uris: listed.resources.map((r) => r.uri), text: read.contents[0].text }
 	});
 
 	it("finds tools from scripts with searchTools() and describeTool()", async () => {
-		const { harness, calls } = await setup("codemode-deferred");
+		const { harness, calls } = await setup("codemode");
 		harness.setResponses([
 			fauxAssistantMessage(
 				[
@@ -628,8 +833,9 @@ return { uris: listed.resources.map((r) => r.uri), text: read.contents[0].text }
 		await harness.session.prompt("find a docs tool");
 
 		expect(harness.session.getActiveToolNames()).toEqual(["tool_search", searchName]);
+		// The description does not depend on the connected servers.
 		const toolSearch = harness.session.agent.state.tools.find((tool) => tool.name === "tool_search");
-		expect(toolSearch?.description).not.toContain("mcp__docs");
+		expect(toolSearch?.description).toBe(TOOL_SEARCH_DESCRIPTION);
 
 		const search = toolResult(harness, "tool_search");
 		expect(getMessageText(search)).toBe(
@@ -642,7 +848,7 @@ return { uris: listed.resources.map((r) => r.uri), text: read.contents[0].text }
 		);
 		expect(loadMessages).toHaveLength(1);
 		expect(loadMessages[0].toolsAdded?.map((tool) => tool.name)).toEqual([searchName]);
-		expect(toolResult(harness, searchName).content[0]).toEqual({ type: "text", text: "loaded guide\nloaded faq" });
+		expect(getMessageText(toolResult(harness, searchName))).toBe("loaded guide\nloaded faq");
 		expect(calls).toEqual(['search:{"query":"loaded"}']);
 
 		// Loads are recorded in the transcript: navigating back before the load drops the tool,
@@ -671,18 +877,13 @@ return { uris: listed.resources.map((r) => r.uri), text: read.contents[0].text }
 describe("AgentSession MCP servers registered by extensions", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(async () => {
-		while (harnesses.length > 0) {
-			const harness = harnesses.pop()!;
-			await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-			harness.cleanup();
-		}
+	afterEach(() => {
+		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
 	/** `configured` are the mcp.json servers; `plugins` register servers through the extension API. */
 	async function setup(plugins: ExtensionFactory | ExtensionFactory[], configured: McpServerEntry[] = []) {
 		const connected: McpServerEntry[] = [];
-		const closed: string[] = [];
 		const harness = await createHarness({
 			initialActiveToolNames: [],
 			extensionFactories: [
@@ -693,7 +894,6 @@ describe("AgentSession MCP servers registered by extensions", () => {
 					createTransport: (entry) => {
 						connected.push(entry);
 						const pair = createFakeServer([]);
-						pair.client.onClose(() => closed.push(entry.name));
 						void pair.server.start();
 						return pair.client;
 					},
@@ -701,13 +901,14 @@ describe("AgentSession MCP servers registered by extensions", () => {
 			],
 		});
 		harnesses.push(harness);
-		await harness.session.bindExtensions({});
-		return { harness, connected, closed };
+		// `/reload` emits session_start only to bound extensions.
+		await harness.session.bindExtensions({ uiContext: createTestUiContext() });
+		return { harness, connected };
 	}
 
 	it("connects servers registered while extensions load", async () => {
 		const { harness, connected } = await setup((pi) => {
-			pi.registerMcpServer("plugin", { url: "http://plugin.invalid", exposure: "direct", connection: "eager" });
+			pi.registerMcpServer("plugin", { url: "http://plugin.invalid", exposure: "direct" });
 		});
 		harness.setResponses([fauxAssistantMessage("ready")]);
 		await harness.session.prompt("start");
@@ -724,7 +925,7 @@ describe("AgentSession MCP servers registered by extensions", () => {
 		if (!api) throw new Error("No extension API");
 		const pi = api;
 
-		pi.registerMcpServer("late", { url: "http://late.invalid", connection: "eager" });
+		pi.registerMcpServer("late", { url: "http://late.invalid" });
 		await vi.waitFor(() => expect(harness.session.getCallableToolNames()).toContain("mcp__late__search"));
 		expect(connected.map((entry) => entry.name)).toEqual(["late"]);
 		// Codemode-exposed tools need the codemode tool, which is activated for them.
@@ -734,80 +935,48 @@ describe("AgentSession MCP servers registered by extensions", () => {
 		await vi.waitFor(() => expect(harness.session.getCallableToolNames()).not.toContain("mcp__late__search"));
 	});
 
-	it.each(["disable/re-enable", "connection policy change"] as const)(
-		"routes unchanged tool definitions to the replacement connection after %s",
-		async (change) => {
-			let api: ExtensionAPI | undefined;
-			const config = { url: "http://plugin.invalid", exposure: "direct" as const };
-			const { harness, connected, closed } = await setup((pi) => {
-				api = pi;
-				pi.registerMcpServer("plugin", { ...config, connection: "eager" });
-			});
-			if (!api) throw new Error("No extension API");
-			await vi.waitFor(() => expect(harness.session.getActiveToolNames()).toContain("mcp__plugin__search"));
-			const definition = harness.session.getToolDefinition("mcp__plugin__search");
-			const call = async (query: string) => {
-				harness.setResponses([
-					fauxAssistantMessage([fauxToolCall("mcp__plugin__search", { query })], { stopReason: "toolUse" }),
-					fauxAssistantMessage("done"),
-				]);
-				await harness.session.prompt("search");
-				return toolResult(harness, "mcp__plugin__search");
-			};
-			expect((await call("before")).isError).toBe(false);
-			if (change === "disable/re-enable") {
-				api.registerMcpServer("plugin", { ...config, enabled: false });
-				await vi.waitFor(() => expect(closed).toEqual(["plugin"]));
-				expect(harness.session.getCallableToolNames()).not.toContain("mcp__plugin__search");
-			}
-			api.registerMcpServer("plugin", { ...config, connection: "lazy" });
-			await vi.waitFor(() => expect(closed).toEqual(["plugin"]));
-			await vi.waitFor(() =>
-				expect(harness.session.getToolDefinition("mcp__plugin__search")?.exposure).toBe("direct"),
-			);
-			expect(harness.session.getToolDefinition("mcp__plugin__search")).toBe(definition);
-			const result = await call("after");
-			expect(result.isError).toBe(false);
-			expect(result.content[0]).toEqual({ type: "text", text: "after guide\nafter faq" });
-			expect(connected).toHaveLength(2);
-		},
-	);
-
-	it("prefers the mcp.json server over a registered server of the same name", async () => {
+	// "my_docs" shares the namespace of "my-docs" (#10239).
+	it.each(["my-docs", "my_docs"])("prefers the mcp.json server over a registered %s", async (name) => {
 		const configured: McpServerEntry = {
-			name: "docs",
-			config: { url: "http://config.invalid", connection: "eager" },
+			name: "my-docs",
+			config: { url: "http://config.invalid" },
 			source: "mcp.json",
 		};
-		const { harness, connected } = await setup(
+		const { connected } = await setup(
 			(pi) => {
-				pi.registerMcpServer("docs", { url: "http://plugin.invalid" });
+				pi.registerMcpServer(name, { url: "http://plugin.invalid" });
 			},
 			[configured],
 		);
-		harness.setResponses([fauxAssistantMessage("ready")]);
-		await harness.session.prompt("start");
-
+		await vi.waitFor(() => expect(connected).toEqual([configured]));
+		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(connected).toEqual([configured]);
 	});
 
 	it("rejects names another extension registered", async () => {
-		let error: unknown;
+		const errors: string[] = [];
 		await setup([
 			(pi) => {
 				pi.registerMcpServer("taken", { url: "http://x.invalid" });
 				// Registering again replaces the extension's own registration.
 				pi.registerMcpServer("taken", { url: "http://y.invalid" });
+				pi.registerMcpServer("my-server", { url: "http://x.invalid" });
 			},
 			(pi) => {
-				try {
-					pi.registerMcpServer("taken", { url: "http://z.invalid" });
-				} catch (caught) {
-					error = caught;
+				for (const name of ["taken", "my_server"]) {
+					try {
+						pi.registerMcpServer(name, { url: "http://z.invalid" });
+					} catch (caught) {
+						errors.push(String(caught));
+					}
 				}
 			},
 		]);
-		expect(String(error)).toMatch(/MCP server "taken" is already registered by extension/);
+		expect(errors).toEqual([
+			expect.stringMatching(/MCP server "taken" is already registered by extension/),
+			// Names that differ only in - and _ share a namespace (#10239).
+			'Error: MCP server "my_server" conflicts with registered server "my-server"',
+		]);
 	});
 
 	it("reports registered servers when no extension connects them", async () => {
@@ -819,5 +988,132 @@ describe("AgentSession MCP servers registered by extensions", () => {
 		await harness.session.bindExtensions({ onError: (error) => errors.push(error.error) });
 
 		expect(errors).toEqual([expect.stringContaining('MCP server "orphan" is registered, but no loaded extension')]);
+	});
+});
+
+describe("AgentSession MCP tools after resume and reload", () => {
+	const harnesses: Harness[] = [];
+
+	afterEach(() => {
+		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	});
+
+	/**
+	 * A deferred `docs` server that answers `initialize` after `initializeDelayMs`; `connected` counts
+	 * its connections. `/reload` loads the extensions again.
+	 */
+	async function setup(
+		sessionManager?: SessionManager,
+		extensionFactories: ExtensionFactory[] = [],
+		initializeDelayMs = 0,
+	) {
+		const connected: string[] = [];
+		const servers: McpServerEntry[] = [
+			{ name: "docs", config: { url: "http://unused.invalid", exposure: "deferred" }, source: "test" },
+		];
+		const factories = [
+			...extensionFactories,
+			createToolSearchExtension(),
+			createMcpExtension({
+				loadConfig: () => ({ servers, errors: [] }),
+				createTransport: (entry) => {
+					connected.push(entry.name);
+					const pair = createFakeServer([], { initializeDelayMs });
+					void pair.server.start();
+					return pair.client;
+				},
+			}),
+		];
+		let extensions = await createTestExtensionsResult(factories);
+		const resourceLoader = {
+			...createTestResourceLoader(),
+			getExtensions: () => extensions,
+			reload: async () => {
+				extensions = await createTestExtensionsResult(factories);
+			},
+		};
+		const harness = await createHarness({ resourceLoader, sessionManager });
+		harnesses.push(harness);
+		// `/reload` emits session_start only to bound extensions.
+		await harness.session.bindExtensions({ uiContext: createTestUiContext() });
+		return { harness, connected };
+	}
+
+	async function loadDocsSearch(harness: Harness) {
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("tool_search", { query: "search the docs", limit: 1 })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("loaded"),
+		]);
+		await harness.session.prompt("load");
+		expect(harness.session.getActiveToolNames()).toContain("mcp__docs__search");
+	}
+
+	it("declares tools tool_search loaded again on resume once their server connects", async () => {
+		const first = await setup();
+		await loadDocsSearch(first.harness);
+
+		// The session restores its tools before the server connects again.
+		const second = await setup(first.harness.sessionManager);
+		await vi.waitFor(() => expect(second.harness.session.getActiveToolNames()).toContain("mcp__docs__search"));
+		second.harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("mcp__docs__search", { query: "again" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		await second.harness.session.prompt("use it");
+
+		expect(getMessageText(toolResult(second.harness, "mcp__docs__search"))).toBe("again guide\nagain faq");
+		const removals = second.harness.session.messages.filter(
+			(message) => message.role === "system" && (message.toolsRemoved ?? []).length > 0,
+		);
+		expect(removals).toEqual([]);
+	});
+
+	it.each([
+		["drops", ["read"], false],
+		["keeps", undefined, true],
+	] as const)(
+		"%s restored tools when an extension sets the loadout before they register",
+		async (_, loadout, kept) => {
+			const first = await setup();
+			await loadDocsSearch(first.harness);
+
+			// Like plan mode restoring its tools, or an extension adding one to the current loadout.
+			const setLoadout: ExtensionFactory = (pi) => {
+				pi.on("session_start", () => pi.setActiveTools(loadout ? [...loadout] : [...pi.getActiveTools(), "read"]));
+			};
+			const second = await setup(first.harness.sessionManager, [setLoadout]);
+			await vi.waitFor(() =>
+				expect(second.harness.session.getAllTools().some((tool) => tool.name === "mcp__docs__search")).toBe(true),
+			);
+
+			expect(second.harness.session.getActiveToolNames().includes("mcp__docs__search")).toBe(kept);
+		},
+	);
+
+	it("does not activate restored tools that register after the next prompt starts", async () => {
+		const first = await setup();
+		await loadDocsSearch(first.harness);
+
+		// The first prompt does not wait for servers without direct tools.
+		const second = await setup(first.harness.sessionManager, [], 200);
+		second.harness.setResponses([fauxAssistantMessage("done")]);
+		await second.harness.session.prompt("go");
+		await vi.waitFor(() =>
+			expect(second.harness.session.getAllTools().some((tool) => tool.name === "mcp__docs__search")).toBe(true),
+		);
+
+		expect(second.harness.session.getActiveToolNames()).not.toContain("mcp__docs__search");
+	});
+
+	it("declares tools tool_search loaded again after /reload", async () => {
+		const { harness, connected } = await setup();
+		await loadDocsSearch(harness);
+
+		await harness.session.reload();
+
+		await vi.waitFor(() => expect(connected).toEqual(["docs", "docs"]));
+		await vi.waitFor(() => expect(harness.session.getActiveToolNames()).toContain("mcp__docs__search"));
 	});
 });

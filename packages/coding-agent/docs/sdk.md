@@ -39,24 +39,6 @@ Sessions are persistent by default. `SessionManager` owns the persisted or in-me
 
 `SessionManager` is authoritative for finalized model context. Restore external history by constructing the session with a manager containing those entries. Assigning `session.agent.state.messages` does not replace persisted context.
 
-File-backed history keeps a derived byte-offset index and enumerable lazy payload fields. `getEntry()`, `getEntries()`, `getBranch()`, and `getTree()` preserve complete entry values without loading unrelated historical bodies. Reading or serializing a payload requests that value; a full individual value and active model context still require sufficient consumer memory.
-
-Use `getEntryMetadata(id)` for one entry's readonly structural, configuration, usage, and bounded-preview facts. `iterateEntryMetadata()` returns those facts in physical journal order; `{ branchFrom: id }` returns root-to-entry ancestry, and `{ branchFrom: null }` returns no entries. Neither method reads custom `data`, message bodies, or compaction details. Both are available through `ReadonlySessionManager` and extension contexts. JSONL remains authoritative; the index rebuilds when the source changes and refuses changed prior records rather than returning stale bodies.
-
-Use `{ reverse: true, limit: n }` for bounded newest-first visits, or stop the iterator at a qualifying entry without an arbitrary limit. `getBranchState()` supplies the current context/model/thinking entry IDs without full branch enumeration. See [query costs and cold-rebuild boundaries](extensions.md#keep-hot-paths-bounded).
-
-`buildSessionProjection()` and `buildSessionContext()` retain at most 16 MiB of pristine serialized active bodies. Each call resolves the current leaf, compactions, and context edits and returns independent model-message values. Raw `sourceEntry` references remain the manager's lazy entries. In-memory entries remain caller-owned and are not cached. Source changes and native appends trigger selected-record digest revalidation before reuse; borrowed parent journals are revalidated on every projection. This is not an immutable-prefix or durability certificate. Active context still requires consumer memory, and each projection still traverses and copies that context.
-
-`manager.forkBranch(leafId)` returns an independent `SessionManager` containing that selected branch without replacing the source manager or moving its leaf. Open the parent once to create several siblings:
-
-```typescript
-const parent = SessionManager.open(parentFile);
-const children = Array.from({ length: 4 }, () => parent.forkBranch(leafId));
-const childFiles = children.map((child) => child.getSessionFile());
-```
-
-The source is flushed before copying. Each persistent child retains exclusive publication, file fsync, selected-record digest verification, entry IDs, context edits, compaction boundaries, and resolved labels. The writer derives the child index from the bytes written, then verifies all published record digests and LF separators in bounded chunks before trusting its metadata, including the header and settings. Unchanged output is not reparsed; a verification mismatch rebuilds the index from the published file. Each child still copies its selected bytes; source changes may require a rescan. Setup-only sessions retain deferred file creation. In-memory parents produce detached in-memory children. `createBranchedSession(leafId)` retains its existing behavior of replacing the calling manager with the new branch.
-
 Use an in-memory manager when the host does not want session files:
 
 ```typescript
@@ -77,6 +59,22 @@ See the checked [sessions example](../examples/sdk/11-sessions.ts) for creating,
 
 After a runtime replacement, subscriptions belong to the old `AgentSession` and must be rebound. See the [session runtime example](../examples/sdk/13-session-runtime.ts).
 
+<a id="background-commands"></a>
+
+### Background commands
+
+The CLI loads `builtin:background-command`. SDK hosts opt in by adding `createBackgroundCommandExtension()` to `DefaultResourceLoader.extensionFactories`, then calling `session.bindExtensions({})` to initialize resume monitoring. The tool registers active by default; explicit allowlists and saved tool selections are preserved.
+
+`background_command` accepts `action: "start" | "status" | "cancel"`. Start requires `command`; optional `cwd` resolves from the session working directory (including `~`), and `timeout` is seconds with no default. Cancel requires a job `id`. Status with an `id` returns a readable output tail capped at 16KB/100 lines. Without an `id`, it lists at most 20 jobs newest first, with `offset`, `nextOffset`, and optional `activeOnly` filtering. Negative offsets and invalid timeouts are rejected.
+
+Detached workers use the effective `shellPath`, `shellCommandPrefix`, shell environment, and current `PI_*` session metadata. Each writes its job record, atomic state, and unchanged raw log beneath `<sessionDir>/background-commands/<sessionId>/<jobId>/`. Paths are absolute. Jobs survive Pi exit and session disposal; resume discovers existing work without restarting it. Missing or inaccessible workers report an unknown outcome. Corrupt records do not hide healthy jobs. In-memory sessions retain job files but have no conversation to resume automatically.
+
+Completion messages enter after the entire foreground tool batch, during idle, or after resume. They include job ID, status, exit code when available, command preview, and `logFile`. Success omits output; other outcomes include up to 2KB/20 lines. Read `logFile` for the full output. Persisted notices and terminal status results acknowledge jobs across reload/resume; one process at a time owns delivery for a shared session. After a crashed delivery owner, its filesystem lease expires (normally about 10 seconds) before another process takes over.
+
+Cancelling the agent leaves jobs running and records completions without waking the model; new user input clears wake suppression. Cancelling the job stops its shell process tree. `waitForIdle()` does not wait for external jobs. Print/JSON invocations may exit before completion; use `bash` when the same invocation must consume the result. Session shutdown releases the completion monitor; a disposed SDK context is cleaned up on its next idle tick without stopping detached jobs.
+
+This tool supports native local execution only, not custom `BashOperations` backends or Bash cwd hooks. It honors `pi-change-working-dir` through the synchronous `pi-change-working-dir:resolve-execution-cwd` event: the owner's valid absolute cwd becomes the base for relative `cwd` parameters. The base is captured before worker admission; later directory changes affect only later calls. Owner errors and invalid replies reject the start instead of falling back to the session cwd. An identifiable `pi-change-working-dir` tool or `/cwd` command that does not answer also rejects the start with an update-and-restart instruction. With no identifiable owner and no reply, the session cwd is used. Overriding or excluding `bash` alone does not intercept this separate tool. Permission guards must also handle `background_command` with `action: "start"`. The shipped sandbox and SSH examples block background starts while their restrictions are active; status and cancellation remain available. The plan-mode example hides the entire tool, including status and cancellation, until plan mode is disabled.
+
 ## Prompting
 
 `prompt()` handles extension commands and expands file-based prompt templates before ordinary user messages enter the agent. For an accepted agent run, it resolves after the run finishes, including automatic retries.
@@ -85,56 +83,7 @@ A prompt sent while the session is already streaming must specify whether it sho
 
 A steering message enters after the current assistant turn and its tool calls. A follow-up enters after the current run finishes its pending work. `steer()` and `followUp()` expose those behaviors directly and return `"queued"` if the input was queued (including after an extension transformed it), or `"handled"` if an extension consumed it.
 
-After extension commands and input interception, an idle session reserves the prompt before authentication, compaction, and `before_agent_start`. During preparation, `isStreaming` is true and `isIdle` is false; overlapping prompts obey the same queue/rejection rules. `PromptOptions.preflightResult` reports acceptance, queueing, handling, or rejection before `prompt()` resolves. Later provider failures use normal message events.
-
-`abort()` signals admitted preparation and joins awaited work. A cancelled preflight rejects with `AbortError` without starting a model run. Failed preflight releases its reservation without emitting `agent_settled`; unconsumed queues and next-turn asides remain. Pre-admission `input` handlers are outside run cancellation.
-
-`waitForIdle()` joins preparation, the full run, automatic continuations, and awaited settlement handlers. A deferred action can join child runs without waiting for its own enclosing drain; other callers still wait for later actions. A started run emits `agent_settled` once. During shutdown, waiting can finish while new-run admission remains closed.
-
-### Pending input
-
-| Session state | Counts |
-|---|---|
-| `hasPendingMessages` | Queued user/custom steering and follow-ups |
-| `pendingMessageCount` | Pending user texts for display |
-| `pendingNextTurnCount` | Unpersisted next-turn asides, excluded from the first two |
-| `pendingInputCount` | Submitted input still in preflight or held by the bound mode; excludes dispatched extension commands |
-
-SDK hosts can supply `getQueuedInputCount` through `bindExtensions()` for their own input queue. These observations do not consume input or change idle semantics.
-
-`sendCustomMessage()` delivers custom model-visible content through the ordinary queue. `clearQueue()` returns queued user texts; do not treat a queued message as applied until its turn runs.
-
-### Background commands
-
-The built-in `background_command` tool starts long shell commands without blocking a tool batch. For example, `{ action: "start", command: "gh pr checks --watch --fail-fast" }` returns a job ID and `logFile`. Automatic completion includes the job ID, status, exit code when available, command preview, and `logFile`. Successful jobs omit output; failed, timed-out, cancelled, or unknown outcomes include the error when available and a readable tail bounded to 2KB/20 lines. Raw logs are unchanged. Use `read` for the complete log, or explicit `status` with a job `id` for up to 16KB/100 lines. Without an `id`, `status` lists up to 20 jobs with `offset` and optional `activeOnly`. `cancel` requires an `id` and stops the native shell process tree; a pending cancellation is reported explicitly.
-
-Jobs use the session's effective shell path, command prefix, environment, and native Bash cwd hooks. An optional `cwd` resolves relative to that selected directory. Each detached worker writes its job record, atomic state, and raw output beneath `<sessionDir>/background-commands/<sessionId>/<jobId>/`. Workers survive session disposal and Pi exit. Resume discovers existing work without replaying commands; a vanished or inaccessible worker reports an unknown outcome. Unreadable job records appear as bounded diagnostics without suppressing healthy jobs. In-memory sessions also retain job files, but have no saved conversation to resume automatically. Without a session directory, jobs use `PI_CODING_AGENT_SESSION_DIR`, the `sessionDir` setting, or `<agentDir>/sessions/` (in that order), still partitioned by the actual session ID. `--no-session --session-dir <path>` and `SessionManager.inMemory(cwd, { sessionDir })` select artifact storage without saving a conversation. Job and log paths are absolute, including with relative SDK session directories.
-
-`AgentSession` owns notifications without requiring `bindExtensions()`. Completed jobs enter after the foreground tool batch or during idle, giving queued input and user Bash priority. Terminal status results and completion entries acknowledge jobs across reload/resume. Cancelling the agent leaves commands running and preserves their results without waking the model; a new admitted run clears that suppression. `background_command cancel` instead cancels the command itself.
-
-`waitForIdle()` does not wait for external jobs. Print/JSON invocations can exit before completion; use synchronous `bash` when that invocation must consume the result. Checkpoint holds pause native notification writes, and checkpoint restore waits for explicit input. The host still owns external process quiescence.
-
-Standalone `createBackgroundCommandTool(cwd, { sessionManager, ...shellOptions })` requires an explicit owner (or native execution context). `createCodingTools` and `createAllTools` accept that owner under `background_command`; automatic notifications belong to `AgentSession`. Hosts that collect startup input asynchronously can set `deferBackgroundCommandNotifications: true`, then bind their `getQueuedInputCount` before admitting prompts. Native CLI modes do this themselves.
-
-Background workers use the running Pi code, independently of the `PI_PACKAGE_DIR` asset override. They support native local shell execution, not custom `BashOperations` backends. Shell permission guards and Bash overrides must also handle `background_command` with `action: "start"`; overriding or excluding `bash` alone does not intercept or disable this separate tool. The shipped sandbox and SSH examples block background starts while their custom backend is active; status and cancellation remain available.
-
-New CLI sessions include this tool by default. Existing saved selections and explicit allowlists are preserved. SDK hosts can enable it with `session.setActiveToolsByName([...session.getActiveToolNames(), "background_command"])` when the permitted registry includes it.
-
-### Working-session checkpoints
-
-`acquireCheckpointFile(absolutePath, { boundary, signal?, quiesce? })` holds native activity after awaited persistence and callbacks, writes a complete self-contained v1 file record-wise, and returns its path in `hold.checkpoint.path`. Release in `finally`; check the hold's abort signal throughout archive/upload work. Published bytes remain independent of release and later session changes. Failure retains the previous artifact and releases the hold.
-
-`createAgentSession({ checkpointFile: path })` stream-validates the complete file and restores saved selection, tool restrictions, and pending queues without running them. It refuses differing existing journals unchanged and exclusively publishes a missing journal only after validation. `checkpointFile` and `checkpoint` are mutually exclusive.
-
-The explicit `acquireCheckpoint()` and `readSessionCheckpoint(path)` object APIs detach/assemble values per entry and require heap for the full requested object. A single full entry or queued value still must fit its consumer. Bind extensions before prompting so startup can reconstruct dynamic tools and validate the saved selection. If the checkpoint has no selected model, restore preserves that unselected state; model prompts still require a selection.
-
-The hold's `sleepReady` and `sleepBlockers` describe the native session only. The archive owner still coordinates other writers and preserves the matching files. See [Working-session checkpoints](checkpoint.md).
-
-### User Bash
-
-`executeBash(command, onChunk?, options?)` owns interception, selected local/custom operations, and result recording for interactive `!`/`!!`, RPC `bash`, and SDK callers. A replacement result is recorded once and sent to `onChunk`; normal execution also emits `bash_execution_update`.
-
-`isBashRunning` stays true through asynchronous interception and every concurrent call's completion. `abortBash()` signals all calls; cancellation during interception prevents later shell execution but still waits for that handler. User Bash remains separate from agent idle.
+`abort()` stops the active operation and waits for the session to become idle. `waitForIdle()` waits without aborting it.
 
 ## Subscribing to events
 
@@ -158,7 +107,7 @@ Session events report message updates, tool execution, queues, compaction, retri
 
 `message_end` contains the authoritative completed message. `agent_end` marks the end of one low-level agent run, but automatic recovery or queued work can still follow.
 
-Use `agent_settled` when the host needs to know the local run will not continue automatically. Durable background commands may finish separately; their receipts arrive through ordinary messages.
+Use `agent_settled` when the host needs to know that Pi will not continue automatically.
 
 ## Configuring a session
 
@@ -180,49 +129,15 @@ Inline extension factories can be supplied through `DefaultResourceLoader`. Give
 
 <a id="codemode-mcp"></a>
 
-The CLI loads codemode, tool search, and MCP as built-in extensions. SDK sessions opt in: add `createCodemodeExtension()`, `createToolSearchExtension()`, and `createMcpExtension()` to `DefaultResourceLoader.extensionFactories`, then call `session.bindExtensions({})` to initialize them. Codemode and tool search register inactive; enable them with `defaultTools: ["+codemode", "+tool_search"]`, or let MCP activate codemode for codemode exposures and tool search for deferred or cold lazy direct servers. See [Codemode and MCP](../examples/sdk/14-codemode-mcp.ts).
+The CLI loads `codemode`, `tool_search`, and MCP as built-in extensions. SDK sessions do not; add `createCodemodeExtension()`, `createToolSearchExtension()`, and `createMcpExtension()` to the `extensionFactories` of `DefaultResourceLoader`. `codemode` and `tool_search` are registered inactive: enable them through the `defaultTools` setting (`["+codemode", "+tool_search"]` keeps the other default tools), or let the MCP extension activate them: `codemode` for servers with `codemode` exposure, `tool_search` for servers with `deferred` exposure. The MCP extension connects its servers on `session_start`, so call `session.bindExtensions()`. See [Codemode and MCP](../examples/sdk/14-codemode-mcp.ts).
 
-The same native contracts apply in SDK sessions: lazy connections by default, explicit `connection: "eager"`, account-bound catalogs, cache-only global discovery, and scoped live discovery. Codemode can use `searchTools()` followed by `callTool()` in one script; native `mcp_auth` provides runtime-local begin/complete/cancel sign-in, including a full pasted callback URL for remote hosts. Result artifacts contain only the final hook-permitted payload. See [MCP Servers](mcp.md) for inputs and examples. `McpExtensionOptions` supports host overrides such as `loadConfig`, `createTransport`, `openUrl`, and `startupWaitMs`; use the exported type for its exact interface.
-
-This lifecycle belongs to `createMcpExtension()`. A standalone `@earendil-works/pi-mcp` client connects only when its host calls `connect()` and does not read CLI configuration or inherit CLI permission hooks.
-
-For grouped on-demand owner instructions, also add the exported `instructionGroupsExtension` factory. It is separate from tool search and does not widen callable permissions. The CLI includes it by default; see [instruction groups](instruction-groups.md).
+For full on-demand owner instructions, add the exported `instructionGroupsExtension` factory alongside owner extensions and call `session.bindExtensions()`. It registers `discover_tools` active by default, subject to tool selection and exclusions. The CLI loads it as the replaceable `builtin:instruction-groups` extension. Discovery hides declarations until enabled without changing callable permissions; see [Instruction Groups](instruction-groups.md).
 
 See the focused examples for [models](../examples/sdk/02-custom-model.ts), [tools](../examples/sdk/05-tools.ts), [extensions](../examples/sdk/06-extensions.ts), and [full control](../examples/sdk/12-full-control.ts).
 
-### Model availability
-
-Use `modelRuntime.getModel(provider, id)` to include configured overrides. `getAvailable()` returns healthy providers; a failed provider check does not silently replace an existing saved/default or explicitly scoped model. `getAuthCheckError(providerId)` and `getError()` expose diagnostics without inventing auth or subscription metadata. Direct provider availability/auth calls still reject on failure. A successful refresh clears its diagnostic. Cancellation and credential-store failures reject aggregate refresh without replacing the previous snapshot.
-
-Legacy fork sessions containing retired live-execution fields require one-time conversion with `pi convert-session SOURCE NEW_PATH` while all writers are stopped. The original remains unchanged, unsafe or uncertain work is refused without replay, and resuming the new copy starts a fresh provider request.
-
-For factory-registered providers needed before selection, create services with `createAgentSessionServices()` before `createAgentSessionFromServices()`. See [ambient authentication](custom-provider.md#ambient-authentication). RPC can inspect a pre-login session and run non-model extension commands; model prompts still require selection, and print/JSON require one at startup.
-
-### Context usage
-
-`getContextUsage()` is synchronous. It preserves matching measured usage, including opaque reasoning, and estimates changes to prompt/tools and trailing input relative to that total. It does not count earlier output again. Model/provider/API changes, edits, and context boundaries invalidate inapplicable measurements; ending a request-only forced prompt preserves idle usage.
-
-Provider reports describe the actual sent payload, so request-local `context` and `context_with_system` rewrites, omissions, truncation, and reordering retain that baseline while the same canonical entry anchor remains active. Content added to the assistant response by `message_end` handlers contributes a positive estimated delta; removal keeps the provider baseline.
-
-`source` is `reported` (provider baseline plus possible estimated deltas), `estimated` (heuristic-only), or `unknown` (tokens/percent null after compaction without a qualifying response). Estimates include opaque signatures and schemas. Session-local provider/API/model calibration uses input only: `4 × request estimate / (input + cacheRead + cacheWrite)`, clamped to [1, 4], default 4; zero input totals are skipped and output tokens are excluded. On resume, without a captured sent-request receipt, usage takes the larger of matching report-plus-tail and physical estimate.
-
-The cache uses shallow message/tool identity, not nested content comparisons. Treat those objects as immutable: replace an edited object or array; call `refreshContext()` after canonical journal changes. Unsignalled nested edits remain invisible until another tracked input changes. Streaming-only events do not invalidate usage; streaming state is counted at `message_end`. Request-owned messages isolate canonical history even for in-memory or unflushed persisted content. See the [complete cache, source, and calibration contract](extensions.md#context-usage-and-immutability). Extensions should use `ctx.getCompactionSettings()` for current effective per-model thresholds rather than rereading files.
-
-### Settings and reload
-
-`SettingsManager.create(cwd, agentDir?)` loads file-backed settings. `applyOverrides()` changes effective values only. Unrelated setters retain temporary overrides; explicit setters replace their own fields, subject to project precedence. Reload/trust changes discard overrides; initial `inMemory()` values survive reload.
-
-`DefaultResourceLoader.reload()` reloads settings too. Load resources before applying temporary overrides and pass that loader into `createAgentSession()` to avoid its implicit reload. `flush()` joins queued writes; `flush({ requireSuccessfulPersistence: true })` also rejects unresolved dirty fields/load failures, even after diagnostics are drained.
-
-`session.reload()` refreshes extension code, resource paths, and settings. Restart the host for core changes or a clean process; dependency updates already loaded by the host may need a restart.
-
-### Tool identity and discovery
-
-`getActiveToolNames()` returns currently active names; pass names to `setActiveToolsByName()`. `getAllTools()` supplies registered names, descriptions, schemas, exposure, namespace metadata (including optional `instructions`), and source metadata. Selection replaces the loadout, including `[]`, without widening permissions. Permitted missing names wait for lazy registration; hidden tools never activate. Use `session.setActiveToolsByName([...session.getActiveToolNames(), name], { preservePending: true })` when adding a tool while retaining saved selections that have not registered yet. See [tool discovery](extensions.md#tool-discovery) and [instruction groups](instruction-groups.md).
-
 ### JSON selection with read
 
-`read` accepts `json: { path?, fields? }` before paging and truncation:
+`read` accepts `json: { path?, fields? }` to select part of a JSON file before paging and truncation:
 
 ```typescript
 import { createReadTool } from "@earendil-works/pi-coding-agent";
@@ -234,21 +149,15 @@ const result = await read.execute("summary", {
 });
 ```
 
-`path` is a JSON Pointer, defaulting to the root (`""`). Escape `~` as `~0` and `/` as `~1`. `fields` keeps literal immediate keys on an object or each object in an array. Missing keys are omitted; false/zero/null values, array order, and row count remain. Omit fields to select any value; `json: {}` pretty-prints the root.
+- `path` is a JSON Pointer and defaults to the root (`""`). `/rows/0` selects the first array item. In keys, escape `~` as `~0` and `/` as `~1`.
+- `fields` keeps the listed immediate keys of the selected object, or of each object in a selected array. Keys such as `"a.b"` are literal names, not paths. Missing keys are omitted; `null`, `false`, and `0` values are kept. Array order and length stay the same, so a row without any listed key becomes `{}`.
+- Without `fields`, the whole selected value is returned, including arrays and scalars. `json: {}` pretty-prints the whole file.
 
-Invalid JSON/pointers, missing selected paths, image selection, or non-object rows with `fields` fail. `offset` and `limit` count pretty-printed lines; the 2000-line/50KB caps still apply. Continue with the same JSON options and returned offset. Output may be a fragment plus a notice. The whole file is still parsed with normal `JSON.parse` precision and duplicate-key semantics; this is not a query language.
+Invalid JSON, an invalid or missing pointer target, `json` on an image, and `fields` on anything other than an object or an array of objects produce tool errors.
 
-### File and shell operations
+`offset` and `limit` count lines of the pretty-printed selection, and the usual 2000-line and 50KB limits apply. To continue, pass the same `json` options with the returned offset. A paged or truncated result can be a JSON fragment followed by a continuation notice.
 
-Queue a complete read-modify-write operation with `withFileMutationQueue(absolutePath, callback)`. Symlink aliases, dangling final links, and missing parents resolve through the nearest existing ancestor so supported aliases share a queue.
-
-`publishLocalFile(absolutePath, stringOrBytes, signal?)` stages beside the target and replaces it by rename. Its parent must exist; it does not own a queue. The SDK exports the same helper as `@earendil-works/pi-agent-core/node`. Default local `write`, `edit`, and `NodeExecutionEnv` use it. Failures before rename preserve existing bytes; once submitted, the actual rename result wins over cancellation.
-
-Publication follows existing/dangling final symlinks, checks target write access, and preserves ordinary mode and numeric owner/group or fails before replacement. A writable parent is also required. Hardlinks and open handles keep the old file. ACLs, extended attributes, other platform metadata, and power-loss durability are not guaranteed. Custom backends retain their own semantics.
-
-Custom `BashOperations` and `PowerShellOperations` producers must call `onData(data, source)` with unchanged Buffer bytes and `stdout`/`stderr` identity, then `onEnd(source)` once after each pipe's final data, including errors. Stop callbacks before resolving/rejecting `exec`; cancellation alone is not EOF. Each pipe is decoded independently so interleaved output preserves split UTF-8. Cross-pipe ordering is not guaranteed. Wrappers forwarding options unchanged need no adaptation.
-
-`pi.registerBashCwdHook((cwd) => nextCwd)` changes cwd before built-in Bash and background-command preflight and native user Bash operations. Synchronous hooks chain in extension load/registration order and are replaced on reload/session replacement; errors stop execution. This does not change session headers, project resources, other tools, overridden Bash tools, or factory spawn hooks. Detect support by method presence.
+The whole file is still read and parsed with `JSON.parse`, so large numbers can lose precision and the last duplicate key wins. Selection is not a query language: it has no filters or computed values.
 
 ## Examples
 
@@ -273,7 +182,7 @@ Custom `BashOperations` and `PowerShellOperations` producers must call `onData(d
 
 ## Resources
 
-- [Choose a Model](models.md) covers model selection and compatible endpoints; [Provider Authentication](providers.md) covers credentials and cloud-provider setup.
+- [Choose a Model](models.md) covers model selection and compatible endpoints; [Providers](providers.md) covers credentials and provider-specific setup.
 - [Configuration](configuration.md) explains normal discovery and settings; [Settings](settings.md) lists every setting.
 - [Sessions and Context](sessions.md) explains session behavior; [Session Format](session-format.md) defines persisted entries; [Message Types](message-types.md) defines shared transcript values.
 - [Extensions](extensions.md), [Skills](skills.md), and [Prompt Templates](prompt-templates.md) document resources supplied through a `ResourceLoader`.

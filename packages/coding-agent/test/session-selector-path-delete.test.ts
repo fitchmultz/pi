@@ -1,12 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import { type SessionInfo, SessionManager } from "../src/core/session-manager.ts";
+import type { SessionInfo } from "../src/core/session-manager.ts";
 import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
-import { filterAndSortSessions } from "../src/modes/interactive/components/session-selector-search.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 type Deferred<T> = {
@@ -106,80 +105,6 @@ describe("session selector path/delete interactions", () => {
 		// session selector uses the global theme instance
 		initTheme("dark");
 	});
-	it("shows a full-text search failure and lets the user clear the query", async () => {
-		const session = makeSession({ id: "oversized", firstMessage: "preview" });
-		Object.defineProperty(session, "allMessagesText", {
-			get: () => {
-				throw new RangeError("Invalid string length");
-			},
-		});
-		const selector = new SessionSelectorComponent(
-			async () => [session],
-			async () => [],
-			() => {},
-			() => {},
-			() => {},
-			() => {},
-			{ keybindings },
-		);
-		await flushPromises();
-		expect(selector.getSessionList().getSelectedSessionPath()).toBe(session.path);
-		expect(() => selector.handleInput("re:needle")).not.toThrow();
-		expect(stripAnsi(selector.render(160).join("\n"))).toContain(
-			"Cannot search full session text: Invalid string length",
-		);
-		selector.handleInput("\x15");
-		expect(selector.getSessionList().getSelectedSessionPath()).toBe(session.path);
-	});
-
-	it.each(["missing", "replaced"])("keeps healthy picker matches when one source is %s", async (kind) => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-picker-source-"));
-		tempDirs.push(directory);
-		const healthy = SessionManager.create(directory, directory);
-		healthy.appendMessage({ role: "user", content: "healthy alpha", timestamp: 2 });
-		healthy.appendMessage({ role: "user", content: "beta", timestamp: 2 });
-		const unavailable = SessionManager.create(directory, directory);
-		unavailable.appendMessage({ role: "user", content: "unavailable alpha", timestamp: 1 });
-		unavailable.appendMessage({ role: "user", content: "beta", timestamp: 1 });
-		const sessions = await SessionManager.list(directory, directory);
-		const selector = new SessionSelectorComponent(
-			async () => sessions,
-			async () => [],
-			() => {},
-			() => {},
-			() => {},
-			() => {},
-			{ keybindings },
-		);
-		await flushPromises();
-		const source = unavailable.getSessionFile()!;
-		const before = readFileSync(source);
-		const archive = join(directory, "archived.jsonl");
-		renameSync(source, archive);
-		if (kind === "replaced") writeFileSync(source, '{"type":"session","id":"replacement"}\n');
-		const failure = kind === "missing" ? /ENOENT/ : /Journal source generation changed/;
-		expect(() => filterAndSortSessions(sessions, '"alpha beta"', "recent")).toThrow(failure);
-		for (const query of ["alphabeta", '"alpha beta"', "re:alpha\\s+beta"]) {
-			selector.handleInput("\x15");
-			selector.handleInput(query);
-			for (const mode of ["recent", "relevance"] as const) {
-				selector.getSessionList().setSortMode(mode);
-				expect(selector.getSessionList().getSelectedSessionPath()).toBe(healthy.getSessionFile());
-				const output = stripAnsi(selector.render(200).join("\n"));
-				expect(output).toContain("healthy alpha");
-				expect(output).toContain("Cannot search full session text:");
-				expect(output).toMatch(failure);
-				expect(output).not.toContain("unavailable alpha");
-			}
-		}
-		if (kind === "replaced") rmSync(source);
-		renameSync(archive, source);
-		selector.handleInput("\x15");
-		selector.handleInput('"alpha beta"');
-		expect(stripAnsi(selector.render(200).join("\n"))).toContain("unavailable alpha");
-		expect(readFileSync(source)).toEqual(before);
-	});
-
 	it("does not treat Ctrl+Backspace as delete when search query is non-empty", async () => {
 		const sessions = [makeSession({ id: "a" }), makeSession({ id: "b" })];
 

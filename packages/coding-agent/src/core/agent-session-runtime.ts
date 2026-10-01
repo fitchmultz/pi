@@ -1,10 +1,8 @@
 import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, parse, resolve } from "node:path";
-import { raceWithAbortSignal } from "../utils/abort.ts";
-import { canonicalizePath, resolvePath } from "../utils/paths.ts";
+import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
-import type { ShutdownCheckpoint, ShutdownCheckpointFile } from "./checkpoint.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -52,14 +50,6 @@ export class SessionImportFileNotFoundError extends Error {
 		super(`File not found: ${filePath}`);
 		this.name = "SessionImportFileNotFoundError";
 		this.filePath = filePath;
-	}
-}
-
-/** The outgoing session could not be saved and remains active for recovery. */
-export class SessionReplacementPersistenceError extends Error {
-	constructor(cause: unknown) {
-		super(cause instanceof Error ? cause.message : String(cause), { cause });
-		this.name = "SessionReplacementPersistenceError";
 	}
 }
 
@@ -178,42 +168,13 @@ export class AgentSessionRuntime {
 		// Settle any active response first so the aborted turn (including tool
 		// results) is persisted to the outgoing session before it is replaced.
 		await this.session.abort();
-		// Reject pending save failures before shutdown handlers tear down the live session.
-		try {
-			this.session.sessionManager.flush();
-		} catch (error) {
-			throw new SessionReplacementPersistenceError(error);
-		}
-		this.session.beginShutdown();
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",
 			reason,
 			targetSessionFile,
 		});
-		// Handlers may append state. Failures here cannot promise an intact live session.
-		this.session.sessionManager.flush();
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
-	}
-
-	private reloadIfCurrentSession(
-		sessionManager: SessionManager,
-		previousSessionFile?: string,
-		cwdOverride?: string,
-	): SessionManager {
-		const targetSessionFile = sessionManager.getSessionFile();
-		if (
-			previousSessionFile &&
-			targetSessionFile &&
-			canonicalizePath(previousSessionFile) === canonicalizePath(targetSessionFile)
-		) {
-			return SessionManager.open(
-				targetSessionFile,
-				sessionManager.getSessionDir(),
-				cwdOverride ?? (existsSync(targetSessionFile) ? undefined : this.cwd),
-			);
-		}
-		return sessionManager;
 	}
 
 	private apply(result: CreateAgentSessionRuntimeResult): void {
@@ -246,10 +207,9 @@ export class AgentSessionRuntime {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		let sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
+		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
-		sessionManager = this.reloadIfCurrentSession(sessionManager, previousSessionFile, options?.cwdOverride);
 		this.apply(
 			await this.createRuntime({
 				cwd: sessionManager.getCwd(),
@@ -352,7 +312,7 @@ export class AgentSessionRuntime {
 			if (!existsSync(currentSessionFile)) {
 				throw new Error("This session has not been saved yet. Send a message before cloning or forking it.");
 			}
-			const sessionManager = SessionManager.open(currentSessionFile, sessionDir, this.cwd);
+			const sessionManager = SessionManager.open(currentSessionFile, sessionDir);
 			const forkedSessionPath = sessionManager.createBranchedSession(targetLeafId);
 			if (!forkedSessionPath) {
 				throw new Error("Failed to create forked session");
@@ -407,13 +367,8 @@ export class AgentSessionRuntime {
 			mkdirSync(sessionDir, { recursive: true });
 		}
 
-		const currentSessionFile = this.session.sessionFile;
-		const currentSourcePath =
-			currentSessionFile && canonicalizePath(resolvedPath) === canonicalizePath(currentSessionFile)
-				? currentSessionFile
-				: undefined;
-		let destinationPath = currentSourcePath ?? join(sessionDir, basename(resolvedPath));
-		const sourceAlreadyStored = currentSourcePath !== undefined || resolve(destinationPath) === resolvedPath;
+		let destinationPath = join(sessionDir, basename(resolvedPath));
+		const sourceAlreadyStored = resolve(destinationPath) === resolvedPath;
 		if (!sourceAlreadyStored) {
 			const { name, ext } = parse(destinationPath);
 			let suffix = 1;
@@ -431,10 +386,9 @@ export class AgentSessionRuntime {
 			copyFileSync(resolvedPath, destinationPath, constants.COPYFILE_EXCL);
 		}
 
-		let sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
+		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
-		sessionManager = this.reloadIfCurrentSession(sessionManager, previousSessionFile, cwdOverride);
 		this.apply(
 			await this.createRuntime({
 				cwd: sessionManager.getCwd(),
@@ -448,87 +402,12 @@ export class AgentSessionRuntime {
 	}
 
 	async dispose(): Promise<void> {
-		this.session.beginShutdown();
-		await emitSessionShutdownEvent(this.session.extensionRunner, { type: "session_shutdown", reason: "quit" });
+		await emitSessionShutdownEvent(this.session.extensionRunner, {
+			type: "session_shutdown",
+			reason: "quit",
+		});
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
-	}
-
-	/** Opt-in final capture: preserve default disposal semantics for all existing callers. */
-	async disposeWithCheckpoint(options: {
-		signal: AbortSignal;
-		waitForHost: () => Promise<void>;
-	}): Promise<ShutdownCheckpoint> {
-		return this._disposeWithCheckpoint(options, () => this.session.captureShutdownCheckpoint());
-	}
-
-	async disposeWithCheckpointFile(
-		path: string,
-		options: {
-			signal: AbortSignal;
-			waitForHost: () => Promise<void>;
-			/** Managed CLI only: the original same-provider --api-key is retained in restart argv. */
-			retainedRuntimeProvider?: string;
-		},
-	): Promise<ShutdownCheckpointFile> {
-		return this._disposeWithCheckpoint(options, () =>
-			this.session.captureShutdownCheckpointFile(path, options.signal, options.retainedRuntimeProvider),
-		);
-	}
-
-	private async _disposeWithCheckpoint<T extends ShutdownCheckpoint | ShutdownCheckpointFile>(
-		options: {
-			signal: AbortSignal;
-			waitForHost: () => Promise<void>;
-		},
-		capture: () => Promise<T>,
-	): Promise<T> {
-		this.session.beginShutdown();
-		const errors: string[] = [];
-		const unsubscribe = this.session.extensionRunner.onError((error) =>
-			errors.push(`${error.extensionPath}: ${error.error}`),
-		);
-		let checkpoint: T | undefined;
-		let disposed = false;
-		try {
-			const result = await raceWithAbortSignal(
-				(async () => {
-					await emitSessionShutdownEvent(this.session.extensionRunner, {
-						type: "session_shutdown",
-						reason: "quit",
-					});
-					options.signal.throwIfAborted();
-					await this.session.finishShutdownForCheckpoint();
-					options.signal.throwIfAborted();
-					this.beforeSessionInvalidate?.();
-					await options.waitForHost();
-					options.signal.throwIfAborted();
-					// UI teardown can initiate native cleanup (for example pi.exec from a component disposer).
-					await this.session.finishShutdownForCheckpoint();
-					options.signal.throwIfAborted();
-					const candidate = await capture();
-					checkpoint = candidate;
-					try {
-						options.signal.throwIfAborted();
-						if (errors.length) throw new Error(`Extension shutdown persistence failed: ${errors.join("; ")}`);
-						return candidate;
-					} catch (error) {
-						candidate.release();
-						throw error;
-					}
-				})(),
-				options.signal,
-			);
-			disposed = true;
-			this.session.dispose();
-			return result;
-		} catch (error) {
-			checkpoint?.release();
-			throw error;
-		} finally {
-			unsubscribe();
-			if (!disposed) this.session.dispose();
-		}
 	}
 }
 

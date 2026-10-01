@@ -151,7 +151,7 @@ describe("createAgentSession stream options", () => {
 		const model: Model<Api> = {
 			...createModel("anthropic-messages"),
 			cost: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
-			promptCache: { short: 300, long: 300 },
+			promptCache: { short: 300 },
 		};
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "test-api-key" }));
@@ -164,7 +164,7 @@ describe("createAgentSession stream options", () => {
 				return createDoneStream(model.api, 100_000);
 			},
 		});
-		const sessionManager = SessionManager.create(cwd, join(tempDir, "sessions"));
+		const sessionManager = SessionManager.inMemory(cwd);
 		populate?.(sessionManager, model);
 		const { session } = await createAgentSession({
 			cwd,
@@ -196,36 +196,6 @@ describe("createAgentSession stream options", () => {
 			expect(fixture.session.cacheWarmingStatus?.nextWarmAt).toBeGreaterThan(Date.now());
 			fixture.session.agent.state.messages = fixture.session.agent.state.messages.slice(1);
 			expect(fixture.session.cacheWarmingStatus?.reason).toBe("conversation context changed");
-		} finally {
-			fixture.dispose();
-		}
-	});
-
-	it("stops cache warming while a native checkpoint is held", async () => {
-		const fixture = await createCacheWarmingSession();
-		try {
-			await fixture.session.prompt("test");
-			expect(fixture.session.cacheWarmingStatus?.state).toBe("scheduled");
-			const hold = await fixture.session.acquireCheckpoint({ quiesce: () => () => {} });
-			try {
-				expect(fixture.session.cacheWarmingStatus?.state).toBe("inactive");
-				expect(() => fixture.session.setCacheWarmingMode("off")).toThrow("held");
-				expect(hold.signal.aborted).toBe(true);
-			} finally {
-				hold.release();
-			}
-		} finally {
-			fixture.dispose();
-		}
-	});
-
-	it("stops cache warming before shutdown cleanup", async () => {
-		const fixture = await createCacheWarmingSession();
-		try {
-			await fixture.session.prompt("test");
-			expect(fixture.session.cacheWarmingStatus?.state).toBe("scheduled");
-			fixture.session.beginShutdown();
-			expect(fixture.session.cacheWarmingStatus?.state).toBe("inactive");
 		} finally {
 			fixture.dispose();
 		}

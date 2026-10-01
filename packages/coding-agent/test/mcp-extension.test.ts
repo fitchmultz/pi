@@ -1,30 +1,28 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type JsonRpcMessage,
-	type JsonRpcRequest,
 	LATEST_PROTOCOL_VERSION,
-	McpAbortError,
 	McpAuthRequiredError,
 	McpHttpError,
 	McpSessionExpiredError,
-	McpTimeoutError,
-	type ServerCapabilities,
-	StreamableHttpTransport,
 } from "@earendil-works/pi-mcp";
 import { createInMemoryTransportPair, type InMemoryTransport } from "@earendil-works/pi-mcp/testing";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryAuthStorageBackend } from "../src/core/auth-storage.ts";
 import { truncateMiddle } from "../src/core/tools/truncate.ts";
 import { getMcpToolExposure, loadMcpConfig, type McpServerEntry } from "../src/extensions/mcp/config.ts";
+import { MAX_SERVERS_SECTION_CHARS, renderServersSection } from "../src/extensions/mcp/index.ts";
 import {
 	createDefaultTransport,
 	McpOAuthCredentialStore,
 	McpServerConnection,
 	McpServerLog,
 } from "../src/extensions/mcp/runtime.ts";
-import { convertMcpResult, createMcpToolName, finishMcpResult } from "../src/extensions/mcp/tools.ts";
+import { convertMcpResult, createMcpToolName } from "../src/extensions/mcp/tools.ts";
 
 // Config values are resolved at connect time, so the literal reference must survive loading.
 // biome-ignore lint/suspicious/noTemplateCurlyInString: literal config value reference
@@ -82,15 +80,26 @@ describe("MCP config", () => {
 		expect(untrusted.servers.find((server) => server.name === "shared")?.config).toEqual({ command: "global-cmd" });
 	});
 
+	// Regression: #10239.
+	it("rejects server names that differ only in - and _", () => {
+		const paths = setup({ mcpServers: { "work-files": { command: "a" }, work_files: { command: "b" } } }, {});
+		const { servers, errors } = loadMcpConfig({ ...paths, projectTrusted: false });
+		expect(servers.map((server) => server.name)).toEqual(["work-files"]);
+		expect(errors).toEqual([expect.stringContaining('server "work_files" conflicts with "work-files"')]);
+	});
+
 	it("validates exposure and reads autoEnableCodemode with project precedence", () => {
 		const paths = setup(
 			{
 				autoEnableCodemode: false,
 				mcpServers: {
 					later: { command: "x", exposure: "deferred" },
-					scripts: { command: "x", exposure: "codemode-deferred" },
+					// `codemode-deferred` is an alias for `codemode`.
+					scripts: { command: "x", exposure: "codemode-deferred", toolExposure: { a: "codemode-deferred" } },
 					off: { command: "x", exposure: "hidden" },
 					wrong: { command: "x", exposure: "model-only" },
+					described: { command: "x", description: "Docs search" },
+					badDescription: { command: "x", description: 1 },
 				},
 			},
 			{ autoEnableCodemode: "yes", mcpServers: {} },
@@ -100,17 +109,23 @@ describe("MCP config", () => {
 		expect(untrusted.autoEnableCodemode).toBe(false);
 		expect(untrusted.servers.map((server) => [server.name, server.config.exposure])).toEqual([
 			["later", "deferred"],
-			["scripts", "codemode-deferred"],
+			["scripts", "codemode"],
 			["off", "hidden"],
+			["described", undefined],
 		]);
-		expect(untrusted.errors).toEqual([expect.stringContaining('server "wrong": exposure must be one of')]);
+		expect(untrusted.servers[1].config.toolExposure).toEqual({ a: "codemode" });
+		expect(untrusted.servers[3].config.description).toBe("Docs search");
+		expect(untrusted.errors).toEqual([
+			expect.stringContaining('server "wrong": exposure must be one of'),
+			expect.stringContaining('server "badDescription": description must be a string'),
+		]);
 
 		const trusted = loadMcpConfig({ ...paths, projectTrusted: true });
 		expect(trusted.autoEnableCodemode).toBe(false);
 		expect(trusted.errors).toContainEqual(expect.stringContaining("autoEnableCodemode must be a boolean"));
 	});
 
-	it("validates the OAuth callback URL and scope", () => {
+	it("validates the OAuth callback URL, scope, and client name", () => {
 		const paths = setup(
 			{
 				mcpServers: {
@@ -123,16 +138,25 @@ describe("MCP config", () => {
 					remote: { url: "https://a.example/mcp", oauth: { callbackUrl: "https://example.com/callback" } },
 					both: { url: "https://a.example/mcp", oauth: { callbackUrl: "http://127.0.0.1:1/cb", callbackPort: 2 } },
 					scope: { url: "https://a.example/mcp", oauth: { scope: ["a"] } },
+					named: { url: "https://a.example/mcp", oauth: { clientName: "Claude Code" } },
+					unnamed: { url: "https://a.example/mcp", oauth: { clientName: " " } },
+					metadata: { url: "https://a.example/mcp", oauth: { authServerMetadataUrl: "https://idp.example/m" } },
+					plainMetadata: {
+						url: "https://a.example/mcp",
+						oauth: { authServerMetadataUrl: "http://idp.example/m" },
+					},
 				},
 			},
 			{},
 		);
 		const { servers, errors } = loadMcpConfig({ ...paths, projectTrusted: false });
-		expect(servers.map((server) => server.name)).toEqual(["ok", "ipv6", "same"]);
+		expect(servers.map((server) => server.name)).toEqual(["ok", "ipv6", "same", "named", "metadata"]);
 		expect(errors).toEqual([
 			expect.stringContaining('server "remote": oauth.callbackUrl must be an http URI on localhost'),
 			expect.stringContaining('server "both": oauth.callbackUrl and oauth.callbackPort name different ports'),
 			expect.stringContaining('server "scope": oauth.scope must be a string'),
+			expect.stringContaining('server "unnamed": oauth.clientName must be a non-empty string'),
+			expect.stringContaining('server "plainMetadata": oauth.authServerMetadataUrl must be an https URL'),
 		]);
 	});
 
@@ -163,19 +187,46 @@ describe("MCP config", () => {
 			"codemode",
 		);
 	});
+
+	it("validates provider auth and accepts it only in the global mcp.json", () => {
+		const paths = setup(
+			{
+				mcpServers: {
+					radius: { url: "https://radius.example/mcp", auth: { provider: "radius" } },
+					local: { url: "http://localhost:8788/mcp", auth: { provider: "radius-dev" } },
+					plain: { url: "http://radius.example/mcp", auth: { provider: "radius" } },
+					empty: { url: "https://radius.example/mcp", auth: { provider: "" } },
+				},
+			},
+			{ mcpServers: { radius: { url: "https://evil.example/mcp", auth: { provider: "radius" } } } },
+		);
+		const { servers, errors } = loadMcpConfig({ ...paths, projectTrusted: true });
+		// The project entry cannot replace the global one: it would send the credential to its own URL.
+		expect(servers.map((server) => [server.name, server.scope, "url" in server.config && server.config.url])).toEqual(
+			[
+				["radius", "global", "https://radius.example/mcp"],
+				["local", "global", "http://localhost:8788/mcp"],
+			],
+		);
+		expect(errors).toEqual([
+			expect.stringContaining('server "plain": auth requires an https URL'),
+			expect.stringContaining('server "empty": auth.provider must be a provider name'),
+			expect.stringContaining('server "radius": auth is only allowed in the global mcp.json'),
+		]);
+	});
 });
 
 describe("MCP tools", () => {
 	it("creates provider-safe tool names", () => {
 		expect(createMcpToolName("docs", "search")).toBe("mcp__docs__search");
-		expect(createMcpToolName("my-server", "get.item/v2")).toBe("mcp__my-server__get_item_v2");
+		expect(createMcpToolName("my-server", "get.item/v2")).toBe("mcp__my_server__get_item_v2");
 		const long = createMcpToolName("server", "x".repeat(100));
 		expect(long).toHaveLength(64);
 		expect(long).toMatch(/^mcp__server__x+_[0-9a-f]{8}$/);
 		expect(createMcpToolName("server", `${"x".repeat(100)}y`)).not.toBe(long);
 		// Names that sanitize to one already taken by another tool get a hash suffix.
 		const taken = createMcpToolName("s", "a_b");
-		const second = createMcpToolName("s", "a.b", (name) => name === taken);
+		const second = createMcpToolName("s", "a-b", (name) => name === taken);
 		expect(second).toMatch(/^mcp__s__a_b_[0-9a-f]{8}$/);
 	});
 
@@ -218,7 +269,12 @@ describe("MCP tools", () => {
 	});
 
 	it("points resource links to read_mcp_resource and saves binary resources", async () => {
-		const converted = convertMcpResult(
+		const saved: [string | Uint8Array, string][] = [];
+		const saveOutput = async (data: string | Uint8Array, extension: string) => {
+			saved.push([data, extension]);
+			return `/tmp/saved${extension}`;
+		};
+		const converted = await convertMcpResult(
 			"docs",
 			"t",
 			{
@@ -239,68 +295,49 @@ describe("MCP tools", () => {
 					{ type: "resource", resource: { uri: "docs://logo", mimeType: "image/png", blob: "AAAA" } },
 				],
 			},
-			{ readableResources: true },
+			{ saveOutput, readableResources: true },
 		);
 		expect(converted.content).toEqual([
 			{
 				type: "text",
 				text: '[Resource docs://guide "The Guide" (text/markdown, 2.0KB): How to use it. Read it with read_mcp_resource (server "docs")]',
 			},
-			{
-				type: "text",
-				text: "[Binary resource file:///r/report.pdf (application/pdf, 4B); read its blob from the complete MCP result]",
-			},
+			{ type: "text", text: "[Binary resource file:///r/report.pdf (application/pdf, 4B) saved to /tmp/saved.pdf]" },
 			{ type: "image", data: "AAAA", mimeType: "image/png" },
 		]);
-		const finished = await finishMcpResult(converted, undefined);
-		const binary = finished.content.find(
-			(block) => block.type === "text" && block.text.startsWith("[Binary resource file:///r/report.pdf saved to "),
-		);
-		const binaryPath = binary?.type === "text" ? /saved to (.+)\]/.exec(binary.text)?.[1] : undefined;
-		const fullPath = finished.details.fullResultPath;
-		if (!binaryPath || !fullPath) throw new Error("Missing MCP result artifacts");
-		try {
-			expect(binaryPath).toMatch(/\.pdf$/);
-			expect(readFileSync(binaryPath)).toEqual(Buffer.from("%PDF"));
-			expect(JSON.parse(readFileSync(fullPath, "utf8"))).toEqual(converted.structuredContent);
-		} finally {
-			rmSync(binaryPath, { force: true });
-			rmSync(fullPath, { force: true });
-		}
+		expect(saved).toEqual([[Buffer.from("%PDF"), ".pdf"]]);
 	});
 
 	it("cuts the middle of model-facing text over 20KB and keeps the full result for scripts", async () => {
+		const saved: (string | Uint8Array)[] = [];
+		const saveOutput = async (data: string | Uint8Array) => {
+			saved.push(data);
+			return "/tmp/full.txt";
+		};
 		const lines = Array.from({ length: 3000 }, (_, index) => `line ${index + 1}`);
 		const full = lines.join("\n");
 		const image = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
 		const result = { content: [{ type: "text" as const, text: full }, image] };
-		const converted = await finishMcpResult(convertMcpResult("docs", "snapshot", result), undefined);
-		const path = converted.details.fullResultPath;
-		if (!path) throw new Error("Missing complete MCP result");
-		try {
-			expect(converted.content).toHaveLength(3);
-			const text = (converted.content[0] as { text: string }).text;
-			// Codex's format: a header, the start and end of the text, then the complete result file.
-			expect(text).toMatch(
-				new RegExp(
-					`^Warning: truncated output \\(original token count: ${Math.ceil(full.length / 4)}\\)\nTotal output lines: 3000\n\nline 1\nline 2\n`,
-				),
-			);
-			expect(text).toMatch(/…\d+ chars truncated…/);
-			expect(text.endsWith(`line 3000\n\n[Full output: ${path} (read it with offset/limit)]`)).toBe(true);
-			expect(Buffer.byteLength(text)).toBeLessThan(21 * 1024);
-			expect(converted.content[1]).toEqual(image);
-			expect(converted.details).toEqual({
-				server: "docs",
-				tool: "snapshot",
-				fullOutputPath: path,
-				fullResultPath: path,
-			});
-			expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(result);
-			expect(converted.structuredContent).toEqual({ ...result, fullResultPath: path });
-		} finally {
-			rmSync(path, { force: true });
-		}
+		const converted = await convertMcpResult("docs", "snapshot", result, { saveOutput });
+		expect(converted.content).toHaveLength(2);
+		const text = (converted.content[0] as { text: string }).text;
+		// Codex's format: a header, the start and end of the text, then the file with the full text.
+		expect(text).toMatch(
+			new RegExp(
+				`^Warning: truncated output \\(original token count: ${Math.ceil(full.length / 4)}\\)\nTotal output lines: 3000\n\nline 1\nline 2\n`,
+			),
+		);
+		expect(text).toMatch(/…\d+ chars truncated…/);
+		expect(text.endsWith("line 3000\n\n[Full output: /tmp/full.txt (read it with offset/limit)]")).toBe(true);
+		expect(Buffer.byteLength(text)).toBeLessThan(21 * 1024);
+		expect(converted.content[1]).toEqual(image);
+		expect(converted.details).toEqual({ server: "docs", tool: "snapshot", fullOutputPath: "/tmp/full.txt" });
+		expect(saved).toEqual([full]);
+		expect(converted.structuredContent).toEqual(result);
+
+		// Text within the limit is not saved.
+		await convertMcpResult("docs", "small", { content: [{ type: "text", text: "ok" }] }, { saveOutput });
+		expect(saved).toHaveLength(1);
 	});
 
 	it("cuts multi-byte text only at character boundaries", () => {
@@ -318,78 +355,33 @@ describe("MCP tools", () => {
 
 describe("MCP connections", () => {
 	const servers: InMemoryTransport[] = [];
-	const connections: McpServerConnection[] = [];
-	afterEach(async () => {
-		for (const connection of connections.splice(0)) await connection.close();
-		for (const server of servers.splice(0)) await server.close();
-		vi.useRealTimers();
-	});
 
-	/** Wire peer; the client and connection lifecycle remain real. */
-	function createTransport(
-		options: {
-			expireFirstCall?: boolean;
-			methods?: string[];
-			noTools?: boolean;
-			capabilities?: ServerCapabilities;
-			handlers?: Record<string, (request: JsonRpcRequest) => unknown | Promise<unknown>>;
-		} = {},
-	) {
+	/** In-memory server that answers initialize, tools/list, and tools/call with "ok". */
+	function createTransport(options: { expireFirstCall?: boolean; methods?: string[]; noTools?: boolean } = {}) {
 		const pair = createInMemoryTransportPair();
 		servers.push(pair.server);
 		pair.server.onMessage((message) => {
 			if (!("id" in message) || !("method" in message)) return;
 			options.methods?.push(message.method);
-			queueMicrotask(async () => {
-				let result: unknown;
-				const handler = options.handlers?.[message.method];
-				if (handler) result = await handler(message);
-				else {
-					switch (message.method) {
-						case "initialize":
-							result = {
+			const response: JsonRpcMessage =
+				message.method === "initialize"
+					? {
+							jsonrpc: "2.0",
+							id: message.id,
+							result: {
 								protocolVersion: LATEST_PROTOCOL_VERSION,
-								capabilities: options.capabilities ?? (options.noTools ? { prompts: {} } : { tools: {} }),
+								capabilities: options.noTools ? { prompts: {} } : { tools: {} },
 								serverInfo: { name: "fake", version: "1.0.0" },
-							};
-							break;
-						case "tools/list":
-							if (options.noTools) {
-								await pair.server.send({
-									jsonrpc: "2.0",
-									id: message.id,
-									error: { code: -32601, message: "Method not found" },
-								});
-								return;
-							}
-							result = { tools: [] };
-							break;
-						case "prompts/list":
-							result = { prompts: [{ name: "brief" }] };
-							break;
-						case "resources/list":
-							result = { resources: [] };
-							break;
-						case "resources/templates/list":
-							result = { resourceTemplates: [] };
-							break;
-						case "resources/read":
-							result = { contents: [{ uri: "docs://a", text: "ok" }] };
-							break;
-						case "tools/call":
-							result = { content: [{ type: "text", text: "ok" }] };
-							break;
-						default:
-							await pair.server.send({
-								jsonrpc: "2.0",
-								id: message.id,
-								error: { code: -32601, message: "Method not found" },
-							});
-							return;
-					}
-				}
-				await pair.server.send({ jsonrpc: "2.0", id: message.id, result });
-			});
+							},
+						}
+					: message.method === "tools/list"
+						? options.noTools
+							? { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } }
+							: { jsonrpc: "2.0", id: message.id, result: { tools: [] } }
+						: message.method === "resources/read"
+							? { jsonrpc: "2.0", id: message.id, result: { contents: [{ uri: "docs://a", text: "ok" }] } }
+							: { jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: "ok" }] } };
+			queueMicrotask(() => void pair.server.send(response));
 		});
 		void pair.server.start();
 		if (options.expireFirstCall) {
@@ -417,141 +409,8 @@ describe("MCP connections", () => {
 			log,
 			onTools: () => {},
 		});
-		connections.push(connection);
 		return { connection, opened: () => opened };
 	}
-
-	it("closes default-lazy transports after ten idle minutes and reconnects on the next request", async () => {
-		vi.useFakeTimers();
-		const closed = vi.fn();
-		const transport = () => {
-			const client = createTransport();
-			client.onClose(closed);
-			return client;
-		};
-		const { connection, opened } = connect({ name: "fake", config: { command: "unused" }, source: "test" }, [
-			transport,
-			transport,
-		]);
-		expect(opened()).toBe(0);
-		await connection.callTool("echo", {}, {});
-		await vi.advanceTimersByTimeAsync(10 * 60 * 1000 - 1);
-		expect(connection.state).toBe("connected");
-		expect(closed).not.toHaveBeenCalled();
-		await vi.advanceTimersByTimeAsync(1);
-		expect(connection.state).toBe("idle");
-		expect(closed).toHaveBeenCalledTimes(1);
-		expect(await connection.callTool("echo", {}, {})).toEqual({ content: [{ type: "text", text: "ok" }] });
-		expect(connection.state).toBe("connected");
-		expect(opened()).toBe(2);
-	});
-
-	it("retains eager transports beyond the lazy idle timeout", async () => {
-		vi.useFakeTimers();
-		const closed = vi.fn();
-		const { connection, opened } = connect(
-			{ name: "fake", config: { command: "unused", connection: "eager" }, source: "test" },
-			[
-				() => {
-					const client = createTransport();
-					client.onClose(closed);
-					return client;
-				},
-			],
-		);
-		await connection.getClient();
-		await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
-		expect(connection.state).toBe("connected");
-		expect(closed).not.toHaveBeenCalled();
-		expect(await connection.callTool("echo", {}, {})).toEqual({ content: [{ type: "text", text: "ok" }] });
-		expect(opened()).toBe(1);
-		await connection.close();
-		expect(closed).toHaveBeenCalledTimes(1);
-	});
-
-	it("keeps an active request connected and starts the idle period only after its response", async () => {
-		vi.useFakeTimers();
-		const received = Promise.withResolvers<void>();
-		const response = Promise.withResolvers<unknown>();
-		const transport = createTransport({
-			handlers: {
-				"tools/call": () => {
-					received.resolve();
-					return response.promise;
-				},
-			},
-		});
-		const closed = vi.fn();
-		transport.onClose(closed);
-		const { connection, opened } = connect({ name: "fake", config: { command: "unused" }, source: "test" }, [
-			() => transport,
-		]);
-		await connection.getClient();
-		await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
-		const pending = connection.callTool("slow", {}, { timeoutMs: 20 * 60 * 1000 });
-		await received.promise;
-		await vi.advanceTimersByTimeAsync(11 * 60 * 1000);
-		expect(connection.state).toBe("connected");
-		expect(closed).not.toHaveBeenCalled();
-		response.resolve({ content: [{ type: "text", text: "done" }] });
-		expect(await pending).toEqual({ content: [{ type: "text", text: "done" }] });
-		expect(opened()).toBe(1);
-		await vi.advanceTimersByTimeAsync(10 * 60 * 1000 - 1);
-		expect(closed).not.toHaveBeenCalled();
-		await vi.advanceTimersByTimeAsync(1);
-		expect(connection.state).toBe("idle");
-		expect(closed).toHaveBeenCalledTimes(1);
-	});
-
-	it.each([
-		{ kind: "tools", method: "tools/list", items: [{ name: "new", inputSchema: { type: "object" } }] },
-		{ kind: "resources", method: "resources/list", items: [{ name: "new", uri: "docs://new" }] },
-		{ kind: "prompts", method: "prompts/list", items: [{ name: "new" }] },
-	] as const)(
-		"protects a $kind notification refresh from idle close and publishes its response",
-		async ({ kind, method, items }) => {
-			vi.useFakeTimers();
-			const received = Promise.withResolvers<void>();
-			const response = Promise.withResolvers<unknown>();
-			let lists = 0;
-			const transport = createTransport({
-				capabilities: {
-					tools: { listChanged: true },
-					resources: { listChanged: true },
-					prompts: { listChanged: true },
-				},
-				handlers: {
-					[method]: () => {
-						if (++lists === 1) return { [kind]: [] };
-						received.resolve();
-						return response.promise;
-					},
-				},
-			});
-			const closed = vi.fn();
-			transport.onClose(closed);
-			const { connection, opened } = connect(
-				{ name: "fake", config: { command: "unused", timeout: 20 * 60 }, source: "test" },
-				[() => transport],
-			);
-			await connection.getClient();
-			await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
-			await servers.at(-1)?.send({ jsonrpc: "2.0", method: `notifications/${kind}/list_changed` });
-			await received.promise;
-			await vi.advanceTimersByTimeAsync(11 * 60 * 1000);
-			expect(connection.state).toBe("connected");
-			expect(closed).not.toHaveBeenCalled();
-			response.resolve({ [kind]: items });
-			await vi.advanceTimersByTimeAsync(0);
-			expect(connection[kind]).toEqual(items);
-			expect(opened()).toBe(1);
-			await vi.advanceTimersByTimeAsync(10 * 60 * 1000 - 1);
-			expect(closed).not.toHaveBeenCalled();
-			await vi.advanceTimersByTimeAsync(1);
-			expect(connection.state).toBe("idle");
-			expect(closed).toHaveBeenCalledTimes(1);
-		},
-	);
 
 	it("starts a new session and retries once when the session expired", async () => {
 		const { connection, opened } = connect({ name: "fake", config: { command: "unused" }, source: "test" }, [
@@ -566,89 +425,6 @@ describe("MCP connections", () => {
 		expect(opened()).toBe(2);
 		await connection.close();
 	});
-
-	it.each(["sign-in", "refresh"] as const)(
-		"keeps an HTTP write retry within its original account after a concurrent %s",
-		async (change) => {
-			const entry: McpServerEntry = {
-				name: "invoices",
-				source: "test",
-				config: { url: "https://server.example/mcp", oauth: { clientId: "client" } },
-			};
-			const credentials = new McpOAuthCredentialStore(new InMemoryAuthStorageBackend());
-			const grant = {
-				serverUrl: "https://server.example/mcp",
-				clientInformation: { client_id: "client" },
-				tokens: { access_token: "account-one", refresh_token: "refresh-one", token_type: "Bearer" },
-			};
-			await credentials.importGrant(entry, grant);
-			const identity = credentials.catalogIdentity(entry);
-			const tool = { name: "create_invoice", inputSchema: { type: "object" } };
-			const calls: (string | null)[] = [];
-			const invoices: (string | null)[] = [];
-			const nextToken = change === "sign-in" ? "account-two" : "refreshed-account-one";
-			const connection = new McpServerConnection({
-				entry,
-				cwd: process.cwd(),
-				credentials,
-				onTools: () => {},
-				createTransport: (_entry, _cwd, authProvider) =>
-					new StreamableHttpTransport({
-						url: grant.serverUrl,
-						authProvider,
-						openGetStream: false,
-						fetch: async (_url, init) => {
-							const request: JsonRpcRequest = JSON.parse(String(init?.body));
-							const authorization = new Headers(init?.headers).get("authorization");
-							if (request.method === "tools/call") {
-								calls.push(authorization);
-								if (calls.length === 1) {
-									const store = credentials.forServer(entry);
-									const next = { ...grant, tokens: { ...grant.tokens, access_token: nextToken } };
-									if (change === "sign-in") await store.commitGrant(next, identity);
-									else await store.withMutationLock(() => Promise.resolve(store.save(next)));
-									return new Response(null, { status: 401 });
-								}
-								invoices.push(authorization);
-							}
-							const result =
-								request.method === "initialize"
-									? {
-											protocolVersion: LATEST_PROTOCOL_VERSION,
-											capabilities: { tools: {} },
-											serverInfo: { name: "invoices", version: "1" },
-										}
-									: request.method === "tools/list"
-										? { tools: [tool] }
-										: { content: [{ type: "text", text: "invoice created" }] };
-							return "id" in request
-								? Response.json({ jsonrpc: "2.0", id: request.id, result })
-								: new Response(null, { status: 202 });
-						},
-					}),
-			});
-			connections.push(connection);
-			await connection.getClient();
-			const expected = { tool, bindingIdentity: connection.bindingIdentity };
-			if (change === "sign-in") {
-				await expect(connection.callTool(tool.name, {}, {}, expected)).rejects.toThrow("changed accounts");
-				expect(calls).toEqual(["Bearer account-one"]);
-				expect(invoices).toEqual([]);
-				expect(credentials.tokens(entry)?.access_token).toBe("account-two");
-				await connection.reconnect();
-				await expect(connection.callTool(tool.name, {}, {}, expected)).rejects.toThrow("changed");
-				await connection.callTool(tool.name, {}, {}, { tool, bindingIdentity: connection.bindingIdentity });
-				expect(invoices).toEqual(["Bearer account-two"]);
-			} else {
-				await expect(connection.callTool(tool.name, {}, {}, expected)).resolves.toEqual({
-					content: [{ type: "text", text: "invoice created" }],
-				});
-				expect(calls).toEqual(["Bearer account-one", "Bearer refreshed-account-one"]);
-				expect(invoices).toEqual(["Bearer refreshed-account-one"]);
-				expect(credentials.catalogIdentity(entry)).toBe(identity);
-			}
-		},
-	);
 
 	it.skipIf(process.platform === "win32")(
 		"expands ~ in the command, arguments, and cwd of stdio servers",
@@ -702,8 +478,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 		await connection.getClient();
 		expect(connection.state).toBe("connected");
 		expect(connection.tools).toEqual([]);
-		expect(connection.prompts).toEqual([{ name: "brief" }]);
-		expect(methods).toEqual(["initialize", "prompts/list"]);
+		expect(methods).toEqual(["initialize"]);
 		await connection.close();
 	});
 
@@ -760,36 +535,14 @@ for await (const line of createInterface({ input: process.stdin })) {
 	});
 
 	it("retries resource reads, but not tool calls, after a transient HTTP error", async () => {
-		const received = Promise.withResolvers<void>();
-		let balance = 100;
-		const invoices: string[] = [];
-		const methods: string[] = [];
-		const transport = createTransport({
-			methods,
-			handlers: {
-				"tools/call": (request) => {
-					const { invoice, amount } = (request.params as { arguments: { invoice: string; amount: number } })
-						.arguments;
-					balance -= amount;
-					invoices.push(invoice);
-					received.resolve();
-					// The invoice was charged, but its response never reaches the client.
-					return new Promise(() => {});
-				},
-			},
-		});
+		const transport = createTransport();
 		const send = transport.send.bind(transport);
-		let reads = 0;
-		let calls = 0;
+		const failed = new Set<string>();
+		// The first read and the first call fail with 502.
 		transport.send = async (message) => {
 			const method = "method" in message ? message.method : "";
-			if (method === "resources/read" && ++reads === 1) {
-				throw new McpHttpError(502, "MCP HTTP request failed with status 502");
-			}
-			if (method === "tools/call") {
-				calls++;
-				await send(message);
-				await received.promise;
+			if ((method === "resources/read" || method === "tools/call") && !failed.has(method)) {
+				failed.add(method);
 				throw new McpHttpError(502, "MCP HTTP request failed with status 502");
 			}
 			return send(message);
@@ -798,75 +551,8 @@ for await (const line of createInterface({ input: process.stdin })) {
 			() => transport,
 		]);
 		expect(await connection.readResource("docs://a", {})).toEqual({ contents: [{ uri: "docs://a", text: "ok" }] });
-		expect(reads).toBe(2);
-		await expect(connection.callTool("charge", { invoice: "invoice-1", amount: 25 }, {})).rejects.toMatchObject({
-			message: `MCP tool "fake/charge" did not return a confirmed result: MCP HTTP request failed with status 502. It may have run. Check the server's state before repeating it; pi did not retry the call.`,
-			cause: expect.any(McpHttpError),
-		});
-		expect(await connection.readResource("docs://a", {})).toEqual({ contents: [{ uri: "docs://a", text: "ok" }] });
-		expect(balance).toBe(75);
-		expect(invoices).toEqual(["invoice-1"]);
-		expect(calls).toBe(1);
-		expect(methods.filter((method) => method === "tools/call")).toHaveLength(1);
+		await expect(connection.callTool("echo", {}, {})).rejects.toThrow("status 502");
 		await connection.close();
-	});
-
-	it.each(["timeout", "abort"] as const)("does not replay a charged invoice after response %s", async (failure) => {
-		vi.useFakeTimers();
-		const received = Promise.withResolvers<void>();
-		let balance = 100;
-		const invoices: string[] = [];
-		const methods: string[] = [];
-		const transport = createTransport({
-			methods,
-			handlers: {
-				"tools/call": (request) => {
-					const { invoice, amount } = (request.params as { arguments: { invoice: string; amount: number } })
-						.arguments;
-					balance -= amount;
-					invoices.push(invoice);
-					received.resolve();
-					return new Promise(() => {});
-				},
-			},
-		});
-		const { connection, opened } = connect({ name: "fake", config: { command: "unused" }, source: "test" }, [
-			() => transport,
-		]);
-		const cancelled: JsonRpcMessage[] = [];
-		servers.at(-1)?.onMessage((message) => {
-			if ("method" in message && message.method === "notifications/cancelled") cancelled.push(message);
-		});
-		const controller = new AbortController();
-		const pending = connection.callTool(
-			"charge",
-			{ invoice: "invoice-1", amount: 25 },
-			{ signal: controller.signal, timeoutMs: 50 },
-		);
-		const reason = failure === "timeout" ? "MCP request timed out after 50ms" : "MCP request aborted";
-		const rejected = expect(pending).rejects.toMatchObject({
-			message: `MCP tool "fake/charge" did not return a confirmed result: ${reason}. It may have run. Check the server's state before repeating it; pi did not retry the call.`,
-			cause: failure === "timeout" ? expect.any(McpTimeoutError) : expect.any(McpAbortError),
-		});
-		await received.promise;
-		expect(balance).toBe(75);
-		expect(invoices).toEqual(["invoice-1"]);
-		if (failure === "timeout") await vi.advanceTimersByTimeAsync(50);
-		else controller.abort("stop");
-		await rejected;
-		await vi.advanceTimersByTimeAsync(1000);
-		expect(cancelled).toEqual([
-			{
-				jsonrpc: "2.0",
-				method: "notifications/cancelled",
-				params: { requestId: 3, reason: failure === "timeout" ? "Request timed out" : "stop" },
-			},
-		]);
-		expect(await connection.readResource("docs://a", {})).toEqual({ contents: [{ uri: "docs://a", text: "ok" }] });
-		expect(balance).toBe(75);
-		expect(invoices).toEqual(["invoice-1"]);
-		expect(methods.filter((method) => method === "tools/call")).toHaveLength(1);
-		expect(opened()).toBe(1);
 	});
 
 	it("asks OAuth servers that keep rejecting requests for a new sign-in", async () => {
@@ -882,6 +568,40 @@ for await (const line of createInterface({ input: process.stdin })) {
 		await expect(connection.getClient()).rejects.toThrow('MCP server "fake" requires sign-in. Run /mcp to sign in.');
 		expect(connection.state).toBe("needs-auth");
 		await connection.close();
+	});
+
+	it("sends the provider token and asks for the provider login when the server rejects it", async () => {
+		const authorizations: (string | undefined)[] = [];
+		const server = createServer((request, response) => {
+			authorizations.push(request.headers.authorization);
+			request.resume();
+			response.writeHead(401).end();
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const { port } = server.address() as AddressInfo;
+		const connection = new McpServerConnection({
+			entry: {
+				name: "radius",
+				config: { url: `http://127.0.0.1:${port}/mcp`, auth: { provider: "radius" } },
+				source: "test",
+			},
+			cwd: process.cwd(),
+			createTransport: createDefaultTransport,
+			credentials: new McpOAuthCredentialStore(new InMemoryAuthStorageBackend()),
+			providerToken: async (provider) => (provider === "radius" ? "tok" : undefined),
+			onTools: () => {},
+		});
+		try {
+			expect(connection.oauthUrl).toBeUndefined();
+			await expect(connection.getClient()).rejects.toThrow(
+				'MCP server "radius" requires sign-in. Run /login radius to sign in.',
+			);
+			expect(connection.state).toBe("needs-auth");
+			expect(authorizations).toEqual(["Bearer tok"]);
+		} finally {
+			await connection.close();
+			await new Promise((resolve) => server.close(resolve));
+		}
 	});
 
 	it("appends server log messages to the log file", async () => {
@@ -926,5 +646,48 @@ for await (const line of createInterface({ input: process.stdin })) {
 		expect(await connection.callTool("echo", {}, {})).toEqual({ content: [{ type: "text", text: "ok" }] });
 		expect(() => connection.oauthSettings()).toThrow("oauth.clientSecret");
 		await connection.close();
+	});
+});
+
+describe("MCP servers section", () => {
+	const server = (name: string, description?: string, exposure?: "codemode" | "deferred" | "direct") => ({
+		entry: {
+			name,
+			config: { command: "x", ...(description ? { description } : {}), ...(exposure ? { exposure } : {}) },
+			source: "test",
+		},
+	});
+
+	it("lists servers with how their tools are reached and the first line of their description", () => {
+		const section = renderServersSection([
+			server("docs", "Docs search.\nMore."),
+			server("later", undefined, "deferred"),
+			server("direct", "Declared.", "direct"),
+			{ entry: server("plain").entry, connection: { instructions: "From instructions." } },
+		]);
+		expect(section?.split("\n").slice(1)).toEqual([
+			"- mcp__docs (codemode): Docs search.",
+			"- mcp__later (tool_search)",
+			"- mcp__plain (codemode): From instructions.",
+		]);
+		expect(renderServersSection([server("direct", "Declared.", "direct")])).toBeUndefined();
+	});
+
+	it("shortens descriptions to fit the size limit", () => {
+		const servers = Array.from({ length: 40 }, (_, index) => server(`server${index}`, "x".repeat(400)));
+		const section = renderServersSection(servers) ?? "";
+		expect(section.length).toBeLessThanOrEqual(MAX_SERVERS_SECTION_CHARS);
+		expect(section.split("\n")).toHaveLength(41);
+		expect(section).toContain("- mcp__server39 (codemode): x");
+	});
+
+	it("leaves out the last servers when their names alone do not fit", () => {
+		const servers = Array.from({ length: 200 }, (_, index) => server(`server-with-a-long-name-${index}`, "desc"));
+		const section = renderServersSection(servers) ?? "";
+		expect(section.length).toBeLessThanOrEqual(MAX_SERVERS_SECTION_CHARS);
+		const lines = section.split("\n");
+		expect(lines.at(-1)).toMatch(/^- … \d+ more servers; find their tools with searchTools\(\)$/);
+		const omitted = Number(/(\d+) more/.exec(lines.at(-1) ?? "")?.[1]);
+		expect(lines.length - 2 + omitted).toBe(200);
 	});
 });

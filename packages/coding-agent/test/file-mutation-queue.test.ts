@@ -211,9 +211,7 @@ describe("built-in edit and write tools", () => {
 		expect(await resolvesWithin(secondWriteStarted.promise, 20)).toBe(false);
 
 		finishFirstWrite.resolve();
-		await expect(firstWrite).resolves.toMatchObject({
-			content: [{ type: "text", text: `Successfully wrote to ${filePath}` }],
-		});
+		await expect(firstWrite).rejects.toThrow("Operation aborted");
 		await secondWrite;
 
 		const content = await readFile(filePath, "utf8");
@@ -267,9 +265,7 @@ describe("built-in edit and write tools", () => {
 		expect(await resolvesWithin(secondWriteStarted.promise, 20)).toBe(false);
 
 		finishFirstWrite.resolve();
-		await expect(firstEdit).resolves.toMatchObject({
-			content: [{ type: "text", text: `Successfully replaced 1 block(s) in ${filePath}.` }],
-		});
+		await expect(firstEdit).rejects.toThrow("Operation aborted");
 		await secondEdit;
 
 		const content = await readFile(filePath, "utf8");

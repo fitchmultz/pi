@@ -123,16 +123,16 @@ export async function startOAuthCallbackServer<T>(
 			resolve();
 		});
 	});
+	if (signal?.aborted) {
+		server.close();
+		throw new Error("Login cancelled");
+	}
 	const address = server.address();
 	if (!address || typeof address === "string") {
 		server.close();
 		throw new Error("OAuth callback server did not bind to TCP");
 	}
 
-	if (signal?.aborted) {
-		server.close();
-		throw new Error("Login cancelled");
-	}
 	server.on("error", (error) => finish({ error }));
 	signal?.addEventListener("abort", onAbort, { once: true });
 	if (options.timeoutMs !== undefined) {
@@ -162,16 +162,14 @@ export async function waitForCallbackOrManualInput<T>(
 	callback: OAuthCallbackServer<T> | undefined,
 	prompt: { message: string; placeholder: string },
 ): Promise<{ type: "callback"; value: T } | { type: "manual"; input: string }> {
-	interaction.signal.throwIfAborted();
 	const manualAbort = new AbortController();
-	const onAbort = () => {
-		manualAbort.abort(interaction.signal.reason);
-		callback?.cancel();
-	};
-	interaction.signal.addEventListener("abort", onAbort, { once: true });
 	let manualError: Error | undefined;
+	const signal = AbortSignal.any([manualAbort.signal, interaction.signal]);
 	const manual = Promise.resolve()
-		.then(() => interaction.prompt({ type: "manual_code", ...prompt, signal: manualAbort.signal }))
+		.then(() => {
+			signal.throwIfAborted();
+			return interaction.prompt({ type: "manual_code", ...prompt, signal });
+		})
 		.then((input) => {
 			callback?.cancel();
 			return input;
@@ -186,11 +184,12 @@ export async function waitForCallbackOrManualInput<T>(
 		if (manualError) throw manualError;
 		if (value !== undefined) return { type: "callback", value };
 		const input = await raceWithAbortSignal(manual, interaction.signal);
-		interaction.signal.throwIfAborted();
 		if (manualError) throw manualError;
 		return { type: "manual", input: input ?? "" };
+	} catch (error) {
+		if (interaction.signal.aborted) throw new Error("Login cancelled");
+		throw error;
 	} finally {
-		interaction.signal.removeEventListener("abort", onAbort);
 		manualAbort.abort();
 	}
 }

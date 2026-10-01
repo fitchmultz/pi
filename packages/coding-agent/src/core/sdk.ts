@@ -1,24 +1,12 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
-import {
-	clampThinkingLevel,
-	getCurrentSystemMessage,
-	type Message,
-	type Model,
-	streamSimple,
-} from "@earendil-works/pi-ai/compat";
+import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { CacheWarmer } from "./cache-warmer.ts";
-import {
-	openSessionCheckpoint,
-	openSessionCheckpointFile,
-	restoreSessionCheckpoint,
-	type SessionCheckpoint,
-} from "./checkpoint.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
@@ -31,7 +19,6 @@ import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { DEFAULT_TOOL_NAMES, SettingsManager } from "./settings-manager.ts";
 import { time } from "./timings.ts";
 import {
-	createBackgroundCommandTool,
 	createBashTool,
 	createCodingTools,
 	createEditTool,
@@ -44,7 +31,7 @@ import {
 	createWriteTool,
 	withFileMutationQueue,
 } from "./tools/index.ts";
-import { getSessionSelection } from "./virtual-models.ts";
+import { getBranchSelection } from "./virtual-models.ts";
 
 // Preserve the pre-0.81 fallback for extensions that construct Agent instances
 // or invoke low-level agent loops without supplying streamFn. Agent core remains
@@ -52,11 +39,6 @@ import { getSessionSelection } from "./virtual-models.ts";
 setDefaultStreamFn(streamSimple);
 
 export interface CreateAgentSessionOptions {
-	checkpoint?: SessionCheckpoint;
-	/** Stream-validated self-contained v1 artifact. Mutually exclusive with checkpoint. */
-	checkpointFile?: string;
-	/** Hosts bind startup input before completion notifications may wake the model. */
-	deferBackgroundCommandNotifications?: boolean;
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: ~/.pi/agent */
@@ -140,7 +122,6 @@ export {
 	createCodingTools,
 	createReadOnlyTools,
 	createReadTool,
-	createBackgroundCommandTool,
 	createBashTool,
 	createEditTool,
 	createWriteTool,
@@ -192,16 +173,7 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	if (options.checkpoint && options.checkpointFile) throw new Error("Supply checkpoint or checkpointFile, not both");
-	const fileCheckpoint = options.checkpointFile
-		? openSessionCheckpointFile(resolvePath(options.checkpointFile))
-		: undefined;
-	const checkpoint = fileCheckpoint?.checkpoint ?? options.checkpoint;
-	const checkpointManager =
-		fileCheckpoint?.sessionManager ?? (options.checkpoint ? openSessionCheckpoint(options.checkpoint) : undefined);
-	const cwd = resolvePath(
-		checkpoint?.selection.cwd ?? options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd(),
-	);
+	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
 
@@ -210,8 +182,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
-	const sessionManager =
-		checkpointManager ?? options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
@@ -222,25 +193,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Check if session has existing data to restore
 	const existingSession = sessionManager.buildSessionContext();
 	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranchState().thinkingLevelEntryId !== null;
+	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
-	let model = checkpoint
-		? checkpoint.selection.model
-			? modelRuntime.getModel(checkpoint.selection.model.provider, checkpoint.selection.model.id)
-			: undefined
-		: options.model;
-	if (checkpoint?.selection.model && !model) throw new Error("Checkpoint model unavailable");
+	let model = options.model;
 	let modelFallbackMessage: string | undefined;
 
 	// Assistant messages name the physical model that answered, so a virtual selection is only in
 	// model_change entries.
-	const sessionModel = getSessionSelection(sessionManager, (provider, modelId) =>
+	const sessionModel = getBranchSelection(sessionManager.getBranch(), (provider, modelId) =>
 		modelRuntime.getModel(provider, modelId),
 	);
 
 	// If session has data, try to restore model from it
-	if (!checkpoint && !model && hasExistingSession && sessionModel) {
+	if (!model && hasExistingSession && sessionModel) {
 		const restoredModel = modelRuntime.getModel(sessionModel.provider, sessionModel.modelId);
+		// A failed auth check is not missing auth; keep the session's provider instead of silently switching.
 		if (
 			restoredModel &&
 			(modelRuntime.hasConfiguredAuth(restoredModel.provider) ||
@@ -254,7 +221,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	// If still no model, use findInitialModel (checks settings default, then provider defaults)
-	if (!checkpoint && !model) {
+	if (!model) {
 		const result = await findInitialModel({
 			scopedModels: [],
 			isContinuing: hasExistingSession,
@@ -272,7 +239,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
-	let thinkingLevel = checkpoint?.selection.thinkingLevel ?? options.thinkingLevel;
+	let thinkingLevel = options.thinkingLevel;
 
 	// If session has data, restore thinking level from it
 	if (thinkingLevel === undefined && hasExistingSession) {
@@ -303,12 +270,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
-	const initialActiveToolNames =
-		options.tools === undefined && options.noTools === undefined && getCurrentSystemMessage(existingSession.messages)
-			? undefined
-			: (options.tools ?? (options.noTools ? [] : (configuredDefaultToolNames ?? DEFAULT_TOOL_NAMES))).filter(
-					(name) => !excludedToolNameSet?.has(name),
-				);
+	const initialActiveToolNames = (
+		options.tools ?? (options.noTools ? [] : (configuredDefaultToolNames ?? DEFAULT_TOOL_NAMES))
+	).filter((name) => !excludedToolNameSet?.has(name));
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
@@ -464,10 +428,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Restore missing settings metadata for older sessions.
 	if (hasExistingSession) {
-		if (!hasThinkingEntry && !checkpoint) {
+		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}
-	} else if (!checkpoint) {
+	} else {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
 		if (model) {
 			sessionManager.appendModelChange(model.provider, model.id);
@@ -480,22 +444,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager,
 		settingsManager,
 		cwd,
-		agentDir,
 		scopedModels: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
 		modelRuntime,
 		cacheWarmer,
 		initialActiveToolNames,
+		usesDefaultTools: options.tools === undefined && !options.noTools,
 		allowedToolNames,
-		noBuiltinTools: options.noTools === "builtin",
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
-		deferBackgroundCommandNotifications: options.deferBackgroundCommandNotifications,
 	});
-
-	if (checkpoint) restoreSessionCheckpoint(session, checkpoint);
 
 	const extensionsResult = resourceLoader.getExtensions();
 

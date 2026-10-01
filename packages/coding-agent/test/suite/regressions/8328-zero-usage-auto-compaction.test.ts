@@ -40,21 +40,20 @@ describe("issue #8328 zero-usage auto-compaction", () => {
 
 	async function createCompactionHarness(): Promise<Harness> {
 		const harness = await createHarness({
-			// The estimate covers the system prompt and tool schemas too, so leave room for them.
-			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 20 }],
-			settings: { compaction: { enabled: true, reserveTokens: 1_000 } },
+			models: [{ id: "faux-1", contextWindow: 100, maxTokens: 20 }],
+			settings: { compaction: { enabled: true, reserveTokens: 10 } },
 		});
 		harnesses.push(harness);
 		return harness;
 	}
 
-	// Regression #8328: zero usage must fall back to the canonical message-size estimate.
 	it("uses the message estimate when no assistant has reported usage", async () => {
 		const harness = await createCompactionHarness();
 		const assistant = createZeroUsageAssistant(harness);
-		harness.sessionManager.appendMessage({ role: "user", content: "x".repeat(40_000), timestamp: Date.now() - 1 });
-		harness.sessionManager.appendMessage(assistant);
-		harness.session.refreshContext();
+		harness.session.agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: "x".repeat(400) }], timestamp: Date.now() - 1 },
+			assistant,
+		];
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
@@ -67,9 +66,10 @@ describe("issue #8328 zero-usage auto-compaction", () => {
 	it("does not compact when the zero-usage message estimate is below the threshold", async () => {
 		const harness = await createCompactionHarness();
 		const assistant = createZeroUsageAssistant(harness);
-		harness.sessionManager.appendMessage({ role: "user", content: "short", timestamp: Date.now() - 1 });
-		harness.sessionManager.appendMessage(assistant);
-		harness.session.refreshContext();
+		harness.session.agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: "short" }], timestamp: Date.now() - 1 },
+			assistant,
+		];
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 

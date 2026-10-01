@@ -210,7 +210,10 @@ describe("submissions", () => {
 		await harness.close(context);
 
 		const passive = await openChat(new ControlledStorage(), chatSetup());
-		const taskId = await passive.root.commit((tx) => tx.createTask(GenerationTask, {}), context);
+		const taskId = await passive.root.commit(
+			(tx) => tx.createTask(GenerationTask, {}, { ownership: { kind: "conversation" } }),
+			context,
+		);
 		// A committed task alone does not start scheduling; waiting for it does.
 		expect((await passive.harness.getTask(taskId, context))?.state.status).toBe("pending");
 		expect((await passive.harness.waitForTask(taskId, context)).state.status).toBe("terminal");

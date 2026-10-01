@@ -48,6 +48,24 @@ export class CustomMessageComponent extends Container {
 		}
 	}
 
+	setOutputPad(outputPad: number): void {
+		if (this.outputPad !== outputPad) {
+			this.outputPad = outputPad;
+			this.rebuild();
+		}
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.rebuild();
+	}
+
+	setCompactView(compactView: boolean): void {
+		if (this.compactView === compactView) return;
+		this.compactView = compactView;
+		this.rebuild();
+	}
+
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		const result = super.handleMouse(event);
 		if (result || !this.compactView || event.type !== "click" || event.button !== "left") return result;
@@ -62,25 +80,6 @@ export class CustomMessageComponent extends Container {
 				height: event.height,
 			},
 		};
-	}
-
-	setCompactView(compactView: boolean): void {
-		if (this.compactView !== compactView) {
-			this.compactView = compactView;
-			this.rebuild();
-		}
-	}
-
-	setOutputPad(outputPad: number): void {
-		if (this.outputPad !== outputPad) {
-			this.outputPad = outputPad;
-			this.rebuild();
-		}
-	}
-
-	override invalidate(): void {
-		super.invalidate();
-		this.rebuild();
 	}
 
 	private rebuild(): void {

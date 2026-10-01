@@ -1,33 +1,5 @@
 import type { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
-import type { JsonRecordLayout } from "../../core/json-record-writer.ts";
-import { JsonlRecordDecoder } from "../../core/session-journal.ts";
-import { jsonEventLayout } from "../json-event.ts";
-
-const treeNodeLayout: JsonRecordLayout = { fields: {} };
-const treeLayout: JsonRecordLayout = { items: treeNodeLayout };
-Object.assign(treeNodeLayout.fields!, { children: treeLayout });
-const rpcDataLayout: JsonRecordLayout = {
-	fields: {
-		entries: { items: {} },
-		tree: treeLayout,
-		messages: { items: {} },
-		commands: { items: {} },
-		models: { items: {} },
-		steering: { items: {} },
-		followUp: { items: {} },
-		pendingExtensionUIRequests: { items: {} },
-	},
-};
-export const rpcOutputLayout: JsonRecordLayout = {
-	fields: {
-		...jsonEventLayout.fields,
-		data: rpcDataLayout,
-		state: rpcDataLayout,
-		options: { items: {} },
-		widgetLines: { items: {} },
-	},
-};
 
 /**
  * Serialize a single strict JSONL record.
@@ -37,37 +9,6 @@ export const rpcOutputLayout: JsonRecordLayout = {
  */
 export function serializeJsonLine(value: unknown): string {
 	return `${JSON.stringify(value)}\n`;
-}
-
-/** Receive full objects token-by-token; no whole-line string or JSON.parse allocation. */
-export function attachJsonlRecordReader(
-	stream: Readable,
-	onRecord: (record: Record<string, unknown>) => void,
-	onError: (error: Error) => void,
-): () => void {
-	// ponytail: full RPC/event consumers still need heap for their requested objects and individual strings.
-	// Use selective projection/paging at the consumer if that becomes a demonstrated limit.
-	const decoder = new JsonlRecordDecoder({
-		policy: "tolerant",
-		fatalUtf8: true,
-		onRecord: (record) => onRecord(record.value),
-		onError,
-	});
-	const onData = (chunk: string | Buffer) => {
-		const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-		for (let offset = 0; offset < bytes.length; offset += 65536) {
-			decoder.feed(bytes.subarray(offset, offset + 65536));
-		}
-	};
-	const onEnd = () => {
-		decoder.finish();
-	};
-	stream.on("data", onData);
-	stream.on("end", onEnd);
-	return () => {
-		stream.off("data", onData);
-		stream.off("end", onEnd);
-	};
 }
 
 /**

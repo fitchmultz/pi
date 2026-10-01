@@ -1,9 +1,5 @@
-import { fileURLToPath } from "node:url";
 import { defineConfig, mergeConfig } from "vitest/config";
 import baseConfig, { workspaceSourcePaths } from "../../vitest.base.ts";
-import { offlineTestEnv } from "../../vitest.offline-env.ts";
-
-const offlineSetup = fileURLToPath(new URL("../../vitest.offline-setup.ts", import.meta.url));
 
 export default mergeConfig(
 	baseConfig,
@@ -13,8 +9,7 @@ export default mergeConfig(
 			environment: "node",
 			testTimeout: 30000,
 			// Tests run offline by default; opt in with allowNetwork() from test/test-network-env.ts.
-			env: { PI_OFFLINE: "1", ...offlineTestEnv() },
-			setupFiles: [offlineSetup],
+			env: { PI_OFFLINE: "1" },
 			unstubEnvs: true,
 			reporters: process.env.GITHUB_ACTIONS ? ["dot", "github-actions"] : ["dot"],
 			silent: "passed-only",
@@ -26,6 +21,7 @@ export default mergeConfig(
 		},
 		resolve: {
 			alias: [
+				{ find: /^@earendil-works\/pi-coding-agent$/, replacement: workspaceSourcePaths.codingAgentIndex },
 				{ find: /^@earendil-works\/pi-ai$/, replacement: workspaceSourcePaths.aiIndex },
 				{ find: /^@earendil-works\/pi-agent-core$/, replacement: workspaceSourcePaths.agentIndex },
 				{ find: /^@mariozechner\/pi-ai$/, replacement: workspaceSourcePaths.aiIndex },

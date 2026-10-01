@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -34,8 +34,6 @@ Options:
                          Default: profiles-node for Node, profiles-bun for Bun
   --label <name>         Profile name prefix (default: <mode>-startup)
   --runtime <name>       node, bun, or auto (default: auto)
-  --entry <file>         Profile this CLI entrypoint without building it
-  --cwd <dir>            Child working directory (default: packages/coding-agent)
   --agent-dir <dir>      Use a specific PI_CODING_AGENT_DIR for the benchmark run
   --isolated-agent-dir   Use a fresh temporary agent dir instead of the normal one
   --bundle               Build and profile the bundled Node entrypoint instead of dist/cli.js
@@ -46,11 +44,7 @@ Options:
 
 Notes:
   - By default the benchmark uses your normal configured agent dir, so global models/auth/settings work.
-  - TUI readiness is InteractiveMode.init completion, including awaited session_start handlers and startup render.
-  - The benchmark then drains terminal replies for 150ms before stopping; this is excluded from ready time.
-  - Background extension work is excluded unless its session_start handler awaits it.
-  - Process-to-ready wall time includes launch/import overhead; initialization spans and exit time are separate.
-  - --no-offline preserves inherited PI_OFFLINE / PI_SKIP_VERSION_CHECK rather than clearing them.
+  - TUI mode measures startup until the interactive UI reaches first usable state.
   - RPC mode measures startup until a real get_state request receives a response, then closes stdin to exit cleanly.
   - CPU profiles are kept in the selected profile directory for later analysis.
 `);
@@ -89,8 +83,6 @@ function parseArgs(argv) {
 		offline: true,
 		build: true,
 		runtime: "auto",
-		entry: undefined,
-		cwd: packageDir,
 		agentDir: undefined,
 		isolatedAgentDir: false,
 		cpuProfile: false,
@@ -136,8 +128,6 @@ function parseArgs(argv) {
 				arg === "--profile-dir" ||
 				arg === "--label" ||
 				arg === "--runtime" ||
-				arg === "--entry" ||
-				arg === "--cwd" ||
 				arg === "--agent-dir") &&
 			index + 1 >= argv.length
 		) {
@@ -176,11 +166,6 @@ function parseArgs(argv) {
 
 		if (arg === "--agent-dir") {
 			options.agentDir = resolve(argv[++index]);
-			continue;
-		}
-
-		if (arg === "--entry" || arg === "--cwd") {
-			options[arg.slice(2)] = resolve(argv[++index]);
 			continue;
 		}
 
@@ -238,23 +223,29 @@ function summarize(values) {
 	};
 }
 
-export function parseStartupTimings(stderr) {
+function parseStartupTimings(stderr) {
+	const lines = stderr.split(/\r?\n/);
 	const timings = new Map();
-	let namespace;
-	for (const line of stderr.split(/\r?\n/)) {
-		const header = line.trim().match(/^--- Startup Timings(?:: (.+))? ---$/);
-		if (header) {
-			namespace = header[1] ?? "main";
+	let inBlock = false;
+
+	for (const line of lines) {
+		if (/^--- Startup Timings(?:: [^-]+)? ---$/.test(line.trim())) {
+			inBlock = true;
 			continue;
 		}
-		if (!namespace) continue;
-		if (/^-+$/.test(line.trim())) {
-			namespace = undefined;
+		if (!inBlock) {
 			continue;
 		}
-		const match = line.match(/^\s+(.+):\s+(\d+(?:\.\d+)?)ms$/);
-		if (match) timings.set(`${namespace}.${match[1]}`, Number.parseFloat(match[2]));
+		if (line.includes("------------------------")) {
+			break;
+		}
+		const match = line.match(/^\s+([^:]+):\s+(\d+)ms$/);
+		if (!match) {
+			continue;
+		}
+		timings.set(match[1], Number.parseInt(match[2], 10));
 	}
+
 	return timings;
 }
 
@@ -285,7 +276,7 @@ function toMetricName(label) {
 async function waitForExit(child, errorPrefix) {
 	return await new Promise((resolve, reject) => {
 		child.once("error", reject);
-		child.once("close", (code, signal) => {
+		child.once("exit", (code, signal) => {
 			if (signal) {
 				reject(new Error(`${errorPrefix} exited from signal ${signal}`));
 				return;
@@ -360,26 +351,37 @@ async function runBuild(bundle) {
 	process.stdout.write(`Build completed in ${formatMs(performance.now() - startedAt)}\n`);
 }
 
-function getRuntimeCommand(runtime, mode, profileDir, cpuProfile, entryPath) {
+function getRuntimeCommand(runtime, mode, profileDir, profileName, cpuProfile, nodeEntryPath) {
 	const benchmarkArgs = ["--no-session"];
 	if (mode === "rpc") {
 		benchmarkArgs.push("--mode", "rpc");
 	}
 
+	if (runtime === "bun") {
+		const args = [];
+		if (cpuProfile) {
+			args.push("--cpu-prof", `--cpu-prof-dir=${profileDir}`, `--cpu-prof-name=${profileName}`);
+		}
+		args.push(srcCliPath, ...benchmarkArgs);
+		return {
+			executable: "bun",
+			args,
+		};
+	}
+
 	const args = [];
 	if (cpuProfile) {
-		args.push("--cpu-prof", `--cpu-prof-dir=${profileDir}`);
+		args.push("--cpu-prof", `--cpu-prof-dir=${profileDir}`, `--cpu-prof-name=${profileName}`);
 	}
-	args.push(entryPath, ...benchmarkArgs);
+	args.push(nodeEntryPath, ...benchmarkArgs);
 	return {
-		executable: runtime === "bun" ? "bun" : process.execPath,
+		executable: process.execPath,
 		args,
 	};
 }
 
 function createBenchmarkEnv(options, isolatedAgentDir) {
 	const env = { ...process.env, PI_TIMING: "1" };
-	delete env[startupBenchmarkEnvName];
 	if (options.agentDir) {
 		env[agentDirEnvName] = options.agentDir;
 	} else if (isolatedAgentDir) {
@@ -395,61 +397,46 @@ function createBenchmarkEnv(options, isolatedAgentDir) {
 	return env;
 }
 
-function collectProfiles(profileDir) {
-	if (!profileDir) return [];
-	const paths = readdirSync(profileDir).filter((name) => name.endsWith(".cpuprofile")).sort();
-	if (paths.length === 0) throw new Error(`No CPU profiles were written: ${profileDir}`);
-	return paths.map((name) => join(profileDir, name));
-}
-
-export async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
+async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
 	const runNumber = runIndex + 1;
 	const suffix = String(runNumber).padStart(3, "0");
-	const runProfileDir = options.cpuProfile ? mkdtempSync(join(profileDir, `${options.label}-${suffix}-`)) : undefined;
+	const profileName = `${options.label}-${suffix}.cpuprofile`;
 	const tempRoot = options.isolatedAgentDir ? mkdtempSync(join(tmpdir(), "pi-startup-benchmark-")) : undefined;
 	const isolatedAgentDir = tempRoot ? join(tempRoot, "agent") : undefined;
 	if (isolatedAgentDir) {
 		mkdirSync(isolatedAgentDir, { recursive: true });
 	}
 
-	const command = getRuntimeCommand(runtime, "tui", runProfileDir, options.cpuProfile, options.entry);
-	const startedAt = performance.now();
+	const nodeEntryPath = options.bundle ? bundledDistCliPath : distCliPath;
+	const command = getRuntimeCommand(runtime, "tui", profileDir, profileName, options.cpuProfile, nodeEntryPath);
 	const child = spawn(command.executable, command.args, {
-		cwd: options.cwd,
+		cwd: packageDir,
 		env: createBenchmarkEnv(options, isolatedAgentDir),
 		stdio: ["inherit", "inherit", "pipe"],
 		shell: process.platform === "win32" && runtime === "bun",
 	});
 
 	let stderr = "";
-	let stderrBuffer = "";
-	let readyElapsedMs;
 	child.stderr.setEncoding("utf8");
 	child.stderr.on("data", (chunk) => {
 		stderr += chunk;
-		stderrBuffer = splitLines(stderrBuffer + chunk, (line) => {
-			if (line === "PI_STARTUP_READY" && readyElapsedMs === undefined) {
-				readyElapsedMs = performance.now() - startedAt;
-			}
-		});
 	});
+
+	const startedAt = performance.now();
 	const exitCode = await waitForExit(child, `Benchmark ${measuredIndex === undefined ? `warmup ${runNumber}` : `run ${measuredIndex}`}`);
-	const exitElapsedMs = performance.now() - startedAt;
+	const elapsedMs = performance.now() - startedAt;
 
 	try {
 		if (exitCode !== 0) {
 			throw new Error(stderr.trim() || `Benchmark child exited with code ${exitCode}`);
 		}
 
-		if (readyElapsedMs === undefined) {
-			throw new Error("TUI benchmark did not report PI_STARTUP_READY; use a CLI with startup readiness instrumentation.");
+		const profilePath = options.cpuProfile ? join(profileDir, profileName) : undefined;
+		if (profilePath && !existsSync(profilePath)) {
+			throw new Error(`CPU profile was not written: ${profilePath}`);
 		}
-		return {
-			elapsedMs: readyElapsedMs,
-			exitElapsedMs,
-			profilePaths: collectProfiles(runProfileDir),
-			timings: parseStartupTimings(stderr),
-		};
+
+		return { elapsedMs, profilePath, timings: parseStartupTimings(stderr) };
 	} finally {
 		if (tempRoot) {
 			rmSync(tempRoot, { recursive: true, force: true });
@@ -457,7 +444,7 @@ export async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, opt
 	}
 }
 
-function splitLines(buffer, onLine) {
+function splitJsonLines(buffer, onLine) {
 	let remaining = buffer;
 	while (true) {
 		const newlineIndex = remaining.indexOf("\n");
@@ -470,20 +457,20 @@ function splitLines(buffer, onLine) {
 	}
 }
 
-export async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
+async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
 	const runNumber = runIndex + 1;
 	const suffix = String(runNumber).padStart(3, "0");
-	const runProfileDir = options.cpuProfile ? mkdtempSync(join(profileDir, `${options.label}-${suffix}-`)) : undefined;
+	const profileName = `${options.label}-${suffix}.cpuprofile`;
 	const tempRoot = options.isolatedAgentDir ? mkdtempSync(join(tmpdir(), "pi-startup-benchmark-")) : undefined;
 	const isolatedAgentDir = tempRoot ? join(tempRoot, "agent") : undefined;
 	if (isolatedAgentDir) {
 		mkdirSync(isolatedAgentDir, { recursive: true });
 	}
 
-	const command = getRuntimeCommand(runtime, "rpc", runProfileDir, options.cpuProfile, options.entry);
-	const startedAt = performance.now();
+	const nodeEntryPath = options.bundle ? bundledDistCliPath : distCliPath;
+	const command = getRuntimeCommand(runtime, "rpc", profileDir, profileName, options.cpuProfile, nodeEntryPath);
 	const child = spawn(command.executable, command.args, {
-		cwd: options.cwd,
+		cwd: packageDir,
 		env: createBenchmarkEnv(options, isolatedAgentDir),
 		stdio: ["pipe", "pipe", "pipe"],
 		shell: process.platform === "win32" && runtime === "bun",
@@ -494,10 +481,11 @@ export async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, opt
 	let readyElapsedMs;
 	let responseError;
 	const requestId = `startup-benchmark-${runNumber}`;
+	const startedAt = performance.now();
 
 	child.stdout.setEncoding("utf8");
 	child.stdout.on("data", (chunk) => {
-		stdoutBuffer = splitLines(stdoutBuffer + chunk, (line) => {
+		stdoutBuffer = splitJsonLines(stdoutBuffer + chunk, (line) => {
 			if (line.trim() === "") {
 				return;
 			}
@@ -534,7 +522,6 @@ export async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, opt
 	child.stdin.write(`${JSON.stringify({ id: requestId, type: "get_state" })}\n`);
 
 	const exitCode = await waitForExit(child, `Benchmark ${measuredIndex === undefined ? `warmup ${runNumber}` : `run ${measuredIndex}`}`);
-	const exitElapsedMs = performance.now() - startedAt;
 
 	try {
 		if (responseError) {
@@ -547,12 +534,12 @@ export async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, opt
 			throw new Error(stderr.trim() || `Benchmark child exited with code ${exitCode}`);
 		}
 
-		return {
-			elapsedMs: readyElapsedMs,
-			exitElapsedMs,
-			profilePaths: collectProfiles(runProfileDir),
-			timings: parseStartupTimings(stderr),
-		};
+		const profilePath = options.cpuProfile ? join(profileDir, profileName) : undefined;
+		if (profilePath && !existsSync(profilePath)) {
+			throw new Error(`CPU profile was not written: ${profilePath}`);
+		}
+
+		return { elapsedMs: readyElapsedMs, profilePath, timings: parseStartupTimings(stderr) };
 	} finally {
 		if (tempRoot) {
 			rmSync(tempRoot, { recursive: true, force: true });
@@ -578,9 +565,6 @@ async function main() {
 		throw new Error("--agent-dir and --isolated-agent-dir cannot be combined");
 	}
 
-	if (options.entry && options.bundle) throw new Error("--entry and --bundle cannot be combined");
-	if (options.entry) options.build = false;
-
 	if (options.mode === "tui" && (!process.stdin.isTTY || !process.stdout.isTTY)) {
 		throw new Error("TUI benchmark must be run from an interactive terminal.");
 	}
@@ -595,11 +579,15 @@ async function main() {
 	if (runtime === "node" && options.build) {
 		await runBuild(options.bundle);
 	}
+	if (runtime === "bun") {
+		process.stdout.write(
+			`Using Bun runtime with ${options.mode === "rpc" ? "packages/coding-agent/src/cli.ts --mode rpc" : "packages/coding-agent/src/cli.ts"}\n`,
+		);
+	}
 
-	const entryPath = options.entry ?? (runtime === "bun" ? srcCliPath : options.bundle ? bundledDistCliPath : distCliPath);
+	const entryPath = runtime === "bun" ? srcCliPath : options.bundle ? bundledDistCliPath : distCliPath;
 	if (
 		runtime === "node" &&
-		!options.entry &&
 		!options.bundle &&
 		!options.build &&
 		existsSync(distCliPath) &&
@@ -610,12 +598,6 @@ async function main() {
 	if (!existsSync(entryPath)) {
 		throw new Error(`CLI entrypoint not found: ${entryPath}`);
 	}
-
-	options.entry = entryPath;
-	const env = createBenchmarkEnv(options);
-	process.stdout.write(`\nTarget: ${entryPath}\nRuntime: ${runtime} (${runtime === "node" ? process.execPath : "bun"})\nCwd: ${options.cwd}\n`);
-	process.stdout.write(`Agent dir: ${options.isolatedAgentDir ? "temporary per run" : env[agentDirEnvName] ?? "default (~/.pi/agent)"}\nPI_OFFLINE=${env.PI_OFFLINE ?? "(unset)"} PI_SKIP_VERSION_CHECK=${env.PI_SKIP_VERSION_CHECK ?? "(unset)"}\nCPU profiling: ${options.cpuProfile ? "enabled (adds overhead)" : "disabled"}\n`);
-	process.stdout.write(`Readiness: ${options.mode === "tui" ? "InteractiveMode.init complete (awaited lifecycle handlers and startup render); terminal drain: 150ms after ready" : "successful get_state response; no terminal drain"}\nInitialization spans exclude process launch/imports; exit includes post-ready work and shutdown.\n`);
 
 	mkdirSync(profileDir, { recursive: true });
 
@@ -632,7 +614,7 @@ async function main() {
 		});
 
 		process.stdout.write(
-			`[${measuredIndex === undefined ? `warmup ${runIndex + 1}` : `run ${measuredIndex}`}] ready=${formatMs(result.elapsedMs)} exit=${formatMs(result.exitElapsedMs)} after-ready=${formatMs(result.exitElapsedMs - result.elapsedMs)}\n`,
+			`[${measuredIndex === undefined ? `warmup ${runIndex + 1}` : `run ${measuredIndex}`}] elapsed=${formatMs(result.elapsedMs)}\n`,
 		);
 
 		if (measuredIndex !== undefined) {
@@ -652,13 +634,12 @@ async function main() {
 		process.stdout.write("\nResult\n");
 		process.stdout.write(`  runtime:          ${runtime}${options.bundle ? " (bundle)" : ""}\n`);
 		process.stdout.write(`  mode:             ${options.mode}\n`);
-		process.stdout.write(`  process-to-ready: ${formatMs(measuredRuns[0].elapsedMs)}\n`);
-		process.stdout.write(`  process-to-exit:  ${formatMs(measuredRuns[0].exitElapsedMs)}\n`);
+		process.stdout.write(`  elapsed:          ${formatMs(measuredRuns[0].elapsedMs)}\n`);
 		for (const [label, summary] of timingSummaries.entries()) {
 			process.stdout.write(`  ${label}: ${formatMs(summary.median)}\n`);
 		}
-		if (options.cpuProfile) {
-			for (const path of maxElapsedRun.profilePaths) process.stdout.write(`  slowest run profile: ${toDisplayPath(path)}\n`);
+		if (options.cpuProfile && maxElapsedRun.profilePath) {
+			process.stdout.write(`  selected profile: ${toDisplayPath(maxElapsedRun.profilePath)}\n`);
 			process.stdout.write(`  profiles dir:     ${toDisplayPath(profileDir)}\n`);
 		}
 		process.stdout.write(`METRIC startup_time_ms=${measuredRuns[0].elapsedMs.toFixed(1)}\n`);
@@ -671,16 +652,15 @@ async function main() {
 	process.stdout.write("\nSummary\n");
 	process.stdout.write(`  runtime:          ${runtime}${options.bundle ? " (bundle)" : ""}\n`);
 	process.stdout.write(`  mode:             ${options.mode}\n`);
-	process.stdout.write(`  ready min:        ${formatMs(elapsedSummary.min)}\n`);
-	process.stdout.write(`  ready median:     ${formatMs(elapsedSummary.median)}\n`);
-	process.stdout.write(`  ready avg:        ${formatMs(elapsedSummary.avg)}\n`);
-	process.stdout.write(`  ready max:        ${formatMs(elapsedSummary.max)}\n`);
-	process.stdout.write(`  exit median:      ${formatMs(summarize(measuredRuns.map((run) => run.exitElapsedMs)).median)}\n`);
+	process.stdout.write(`  elapsed min:      ${formatMs(elapsedSummary.min)}\n`);
+	process.stdout.write(`  elapsed median:   ${formatMs(elapsedSummary.median)}\n`);
+	process.stdout.write(`  elapsed avg:      ${formatMs(elapsedSummary.avg)}\n`);
+	process.stdout.write(`  elapsed max:      ${formatMs(elapsedSummary.max)}\n`);
 	for (const [label, summary] of timingSummaries.entries()) {
 		process.stdout.write(`  ${label} median: ${formatMs(summary.median)}\n`);
 	}
-	if (options.cpuProfile) {
-		for (const path of maxElapsedRun.profilePaths) process.stdout.write(`  slowest run profile: ${toDisplayPath(path)}\n`);
+	if (options.cpuProfile && maxElapsedRun.profilePath) {
+		process.stdout.write(`  selected profile: ${toDisplayPath(maxElapsedRun.profilePath)}\n`);
 		process.stdout.write(`  profiles dir:     ${toDisplayPath(profileDir)}\n`);
 	}
 	process.stdout.write(`METRIC startup_time_ms=${elapsedSummary.median.toFixed(1)}\n`);
@@ -689,10 +669,8 @@ async function main() {
 	}
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-	main().catch((error) => {
-		const message = error instanceof Error ? error.message : String(error);
-		console.error(message);
-		process.exit(1);
-	});
-}
+main().catch((error) => {
+	const message = error instanceof Error ? error.message : String(error);
+	console.error(message);
+	process.exit(1);
+});

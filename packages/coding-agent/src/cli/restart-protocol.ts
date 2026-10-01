@@ -1,7 +1,5 @@
 import { connect } from "node:net";
 import { isAbsolute, resolve } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { SessionCheckpoint } from "../core/checkpoint.ts";
 
 export const RESTART_SOCKET_ENV = "PI_RESTART_SOCKET";
 export const RESTART_HANDOFF_ENV = "PI_RESTART_HANDOFF";
@@ -10,85 +8,69 @@ export const MAX_RESTART_BYTES = 64 * 1024;
 
 export interface RestartRequest {
 	message?: string;
-	/** Built package directory; pins this worker for later restarts. Omitted keeps a pin or follows the original installation. */
 	runtime?: string;
-	/** Replace the explicit CLI extension list. Omitted means preserve it. */
 	extensions?: string[];
 	sessionId?: string;
-	/** Trusted offline Node program, invoked once after final native capture. */
-	checkpointTransform?: string;
 }
 
-export interface RestartCheckpoint {
+export interface RestartSession {
 	sessionFile: string;
 	sessionId: string;
-	cwd: string;
-	leafId: string | null;
-	model?: { provider: string; id: string };
-	thinkingLevel: ThinkingLevel;
-	activeTools: string[];
-	knownTools: string[];
-	/** Nested here because already-loaded launchers forward the complete checkpoint object. */
-	files?: {
-		original: { path: string; sha256: string };
-		candidate?: { path: string; sha256: string };
-		/** The same trusted program, used only to restore prepared prior extension artifacts. */
-		rollback?: string;
-		/** Native-owned ordinary capture; unlink only these matching identities after accepted readiness. */
-		cleanup?: {
-			directory: { dev: number; ino: number };
-			original: { dev: number; ino: number };
-		};
-	};
 }
 
-export interface RestartHandoff {
-	checkpoint: RestartCheckpoint;
-	/** Effective registry configuration, including restrictions restored only from a working-session artifact. */
-	toolConfiguration?: SessionCheckpoint["toolConfiguration"];
+export interface RestartHandoff extends RestartSession {
 	message?: string;
 	failure?: string;
 }
 
 export type RestartWorkerMessage =
 	| { type: "pi:ready" }
-	| {
-			type: "pi:restart";
-			request: RestartRequest;
-			checkpoint: RestartCheckpoint;
-			toolConfiguration?: SessionCheckpoint["toolConfiguration"];
-			args: string[];
-			extensions: string[];
-	  };
+	| { type: "pi:restart"; request: RestartRequest; session: RestartSession };
+
+export function parseRestartHandoff(encoded: string): RestartHandoff {
+	const value: unknown = JSON.parse(encoded);
+	if (
+		!value ||
+		typeof value !== "object" ||
+		!("sessionFile" in value) ||
+		typeof value.sessionFile !== "string" ||
+		!("sessionId" in value) ||
+		typeof value.sessionId !== "string"
+	) {
+		throw new Error("This Pi was started by an older Pi launcher; quit and run pi -c to resume on the new runtime.");
+	}
+	const fields = value as Record<string, unknown>;
+	for (const key of ["message", "failure"] as const) {
+		if (fields[key] !== undefined && typeof fields[key] !== "string")
+			throw new Error(`Invalid restart handoff ${key}`);
+	}
+	return value as RestartHandoff;
+}
 
 export function parseRestartRequest(value: unknown): RestartRequest {
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
+	if (!value || typeof value !== "object" || Array.isArray(value))
 		throw new Error("Restart request must be an object");
-	}
 	const request = value as Record<string, unknown>;
 	for (const key of Object.keys(request)) {
-		if (!["message", "runtime", "extensions", "sessionId", "checkpointTransform"].includes(key)) {
+		if (!["message", "runtime", "extensions", "sessionId"].includes(key))
 			throw new Error(`Unknown restart option: ${key}`);
-		}
 	}
-	for (const key of ["message", "runtime", "sessionId", "checkpointTransform"] as const) {
+	for (const key of ["message", "runtime", "sessionId"] as const) {
 		if (request[key] !== undefined && (typeof request[key] !== "string" || request[key].length > 8192)) {
 			throw new Error(`Restart ${key} must be a string of at most 8192 characters`);
 		}
 	}
-	if (request.runtime !== undefined && (typeof request.runtime !== "string" || !isAbsolute(request.runtime))) {
+	if (request.runtime !== undefined && !isAbsolute(request.runtime as string))
 		throw new Error("Restart runtime must be an absolute package directory");
-	}
-	if (request.checkpointTransform !== undefined && !isAbsolute(request.checkpointTransform as string)) {
-		throw new Error("Restart checkpoint transform must be an absolute Node program");
-	}
 	if (
 		request.extensions !== undefined &&
 		(!Array.isArray(request.extensions) ||
 			request.extensions.length > 128 ||
-			request.extensions.some((path: unknown) => typeof path !== "string" || !isAbsolute(path)))
+			request.extensions.some(
+				(path: unknown) => typeof path !== "string" || (!isAbsolute(path) && !path.startsWith("builtin:")),
+			))
 	) {
-		throw new Error("Restart extensions must be an array of absolute local paths");
+		throw new Error("Restart extensions must be absolute local paths or builtin:<name>");
 	}
 	if (Buffer.byteLength(JSON.stringify(request)) > MAX_RESTART_BYTES) throw new Error("Restart request is too large");
 	return request as RestartRequest;
@@ -102,16 +84,15 @@ export function parseRestartCommand(args: string[], cwd: string): RestartRequest
 		if (value === undefined) throw new Error(`Missing value for ${flag}`);
 		if (flag === "--message") request.message = value;
 		else if (flag === "--runtime") request.runtime = resolve(cwd, value);
-		else if (flag === "--checkpoint-transform") request.checkpointTransform = value;
 		else if (flag === "--extension" || flag === "-e") {
 			request.extensions ??= [];
-			request.extensions.push(resolve(cwd, value));
+			request.extensions.push(value.startsWith("builtin:") ? value : resolve(cwd, value));
 		} else throw new Error(`Unknown restart option: ${flag}`);
 	}
 	return parseRestartRequest(request);
 }
 
-/** Acknowledges queueing only; the worker must settle before it can commit a restart. */
+/** The reply acknowledges queueing, not successful activation. */
 export async function requestRestart(socketPath: string, request: RestartRequest): Promise<string> {
 	parseRestartRequest(request);
 	return new Promise((resolvePromise, reject) => {
@@ -129,9 +110,8 @@ export async function requestRestart(socketPath: string, request: RestartRequest
 		socket.on("end", () => {
 			try {
 				const result: unknown = JSON.parse(response);
-				if (!result || typeof result !== "object" || !("message" in result) || typeof result.message !== "string") {
+				if (!result || typeof result !== "object" || !("message" in result) || typeof result.message !== "string")
 					throw new Error("Invalid restart response");
-				}
 				if (!("ok" in result) || result.ok !== true) throw new Error(result.message);
 				resolvePromise(result.message);
 			} catch (error) {

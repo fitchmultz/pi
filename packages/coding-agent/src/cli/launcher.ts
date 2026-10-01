@@ -1,11 +1,12 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { constants } from "node:os";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
-import { getActiveManagedInstallRoot } from "./managed-install.ts";
+import { basename, dirname, extname, join, resolve } from "node:path";
+import { parseArgs } from "./args.ts";
 import {
 	MANAGED_CLI_ENV,
 	parseRestartCommand,
+	parseRestartRequest,
 	RESTART_HANDOFF_ENV,
 	RESTART_SOCKET_ENV,
 	type RestartHandoff,
@@ -16,13 +17,7 @@ import {
 interface Launch {
 	worker: string;
 	args: string[];
-	/** A successful --runtime selection stays pinned until another explicit selection. */
-	selectedRuntime?: string;
-}
-
-interface InstallationSelector {
-	launcherPath: string;
-	managedRoot?: string;
+	pinnedWorker?: string;
 }
 
 export function getCliWorkerPath(launcherPath: string): string {
@@ -32,75 +27,67 @@ export function getCliWorkerPath(launcherPath: string): string {
 	);
 }
 
+/** Also used by the fork installer's runtime smoke test. */
 export function getRestartRuntimeWorker(runtime: string): string {
 	const worker = realpathSync(join(runtime, "dist", "bundle", "cli-worker.js"));
 	if (!statSync(worker).isFile()) throw new Error("Restart runtime must contain dist/bundle/cli-worker.js");
 	return worker;
 }
 
-function getManagedRootForInvocation(invocationPath: string, concreteLauncher: string): string | undefined {
-	const root = process.env.PI_MANAGED_INSTALL_ROOT?.trim();
-	if (!root) return undefined;
-	// The install.sh wrapper execs this concrete release bin with the root in its environment.
-	// Direct release CLI files and source entries do not opt into its moving version pointer.
-	const parts = relative(join(resolve(root), "releases"), invocationPath).split(sep);
-	if (
-		parts.length !== 4 ||
-		!parts[0] ||
-		parts[0] === "." ||
-		parts[0] === ".." ||
-		!/^[0-9A-Za-z._+-]+$/.test(parts[0]) ||
-		parts[1] !== "node_modules" ||
-		parts[2] !== ".bin" ||
-		parts[3] !== "pi"
-	) {
-		return undefined;
+/** Use the CLI parser's token boundaries; startup messages and attachments are never replayed. */
+export function getRestartArgs(args: string[], extensions?: string[]): string[] {
+	const result: string[] = [];
+	const replaced = new Set([
+		"--session",
+		"--session-id",
+		"--no-session",
+		"--continue",
+		"-c",
+		"--resume",
+		"-r",
+		"--fork",
+		"--name",
+		"-n",
+		"--thinking",
+	]);
+	// The resumed session restores its current model; a runtime --api-key still needs the launch model.
+	if (parseArgs(args).apiKey === undefined) {
+		replaced.add("--model");
+		replaced.add("--provider");
 	}
-	return getActiveManagedInstallRoot(concreteLauncher, root);
+	if (extensions) {
+		replaced.add("--extension");
+		replaced.add("-e");
+	}
+	parseArgs(args, (option, tokens) => {
+		if (!replaced.has(option)) result.push(...tokens);
+	});
+	if (extensions) result.push(...extensions.flatMap((path) => ["-e", path]));
+	return result;
 }
 
-function resolveSelectedWorker(selector: InstallationSelector): string {
-	let launcherPath = selector.launcherPath;
-	if (selector.managedRoot) {
-		const currentFile = join(selector.managedRoot, "current-version");
-		const version = readFileSync(currentFile, "utf8").split("\n", 1)[0];
-		if (!version || version === "." || version === ".." || !/^[0-9A-Za-z._+-]+$/.test(version)) {
-			throw new Error(`Managed Pi version file is invalid: ${currentFile}`);
-		}
-		launcherPath = join(selector.managedRoot, "releases", version, "node_modules", ".bin", "pi");
-	}
-	// Resolve the launcher first: an npm bin/pi symlink is not beside cli-worker.js.
-	return realpathSync(getCliWorkerPath(realpathSync(launcherPath)));
-}
-
-/** Only this parent owns process replacement. Normal exits and signals never restart a worker. */
+/** Only this parent replaces workers. Exits and signals do not implicitly request a restart. */
 export async function superviseCli(
 	worker: string,
 	args: string[],
-	options: {
-		startupTimeoutMs?: number;
-		env?: NodeJS.ProcessEnv;
-		execArgv?: string[];
-		selector?: InstallationSelector;
-	} = {},
+	options: { invocationPath?: string; startupTimeoutMs?: number; env?: NodeJS.ProcessEnv; execArgv?: string[] } = {},
 ): Promise<number> {
-	const initialWorker = realpathSync(worker);
-	let launch: Launch = { worker: initialWorker, args };
+	let launch: Launch = { worker: realpathSync(worker), args };
 	let fallback: Launch | undefined;
 	let handoff: RestartHandoff | undefined;
 	let child: ChildProcess | undefined;
 	let stopping: NodeJS.Signals | undefined;
 	const env = { ...(options.env ?? process.env) };
-	// Nested Pi processes must not inherit the outer session's restart endpoint or continuation.
 	delete env[RESTART_SOCKET_ENV];
 	delete env[RESTART_HANDOFF_ENV];
 	delete env[MANAGED_CLI_ENV];
 	const signals: NodeJS.Signals[] =
 		process.platform === "win32" ? ["SIGINT", "SIGTERM"] : ["SIGINT", "SIGTERM", "SIGHUP"];
-	const signalHandlers = signals.map((signal) => {
+	const removers = signals.map((signal) => {
 		const handler = () => {
 			stopping = signal;
-			child?.kill(signal);
+			// The terminal already delivers SIGINT/SIGHUP to the foreground process group.
+			if (signal === "SIGTERM") child?.kill(signal);
 		};
 		process.on(signal, handler);
 		return () => process.off(signal, handler);
@@ -110,8 +97,8 @@ export async function superviseCli(
 	try {
 		while (!stopping) {
 			let ready = false;
-			let restart: Extract<RestartWorkerMessage, { type: "pi:restart" }> | undefined;
 			let timedOut = false;
+			let restart: Extract<RestartWorkerMessage, { type: "pi:restart" }> | undefined;
 			let timeout: NodeJS.Timeout | undefined;
 			let killTimeout: NodeJS.Timeout | undefined;
 			child = spawn(process.execPath, [...(options.execArgv ?? process.execArgv), launch.worker, ...launch.args], {
@@ -122,128 +109,102 @@ export async function superviseCli(
 					...(handoff ? { [RESTART_HANDOFF_ENV]: JSON.stringify(handoff) } : {}),
 				},
 			});
-			const workerProcess = child;
-			workerProcess.on("message", (message: unknown) => {
-				if (!message || typeof message !== "object" || !("type" in message)) return;
-				if (message.type === "pi:ready" && !timedOut && !stopping) {
+			const current = child;
+			current.on("message", (value: unknown) => {
+				if (!value || typeof value !== "object" || !("type" in value) || stopping || timedOut) return;
+				if (value.type === "pi:ready") {
 					ready = true;
 					fallback = undefined;
 					clearTimeout(timeout);
-					const files = handoff?.checkpoint.files;
-					if (files?.cleanup && !files.candidate && !files.rollback) {
-						try {
-							const directory = dirname(files.original.path);
-							const dir = lstatSync(directory);
-							const file = lstatSync(files.original.path);
-							if (
-								dir.isDirectory() &&
-								file.isFile() &&
-								dir.dev === files.cleanup.directory.dev &&
-								dir.ino === files.cleanup.directory.ino &&
-								file.dev === files.cleanup.original.dev &&
-								file.ino === files.cleanup.original.ino
-							) {
-								unlinkSync(files.original.path);
-								rmdirSync(directory);
-							}
-						} catch {
-							// Leave changed or inaccessible files and nonempty directories alone; admission already succeeded.
-						}
+				} else if (value.type === "pi:restart" && ready && "session" in value && "request" in value) {
+					try {
+						const session = value.session;
+						if (
+							!session ||
+							typeof session !== "object" ||
+							!("sessionFile" in session) ||
+							typeof session.sessionFile !== "string" ||
+							!("sessionId" in session) ||
+							typeof session.sessionId !== "string"
+						)
+							return;
+						restart = {
+							type: "pi:restart",
+							session: { sessionFile: session.sessionFile, sessionId: session.sessionId },
+							request: parseRestartRequest(value.request),
+						};
+					} catch {
+						/* Ignore malformed IPC from a worker. */
 					}
-				} else if (message.type === "pi:restart" && ready && !stopping) {
-					restart = message as Extract<RestartWorkerMessage, { type: "pi:restart" }>;
 				}
 			});
-			// Initial startup may involve login/trust dialogs. Only an explicitly requested replacement has a deadline.
 			if (handoff) {
 				timeout = setTimeout(() => {
 					timedOut = true;
-					workerProcess.kill("SIGTERM");
-					killTimeout = setTimeout(() => workerProcess.kill("SIGKILL"), 2000);
-					killTimeout.unref();
+					current.kill("SIGTERM");
+					killTimeout = setTimeout(() => current.kill("SIGKILL"), 2000);
 				}, options.startupTimeoutMs ?? 60_000);
-				timeout.unref();
 			}
 			const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolvePromise) => {
-				workerProcess.on("error", (error) => {
+				current.on("error", (error) => {
 					console.error(`Pi worker failed to start: ${error.message}`);
 					resolvePromise({ code: 1, signal: null });
 				});
-				workerProcess.on("exit", (code, signal) => resolvePromise({ code, signal }));
+				current.on("exit", (code, signal) => resolvePromise({ code, signal }));
 			});
 			clearTimeout(timeout);
 			clearTimeout(killTimeout);
 			child = undefined;
-			if (stopping) return 128 + constants.signals[stopping];
+			const exitCode = result.signal ? 128 + constants.signals[result.signal] : timedOut ? 1 : (result.code ?? 1);
+			if (stopping) return exitCode;
 			if (restart && result.code === 0 && !result.signal) {
-				const checkpoint = restart.checkpoint;
-				const resumeArgs = [
-					...restart.args,
-					"--session",
-					checkpoint.sessionFile,
-					"--session-cwd",
-					checkpoint.cwd,
-					"--thinking",
-					checkpoint.thinkingLevel,
-					...(checkpoint.model
-						? [
-								"--provider",
-								checkpoint.model.provider,
-								"--model",
-								`${checkpoint.model.provider}/${checkpoint.model.id}`,
-							]
-						: []),
-				];
 				const previous: Launch = {
-					worker: launch.worker,
-					args: [...resumeArgs, ...restart.extensions.flatMap((path) => ["-e", path])],
-					selectedRuntime: launch.selectedRuntime,
+					...launch,
+					args: [...getRestartArgs(launch.args), "--session", restart.session.sessionFile],
 				};
+				handoff = { ...restart.session, message: restart.request.message };
 				try {
-					const extensions = restart.request.extensions ?? restart.extensions;
-					const selectedRuntime = restart.request.runtime
+					const pinnedWorker = restart.request.runtime
 						? getRestartRuntimeWorker(restart.request.runtime)
-						: launch.selectedRuntime;
+						: launch.pinnedWorker;
 					launch = {
 						worker:
-							selectedRuntime ?? (options.selector ? resolveSelectedWorker(options.selector) : initialWorker),
-						args: [...resumeArgs, ...extensions.flatMap((path) => ["-e", path])],
-						selectedRuntime,
+							pinnedWorker ??
+							(options.invocationPath
+								? realpathSync(getCliWorkerPath(realpathSync(options.invocationPath)))
+								: launch.worker),
+						args: [
+							...getRestartArgs(launch.args, restart.request.extensions),
+							"--session",
+							restart.session.sessionFile,
+						],
+						pinnedWorker,
 					};
 					fallback = previous;
-					handoff = {
-						checkpoint: restart.checkpoint,
-						toolConfiguration: restart.toolConfiguration,
-						message: restart.request.message,
-					};
 					console.error("Restarting Pi; resuming the same session.");
 				} catch (error) {
 					launch = previous;
-					handoff = {
-						checkpoint: restart.checkpoint,
-						toolConfiguration: restart.toolConfiguration,
-						message: restart.request.message,
-						failure: `Could not select the updated runtime: ${error instanceof Error ? error.message : String(error)}`,
-					};
+					fallback = undefined;
+					handoff.failure = `Could not select the updated runtime: ${error instanceof Error ? error.message : String(error)}`;
 					console.error(handoff.failure);
 				}
 				continue;
 			}
-			if (!ready && fallback && handoff && (timedOut || result.code !== 0 || result.signal)) {
+			if (!ready && fallback && handoff) {
 				const failure = timedOut
-					? "Updated Pi did not become ready within the startup deadline."
-					: "Updated Pi failed during startup.";
-				console.error(`${failure} Returning to the previous launch configuration.`);
+					? `Updated Pi did not become ready within ${(options.startupTimeoutMs ?? 60_000) / 1000} seconds.`
+					: "Updated Pi exited before becoming ready.";
+				console.error(`${failure} Returning to the previous launch configuration once.`);
 				launch = fallback;
 				fallback = undefined;
 				handoff = { ...handoff, failure };
 				continue;
 			}
-			return result.signal ? 128 + constants.signals[result.signal] : (result.code ?? 1);
+			return exitCode;
 		}
-		return 1;
+		return stopping ? 128 + constants.signals[stopping] : 1;
 	} finally {
-		for (const remove of signalHandlers) remove();
+		for (const remove of removers) remove();
 		process.off("exit", killChild);
 	}
 }
@@ -251,24 +212,28 @@ export async function superviseCli(
 export async function runCliLauncher(args: string[], launcherPath: string): Promise<number> {
 	if (args[0] === "restart") {
 		if (args.length === 2 && (args[1] === "--help" || args[1] === "-h")) {
-			console.log(
-				"Usage: pi restart [--message <continuation>] [--runtime <built-package-dir>] [-e <extension> ...] [--checkpoint-transform <absolute-node-program>]\nWithout --runtime, Pi follows the original installation selector or keeps the last explicit runtime. --runtime pins a built package for later restarts. Omit -e to keep the current explicit extensions; supplying -e replaces that list. --checkpoint-transform explicitly runs one trusted offline transform after final shutdown capture. Run inside a managed Pi shell tool.",
-			);
+			console.log(`Usage: pi restart [--message <text>] [-e <extension> ...] [--runtime <package-dir>]
+Queue a restart from a managed interactive Pi shell tool; activation waits for final idle.
+  --message <text>         Submit a labelled continuation once after startup.
+  -e, --extension <path>   Replace explicit extensions; omit to preserve them.
+  --runtime <dir>          Pin dist/bundle/cli-worker.js for later restarts.
+  -h, --help              Show this help.
+Without --runtime, keep a pin or re-resolve the original invocation symlink.
+Keep the previous runtime and extensions intact for one-shot startup rollback.
+Examples:
+  pi restart --message "Verify the change and continue"
+  pi restart -e /staged/extension.ts --runtime /staged/pi-coding-agent
+Exit codes: 0 = queued (or help); 1 = invalid options, unavailable session, or refused request.`);
 			return 0;
 		}
 		const socket = process.env[RESTART_SOCKET_ENV];
-		if (!socket) throw new Error("This process has no managed Pi session. Start the updated pi CLI first.");
+		if (!socket)
+			throw new Error("pi restart requires a managed interactive Pi session; run it from that Pi's shell tool.");
 		const request = parseRestartCommand(args.slice(1), process.cwd());
 		request.sessionId = process.env.PI_SESSION_ID;
 		console.log(await requestRestart(socket, request));
 		return 0;
 	}
 	const invocationPath = resolve(launcherPath);
-	const concreteLauncher = realpathSync(invocationPath);
-	return superviseCli(getCliWorkerPath(concreteLauncher), args, {
-		selector: {
-			launcherPath: invocationPath,
-			managedRoot: getManagedRootForInvocation(invocationPath, concreteLauncher),
-		},
-	});
+	return superviseCli(getCliWorkerPath(realpathSync(invocationPath)), args, { invocationPath });
 }

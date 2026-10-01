@@ -1,14 +1,7 @@
-import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
-import { createHarness } from "./suite/harness.ts";
 
 type EmitEvent = SessionShutdownEvent;
 
@@ -18,10 +11,9 @@ type FakeExtensionRunner = {
 };
 
 type FakeSession = {
-	sessionManager: SessionManager;
-	agent: { subscribe: ReturnType<typeof vi.fn> };
-	waitForIdle: () => Promise<void>;
-	state: { messages: AgentMessage[] };
+	sessionManager: { getHeader: () => object | undefined };
+	agent: { waitForIdle: () => Promise<void>; subscribe: ReturnType<typeof vi.fn> };
+	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
 	bindExtensions: ReturnType<typeof vi.fn>;
 	subscribe: ReturnType<typeof vi.fn>;
@@ -63,23 +55,6 @@ function createAssistantMessage(options?: {
 	};
 }
 
-function captureMessages(session: FakeSession): (message: AgentMessage) => void {
-	let listener: ((event: { type: "message_end"; message: AgentMessage }) => void) | undefined;
-	session.subscribe.mockImplementation((next) => {
-		listener = next;
-		return () => {};
-	});
-	return (message) => listener?.({ type: "message_end", message });
-}
-
-const contextMarker: AgentMessage = {
-	role: "custom",
-	customType: "context",
-	content: "Fresh context",
-	display: true,
-	timestamp: Date.now(),
-};
-
 function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost {
 	const extensionRunner: FakeExtensionRunner = {
 		hasHandlers: (eventType: string) => eventType === "session_shutdown",
@@ -87,13 +62,10 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 	};
 
 	const state = { messages: [assistantMessage] };
-	const sessionManager = SessionManager.inMemory();
-	sessionManager.appendMessage(assistantMessage);
 
 	const session: FakeSession = {
-		sessionManager,
-		agent: { subscribe: vi.fn(() => () => {}) },
-		waitForIdle: async () => {},
+		sessionManager: { getHeader: () => undefined },
+		agent: { waitForIdle: async () => {}, subscribe: vi.fn(() => () => {}) },
 		state,
 		extensionRunner,
 		bindExtensions: vi.fn(async () => {}),
@@ -136,176 +108,6 @@ describe("runPrintMode", () => {
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
 
-	it.each(["compaction", "custom_message"] as const)(
-		"prints the completed response after public %s adds trailing context",
-		async (type) => {
-			const harness = await createHarness({
-				tools: [],
-				settings: { compaction: { enabled: false }, retry: { enabled: false } },
-				extensionFactories: [
-					(pi) => {
-						pi.on("turn_end", () => ({
-							entries:
-								type === "compaction"
-									? [{ type, summary: "", firstKeptEntryId: null }]
-									: [{ type, customType: "after-end", content: "extra context", display: false }],
-						}));
-					},
-				],
-			});
-			onTestFinished(() => harness.cleanup());
-			harness.setResponses([fauxAssistantMessage("done")]);
-			const runtime = new AgentSessionRuntime(
-				harness.session,
-				{
-					cwd: harness.tempDir,
-					agentDir: harness.tempDir,
-					modelRuntime: harness.session.modelRuntime,
-					settingsManager: harness.settingsManager,
-					resourceLoader: harness.session.resourceLoader,
-					diagnostics: [],
-				},
-				async () => {
-					throw new Error("This prompt must not replace the session");
-				},
-			);
-			const stdout = vi.spyOn(process.stdout, "write");
-
-			const exitCode = await runPrintMode(runtime, { mode: "text", initialMessage: "Say done" });
-
-			expect(exitCode).toBe(0);
-			expect(harness.session.messages.at(-1)?.role).toBe(type === "compaction" ? "compactionSummary" : "custom");
-			expect(stdout.mock.calls.map(([chunk]) => String(chunk)).join("")).toBe("done\n");
-			expect(harness.faux.state.callCount).toBe(1);
-		},
-	);
-
-	it.each([false, true])("prefers the selected branch with compacted=%s after a later prompt", async (compacted) => {
-		const selectedBranch = createAssistantMessage({ text: "selected branch" });
-		const laterBranch = createAssistantMessage({ text: "later branch" });
-		const runtimeHost = createRuntimeHost(selectedBranch);
-		const { session } = runtimeHost;
-		const emitMessage = captureMessages(session);
-		let promptCount = 0;
-		session.prompt.mockImplementation(async () => {
-			if (promptCount++ === 0) {
-				emitMessage(laterBranch);
-				session.state.messages = [laterBranch];
-			} else {
-				session.state.messages = compacted ? [contextMarker] : [selectedBranch];
-				session.sessionManager.newSession();
-				session.sessionManager.appendMessage(selectedBranch);
-			}
-		});
-		const stdout = vi.spyOn(process.stdout, "write");
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-			initialMessage: "Generate on this branch",
-			messages: ["/tree select earlier branch"],
-		});
-
-		expect(exitCode).toBe(0);
-		expect(stdout).toHaveBeenCalledWith("selected branch\n", expect.any(Function));
-		expect(stdout).not.toHaveBeenCalledWith("later branch\n", expect.any(Function));
-	});
-
-	it("does not reuse an earlier response when a later prompt starts a new context", async () => {
-		const earlier = createAssistantMessage({ text: "earlier response" });
-		const runtimeHost = createRuntimeHost(earlier);
-		const { session } = runtimeHost;
-		const emitMessage = captureMessages(session);
-		let promptCount = 0;
-		session.prompt.mockImplementation(async () => {
-			if (promptCount++ === 0) {
-				emitMessage(earlier);
-				session.state.messages = [earlier];
-			} else {
-				session.state.messages = [contextMarker];
-				session.sessionManager.newSession();
-			}
-		});
-		const stdout = vi.spyOn(process.stdout, "write");
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-			initialMessage: "Generate",
-			messages: ["Start a new context without an assistant response"],
-		});
-
-		expect(exitCode).toBe(0);
-		expect(stdout).not.toHaveBeenCalledWith("earlier response\n", expect.any(Function));
-	});
-
-	it.each(["user", "toolResult", "toolUse"] as const)(
-		"does not recover an older answer across a later %s after compaction",
-		async (role) => {
-			const earlier = createAssistantMessage({ text: "earlier response" });
-			const latest: AgentMessage =
-				role === "toolUse"
-					? createAssistantMessage({ text: "intermediate preamble", stopReason: "toolUse" })
-					: role === "user"
-						? { role, content: "new question", timestamp: Date.now() }
-						: {
-								role,
-								toolCallId: "call-1",
-								toolName: "stop",
-								content: [{ type: "text", text: "stopped" }],
-								isError: false,
-								timestamp: Date.now(),
-							};
-			const runtimeHost = createRuntimeHost(earlier);
-			runtimeHost.session.state.messages = [contextMarker];
-			runtimeHost.session.sessionManager.appendMessage(latest);
-			const stdout = vi.spyOn(process.stdout, "write");
-
-			expect(
-				await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], { mode: "text" }),
-			).toBe(0);
-			expect(stdout.mock.calls.map(([chunk]) => String(chunk)).join("")).toBe("");
-		},
-	);
-
-	it("does not print an intermediate assistant when a terminating tool leaves the branch tip", async () => {
-		const intermediate = createAssistantMessage({ text: "intermediate preamble", stopReason: "toolUse" });
-		const runtimeHost = createRuntimeHost(intermediate);
-		const { session } = runtimeHost;
-		const emitMessage = captureMessages(session);
-		session.prompt.mockImplementation(async () => {
-			emitMessage(contextMarker);
-			emitMessage(intermediate);
-			session.state.messages = [
-				contextMarker,
-				intermediate,
-				{
-					role: "toolResult",
-					toolCallId: "call-1",
-					toolName: "stop",
-					content: [{ type: "text", text: "stopped" }],
-					isError: false,
-					timestamp: Date.now(),
-				},
-			];
-			session.sessionManager.appendMessage({
-				role: "toolResult",
-				toolCallId: "call-1",
-				toolName: "stop",
-				content: [{ type: "text", text: "stopped" }],
-				isError: false,
-				timestamp: Date.now(),
-			});
-		});
-		const stdout = vi.spyOn(process.stdout, "write");
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-			initialMessage: "Stop through the tool",
-		});
-
-		expect(exitCode).toBe(0);
-		expect(stdout).not.toHaveBeenCalledWith("intermediate preamble\n", expect.any(Function));
-	});
-
 	it("emits session_shutdown in json mode", async () => {
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
 		const { session } = runtimeHost;
@@ -320,82 +122,6 @@ describe("runPrintMode", () => {
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
-
-	it("snapshots complete native aggregates synchronously before a later listener mutates them", async () => {
-		const message = createAssistantMessage({ text: "original" });
-		const runtimeHost = createRuntimeHost(message);
-		const event = { type: "agent_end", messages: [message], willRetry: false };
-		const original = JSON.parse(JSON.stringify(event));
-		let publish: (value: typeof event) => void = () => {};
-		runtimeHost.session.subscribe.mockImplementation((listener) => {
-			publish = listener;
-			return () => {};
-		});
-		runtimeHost.session.prompt.mockImplementation(async () => {
-			publish(event);
-			message.content = [{ type: "text", text: "mutated" }];
-			event.messages.length = 0;
-		});
-		const stdout = vi.spyOn(process.stdout, "write");
-		expect(
-			await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-				mode: "json",
-				initialMessage: "snapshot",
-			}),
-		).toBe(0);
-		const records = stdout.mock.calls
-			.map(([chunk]) => String(chunk))
-			.join("")
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line));
-		expect(records).toEqual([runtimeHost.session.sessionManager.getHeader(), original]);
-		expect(records[1].messages[0].timestamp).toBe(message.timestamp);
-	});
-
-	it("prints the selected answer without hydrating an unrelated >512 MiB historical message", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-print-lazy-answer-"));
-		onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
-		const path = join(directory, "session.jsonl");
-		const fd = openSync(path, "wx");
-		const timestamp = "2024-01-01T00:00:00.000Z";
-		const answer = createAssistantMessage({ text: "winning answer" });
-		const ignored = JSON.stringify({
-			type: "message",
-			id: "ignored",
-			parentId: null,
-			timestamp,
-			message: createAssistantMessage(),
-		}).split('"content":[]');
-		try {
-			writeFileSync(
-				fd,
-				`${JSON.stringify({ type: "session", version: 3, id: "fixture", timestamp, cwd: directory })}\n`,
-			);
-			writeFileSync(fd, `${ignored[0]}"content":[{"type":"text","text":"`);
-			const chunk = Buffer.alloc(1024 * 1024, 0x78);
-			for (let index = 0; index < 520; index++) writeFileSync(fd, chunk);
-			writeFileSync(fd, `"}]${ignored[1]}\n`);
-			writeFileSync(
-				fd,
-				`${JSON.stringify({ type: "message", id: "answer", parentId: "ignored", timestamp, message: answer })}\n`,
-			);
-			writeFileSync(
-				fd,
-				`${JSON.stringify({ type: "custom", id: "context", parentId: "answer", timestamp, customType: "trailing", data: {} })}\n`,
-			);
-		} finally {
-			closeSync(fd);
-		}
-		const runtimeHost = createRuntimeHost(answer);
-		runtimeHost.session.sessionManager = SessionManager.open(path);
-		runtimeHost.session.state.messages = [contextMarker];
-		const stdout = vi.spyOn(process.stdout, "write");
-		expect(await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], { mode: "text" })).toBe(
-			0,
-		);
-		expect(stdout.mock.calls.map(([chunk]) => String(chunk)).join("")).toBe("winning answer\n");
-	}, 30000);
 
 	it("emits session_shutdown and returns non-zero on assistant error", async () => {
 		const runtimeHost = createRuntimeHost(

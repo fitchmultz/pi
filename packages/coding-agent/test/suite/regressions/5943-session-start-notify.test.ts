@@ -32,6 +32,7 @@ type LoadedResourcesContext = {
 		};
 	};
 	getStartupExpansionState: () => boolean;
+	shouldShowStartupDetails: () => boolean;
 	formatDisplayPath: (resourcePath: string) => string;
 	formatContextPath: (resourcePath: string) => string;
 	getBuiltInCommandConflictDiagnostics: (extensionRunner: LoadedResourcesContext["session"]["extensionRunner"]) => [];
@@ -208,6 +209,7 @@ function createLoadedResourcesContext(): LoadedResourcesContext {
 			},
 		},
 		getStartupExpansionState: () => false,
+		shouldShowStartupDetails: () => true,
 		formatDisplayPath: (resourcePath) => resourcePath,
 		formatContextPath: (resourcePath) => resourcePath.replace("/repo/", ""),
 		getBuiltInCommandConflictDiagnostics: () => [],
@@ -377,7 +379,7 @@ describe("regression #5943: session_start transient UI", () => {
 		}
 	});
 
-	it.each(["tui", "rpc"] as const)("notifies %s after extension-code reload", async (mode) => {
+	it("runs the reload render hook before reload session_start handlers can notify", async () => {
 		const events: string[] = [];
 		const beforeSessionStart = vi.fn(() => {
 			events.push("render");
@@ -396,7 +398,7 @@ describe("regression #5943: session_start transient UI", () => {
 		try {
 			await harness.session.bindExtensions({
 				uiContext: createTestUiContext({ notify: (message) => events.push(message) }),
-				mode,
+				mode: "tui",
 			});
 			expect(events).toEqual(["start:startup", "notify:startup"]);
 

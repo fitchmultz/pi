@@ -1,10 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { type SessionInfo, SessionManager } from "../src/core/session-manager.ts";
+import type { SessionInfo } from "../src/core/session-manager.ts";
 import { filterAndSortSessions } from "../src/modes/interactive/components/session-selector-search.ts";
 
 function makeSession(
@@ -24,60 +19,6 @@ function makeSession(
 }
 
 describe("session selector search", () => {
-	it("lists and renders large conversation history under a bounded heap before any search", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-session-list-"));
-		try {
-			const output = execFileSync(
-				process.execPath,
-				[
-					"--max-old-space-size=96",
-					"--expose-gc",
-					"--import",
-					new URL("../src/experimental/source-resolver.ts", import.meta.url).href,
-					new URL("./fixtures/session-large-list.ts", import.meta.url).pathname,
-					directory,
-				],
-				{ timeout: 60_000, encoding: "utf8" },
-			);
-			const receipt = JSON.parse(output) as { bytes: number; entries: number; retainedHeap: number };
-			expect(receipt.bytes).toBeGreaterThan(128 * 1024 * 1024);
-			expect(receipt.entries).toBe(65);
-			expect(receipt.retainedHeap).toBeLessThan(96 * 1024 * 1024);
-		} finally {
-			rmSync(directory, { recursive: true, force: true });
-		}
-	}, 70_000);
-
-	it("retains cached complete snapshots and cross-message picker search beyond list previews", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-session-search-"));
-		try {
-			const manager = SessionManager.create(directory, directory);
-			const first = `${"prefix ".repeat(60)}alpha`;
-			const second = "beta reachable-needle";
-			manager.appendMessage({ role: "user", content: first, timestamp: 1 });
-			manager.appendMessage(fauxAssistantMessage(second));
-			const source = manager.getSessionFile()!;
-			const before = readFileSync(source);
-			const sessions = await SessionManager.list(directory, directory);
-			expect(sessions).toHaveLength(1);
-			expect(sessions[0]!.firstMessagePreview).toBe(first.slice(0, 256));
-			expect(sessions[0]!.firstMessage).toBe(first);
-			expect(sessions[0]!.allMessagesText).toBe(`${first} ${second}`);
-			const archive = join(directory, "archived.jsonl");
-			renameSync(source, archive);
-			expect(sessions[0]!.firstMessage).toBe(first);
-			expect(sessions[0]!.allMessagesText).toBe(`${first} ${second}`);
-			for (const query of ["reachable-needle", '"alpha beta"', "re:alpha\\s+beta"]) {
-				expect(filterAndSortSessions(sessions, query, "recent").map((session) => session.id)).toEqual([
-					manager.getSessionId(),
-				]);
-			}
-			expect(readFileSync(archive)).toEqual(before);
-		} finally {
-			rmSync(directory, { recursive: true, force: true });
-		}
-	});
-
 	it("filters by quoted phrase with whitespace normalization", () => {
 		const sessions: SessionInfo[] = [
 			makeSession({

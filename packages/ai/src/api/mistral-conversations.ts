@@ -13,7 +13,6 @@ import type {
 	ToolCall,
 	TranscriptContext,
 } from "../types.ts";
-import { assertContextFits } from "../utils/estimate.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
@@ -128,11 +127,7 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 	options?: MistralOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages, "all", {
-		contextWindow: model.contextWindow,
-		transform: (messages) => transformMessages(messages, model, createMistralToolCallIdNormalizer()),
-		tools: "current",
-	});
+	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
 
 	(async () => {
 		const output = createOutput(model);
@@ -528,7 +523,6 @@ function buildChatPayload(
 	};
 
 	const currentTools = getCurrentTools(context.messages);
-	assertContextFits(model, messages, currentTools);
 	if (currentTools.length > 0) payload.tools = toFunctionTools(currentTools);
 	if (options?.temperature !== undefined) payload.temperature = options.temperature;
 	if (options?.maxTokens !== undefined) payload.maxTokens = options.maxTokens;

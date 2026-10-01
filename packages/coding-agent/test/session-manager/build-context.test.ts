@@ -208,58 +208,6 @@ describe("buildSessionContext", () => {
 		});
 	});
 
-	describe("with retain-none compactions", () => {
-		it("drops all earlier messages and keeps the handoff", () => {
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "old request"),
-				msg("2", "1", "assistant", "old response"),
-				compaction("3", "2", "Continue the migration", "3"),
-				msg("4", "3", "assistant", "new response"),
-			];
-
-			expect(buildContextEntries(entries).map((entry) => entry.id)).toEqual(["3", "4"]);
-			const ctx = buildSessionContext(entries);
-			expect(ctx.messages.map((message) => message.role)).toEqual(["compactionSummary", "assistant"]);
-			expect(ctx.messages[0]).toMatchObject({ summary: "Continue the migration" });
-		});
-
-		it("only applies the newest compaction after a retain-none boundary", () => {
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "old request"),
-				msg("2", "1", "assistant", "old response"),
-				compaction("3", "2", "Old summary", "1"),
-				compaction("4", "3", "", "4"),
-				msg("5", "4", "user", "current request"),
-				msg("6", "5", "assistant", "current response"),
-				compaction("7", "6", "Current summary", "5"),
-			];
-
-			const ctx = buildSessionContext(entries);
-			expect(ctx.messages).toHaveLength(3);
-			expect((ctx.messages[0] as any).summary).toBe("Current summary");
-			expect((ctx.messages[1] as any).content).toBe("current request");
-		});
-
-		it("is branch-local while retaining model and thinking settings", () => {
-			const entries: SessionEntry[] = [
-				modelChange("1", null, "openai", "gpt-test"),
-				thinkingLevel("2", "1", "high"),
-				msg("3", "2", "user", "old request"),
-				compaction("4", "3", "", "4"),
-				msg("5", "4", "user", "new request"),
-				msg("6", "3", "user", "sibling request"),
-			];
-
-			const current = buildSessionContext(entries, "5");
-			expect(current.messages.map((message) => message.role)).toEqual(["compactionSummary", "user"]);
-			expect(current.thinkingLevel).toBe("high");
-			expect(current.model).toEqual({ provider: "openai", modelId: "gpt-test" });
-
-			const sibling = buildSessionContext(entries, "6");
-			expect(sibling.messages.map((message) => message.role)).toEqual(["user", "user"]);
-		});
-	});
-
 	describe("with branches", () => {
 		it("follows path to specified leaf", () => {
 			// Tree:

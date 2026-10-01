@@ -1,3 +1,4 @@
+import type { Models } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -107,42 +108,26 @@ describe("issue #7301 stalled availability refresh", () => {
 	it("does not let a stale provider-scoped failure overwrite a newer availability pass", async () => {
 		harness = await createHarness();
 		const runtime = harness.session.modelRuntime;
-		const provider = runtime.getProvider(harness.getModel().provider)!;
-		const apiKey = provider.auth.apiKey!;
+		const models = Reflect.get(runtime, "models") as Models;
+		const originalGetAvailable = models.getAvailable.bind(models);
 		const started = createDeferred();
 		const gate = createDeferred();
-		let stall = false;
-		// PR #66: gate the faux provider boundary, not the collection's private call path.
-		runtime.registerNativeProvider({
-			...provider,
-			auth: {
-				...provider.auth,
-				apiKey: {
-					...apiKey,
-					check: async (input) => {
-						if (!stall) return apiKey.check?.(input);
-						stall = false;
-						started.resolve();
-						await gate.promise;
-						throw new Error("stale provider availability failure");
-					},
-				},
-			},
-		});
-		await runtime.flushForCheckpoint();
-		stall = true;
-		const staleRefresh = runtime.getAvailable(provider.id);
-		const rejected = expect(staleRefresh).rejects.toThrow("stale provider availability failure");
-		try {
-			await started.promise;
-			await runtime.getAvailable();
-			expect(runtime.getError()).toBeUndefined();
-			expect(runtime.hasConfiguredAuth(provider.id)).toBe(true);
-		} finally {
-			gate.resolve();
-			await rejected;
-		}
+		let stall = true;
+		models.getAvailable = async (providerId, options) => {
+			if (!providerId || !stall) return originalGetAvailable(providerId, options);
+			stall = false;
+			started.resolve();
+			await gate.promise;
+			throw new Error("stale provider availability failure");
+		};
+
+		const staleRefresh = runtime.getAvailable(harness.getModel().provider);
+		await started.promise;
+		await runtime.getAvailable();
 		expect(runtime.getError()).toBeUndefined();
-		expect(runtime.hasConfiguredAuth(provider.id)).toBe(true);
+
+		gate.resolve();
+		await expect(staleRefresh).rejects.toThrow("stale provider availability failure");
+		expect(runtime.getError()).toBeUndefined();
 	});
 });

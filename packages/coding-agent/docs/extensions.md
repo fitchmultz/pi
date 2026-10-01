@@ -47,7 +47,7 @@ Place the extension in your user or project extensions directory. Pi loads direc
 
 Use a single file for a small extension and a directory for a multi-file implementation. Put npm dependencies in a nearby `package.json`. See [Configuration](configuration.md) for conventional locations and [Settings](settings.md#resources) for additional paths.
 
-`/reload` refreshes settings and resources, including extension code. Use a full process launch or [Managed Restarts](restart.md) for core runtime changes or a clean process. When updating installed package dependencies, restart if the running process has already loaded them. Path and enable/disable settings still apply, and new entrypoints can load. After `await ctx.reload()`, return without reusing old runtime state. Only personal and explicit command-line extensions can participate in the `project_trust` event that runs before project extensions load.
+Reload replaces the extension runtime, so code after `await ctx.reload()` must not reuse state from the old runtime. Only personal and explicit command-line extensions can participate in the `project_trust` event that runs before project extensions load.
 
 <a id="understand-the-lifecycle"></a>
 
@@ -63,8 +63,7 @@ A run proceeds from input and `before_agent_start`, through model, message, and 
 Automatic retries, recovery, compaction, or queued work can continue afterward.
 <a id="agent_start--agent_end--agent_before_settle--agent_settled"></a>
 
-`turn_end` and `agent_before_settle` are actionable boundaries. Their handlers can chain proposed `custom`, `custom_message`, `context_edit`, or `compaction` entries and return `continue: true` for one next model request. Guard continuation conditions because an unconditional continuation can loop. Use the exported event declarations for the complete validation and ordering contract.
-Their `event.context` message, entry-body, LLM-message, and pending-message payloads are lazy: each handler gets independent mutable payloads on first access. History reflects the dispatch-time leaf, even if first read after an await or a later append; that delayed-read fallback can cost O(captured branch length). Queue membership and continuation facts are refreshed between handlers; draft validation is still eager. Read only the fields you need. Spreading or serializing the whole preview forces its getters.
+`agent_before_settle` is the final actionable boundary: it can append entries and request one continuation.
 `agent_settled` is final and notification-only; use it when an integration needs to know Pi will not continue automatically.
 
 <a id="extensionapi-methods"></a>
@@ -75,12 +74,10 @@ Their `event.context` message, entry-body, LLM-message, and pending-message payl
 |---|---|
 | Observe or modify lifecycle behavior | `pi.on()` |
 | Add a model-callable operation | `pi.registerTool()` |
-| Expose deferred tools for built-in search | `pi.registerTool()` with `exposure` |
-| Add or remove an owned `/` command | `pi.registerCommand()`, `pi.unregisterCommand()` |
+| Add a `/` command | `pi.registerCommand()` |
 | Add a shortcut or CLI flag | `pi.registerShortcut()` or `pi.registerFlag()` |
 | Send user or custom messages | `pi.sendUserMessage()` or `pi.sendMessage()` |
 | Persist non-context session data | `pi.appendEntry()` |
-| Record model-attributed external usage | `pi.recordUsage()` |
 | Change active tools, model, or thinking level | Session control methods on `pi` |
 | Add a model provider | `pi.registerProvider()` |
 | Add an MCP server | `pi.registerMcpServer()` |
@@ -88,9 +85,7 @@ Their `event.context` message, entry-body, LLM-message, and pending-message payl
 | Add terminal rendering | Renderer registration and `ctx.ui` |
 | Communicate with another extension | `pi.events` |
 
-`pi.unregisterCommand(name)` removes only a command registered by the calling extension. A missing command is a no-op; another extension's command is untouched. This supports dynamic commands such as cached MCP prompts.
-
-Use the exported declarations in [`extensions/types.ts`](../src/core/extensions/types.ts) for exact event, context, tool, and result types.
+Use the exported declarations in [`extensions/types.ts`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts) for exact event, context, tool, and result types.
 
 ## Follow the extension contracts
 
@@ -105,7 +100,7 @@ Use each event’s declared result type rather than assuming every return value 
 
 Events cover resource discovery, sessions, agent and message lifecycle, providers, tools, and raw input.
 
-`before_agent_start` exposes both the current prompt and its structured `systemPromptOptions`. Prefer changing prompt sections, selected tools, or guidelines so Pi can append a transcript delta. Returning `systemPrompt`, or setting `forceSystemPrompt`, replaces the whole prompt for that run while the transcript continues recording the structured sections. Providers receive the forced text as their leading system prompt. It survives tool-loop turns within that run, ends at settlement, and is regenerated on the next run. Later section edits do not amend a forced complete prompt. This event also runs for idle custom-message wakeups, with `event.prompt === ""`.
+`before_agent_start` exposes both the current prompt and its structured `systemPromptOptions`. Prefer changing prompt sections, selected tools, or guidelines so Pi can append a transcript delta. Returning `systemPrompt`, or setting `forceSystemPrompt`, replaces the whole prompt for that run while the transcript continues recording the structured sections. Providers receive the forced text as their leading system prompt.
 
 `message_end` can replace a finalized message while preserving its role. `tool_call` can mutate input or block execution. `tool_result` handlers compose, with each handler seeing prior changes.
 
@@ -119,7 +114,7 @@ Handlers are awaited in stream order, so slow handlers delay stream consumption.
 
 `context` transforms conversation messages without prompt and tool system messages; Pi restores that state afterward. Use `context_with_system` only when a request-local transformation must own the complete transcript, and keep a system message at index zero.
 
-Keep the leading system declaration and stable tool state when changing context. Provider-specific cache behavior can differ; do not assume a context edit preserves a cached prefix.
+`turn_end` and `agent_before_settle` are actionable boundaries. Their handlers can chain proposed `custom`, `custom_message`, `context_edit`, or `compaction` entries and return `continue: true` for one next model request. Guard continuation conditions because an unconditional continuation can loop. Use the exported event declarations for the complete validation and ordering contract.
 
 <a id="cache_warming_decision"></a>
 
@@ -127,22 +122,9 @@ Keep the leading system declaration and stable tool state when changing context.
 
 Tool calls from one assistant message can run in parallel.
 Do not assume a sibling call or result exists when another tool event runs.
-`ctx.signal` covers admitted prompt preparation through `agent_before_settle`, including retries and continuations. Capture it for nested work. It is absent while idle, in pre-admission `input`, and in notification-only `agent_settled`. Abort signals cooperative work immediately but still joins awaited handlers; it cannot forcibly stop a JavaScript promise.
+Use `ctx.signal` for nested work owned by an active turn; commands and idle session events often have no operation signal.
 
 A `user_bash` handler that returns `undefined` passes the command to the next handler and then to local execution if no handler handles it. Returning `operations` or `result` stops propagation. A handler failure blocks the command rather than falling through to local execution.
-
-### Context boundaries and persistence
-
-`session_before_compact` is the upstream compaction boundary for threshold, overflow, and manual requests. It can cancel or provide a custom compaction result; inspect `event.reason` and `event.preparation`. Posthorse can return a compaction result with an empty summary and its own handoff state, including on early and post-reset overflow when stock compaction has no cut; if it declines that special case, Pi does not call the default summarizer. The fork-only native context-window methods are retired. See [Compaction](compaction.md).
-Automatic compaction prepares only the retained context. Its `branchEntries` property lazily returns the **complete original branch** if read; prefer `preparation` when that is sufficient. Manual compaction retains the full-branch hook contract.
-
-`session_checkpoint` is the optional awaited persistence barrier for [working-session checkpoints](checkpoint.md). Use its signal and invalidation callback to keep owned background work quiescent while a receipt is held. It does not run shutdown just to save.
-
-### Retry notifications
-
-`auto_retry_start` fires before each native retry's backoff with 1-based `attempt`, `maxAttempts` excluding the initial request, `delayMs`, and `errorMessage`. `auto_retry_end` reports `success`, `attempt`, and optional `finalError`, including cancellation/exhaustion. Handlers are awaited before subscribers; start handlers and backoff finish before the retry request. `ctx.abort()` cancels pending retries. Returns do not alter retry policy.
-
-Summary calls have separate awaited `summarization_retry_scheduled`, `summarization_retry_attempt_start`, and `summarization_retry_finished` events. Attempt-start follows backoff and identifies `source: "compaction" | "branchSummary"` plus compaction `reason`. Cancellation in either pre-request handler prevents the retry. Finished runs once after a call that scheduled retries, before that call returns; it alone does not report success. Split-turn summaries may make two calls with separate sequences. Extension-owned summaries do not emit these events automatically.
 
 <a id="custom-tools"></a>
 <a id="register-tools"></a>
@@ -151,19 +133,19 @@ Summary calls have separate awaited `summarization_retry_scheduled`, `summarizat
 
 A custom tool defines a name, model-facing description, TypeBox parameter schema, and `execute()` function.
 Its result requires model-facing `content` and a `details` field for rendering or state reconstruction.
-Use `details: undefined` when there are no structured details. Include `usage` for model calls the tool performs itself, unless that usage was already recorded with `pi.recordUsage()`. Usage from `ctx.executeTool()` is added automatically; do not return it again.
+Use `details: undefined` when there are no structured details. If the tool makes nested model calls, include their `usage` in the result so session totals remain accurate.
 
 Throw from `execute()` to produce a failed tool result.
 Returning an object does not mark it as an error.
 Return `terminate: true` only when the agent should skip its automatic follow-up after every completed tool in that batch agrees to terminate.
 
 Use sequential execution when tools share mutable in-memory state.
-File-mutating tools should wrap the complete read-modify-write operation with `withFileMutationQueue()` and use `publishLocalFile()` for native local publication. Both are exported from the SDK; see [file and shell operations](sdk.md#file-and-shell-operations).
+File-mutating tools should wrap the complete read-modify-write operation with `withFileMutationQueue()`.
 Truncate large model-facing results and tell the model where to read the complete output.
 
 Declare `outputSchema` and return a matching `structuredContent` when the result is data. The model still receives `content`; programmatic callers such as codemode scripts receive `structuredContent` instead of the text. Tools without `outputSchema` are passed to scripts as their text content. To report a failure that still carries data, return the result with `isError: true` instead of throwing: the model sees an error, and scripts still receive `structuredContent`.
 
-A tool can run other tools with `ctx.executeTool(name, args, { signal, onUpdate })`. Nested calls go through argument validation and the `tool_call` and `tool_result` handlers like model-issued calls, and emit `tool_execution_start`, `tool_execution_update`, and `tool_execution_end`; all of these events carry `parentToolCallId`, and their `toolCallId` is assigned by pi as `<parent id>/<n>`. These ids do not appear as tool calls or tool results in the transcript. Nested calls do not add transcript entries: their results only reach the calling tool, which reports them itself, for example through `onUpdate` and `details`. The session keeps a bounded record of them (name, arguments, status, duration, error; never results) as `nestedCalls` on the calling tool's result message. It is used for compaction file lists and shown in HTML exports. Arguments over 8 KiB per call or 32 KiB per tool result are omitted, at most 256 calls are kept, and `complete: false` marks a record that lost anything. The `usage` of nested results, at every depth, is added to the calling tool's result `usage`, so a tool reports only its own usage, not that of the tools it called. `ctx.tools` lists the tools `ctx.executeTool()` can call. `tool_result` handlers that redact `content` should also replace `structuredContent`; replacing only `content` drops it. Native MCP publishes complete JSON and binary result artifacts only after all result hooks, using the final permitted payload; neither scripts nor artifact readback recover the earlier unredacted response.
+A tool can run other tools with `ctx.executeTool(name, args, { signal, onUpdate })`. Nested calls go through argument validation and the `tool_call` and `tool_result` handlers like model-issued calls, and emit `tool_execution_start`, `tool_execution_update`, and `tool_execution_end`; all of these events carry `parentToolCallId`, and their `toolCallId` is assigned by pi as `<parent id>/<n>`. These ids do not appear as tool calls or tool results in the transcript. Nested calls do not add transcript entries: their results only reach the calling tool, which reports them itself, for example through `onUpdate` and `details`. The session keeps a bounded record of them (name, arguments, status, duration, error; never results) as `nestedCalls` on the calling tool's result message. It is used for compaction file lists and shown in HTML exports. Arguments over 8 KiB per call or 32 KiB per tool result are omitted, at most 256 calls are kept, and `complete: false` marks a record that lost anything. The `usage` of nested results, at every depth, is added to the calling tool's result `usage`, so a tool reports only its own usage, not that of the tools it called. `ctx.tools` lists the tools `ctx.executeTool()` can call. `tool_result` handlers that redact `content` should also replace `structuredContent`; replacing only `content` drops it.
 
 See [`hello.ts`](../examples/extensions/hello.ts), [`todo.ts`](../examples/extensions/todo.ts), [`dynamic-tools.ts`](../examples/extensions/dynamic-tools.ts), and [`truncated-tool.ts`](../examples/extensions/truncated-tool.ts).
 
@@ -177,7 +159,7 @@ See [`hello.ts`](../examples/extensions/hello.ts), [`todo.ts`](../examples/exten
 - `deferred`: like `codemode`, but codemode tools do not list it; `tool_search` can find and activate it.
 - `hidden`: registered but unreachable. Re-register a tool with `exposure: "hidden"` to withdraw it, since tools cannot be unregistered.
 
-`namespace: { name, description?, instructions? }` groups related tools. `description` is a short heading; `instructions` holds full usage guidance returned by codemode's `describeNamespace(name)`, outside inline tool declarations. Search indexes both. Native MCP uses namespace `mcp__<server>` and supplies the server's initialization instructions here.
+`namespace: { name, description, instructions }` groups related tools, as MCP servers do. Codemode tools list a namespace under one heading with its `description`. `instructions` holds longer usage guidance; it is not listed, and codemode scripts read it with `describeNamespace(name)`.
 
 Registering a `direct` or `model-only` tool activates it; the other exposures are not activated on registration. The active set (`pi.getActiveTools()`, `pi.setActiveTools()`) is the set of tools declared to the model. `pi.getAllTools()` reports each tool's `exposure`, `namespace`, and `annotations`.
 
@@ -195,30 +177,26 @@ pi.on("tool_call", async (event, ctx) => {
 });
 ```
 
-A tool that orchestrates other tools can adjust what the model sees while it is active with `prepareLoadout(loadout)`. It runs whenever the active tools change and receives the declared tools, the callable tools, and every registered tool with its exposure and namespace. It returns replacement `descriptions` for declared tools (including its own) and `hiddenDeclarations`: active tools whose declarations requests leave out while they stay active and callable. `codemode` and `tool_search` use only this hook, `exposure`, and `ctx.executeTool()`, so another tool can implement the same behavior under a different name.
+A tool that orchestrates other tools can adjust what the model sees while it is active with `prepareLoadout(loadout)`. It runs whenever the active tools change and receives the declared tools, the callable tools, and every registered tool with its exposure and namespace. It returns replacement `descriptions` for declared tools (including its own) and `hiddenDeclarations`: active tools whose declarations requests leave out while they stay active and callable. `codemode` uses only this hook, `exposure`, and `ctx.executeTool()`, so another tool can implement the same behavior under a different name.
+
+For optional full instructions, register a group through the synchronous `pi:instruction-groups` event collector. The built-in `discover_tools` defers selected grouped tools until enabled, then restores their declarations positionally and delivers full instructions before they can run in a later turn. It never widens tool permissions; owners supply eager instructions when discovery is inactive. See [Instruction Groups](instruction-groups.md).
 
 ### Activate tools dynamically
 
-Select tools using `pi.setActiveTools(names)`. `getAllTools()` supplies registered tools' names, namespace metadata, exposure, description, schema, guidelines, and source. Names are selection keys. The setter replaces the selection, including clearing it with `[]`; permitted missing names wait for lazy registration. Hidden tools never activate, and registration collisions reject. Configured allowlists and exclusions still apply.
+Register every tool first, keep optional tools inactive, and use `pi.setActiveTools()` from a loader tool to select the desired active tools. Names must already be registered; unknown names are ignored.
 
-When adding a tool without dropping saved names that have not registered yet, use `pi.setActiveTools([...pi.getActiveTools(), name], { preservePending: true })`. Omit `preservePending` for an intentional replacement. This is useful when an extension activates its own tool before lazy MCP discovery restores the saved selection.
-
-For optional full instructions, register a group through the extension-owned `pi:instruction-groups` event collector. The built-in `discover_tools` delivers them when the group is enabled; the owner supplies eager instructions when discovery is unavailable. Discovery must not widen tool permissions. See [Instruction Groups](instruction-groups.md).
-
-### Tool discovery
-
-The built-in `tool_search` finds deferred tools and activates matches for the next model request. For native MCP, global search reads cached catalogs only; `server` or `namespace` scope discovers just that server. Codemode's scoped `searchTools()` uses the same discovery, and `callTool(name, args)` can use a newly registered tool in the same script. `ctx.tools` reflects currently callable tools; nested calls still pass live admission and permission hooks. Other extensions can implement search with `registerTool()` and `setActiveTools()` without bypassing configured restrictions. Pi records declaration changes in the transcript; providers that cannot represent a transition may resend a complete context and invalidate a cached prefix.
+Pi records the initial prompt and tool set in the transcript's first system message, then appends tool and prompt changes before the next model request. Providers that cannot represent the transition receive a complete transcript checkpoint, which can invalidate the cached prefix.
 
 ### MCP servers
 
-`pi.registerMcpServer(name, config)` adds an MCP server for the current session. `config` has the shape of an `mcpServers` entry in [`mcp.json`](mcp.md): `command`, `args`, `env`, and `cwd` for stdio servers, `url`, `headers`, and `oauth` for HTTP servers, plus `connection`, `description`, `exposure`, `toolExposure`, `enabled`, and `timeout`.
+`pi.registerMcpServer(name, config)` adds an MCP server for the current session. `config` has the shape of an `mcpServers` entry in [`mcp.json`](mcp.md): `command`, `args`, `env`, and `cwd` for stdio servers, `url`, `headers`, and `oauth` for HTTP servers, plus `exposure`, `toolExposure`, `description`, `enabled`, and `timeout`.
 
 ```typescript
 pi.registerMcpServer("jira", { url: "https://mcp.example.com/jira", exposure: "codemode" });
 pi.unregisterMcpServer("jira");
 ```
 
-Registered servers are lazy by default, whether registered before or after session startup. Their matching cached descriptors register without connecting; scoped discovery or use connects the target. Set `connection: "eager"` to connect at startup or immediately after a later registration. `pi.unregisterMcpServer()` closes the connection and withdraws tools and prompt commands. Registrations are not saved: register again on every load, for example based on the extension's own settings. A server in `mcp.json` with the same name takes precedence, and `/mcp` shows the override. Registering the same name again replaces the extension's earlier registration; names registered by another extension, invalid names, and invalid configs throw.
+Servers registered while the extension loads connect when the session starts, together with the `mcp.json` servers; servers registered later connect right away, and `pi.unregisterMcpServer()` closes the connection and makes the server's tools unreachable. Registrations are not saved: register again on every load, for example based on the extension's own settings. A server in `mcp.json` with the same name takes precedence, and `/mcp` shows the override. Registering the same name again replaces the extension's earlier registration; names registered by another extension, invalid names, and invalid configs throw.
 
 The built-in MCP support connects registered servers. When nothing does, because another extension replaced it (see [MCP](mcp.md#other-mcp-extensions)), each registration is reported as an extension error. Other MCP extensions can connect registered servers too: read them with `pi.getMcpServers()` on `session_start` and handle the `mcp_servers_change` event for later changes.
 
@@ -229,75 +207,12 @@ The built-in MCP support connects registered servers. When nothing does, because
 ### Context and session changes
 
 `ExtensionContext` provides the working directory, mode, UI, session manager, model runtime, abort signal, context usage, and controls for compaction and shutdown.
-Use `ctx.modelRegistry.streamSimple()` for provider-neutral nested model calls. `ctx.getCompactionSettings()` returns effective per-model settings; `ctx.getContextUsage()` reports measured or estimated context, including its `source`. See [SDK context usage](sdk.md#context-usage).
-
-Read native activity without consuming it:
-
-| Method | Meaning |
-|---|---|
-| `isIdle()` | False during admitted preparation, model runs, summaries, retries, continuations, or shutdown |
-| `hasPendingMessages()` | Queued user/custom steering and follow-ups; excludes `nextTurn` asides |
-| `hasPendingSteeringMessages()` | Steering only; not follow-ups or asides |
-| `getPendingInputCount()` | Inputs still preparing or held by the mode, including remaining CLI startup prompts; excludes dispatched extension commands |
-| `getPendingNextTurnCount()` | Unpersisted next-turn custom asides; retained across reload and `clearQueue()` |
-| `isBashRunning()` | Unfinished user Bash, including async interception, execution, and recording |
-
-User Bash and pending pre-admission input are separate from agent idle. `waitForIdle()` joins preparation and awaited settlement handlers; during shutdown it can resolve while `isIdle()` remains false.
+Use `ctx.modelRegistry.streamSimple()` for provider-neutral nested model calls.
 
 Command handlers receive `ExtensionCommandContext`, which adds operations for waiting until idle, reloading, tree navigation, and session replacement.
 These operations are command-only because calling them from lifecycle handlers can deadlock the runtime.
 
 Session replacement invalidates the old context. Capture only plain data before switching, then use the fresh context supplied to `withSession` for session-bound work.
-
-### Keep hot paths bounded
-
-A footer can render once per frame, and a stream can dispatch many events per response. A full-history scan in either place multiplies with session length, even after compaction.
-
-| API / operation | Cost |
-|---|---|
-| `sessionManager.getLeafId()`, `getEntriesRevision()`, `getEntryMetadata(id)`; scalar `ctx` state such as `model`, `isIdle()`, and pending counts | O(1) |
-| `sessionManager.getBranchState()` | O(1) on a warm active-path index |
-| `iterateEntryMetadata({ branchFrom, reverse, limit })` | O(entries visited) on a warm active path; no payload decoding |
-| `ctx.getContextUsage()` cache hit | O(active message count + tool count + prompt-option count) shallow identity checks, independent of archived history and payload bytes |
-| Usage cache miss; `buildContextEntries()`, `buildSessionProjection()`, `buildSessionContext()` | O(active context), including decoding/estimating payload bytes when needed |
-| `getBranch()`, `getEntries()`, `getTree()`, complete metadata iteration | O(total requested history/output); inspecting lazy message bodies additionally costs their bytes |
-| `getEntry(id)` | O(1) lookup; reading its lazy body costs that record's bytes |
-
-The active-path index is keyed by entries revision and leaf. Appending a child extends it in O(1); the first query after navigation, reload, or reconciliation rebuilds it in O(branch length). An off-path forward query also builds that requested path; reverse off-path queries follow parents lazily. Metadata strings do not retain whole journal lines. Projections still return independently decoded mutable messages, not shared decoded history.
-
-In footers, use `ctx.getContextUsage()`, `ctx.model`, and cached extension totals. Accumulate billing or other history-derived state outside `render()`, process appends incrementally, and replay once on session replacement, navigation, or reload. Revision alone does not detect leaf-only navigation: include the leaf and session identity in branch-sensitive caches. Avoid `getBranch()`, `getEntries()`, `getTree()`, and full iteration on per-frame or per-event paths.
-
-Use `getBranchState()` for `contextStartId`, `modelEntryId`, and `thinkingLevelEntryId`, then `getEntryMetadata(id)` for small facts. `contextStartId` is the latest compaction (including retain-none resets), or the root without compaction; an empty path returns null. Kept raw messages can precede that compaction. `modelEntryId` can identify an assistant response or an explicit model change.
-
-For a recent-history display, bound visits rather than materializing the branch:
-
-```typescript
-for (const entry of ctx.sessionManager.iterateEntryMetadata({
-  branchFrom: ctx.sessionManager.getLeafId(),
-  reverse: true,
-  limit: 32,
-})) {
-  // Inspect only the newest 32 entries; decode a selected body only if needed.
-  if (entry.type === "message" && entry.message.role === "assistant") {
-    // Use entry.message.usage, entry.id, etc.
-    break;
-  }
-}
-```
-
-`limit` is an optional non-negative safe integer and bounds entries visited, not matches; invalid limits throw when iteration starts. Do not cap a correctness-sensitive search arbitrarily: omit `limit` and stop at its actual boundary or qualifying entry. Do not spread the iterator before stopping. Omitted `branchFrom` means physical journal order, including abandoned branches; `branchFrom: null` is empty. `reverse` applies to either ordering.
-
-### Context usage and immutability
-
-`ContextUsage.source` distinguishes:
-
-- `reported`: provider usage anchors the retained conversation. It already describes the payload changed by `context` or `context_with_system` handlers; those changes do **not** discard the baseline. Content added to the assistant response by `message_end` handlers is counted as a positive estimated delta; removal keeps the provider baseline. Later messages and pending prompt/tool differences may still be estimated.
-- `estimated`: heuristic-only usage, counting text, opaque thinking/tool-call signatures, and tool schemas. The built-in footer prefixes the percentage with `~`.
-- `unknown`: no qualifying current-model response since compaction. Tokens and percent are null (the footer shows `?`); internal compaction preflight still estimates.
-
-Fallback starts at four characters per token. The latest comparable live request calibrates **input-side density** for its provider/API/model: `4 × request estimate / reported input tokens`, where reported input is `input + cacheRead + cacheWrite`. The ratio is clamped to [1, 4], so calibration never lowers the old chars/4 estimate; output tokens do not participate, and zero input totals are skipped. Calibration is session-local, not persisted. On resume, without the original sent-request receipt, historical usage uses the conservative maximum of report-plus-tail and physical estimate; it cannot calibrate from an unknown transformed request.
-
-Usage cache hits are keyed by journal revision, branch state, message/tool array and element identity, internal message revisions, system-prompt options, model, and usage anchor. **Treat SDK messages and tools as immutable.** Replace the edited object or its array. Nested in-place edits within an existing message or tool object are not observed until the object/array is replaced, `AgentSession.refreshContext()` runs after journal changes, or another tracked input changes. Streaming-only events do not invalidate usage; streaming state is counted at `message_end`. Returned usage objects are defensive copies. Request-local context transforms operate on separate request-owned messages, including in-memory and unflushed persisted content; when neither context event has handlers, dispatch does not clone them again.
 
 <a id="state-management"></a>
 <a id="persist-state"></a>
@@ -313,11 +228,7 @@ Choose storage based on how state participates in the conversation:
 | Custom content stored and sent to the model | `pi.sendMessage()` |
 | Data outside one session | External storage |
 
-Use `pi.sendMessage()` for custom model-visible content. Queue behavior follows ordinary request boundaries; see [SDK prompting](sdk.md#prompting).
-
-`pi.recordUsage({ id, kind, provider, model, usage, note? })` synchronously journals external usage without adding model context or triggering work. Use a stable namespaced contribution ID and do not also return that usage in a tool result. Identical repeats are no-ops across the journal; conflicts throw. Required strings must be nonempty and token/cost values finite and non-negative. An I/O error retains accepted usage; repeat the same contribution to retry persistence without recounting. See [UsageEntry](session-format.md#usageentry).
-
-`ctx.sessionManager.getEntriesRevision()` supports caches over all entries; leaf-only navigation does not change that revision. Reconstruct branch-sensitive state from `ctx.sessionManager.getBranch()` during `session_start`.
+Reconstruct branch-sensitive state from `ctx.sessionManager.getBranch()` during `session_start`.
 Do not rebuild it from every file entry because abandoned branches represent alternative histories.
 Register an entry or message renderer when custom stored content should appear in the transcript.
 
@@ -329,12 +240,12 @@ Register an entry or message renderer when custom stored content should appear i
 ### UI and modes
 
 `ctx.ui` provides dialogs, notifications, status text, widgets, titles, editor access, and custom components.
-Use `ctx.ui.custom()` only when the interaction needs its own rendering and input.
+Use `ctx.ui.custom()` only when the interaction needs its own rendering and input. `ctx.ui.editor(title, prefill, { signal })` accepts an optional abort signal to dismiss a multiline editor.
 See [Terminal UI](tui.md) for component, focus, overlay, theme, and performance guidance.
 
 Extensions load in interactive, RPC, JSON, and print modes.
 Interactive mode provides the complete terminal UI.
-Pipe-based RPC forwards supported dialogs and notifications through the [RPC Extension UI protocol](rpc-extension-ui.md). PTY-backed RPC can [attach the TUI](rpc-commands.md#attach_tui) for a pending custom component. JSON and print modes have no UI.
+RPC can forward supported dialogs and notifications through the [RPC Extension UI protocol](rpc-extension-ui.md). POSIX PTY-backed RPC can [attach the live TUI](rpc.md#live-terminal-handoff) for a pending custom component; pipe-based RPC cannot. Handoff preserves the runtime without repeating `session_start`, and `ctx.mode` follows frontend ownership. JSON and print modes have no UI.
 Guard terminal-only behavior with `ctx.mode === "tui"` and use `ctx.hasUI` for interactions supported by interactive and RPC clients.
 
 Keep tool and event behavior independent from rendering so non-interactive modes remain functional.
@@ -346,13 +257,22 @@ Keep tool and event behavior independent from rendering so non-interactive modes
 
 Pi reports handler errors and continues where possible. A `tool_call` handler failure blocks the tool as a fail-safe; a tool execution failure becomes an error result for the model.
 
-Pi also reports **non-fatal performance warnings** once per loaded extension and event kind when the synchronous invocation exceeds 100 ms, and once per extension when a custom footer render exceeds 16 ms. A handler blocking for 100 ms delays input and turns across several frames; 16 ms is one TUI frame interval. Handler timing stops when it returns a value or promise: awaited I/O, dialogs, and work after the first `await` are not attributed. This is not a CPU profiler or a timeout. Results, cancellation, and error handling are unchanged. Reloading the extension resets suppression.
-
-Warnings use the existing extension diagnostic channel: interactive notices, stderr in print/JSON mode, and `extension_error` records in RPC. The message explicitly says “Non-fatal performance warning”; no protocol or configuration setting is added. Footer notices are deferred until after the render pass. Use [local profiling](profiling.md#session-history-scaling) to investigate asynchronous work and costs after the first `await`.
-
 Release resources in `session_shutdown` even when normal operation attempted cleanup.
 Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path.
 Use `ctx.shutdown()` to request an orderly process shutdown.
+
+### Non-fatal performance warnings
+
+Pi reports one warning per loaded extension and event kind when a handler's synchronous
+invocation exceeds 100 ms. Custom footer renders exceeding 16 ms produce one warning per
+extension. These budgets protect input/turn responsiveness and a single TUI frame.
+
+Handler timing stops when the function returns, including when an async handler first awaits.
+Awaited I/O, dialogs, and later async work are not counted. Warnings do not cancel work or
+change results. Footer warnings are delivered after the render pass, through the same extension
+diagnostic paths as handler warnings (interactive, print, JSON, and RPC).
+Reloading the extension resets warning suppression. Cache expensive footer data outside render
+and avoid full-history queries on hot paths; use profiling for awaited or later work.
 
 <a id="examples-reference"></a>
 <a id="use-examples-as-the-implementation-reference"></a>

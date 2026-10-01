@@ -3,32 +3,27 @@
  *
  */
 
-import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as nodeModule from "node:module";
+import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import type { Provider } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
-import type { createJiti, Jiti } from "jiti";
+import type { createJiti } from "jiti";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.ts";
 import { resolvePath } from "../../utils/paths.ts";
-import { CheckpointActivity } from "../checkpoint.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
-import { type McpServerConfig, McpServerRegistry, validateMcpServerConfig } from "../mcp-servers.ts";
+import { type McpServerConfig, McpServerRegistry, mcpNamespace, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
 import type {
-	BashCwdHook,
 	EntryRenderer,
 	Extension,
 	ExtensionAPI,
-	ExtensionContext,
 	ExtensionFactory,
 	ExtensionRuntime,
 	ExtensionVirtualModel,
@@ -40,7 +35,7 @@ import type {
 	ToolDefinition,
 } from "./types.ts";
 
-const require = nodeModule.createRequire(import.meta.url);
+const require = createRequire(import.meta.url);
 
 const isNodeSeaBinary =
 	("sea" in process.features && process.features.sea === true) ||
@@ -104,19 +99,15 @@ function getAliases(): Record<string, string> {
 
 	_aliases = {
 		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
-		"@earendil-works/pi-agent-core/": path.dirname(piAgentCoreEntry),
 		"@earendil-works/pi-agent-core": piAgentCoreEntry,
 		"@earendil-works/pi-tui": piTuiEntry,
-		"@earendil-works/pi-ai/": path.dirname(piAiCompatEntry),
 		"@earendil-works/pi-ai/providers/all": piAiProvidersEntry,
 		"@earendil-works/pi-ai/compat": piAiCompatEntry,
 		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
 		"@earendil-works/pi-ai": piAiCompatEntry,
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
-		"@mariozechner/pi-agent-core/": path.dirname(piAgentCoreEntry),
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
 		"@mariozechner/pi-tui": piTuiEntry,
-		"@mariozechner/pi-ai/": path.dirname(piAiCompatEntry),
 		"@mariozechner/pi-ai/providers/all": piAiProvidersEntry,
 		"@mariozechner/pi-ai/compat": piAiCompatEntry,
 		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
@@ -137,40 +128,6 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 let extensionCacheCwd: string | undefined;
 let extensionCacheGeneration = 0;
 const extensionCache = new Map<string, ExtensionFactory>();
-
-const nativeExtensionImport = new AsyncLocalStorage<{ entry: string; version: string }>();
-const nativeReloadParameter = `pi-extension-${randomUUID()}`;
-let nativeReloadHookRegistered = false;
-
-function registerNativeReloadHook(): void {
-	if (nativeReloadHookRegistered || typeof nodeModule.registerHooks !== "function") return;
-	nodeModule.registerHooks({
-		resolve(specifier, context, nextResolve) {
-			const resolved = nextResolve(specifier, context);
-			if (!Array.from(context.conditions).includes("import") || !resolved.url.startsWith("file:")) return resolved;
-			const url = new URL(resolved.url);
-			const entry = nativeExtensionImport.getStore();
-			let version = entry?.entry === resolved.url ? entry.version : undefined;
-			if (!version && context.parentURL?.startsWith("file:")) {
-				// Follow only local imports from our marked graph. Bare package imports
-				// (including symlinked packages) retain their physical singleton identity.
-				const local = specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("file:");
-				if (
-					local &&
-					!specifier.split("/").includes("node_modules") &&
-					!url.pathname.split("/").includes("node_modules") &&
-					resolved.format !== "commonjs"
-				) {
-					version = new URL(context.parentURL).searchParams.get(nativeReloadParameter) ?? undefined;
-				}
-			}
-			if (!version) return resolved;
-			url.searchParams.set(nativeReloadParameter, version);
-			return { ...resolved, url: url.href };
-		},
-	});
-	nativeReloadHookRegistered = true;
-}
 
 interface ExtensionCacheToken {
 	cwd: string;
@@ -212,8 +169,6 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		sendMessage: notInitialized,
 		sendUserMessage: notInitialized,
 		appendEntry: notInitialized,
-		recordUsage: notInitialized,
-		checkpointActivity: new CheckpointActivity(),
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
 		setLabel: notInitialized,
@@ -315,7 +270,7 @@ function createExtensionAPI(
 		// Registration methods - write to extension
 		on(event: string, handler: HandlerFn): () => void {
 			assertActive();
-			const registeredHandler: HandlerFn = (...args) => runtime.checkpointActivity.run(() => handler(...args));
+			const registeredHandler: HandlerFn = (...args) => handler(...args);
 			const list = extension.handlers.get(event) ?? [];
 			list.push(registeredHandler);
 			extension.handlers.set(event, list);
@@ -328,12 +283,6 @@ function createExtensionAPI(
 				handlers.splice(handlerIndex, 1);
 				if (handlers.length === 0) extension.handlers.delete(event);
 			};
-		},
-
-		registerBashCwdHook(hook: BashCwdHook): void {
-			assertActive();
-			extension.bashCwdHooks ??= [];
-			extension.bashCwdHooks.push(hook);
 		},
 
 		registerTool(tool: ToolDefinition): void {
@@ -352,33 +301,30 @@ function createExtensionAPI(
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
 			assertActive();
+			if (typeof name !== "string" || name.length === 0) {
+				throw new Error(
+					`Command registered by extension "${extension.path}" must have a non-empty string name. Use pi.registerCommand("name", { description, handler }).`,
+				);
+			}
+			if (typeof options?.handler !== "function") {
+				throw new Error(`Command "/${name}" registered by extension "${extension.path}" must define handler().`);
+			}
 			extension.commands.set(name, {
 				name,
 				sourceInfo: extension.sourceInfo,
 				...options,
-				handler: (args, ctx) => runtime.checkpointActivity.run(() => options.handler(args, ctx)),
 			});
-		},
-
-		unregisterCommand(name: string): void {
-			assertActive();
-			extension.commands.delete(name);
 		},
 
 		registerShortcut(
 			shortcut: KeyId,
 			options: {
 				description?: string;
-				handler: (ctx: ExtensionContext) => Promise<void> | void;
+				handler: (ctx: import("./types.ts").ExtensionContext) => Promise<void> | void;
 			},
 		): void {
 			assertActive();
-			extension.shortcuts.set(shortcut, {
-				shortcut,
-				extensionPath: extension.path,
-				...options,
-				handler: (ctx) => runtime.checkpointActivity.run(() => options.handler(ctx)),
-			});
+			extension.shortcuts.set(shortcut, { shortcut, extensionPath: extension.path, ...options });
 		},
 
 		registerFlag(
@@ -440,11 +386,6 @@ function createExtensionAPI(
 			runtime.appendEntry(customType, data);
 		},
 
-		recordUsage(contribution): void {
-			assertActive();
-			runtime.recordUsage(contribution);
-		},
-
 		setSessionName(name: string): void {
 			assertActive();
 			runtime.setSessionName(name);
@@ -462,7 +403,7 @@ function createExtensionAPI(
 
 		exec(command: string, args: string[], options?: ExecOptions) {
 			assertActive();
-			return runtime.checkpointActivity.run(() => execCommand(command, args, options?.cwd ?? cwd, options));
+			return execCommand(command, args, options?.cwd ?? cwd, options);
 		},
 
 		getActiveTools(): string[] {
@@ -480,9 +421,9 @@ function createExtensionAPI(
 			return runtime.getSettings();
 		},
 
-		setActiveTools(toolNames: string[], options?: Parameters<ExtensionAPI["setActiveTools"]>[1]): void {
+		setActiveTools(toolNames: string[]): void {
 			assertActive();
-			runtime.setActiveTools(toolNames, options);
+			runtime.setActiveTools(toolNames);
 		},
 
 		getCommands() {
@@ -530,6 +471,11 @@ function createExtensionAPI(
 			if (owner !== undefined && owner !== extension.path) {
 				throw new Error(`MCP server "${name}" is already registered by extension "${owner}"`);
 			}
+			// Names that differ only in `-` and `_` would share a namespace.
+			const clash = runtime.mcpServers
+				.list()
+				.find((server) => server.name !== name && mcpNamespace(server.name) === mcpNamespace(name));
+			if (clash) throw new Error(`MCP server "${name}" conflicts with registered server "${clash.name}"`);
 			const server = { name, config: structuredClone(validated), extensionPath: extension.path };
 			applyRuntimeChange(() => runtime.mcpServers.register(server));
 		},
@@ -567,9 +513,7 @@ function createExtensionAPI(
 			},
 			on(channel, handler) {
 				assertActive();
-				const unsubscribe = runtime.trackEventBusSubscription(
-					eventBus.on(channel, (data) => runtime.checkpointActivity.run(() => handler(data))),
-				);
+				const unsubscribe = runtime.trackEventBusSubscription(eventBus.on(channel, handler));
 				if (state === "loading") loadingUnsubscribers.push(unsubscribe);
 				return unsubscribe;
 			},
@@ -622,64 +566,12 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 		: isTypeScriptSourceRuntime
 			? { virtualModules: await getVirtualModules(), tsconfigPaths: true }
 			: { alias: getAliases() };
-	let jiti = createJitiImpl(import.meta.url, {
+	const jiti = createJitiImpl(import.meta.url, {
 		moduleCache: false,
 		...resolutionOptions,
 	});
-	const importContext = { entry: pathToFileURL(fs.realpathSync(extensionPath)).href, version: randomUUID() };
-	if (typeof nodeModule.registerHooks === "function") {
-		const transform = jiti.transform;
-		const reloadModule = `pi:extension-reload/${importContext.version}`;
-		jiti = createJitiImpl(import.meta.url, {
-			...jiti.options,
-			// Cache the original transform via the first instance, not the per-load
-			// instrumentation containing this generation's private virtual module.
-			fsCache: false,
-			transform(options) {
-				const code = transform(options);
-				const context = nativeExtensionImport.getStore();
-				if (
-					!options.async ||
-					!options.filename ||
-					context?.entry !== pathToFileURL(fs.realpathSync(options.filename)).href
-				) {
-					return { code };
-				}
-				// Pinned Jiti 2.6.1 supplies these parameters to transformed modules.
-				// Wrapping the contextual importer also covers later lazy TS→JS imports.
-				return {
-					code: `"use strict"; jitiImport = require(${JSON.stringify(reloadModule)})(jitiImport, jitiESMResolve);${code}`,
-				};
-			},
-			virtualModules: {
-				...jiti.options.virtualModules,
-				[reloadModule]: (load: Jiti["import"], resolve: Jiti["esmResolve"]) => {
-					return (id: string, options?: Parameters<Jiti["import"]>[1]) => {
-						const local = id.startsWith(".") || id.startsWith("/") || id.startsWith("file:");
-						if (!local || id.split("/").includes("node_modules")) return load(id, options);
-						const entry = resolve(id, options);
-						if (!entry.startsWith("file:") || new URL(entry).pathname.split("/").includes("node_modules")) {
-							return load(id, options);
-						}
-						return nativeExtensionImport.run(
-							{
-								entry: pathToFileURL(fs.realpathSync(fileURLToPath(entry))).href,
-								version: importContext.version,
-							},
-							() => load(id, options),
-						);
-					};
-				},
-			},
-		});
-	}
 
-	// Jiti delegates JS ESM to Node even with moduleCache:false. Keep native
-	// async evaluation, but give this entry and its local ESM graph a fresh URL.
-	// ponytail: Node retains these module versions until exit; restart long-lived
-	// hosts periodically if repeated reloads consume significant memory.
-	registerNativeReloadHook();
-	const module = await nativeExtensionImport.run(importContext, () => jiti.import(extensionPath, { default: true }));
+	const module = await jiti.import(extensionPath, { default: true });
 	const factory = module as ExtensionFactory;
 	if (typeof factory !== "function") {
 		return undefined;

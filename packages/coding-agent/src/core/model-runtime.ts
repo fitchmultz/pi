@@ -25,12 +25,10 @@ import {
 	type DeferredCancelOptions,
 	type DeferredFetchOptions,
 	type DeferredHandle,
-	getModelType,
 	type ImageApi,
 	type ImageModel,
 	type ImagesContext,
 	type ImagesOptions,
-	isModelType,
 	type LoginOptions,
 	lazyStream,
 	type Message,
@@ -68,8 +66,7 @@ import {
 } from "@earendil-works/pi-ai/utils/model-operations";
 import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
-import { AuthStorage as DefaultAuthStorage, FileAuthStorageBackend } from "./auth-storage.ts";
-import { CheckpointActivity } from "./checkpoint.ts";
+import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
 import { ModelConfig } from "./model-config.ts";
 import { FileModelsStore, InMemoryCodingAgentModelsStore } from "./models-store.ts";
 import {
@@ -102,11 +99,9 @@ interface RegisteredVirtualModel {
 interface ModelRuntimeSnapshot {
 	all: readonly Model<Api>[];
 	available: readonly Model<Api>[];
-	allAvailable: readonly AnyModel[];
 	configuredProviders: ReadonlySet<string>;
 	storedProviders: ReadonlySet<string>;
 	auth: ReadonlyMap<string, AuthCheck | undefined>;
-	authErrors: ReadonlyMap<string, Error>;
 }
 
 export interface CreateModelRuntimeOptions {
@@ -174,7 +169,9 @@ function mergeHeaders(
 
 /** Configured pi-ai Models collection used by coding-agent and SDK consumers. */
 export class ModelRuntime implements Models {
+	/** Feature detection for extensions that also run on hosts without credential isolation. */
 	static readonly supportsIgnoreStoredCredentials = true;
+
 	private readonly models: MutableModels;
 	private readonly credentials: RuntimeCredentials;
 	private readonly defaultBuiltins: ReadonlyMap<string, Provider>;
@@ -190,64 +187,16 @@ export class ModelRuntime implements Models {
 	private snapshot: ModelRuntimeSnapshot = {
 		all: [],
 		available: [],
-		allAvailable: [],
 		configuredProviders: new Set(),
 		storedProviders: new Set(),
 		auth: new Map(),
-		authErrors: new Map(),
 	};
-	private registrationRefreshPending = false;
 	private availabilityRefreshSeq = 0;
-	private availabilityRefresh: { seq: number; promise: Promise<void>; cancelled: boolean } | undefined;
 	private availabilityErrorSeq = 0;
 	private readonly providerAvailabilitySeq = new Map<string, number>();
 	private availabilityError: string | undefined;
+	private authCheckErrors: ReadonlyMap<string, Error> = new Map();
 	private readonly credentialOperations = new Map<string, Promise<unknown>>();
-	private readonly checkpointActivity = new CheckpointActivity();
-	private readonly checkpointPersistenceErrors = new Map<string, unknown>();
-
-	private persistForCheckpoint<T>(
-		key: string,
-		write: () => Promise<T>,
-		signal?: AbortSignal,
-		isPersistenceFailure: (error: unknown) => boolean = () => true,
-	): Promise<T> {
-		return this.checkpointActivity.run(async () => {
-			try {
-				const result = await write();
-				this.checkpointPersistenceErrors.delete(key);
-				return result;
-			} catch (error) {
-				if (!signal?.aborted && isPersistenceFailure(error)) this.checkpointPersistenceErrors.set(key, error);
-				throw error;
-			}
-		});
-	}
-
-	/** Join catalog/auth operations and their underlying storage, including cancelled callers' unlock tails. */
-	async flushForCheckpoint(options?: { requireSuccessfulPersistence?: boolean }): Promise<void> {
-		await this.checkpointActivity.flush();
-		await FileAuthStorageBackend.checkpointActivity.flush();
-		if (options?.requireSuccessfulPersistence && this.checkpointPersistenceErrors.size)
-			throw new Error(
-				`Native persistence failed: ${[...this.checkpointPersistenceErrors].map(([key, error]) => `${key}: ${error instanceof Error ? error.message : String(error)}`).join("; ")}`,
-			);
-	}
-
-	/** New native model/auth work invalidates the receipt before it starts. */
-	holdForCheckpoint(invalidate: () => void): () => void {
-		const release = this.checkpointActivity.hold(invalidate);
-		try {
-			const releaseStorage = FileAuthStorageBackend.checkpointActivity.hold(invalidate);
-			return () => {
-				releaseStorage();
-				release();
-			};
-		} catch (error) {
-			release();
-			throw error;
-		}
-	}
 
 	private constructor(
 		credentials: RuntimeCredentials,
@@ -263,54 +212,20 @@ export class ModelRuntime implements Models {
 		this.modelNetworkEnabled = modelNetworkEnabled;
 		this.defaultBuiltins = new Map(providers.map((provider) => [provider.id, provider]));
 		for (const [providerId, provider] of this.defaultBuiltins) this.builtins.set(providerId, provider);
-		// Track the actual stores as well as public operations: cancellation can return before
-		// a provider/store continuation releases its file lock. Keep native auth unchanged.
 		this.models = createModels({
 			credentials: {
-				read: (id, options) =>
-					this.checkpointActivity.run(async () => {
-						options?.signal?.throwIfAborted();
-						if (
-							this.extensionProviders.get(id)?.ignoreStoredCredentials === true &&
-							!credentials.hasRuntimeApiKey(id)
-						) {
-							return undefined;
-						}
-						return credentials.read(id, options);
-					}),
-				list: (options) => this.checkpointActivity.run(() => credentials.list(options)),
-				modify: (id, fn, options) => {
-					let callbackFailure: { error: unknown } | undefined;
-					return this.persistForCheckpoint(
-						`credentials:${id}`,
-						() =>
-							credentials.modify(
-								id,
-								async (current) => {
-									try {
-										return await fn(current);
-									} catch (error) {
-										// OAuth refresh runs inside modify, before any credential is adopted or written.
-										callbackFailure = { error };
-										throw error;
-									}
-								},
-								options,
-							),
-						options?.signal,
-						(error) => !callbackFailure || error !== callbackFailure.error,
-					);
+				read: (id, options) => {
+					options?.signal?.throwIfAborted();
+					return this.extensionProviders.get(id)?.ignoreStoredCredentials === true &&
+						!credentials.hasRuntimeApiKey(id)
+						? Promise.resolve(undefined)
+						: credentials.read(id, options);
 				},
-				delete: (id, options) =>
-					this.persistForCheckpoint(`credentials:${id}`, () => credentials.delete(id, options), options?.signal),
+				list: (options) => credentials.list(options),
+				modify: (id, fn, options) => credentials.modify(id, fn, options),
+				delete: (id, options) => credentials.delete(id, options),
 			},
-			modelsStore: {
-				read: (id, options) => this.checkpointActivity.run(() => modelsStore.read(id, options)),
-				write: (id, entry, options) =>
-					this.persistForCheckpoint(`catalog:${id}`, () => modelsStore.write(id, entry, options), options?.signal),
-				delete: (id, options) =>
-					this.persistForCheckpoint(`catalog:${id}`, () => modelsStore.delete(id, options), options?.signal),
-			},
+			modelsStore,
 		});
 		this.rebuildProviders();
 	}
@@ -431,139 +346,64 @@ export class ModelRuntime implements Models {
 			...this.snapshot,
 			all,
 			available: all.filter((model) => this.snapshot.configuredProviders.has(model.provider)),
-			allAvailable: this.models
-				.getAllModels()
-				.filter((model) => this.snapshot.configuredProviders.has(model.provider)),
 		};
 	}
 
-	private async runAvailabilityRefresh(
-		seq: number,
-		errorSeq: number,
-		signal: AbortSignal,
-		onAuthResult?: AuthOperationOptions["onAuthResult"],
-	): Promise<void> {
-		const auth = new Map<string, AuthCheck | undefined>();
-		const authErrors = new Map<string, Error>();
-		// The models collection observes only registered providers. Keep credentials for
-		// unknown providers visible too, and fail the whole pass if storage cannot be listed.
-		const storedProviders = new Set((await this.credentials.list({ signal })).map((entry) => entry.providerId));
-		const available = await this.models.getAllAvailable(undefined, {
-			signal,
-			onAuthResult: (id, observation) => {
-				auth.set(id, observation.auth);
-				if (observation.error) authErrors.set(id, observation.error);
-				if (observation.stored) storedProviders.add(id);
-				onAuthResult?.(id, observation);
-			},
-		});
-		signal.throwIfAborted();
+	private async runAvailabilityRefresh(seq: number, errorSeq: number, signal: AbortSignal): Promise<void> {
+		const [availability, credentials] = await Promise.all([
+			this.models.getAvailability({ signal }),
+			this.credentials.list({ signal }),
+		]);
 		if (seq !== this.availabilityRefreshSeq) return;
-		const configuredProviders = new Set([...auth].filter(([, check]) => check !== undefined).map(([id]) => id));
+		const { available, auth, errors } = availability;
+		this.authCheckErrors = errors;
+		const configuredProviders = new Set(
+			[...auth]
+				.filter((entry): entry is [string, AuthCheck] => entry[1] !== undefined)
+				.map(([providerId]) => providerId),
+		);
 		this.snapshot = {
 			all: [...this.models.getModels()],
-			available: available.filter((model) => isModelType(model, "chat")),
-			allAvailable: available,
+			available: [...available],
 			configuredProviders,
-			storedProviders,
+			storedProviders: new Set(credentials.map((entry) => entry.providerId)),
 			auth,
-			authErrors,
 		};
 		if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
 	}
 
-	private async queueAvailabilityRefresh(
-		signal?: AbortSignal,
-		onAuthResult?: AuthOperationOptions["onAuthResult"],
-	): Promise<void> {
+	private queueAvailabilityRefresh(signal?: AbortSignal): Promise<void> {
 		const seq = ++this.availabilityRefreshSeq;
 		for (const [providerId, providerSeq] of this.providerAvailabilitySeq) {
 			this.providerAvailabilitySeq.set(providerId, providerSeq + 1);
 		}
 		const errorSeq = ++this.availabilityErrorSeq;
 		const effectiveSignal = operationSignal(signal);
-		const pass: { seq: number; promise: Promise<void>; cancelled: boolean } = {
-			seq,
-			cancelled: false,
-			promise: this.runAvailabilityRefresh(seq, errorSeq, effectiveSignal, onAuthResult).catch((error) => {
-				// Capture at rejection; a later deadline cannot change a real failure into cancellation.
-				pass.cancelled = effectiveSignal.aborted;
-				if (errorSeq === this.availabilityErrorSeq && !effectiveSignal.aborted) {
-					this.availabilityError = error instanceof Error ? error.message : String(error);
-				}
-				throw error;
-			}),
-		};
-		let refresh = pass;
-		let failure: { error: unknown } | undefined;
-		this.availabilityRefresh = pass;
-		// Registration refreshes can overlap the startup barrier. If a newer pass
-		// supersedes this one, its snapshot must land before this caller continues.
-		for (;;) {
-			try {
-				await raceWithAbortSignal(refresh.promise, effectiveSignal);
-			} catch (error) {
-				effectiveSignal.throwIfAborted();
-				// A superseded failure cannot end the barrier before the current pass publishes.
-				if (this.availabilityRefresh !== refresh) {
-					if (!refresh.cancelled) failure ??= { error };
-					refresh = this.availabilityRefresh;
-					continue;
-				}
-				if (!refresh.cancelled) throw error;
-				// The current pass's caller cancelled before publication. Recheck under
-				// this caller's signal without reclassifying an earlier real failure.
-				await this.queueAvailabilityRefresh(effectiveSignal, onAuthResult);
-				if (failure) throw failure.error;
-				return;
+		return this.runAvailabilityRefresh(seq, errorSeq, effectiveSignal).catch((error) => {
+			if (errorSeq === this.availabilityErrorSeq && !effectiveSignal.aborted) {
+				this.availabilityError = error instanceof Error ? error.message : String(error);
 			}
-			if (this.availabilityRefresh === refresh) {
-				// Scoped observations invalidate a full pass without replacing its waiter.
-				// A discarded pass is not a complete snapshot, even if the scoped caller aborted.
-				if (refresh.seq !== this.availabilityRefreshSeq)
-					await this.queueAvailabilityRefresh(effectiveSignal, onAuthResult);
-				// Preserve this caller's real failure, but only after the current snapshot barrier.
-				if (failure) throw failure.error;
-				return;
-			}
-			refresh = this.availabilityRefresh;
-		}
+			throw error;
+		});
 	}
 
-	private async refreshProviderAvailability(
-		providerId: string,
-		signal: AbortSignal,
-		onAuthResult?: AuthOperationOptions["onAuthResult"],
-	): Promise<readonly AnyModel[]> {
-		// Invalidate older full observations before this provider-scoped check can publish.
+	private async refreshProviderAvailability(providerId: string, signal: AbortSignal): Promise<void> {
+		// Invalidate any full availability pass that started before this credential change.
 		++this.availabilityRefreshSeq;
 		const providerSeq = (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1;
 		this.providerAvailabilitySeq.set(providerId, providerSeq);
 		const errorSeq = ++this.availabilityErrorSeq;
 		try {
-			let auth: AuthCheck | undefined;
-			let authError: Error | undefined;
-			let stored = false;
-			const available = await this.models.getAllAvailable(providerId, {
-				signal,
-				onAuthResult: (_id, observation) => {
-					auth = observation.auth;
-					authError = observation.error;
-					stored = observation.stored;
-					onAuthResult?.(_id, observation);
-				},
-			});
+			const [available, auth, credential] = await Promise.all([
+				this.models.getAvailable(providerId, { signal }),
+				this.models.checkAuth(providerId, { signal }),
+				this.credentials.read(providerId, { signal }),
+			]);
 			signal.throwIfAborted();
-			if (this.providerAvailabilitySeq.get(providerId) !== providerSeq) {
-				if (authError) throw authError;
-				return available;
-			}
+			if (this.providerAvailabilitySeq.get(providerId) !== providerSeq) return;
 			const configuredProviders = new Set(this.snapshot.configuredProviders);
 			const storedProviders = new Set(this.snapshot.storedProviders);
 			const authByProvider = new Map(this.snapshot.auth);
-			const authErrors = new Map(this.snapshot.authErrors);
-			if (authError) authErrors.set(providerId, authError);
-			else authErrors.delete(providerId);
 			if (auth) {
 				configuredProviders.add(providerId);
 				authByProvider.set(providerId, auth);
@@ -571,36 +411,31 @@ export class ModelRuntime implements Models {
 				configuredProviders.delete(providerId);
 				authByProvider.delete(providerId);
 			}
-			if (stored) storedProviders.add(providerId);
+			if (credential) storedProviders.add(providerId);
 			else storedProviders.delete(providerId);
 			const all = [...this.models.getModels()];
 			const availableById = new Map(
-				[...this.snapshot.allAvailable.filter((model) => model.provider !== providerId), ...available].map(
-					(model) => [`${model.provider}\0${getModelType(model)}\0${model.id}`, model],
-				),
+				[...this.snapshot.available.filter((model) => model.provider !== providerId), ...available].map((model) => [
+					`${model.provider}\0${model.id}`,
+					model,
+				]),
 			);
 			this.snapshot = {
 				all,
-				available: all.filter((model) => availableById.has(`${model.provider}\0chat\0${model.id}`)),
-				allAvailable: this.models
-					.getAllModels()
-					.flatMap((model) => availableById.get(`${model.provider}\0${getModelType(model)}\0${model.id}`) ?? []),
+				available: all.flatMap((model) => availableById.get(`${model.provider}\0${model.id}`) ?? []),
 				configuredProviders,
 				storedProviders,
 				auth: authByProvider,
-				authErrors,
 			};
+			const authErrors = new Map(this.authCheckErrors);
+			authErrors.delete(providerId);
+			this.authCheckErrors = authErrors;
 			if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
-			// Credential mutation callers still learn that their committed change failed
-			// local verification, but no stale successful auth survives that failure.
-			if (authError) throw authError;
-			return available;
 		} catch (error) {
 			if (
 				this.providerAvailabilitySeq.get(providerId) === providerSeq &&
 				errorSeq === this.availabilityErrorSeq &&
-				!signal.aborted &&
-				this.snapshot.authErrors.get(providerId) !== error
+				!signal.aborted
 			) {
 				this.availabilityError = error instanceof Error ? error.message : String(error);
 			}
@@ -640,22 +475,16 @@ export class ModelRuntime implements Models {
 		return this.models.getAllModels(providerId);
 	}
 
-	async getAvailableOfType<TType extends ModelType>(
+	getAvailableOfType<TType extends ModelType>(
 		type: TType,
 		providerId?: string,
 		options?: AuthOperationOptions,
 	): Promise<readonly ModelTypeMap[TType][]> {
-		return (await this.getAllAvailable(providerId, options)).filter((model) => isModelType(model, type));
+		return this.models.getAvailableOfType(type, providerId, options);
 	}
 
-	async getAllAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly AnyModel[]> {
-		if (providerId) {
-			return this.checkpointActivity.run(() =>
-				this.refreshProviderAvailability(providerId, operationSignal(options?.signal), options?.onAuthResult),
-			);
-		}
-		await this.checkpointActivity.run(() => this.queueAvailabilityRefresh(options?.signal, options?.onAuthResult));
-		return this.snapshot.allAvailable;
+	getAllAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly AnyModel[]> {
+		return this.models.getAllAvailable(providerId, options);
 	}
 
 	async checkAuth(providerId: string, options?: AuthOperationOptions): Promise<AuthCheck | undefined> {
@@ -663,8 +492,21 @@ export class ModelRuntime implements Models {
 	}
 
 	async getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]> {
-		const available = await this.getAllAvailable(providerId, options);
-		return providerId ? available.filter((model) => isModelType(model, "chat")) : this.snapshot.available;
+		if (providerId) {
+			const errorSeq = ++this.availabilityErrorSeq;
+			try {
+				const available = await this.models.getAvailable(providerId, options);
+				if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
+				return available;
+			} catch (error) {
+				if (errorSeq === this.availabilityErrorSeq && !options?.signal?.aborted) {
+					this.availabilityError = error instanceof Error ? error.message : String(error);
+				}
+				throw error;
+			}
+		}
+		await this.queueAvailabilityRefresh(options?.signal);
+		return this.snapshot.available;
 	}
 
 	getAvailableSnapshot(): readonly Model<Api>[] {
@@ -678,10 +520,8 @@ export class ModelRuntime implements Models {
 		for (const [providerId, error] of this.compositionErrors) {
 			errors.push(`Provider "${providerId}": ${error}`);
 		}
-		for (const [providerId, error] of this.snapshot.authErrors) {
-			errors.push(`Provider "${providerId}" availability: ${error.message}`);
-		}
 		if (this.availabilityError) errors.push(`Availability refresh: ${this.availabilityError}`);
+		for (const [providerId, error] of this.authCheckErrors) errors.push(`Provider "${providerId}": ${error.message}`);
 		return errors.length > 0 ? errors.join("\n\n") : undefined;
 	}
 
@@ -714,13 +554,12 @@ export class ModelRuntime implements Models {
 		return this.isUsingOAuth(providerId) && this.models.getProvider(providerId)?.auth.oauth?.isSubscription === true;
 	}
 
-	/** Failed observation, distinct from a successful unconfigured check. Does not resolve credentials. */
-	getAuthCheckError(providerId: string): Error | undefined {
-		return this.snapshot.authErrors.get(providerId);
-	}
-
 	hasConfiguredAuth(providerId: string): boolean {
 		return this.snapshot.configuredProviders.has(providerId);
+	}
+
+	getAuthCheckError(providerId: string): Error | undefined {
+		return this.authCheckErrors.get(providerId);
 	}
 
 	getAuth(providerId: string, overrides?: ModelRuntimeAuthOverrides): Promise<AuthResult | undefined>;
@@ -728,13 +567,6 @@ export class ModelRuntime implements Models {
 	async getAuth(
 		providerOrModel: string | AnyModel,
 		overrides: ModelRuntimeAuthOverrides = {},
-	): Promise<AuthResult | undefined> {
-		return this.checkpointActivity.run(() => this.resolveAuth(providerOrModel, overrides));
-	}
-
-	private async resolveAuth(
-		providerOrModel: string | AnyModel,
-		overrides: ModelRuntimeAuthOverrides,
 	): Promise<AuthResult | undefined> {
 		if (typeof providerOrModel === "string") return this.models.getAuth(providerOrModel, overrides);
 		const resolution = await this.models.getAuth(providerOrModel, overrides);
@@ -764,14 +596,14 @@ export class ModelRuntime implements Models {
 			await previous.catch(() => {});
 			signal.throwIfAborted();
 			markStarted?.();
-			return this.checkpointActivity.run(task);
+			return task();
 		})();
 		const tail = operation.catch(() => {});
 		this.credentialOperations.set(providerId, tail);
 		void tail.then(() => {
 			if (this.credentialOperations.get(providerId) === tail) this.credentialOperations.delete(providerId);
 		});
-		return this.checkpointActivity.run(() => raceWithAbortSignal(started, signal).then(() => operation));
+		return raceWithAbortSignal(started, signal).then(() => operation);
 	}
 
 	private async synchronizeCredentialState(
@@ -822,7 +654,6 @@ export class ModelRuntime implements Models {
 	}
 
 	getProviderAuthStatus(providerId: string): AuthStatus {
-		if (this.snapshot.authErrors.has(providerId)) return { configured: false };
 		if (this.credentials.hasRuntimeApiKey(providerId)) return { configured: true, source: "runtime" };
 		if (
 			this.snapshot.storedProviders.has(providerId) &&
@@ -886,18 +717,14 @@ export class ModelRuntime implements Models {
 		options?: ModelsApiStreamOptions<TApi>,
 	): AssistantMessageEventStream {
 		const transcript = normalizeContext(context);
-		return lazyStream(
-			model,
-			async () => {
-				assertChatModel(model);
-				const prepared = await this.prepareRequest(
-					model,
-					options as (StreamOptions & ModelsRequestTransforms) | undefined,
-				);
-				return prepared.provider.stream(prepared.model, transcript, prepared.options as ApiStreamOptions<TApi>);
-			},
-			options?.signal,
-		);
+		return lazyStream(model, async () => {
+			assertChatModel(model);
+			const prepared = await this.prepareRequest(
+				model,
+				options as (StreamOptions & ModelsRequestTransforms) | undefined,
+			);
+			return prepared.provider.stream(prepared.model, transcript, prepared.options as ApiStreamOptions<TApi>);
+		});
 	}
 
 	complete<TApi extends Api>(
@@ -913,36 +740,27 @@ export class ModelRuntime implements Models {
 		if (isVirtualModel(model)) {
 			// Requests outside the agent loop are routed here. Callers sized them before routing, so
 			// cap the output budget to the routed model.
-			return lazyStream(
-				model,
-				async () => {
-					const route = await this.resolveModel(model, transcript.messages, {
-						reason: "direct",
-						thinkingLevel: options?.reasoning ?? "off",
-						signal: options?.signal,
-					});
-					const { maxTokens: limit } = route.model;
-					const maxTokens =
-						options?.maxTokens && limit > 0 ? Math.min(options.maxTokens, limit) : options?.maxTokens;
-					const reasoning = route.thinkingLevel === "off" ? undefined : route.thinkingLevel;
-					// Caller credentials were resolved for the virtual model's provider. Another provider
-					// resolves its own, so they are not sent to the wrong vendor.
-					const { apiKey, headers, env, ...rest } = options ?? {};
-					const auth = route.model.provider === model.provider ? { apiKey, headers, env } : {};
-					return this.streamSimple(route.model, context, { ...rest, ...auth, maxTokens, reasoning });
-				},
-				options?.signal,
-			);
+			return lazyStream(model, async () => {
+				const route = await this.resolveModel(model, transcript.messages, {
+					reason: "direct",
+					thinkingLevel: options?.reasoning ?? "off",
+					signal: options?.signal,
+				});
+				const { maxTokens: limit } = route.model;
+				const maxTokens = options?.maxTokens && limit > 0 ? Math.min(options.maxTokens, limit) : options?.maxTokens;
+				const reasoning = route.thinkingLevel === "off" ? undefined : route.thinkingLevel;
+				// Caller credentials were resolved for the virtual model's provider. Another provider
+				// resolves its own, so they are not sent to the wrong vendor.
+				const { apiKey, headers, env, ...rest } = options ?? {};
+				const auth = route.model.provider === model.provider ? { apiKey, headers, env } : {};
+				return this.streamSimple(route.model, context, { ...rest, ...auth, maxTokens, reasoning });
+			});
 		}
-		return lazyStream(
-			model,
-			async () => {
-				assertChatModel(model);
-				const prepared = await this.prepareRequest(model, options);
-				return prepared.provider.streamSimple(prepared.model, transcript, prepared.options as SimpleStreamOptions);
-			},
-			options?.signal,
-		);
+		return lazyStream(model, async () => {
+			assertChatModel(model);
+			const prepared = await this.prepareRequest(model, options);
+			return prepared.provider.streamSimple(prepared.model, transcript, prepared.options as SimpleStreamOptions);
+		});
 	}
 
 	completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage> {
@@ -954,18 +772,14 @@ export class ModelRuntime implements Models {
 		handle: DeferredHandle,
 		options?: ModelsDeferredFetchOptions,
 	): AssistantMessageEventStream {
-		return lazyStream(
-			model,
-			async () => {
-				assertChatModel(model);
-				const prepared = await this.prepareRequest(model, options);
-				if (!prepared.provider.fetchDeferred) {
-					throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
-				}
-				return prepared.provider.fetchDeferred(prepared.model, handle, prepared.options as DeferredFetchOptions);
-			},
-			options?.signal,
-		);
+		return lazyStream(model, async () => {
+			assertChatModel(model);
+			const prepared = await this.prepareRequest(model, options);
+			if (!prepared.provider.fetchDeferred) {
+				throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
+			}
+			return prepared.provider.fetchDeferred(prepared.model, handle, prepared.options as DeferredFetchOptions);
+		});
 	}
 
 	async fetchDeferred(
@@ -1045,24 +859,7 @@ export class ModelRuntime implements Models {
 		});
 	}
 
-	refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
-		// An explicit full refresh (notably the services startup barrier) covers queued registrations.
-		if (!options.providers) this.registrationRefreshPending = false;
-		return this.checkpointActivity.run(() => this.refreshCatalogs(options));
-	}
-
-	private queueRegistrationRefresh(): void {
-		if (this.registrationRefreshPending) return;
-		this.registrationRefreshPending = true;
-		void this.checkpointActivity.run(async () => {
-			// Composition is synchronous; only the redundant catalog/auth work is coalesced.
-			// Reserve checkpoint activity now, before yielding to the rest of the factory batch.
-			await Promise.resolve();
-			if (this.registrationRefreshPending) await this.refresh({ allowNetwork: false });
-		});
-	}
-
-	private async refreshCatalogs(options: ModelsRefreshOptions): Promise<ModelsRefreshResult> {
+	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
 		this.config = await ModelConfig.load(this.modelsPath);
 		this.configureRadiusProviders();
 		if (options.providers) {
@@ -1075,7 +872,12 @@ export class ModelRuntime implements Models {
 			...options,
 			allowNetwork: options.allowNetwork ?? this.modelNetworkEnabled,
 		};
-		const result = await this.models.refresh(refreshOptions);
+		// Published pi-ai builds before ModelsStore returned void and accepted a provider ID.
+		// The fallback keeps source-mode CLI tests working without rebuilding workspace dependencies.
+		const result = ((await this.models.refresh(refreshOptions)) as ModelsRefreshResult | undefined) ?? {
+			aborted: refreshOptions.signal?.aborted ?? false,
+			errors: new Map(),
+		};
 		const errors = new Map(result.errors);
 		this.updateModelSnapshot();
 		if (options.providers) {
@@ -1100,18 +902,8 @@ export class ModelRuntime implements Models {
 		return { aborted: result.aborted || (options.signal?.aborted ?? false), errors };
 	}
 
-	private invalidateProviderAvailability(providerId: string): void {
-		++this.availabilityRefreshSeq;
-		this.providerAvailabilitySeq.set(providerId, (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1);
-		const authErrors = new Map(this.snapshot.authErrors);
-		authErrors.delete(providerId);
-		this.snapshot = { ...this.snapshot, authErrors };
-	}
-
 	registerNativeProvider(provider: Provider): void {
-		this.checkpointActivity.invalidate();
 		if (!provider.id.trim()) throw new Error("Provider id must not be empty.");
-		this.invalidateProviderAvailability(provider.id);
 		this.extensionProviders.delete(provider.id);
 		this.nativeExtensionProviders.set(provider.id, provider);
 		this.recomposeProvider(provider.id);
@@ -1121,7 +913,7 @@ export class ModelRuntime implements Models {
 			configuredRequestAuthStatus(this.config.getProvider(provider.id), undefined),
 			provider.auth.oauth && !provider.auth.apiKey ? "oauth" : "api_key",
 		);
-		this.queueRegistrationRefresh();
+		void this.refresh({ allowNetwork: false });
 	}
 
 	/**
@@ -1134,7 +926,10 @@ export class ModelRuntime implements Models {
 		configuredStatus: AuthStatus | undefined,
 		type: AuthType,
 	): void {
-		if (!this.snapshot.storedProviders.has(providerId) && !configuredStatus?.configured) return;
+		const hasStored =
+			this.snapshot.storedProviders.has(providerId) &&
+			this.extensionProviders.get(providerId)?.ignoreStoredCredentials !== true;
+		if (!hasStored && !this.credentials.hasRuntimeApiKey(providerId) && !configuredStatus?.configured) return;
 		const configuredProviders = new Set(this.snapshot.configuredProviders).add(providerId);
 		const auth = new Map(this.snapshot.auth);
 		// Never clobber a real check result.
@@ -1144,16 +939,13 @@ export class ModelRuntime implements Models {
 			auth,
 			configuredProviders,
 			available: this.snapshot.all.filter((model) => configuredProviders.has(model.provider)),
-			allAvailable: this.models.getAllModels().filter((model) => configuredProviders.has(model.provider)),
 		};
 	}
 
 	registerProvider(providerId: string, config: ProviderConfigInput): void {
-		this.checkpointActivity.invalidate();
 		// Validate the incoming registration on its own, like the legacy registry:
 		// a broken re-registration must throw without touching the stored config.
 		validateExtensionProvider(providerId, this.builtins.get(providerId), this.config.getProvider(providerId), config);
-		this.invalidateProviderAvailability(providerId);
 		this.nativeExtensionProviders.delete(providerId);
 		// Re-registration merges defined values over the previous registration and
 		// preserves undefined ones, matching the legacy ModelRegistry contract.
@@ -1163,6 +955,16 @@ export class ModelRuntime implements Models {
 			if (value !== undefined) (effective as Record<string, unknown>)[key] = value;
 		}
 		this.extensionProviders.set(providerId, effective);
+		if (effective.ignoreStoredCredentials === true) {
+			// A saved credential's old check must not survive isolation or an in-flight refresh.
+			++this.availabilityRefreshSeq;
+			this.providerAvailabilitySeq.set(providerId, (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1);
+			const configuredProviders = new Set(this.snapshot.configuredProviders);
+			const auth = new Map(this.snapshot.auth);
+			configuredProviders.delete(providerId);
+			auth.delete(providerId);
+			this.snapshot = { ...this.snapshot, configuredProviders, auth };
+		}
 		this.recomposeProvider(providerId);
 		this.updateModelSnapshot();
 		this.markProvisionallyConfigured(
@@ -1170,17 +972,15 @@ export class ModelRuntime implements Models {
 			configuredRequestAuthStatus(this.config.getProvider(providerId), effective),
 			effective.oauth && !effective.apiKey ? "oauth" : "api_key",
 		);
-		this.queueRegistrationRefresh();
+		void this.refresh({ allowNetwork: false });
 	}
 
 	unregisterProvider(providerId: string): void {
-		this.checkpointActivity.invalidate();
-		this.invalidateProviderAvailability(providerId);
 		this.extensionProviders.delete(providerId);
 		this.nativeExtensionProviders.delete(providerId);
 		this.recomposeProvider(providerId);
 		this.updateModelSnapshot();
-		this.queueRegistrationRefresh();
+		void this.refresh({ allowNetwork: false });
 	}
 
 	/**
@@ -1189,9 +989,7 @@ export class ModelRuntime implements Models {
 	 * Throws when the id belongs to a physical model of that provider.
 	 */
 	registerVirtualModel(definition: VirtualModelDefinition): void {
-		this.checkpointActivity.invalidate();
 		const { provider: providerId, id } = definition;
-		this.invalidateProviderAvailability(providerId);
 		if (!providerId.trim() || !id.trim()) throw new Error("Virtual model provider and id must not be empty.");
 		const existing = this.models.getModel(providerId, id);
 		if (existing && !isVirtualModel(existing)) {
@@ -1208,18 +1006,16 @@ export class ModelRuntime implements Models {
 			this.snapshot = { ...this.snapshot, auth, configuredProviders };
 		}
 		this.updateModelSnapshot();
-		this.queueRegistrationRefresh();
+		void this.refresh({ allowNetwork: false });
 	}
 
 	unregisterVirtualModel(providerId: string, id: string): void {
-		this.checkpointActivity.invalidate();
-		this.invalidateProviderAvailability(providerId);
 		const models = this.virtualModels.get(providerId);
 		if (!models?.delete(id)) return;
 		if (models.size === 0) this.virtualModels.delete(providerId);
 		this.recomposeProvider(providerId);
 		this.updateModelSnapshot();
-		this.queueRegistrationRefresh();
+		void this.refresh({ allowNetwork: false });
 	}
 
 	/**

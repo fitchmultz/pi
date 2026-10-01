@@ -1,5 +1,6 @@
 import { readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import nodePath from "path";
 import { type Static, Type } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
@@ -116,13 +117,14 @@ export function createLsToolDefinition(
 								break;
 							}
 
-							const fullPath = resolveToCwd(`./${entry}`, dirPath);
+							const fullPath = nodePath.join(dirPath, entry);
 							let suffix = "";
 							try {
 								const entryStat = await ops.stat(fullPath);
 								if (entryStat.isDirectory()) suffix = "/";
 							} catch {
-								// Keep entries even when their target is missing or unreadable.
+								// Skip entries we cannot stat.
+								continue;
 							}
 							results.push(entry + suffix);
 						}

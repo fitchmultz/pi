@@ -200,20 +200,4 @@ describe("formatDimensionNote", () => {
 		expect(note).toContain("displayed at 1000x500");
 		expect(note).toContain("Multiply x coordinates by 2000/1000 and y coordinates by 1000/500");
 	});
-
-	it("uses exact independent ratios when rounded dimensions change only one axis", () => {
-		const note = formatDimensionNote({
-			data: "",
-			mimeType: "image/png",
-			originalWidth: 2001,
-			originalHeight: 1000,
-			width: 2000,
-			height: 1000,
-			wasResized: true,
-		});
-
-		expect(note).toBe(
-			"[Image: original 2001x1000, displayed at 2000x1000. Multiply x coordinates by 2001/2000 and y coordinates by 1000/1000 to map to original image.]",
-		);
-	});
 });

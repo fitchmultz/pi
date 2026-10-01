@@ -13,11 +13,12 @@ import type {
 	TaskId,
 	WatchEnd,
 } from "../types.ts";
-import { ConversationConfig, type ConversationConfigState } from "./config.ts";
+import { AgentDoc } from "./agent.ts";
 import type { InboxItem, InboxState } from "./inbox.ts";
-import type { LiveState, ToolSlot } from "./live.ts";
-import type { Harness, ToolDiagnostic } from "./types.ts";
+import type { CompactionStatus, LiveState, ToolSlot } from "./live.ts";
+import type { AgentState, CompactionReason, Harness, ToolDiagnostic } from "./types.ts";
 import { UsageDoc, type UsageState } from "./usage.ts";
+import { scanAll } from "./util.ts";
 import { type ConversationView, conversationViews } from "./view.ts";
 
 type Block = AssistantMessage["content"][number];
@@ -43,8 +44,11 @@ export type SnapshotEvent = {
 		deferred?: { pollAt: number };
 	};
 	tools: readonly ToolSlot[];
+	/** `pi.live.compactions`: live compactions with their attempt and retry backoff. */
+	compactions: readonly CompactionStatus[];
 	inbox: readonly QueuedItem[];
-	config: ConversationConfigState;
+	/** `pi.agent`; `{}` when absent. */
+	agent: AgentState;
 	usage: UsageState;
 };
 
@@ -77,9 +81,12 @@ export type AgentEvent =
 	| { type: "auto_retry_end"; attempt: number }
 	| { type: "deferred_poll"; pollAt: number }
 	| { type: "entry_appended"; entry: EntryRecord }
-	| { type: "config_changed"; config: ConversationConfigState }
+	| { type: "agent_changed"; agent: AgentState }
 	| { type: "usage_changed"; usage: UsageState }
-	| { type: "task_failed"; taskId: TaskId; kind: string; message: string };
+	| { type: "task_failed"; taskId: TaskId; kind: string; message: string }
+	| { type: "compaction_start"; taskId: TaskId; reason: CompactionReason; blocking: boolean }
+	/** The task's receipt tells whether it produced a summary; the summary entry has its own events. */
+	| { type: "compaction_end"; taskId: TaskId; reason: CompactionReason };
 
 /** Serialized stream of one conversation's event batches, one per commit. */
 export interface AgentEventStream {
@@ -94,7 +101,7 @@ export interface AgentEventStream {
 type Parts = {
 	live: LiveState;
 	inbox: InboxState | undefined;
-	config: ConversationConfigState | undefined;
+	agent: AgentState | undefined;
 	usage: UsageState | undefined;
 };
 
@@ -102,21 +109,22 @@ function parts(view: ConversationView): Parts {
 	return {
 		live: (view.docs["pi.live"] ?? {}) as LiveState,
 		inbox: view.docs["pi.inbox"] as InboxState | undefined,
-		config: view.docs["pi.conversation.config"] as ConversationConfigState | undefined,
+		agent: view.docs["pi.agent"] as AgentState | undefined,
 		usage: view.docs["pi.usage"] as UsageState | undefined,
 	};
 }
 
 function snapshotOf(view: ConversationView): SnapshotEvent {
-	const { live, inbox, config, usage } = parts(view);
+	const { live, inbox, agent, usage } = parts(view);
 	return {
 		type: "snapshot",
 		entries: view.entries,
 		...(live.run === undefined ? {} : { run: { inputs: live.run.inputs } }),
 		...(live.generation === undefined ? {} : { generation: live.generation as SnapshotEvent["generation"] }),
 		tools: live.tools ?? [],
+		compactions: live.compactions ?? [],
 		inbox: queued(inbox),
-		config: config ?? ConversationConfig.definition.initial(),
+		agent: agent ?? AgentDoc.definition.initial(),
 		usage: usage ?? UsageDoc.definition.initial(),
 	};
 }
@@ -138,7 +146,11 @@ export async function watchEvents(
 	let snapshot!: SnapshotEvent;
 	await conversationViews(harness).attach(
 		conversationId,
-		(initial, release) => {
+		async (initial, release, storage) => {
+			// Generations whose held outcome already ended their turn, read on the line with the snapshot.
+			const query = { conversationId, kind: "pi.generation", status: "completing" } as const;
+			const completing = await scanAll((cursor) => storage.scanTasks(query, 100, cursor, context));
+			const held = new Set<TaskId>(completing.map((record) => record.id));
 			let current = initial;
 			snapshot = snapshotOf(initial);
 			// Batches are the watch's values; an overflow delivers a snapshot of the newest view instead.
@@ -146,7 +158,7 @@ export async function watchEvents(
 			return {
 				publication: (before, after, ops, publication, commitContext) => {
 					current = after;
-					const events = translate(conversationId, before, after, ops, publication);
+					const events = translate(conversationId, before, after, ops, publication, held);
 					if (events.length > 0) watch.advance(events, [], commitContext);
 				},
 				closeSession: () => watch.closeSession(),
@@ -171,6 +183,14 @@ export async function watchEvents(
 
 type TaskChange = Extract<CommitChange, { type: "task" }>;
 
+/** The tool result for `callId` among `entries`. */
+function resultOf(entries: readonly EntryRecord[], callId: string): EntryRecord | undefined {
+	return entries.find((entry) => {
+		const message = entry.model?.[0];
+		return message?.role === "toolResult" && message.toolCallId === callId;
+	});
+}
+
 /** Every event one publication causes, in the order of spec §9.4. */
 function translate(
 	conversationId: ConversationId,
@@ -178,6 +198,7 @@ function translate(
 	after: ConversationView,
 	viewOps: readonly Op[],
 	publication: CommitPublication,
+	held: Set<TaskId>,
 ): AgentEvent[] {
 	const entries: EntryRecord[] = [];
 	const tasks = new Map<TaskId, TaskChange["value"]>();
@@ -247,7 +268,9 @@ function translate(
 	for (const previous of slotsBefore.values()) {
 		if (previous.status === "done") continue;
 		const slot = slots.find((candidate) => candidate.callId === previous.callId);
-		if (slot === undefined || slot.status === "done") endTool(previous.callId, previous.name, slot?.entry);
+		if (slot?.status === "done") endTool(previous.callId, previous.name, slot.entry);
+		// A slot whose run ended in this commit may have had its result appended with it, as for unstarted calls.
+		else if (slot === undefined) endTool(previous.callId, previous.name, resultOf(entries, previous.callId)?.id);
 	}
 	for (const slot of slots) {
 		if (slot.status === "done" && !slotsBefore.has(slot.callId)) endTool(slot.callId, slot.name, slot.entry);
@@ -271,20 +294,32 @@ function translate(
 	// Ends without a result entry: a faulted or orphaned tool, or one whose run ended.
 	events.push(...toolEnds.filter((end) => end.entry === undefined));
 
-	// Task failures, then turn and run ends.
-	let postToolsCreated = false;
+	// Compaction ends, task failures, then turn and run ends.
+	const compactionsBefore = was.live.compactions ?? [];
+	const compactions = now.live.compactions ?? [];
+	for (const { taskId, reason } of compactionsBefore) {
+		if (!compactions.some((status) => status.taskId === taskId)) {
+			events.push({ type: "compaction_end", taskId, reason });
+		}
+	}
+	// A generation's turn ends when its outcome is committed: at a `completing` hold or at terminal, whichever comes
+	// first, so a successor created at the hold starts after it.
 	let turnEnded = false;
 	for (const task of tasks.values()) {
-		if (task.kind === "pi.post-tools" && task.state.status === "pending") postToolsCreated = true;
-		if (task.state.status !== "terminal") continue;
-		if (task.kind === "pi.generation" || task.kind === "pi.post-tools") turnEnded = true;
+		const status = task.state.status;
+		if (task.kind === "pi.generation" && status === "completing" && !held.has(task.id)) {
+			held.add(task.id);
+			turnEnded = true;
+		}
+		if (status !== "terminal") continue;
+		if (task.kind === "pi.generation" && !held.delete(task.id)) turnEnded = true;
 		const outcome = task.state.outcome;
 		if (outcome.status === "faulted" || outcome.status === "orphaned") {
 			const message = outcome.status === "faulted" ? outcome.error.message : outcome.reason;
 			events.push({ type: "task_failed", taskId: task.id, kind: task.kind, message });
 		}
 	}
-	if (turnEnded && !postToolsCreated) events.push({ type: "turn_end" });
+	if (turnEnded) events.push({ type: "turn_end" });
 	const run = now.live.run;
 	const runBefore = was.live.run;
 	const runChanged = run?.inputs[0] !== runBefore?.inputs[0];
@@ -294,11 +329,16 @@ function translate(
 	for (const record of submissions) events.push({ type: "submission", record });
 	if (now.inbox !== was.inbox) events.push({ type: "inbox_update", items: queued(now.inbox) });
 	// A retired document reads as its initial value, as in a snapshot.
-	if (now.config !== was.config) {
-		events.push({ type: "config_changed", config: now.config ?? ConversationConfig.definition.initial() });
+	if (now.agent !== was.agent) {
+		events.push({ type: "agent_changed", agent: now.agent ?? AgentDoc.definition.initial() });
 	}
 	if (now.usage !== was.usage)
 		events.push({ type: "usage_changed", usage: now.usage ?? UsageDoc.definition.initial() });
+	for (const { taskId, reason, blocking } of compactions) {
+		if (!compactionsBefore.some((status) => status.taskId === taskId)) {
+			events.push({ type: "compaction_start", taskId, reason, blocking });
+		}
+	}
 	if (run !== undefined && runChanged) events.push({ type: "run_start", inputs: run.inputs });
 	if (run !== undefined && run.taskId !== runBefore?.taskId && tasks.get(run.taskId)?.kind === "pi.generation") {
 		events.push({ type: "turn_start" });

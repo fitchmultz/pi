@@ -1038,13 +1038,8 @@ export default function(pi: ExtensionAPI) {
 			expect(runner.getToolDefinition("duplicate-tool")?.description).toBe("explicit tool");
 		});
 
-		it.each([
-			{ builtin: false, trust: false },
-			{ builtin: false, trust: true },
-			{ builtin: true, trust: false },
-			{ builtin: true, trust: true },
-		])("should leave out replaced extensions (builtin=$builtin, trust=$trust)", async ({ builtin, trust }) => {
-			// Regression for #10174: replacing a built-in MCP extension must report its owner.
+		it("should leave out replaceable extensions whose names another extension registers", async () => {
+			// A third-party MCP extension registering /mcp replaces the built-in one instead of both running.
 			const globalExtDir = join(agentDir, "extensions");
 			mkdirSync(globalExtDir, { recursive: true });
 			writeFileSync(
@@ -1062,7 +1057,6 @@ export default function(pi: ExtensionAPI) {
 				extensionFactories: [
 					{
 						name: "mcp",
-						...(builtin ? { builtin: true as const } : {}),
 						replaceable: true,
 						factory: (pi) => pi.registerCommand("mcp", { description: "built-in mcp", handler: async () => {} }),
 					},
@@ -1074,7 +1068,7 @@ export default function(pi: ExtensionAPI) {
 					},
 				],
 			});
-			await loader.reload(trust ? { resolveProjectTrust: async () => true } : undefined);
+			await loader.reload();
 
 			const extensionsResult = loader.getExtensions();
 			expect(extensionsResult.extensions.map((extension) => extension.path)).toEqual([
@@ -1082,18 +1076,6 @@ export default function(pi: ExtensionAPI) {
 				"<inline:llama>",
 			]);
 			expect(extensionsResult.errors).toEqual([]);
-			expect(extensionsResult.warnings).toEqual(
-				builtin
-					? [
-							{
-								path: "builtin:mcp",
-								warning: expect.stringContaining(
-									`Extension ${join(globalExtDir, "other-mcp.ts")} registers command \`/mcp\`, so built-in extension \`mcp\` was not loaded.`,
-								),
-							},
-						]
-					: [],
-			);
 
 			const runner = new ExtensionRunner(
 				extensionsResult.extensions,

@@ -383,11 +383,7 @@ class SessionList implements Component, Focusable {
 			this.filteredSessions = flattenSessionTree(roots);
 		} else {
 			// Other modes or with search: flat list
-			const filtered = filterAndSortSessions(nameFiltered, query, this.sortMode, "all", (session, error) => {
-				this.onError?.(
-					`Cannot search full session text: ${error instanceof Error ? error.message : String(error)} (${session.path})`,
-				);
-			});
+			const filtered = filterAndSortSessions(nameFiltered, query, this.sortMode, "all");
 			this.filteredSessions = filtered.map((session) => ({
 				session,
 				depth: 0,
@@ -470,7 +466,7 @@ class SessionList implements Component, Focusable {
 
 			// Session display text (name or first message)
 			const hasName = !!session.name;
-			const displayText = session.name ?? session.firstMessagePreview ?? session.firstMessage;
+			const displayText = session.name ?? session.firstMessage;
 			const normalizedMessage = displayText.replace(/[\x00-\x1f\x7f]/g, " ").trim();
 
 			// Right side: message count and age
@@ -769,8 +765,6 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
 			showRenameHint?: boolean;
 			keybindings?: KeybindingsManager;
-			/** Own file mutations even if the selector is dismissed before completion. */
-			runMutation?: (operation: () => Promise<void>) => Promise<void>;
 		},
 		currentSessionFilePath?: string,
 	) {
@@ -844,34 +838,32 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			this.requestRender();
 		};
 
-		const runMutation = options?.runMutation ?? ((operation: () => Promise<void>) => operation());
 		// Handle session deletion
-		this.sessionList.onDeleteSession = (sessionPath: string) =>
-			runMutation(async () => {
-				const result = await deleteSessionFile(sessionPath);
+		this.sessionList.onDeleteSession = async (sessionPath: string) => {
+			const result = await deleteSessionFile(sessionPath);
 
-				if (result.ok) {
-					if (this.currentSessions) {
-						this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
-					}
-					if (this.allSessions) {
-						this.allSessions = this.allSessions.filter((s) => s.path !== sessionPath);
-					}
-
-					const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
-					const showCwd = this.scope === "all";
-					this.sessionList.setSessions(sessions, showCwd);
-
-					const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
-					this.header.setStatusMessage({ type: "info", message: msg }, 2000);
-					await this.refreshSessionsAfterMutation();
-				} else {
-					const errorMessage = result.error ?? "Unknown error";
-					this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
+			if (result.ok) {
+				if (this.currentSessions) {
+					this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
+				}
+				if (this.allSessions) {
+					this.allSessions = this.allSessions.filter((s) => s.path !== sessionPath);
 				}
 
-				this.requestRender();
-			});
+				const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
+				const showCwd = this.scope === "all";
+				this.sessionList.setSessions(sessions, showCwd);
+
+				const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
+				this.header.setStatusMessage({ type: "info", message: msg }, 2000);
+				await this.refreshSessionsAfterMutation();
+			} else {
+				const errorMessage = result.error ?? "Unknown error";
+				this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
+			}
+
+			this.requestRender();
+		};
 
 		// Start loading current sessions immediately
 		void this.loadScope("current");

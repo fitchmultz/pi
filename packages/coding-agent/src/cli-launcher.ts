@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-import { fileURLToPath } from "node:url";
+import { enableCompileCache } from "node:module";
 import { runCliLauncher } from "./cli/launcher.ts";
 
-runCliLauncher(process.argv.slice(2), process.argv[1] ?? fileURLToPath(import.meta.url)).then(
+enableCompileCache();
+runCliLauncher(process.argv.slice(2), process.argv[1]).then(
 	(code) => {
 		process.exitCode = code;
 	},

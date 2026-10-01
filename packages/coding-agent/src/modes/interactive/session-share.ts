@@ -5,7 +5,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_RADIUS_GATEWAY } from "@earendil-works/pi-ai/providers/radius-config";
 import { type Container, type EditorComponent, hyperlink, type TUI } from "@earendil-works/pi-tui";
-import { fetch } from "undici";
 import { getAuthCredential } from "../../cli/auth-command.ts";
 import { getShareViewerUrl } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
@@ -116,30 +115,20 @@ async function tryShareViaRadius(tmpFile: string, context: SessionShareContext):
 	};
 
 	try {
-		const file = await fs.promises.open(tmpFile, "r");
+		const body = fs.readFileSync(tmpFile);
 		const url = new URL("/v1/artifacts", DEFAULT_RADIUS_GATEWAY);
 		url.searchParams.set("visibility", "organization");
 		url.searchParams.set("title", "Pi session");
-		let body: fs.ReadStream | undefined;
-		let response: Awaited<ReturnType<typeof fetch>>;
-		try {
-			const size = (await file.stat()).size;
-			body = file.createReadStream({ autoClose: false, end: size - 1 });
-			response = await fetch(url, {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${token}`,
-					"Content-Type": "application/x-ndjson",
-					"Content-Length": String(size),
-				},
-				body,
-				duplex: "half",
-				signal: loader.signal,
-			});
-		} finally {
-			body?.destroy();
-			await file.close();
-		}
+		const response = await fetch(url, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/x-ndjson",
+				"Content-Length": String(body.byteLength),
+			},
+			body,
+			signal: loader.signal,
+		});
 		if (loader.signal.aborted) return true;
 		const json = (await response.json().catch(() => null)) as {
 			artifact?: { canonical_url: string };

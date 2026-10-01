@@ -14,14 +14,14 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, type ExtensionContext, isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { extractTodoItems, isSafeCommand, markCompletedSteps, type TodoItem } from "./utils.ts";
 
 // Tools
 const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
-const NORMAL_MODE_TOOLS = ["read", "bash", "background_command", "edit", "write"];
-const PLAN_MODE_DISABLED_TOOLS = new Set<string>(["background_command", "edit", "write"]);
+const NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write"];
+const PLAN_MODE_DISABLED_TOOLS = new Set<string>(["edit", "write", "background_command"]);
 const PLAN_MANAGED_TOOLS = new Set<string>([...PLAN_MODE_TOOLS, ...NORMAL_MODE_TOOLS]);
 
 interface PlanModeState {
@@ -162,13 +162,12 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 	// Block destructive bash commands in plan mode
 	pi.on("tool_call", async (event) => {
-		if (!planModeEnabled) return;
-		if (isToolCallEventType("background_command", event) && event.input.action === "start") {
-			return { block: true, reason: "Plan mode: background commands are disabled. Use /plan to leave plan mode." };
+		if (planModeEnabled && event.toolName === "background_command" && event.input.action === "start") {
+			return { block: true, reason: "Plan mode: background commands are disabled. Use read-only bash." };
 		}
-		if (!isToolCallEventType("bash", event)) return;
+		if (!planModeEnabled || event.toolName !== "bash") return;
 
-		const command = event.input.command;
+		const command = event.input.command as string;
 		if (!isSafeCommand(command)) {
 			return {
 				block: true,
@@ -211,7 +210,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 You are in plan mode - a read-only exploration mode for safe code analysis.
 
 Restrictions:
-- Built-in edit, write, and background_command tools are disabled
+- Built-in edit and write tools are disabled
 - Other currently active tools remain available
 - Bash is restricted to an allowlist of read-only commands
 

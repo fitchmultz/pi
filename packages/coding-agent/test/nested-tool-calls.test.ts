@@ -9,7 +9,6 @@ import {
 	NestedToolCallRunner,
 	type NestedToolExecutionEvent,
 } from "../src/core/nested-tool-calls.ts";
-import { createBashTool } from "../src/core/tools/bash.ts";
 
 function usage(input: number, cost: number): Usage {
 	return {
@@ -52,20 +51,6 @@ function createRunner(tools: AgentTool[], options: { sequential?: boolean } = {}
 }
 
 describe("NestedToolCallRunner", () => {
-	it("preserves structured shell failures for programmatic callers and records the error", async () => {
-		const { runner, events } = createRunner([createBashTool(process.cwd())]);
-		const outcome = await runner.execute("script", "bash", { command: "printf 'failed'; exit 7" });
-		expect(outcome.isError).toBe(true);
-		expect(outcome.result.structuredContent).toEqual({
-			output: "failed",
-			truncated: false,
-			exit_code: 7,
-			wall_time_seconds: expect.any(Number),
-		});
-		expect(events.at(-1)).toMatchObject({ type: "tool_execution_end", isError: true });
-		expect(runner.takeRecord("script")?.calls?.calls[0]).toMatchObject({ name: "bash", status: "error" });
-	});
-
 	it("assigns ids below the caller, emits events with the parent id, and records the calls", async () => {
 		const echo: AgentTool = {
 			name: "echo",

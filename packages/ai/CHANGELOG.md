@@ -4,14 +4,45 @@
 
 ### Fixed
 
-- Fixed confirmed GPT-6 Astra Ultrafast responses being priced at standard rates across OpenAI and Codex, including long-context and cache costs, without inferring Ultrafast from the requested tier.
-- Fixed OpenAI Codex WebSocket continuation baselines changing after later in-memory edits, and avoided full-transcript JSON encoding for successful continuation deltas.
-- Fixed Anthropic strict schema requests exceeding per-request limits by admitting optional strict tools within those limits.
-- Fixed context estimation and physical preflight ignoring opaque thinking and tool-call signatures.
+- Fixed exact `gpt-6-astra` Ultrafast estimates in OpenAI and Codex Responses: terminal-confirmed `ultrafast` costs 6x every standard or long-context component; request-only Ultrafast does not imply delivery.
+- Fixed legacy Codex Responses `fast` pricing to match `priority`, including its existing requested-tier fallback.
+- Fixed Cloudflare AI Gateway Claude catalog IDs to use Anthropic's hyphenated versions during generation and provider construction.
+- Fixed a provider's auth-check failure hiding healthy providers; global availability now exposes provider-local diagnostics.
+- Fixed optional null tool arguments inside schema unions being coerced into values instead of omitted.
+- Fixed retained Codex payload objects mutating the cached continuation baseline.
+- Fixed failed Responses streams losing terminal usage, response IDs, and error details.
+- Fixed `NO_PROXY` exclusions not matching trailing DNS root dots.
+- Fixed fractional and overflowed zero retry delays becoming 60-second delays.
+- Fixed context estimates omitting thinking and tool-call signatures.
+- Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
+- Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
+
+## [1.0.0] - 2026-10-01
+
+### Added
+
+- Added a copy code login method to Anthropic OAuth. Login asks for browser login (default) or copy code login, which shows the authorization code on Anthropic's page for pasting into pi and works when the browser runs on another machine ([#10194](https://github.com/earendil-works/pi/pull/10194) by [@lucasmeijer](https://github.com/lucasmeijer)).
+
+### Changed
+
+- Changed OAuth browser pages to use the color Pi logo.
+
+### Fixed
+
+- Fixed OpenAI Responses requests failing with `Expected an ID that begins with 'ctc'` when replaying grammar tool calls, such as `codemode`, from another provider or a gateway like Radius.
+
+## [0.99.2] - 2026-09-30
 
 ### Added
 
 - Added the lightweight `@earendil-works/pi-ai/models` entry point for model collections and provider construction without loading TypeBox, built-in catalogs, or provider SDKs.
+- Added Anthropic workload identity federation from the Anthropic SDK environment variables `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, and `ANTHROPIC_IDENTITY_TOKEN_FILE` (plus optional `ANTHROPIC_SERVICE_ACCOUNT_ID` and `ANTHROPIC_WORKSPACE_ID`). API keys and `ANTHROPIC_AUTH_TOKEN` take precedence ([#10177](https://github.com/earendil-works/pi/issues/10177), [#10242](https://github.com/earendil-works/pi/pull/10242) by [@philfreo](https://github.com/philfreo))
+
+### Fixed
+
+- Fixed context overflow detection for Z.AI CN endpoint `Prompt exceeds max length` errors ([#10208](https://github.com/earendil-works/pi/issues/10208))
+- Fixed Anthropic requests failing when a `strict: "prefer"` tool schema uses keywords Anthropic strict tool use rejects, such as `minimum`/`maximum`; such tools are now sent non-strict ([#9953](https://github.com/earendil-works/pi/issues/9953))
+- Fixed provider retries firing immediately when a `Retry-After` header contains an unparseable date; they now use exponential backoff ([#9571](https://github.com/earendil-works/pi/issues/9571))
 
 ## [0.99.1] - 2026-09-29
 

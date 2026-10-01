@@ -12,7 +12,6 @@ Provider extensions run inside Pi and can inspect credentials, prompts, tool def
 | Change an existing provider endpoint or headers | `models.json` or a small provider extension |
 | Discover models dynamically | A provider with `refreshModels` |
 | Add a `/login` flow | A provider with native or legacy OAuth configuration |
-| Share account credentials with a built-in provider | `ProviderConfig.ambientAuth` |
 | Implement an unsupported wire protocol | A provider with `stream` or `streamSimple` |
 
 A provider extension is an [extension](extensions.md), so it follows the same loading, trust, reload, and error behavior.
@@ -26,7 +25,7 @@ There are two registration forms:
 - Register a complete `Provider` from `@earendil-works/pi-ai` for native authentication, filtering, discovery, refresh, and streaming behavior.
 - Register a provider name with `ProviderConfig` for the legacy configuration form used by existing extensions.
 
-Prefer a complete provider when replacing authentication, discovery, or streaming behavior. Use `ambientAuth` to add shared-account authentication while retaining a built-in provider's catalogs and transports. Pi composes `models.json` overrides above a registered native provider.
+Prefer a complete provider for new integrations that own more than static endpoint and model metadata. Pi composes `models.json` overrides above a registered native provider.
 
 Registering only `baseUrl` or `headers` for an existing provider preserves its built-in models. Supplying `models` in the legacy form replaces that provider's models across chat, image, and classifier operations. An omitted `type` means `"chat"`; image and classifier models require explicit discriminants and implementations keyed by their `api` values through the `images` and `classifiers` fields.
 
@@ -89,39 +88,28 @@ OAuth callbacks are UI-neutral. They can open an authorization URL, show a devic
 
 Never write access tokens, refresh tokens, authorization headers, or complete provider responses to ordinary logs.
 
-## Ambient authentication
+### Isolate a routing provider from stored credentials
 
-Register `pi.registerProvider(providerId, { ambientAuth: { check, resolve } })` in the extension factory. CLI startup and SDK `createAgentSessionServices()` apply factory registrations before initial selection; bare `createAgentSession()` does not flush them before selection. This option preserves native login, subscription metadata, transports, and catalogs. Do not supply replacement `models` just to add credentials.
+Routing extensions that supply their own account token can opt out of saved authentication:
 
-Both callbacks use the native `ApiKeyAuth` input `{ ctx, signal, credential? }`, with `credential` undefined. Honor `signal` in blocking I/O.
-
-- Required `check` should be side-effect-free. Return `{ type: "oauth", source: "Shared subscription" }`, `{ type: "api_key", source: "Shared API key" }`, or `undefined` when unconfigured. Subscription labels also require the native provider's `oauth.isSubscription` flag.
-- `resolve` returns the complete fresh `AuthResult`: `{ auth: { apiKey?, headers?, baseUrl? }, env?, source? }`. Pi does not save it as a local credential. Configured headers and `authHeader` still compose over it.
-
-Priority is explicit request/CLI key, stored local credential, configured `apiKey`, then `ambientAuth`. `/login` creates a deliberate local override; `/logout` reveals ambient auth. Failed local OAuth refresh never falls through to ambient auth. OAuth-only providers do not gain API-key login.
-
-An installed resolver owns ambient policy: returning `undefined` does not try native environment credentials or another account. Throw a sanitized reconnect error for a selected-but-broken account. Unregistering restores built-in behavior.
-
-A throwing `check` is distinct from unconfigured authentication. Aggregate availability omits that provider and records its diagnostic while retaining healthy providers. Saved/default and explicitly scoped models remain selected if their exact IDs still exist; prompt admission reports the error. Direct provider checks and resolution still reject. Cancellation and credential-store failures are not converted to partial success. See [SDK model availability](sdk.md#model-availability).
-
-`ambientAuth` is extension-only, not a `models.json` field. Standalone `pi update --models` does not discover session extensions.
-
-## Isolate a routing provider from stored credentials
-
-An account router may replace a built-in provider's requests while leaving its ordinary login available to other Pi processes. Register `ignoreStoredCredentials: true` alongside the router's configured `apiKey` or `ambientAuth`:
-
-```ts
+```typescript
 pi.registerProvider("openai-codex", {
   ignoreStoredCredentials: true,
-  ambientAuth: accountRouterAuth,
+  apiKey: "routing-placeholder",
+  api: "openai-codex-responses",
+  streamSimple: routeWithSelectedAccount,
 });
 ```
 
-This skips only that provider's persisted credential during request resolution, availability checks and catalog refresh. An expired or revoked standalone login cannot block the router. Explicit request and CLI/runtime keys retain priority; empty runtime keys are rejected rather than falling back to storage. `/login` and `/logout` remain deliberate persistent operations; this option never deletes, migrates or refreshes the ignored credential. Other providers and independent runtimes are unaffected.
+This bypasses saved API keys and OAuth credentials during request preflight, availability checks,
+and catalog refresh. Expired or revoked standalone credentials cannot block the routing provider.
+Explicit request and runtime (CLI) keys still take priority. `/login`, `/logout`, and credential
+listing retain their normal persistent behavior; the flag does not delete or migrate credentials.
+Unregistering the override restores built-in authentication.
 
-The policy belongs to the registration: set it to `false` or unregister the provider to restore stored authentication. Extensions must unregister their own override during `session_shutdown` if disabling/removing them on reload should restore native behavior; resource reload does not automatically remove provider registrations.
-
-This is a fork extension capability, not a `models.json` field. Detect it with `ModelRuntime.supportsIgnoreStoredCredentials === true` from `@earendil-works/pi-coding-agent`; version strings cannot distinguish the fork from official Pi. On hosts without it, use a distinct routing provider ID rather than deleting credentials or pretending OAuth refresh succeeded.
+Extensions supporting other hosts can feature-detect
+`ModelRuntime.supportsIgnoreStoredCredentials === true` from `@earendil-works/pi-coding-agent`.
+The flag is supported on the named `ProviderConfig` registration form.
 
 ## Supply and refresh models
 
@@ -205,4 +193,4 @@ Test at least:
 
 The provider tests under [`packages/ai/test`](https://github.com/earendil-works/pi/tree/main/packages/ai/test) define the behavior expected from built-in providers. Adapt the relevant suites rather than relying only on manual prompts.
 
-Run the extension directly while developing, then move it to a discovered extension location or distribute it through a [Pi package](packages.md). Restart Pi after changing provider code or dependencies; `/reload` reinitializes cached factories. See [Managed Restarts](restart.md).
+Run the extension directly while developing, then move it to a discovered extension location or distribute it through a [Pi package](packages.md). Use `/reload` after changing a discovered provider extension in an active session.

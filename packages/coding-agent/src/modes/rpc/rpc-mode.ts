@@ -17,20 +17,19 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
-	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
-import { writeJsonRecordToStdout } from "../../core/json-record-writer.ts";
 import {
 	flushRawStdout,
 	restoreStdout,
 	takeOverStdout,
 	waitForRawStdoutBackpressure,
+	writeRawStdout,
 } from "../../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import type { InteractiveMode } from "../interactive/interactive-mode.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { toJsonEvent } from "../json-event.ts";
-import { attachJsonlLineReader, rpcOutputLayout } from "./jsonl.ts";
+import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
@@ -38,6 +37,7 @@ import type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
+	RpcTuiDetachedEvent,
 } from "./rpc-types.ts";
 
 // Re-export types for consumers
@@ -60,30 +60,26 @@ export interface RpcModeOptions {
  */
 export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcModeOptions = {}): Promise<never> {
 	const interactiveMode = options.interactiveMode;
-	interactiveMode?.host();
-	const interactiveUI = interactiveMode?.getExtensionUIContext();
+	const interactiveUI = interactiveMode?.host(() => shutdown());
 	let frontend: "rpc" | "tui" = "rpc";
+	let transitioning = false;
+	let returnRequested = false;
+	let attachToken: string | undefined;
 	let interactiveRunStarted = false;
-	let activateTuiRequested = false;
-	let frontendTransitioning = false;
-	let returnToRpcRequested = false;
-	let tuiHandoffToken: string | undefined;
 	let extensionTitle: string | undefined;
-	let editorComponentConfigured = false;
-	let editorComponentFactory: ReturnType<ExtensionUIContext["getEditorComponent"]>;
+	let editorFactory: ReturnType<ExtensionUIContext["getEditorComponent"]>;
+	let headerFactory: Parameters<ExtensionUIContext["setHeader"]>[0];
+	let editorFactoryPending = false;
+	let headerFactoryPending = false;
 	const stdinWasRaw = process.stdin.isRaw ?? false;
-	if (interactiveMode && process.stdin.setRawMode) {
-		process.stdin.setRawMode(true);
-	}
+	if (interactiveMode) process.stdin.setRawMode?.(true);
 	takeOverStdout();
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
-		if (frontend === "rpc") {
-			writeJsonRecordToStdout(obj, rpcOutputLayout);
-		}
+		if (frontend === "rpc") writeRawStdout(serializeJsonLine(obj));
 	};
 
 	const success = <T extends RpcCommand["type"]>(
@@ -101,25 +97,36 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		return { id, type: "response", command, success: false, error: message };
 	};
 
-	type PendingExtensionRequest = {
-		request: RpcExtensionUIRequest;
-		resolve: (response: RpcExtensionUIResponse) => void;
-		reject: (error: Error) => void;
-		presentInTui?: (signal: AbortSignal) => Promise<RpcExtensionUIResponse>;
-		tuiAbortController?: AbortController;
-	};
-
 	// Pending extension UI requests waiting for response
-	const pendingExtensionRequests = new Map<string, PendingExtensionRequest>();
-	const pendingCustomRequests = new Map<
+	const pendingExtensionRequests = new Map<
 		string,
-		{ request: RpcExtensionUIRequest; presented: boolean; present: () => Promise<void> }
+		{
+			request: RpcExtensionUIRequest;
+			resolve?: (value: RpcExtensionUIResponse) => void;
+			reject: (error: Error) => void;
+			present?: () => void;
+			replacesEditor?: boolean;
+		}
 	>();
+	let activeReplacementRequestId: string | undefined;
 
 	// Shutdown request flag
 	let shutdownRequested = false;
 	let shuttingDown = false;
 	const signalCleanupHandlers: Array<() => void> = [];
+
+	function presentPendingRequests(): void {
+		if (frontend !== "tui" || transitioning || shuttingDown) return;
+		// Replacement components share one editor container; overlays render independently.
+		for (const [id, pending] of pendingExtensionRequests) {
+			if (!pending.present) continue;
+			if (pending.replacesEditor) {
+				if (activeReplacementRequestId) continue;
+				activeReplacementRequestId = id;
+			}
+			pending.present();
+		}
+	}
 
 	/** Helper for dialog methods with signal/timeout support */
 	function createDialogPromise<T>(
@@ -127,22 +134,24 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		defaultValue: T,
 		request: Record<string, unknown>,
 		parseResponse: (response: RpcExtensionUIResponse) => T,
-		presentInTui?: (opts: ExtensionUIDialogOptions) => Promise<RpcExtensionUIResponse>,
+		present?: (opts: ExtensionUIDialogOptions) => Promise<T>,
 	): Promise<T> {
 		if (opts?.signal?.aborted) return Promise.resolve(defaultValue);
 
 		const id = crypto.randomUUID();
-		const deadline = opts?.timeout ? Date.now() + opts.timeout : undefined;
 		const rpcRequest = { type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest;
+		const deadline = opts?.timeout ? Date.now() + opts.timeout : undefined;
 		return new Promise((resolve, reject) => {
+			let nativeController: AbortController | undefined;
 			let timeoutId: ReturnType<typeof setTimeout> | undefined;
-			let pending: PendingExtensionRequest;
 
 			const cleanup = () => {
 				if (timeoutId) clearTimeout(timeoutId);
 				opts?.signal?.removeEventListener("abort", onAbort);
-				pending.tuiAbortController?.abort();
 				pendingExtensionRequests.delete(id);
+				nativeController?.abort();
+				if (activeReplacementRequestId === id) activeReplacementRequestId = undefined;
+				presentPendingRequests();
 			};
 
 			const onAbort = () => {
@@ -158,9 +167,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				}, opts.timeout);
 			}
 
-			pending = {
-				request: rpcRequest,
-				resolve: (response) => {
+			pendingExtensionRequests.set(id, {
+				resolve: (response: RpcExtensionUIResponse) => {
 					cleanup();
 					resolve(parseResponse(response));
 				},
@@ -168,18 +176,31 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					cleanup();
 					reject(error);
 				},
-				presentInTui: presentInTui
-					? (signal) =>
-							presentInTui({
-								...opts,
-								signal: opts?.signal ? AbortSignal.any([opts.signal, signal]) : signal,
+				request: rpcRequest,
+				replacesEditor: true,
+				present: present
+					? () => {
+							if (nativeController) return;
+							nativeController = new AbortController();
+							void present({
+								signal: nativeController.signal,
 								timeout: deadline ? Math.max(1, deadline - Date.now()) : undefined,
-							})
+							}).then(
+								(value) => {
+									if (!pendingExtensionRequests.has(id)) return;
+									cleanup();
+									resolve(value);
+								},
+								(error: unknown) => {
+									cleanup();
+									reject(error);
+								},
+							);
+						}
 					: undefined,
-			};
-			pendingExtensionRequests.set(id, pending);
+			});
 			output(rpcRequest);
-			if (frontend === "tui") presentPendingExtensionRequests();
+			presentPendingRequests();
 		});
 	}
 
@@ -187,246 +208,135 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	 * Create an extension UI context that uses the RPC protocol.
 	 */
 	const createExtensionUIContext = (): ExtensionUIContext => ({
-		select: (title, values, opts) => {
-			return createDialogPromise(
+		select: (title, values, opts) =>
+			createDialogPromise(
 				opts,
 				undefined,
 				{ method: "select", title, options: values, timeout: opts?.timeout },
-				(response) => ("value" in response ? response.value : undefined),
-				interactiveUI
-					? async (tuiOpts) => {
-							const value = await interactiveUI.select(title, values, tuiOpts);
-							return value === undefined
-								? { type: "extension_ui_response", id: "", cancelled: true }
-								: { type: "extension_ui_response", id: "", value };
-						}
-					: undefined,
-			);
-		},
-
-		confirm: (title, message, opts) => {
-			return createDialogPromise(
+				(r) => ("cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined),
+				interactiveUI ? (tuiOpts) => interactiveUI.select(title, values, tuiOpts) : undefined,
+			),
+		confirm: (title, message, opts) =>
+			createDialogPromise(
 				opts,
 				false,
 				{ method: "confirm", title, message, timeout: opts?.timeout },
-				(response) => ("confirmed" in response ? response.confirmed : false),
-				interactiveUI
-					? async (tuiOpts) => ({
-							type: "extension_ui_response",
-							id: "",
-							confirmed: await interactiveUI.confirm(title, message, tuiOpts),
-						})
-					: undefined,
-			);
-		},
-
-		input: (title, placeholder, opts) => {
-			return createDialogPromise(
+				(r) => ("cancelled" in r && r.cancelled ? false : "confirmed" in r ? r.confirmed : false),
+				interactiveUI ? (tuiOpts) => interactiveUI.confirm(title, message, tuiOpts) : undefined,
+			),
+		input: (title, placeholder, opts) =>
+			createDialogPromise(
 				opts,
 				undefined,
 				{ method: "input", title, placeholder, timeout: opts?.timeout },
-				(response) => ("value" in response ? response.value : undefined),
-				interactiveUI
-					? async (tuiOpts) => {
-							const value = await interactiveUI.input(title, placeholder, tuiOpts);
-							return value === undefined
-								? { type: "extension_ui_response", id: "", cancelled: true }
-								: { type: "extension_ui_response", id: "", value };
-						}
-					: undefined,
-			);
-		},
-
-		notify(message: string, type?: "info" | "warning" | "error"): void {
-			if (frontend === "tui" && interactiveUI) {
-				interactiveUI.notify(message, type);
-				return;
-			}
-			output({
-				type: "extension_ui_request",
-				id: crypto.randomUUID(),
-				method: "notify",
-				message,
-				notifyType: type,
-			} as RpcExtensionUIRequest);
-		},
-
-		onTerminalInput(handler): () => void {
-			return interactiveUI?.onTerminalInput(handler) ?? (() => {});
-		},
-
-		setStatus(key: string, text: string | undefined): void {
-			interactiveUI?.setStatus(key, text);
-			output({
-				type: "extension_ui_request",
-				id: crypto.randomUUID(),
-				method: "setStatus",
-				statusKey: key,
-				statusText: text,
-			} as RpcExtensionUIRequest);
-		},
-
-		setWorkingMessage(message?: string): void {
-			interactiveUI?.setWorkingMessage(message);
-		},
-
-		setWorkingVisible(visible: boolean): void {
-			interactiveUI?.setWorkingVisible(visible);
-		},
-
-		setWorkingIndicator(indicatorOptions?: WorkingIndicatorOptions): void {
-			interactiveUI?.setWorkingIndicator(indicatorOptions);
-		},
-
-		setHiddenThinkingLabel(label?: string): void {
-			interactiveUI?.setHiddenThinkingLabel(label);
-		},
-
-		setWidget(key: string, content: unknown, widgetOptions?: ExtensionWidgetOptions): void {
-			if (interactiveUI) {
-				Reflect.apply(interactiveUI.setWidget, interactiveUI, [key, content, widgetOptions]);
-			}
-			if (content === undefined || Array.isArray(content)) {
-				output({
-					type: "extension_ui_request",
-					id: crypto.randomUUID(),
-					method: "setWidget",
-					widgetKey: key,
-					widgetLines: content as string[] | undefined,
-					widgetPlacement: widgetOptions?.placement,
-				} as RpcExtensionUIRequest);
-			}
-		},
-
-		setFooter(factory): void {
-			interactiveUI?.setFooter(factory);
-		},
-
-		setHeader(factory): void {
-			interactiveUI?.setHeader(factory);
-		},
-
-		setTitle(title: string): void {
-			extensionTitle = title;
-			if (frontend === "tui" && interactiveUI) {
-				interactiveUI.setTitle(title);
-				return;
-			}
-			output({
-				type: "extension_ui_request",
-				id: crypto.randomUUID(),
-				method: "setTitle",
-				title,
-			} as RpcExtensionUIRequest);
-		},
-
-		async custom(factory, customOptions) {
-			if (!interactiveUI) return undefined as never;
-			const id = crypto.randomUUID();
-			const request = { type: "extension_ui_request", id, method: "custom" } as RpcExtensionUIRequest;
-			return new Promise((resolve, reject) => {
-				const pending = {
-					request,
-					presented: false,
-					present: async () => {
-						try {
-							resolve(await interactiveUI.custom(factory, customOptions));
-						} catch (error) {
-							reject(error);
-						} finally {
-							pendingCustomRequests.delete(id);
-						}
-					},
-				};
-				pendingCustomRequests.set(id, pending);
-				output(request);
-				if (frontend === "tui") presentPendingExtensionRequests();
-			});
-		},
-
-		pasteToEditor(text: string): void {
-			interactiveUI?.pasteToEditor(text);
-			output({
-				type: "extension_ui_request",
-				id: crypto.randomUUID(),
-				method: "set_editor_text",
-				text,
-			} as RpcExtensionUIRequest);
-		},
-
-		setEditorText(text: string): void {
-			interactiveUI?.setEditorText(text);
-			output({
-				type: "extension_ui_request",
-				id: crypto.randomUUID(),
-				method: "set_editor_text",
-				text,
-			} as RpcExtensionUIRequest);
-		},
-
-		getEditorText(): string {
-			return interactiveUI?.getEditorText() ?? "";
-		},
-
-		editor(title: string, prefill?: string, opts?: { signal?: AbortSignal }): Promise<string | undefined> {
-			return createDialogPromise(
+				(r) => ("cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined),
+				interactiveUI ? (tuiOpts) => interactiveUI.input(title, placeholder, tuiOpts) : undefined,
+			),
+		editor: (title, prefill, opts) =>
+			createDialogPromise(
 				opts,
 				undefined,
 				{ method: "editor", title, prefill },
-				(response) => ("value" in response ? response.value : undefined),
-				interactiveUI
-					? async (tuiOpts) => {
-							const value = await interactiveUI.editor(title, prefill, tuiOpts);
-							return value === undefined
-								? { type: "extension_ui_response", id: "", cancelled: true }
-								: { type: "extension_ui_response", id: "", value };
-						}
-					: undefined,
-			);
+				(r) => ("cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined),
+				interactiveUI ? (tuiOpts) => interactiveUI.editor(title, prefill, tuiOpts) : undefined,
+			),
+		notify: (message, notifyType) => {
+			if (frontend === "tui") interactiveUI?.notify(message, notifyType);
+			else output({ type: "extension_ui_request", id: crypto.randomUUID(), method: "notify", message, notifyType });
 		},
-
-		addAutocompleteProvider(factory): void {
-			interactiveUI?.addAutocompleteProvider(factory);
+		onTerminalInput: (handler) => interactiveUI?.onTerminalInput(handler) ?? (() => {}),
+		setStatus: (statusKey, statusText) => {
+			interactiveUI?.setStatus(statusKey, statusText);
+			output({ type: "extension_ui_request", id: crypto.randomUUID(), method: "setStatus", statusKey, statusText });
 		},
-
-		setEditorComponent(factory): void {
-			editorComponentConfigured = true;
-			editorComponentFactory = factory;
+		setWorkingMessage: (message) => interactiveUI?.setWorkingMessage(message),
+		setWorkingVisible: (visible) => interactiveUI?.setWorkingVisible(visible),
+		setWorkingIndicator: (indicator) => interactiveUI?.setWorkingIndicator(indicator),
+		setHiddenThinkingLabel: (label) => interactiveUI?.setHiddenThinkingLabel(label),
+		setWidget(
+			key: string,
+			content: string[] | Parameters<ExtensionUIContext["setWidget"]>[1],
+			widgetOptions?: ExtensionWidgetOptions,
+		): void {
+			if (typeof content === "function") {
+				interactiveUI?.setWidget(key, content, widgetOptions);
+				return;
+			}
+			interactiveUI?.setWidget(key, content, widgetOptions);
+			output({
+				type: "extension_ui_request",
+				id: crypto.randomUUID(),
+				method: "setWidget",
+				widgetKey: key,
+				widgetLines: content,
+				widgetPlacement: widgetOptions?.placement,
+			});
+		},
+		setFooter: (factory) => interactiveUI?.setFooter(factory),
+		setHeader: (factory) => {
+			headerFactory = factory;
+			headerFactoryPending = frontend === "rpc";
+			if (frontend === "tui") interactiveUI?.setHeader(factory);
+		},
+		setTitle: (title) => {
+			extensionTitle = title;
+			if (frontend === "tui") interactiveUI?.setTitle(title);
+			else output({ type: "extension_ui_request", id: crypto.randomUUID(), method: "setTitle", title });
+		},
+		async custom(factory, customOptions) {
+			if (!interactiveUI) return undefined as never;
+			const id = crypto.randomUUID();
+			const request: RpcExtensionUIRequest = { type: "extension_ui_request", id, method: "custom" };
+			return new Promise((resolve, reject) => {
+				let presented = false;
+				const present = () => {
+					if (presented) return;
+					presented = true;
+					void interactiveUI
+						.custom(factory, customOptions)
+						.then(resolve, reject)
+						.finally(() => {
+							pendingExtensionRequests.delete(id);
+							if (activeReplacementRequestId === id) activeReplacementRequestId = undefined;
+							presentPendingRequests();
+						});
+				};
+				pendingExtensionRequests.set(id, {
+					request,
+					reject,
+					present,
+					replacesEditor: !customOptions?.overlay,
+				});
+				output(request);
+				presentPendingRequests();
+			});
+		},
+		pasteToEditor: (text) => {
+			interactiveUI?.pasteToEditor(text);
+			output({ type: "extension_ui_request", id: crypto.randomUUID(), method: "set_editor_text", text });
+		},
+		setEditorText: (text) => {
+			interactiveUI?.setEditorText(text);
+			output({ type: "extension_ui_request", id: crypto.randomUUID(), method: "set_editor_text", text });
+		},
+		getEditorText: () => interactiveUI?.getEditorText() ?? "",
+		addAutocompleteProvider: (factory) => interactiveUI?.addAutocompleteProvider(factory),
+		setEditorComponent: (factory) => {
+			editorFactory = factory;
+			editorFactoryPending = frontend === "rpc";
 			if (frontend === "tui") interactiveUI?.setEditorComponent(factory);
 		},
-
-		getEditorComponent() {
-			return frontend === "tui" ? interactiveUI?.getEditorComponent() : editorComponentFactory;
-		},
-
+		getEditorComponent: () =>
+			editorFactoryPending && interactiveUI ? editorFactory : interactiveUI?.getEditorComponent(),
 		get theme() {
 			return interactiveUI?.theme ?? theme;
 		},
-
-		getAllThemes() {
-			return interactiveUI?.getAllThemes() ?? [];
-		},
-
-		getTheme(name: string) {
-			return interactiveUI?.getTheme(name);
-		},
-
-		setTheme(themeOrName: string | Theme) {
-			return (
-				interactiveUI?.setTheme(themeOrName) ?? {
-					success: false,
-					error: "Theme switching not supported in RPC mode",
-				}
-			);
-		},
-
-		getToolsExpanded() {
-			return interactiveUI?.getToolsExpanded() ?? false;
-		},
-
-		setToolsExpanded(expanded: boolean) {
-			interactiveUI?.setToolsExpanded(expanded);
-		},
+		getAllThemes: () => interactiveUI?.getAllThemes() ?? [],
+		getTheme: (name) => interactiveUI?.getTheme(name),
+		setTheme: (value: string | Theme) =>
+			interactiveUI?.setTheme(value) ?? { success: false, error: "Theme switching not supported in RPC mode" },
+		getToolsExpanded: () => interactiveUI?.getToolsExpanded() ?? false,
+		setToolsExpanded: (expanded) => interactiveUI?.setToolsExpanded(expanded),
 	});
 
 	const getRpcState = (): RpcSessionState => ({
@@ -442,10 +352,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		autoCompactionEnabled: session.autoCompactionEnabled,
 		messageCount: session.messages.length,
 		pendingMessageCount: session.pendingMessageCount,
-		pendingExtensionUIRequests: [
-			...Array.from(pendingExtensionRequests.values(), (pending) => pending.request),
-			...Array.from(pendingCustomRequests.values(), (pending) => pending.request),
-		],
+		pendingExtensionUIRequests: Array.from(pendingExtensionRequests.values(), (pending) => pending.request),
 	});
 
 	runtimeHost.setRebindSession(async () => {
@@ -454,22 +361,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
-		unsubscribe?.();
-		unsubscribeBackpressure?.();
-		unsubscribe = session.subscribe((event) => {
-			output(toJsonEvent(event));
-			if (event.type === "agent_settled") {
-				void checkShutdownRequested();
-			}
-		});
-		unsubscribeBackpressure = session.agent.subscribe(async () => {
-			await waitForRawStdoutBackpressure();
-		});
-
 		await session.bindExtensions({
 			uiContext: createExtensionUIContext(),
 			mode: frontend,
-			getQueuedInputCount: () => interactiveMode?.getQueuedInputCount() ?? 0,
 			commandContextActions: {
 				waitForIdle: () => session.waitForIdle(),
 				newSession: async (options) => runtimeHost.newSession(options),
@@ -491,25 +385,32 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				},
 				reload: async () => {
 					await session.reload();
+					await interactiveMode?.rebindHostedSession();
 				},
 			},
 			shutdownHandler: () => {
 				shutdownRequested = true;
 			},
 			onError: (err) => {
-				if (frontend === "tui" && interactiveMode) {
-					interactiveMode.showExtensionError(err.extensionPath, err.error, err.stack);
-				} else {
-					output({
-						type: "extension_error",
-						extensionPath: err.extensionPath,
-						event: err.event,
-						error: err.error,
-					});
+				if (frontend === "tui") {
+					interactiveMode?.showError(`Extension "${err.extensionPath}" error: ${err.error}`);
+					return;
 				}
+				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
 			},
 		});
 
+		unsubscribe?.();
+		unsubscribeBackpressure?.();
+		unsubscribe = session.subscribe((event) => {
+			output(toJsonEvent(event));
+			if (event.type === "agent_settled") {
+				void checkShutdownRequested();
+			}
+		});
+		unsubscribeBackpressure = session.agent.subscribe(async () => {
+			if (frontend === "rpc") await waitForRawStdoutBackpressure();
+		});
 		await interactiveMode?.rebindHostedSession();
 	};
 
@@ -527,15 +428,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			process.on(signal, handler);
 			signalCleanupHandlers.push(() => process.off(signal, handler));
 		}
-
 		if (interactiveMode && process.platform !== "win32") {
-			const returnToRpc = () => {
-				if (frontend === "rpc" && !frontendTransitioning) return;
-				returnToRpcRequested = true;
-				void activateRpcFrontend();
+			const detach = () => {
+				if (frontend === "rpc" && !transitioning) return;
+				returnRequested = true;
+				void activateRpcFrontend().catch((error: unknown) => shutdown(1, undefined, error));
 			};
-			process.on("SIGUSR2", returnToRpc);
-			signalCleanupHandlers.push(() => process.off("SIGUSR2", returnToRpc));
+			process.on("SIGUSR2", detach);
+			signalCleanupHandlers.push(() => process.off("SIGUSR2", detach));
 		}
 	};
 
@@ -595,31 +495,35 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			case "new_session": {
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
 				const result = await runtimeHost.newSession(options);
+				if (!result.cancelled) {
+					await rebindSession();
+				}
 				return success(id, "new_session", result);
-			}
-
-			case "attach_tui": {
-				if (!interactiveMode || !process.stdin.isTTY || !process.stdout.isTTY) {
-					return error(id, "attach_tui", "TUI handoff requires a PTY");
-				}
-				if (command.token !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(command.token)) {
-					return error(id, "attach_tui", "TUI handoff token must be a UUID");
-				}
-				tuiHandoffToken = command.token ?? crypto.randomUUID();
-				activateTuiRequested = true;
-				return success(id, "attach_tui", { token: tuiHandoffToken });
 			}
 
 			// =================================================================
 			// State
 			// =================================================================
 
-			case "get_state":
-				return success(id, "get_state", getRpcState());
+			case "attach_tui": {
+				if (!interactiveMode || !process.stdin.isTTY || !process.stdout.isTTY || process.platform === "win32") {
+					return error(id, "attach_tui", "TUI handoff requires a PTY");
+				}
+				if (
+					command.token !== undefined &&
+					(typeof command.token !== "string" ||
+						!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(command.token))
+				) {
+					return error(id, "attach_tui", "TUI handoff token must be a UUID");
+				}
+				attachToken = command.token ?? crypto.randomUUID();
+				transitioning = true;
+				detachInput();
+				return success(id, "attach_tui", { token: attachToken });
+			}
 
-			case "wait_for_idle": {
-				await session.waitForIdle();
-				return success(id, "wait_for_idle");
+			case "get_state": {
+				return success(id, "get_state", getRpcState());
 			}
 
 			// =================================================================
@@ -718,9 +622,24 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			// =================================================================
 
 			case "bash": {
+				const eventResult = await session.extensionRunner.emitUserBash({
+					type: "user_bash",
+					command: command.command,
+					excludeFromContext: command.excludeFromContext ?? false,
+					cwd: session.sessionManager.getCwd(),
+				});
+
+				if (eventResult?.result) {
+					session.recordBashResult(command.command, eventResult.result, {
+						excludeFromContext: command.excludeFromContext,
+					});
+					return success(id, "bash", eventResult.result);
+				}
+
 				const result = await session.executeBash(command.command, undefined, {
 					excludeFromContext: command.excludeFromContext,
 					id,
+					operations: eventResult?.operations,
 				});
 				return success(id, "bash", result);
 			}
@@ -746,11 +665,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 
 			case "switch_session": {
 				const result = await runtimeHost.switchSession(command.sessionPath);
+				if (!result.cancelled) {
+					await rebindSession();
+				}
 				return success(id, "switch_session", result);
 			}
 
 			case "fork": {
 				const result = await runtimeHost.fork(command.entryId);
+				if (!result.cancelled) {
+					await rebindSession();
+				}
 				return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
 			}
 
@@ -760,6 +685,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					return error(id, "clone", "Cannot clone session: no current entry selected");
 				}
 				const result = await runtimeHost.fork(leafId, { position: "at" });
+				if (!result.cancelled) {
+					await rebindSession();
+				}
 				return success(id, "clone", { cancelled: result.cancelled });
 			}
 
@@ -857,82 +785,54 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	 * Called after handling each command when waiting for the next command.
 	 */
 	let detachInput = () => {};
-	let attachInput = () => {};
-
-	function presentPendingExtensionRequests(): void {
-		for (const [id, pending] of pendingExtensionRequests) {
-			if (!pending.presentInTui || pending.tuiAbortController) continue;
-			const controller = new AbortController();
-			pending.tuiAbortController = controller;
-			void pending
-				.presentInTui(controller.signal)
-				.then((response) => {
-					if (pendingExtensionRequests.get(id) === pending) pending.resolve(response);
-				})
-				.catch((error: unknown) => {
-					if (pendingExtensionRequests.get(id) === pending) {
-						pending.reject(error instanceof Error ? error : new Error(String(error)));
-					}
-				});
-		}
-
-		for (const pending of pendingCustomRequests.values()) {
-			if (pending.presented) continue;
-			pending.presented = true;
-			void pending.present();
-		}
-	}
 
 	async function activateTuiFrontend(): Promise<void> {
-		if (frontend === "tui" || !interactiveMode) return;
-		frontendTransitioning = true;
+		if (!interactiveMode) return;
 		try {
 			await flushRawStdout();
-			detachInput();
 			frontend = "tui";
 			session.setExtensionMode("tui");
 			restoreStdout();
 			await interactiveMode.activateHosted();
-			if (extensionTitle) interactiveUI?.setTitle(extensionTitle);
-			if (editorComponentConfigured) interactiveUI?.setEditorComponent(editorComponentFactory);
+			if (extensionTitle !== undefined) interactiveUI?.setTitle(extensionTitle);
+			if (editorFactoryPending) interactiveUI?.setEditorComponent(editorFactory);
+			if (headerFactoryPending) interactiveUI?.setHeader(headerFactory);
+			editorFactoryPending = false;
+			headerFactoryPending = false;
 			if (!interactiveRunStarted) {
 				interactiveRunStarted = true;
-				void interactiveMode.runHosted().catch((error: unknown) => {
-					console.error(error);
-					void shutdown(1);
-				});
+				void interactiveMode.runHosted().catch((error: unknown) => shutdown(1, undefined, error));
 			}
-			presentPendingExtensionRequests();
+		} catch (error) {
+			await shutdown(1, undefined, error);
 		} finally {
-			frontendTransitioning = false;
+			transitioning = false;
 		}
-		if (returnToRpcRequested) await activateRpcFrontend();
+		if (returnRequested) await activateRpcFrontend();
+		else presentPendingRequests();
 	}
 
 	async function activateRpcFrontend(): Promise<void> {
-		if (frontendTransitioning || frontend === "rpc" || !interactiveMode) return;
-		frontendTransitioning = true;
+		if (transitioning || frontend === "rpc" || !interactiveMode) return;
+		transitioning = true;
 		try {
 			await interactiveMode.deactivateHosted();
 			takeOverStdout();
 			frontend = "rpc";
 			session.setExtensionMode("rpc");
-			attachInput();
-			writeJsonRecordToStdout(
-				{ type: "tui_detached", state: getRpcState() },
-				rpcOutputLayout,
-				`\x1e${tuiHandoffToken}\x1e`,
-			);
+			process.stdin.setRawMode?.(true);
+			const event: RpcTuiDetachedEvent = { type: "tui_detached", state: getRpcState() };
+			writeRawStdout(`\x1e${attachToken}\x1e${serializeJsonLine(event)}`);
 			for (const pending of pendingExtensionRequests.values()) output(pending.request);
-			for (const pending of pendingCustomRequests.values()) output(pending.request);
 			await waitForRawStdoutBackpressure();
-			returnToRpcRequested = false;
+			returnRequested = false;
 		} finally {
-			frontendTransitioning = false;
+			transitioning = false;
 		}
+		attachInput();
 	}
 
-	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<never> {
+	async function shutdown(exitCode = 0, signal?: NodeJS.Signals, error?: unknown): Promise<never> {
 		if (shuttingDown) {
 			process.exit(exitCode);
 		}
@@ -940,22 +840,21 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
-		if (frontend === "tui") {
-			await interactiveMode?.deactivateHosted();
-			takeOverStdout();
-			frontend = "rpc";
-		}
+		await interactiveMode?.deactivateHosted();
+		interactiveMode?.stop();
+		takeOverStdout();
+		frontend = "rpc";
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		await runtimeHost.dispose();
 		detachInput();
 		process.stdin.pause();
-		if (interactiveMode && process.stdin.setRawMode) {
-			process.stdin.setRawMode(stdinWasRaw);
-		}
+		if (interactiveMode) process.stdin.setRawMode?.(stdinWasRaw);
 		if (signal !== "SIGTERM") {
 			await flushRawStdout();
 		}
+		// TUI handoff failures are reported only after the terminal is restored.
+		if (error !== undefined) console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
 		process.exit(exitCode);
 	}
 
@@ -965,6 +864,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	}
 
 	const handleInputLine = async (line: string) => {
+		if (frontend !== "rpc" || transitioning) return;
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(line);
@@ -989,10 +889,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		) {
 			const response = parsed as RpcExtensionUIResponse;
 			const pending = pendingExtensionRequests.get(response.id);
-			if (pending) {
-				pendingExtensionRequests.delete(response.id);
-				pending.resolve(response);
-			}
+			pending?.resolve?.(response);
 			return;
 		}
 
@@ -1004,10 +901,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				await waitForRawStdoutBackpressure();
 			}
 			await checkShutdownRequested();
-			if (activateTuiRequested) {
-				activateTuiRequested = false;
-				await activateTuiFrontend();
-			}
+			if (command.type === "attach_tui" && response?.success) await activateTuiFrontend();
 		} catch (commandError: unknown) {
 			output(
 				error(
@@ -1023,22 +917,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	const onInputEnd = () => {
 		void shutdown();
 	};
-	let inputAttached = false;
-	attachInput = () => {
-		if (inputAttached) return;
-		inputAttached = true;
+	function attachInput(): void {
 		process.stdin.on("end", onInputEnd);
 		process.stdin.resume();
 		const detachJsonl = attachJsonlLineReader(process.stdin, (line) => {
 			void handleInputLine(line);
 		});
 		detachInput = () => {
-			if (!inputAttached) return;
-			inputAttached = false;
 			detachJsonl();
 			process.stdin.off("end", onInputEnd);
 		};
-	};
+	}
 	attachInput();
 
 	// Keep process alive forever

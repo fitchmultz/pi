@@ -40,10 +40,6 @@
               "path": "restart.md"
             },
             {
-              "title": "Diagnose Codex Connections",
-              "path": "websocket-recovery.md"
-            },
-            {
               "title": "Run Pi Safely",
               "path": "security.md"
             },
@@ -114,7 +110,7 @@
               "path": "extensions.md"
             },
             {
-              "title": "Group On-demand Instructions",
+              "title": "On-demand Full Instructions",
               "path": "instruction-groups.md"
             },
             {
@@ -136,14 +132,6 @@
             {
               "title": "Use the SDK",
               "path": "sdk.md"
-            },
-            {
-              "title": "Save Working-session Checkpoints",
-              "path": "checkpoint.md"
-            },
-            {
-              "title": "Profile Startup",
-              "path": "profiling.md"
             }
           ]
         }
@@ -155,6 +143,10 @@
         {
           "title": "CLI",
           "path": "cli.md"
+        },
+        {
+          "title": "Codemode",
+          "path": "codemode.md"
         },
         {
           "title": "Slash Commands",
@@ -173,7 +165,7 @@
           "path": "keybindings.md"
         },
         {
-          "title": "Provider Authentication",
+          "title": "Providers",
           "path": "providers.md"
         },
         {
@@ -210,7 +202,7 @@
   "redirects": [
     {
       "from": "development.md",
-      "to": "profiling.md"
+      "to": "index.md"
     },
     {
       "from": "session.md",

@@ -1,4 +1,4 @@
-import type { AssistantMessage, ImageContent, Message, TextContent, Tool, TranscriptContext, Usage } from "../types.ts";
+import type { AssistantMessage, ImageContent, Message, TextContent, TranscriptContext, Usage } from "../types.ts";
 import { getSystemMessageText } from "./text.ts";
 
 export interface ContextUsageEstimate {
@@ -43,13 +43,14 @@ export function estimateTextAndImageContentTokens(content: string | Array<TextCo
 	return Math.ceil(estimateTextAndImageContentChars(content) / CHARS_PER_TOKEN);
 }
 
-export function estimateMessageTokens(message: Message, includeTools = true): number {
+export function estimateMessageTokens(message: Message): number {
 	let chars = 0;
 
 	if (message.role === "system") {
 		return (
 			estimateTextTokens(getSystemMessageText(message)) +
-			(includeTools ? estimateToolsTokens(message.toolsAdded) + estimateToolsTokens(message.toolsRemoved) : 0)
+			estimateToolsTokens(message.toolsAdded) +
+			estimateToolsTokens(message.toolsRemoved)
 		);
 	}
 	if (message.role === "user") return estimateTextAndImageContentTokens(message.content);
@@ -59,39 +60,12 @@ export function estimateMessageTokens(message: Message, includeTools = true): nu
 		if (block.type === "text") {
 			chars += block.text.length;
 		} else if (block.type === "thinking") {
-			// Signatures also carry redacted thinking and encrypted Responses reasoning.
 			chars += block.thinking.length + (block.thinkingSignature?.length ?? 0);
 		} else {
 			chars += block.name.length + safeJsonStringify(block.arguments).length + (block.thoughtSignature?.length ?? 0);
 		}
 	}
 	return Math.ceil(chars / CHARS_PER_TOKEN);
-}
-
-/** Estimate the physical request without borrowing usage from an earlier response. */
-export function estimateProviderInputTokens(
-	context: TranscriptContext | readonly Message[],
-	tools?: readonly Tool[],
-): number {
-	const messages = "messages" in context ? context.messages : context;
-	return messages.reduce(
-		(sum, message) => sum + estimateMessageTokens(message, tools === undefined),
-		tools === undefined ? 0 : estimateToolsTokens(tools),
-	);
-}
-
-/** Refuse known oversized projected input before transport. This is an estimate, not provider tokenization. */
-export function assertContextFits(
-	model: { contextWindow: number },
-	context: TranscriptContext | readonly Message[],
-	tools?: readonly Tool[],
-): void {
-	if (!(model.contextWindow > 0)) return;
-	const inputTokens = estimateProviderInputTokens(context, tools);
-	if (inputTokens > model.contextWindow)
-		throw new Error(
-			`Estimated provider input (${inputTokens} tokens) exceeds the context window of this model (${model.contextWindow} tokens). Reduce input or use a larger-context model.`,
-		);
 }
 
 function getLastAssistantUsageInfo(messages: readonly Message[]): { usage: Usage; index: number } | undefined {

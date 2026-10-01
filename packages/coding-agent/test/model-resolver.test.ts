@@ -563,7 +563,6 @@ describe("resolveCliModel", () => {
 		const registry = {
 			getModels: () => [...allModels, commandcodeModel, xiaomiModel],
 			hasConfiguredAuth: (provider: string) => provider === "commandcode",
-			getAuthCheckError: () => undefined,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
 
 		const result = resolveCliModel({
@@ -715,6 +714,29 @@ describe("resolveCliModel", () => {
 });
 
 describe("default model selection", () => {
+	test("retains saved and scoped provider selections when that provider's auth check fails", async () => {
+		const registry = {
+			getAvailable: async () => [mockModels[1]],
+			getAvailableSnapshot: () => [mockModels[1]],
+			getModels: () => mockModels,
+			getModel: () => mockModels[0],
+			hasConfiguredAuth: () => false,
+			getAuthCheckError: (provider: string) => (provider === "anthropic" ? new Error("auth failed") : undefined),
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
+		const initial = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: "anthropic",
+			defaultModelId: mockModels[0].id,
+			modelRuntime: registry,
+		});
+		expect(initial.model?.provider).toBe("anthropic");
+		expect(
+			(await resolveModelScopeWithDiagnostics(["anthropic/*"], registry)).scopedModels.map(
+				(entry) => entry.model.provider,
+			),
+		).toEqual(["anthropic"]);
+	});
 	test("openai defaults track current models", () => {
 		expect(defaultModelPerProvider.openai).toBe("gpt-5.5");
 		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-6.1-sol");

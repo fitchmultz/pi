@@ -5,13 +5,10 @@ import {
 	fauxAssistantMessage,
 	type Model,
 	type SimpleStreamOptions,
-	type SystemMessage,
 } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { generateBranchSummary, prepareBranchEntries, serializeConversation } from "../src/core/compaction/index.ts";
-import { convertToLlm } from "../src/core/messages.ts";
-import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
+import { generateBranchSummary, prepareBranchEntries } from "../src/core/compaction/index.ts";
+import type { SessionEntry } from "../src/core/session-manager.ts";
 
 const model: Model<"anthropic-messages"> = {
 	id: "test-model",
@@ -47,62 +44,22 @@ function response(content: AssistantMessage["content"]): AssistantMessage {
 }
 
 describe("branch summarization", () => {
-	// PR50: prompt/tool state omitted by serialization must not crowd out conversation.
-	it.each<{ name: string; patch: SystemMessage }>([
-		{ name: "instructions", patch: { role: "system", content: "p".repeat(68_000), timestamp: 2 } },
-		{
-			name: "prompt sections",
-			patch: { role: "system", content: "", sections: { project_context: "p".repeat(68_000) }, timestamp: 2 },
-		},
-		{
-			name: "tool declarations",
-			patch: {
+	it("budgets conversation without system declarations", () => {
+		const system: SessionEntry = {
+			type: "message",
+			id: "branch-system",
+			parentId: "branch-user",
+			timestamp: new Date(2).toISOString(),
+			message: {
 				role: "system",
-				content: "",
-				toolsAdded: [{ name: "extension_tool", description: "p".repeat(68_000), parameters: Type.Object({}) }],
-				toolsRemoved: [{ name: "old_extension_tool" }],
+				content: "Tool and system declarations ".repeat(1000),
 				timestamp: 2,
 			},
-		},
-	])("does not spend the conversation budget on $name", async ({ patch }) => {
-		const session = SessionManager.inMemory();
-		const earlier = { role: "user" as const, content: "Deploy needs owner approval", timestamp: 1 };
-		const recent = { role: "user" as const, content: "Please continue.", timestamp: 3 };
-		session.appendMessage(earlier);
-		session.appendMessage(patch);
-		session.appendMessage(recent);
-		const branch = session.getBranch();
-		const control = prepareBranchEntries(
-			branch.filter((entry) => entry.type !== "message" || entry.message.role !== "system"),
-			16384,
-		);
-		expect(control.messages).toEqual([earlier, recent]);
-		expect(control.totalTokens).toBeLessThan(16384);
-		const conversation = serializeConversation(convertToLlm([earlier, patch, recent]));
-		expect(conversation).toBe(serializeConversation(convertToLlm(control.messages)));
-
-		for (const budget of [16384, 0]) {
-			const prepared = prepareBranchEntries(branch, budget);
-			expect(prepared.messages).toEqual(control.messages);
-			expect(prepared.totalTokens).toBe(control.totalTokens);
-		}
-
-		let requests = 0;
-		const result = await generateBranchSummary(branch, {
-			model: { ...model, contextWindow: 32768 },
-			signal: new AbortController().signal,
-			streamFn: (_model, context) => {
-				requests++;
-				const request = serializeConversation(context.messages);
-				expect(request).toContain(`<conversation>\n${conversation}\n</conversation>`);
-				expect(request).not.toContain("p".repeat(100));
-				const stream = createAssistantMessageEventStream();
-				stream.push({ type: "done", reason: "stop", message: response([{ type: "text", text: earlier.content }]) });
-				return stream;
-			},
-		});
-		expect(requests).toBe(1);
-		expect(result.summary).toContain(earlier.content);
+		};
+		const prepared = prepareBranchEntries([...entries, system], 100);
+		expect(prepared.messages).toEqual([{ role: "user", content: "Abandoned request", timestamp: 1 }]);
+		expect(prepared.totalTokens).toBeGreaterThan(0);
+		expect(prepared.totalTokens).toBeLessThan(100);
 	});
 
 	it("does not override tool choice for branch summaries", async () => {

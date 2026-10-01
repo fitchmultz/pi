@@ -240,7 +240,7 @@ function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown
 function normalizeOptionalNulls(value: unknown, schema: JsonSchemaObject): void {
 	const alternatives = schema.anyOf ?? schema.oneOf;
 	if (alternatives && typeof value === "object" && value !== null) {
-		// Preserve a valid nullable branch before trying omission in another branch.
+		// A valid nullable branch must not be changed by normalization in another branch.
 		if (getSubSchemaValidator(schema)?.Check(value)) return;
 		for (const alternative of alternatives) {
 			const candidate = structuredClone(value);

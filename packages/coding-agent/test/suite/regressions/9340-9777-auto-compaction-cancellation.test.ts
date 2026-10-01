@@ -48,7 +48,7 @@ describe("automatic compaction cancellation regressions", () => {
 		const harness = await createHarness({
 			models: [{ id: "faux-1", contextWindow: 200, maxTokens: 50 }],
 			settings: {
-				compaction: { enabled: false, reserveTokens: 50, keepRecentTokens: 1 },
+				compaction: { enabled: true, reserveTokens: 50, keepRecentTokens: 1 },
 				retry: { enabled: false },
 			},
 			extensionFactories: [
@@ -64,8 +64,6 @@ describe("automatic compaction cancellation regressions", () => {
 		]);
 		harness.session.subscribe((event) => {
 			if (event.type === "message_end" && event.message.role === "assistant") {
-				// Exercise post-run cancellation without the fork's pre-request budget checks.
-				harness.session.setAutoCompactionEnabled(true);
 				harness.session.abortCompaction();
 				void harness.session.abort();
 			}

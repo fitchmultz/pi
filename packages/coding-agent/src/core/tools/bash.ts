@@ -2,7 +2,6 @@ import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { constants as osConstants } from "node:os";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { ShellSource } from "@earendil-works/pi-agent-core/node";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
 import { waitForChildProcess } from "../../utils/child-process.ts";
@@ -55,12 +54,9 @@ export type BashToolInput = Static<typeof bashSchema>;
  * `output` is not limited like the model-facing output: callers decide how much of it reaches the model.
  */
 const bashOutputSchema = Type.Object({
-	output: Type.String({
-		description:
-			"Combined stdout and stderr, up to 1 MiB. Longer output keeps its first and last 512 KiB around an omission marker.",
-	}),
-	truncated: Type.Boolean({ description: "Whether `output` omits part of the command output" }),
-	full_output_path: Type.Optional(Type.String({ description: "Temp file with the full output, when truncated" })),
+	output: Type.String({ description: "Combined stdout and stderr, possibly truncated" }),
+	truncated: Type.Boolean(),
+	full_output_path: Type.Optional(Type.String({ description: "Full output, when truncated" })),
 	exit_code: Type.Number(),
 	wall_time_seconds: Type.Number(),
 });
@@ -89,10 +85,7 @@ export interface BashOperations {
 		command: string,
 		cwd: string,
 		options: {
-			/** Original bytes, tagged with the pipe that produced them. */
-			onData: (data: Buffer, source: ShellSource) => void;
-			/** Report each pipe's EOF once, after its final data callback. */
-			onEnd: (source: ShellSource) => void;
+			onData: (data: Buffer) => void;
 			signal?: AbortSignal;
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
@@ -103,7 +96,7 @@ export interface BashOperations {
 /** Shared process execution used by the built-in shell tools. */
 export function createLocalShellOperations(shellName: string, resolveShellConfig: () => ShellConfig): BashOperations {
 	return {
-		exec: async (command, cwd, { onData, onEnd, signal, timeout, env }) => {
+		exec: async (command, cwd, { onData, signal, timeout, env }) => {
 			const timeoutMs = resolveTimeoutMs(timeout);
 			if (signal?.aborted) {
 				throw new Error("aborted");
@@ -130,55 +123,21 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			if (child.pid) trackDetachedChildPid(child.pid);
 			let timedOut = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
-			const cancellation = new AbortController();
 			const onAbort = () => {
 				if (child.pid) killProcessTree(child.pid);
-				cancellation.abort();
 			};
-			let outputError: unknown;
-			let acceptingOutput = true;
-			const onOutputError = (error: unknown) => {
-				if (!acceptingOutput) return;
-				outputError ??= error;
-				onAbort();
-			};
-			const ended = new Set<ShellSource>();
-			const end = (source: ShellSource) => {
-				if (ended.has(source)) return;
-				ended.add(source);
-				try {
-					onEnd(source);
-				} catch (error) {
-					onOutputError(error);
-				}
-			};
-			const feed = (data: Buffer, source: ShellSource) => {
-				try {
-					onData(data, source);
-				} catch (error) {
-					onOutputError(error);
-				}
-			};
-			const onStdout = (data: Buffer) => feed(data, "stdout");
-			const onStderr = (data: Buffer) => feed(data, "stderr");
-			const onStdoutEnd = () => end("stdout");
-			const onStderrEnd = () => end("stderr");
 
 			try {
 				// Set timeout if provided.
 				if (timeoutMs !== undefined) {
 					timeoutHandle = setTimeout(() => {
 						timedOut = true;
-						onAbort();
+						if (child.pid) killProcessTree(child.pid);
 					}, timeoutMs);
 				}
 				// Stream stdout and stderr.
-				child.stdout?.on("data", onStdout);
-				child.stderr?.on("data", onStderr);
-				child.stdout?.once("end", onStdoutEnd);
-				child.stderr?.once("end", onStderrEnd);
-				child.stdout?.on("error", onOutputError);
-				child.stderr?.on("error", onOutputError);
+				child.stdout?.on("data", onData);
+				child.stderr?.on("data", onData);
 				// Handle abort signal by killing the entire process tree.
 				if (signal) {
 					if (signal.aborted) onAbort();
@@ -186,10 +145,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				}
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
-				const exitCode = await waitForChildProcess(child, cancellation.signal);
-				end("stdout");
-				end("stderr");
-				if (outputError) throw outputError;
+				const exitCode = await waitForChildProcess(child);
 				if (signal?.aborted) {
 					throw new Error("aborted");
 				}
@@ -201,15 +157,6 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				const signalCode = child.signalCode;
 				return { exitCode: exitCode ?? (signalCode ? 128 + (osConstants.signals[signalCode] ?? 0) : 1) };
 			} finally {
-				child.stdout?.removeListener("data", onStdout);
-				child.stderr?.removeListener("data", onStderr);
-				child.stdout?.removeListener("end", onStdoutEnd);
-				child.stderr?.removeListener("end", onStderrEnd);
-				child.stdout?.destroy();
-				child.stderr?.destroy();
-				end("stdout");
-				end("stderr");
-				acceptingOutput = false;
 				if (child.pid) untrackDetachedChildPid(child.pid);
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", onAbort);
@@ -236,7 +183,7 @@ export interface BashSpawnContext {
 
 export type BashSpawnHook = (context: BashSpawnContext) => BashSpawnContext;
 
-export function resolveSpawnContext(
+function resolveSpawnContext(
 	command: string,
 	cwd: string,
 	spawnHook: BashSpawnHook | undefined,
@@ -326,10 +273,7 @@ export function createShellToolDefinition(
 				exposeSessionEnvironment,
 				ctx,
 			);
-			const output = new OutputAccumulator({
-				tempFilePrefix: config.tempFilePrefix,
-				fullOutputMaxBytes: STRUCTURED_OUTPUT_MAX_BYTES,
-			});
+			const output = new OutputAccumulator({ tempFilePrefix: config.tempFilePrefix });
 			let acceptingOutput = true;
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
@@ -375,14 +319,9 @@ export function createShellToolDefinition(
 				onUpdate({ content: [], details: undefined });
 			}
 
-			const handleData = (data: Buffer, source: ShellSource) => {
+			const handleData = (data: Buffer) => {
 				if (!acceptingOutput) return;
-				output.append(data, source);
-				scheduleOutputUpdate();
-			};
-			const handleEnd = (source: ShellSource) => {
-				if (!acceptingOutput) return;
-				output.end(source);
+				output.append(data);
 				scheduleOutputUpdate();
 			};
 
@@ -390,10 +329,9 @@ export function createShellToolDefinition(
 				acceptingOutput = false;
 				output.finish();
 				clearUpdateTimer();
+				emitOutputUpdate();
 				const snapshot = output.snapshot({ persistIfTruncated: true });
 				await output.closeTempFile();
-				updateDirty = true;
-				emitOutputUpdate();
 				return snapshot;
 			};
 
@@ -425,7 +363,6 @@ export function createShellToolDefinition(
 				try {
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
-						onEnd: handleEnd,
 						signal,
 						timeout,
 						env: spawnContext.env,
@@ -450,7 +387,7 @@ export function createShellToolDefinition(
 					throw new Error(appendStatus(outputText, "Command terminated without an exit code"));
 				}
 				const wallTimeSeconds = Math.round((performance.now() - startedAt) / 100) / 10;
-				const fullOutput = output.getFullOutput();
+				const fullOutput = await output.readFullOutput(STRUCTURED_OUTPUT_MAX_BYTES);
 				const structuredContent: BashToolOutput = {
 					output: fullOutput.content,
 					truncated: fullOutput.truncated,

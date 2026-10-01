@@ -66,13 +66,6 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	setCompactView(compactView: boolean): void {
-		if (this.compactView !== compactView) {
-			this.compactView = compactView;
-			if (this.lastMessage) this.updateContent(this.lastMessage);
-		}
-	}
-
 	setHiddenThinkingLabel(label: string): void {
 		this.hiddenThinkingLabel = label;
 		if (this.lastMessage) {
@@ -85,6 +78,12 @@ export class AssistantMessageComponent extends Container {
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
+	}
+
+	setCompactView(compactView: boolean): void {
+		if (this.compactView === compactView) return;
+		this.compactView = compactView;
+		if (this.lastMessage) this.updateContent(this.lastMessage);
 	}
 
 	override render(width: number): string[] {
@@ -142,7 +141,6 @@ export class AssistantMessageComponent extends Container {
 				const runIndex = thinkingRunIndex++;
 				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
 				if (hidden && this.compactView) continue;
-
 				if (needsSpacer) this.contentContainer.addChild(new Spacer(1));
 				needsSpacer = true;
 				const thinkingComponent = hidden

@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { getProviderEnvValue } from "@earendil-works/pi-ai/utils/provider-env";
 import type { ModelRuntime } from "./model-runtime.ts";
-import type { SessionManager, UsageEntry } from "./session-manager.ts";
+import type { SessionEntry, SessionManager, UsageEntry } from "./session-manager.ts";
 import type { CacheWarmingMode } from "./settings-manager.ts";
 
 /** Streaming warming never continues past this long after the real request that started it. */
@@ -36,10 +36,7 @@ export function getCacheWarmingDelayMs(ttlMs: number): number | undefined {
  * `promptCache` tier for the retention the request used. Undefined when the
  * model has no lifetime for that tier or caching is off.
  */
-export function getPromptCacheTtlMs(
-	model: Pick<Model<Api>, "promptCache">,
-	options: SimpleStreamOptions | undefined,
-): number | undefined {
+export function getPromptCacheTtlMs(model: Model<Api>, options: SimpleStreamOptions | undefined): number | undefined {
 	const retention =
 		options?.cacheRetention ??
 		(getProviderEnvValue("PI_CACHE_RETENTION", options?.env) === "long" ? "long" : "short");
@@ -58,6 +55,18 @@ export function getPromptCacheTtlMs(
 export function isReplayable(model: Model<Api>, options: SimpleStreamOptions | undefined): boolean {
 	if (!options?.reasoning || model.api !== "anthropic-messages") return true;
 	return (model as Model<"anthropic-messages">).compat?.forceAdaptiveThinking === true;
+}
+
+/** Prompt size of the most recent real request on the branch, as reported by the provider. */
+function lastPromptTokens(entries: SessionEntry[]): number {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			const usage = entry.message.usage;
+			return usage.input + usage.cacheRead + usage.cacheWrite;
+		}
+	}
+	return 0;
 }
 
 function price(
@@ -154,7 +163,7 @@ export class CacheWarmer {
 	private run?: ActiveRun;
 	private inactive: CacheWarmingStatus;
 	private readonly models: Pick<ModelRuntime, "streamSimple">;
-	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getLeafId" | "iterateEntryMetadata">;
+	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">;
 	private readonly getMode: () => CacheWarmingMode;
 	/** Lets extensions override `event.action`; failures fall back to pi's decision. */
 	private readonly decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction>;
@@ -163,7 +172,7 @@ export class CacheWarmer {
 
 	constructor(
 		models: Pick<ModelRuntime, "streamSimple">,
-		sessionManager: Pick<SessionManager, "appendUsage" | "getLeafId" | "iterateEntryMetadata">,
+		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">,
 		getMode: () => CacheWarmingMode,
 		decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction> = async (event) => event.action,
 	) {
@@ -368,16 +377,7 @@ export class CacheWarmer {
 
 	private evaluate(run: ActiveRun): CacheWarmingDecision {
 		const model = run.model;
-		let promptTokens = 0;
-		for (const entry of this.sessionManager.iterateEntryMetadata({
-			branchFrom: this.sessionManager.getLeafId(),
-			reverse: true,
-		})) {
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const usage = entry.message.usage;
-			if (usage) promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-			break;
-		}
+		const promptTokens = lastPromptTokens(this.sessionManager.getBranch());
 		const cacheHitCost = price(model, { cacheRead: promptTokens });
 		const cacheMissCost = price(
 			model,

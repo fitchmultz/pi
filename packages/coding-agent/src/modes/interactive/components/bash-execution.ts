@@ -28,8 +28,8 @@ export class BashExecutionComponent extends Container {
 	private fullOutputPath?: string;
 	private expanded = false;
 	private compactView: boolean;
-	private compactPreview?: { width: number; lines: string[] };
 	private excludeFromContext: boolean;
+	private compactPreview?: { width: number; lines: string[] };
 	private contentContainer: Container;
 
 	constructor(command: string, ui: TUI, excludeFromContext = false, compactView = false) {
@@ -81,6 +81,10 @@ export class BashExecutionComponent extends Container {
 		return this.status;
 	}
 
+	setCompactView(compactView: boolean): void {
+		this.compactView = compactView;
+	}
+
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		if (!this.compactView) return super.handleMouse(event);
 		if (event.type !== "click" || event.button !== "left") return undefined;
@@ -97,16 +101,13 @@ export class BashExecutionComponent extends Container {
 		};
 	}
 
-	setCompactView(compactView: boolean): void {
-		this.compactView = compactView;
-	}
-
 	override render(width: number): string[] {
 		if (!this.compactView || this.expanded) return super.render(width);
 		if (this.compactPreview?.width === width) return this.compactPreview.lines;
-
-		const colorKey = this.excludeFromContext ? "dim" : "bashMode";
-		const command = theme.fg(colorKey, theme.bold(`$ ${this.command.replace(/\s+/g, " ")}`));
+		const command = theme.fg(
+			this.excludeFromContext ? "dim" : "bashMode",
+			theme.bold(`$ ${this.command.replace(/\s+/g, " ")}`),
+		);
 		const status =
 			this.status === "running"
 				? theme.fg("muted", "Running...")
@@ -115,13 +116,7 @@ export class BashExecutionComponent extends Container {
 					: this.status === "error"
 						? theme.fg("error", `(exit ${this.exitCode})`)
 						: "";
-		let output = "";
-		for (let i = this.outputLines.length - 1; i >= 0; i--) {
-			if (this.outputLines[i].trim()) {
-				output = this.outputLines[i];
-				break;
-			}
-		}
+		const output = this.outputLines.findLast((line) => line.trim()) ?? "";
 		const detail = [status, output ? theme.fg("muted", output) : ""].filter(Boolean).join(" ");
 		const lines = (detail ? [command, detail] : [command]).map((line) => truncateToWidth(line, width));
 		this.compactPreview = { width, lines };

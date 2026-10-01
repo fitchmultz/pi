@@ -43,6 +43,44 @@ Install Termux from [GitHub or F-Droid](https://github.com/termux/termux-app#ins
 
 Continue with the main [Quickstart](quickstart.md#3-choose-a-model) to connect a model and run your first task.
 
+### Install the fork
+
+The fork's immutable installer and `pi update --fork` support Termux arm64/x64.
+Install the build and validation tools:
+
+```bash
+pkg install nodejs git bash tar gzip tmux golang
+```
+
+Use Node.js >=22.19 with its adjacent npm. Go >=1.26 is needed only if Android
+blocks the TypeScript compiler's fanotify probe. The installer first tries the
+lockfile-pinned Linux compiler; on that specific failure it rebuilds the package's
+pinned source commit with fanotify disabled. It never changes the root lockfile
+or runs dependency lifecycle scripts.
+
+From a fork checkout, with unused selector and executable locations:
+
+```bash
+npm ci --ignore-scripts
+npm run hydrate:model-data
+selector="$HOME/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent"
+node scripts/install-fork.mjs --ref HEAD --selector "$selector"
+mkdir -p "$HOME/.local/bin"
+ln -s "$selector/dist/bundle/cli.js" "$HOME/.local/bin/pi"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Keep `~/.local/bin` on your shell's `PATH`. Do not replace the selector with a real
+directory or point `pi` directly at a release. Once installed, run
+`pi update --fork` to fetch, pin, build, validate, and select latest fork main
+without a local checkout. See [fork installation](quickstart.md#fork-installation)
+for staging and rollback.
+
+Builds, consumer smoke tests, and `test.sh` retain Termux's `PREFIX` and
+`LD_PRELOAD` exec wrapper while isolating home/configuration. npm scripts use the
+native Termux bash rather than `/bin/sh`. The installer selects the prepared
+compiler before `build:offline`; TypeScript API checks also use that compiler.
+
 ## Access Android shared storage
 
 Termux cannot access shared Android storage until you grant permission. Run this once:

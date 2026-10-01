@@ -1,7 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "../../src/core/extensions/index.ts";
 import { type ModelRoute, type ModelRouteRequest, VIRTUAL_MODEL_STATE_ENTRY } from "../../src/core/virtual-models.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
@@ -90,7 +90,6 @@ describe("AgentSession virtual models", () => {
 		await harness.session.prompt("hello");
 
 		expect(reasons()).toEqual(["user", "retry", "continuation"]);
-		expect(harness.faux.state.callCount).toBe(3);
 		expect(requests[1].failed?.message.errorMessage).toBe("overloaded_error");
 		expect(requests[2].previous?.model.id).toBe("large");
 		expect(dispatched()).toEqual(["faux/large:high", "faux/large:high"]);
@@ -227,13 +226,11 @@ describe("AgentSession virtual models", () => {
 	});
 
 	it("compacts before a request routed to a model with a smaller window", async () => {
-		let firstKeptEntryId = "";
 		const { harness, dispatched } = await createRoutedHarness(defaultRoute, {
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_compact", async ({ preparation: { tokensBefore } }) => ({
-						// The prior 8k-character answer cannot fit the routed model's 1k-token window.
+					pi.on("session_before_compact", async ({ preparation: { firstKeptEntryId, tokensBefore } }) => ({
 						compaction: { summary: "compacted", firstKeptEntryId, tokensBefore },
 					}));
 				},
@@ -249,13 +246,6 @@ describe("AgentSession virtual models", () => {
 		]);
 		await harness.session.prompt("hello");
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
-
-		firstKeptEntryId = harness.sessionManager.appendCustomMessageEntry(
-			"context",
-			"Continue with the next task.",
-			false,
-		);
-		harness.session.refreshContext();
 
 		// About 2k tokens fit the large model that answered last, but not the small model's 1k window.
 		harness.session.setThinkingLevel("low");
@@ -296,6 +286,20 @@ describe("AgentSession virtual models", () => {
 		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toEqual(["threshold"]);
 		expect(compactedBeforeSmall).toBe(true);
 		expect(dispatched()).toEqual(["faux/large:high", "faux/small:off"]);
+	});
+
+	it("projects the session once per request under a virtual selection", async () => {
+		const { harness } = await createRoutedHarness();
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("echo", { text: "hi" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		const projections = vi.spyOn(harness.sessionManager, "buildSessionProjection");
+
+		await harness.session.prompt("hello");
+
+		// One per request, one between the turns, and one for the compaction check after the run.
+		expect(projections).toHaveBeenCalledTimes(4);
 	});
 
 	it("stores router state on the branch and passes it to later requests", async () => {

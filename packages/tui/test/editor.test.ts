@@ -2132,34 +2132,6 @@ describe("Editor component", () => {
 	});
 
 	describe("Autocomplete", () => {
-		for (const [action, keys] of [
-			["delete to line start", ["\x15"]],
-			["delete to line end", ["\x01", "\x0b"]],
-			["delete word backward", ["\x17", "\x17"]],
-			["delete word forward", ["\x01", "\x1bd", "\x1bd"]],
-			["undo", ["\x1b[45;5u"]],
-		] as const) {
-			it(`does not submit a deleted slash command after ${action}`, async () => {
-				const editor = new Editor(createTestTUI(), defaultEditorTheme);
-				editor.setAutocompleteProvider(new CombinedAutocompleteProvider([{ name: "quit" }], process.cwd()));
-				let submitted: string | undefined;
-				editor.onSubmit = (text) => {
-					submitted = text;
-				};
-				for (const char of "/qui") editor.handleInput(char);
-				await flushAutocomplete();
-				assert.strictEqual(editor.isShowingAutocomplete(), true);
-
-				for (const key of keys) editor.handleInput(key);
-				assert.strictEqual(editor.getText(), "");
-				assert.strictEqual(editor.isShowingAutocomplete(), false);
-				editor.handleInput("\r");
-				assert.strictEqual(submitted, "");
-				await flushAutocomplete();
-				assert.strictEqual(editor.isShowingAutocomplete(), false);
-			});
-		}
-
 		it("triggers and debounces symbol completion after CJK punctuation", async (t) => {
 			t.mock.timers.enable({ apis: ["setTimeout"] });
 			for (const before of [
@@ -3831,8 +3803,8 @@ describe("Editor component", () => {
 		function pasteWithMarker(editor: Editor): string {
 			const bigContent = "line\n".repeat(20).trimEnd(); // 20 lines
 			editor.handleInput(`\x1b[200~${bigContent}\x1b[201~`);
-			assert.ok(editor.getText().includes(bigContent));
-			return editor.render(80).map(stripVTControlCharacters).join("\n");
+			// The editor replaces large pastes with a marker like "[paste #1 +20 lines]"
+			return editor.getText();
 		}
 
 		/** Helper: 12-line paste content with a distinguishing tag */
@@ -3851,7 +3823,7 @@ describe("Editor component", () => {
 			editor.handleInput("A");
 			pasteWithMarker(editor);
 			editor.handleInput("B");
-			// Visible text: "A[paste #1 +20 lines]B", cursor at end
+			// Text: "A[paste #1 +20 lines]B", cursor at end
 
 			// Go to start
 			editor.handleInput("\x01"); // Ctrl+A
@@ -3863,11 +3835,12 @@ describe("Editor component", () => {
 
 			// Right arrow: should skip the entire marker
 			editor.handleInput("\x1b[C");
-			assert.deepStrictEqual(editor.getCursor(), { line: 19, col: 4 });
+			const marker = editor.getText().match(/\[paste #\d+ \+\d+ lines\]/)![0];
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 1 + marker.length });
 
 			// Right arrow: should move past "B"
 			editor.handleInput("\x1b[C");
-			assert.deepStrictEqual(editor.getCursor(), { line: 19, col: 5 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 1 + marker.length + 1 });
 		});
 
 		it("treats paste marker as single unit for left arrow", () => {
@@ -3879,7 +3852,9 @@ describe("Editor component", () => {
 
 			// Left arrow: past "B"
 			editor.handleInput("\x1b[D");
-			assert.deepStrictEqual(editor.getCursor(), { line: 19, col: 4 });
+			const text = editor.getText();
+			const marker = text.match(/\[paste #\d+ \+\d+ lines\]/)![0];
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 1 + marker.length });
 
 			// Left arrow: skip the entire marker
 			editor.handleInput("\x1b[D");
@@ -3896,12 +3871,15 @@ describe("Editor component", () => {
 			pasteWithMarker(editor);
 			editor.handleInput("B");
 
+			const text = editor.getText();
+			const marker = text.match(/\[paste #\d+ \+\d+ lines\]/)![0];
+
 			// Position cursor right after the marker (before "B")
 			editor.handleInput("\x01"); // Ctrl+A
 			// Move past "A" and the marker
 			editor.handleInput("\x1b[C"); // past "A"
 			editor.handleInput("\x1b[C"); // past marker
-			assert.deepStrictEqual(editor.getCursor(), { line: 19, col: 4 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 1 + marker.length });
 
 			// Backspace: should delete the entire marker at once
 			editor.handleInput("\x7f");
@@ -3932,7 +3910,10 @@ describe("Editor component", () => {
 			pasteWithMarker(editor);
 			editor.handleInput(" ");
 			editor.handleInput("Y");
-			// Visible text: "X [paste #1 +20 lines] Y"
+			// Text: "X [paste #1 +20 lines] Y"
+
+			const text = editor.getText();
+			const marker = text.match(/\[paste #\d+ \+\d+ lines\]/)![0];
 
 			// Go to start
 			editor.handleInput("\x01"); // Ctrl+A
@@ -3943,7 +3924,7 @@ describe("Editor component", () => {
 
 			// Ctrl+Right: skip whitespace + marker (marker treated as single non-ws, non-punct unit)
 			editor.handleInput("\x1b[1;5C");
-			assert.deepStrictEqual(editor.getCursor(), { line: 19, col: 4 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 2 + marker.length });
 		});
 
 		it("undo restores marker after backspace deletion", () => {
@@ -3966,10 +3947,9 @@ describe("Editor component", () => {
 			// Undo
 			editor.handleInput("\x1b[45;5u");
 			assert.strictEqual(editor.getText(), textBefore);
-			assert.match(editor.render(80).map(stripVTControlCharacters).join("\n"), /\[paste #\d+ \+20 lines\]/);
 		});
 
-		it("undo after paste deletion restores the folded content", () => {
+		it("undo after paste marker deletion restores the paste registry", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			let submitted = "";
 			editor.onSubmit = (t) => {
@@ -3979,12 +3959,12 @@ describe("Editor component", () => {
 			const paste = bigPaste("alpha");
 			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
 			editor.handleInput("\x7f"); // delete the marker
-			editor.handleInput("\x1b[45;5u"); // undo: restores folded content
+			editor.handleInput("\x1b[45;5u"); // undo: restores marker text and registry
 			editor.handleInput("\r");
 			assert.strictEqual(submitted, paste);
 		});
 
-		it("undo after deleting the first of two pastes restores both payloads", () => {
+		it("undo after deleting the first of two paste markers restores both registry entries", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			let submitted = "";
 			editor.onSubmit = (t) => {
@@ -3997,13 +3977,13 @@ describe("Editor component", () => {
 			editor.handleInput(`\x1b[200~${pasteB}\x1b[201~`); // #2 = B, cursor at end
 			editor.handleInput("\x01"); // Ctrl+A
 			editor.handleInput("\x1b[C"); // right over marker #1
-			editor.handleInput("\x7f"); // delete the first fold
+			editor.handleInput("\x7f"); // delete marker #1, renumbers #2 -> #1
 			editor.handleInput("\x1b[45;5u"); // undo
 			editor.handleInput("\r");
 			assert.strictEqual(submitted, pasteA + pasteB);
 		});
 
-		it("preserves payload order after deleting the earliest inserted paste", () => {
+		it("renumbers the paste registry in ascending id order when markers are out of order in text", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			let submitted = "";
 			editor.onSubmit = (t) => {
@@ -4019,12 +3999,12 @@ describe("Editor component", () => {
 			editor.handleInput("\x01"); // Ctrl+A
 			editor.handleInput(`\x1b[200~${pasteC}\x1b[201~`); // #3 = C, text: [#3][#2][#1]
 			editor.handleInput("\x05"); // Ctrl+E
-			editor.handleInput("\x7f"); // delete the earliest inserted fold
+			editor.handleInput("\x7f"); // delete marker #1, renumber #3 -> #2 and #2 -> #1
 			editor.handleInput("\r");
 			assert.strictEqual(submitted, pasteC + pasteB);
 		});
 
-		it("undo after setText restores paste folds and content", () => {
+		it("undo after setText restores paste markers and registry", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			let submitted = "";
 			editor.onSubmit = (t) => {
@@ -4045,9 +4025,8 @@ describe("Editor component", () => {
 			editor.handleInput(" ");
 			pasteWithMarker(editor);
 
-			const text = editor.render(80).map(stripVTControlCharacters).join("\n");
+			const text = editor.getText();
 			const markers = [...text.matchAll(/\[paste #\d+ \+\d+ lines\]/g)];
-			assert.strictEqual(editor.getText(), `${"line\n".repeat(20).trimEnd()} ${"line\n".repeat(20).trimEnd()}`);
 			assert.strictEqual(markers.length, 2);
 
 			// Go to start
@@ -4055,29 +4034,29 @@ describe("Editor component", () => {
 
 			// Right arrow: should skip first marker atomically
 			editor.handleInput("\x1b[C");
-			assert.deepStrictEqual(editor.getCursor(), { line: 19, col: 4 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: markers[0]![0].length });
 
 			// Right arrow: past space
 			editor.handleInput("\x1b[C");
-			assert.deepStrictEqual(editor.getCursor(), { line: 19, col: 5 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: markers[0]![0].length + 1 });
 
 			// Right arrow: should skip second marker atomically
 			editor.handleInput("\x1b[C");
 			assert.deepStrictEqual(editor.getCursor(), {
-				line: 38,
-				col: 4,
+				line: 0,
+				col: markers[0]![0].length + 1 + markers[1]![0].length,
 			});
 		});
 
-		it("does not treat manually typed marker-like text as atomic", () => {
+		it("does not treat manually typed marker-like text as atomic (no valid paste ID)", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			// Literal label-shaped text has no fold annotation.
+			// Type text that matches the pattern but was typed manually (no paste entry)
 			const fakeMarker = "[paste #99 +5 lines]";
 			for (const ch of fakeMarker) editor.handleInput(ch);
 
 			assert.strictEqual(editor.getText(), fakeMarker);
 
-			// Literal text is not atomic.
+			// No paste with ID 99 exists, so the marker is NOT treated atomically.
 			// Right arrow should move one grapheme at a time.
 			editor.handleInput("\x01"); // Ctrl+A
 			editor.handleInput("\x1b[C"); // Right
@@ -4091,7 +4070,7 @@ describe("Editor component", () => {
 			const bigContent = "line\n".repeat(47).trimEnd();
 			editor.handleInput(`\x1b[200~${bigContent}\x1b[201~`);
 
-			const text = editor.render(80).map(stripVTControlCharacters).join("\n");
+			const text = editor.getText();
 			const marker = text.match(/\[paste #\d+ \+\d+ lines\]/);
 			assert.ok(marker, "paste marker should be created");
 			assert.ok(visibleWidth(marker[0]) > 8, "marker should be wider than render width");
@@ -4189,8 +4168,7 @@ describe("Editor component", () => {
 
 			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
 
-			assert.match(editor.render(80).map(stripVTControlCharacters).join("\n"), /\[paste #\d+ \+\d+ lines\]/);
-			assert.strictEqual(editor.getText(), pastedText);
+			assert.match(editor.getText(), /\[paste #\d+ \+\d+ lines\]/);
 			assert.strictEqual(editor.getExpandedText(), pastedText);
 		});
 
@@ -4205,7 +4183,8 @@ describe("Editor component", () => {
 			editor.handleInput(`\x1b[200~${bigContent}\x1b[201~`);
 			editor.render(80);
 
-			assert.match(editor.render(80).map(stripVTControlCharacters).join("\n"), /\[paste #\d+ \d+ chars\]/);
+			const text = editor.getText();
+			const _marker = text.match(/\[paste #\d+ \d+ chars\]/)![0];
 			// Line 0: "12345678901234567890"
 			// Line 1: "" (empty)
 			// Line 2: "hello [paste #1 2000 chars]"
@@ -4275,8 +4254,8 @@ describe("Editor component", () => {
 			const editor = new Editor(tui, defaultEditorTheme);
 
 			// Build:
-			// Projected line 0: "abcdefgh" + marker(21 chars) + "ijklmnopqr"
-			// Projected line 1: "123456789012345678"
+			// Logical line 0: "abcdefgh" + marker(21 chars) + "ijklmnopqr"
+			// Logical line 1: "123456789012345678"
 			//
 			// Marker "[paste #1 +100 lines]" (21 chars) is wider than the
 			// terminal (20). Word-wrap splits at the space before "lines",
@@ -4296,13 +4275,13 @@ describe("Editor component", () => {
 			for (const ch of "123456789012345678") editor.handleInput(ch);
 			editor.render(20);
 
-			const text = editor.render(80).map(stripVTControlCharacters).join("\n");
+			const text = editor.getText();
 			const markerMatch = text.match(/\[paste #\d+ \+\d+ lines]/);
 			assert.ok(markerMatch, "paste marker should be created");
 			const markerLen = markerMatch[0].length; // 21
 			assert.ok(markerLen > 20, "marker should be wider than terminal");
 			const markerStart = 8;
-			editor.render(20);
+			const markerEnd = markerStart + markerLen; // 29
 
 			// Navigate to line 0, col 6 (on "g"). Preferred col 6 is past the
 			// marker tail on VL3, so the cursor should land on content ("i" at
@@ -4316,10 +4295,11 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[B");
 			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: markerStart });
 
-			// Down again: preferred col 6 lands past the marker on "i",
-			// at source line 99, col 4.
+			// Down again: preferred col 6 lands at VL3 col 29 ("i"), which is
+			// past the marker. Cursor stays on line 0.
 			editor.handleInput("\x1b[B");
-			assert.deepStrictEqual(editor.getCursor(), { line: 99, col: 4 });
+			assert.strictEqual(editor.getCursor().line, 0);
+			assert.strictEqual(editor.getCursor().col, markerEnd); // col 29 = "i"
 
 			// Up: back to paste marker
 			editor.handleInput("\x1b[A");
@@ -4360,9 +4340,9 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[B");
 			assert.strictEqual(editor.getCursor().col, 8);
 
-			// Down: skips VL3 (col 3 in marker tail) and lands on source line 100
+			// Down: skips VL3 (col 3 in marker tail) and lands on line 1
 			editor.handleInput("\x1b[B");
-			assert.deepStrictEqual(editor.getCursor(), { line: 100, col: 3 });
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 3 });
 
 			// Round-trip back
 			editor.handleInput("\x1b[A");

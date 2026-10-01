@@ -93,7 +93,6 @@ function createIssueAutocompleteProvider(
 	getIssues: () => Promise<GitHubIssue[] | undefined>,
 ): AutocompleteProvider {
 	return {
-		inputContext: current.inputContext,
 		async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
 			const currentLine = lines[cursorLine] ?? "";
 			const textBeforeCursor = currentLine.slice(0, cursorCol);
@@ -122,8 +121,8 @@ function createIssueAutocompleteProvider(
 			return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
 		},
 
-		shouldTriggerFileCompletion(lines, cursorLine, cursorCol, options) {
-			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol, options) ?? true;
+		shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
 		},
 	};
 }

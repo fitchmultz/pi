@@ -1,134 +1,58 @@
-import type { AssistantMessage, JsonObject, ModelPromptCache } from "@earendil-works/pi-ai";
-import { getPromptCacheTtlMs } from "./cache-warmer.ts";
-import type { SessionEntry, SessionManager } from "./session-manager.ts";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { SessionEntry } from "./session-manager.ts";
 
-/** Fallback when the provider's cache lifetime is unknown. */
-const CACHE_TTL_MS = 5 * 60 * 1000;
+/**
+ * Prompt-cache TTL: idle gaps longer than this are worth mentioning as the
+ * likely cause of a miss. Anthropic's default cache TTL is 5 minutes.
+ */
+export const CACHE_TTL_MS = 5 * 60 * 1000;
+
+/** Per-turn misses at or below this are cache breakpoint granularity noise. */
 const NOISE_FLOOR_TOKENS = 1024;
 
+/** A counted cache miss on a single assistant message. */
 export interface CacheMiss {
-	/** Warning deficit: min(previous prompt, current prompt) - current cache reads. */
+	/** Prompt tokens that were in the previous turn's prompt but not read from cache. */
 	missedTokens: number;
-	/** Estimated extra cost versus cached reads; zero when pricing is unknown. */
+	/** Extra dollars paid vs. a full cache hit; 0 when pricing is unknown. */
 	missedCost: number;
-	/** Actual decrease in cached reads, independently of the warning deficit. */
-	cacheReadDecline: number;
+	/** Milliseconds since the previous request (which last refreshed the cache). */
 	idleMs: number;
+	/** True when the model changed relative to the previous request. */
 	modelChanged: boolean;
-	observedChanges: string[];
-	providerReasons: string[];
 }
 
 export interface CacheWasteTotals {
 	missedTokens: number;
 	missedCost: number;
+	/** Number of counted misses (turns above the noise floor). */
 	missCount: number;
-	/** Counts overlap when a request has multiple observations. */
-	observedChanges: Map<string, number>;
-	providerReasons: Map<string, number>;
 }
 
+/** Minimal pricing lookup, satisfied by ModelRuntime. Cost is $/million tokens. */
 export interface ModelPriceSource {
-	getModel(
-		provider: string,
-		modelId: string,
-	): { cost: { cacheRead: number }; promptCache?: ModelPromptCache } | undefined;
+	getModel(provider: string, modelId: string): { cost: { cacheRead: number } } | undefined;
 }
 
+/** The last request seen by the scan; everything in its prompt should be cached. */
 interface PreviousRequest {
 	promptTokens: number;
-	cacheRead: number;
 	modelKey: string;
-	endedAt: number;
-	ttlMs: number;
+	timestamp: number;
+	/**
+	 * Sticky: some earlier request in this scan segment reported cache activity.
+	 * Distinguishes a total miss on a cache-read-only provider (OpenAI-style,
+	 * writes unreported) from a provider that never reports caching at all.
+	 */
 	reportedCache: boolean;
-	details: JsonObject;
 }
 
-function object(value: unknown): JsonObject {
-	return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
-}
-
-function requestDetails(message: AssistantMessage): JsonObject {
-	return message.diagnostics?.find((diagnostic) => diagnostic.type === "provider_request")?.details ?? {};
-}
-
-function requestStart(message: AssistantMessage): number {
-	return (
-		message.diagnostics?.find((diagnostic) => diagnostic.type === "provider_request")?.timestamp ?? message.timestamp
-	);
-}
-
-function formatProviderCode(code: string): string {
-	return [
-		"model_changed",
-		"prompt_cache_key_changed",
-		"service_tier_changed",
-		"tools_changed",
-		"text_format_changed",
-		"reasoning_effort_changed",
-		"verbosity_changed",
-		"context_compacted",
-		"input_changed",
-		"cache_hit",
-		"cache_miss",
-		"comparison_response_not_found",
-		"model_binding_mismatch",
-		"prefix_binding_mismatch",
-		"organization_binding_mismatch",
-		"end_user_binding_mismatch",
-	].includes(code)
-		? code.replaceAll("_", " ")
-		: code;
-}
-
-function providerReasons(message: AssistantMessage): string[] {
-	const reasons: string[] = [];
-	const groups = new Map<string, { type: string; reason: string; count: number }>();
-	for (const diagnostic of message.diagnostics ?? []) {
-		if (diagnostic.type === "anthropic_input_transformations") {
-			const transformations = diagnostic.details?.transformations;
-			if (!Array.isArray(transformations)) continue;
-			for (const value of transformations) {
-				const transformation = object(value);
-				if (typeof transformation.type !== "string") continue;
-				const type = transformation.type;
-				const reason = typeof transformation.reason === "string" ? transformation.reason : "";
-				const key = JSON.stringify([type, reason]);
-				const group = groups.get(key);
-				if (group) group.count++;
-				else groups.set(key, { type, reason, count: 1 });
-			}
-		}
-		const diagnostics =
-			diagnostic.type === "prompt_cache_diagnostics"
-				? diagnostic.details
-				: diagnostic.details?.prompt_cache_diagnostics;
-		const result = object(diagnostics);
-		if (result.type === "unavailable") continue;
-		const code = typeof result.reason === "string" ? result.reason : result.type;
-		if (typeof code === "string" && code) reasons.push(formatProviderCode(code));
-	}
-	for (const { type, reason, count } of groups.values()) {
-		const summary =
-			type === "thinking_dropped"
-				? `dropped ${count} thinking ${count === 1 ? "block" : "blocks"}`
-				: `${type} (${count})`;
-		reasons.push(summary + (reason ? ` (${formatProviderCode(reason)})` : ""));
-	}
-	// Provider text is untrusted terminal input; display control characters rather than executing them.
-	return [
-		...new Set(
-			reasons.map((reason) =>
-				reason.replace(
-					/[\p{Cc}\p{Cf}]/gu,
-					(character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
-				),
-			),
-		),
-	];
-}
-
+/**
+ * Compute the cache miss for one assistant message relative to the previous
+ * request. Returns undefined when nothing is counted: first turn, after a
+ * reset, no cache activity ever reported (provider without cache support), or
+ * miss below the noise floor.
+ */
 function detectMiss(
 	prev: PreviousRequest | undefined,
 	message: AssistantMessage,
@@ -136,156 +60,100 @@ function detectMiss(
 ): CacheMiss | undefined {
 	const usage = message.usage;
 	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-	if (!prev || promptTokens <= 0 || (usage.cacheRead + usage.cacheWrite === 0 && !prev.reportedCache))
+	// A zero-cache turn only counts when cache activity was reported before:
+	// on cache-read-only providers that is a total miss, while on providers
+	// that never report caching it means nothing.
+	if (!prev || promptTokens <= 0 || (usage.cacheRead + usage.cacheWrite === 0 && !prev.reportedCache)) {
 		return undefined;
+	}
+
 	const missedTokens = Math.min(prev.promptTokens, promptTokens) - usage.cacheRead;
 	if (missedTokens <= NOISE_FLOOR_TOKENS) return undefined;
 
+	// Extra cost = missed tokens billed at the actual paid rate (input/cacheWrite,
+	// incl. write premium) instead of the cache-read rate. Missed tokens can only
+	// land in the input or cacheWrite buckets, so the paid rate comes straight
+	// from this message's own cost breakdown.
 	const paidTokens = usage.input + usage.cacheWrite;
 	const paidPerToken = paidTokens > 0 ? (usage.cost.input + usage.cost.cacheWrite) / paidTokens : 0;
 	const readPerToken =
 		usage.cacheRead > 0
 			? usage.cost.cacheRead / usage.cacheRead
 			: (models.getModel(message.provider, message.model)?.cost.cacheRead ?? 0) / 1_000_000;
-	const details = requestDetails(message);
-	const before = object(prev.details.requestShape);
-	const after = object(details.requestShape);
-	const observedChanges: string[] = [];
-	const modelChanged = `${message.provider}/${message.model}` !== prev.modelKey;
-	if (modelChanged) observedChanges.push("model changed");
-	if (
-		["requestedServiceTier", "returnedServiceTier"].some(
-			(key) =>
-				typeof prev.details[key] === "string" &&
-				typeof details[key] === "string" &&
-				prev.details[key] !== "unknown" &&
-				details[key] !== "unknown" &&
-				prev.details[key] !== details[key],
-		)
-	)
-		observedChanges.push("service tier changed");
-	// ponytail: byte sizes cannot detect equal-length edits; use content hashes if providers expose them.
-	if (
-		(typeof before.toolsBytes === "number" &&
-			typeof after.toolsBytes === "number" &&
-			before.toolsBytes !== after.toolsBytes) ||
-		(Array.isArray(before.toolDefinitionBytes) &&
-			Array.isArray(after.toolDefinitionBytes) &&
-			JSON.stringify(before.toolDefinitionBytes) !== JSON.stringify(after.toolDefinitionBytes))
-	) {
-		observedChanges.push("tool definitions changed");
-	}
-	if (
-		typeof before.instructionsBytes === "number" &&
-		typeof after.instructionsBytes === "number" &&
-		before.instructionsBytes !== after.instructionsBytes
-	)
-		observedChanges.push("instructions changed");
-	if (details.socketReused === false) observedChanges.push("new connection");
-	if (details.websocketRequestMode === "full" && prev.details.websocketRequestMode === "delta")
-		observedChanges.push("full resend");
-	const idleMs = Math.max(0, requestStart(message) - prev.endedAt);
-	if (idleMs > prev.ttlMs) {
-		const duration = idleMs < 60_000 ? `${Math.floor(idleMs / 1000)}s` : `${Math.floor(idleMs / 60_000)}m`;
-		observedChanges.push(`idle ${duration}`);
-	}
-	if (observedChanges.length === 0) observedChanges.push("unclassified");
+
 	return {
 		missedTokens,
 		missedCost: missedTokens * Math.max(0, paidPerToken - readPerToken),
-		cacheReadDecline: Math.max(0, prev.cacheRead - usage.cacheRead),
-		idleMs,
-		modelChanged,
-		observedChanges,
-		providerReasons: providerReasons(message),
+		idleMs: Math.max(0, message.timestamp - prev.timestamp),
+		modelChanged: `${message.provider}/${message.model}` !== prev.modelKey,
 	};
 }
 
-class CacheMissTracker {
-	private prev: PreviousRequest | undefined;
-
-	detect(message: AssistantMessage, models: ModelPriceSource): CacheMiss | undefined {
-		return detectMiss(this.prev, message, models);
-	}
-
-	observe(entry: SessionEntry, models: ModelPriceSource): CacheMiss | undefined {
-		if (entry.type === "compaction" || entry.type === "branch_summary") {
-			this.prev = undefined;
-			return;
-		}
-		if (entry.type === "usage" && entry.kind === "cache_warm") {
-			const promptTokens = entry.usage.input + entry.usage.cacheRead + entry.usage.cacheWrite;
-			if (promptTokens > 0) {
-				this.prev = {
-					promptTokens,
-					cacheRead: entry.usage.cacheRead,
-					modelKey: `${entry.provider}/${entry.model}`,
-					endedAt: Date.parse(entry.timestamp),
-					ttlMs: this.prev?.ttlMs ?? CACHE_TTL_MS,
-					reportedCache: true,
-					details: this.prev?.details ?? {},
-				};
-			}
-		}
-		if (entry.type !== "message" || entry.message.role !== "assistant") return;
-		const message = entry.message;
-		const miss = this.detect(message, models);
-		const usage = message.usage;
-		const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-		if (promptTokens > 0) {
-			const details = requestDetails(message);
-			const endedAt =
-				typeof details.terminalEventMs === "number"
-					? requestStart(message) + details.terminalEventMs
-					: Date.parse(entry.timestamp);
-			const model = models.getModel(message.provider, message.model);
-			this.prev = {
-				promptTokens,
-				cacheRead: usage.cacheRead,
-				modelKey: `${message.provider}/${message.model}`,
-				endedAt: Number.isFinite(endedAt) ? endedAt : message.timestamp,
-				// ponytail: journals omit retention overrides; use the configured lifetime until requests record their TTL.
-				ttlMs: (model && getPromptCacheTtlMs(model, undefined)) ?? CACHE_TTL_MS,
-				reportedCache: (this.prev?.reportedCache ?? false) || usage.cacheRead + usage.cacheWrite > 0,
-				details,
-			};
-		}
-		return miss;
-	}
+function asPreviousRequest(message: AssistantMessage, reportedCache: boolean): PreviousRequest | undefined {
+	const usage = message.usage;
+	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	if (promptTokens <= 0) return undefined;
+	return {
+		promptTokens,
+		modelKey: `${message.provider}/${message.model}`,
+		timestamp: message.timestamp,
+		reportedCache: reportedCache || usage.cacheRead + usage.cacheWrite > 0,
+	};
 }
 
 function scan(
 	entries: SessionEntry[],
 	models: ModelPriceSource,
-): { totals: CacheWasteTotals; misses: Map<AssistantMessage, CacheMiss> } {
-	const tracker = new CacheMissTracker();
-	const totals: CacheWasteTotals = {
-		missedTokens: 0,
-		missedCost: 0,
-		missCount: 0,
-		observedChanges: new Map(),
-		providerReasons: new Map(),
-	};
+): { prev: PreviousRequest | undefined; totals: CacheWasteTotals; misses: Map<AssistantMessage, CacheMiss> } {
+	let prev: PreviousRequest | undefined;
+	const totals: CacheWasteTotals = { missedTokens: 0, missedCost: 0, missCount: 0 };
 	const misses = new Map<AssistantMessage, CacheMiss>();
+
 	for (const entry of entries) {
-		const miss = tracker.observe(entry, models);
-		if (!miss || entry.type !== "message" || entry.message.role !== "assistant") continue;
-		totals.missedTokens += miss.missedTokens;
-		totals.missedCost += miss.missedCost;
-		totals.missCount++;
-		for (const label of miss.observedChanges)
-			totals.observedChanges.set(label, (totals.observedChanges.get(label) ?? 0) + 1);
-		for (const reason of miss.providerReasons)
-			totals.providerReasons.set(reason, (totals.providerReasons.get(reason) ?? 0) + 1);
-		misses.set(entry.message, miss);
+		if (entry.type === "compaction" || entry.type === "branch_summary") {
+			// The context legitimately changed; the next turn's prompt is new content,
+			// not re-billed content. Model switches are NOT exempt: they re-bill the
+			// full prompt and should be counted.
+			prev = undefined;
+			continue;
+		}
+		if (entry.type === "usage" && entry.kind === "cache_warm") {
+			const promptTokens = entry.usage.input + entry.usage.cacheRead + entry.usage.cacheWrite;
+			if (promptTokens > 0) {
+				prev = {
+					promptTokens,
+					modelKey: `${entry.provider}/${entry.model}`,
+					timestamp: Date.parse(entry.timestamp),
+					reportedCache: true,
+				};
+			}
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			const miss = detectMiss(prev, entry.message, models);
+			if (miss) {
+				totals.missedTokens += miss.missedTokens;
+				totals.missedCost += miss.missedCost;
+				totals.missCount += 1;
+				misses.set(entry.message, miss);
+			}
+			prev = asPreviousRequest(entry.message, prev?.reportedCache ?? false) ?? prev;
+		}
 	}
-	return { totals, misses };
+	return { prev, totals, misses };
 }
 
+/**
+ * Cumulative cache waste across a session: prompt tokens that should have been
+ * cache reads (they were in the previous turn's prompt) but were re-billed.
+ */
 export function computeCacheWaste(entries: SessionEntry[], models: ModelPriceSource): CacheWasteTotals {
 	return scan(entries, models).totals;
 }
 
+/**
+ * All counted cache misses across a session, keyed by the assistant message
+ * (by reference) that paid for them. Used to re-derive transcript notices when
+ * rebuilding the chat from entries (resume, post-compaction rebuild).
+ */
 export function collectCacheMisses(
 	entries: SessionEntry[],
 	models: ModelPriceSource,
@@ -293,70 +161,14 @@ export function collectCacheMisses(
 	return scan(entries, models).misses;
 }
 
-interface LiveCacheState {
-	tracker: CacheMissTracker;
-	sessionId: string;
-	revision: number;
-	leafId: string | null;
-	lastEntry: SessionEntry | undefined;
-	lastComparison?: { message: AssistantMessage; miss: CacheMiss | undefined };
-}
-const liveCacheStates = new WeakMap<SessionManager, LiveCacheState>();
-
-/** Compare before persistence; the next call ingests the completed response exactly once. */
+/**
+ * Detect a cache miss on a just-completed assistant message.
+ * `entries` must not yet contain `message` (message_end fires before persistence).
+ */
 export function detectCacheMiss(
-	manager: SessionManager,
+	entries: SessionEntry[],
 	message: AssistantMessage,
 	models: ModelPriceSource,
 ): CacheMiss | undefined {
-	let state = liveCacheStates.get(manager);
-	const revision = manager.getEntriesRevision();
-	// Navigation moves the leaf without changing the entry revision.
-	const leafId = manager.getLeafId();
-	const sessionId = manager.getSessionId();
-	if (
-		!state ||
-		state.sessionId !== sessionId ||
-		(state.lastEntry && manager.getEntry(state.lastEntry.id) !== state.lastEntry)
-	) {
-		state = {
-			tracker: new CacheMissTracker(),
-			sessionId,
-			revision: -1,
-			leafId: null,
-			lastEntry: undefined,
-		};
-		liveCacheStates.set(manager, state);
-	}
-	if (state.revision !== revision || state.leafId !== leafId) {
-		const pending: SessionEntry[] = [];
-		let id = leafId;
-		while (id && id !== state.lastEntry?.id) {
-			const entry = manager.getEntry(id);
-			if (!entry) break;
-			pending.push(entry);
-			id = entry.parentId;
-		}
-		// Initial hydration, navigation, or a reload replays the active branch; appends only visit the new suffix.
-		if (
-			state.revision === -1 ||
-			id !== (state.lastEntry?.id ?? null) ||
-			pending.length !== revision - state.revision
-		) {
-			state.tracker = new CacheMissTracker();
-			const branch = manager.getBranch();
-			for (const entry of branch) state.tracker.observe(entry, models);
-			state.lastEntry = branch.at(-1);
-		} else {
-			for (const entry of pending.reverse()) state.tracker.observe(entry, models);
-			state.lastEntry = pending.at(-1) ?? state.lastEntry;
-		}
-		state.revision = revision;
-		state.leafId = leafId;
-		state.lastComparison = undefined;
-	}
-	if (state.lastComparison?.message === message) return state.lastComparison.miss;
-	const miss = state.tracker.detect(message, models);
-	state.lastComparison = { message, miss };
-	return miss;
+	return detectMiss(scan(entries, models).prev, message, models);
 }

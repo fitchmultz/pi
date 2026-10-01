@@ -36,20 +36,13 @@ import {
 	getDeclaredTools,
 	getInitialSystemMessage,
 	normalizeContext,
+	resolveTranscript,
 	resolveTranscriptTools,
 } from "../utils/transcript.ts";
 import { uuidv7 } from "../utils/uuid.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import {
-	convertResponsesMessages,
-	convertResponsesTools,
-	getInitialResponsesEffort,
-	processResponsesStream,
-	resolveResponsesEffort,
-	resolveResponsesTranscript,
-	supportsPositionalResponsesEffort,
-} from "./openai-responses-shared.ts";
+import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 // ============================================================================
@@ -247,7 +240,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 	options?: OpenAICodexResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveResponsesTranscript(model, context, model.compat?.supportsMidConvoSystemMessages);
+	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -282,14 +275,10 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
 			const codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
 			let body = buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties);
-			if (supportsPositionalResponsesEffort(model, { ...model.samplingParams, ...options?.samplingParams }))
-				output.providerThinkingLevel = resolveResponsesEffort(model, options?.reasoningEffort);
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
 			}
-			// One detached request survives retries, fallback, and retained hook references.
-			body = structuredClone(body);
 			const websocketRequestId = codexSessionId || uuidv7();
 			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
 			const websocketHeaders = buildWebSocketHeaders(
@@ -299,7 +288,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				apiKey,
 				websocketRequestId,
 			);
-			let bodyJson: string | undefined;
+			const bodyJson = JSON.stringify(body);
 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
@@ -364,7 +353,6 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						if (aborted || (isCodexNonTransportError(error) && !connectionLimitBeforeStart)) {
 							throw error;
 						}
-						bodyJson ??= JSON.stringify(body);
 						appendAssistantMessageDiagnostic(
 							output,
 							createAssistantMessageDiagnostic("provider_transport_failure", error, {
@@ -388,7 +376,6 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			// Compress the request body once for the SSE path. The Codex backend
 			// decodes Content-Encoding: zstd; the WebSocket transport above sends the
 			// uncompressed JSON frame, matching the official Codex client.
-			bodyJson ??= JSON.stringify(body);
 			const compressedBody = compressRequestBodyZstd(bodyJson);
 			if (compressedBody) {
 				sseHeaders.set("content-encoding", "zstd");
@@ -552,11 +539,7 @@ function buildRequestBody(
 	const supportsAdditionalTools = model.compat?.supportsAdditionalTools ?? false;
 	const supportsToolSearch = model.compat?.supportsToolSearch ?? false;
 	const transcriptTools = resolveTranscriptTools(context.messages, supportsAdditionalTools || supportsToolSearch);
-	const effort = supportsPositionalResponsesEffort(model, { ...model.samplingParams, ...options?.samplingParams })
-		? resolveResponsesEffort(model, options?.reasoningEffort)
-		: undefined;
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
-		reasoningEffort: effort,
 		includeSystemPrompt: false,
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
@@ -613,8 +596,6 @@ function buildRequestBody(
 		body.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
 	}
 
-	if (effort !== undefined)
-		body.reasoning = { ...body.reasoning, effort: getInitialResponsesEffort(model, context, effort) };
 	return body;
 }
 
@@ -660,7 +641,8 @@ function resolveCodexServiceTier(
 	) {
 		return requestServiceTier;
 	}
-	return responseServiceTier ?? requestServiceTier;
+	// Ultrafast must be confirmed by the terminal response.
+	return responseServiceTier ?? (requestServiceTier === "ultrafast" ? undefined : requestServiceTier);
 }
 
 function resolveCodexUrl(baseUrl?: string): string {
@@ -698,7 +680,6 @@ async function processStream(
 		{
 			serviceTier: options?.serviceTier,
 			grammarToolInputProperties,
-			responseError: codexResponseError,
 			resolveServiceTier: resolveCodexServiceTier,
 			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 		},
@@ -710,19 +691,12 @@ class CodexApiError extends Error {
 	readonly payload?: Record<string, unknown>;
 
 	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
-		super(message);
+		super(options?.code ? `${options.code}: ${message}` : message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
 		this.payload = options?.payload;
 		this.cause = options?.cause;
 	}
-}
-
-function codexResponseError(response: Extract<ResponseStreamEvent, { type: "response.failed" }>["response"]): Error {
-	return new CodexApiError(response.error?.message || "Codex response failed", {
-		code: response.error?.code,
-		payload: { response },
-	});
 }
 
 class CodexProtocolError extends Error {
@@ -795,6 +769,15 @@ async function* mapCodexEvents(
 				code,
 				payload: event,
 			});
+		}
+
+		if (type === "response.failed") {
+			// Preserve terminal usage before the typed error used by transport recovery.
+			yield { ...event, type: "response.completed" } as unknown as ResponseStreamEvent;
+			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
+			const code = response?.error?.code;
+			const message = response?.error?.message;
+			throw new CodexApiError(message || "Codex response failed", { code, payload: event });
 		}
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
@@ -1453,6 +1436,10 @@ function requestBodyWithoutInput(body: RequestBody): RequestBody {
 	return rest;
 }
 
+function responseInputsEqual(a: ResponseInput | undefined, b: ResponseInput | undefined): boolean {
+	return JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
+}
+
 function requestBodiesMatchExceptInput(a: RequestBody, b: RequestBody): boolean {
 	return JSON.stringify(requestBodyWithoutInput(a)) === JSON.stringify(requestBodyWithoutInput(b));
 }
@@ -1466,15 +1453,17 @@ function getCachedWebSocketInputDelta(
 	}
 
 	const currentInput = body.input ?? [];
-	const previousInput = continuation.lastRequestBody.input ?? [];
-	const responseItems = continuation.lastResponseItems;
-	const prefixLength = previousInput.length + responseItems.length;
-	if (currentInput.length < prefixLength) return undefined;
-	for (let i = 0; i < prefixLength; i++) {
-		const previous = i < previousInput.length ? previousInput[i] : responseItems[i - previousInput.length];
-		if (JSON.stringify(currentInput[i]) !== JSON.stringify(previous)) return undefined;
+	const baseline = [...(continuation.lastRequestBody.input ?? []), ...continuation.lastResponseItems];
+	if (currentInput.length < baseline.length) {
+		return undefined;
 	}
-	return currentInput.slice(prefixLength);
+
+	const prefix = currentInput.slice(0, baseline.length);
+	if (!responseInputsEqual(prefix, baseline)) {
+		return undefined;
+	}
+
+	return currentInput.slice(baseline.length);
 }
 
 function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body: RequestBody): RequestBody {
@@ -1525,6 +1514,7 @@ async function processWebSocketStream(
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
+	const fullBody = structuredClone(body);
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1538,7 +1528,7 @@ async function processWebSocketStream(
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
-	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, body) : body;
+	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
 	const stats = cacheSessionId ? getOrCreateWebSocketDebugStats(cacheSessionId) : undefined;
 	if (stats) {
 		stats.requests++;
@@ -1575,7 +1565,6 @@ async function processWebSocketStream(
 			{
 				serviceTier: options?.serviceTier,
 				grammarToolInputProperties,
-				responseError: codexResponseError,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			},
@@ -1593,7 +1582,7 @@ async function processWebSocketStream(
 				},
 			).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");
 			entry.continuation = {
-				lastRequestBody: body,
+				lastRequestBody: fullBody,
 				lastResponseId: output.responseId,
 				lastResponseItems: structuredClone(responseItems),
 			};

@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as nodeResolvePath, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +13,8 @@ export interface PathInputOptions {
 	expandTilde?: boolean;
 	/** Home directory used for `~` expansion. Defaults to `os.homedir()`. */
 	homeDir?: string;
+	/** Strip a leading `@`, used for CLI @file paths. */
+	stripAtPrefix?: boolean;
 	/** Normalize unicode space variants to regular spaces. */
 	normalizeUnicodeSpaces?: boolean;
 }
@@ -34,8 +35,6 @@ export function canonicalizePath(path: string): string {
 
 export function getFileRevision(path: string): string | undefined {
 	try {
-		// Android can preserve both timestamps across same-size writes within one filesystem tick.
-		if (process.platform === "android") return createHash("sha256").update(readFileSync(path)).digest("hex");
 		const stats = statSync(path, { bigint: true });
 		return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
 	} catch {
@@ -78,6 +77,9 @@ export function normalizePath(input: string, options: PathInputOptions = {}): st
 	let normalized = options.trim ? input.trim() : input;
 	if (options.normalizeUnicodeSpaces) {
 		normalized = normalized.replace(UNICODE_SPACES, " ");
+	}
+	if (options.stripAtPrefix && normalized.startsWith("@")) {
+		normalized = normalized.slice(1);
 	}
 	if (process.platform === "win32") {
 		normalized = normalizeWindowsShellPath(normalized);

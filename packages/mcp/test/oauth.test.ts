@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { McpClient, StreamableHttpTransport } from "../src/index.ts";
 import {
 	adaptOAuthProvider,
@@ -16,8 +16,6 @@ import {
 	OAuthInsecureEndpointError,
 	OAuthIssuerMismatchError,
 	type OAuthTokens,
-	registerClient,
-	startAuthorization,
 } from "../src/oauth/index.ts";
 import { closeServers, listen, readBody } from "./helpers.ts";
 
@@ -93,68 +91,6 @@ class TestOAuthProvider implements OAuthClientProvider {
 afterEach(closeServers);
 
 describe("MCP OAuth", () => {
-	it.each([
-		["authorization_endpoint", "http://auth.example/authorize"],
-		["registration_endpoint", "http://auth.example/register"],
-		["authorization_endpoint", "ftp://localhost/authorize"],
-		["registration_endpoint", "ftp://localhost/register"],
-	] as const)("rejects an insecure %s at %s before registration or redirect", async (endpoint, url) => {
-		const provider = new TestOAuthProvider("http://127.0.0.1/callback");
-		if (endpoint === "authorization_endpoint") provider.client = { client_id: "client" };
-		provider.discovery = {
-			authorizationServerUrl: "https://auth.example",
-			authorizationServerMetadata: {
-				issuer: "https://auth.example",
-				authorization_endpoint: "https://auth.example/authorize",
-				registration_endpoint: "https://auth.example/register",
-				token_endpoint: "https://auth.example/token",
-				response_types_supported: ["code"],
-				[endpoint]: url,
-			},
-		};
-		const fetch = vi.fn(async () =>
-			Response.json({ client_id: "client", redirect_uris: [provider.redirectUrl] }, { status: 201 }),
-		);
-		await expect(authorizeMcp(provider, { serverUrl: "https://server.example/mcp", fetch })).rejects.toBeInstanceOf(
-			OAuthInsecureEndpointError,
-		);
-		expect(fetch).not.toHaveBeenCalled();
-		expect(provider.authorizationUrl).toBeUndefined();
-		expect(provider.verifier).toBeUndefined();
-	});
-
-	it.each(["http://auth.example", "ftp://localhost"])("rejects insecure fallback endpoints on %s", async (origin) => {
-		const provider = new TestOAuthProvider("http://127.0.0.1/callback");
-		const fetch = vi.fn(async () => Response.json({ client_id: "client" }, { status: 201 }));
-		await expect(
-			startAuthorization(origin, { clientInformation: { client_id: "client" }, redirectUrl: provider.redirectUrl }),
-		).rejects.toBeInstanceOf(OAuthInsecureEndpointError);
-		await expect(registerClient(origin, { clientMetadata: provider.clientMetadata, fetch })).rejects.toBeInstanceOf(
-			OAuthInsecureEndpointError,
-		);
-		expect(fetch).not.toHaveBeenCalled();
-	});
-
-	it.each(["https://auth.example", "http://localhost", "http://127.0.0.1", "http://[::1]"])(
-		"permits secure or HTTP loopback fallback endpoints on %s",
-		async (origin) => {
-			const provider = new TestOAuthProvider("http://127.0.0.1/callback");
-			const fetch = vi.fn(async () => Response.json({ client_id: "client" }, { status: 201 }));
-			const { authorizationUrl } = await startAuthorization(origin, {
-				clientInformation: { client_id: "client" },
-				redirectUrl: provider.redirectUrl,
-			});
-			expect(authorizationUrl.origin).toBe(origin);
-			expect(authorizationUrl.pathname).toBe("/authorize");
-			await expect(
-				registerClient(origin, { clientMetadata: provider.clientMetadata, fetch }),
-			).resolves.toMatchObject({
-				client_id: "client",
-			});
-			expect(fetch).toHaveBeenCalledOnce();
-		},
-	);
-
 	it("discovers, registers, authorizes with PKCE, and refreshes on 401", async () => {
 		let expectedChallenge: string | undefined;
 		let refreshes = 0;
@@ -190,7 +126,8 @@ describe("MCP OAuth", () => {
 			if (url.pathname === "/register") {
 				const metadata = JSON.parse(await readBody(request)) as Record<string, unknown>;
 				response.writeHead(201, { "content-type": "application/json" });
-				response.end(JSON.stringify({ ...metadata, client_id: "test-client" }));
+				// Empty and null optional fields count as absent (#10266).
+				response.end(JSON.stringify({ ...metadata, client_id: "test-client", client_secret: "" }));
 				return;
 			}
 			if (url.pathname === "/authorize") {
@@ -206,7 +143,14 @@ describe("MCP OAuth", () => {
 				if (params.get("grant_type") === "refresh_token") {
 					refreshes++;
 					response.setHeader("content-type", "application/json");
-					response.end(JSON.stringify({ access_token: "refreshed-token", token_type: "Bearer" }));
+					response.end(
+						JSON.stringify({
+							access_token: "refreshed-token",
+							token_type: "Bearer",
+							refresh_token: "",
+							expires_in: null,
+						}),
+					);
 					return;
 				}
 				const challenge = createHash("sha256")
@@ -219,7 +163,12 @@ describe("MCP OAuth", () => {
 				}
 				response.setHeader("content-type", "application/json");
 				response.end(
-					JSON.stringify({ access_token: "first-token", refresh_token: "refresh-token", token_type: "Bearer" }),
+					JSON.stringify({
+						access_token: "first-token",
+						refresh_token: "refresh-token",
+						token_type: "Bearer",
+						scope: "",
+					}),
 				);
 				return;
 			}
@@ -242,7 +191,8 @@ describe("MCP OAuth", () => {
 			if (token !== "Bearer first-token" && token !== "Bearer refreshed-token") {
 				await readBody(request);
 				response.writeHead(401, {
-					"www-authenticate": `Bearer resource_metadata="${serverOrigin}/.well-known/oauth-protected-resource/mcp", scope="org:read"`,
+					// An empty scope falls through to the resource metadata's scopes_supported.
+					"www-authenticate": `Bearer resource_metadata="${serverOrigin}/.well-known/oauth-protected-resource/mcp", scope=""`,
 				});
 				response.end("Unauthorized");
 				return;
@@ -315,7 +265,13 @@ describe("MCP OAuth", () => {
 				openGetStream: false,
 			}),
 		);
-		expect(provider.tokenSet?.access_token).toBe("refreshed-token");
+		// Neither token response names a scope, so the grant has the requested scope.
+		expect(provider.tokenSet).toEqual({
+			access_token: "refreshed-token",
+			refresh_token: "refresh-token",
+			token_type: "Bearer",
+			scope: "org:read",
+		});
 		expect(refreshes).toBe(1);
 		await refreshedClient.close();
 		await callback.close();
@@ -325,6 +281,12 @@ describe("MCP OAuth", () => {
 		const grants: string[] = [];
 		const origin = await listen(async (request, response, serverOrigin) => {
 			const url = new URL(request.url ?? "/", serverOrigin);
+			if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+				// Invalid resource metadata falls back to the server origin instead of failing discovery.
+				response.setHeader("content-type", "application/json");
+				response.end(JSON.stringify({ resource: `${serverOrigin}/mcp`, authorization_servers: ["not a url"] }));
+				return;
+			}
 			if (url.pathname === "/.well-known/oauth-authorization-server") {
 				response.setHeader("content-type", "application/json");
 				response.end(
@@ -387,7 +349,7 @@ describe("MCP OAuth", () => {
 	it("asks for authorization instead of refreshing when the server needs more scope", async () => {
 		const provider = new TestOAuthProvider("http://127.0.0.1/callback");
 		provider.client = { client_id: "client" };
-		provider.tokenSet = { access_token: "a1", refresh_token: "r1", token_type: "Bearer" };
+		provider.tokenSet = { access_token: "a1", refresh_token: "r1", token_type: "Bearer", scope: "repo read:org" };
 		const origin = await listen(async (request, response, serverOrigin) => {
 			const url = new URL(request.url ?? "/", serverOrigin);
 			if (url.pathname === "/.well-known/oauth-authorization-server") {
@@ -417,7 +379,8 @@ describe("MCP OAuth", () => {
 				token: "a1",
 			}),
 		).rejects.toBeInstanceOf(McpOAuthAuthorizationRequiredError);
-		expect(provider.authorizationUrl?.searchParams.get("scope")).toBe("repo admin");
+		// The challenge may list only the missing scopes; the new grant keeps the old ones too.
+		expect(provider.authorizationUrl?.searchParams.get("scope")).toBe("repo read:org admin");
 		// The working grant is kept until the user authorizes the new scope.
 		expect(provider.tokenSet?.access_token).toBe("a1");
 	});
@@ -463,6 +426,77 @@ describe("MCP OAuth", () => {
 			response.end();
 		});
 		await expect(discoverAuthorizationServerMetadata(origin)).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
+	});
+
+	// #10172
+	it("uses a configured authorization server metadata document as is", async () => {
+		const origin = await listen(async (request, response, serverOrigin) => {
+			const url = new URL(request.url ?? "/", serverOrigin);
+			response.setHeader("content-type", "application/json");
+			if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+				// Names the MCP server itself, which serves no authorization server metadata.
+				response.end(JSON.stringify({ resource: `${serverOrigin}/mcp`, authorization_servers: [serverOrigin] }));
+			} else if (url.pathname === "/idp/metadata.json") {
+				response.end(
+					JSON.stringify({
+						// Not derivable from the document URL; a configured document is not checked.
+						issuer: "https://idp.example",
+						authorization_endpoint: `${serverOrigin}/idp/authorize`,
+						token_endpoint: `${serverOrigin}/idp/token`,
+						response_types_supported: ["code"],
+					}),
+				);
+			} else {
+				response.statusCode = 404;
+				response.end();
+			}
+		});
+		const provider = new TestOAuthProvider("http://127.0.0.1/callback");
+		provider.client = { client_id: "client" };
+		const options = {
+			serverUrl: `${origin}/mcp`,
+			authorizationServerMetadataUrl: new URL(`${origin}/idp/metadata.json`),
+		};
+		expect(await authorizeMcp(provider, options)).toBe("REDIRECT");
+		const authorizationUrl = provider.authorizationUrl as URL;
+		expect(`${authorizationUrl.origin}${authorizationUrl.pathname}`).toBe(`${origin}/idp/authorize`);
+		expect(authorizationUrl.searchParams.get("resource")).toBe(`${origin}/mcp`);
+
+		const insecure = { ...options, authorizationServerMetadataUrl: new URL("http://idp.example/metadata.json") };
+		await expect(authorizeMcp(provider, insecure)).rejects.toBeInstanceOf(OAuthInsecureEndpointError);
+	});
+
+	it("exchanges a code only when its iss parameter names the authorization server", async () => {
+		const codes: string[] = [];
+		const origin = await listen(async (request, response) => {
+			codes.push(new URLSearchParams(await readBody(request)).get("code") ?? "");
+			response.setHeader("content-type", "application/json");
+			response.end(JSON.stringify({ access_token: "token", token_type: "Bearer" }));
+		});
+		const exchange = (code: string, iss: string | undefined, issParameterSupported: boolean) => {
+			const provider = new TestOAuthProvider("http://127.0.0.1/callback");
+			provider.client = { client_id: "client" };
+			provider.verifier = "verifier";
+			provider.discovery = {
+				authorizationServerUrl: origin,
+				authorizationServerMetadata: {
+					issuer: origin,
+					authorization_endpoint: `${origin}/authorize`,
+					token_endpoint: `${origin}/token`,
+					response_types_supported: ["code"],
+					authorization_response_iss_parameter_supported: issParameterSupported,
+				},
+			};
+			return authorizeMcp(provider, { serverUrl: `${origin}/mcp`, authorizationCode: code, iss });
+		};
+		await expect(exchange("other", "https://attacker.example", false)).rejects.toBeInstanceOf(
+			OAuthIssuerMismatchError,
+		);
+		await expect(exchange("missing", undefined, true)).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
+		expect(await exchange("matching", origin, true)).toBe("AUTHORIZED");
+		// Servers that do not promise the parameter may omit it.
+		expect(await exchange("omitted", undefined, false)).toBe("AUTHORIZED");
+		expect(codes).toEqual(["matching", "omitted"]);
 	});
 });
 

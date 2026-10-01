@@ -433,7 +433,7 @@ describe("parseCommandArgs", () => {
 // ============================================================================
 
 describe("expandPromptTemplate", () => {
-	test.each(['""', "''"])("uses a default for %s without shifting the following argument", (empty) => {
+	test.each(['""', "''"])("keeps positional arguments after %s", (empty) => {
 		const result = expandPromptTemplate(`/review ${empty} src/auth.ts`, [
 			{
 				name: "review",

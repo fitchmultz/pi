@@ -7,22 +7,11 @@ import type {
 	WheelScrollLines,
 } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
-import {
-	closeSync,
-	existsSync,
-	fchmodSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "fs";
-import { dirname, join } from "path";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "fs";
+import { basename, dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { atomicWriteFileSync, resolveFileTarget } from "../utils/atomic-file.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
@@ -105,8 +94,8 @@ export interface WarningSettings {
 
 /**
  * How the codemode tool presents tools while it is active.
- * - `on`: declared tools that scripts can call get their codemode declaration appended to their
- *   description; the codemode description lists only the tools without `direct` exposure.
+ * - `on`: declared tools that scripts can call get a note on calling them from scripts appended to
+ *   their description; the codemode description lists only the tools without `direct` exposure.
  * - `only`: the codemode description lists every tool scripts can call, and active `direct` tools are
  *   not declared to the model.
  */
@@ -120,6 +109,8 @@ export interface CodemodeSettings {
 }
 
 export type DefaultProjectTrust = "ask" | "always" | "never";
+/** true hides all startup output, "header" keeps only the startup header. */
+export type QuietStartup = boolean | "header";
 
 export type TransportSetting = Transport;
 
@@ -140,6 +131,8 @@ export type PackageSource =
 			themes?: string[];
 	  };
 
+export type CompactView = boolean | "hybrid";
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -154,11 +147,11 @@ export interface Settings {
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
-	compactView?: boolean;
+	compactView?: CompactView; // default: false; global future-start preference
 	showCacheMissNotices?: boolean; // default: false - show cache cost and provider recovery notices
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
-	quietStartup?: boolean;
+	quietStartup?: QuietStartup; // default: false
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
@@ -192,7 +185,7 @@ export interface Settings {
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	cacheWarming?: CacheWarmingMode; // default: "streaming"; global only because each refresh costs money
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
-	tuiMode?: TuiMode; // default: "regular"
+	tuiMode?: TuiMode; // default: "fullscreen"
 	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular TUI mode
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
 	fullscreenCopyOnSelect?: boolean; // default: true; no effect in regular TUI mode
@@ -223,7 +216,7 @@ function deepMergeObjects(base: Record<string, unknown>, overrides: Record<strin
 }
 
 /** Tools enabled at startup when `defaultTools` does not change them. */
-export const DEFAULT_TOOL_NAMES: readonly string[] = ["read", "bash", "background_command", "edit", "write"];
+export const DEFAULT_TOOL_NAMES: readonly string[] = ["read", "bash", "edit", "write"];
 
 function isToolModifier(entry: unknown): boolean {
 	return typeof entry === "string" && (entry.startsWith("+") || entry.startsWith("-"));
@@ -282,11 +275,6 @@ export interface SettingsManagerCreateOptions {
 }
 
 export interface SettingsStorage {
-	/**
-	 * Invoke fn once, with read/modify/write protected by a lock. File storage creates
-	 * parent directories by default. Use readOnly for reads that must not create them;
-	 * read-only callbacks must return undefined. Reads of missing files skip locking.
-	 */
 	withLock(
 		scope: SettingsScope,
 		fn: (current: string | undefined) => string | undefined,
@@ -354,34 +342,21 @@ export class FileSettingsStorage implements SettingsStorage {
 		options: { readOnly?: boolean } = {},
 	): void {
 		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
-		if (!options.readOnly) mkdirSync(dirname(path), { recursive: true });
+		const dir = dirname(path);
 
 		let release: (() => void) | undefined;
 		try {
+			if (!options.readOnly) mkdirSync(dir, { recursive: true });
 			if (!options.readOnly || existsSync(path)) {
-				release = this.acquireLockSyncWithRetry(path);
+				const target = resolveFileTarget(path);
+				const lockPath = join(realpathSync(dirname(target)), basename(target));
+				release = this.acquireLockSyncWithRetry(lockPath);
 			}
-			const current = release && existsSync(path) ? readFileSync(path, "utf-8") : undefined;
+			const current = existsSync(path) ? readFileSync(path, "utf-8") : undefined;
 			const next = fn(current);
 			if (next !== undefined) {
 				if (options.readOnly) throw new Error("Cannot write settings in read-only mode");
-				// Follow even dangling symlinks and check writability without truncating existing settings.
-				closeSync(openSync(path, "a"));
-				const destination = realpathSync(path);
-				const mode = statSync(destination).mode & 0o777;
-				const temporary = `${destination}.${randomUUID()}.tmp`;
-				const fd = openSync(temporary, "wx", mode);
-				try {
-					try {
-						fchmodSync(fd, mode);
-						writeFileSync(fd, next, "utf-8");
-					} finally {
-						closeSync(fd);
-					}
-					renameSync(temporary, destination);
-				} finally {
-					rmSync(temporary, { force: true });
-				}
+				atomicWriteFileSync(path, next);
 			}
 		} finally {
 			if (release) {
@@ -395,15 +370,10 @@ export class InMemorySettingsStorage implements SettingsStorage {
 	private global: string | undefined;
 	private project: string | undefined;
 
-	withLock(
-		scope: SettingsScope,
-		fn: (current: string | undefined) => string | undefined,
-		options: { readOnly?: boolean } = {},
-	): void {
+	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
 		const current = scope === "global" ? this.global : this.project;
 		const next = fn(current);
 		if (next !== undefined) {
-			if (options.readOnly) throw new Error("Cannot write settings in read-only mode");
 			if (scope === "global") {
 				this.global = next;
 			} else {
@@ -680,9 +650,9 @@ export class SettingsManager {
 
 	private refreshSetting(field: keyof Settings, nestedKey?: string): void {
 		let value: unknown = deepMergeSettings(this.globalSettings, this.projectSettings)[field];
-		if (nestedKey) {
+		if (nestedKey !== undefined) {
 			const nested = { ...(this.settings[field] as Record<string, unknown>) };
-			const replacement = (value as Record<string, unknown>)?.[nestedKey];
+			const replacement = (value as Record<string, unknown> | undefined)?.[nestedKey];
 			if (replacement === undefined) delete nested[nestedKey];
 			else nested[nestedKey] = replacement;
 			value = nested;
@@ -752,7 +722,7 @@ export class SettingsManager {
 		scope: SettingsScope,
 		scopedSettings: Settings,
 		modifiedFields: Set<keyof Settings>,
-		modifiedNestedFields?: Map<keyof Settings, Set<string>>,
+		modifiedNestedFields: Map<keyof Settings, Set<string>>,
 	): void {
 		this.storage.withLock(scope, (current) => {
 			const currentFileSettings = current
@@ -762,7 +732,7 @@ export class SettingsManager {
 			for (const field of modifiedFields) {
 				const value = scopedSettings[field];
 				if (
-					modifiedNestedFields?.has(field) &&
+					modifiedNestedFields.has(field) &&
 					(value === undefined || (typeof value === "object" && value !== null))
 				) {
 					const nestedModified = modifiedNestedFields.get(field)!;
@@ -773,7 +743,7 @@ export class SettingsManager {
 						mergedNested[nestedKey] = inMemoryNested[nestedKey];
 					}
 					(mergedSettings as Record<string, unknown>)[field] =
-						value === undefined && Object.values(mergedNested).every((nestedValue) => nestedValue === undefined)
+						value === undefined && Object.values(mergedNested).every((entry) => entry === undefined)
 							? undefined
 							: mergedNested;
 				} else {
@@ -824,19 +794,8 @@ export class SettingsManager {
 		this.refreshSetting(field);
 	}
 
-	async flush(options?: { requireSuccessfulPersistence: boolean }): Promise<void> {
+	async flush(): Promise<void> {
 		await this.writeQueue;
-		// Presentation diagnostics can be drained independently. Only successful writes or
-		// an explicit reload/trust reconciliation clear the native dirty/load-error state.
-		if (
-			options?.requireSuccessfulPersistence &&
-			(this.modifiedFields.size ||
-				this.modifiedProjectFields.size ||
-				this.globalSettingsLoadError ||
-				this.projectSettingsLoadError)
-		) {
-			throw new Error("Settings checkpoint failed: unresolved persistence or load failure");
-		}
 	}
 
 	drainErrors(): SettingsError[] {
@@ -1110,11 +1069,12 @@ export class SettingsManager {
 		return this.settings.hideThinkingBlock ?? false;
 	}
 
-	getCompactView(): boolean {
-		return this.globalSettings.compactView === true;
+	getCompactView(): CompactView {
+		const value = this.globalSettings.compactView;
+		return value === "hybrid" ? value : value === true;
 	}
 
-	setCompactView(compactView: boolean): void {
+	setCompactView(compactView: CompactView): void {
 		this.globalSettings.compactView = compactView;
 		this.markModified("compactView");
 		this.save();
@@ -1159,11 +1119,12 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getQuietStartup(): boolean {
-		return this.settings.quietStartup ?? false;
+	getQuietStartup(): QuietStartup {
+		const value = this.settings.quietStartup;
+		return value === true || value === "header" ? value : false;
 	}
 
-	setQuietStartup(quiet: boolean): void {
+	setQuietStartup(quiet: QuietStartup): void {
 		this.globalSettings.quietStartup = quiet;
 		this.markModified("quietStartup");
 		this.save();
@@ -1418,7 +1379,7 @@ export class SettingsManager {
 	}
 
 	getTuiMode(): TuiMode {
-		return this.settings.tuiMode === "fullscreen" ? "fullscreen" : "regular";
+		return this.settings.tuiMode === "regular" ? "regular" : "fullscreen";
 	}
 
 	setTuiMode(mode: TuiMode): void {

@@ -1,5 +1,4 @@
 import type { TelemetryContext } from "@earendil-works/pi-telemetry";
-import type { ResponseFunctionWebSearch, ResponseOutputText } from "openai/resources/responses/responses.js";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.ts";
 import type { BedrockOptions } from "./api/bedrock-converse-stream.ts";
@@ -544,17 +543,6 @@ export interface UserMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
-/** Provider-reported hosted web actions and URL citations, not fetched page contents. */
-export interface ResponsesWebSearchMetadata {
-	calls?: ResponseFunctionWebSearch[];
-	citations?: {
-		itemId: string;
-		/** Index in the original Responses message content, not AssistantMessage.content. */
-		contentIndex: number;
-		annotation: ResponseOutputText.URLCitation;
-	}[];
-}
-
 export interface AssistantMessage {
 	role: "assistant";
 	content: (TextContent | ThinkingContent | ToolCall)[];
@@ -567,8 +555,6 @@ export interface AssistantMessage {
 	providerThinkingLevel?: string;
 	/** Pi thinking level the agent loop requested for this response. Absent outside the agent loop and for legacy responses. */
 	thinkingLevel?: ModelThinkingLevel;
-	/** Observational metadata only: hosted calls are never executed locally or replayed. */
-	webSearch?: ResponsesWebSearchMetadata;
 	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
 	usage: Usage;
 	stopReason: StopReason;
@@ -881,10 +867,6 @@ export interface OpenAICompletionsCompat {
 
 /** Compatibility settings for OpenAI Responses APIs. */
 export interface OpenAIResponsesCompat {
-	/** Whether public Responses accepts tool_choice.allowed_tools. Default: true on api.openai.com; not used by Codex/Azure. */
-	supportsAllowedTools?: boolean;
-	/** Between-request positional reasoning updates in standard single-agent mode (not live steering). */
-	supportsReasoningEffortUpdates?: boolean;
 	/** Whether the provider supports the `developer` role (vs `system`). Default: true. */
 	supportsDeveloperRole?: boolean;
 	/** Whether the exact model accepts developer or system messages after the conversation has started. When false, later system messages are folded into the leading system message. Default: false; the generated model catalog enables it for verified models. */

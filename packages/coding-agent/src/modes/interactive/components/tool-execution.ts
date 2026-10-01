@@ -5,7 +5,6 @@ import {
 	Container,
 	getCapabilities,
 	Image,
-	isImageLine,
 	MouseRegion,
 	Spacer,
 	Text,
@@ -64,8 +63,9 @@ export class ToolExecutionComponent extends Container {
 	private args: any;
 	private expanded = false;
 	private compactView: boolean;
-	private compactLayout?: { rows: number[]; height: number };
-	private compactPreview?: { width: number; sourceLines: string[]; resultStart: number | undefined; lines: string[] };
+	private compactRows: number[] = [];
+	private compactHeight = 0;
+	private compactPreview?: { width: number; source: string[]; resultStart: number; lines: string[] };
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private isPartial = true;
@@ -155,7 +155,6 @@ export class ToolExecutionComponent extends Container {
 			argsComplete: this.argsComplete,
 			isPartial: this.isPartial,
 			expanded: this.expanded,
-			compactView: this.compactView,
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
 		};
@@ -187,30 +186,6 @@ export class ToolExecutionComponent extends Container {
 			this.setExpanded(!this.expanded);
 			return { handled: true };
 		});
-	}
-
-	updateToolDefinition(definition: ToolRenderers | undefined): void {
-		if (
-			this.toolDefinition?.renderCall === definition?.renderCall &&
-			this.toolDefinition?.renderResult === definition?.renderResult &&
-			this.toolDefinition?.renderShell === definition?.renderShell &&
-			(this.toolDefinition !== undefined) === (definition !== undefined)
-		)
-			return;
-		this.toolDefinition = definition;
-		this.callRendererComponent = undefined;
-		this.resultRendererComponent = undefined;
-		this.rendererState = {};
-		this.clear();
-		this.addChild(new Spacer(1));
-		this.addChild(
-			this.hasRendererDefinition()
-				? this.getRenderShell() === "self"
-					? this.selfRenderContainer
-					: this.contentBox
-				: this.contentTextRegion,
-		);
-		this.updateDisplay();
 	}
 
 	updateArgs(args: any): void {
@@ -274,20 +249,19 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
-	getActivityStatus(): "running" | "error" | "complete" {
-		return this.isPartial ? "running" : this.result?.isError ? "error" : "complete";
-	}
-
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		this.updateDisplay();
 	}
 
+	getActivityStatus(): "running" | "error" | "complete" {
+		return this.isPartial ? "running" : this.result?.isError ? "error" : "complete";
+	}
+
 	setCompactView(compactView: boolean): void {
-		if (this.compactView !== compactView) {
-			this.compactView = compactView;
-			this.updateDisplay();
-		}
+		if (this.compactView === compactView) return;
+		this.compactView = compactView;
+		this.updateDisplay();
 	}
 
 	setShowImages(show: boolean): void {
@@ -311,43 +285,40 @@ export class ToolExecutionComponent extends Container {
 		}
 
 		if (this.compactView && !this.expanded) {
-			// Render the real children to retain their caches and native mouse layout.
-			// Image protocol rows become placeholders, never a partially clipped image.
-			const lines = super.render(width);
-			let resultStart: number | undefined;
-			if (this.hasRendererDefinition() && this.result) {
-				const self = this.getRenderShell() === "self";
-				const container = self ? this.selfRenderContainer : this.contentBox;
-				const padding = self ? 0 : 1;
-				const callHeight = container.children[0]?.render(Math.max(1, width - padding * 2)).length ?? 0;
-				resultStart = 1 + padding + callHeight;
-			}
+			// Keep native child layouts live for inner card clicks and asynchronous renderers.
+			const source = super.render(width);
+			const self = this.getRenderShell() === "self";
+			const padding = self ? 0 : 1;
+			const container = self ? this.selfRenderContainer : this.contentBox;
+			const resultStart =
+				this.hasRendererDefinition() && this.result
+					? 1 + padding + (container.children[0]?.render(Math.max(1, width - padding * 2)).length ?? 0)
+					: 0;
 			const cached = this.compactPreview;
 			if (
-				cached &&
-				cached.width === width &&
+				cached?.width === width &&
 				cached.resultStart === resultStart &&
-				cached.sourceLines.length === lines.length &&
-				cached.sourceLines.every((line, i) => line === lines[i])
+				cached.source.length === source.length &&
+				cached.source.every((line, i) => line === source[i])
 			) {
 				return cached.lines;
 			}
-			const rows = lines.flatMap((line, y) => (isImageLine(line) || stripAnsi(line).trim() ? [y] : []));
-			// A wrapping call or an edit preview must not crowd out the result/error row.
-			const secondRow =
-				resultStart === undefined ? rows[1] : (rows.find((y) => y > rows[0] && y >= resultStart) ?? rows[1]);
-			const previewRows = [rows[0], secondRow].filter((y) => y !== undefined);
-			this.compactLayout = { rows: previewRows, height: lines.length };
-			const preview = previewRows.map((y) => {
-				const line = lines[y];
+			const rows = source.flatMap((line, y) =>
+				/\x1b(?:_G|\]1337;File=)/.test(line) || stripAnsi(line).trim() ? [y] : [],
+			);
+			const second = rows.find((y) => y > rows[0] && y >= resultStart) ?? rows[1];
+			this.compactRows = [rows[0], second].filter((y) => y !== undefined);
+			this.compactHeight = source.length;
+			const lines = this.compactRows.map((y) => {
+				const line = source[y];
 				const imageStart = line.search(/\x1b(?:_G|\]1337;File=)/);
 				return truncateToWidth(
 					imageStart === -1 ? line : stripAnsi(line.slice(0, imageStart)) + theme.fg("muted", "[image]"),
 					width,
 				);
 			});
-			this.compactPreview = { width, sourceLines: lines, resultStart, lines: preview };
-			return preview;
+			this.compactPreview = { width, source, resultStart, lines };
+			return lines;
 		}
 
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
@@ -380,9 +351,8 @@ export class ToolExecutionComponent extends Container {
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		if (this.compactView && !this.expanded) {
-			const y = this.compactLayout?.rows[event.y];
-			if (y === undefined || !this.compactLayout) return undefined;
-			return super.handleMouse({ ...event, y, height: this.compactLayout.height });
+			const y = this.compactRows[event.y];
+			return y === undefined ? undefined : super.handleMouse({ ...event, y, height: this.compactHeight });
 		}
 		if (!this.hasRendererDefinition() || this.getRenderShell() !== "self") return super.handleMouse(event);
 		if (event.y <= 0 || event.y > this.selfRenderHeight) return undefined;

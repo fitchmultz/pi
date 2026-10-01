@@ -1,5 +1,5 @@
-import { renderScrollView, type ScrollView } from "./components/scroll-view.ts";
-import { allocateStackSizes, renderStack, visibleStackEntries } from "./components/stack.ts";
+import type { ScrollView } from "./components/scroll-view.ts";
+import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
 import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
@@ -74,16 +74,7 @@ function renderCached(context: LayoutContext, component: Component, width: numbe
 	}
 	let lines = widths.get(safeWidth);
 	if (!lines) {
-		const node = getLayoutNode(component);
-		if (node) {
-			const renderChild = (child: Component, childWidth: number) => renderCached(context, child, childWidth);
-			lines =
-				node.type === "scroll"
-					? renderScrollView(node, safeWidth, renderChild)
-					: renderStack(node, safeWidth, renderChild);
-		} else {
-			lines = component.render(safeWidth);
-		}
+		lines = component.render(safeWidth);
 		widths.set(safeWidth, lines);
 	}
 	return lines;
@@ -156,8 +147,7 @@ function layoutComponent(
 		);
 		const contentHeight = childBox.rect.height;
 		const viewportHeight = height === undefined ? contentHeight : Math.max(0, Math.floor(height));
-		const contentLines = renderCached(context, node.component, contentWidth);
-		node.state.updateLayout(contentHeight, viewportHeight, context.requestRender, contentLines);
+		node.state.updateLayout(contentHeight, viewportHeight, context.requestRender);
 		translateBox(childBox, previousScrollTop - node.state.scrollTop);
 		const scrollView = node.state as ScrollView;
 		if (node.state.primary || !context.primaryScrollView) context.primaryScrollView = scrollView;
@@ -169,7 +159,7 @@ function layoutComponent(
 			clip: childClip,
 			children: [childBox],
 			scrollView,
-			scrollContentLines: contentLines,
+			scrollContentLines: renderCached(context, node.component, contentWidth),
 			layer: 0,
 		};
 		childBox.parent = box;

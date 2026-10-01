@@ -401,8 +401,6 @@ Both overloads resolve credentials, refresh expired OAuth when necessary, and ma
 
 `getAuth()`, `checkAuth()`, `getAvailable()`, login, and logout accept optional caller cancellation through their existing options or interaction objects and remain unbounded when no signal is supplied. Provider `login`, `ApiKeyAuth.check`, `ApiKeyAuth.resolve`, and `OAuthAuth.refresh` implementations always receive a concrete signal and must honor it for blocking work.
 
-Availability enumeration (`getAvailable`, `getAvailableOfType`, and `getAllAvailable`) isolates provider auth-check failures so healthy providers remain visible. Pass `onAuthResult(providerId, { stored, auth, error })` in the operation options to observe each provider from the same credential read and check. These observations contain no credentials. Storage failures and cancellation still reject; callers must not interpret a failed selected-provider check as permission to switch billing accounts.
-
 ### Transforming Request Headers
 
 `Models.stream()`, `complete()`, `streamSimple()`, and `completeSimple()` accept a Models-only `transformHeaders` option. It runs once after provider auth, `model.headers`, and explicit `options.headers` have been merged, but before provider dispatch:
@@ -573,8 +571,6 @@ const patchTool: Tool = {
   }
 };
 ```
-
-Anthropic admits preferred strict schemas in declaration order within its request-wide strict-tool and union limits. Required strict schemas are never silently relaxed. A grammar-size rejection permits one retry without preferred strictness, preserving hook-owned declarations and recording accepted fallback provenance for later requests. Unrelated request or auth errors do not trigger this retry.
 
 ### Handling Tool Calls
 
@@ -1210,8 +1206,6 @@ const response = await models.complete(openRouterModel, context, {
 
 Callbacks are awaited in stream order, so slow callbacks delay stream consumption and thrown errors fail the request. SDK-backed adapters can expose only fields retained by their SDK.
 
-Responses adapters retain completed hosted web-search actions and URL citations in `AssistantMessage.webSearch`. Citation indexes refer to the original provider message content. This is observational metadata, not fetched page contents or locally executable tool calls; hosted calls are not replayed.
-
 ## Custom Providers
 
 ### createProvider()
@@ -1593,17 +1587,7 @@ getCurrentTools(messages);        // []
 
 A custom `Provider` or `ProviderStreams` implementation reads the prompt and tools the same way from `context.messages`; `context.systemPrompt` and `context.tools` do not exist at that layer.
 
-Models that accept system messages mid-conversation (`supportsMidConvoSystemMessages`, set by the catalog for verified models) receive later system messages in place. Other models receive `collapseSystemMessages(transcript)`: the replayed prompt and current tools as the leading system message. Anthropic's reference-based tool-change protocol keeps initial tools active and later tools deferred, with a stable placeholder; it requires an initial tool and no same-name redefinition. Inline-capable routes and bounded retention are described below.
-
-### Bounded cache-prefix preservation
-
-Supported Responses routes retain removed declarations and append availability, description-change, and reactivation notices. Schema changes rebuild the baseline; retained declarations also rebuild when the estimated provider input exceeds the context limit. Additive loading still uses the upstream `additional_tools` or synthetic search encoders. Retention does not grant execution permission: hosts must validate calls against the current active tools. Public OpenAI Responses additionally uses `allowed_tools` (or `none`) when tools are revoked; custom routes must explicitly opt in with `supportsAllowedTools`.
-
-On official Anthropic routes with both mid-conversation capabilities, new prefixes use inline tool definitions. Protocol choice and preferred-strict fallback are bound to API, provider, model, endpoint, and the leading system message timestamp. Persist assistant diagnostics with the transcript; give a replacement leading system message a fresh timestamp after rollover. Existing unannotated prefixes keep the reference-based protocol. Changes without a legal user/tool-result boundary rebuild immediately rather than emitting an illegal system update. This preserves supported thinking signatures and does not promise zero cache resets.
-
-Standard, stateless GPT-6 Astra/Sol/Luna requests on official OpenAI and Codex routes preserve initial reasoning effort and append between-request `configuration_update` items. Explicit `supportsReasoningEffortUpdates` overrides the route default; nonstandard reasoning, automatic truncation, compaction, and multi-agent sampling disable this projection. This is not live steering. Codex cached WebSocket continuation retains detached request/response snapshots; direct Responses uses upstream HTTP transport.
-
-Offline payload and loopback tests verify these contracts, not live provider cache hits or latency. Correctness, security, schema changes, retention pressure, provider switches, and rollover may reset a prefix.
+Models that accept system messages mid-conversation (`supportsMidConvoSystemMessages` in the model's compat settings, set by the generated catalog for verified models) receive each later system message in place, so the cached prefix stays intact; section changes are framed by name for the model. Every other model receives `collapseSystemMessages(transcript)`: the replayed prompt and current tools as the leading system message, with later system messages dropped. Anthropic models that also set `supportsMidConvoToolChanges` send tool changes as native `tool_addition`/`tool_removal` blocks: the initial tools stay active at the top level, every later declaration is sent with `defer_loading` (plus a stable deferred placeholder from the first request, which keeps Anthropic's deferred-tool scaffolding in the cached prefix), and removed tools stay declared, so tool changes do not invalidate the prompt cache. That needs at least one initial tool and no same-name redefinition; otherwise the current tool list is sent at the top level with the system text only. OpenAI Responses models with `supportsAdditionalTools` or `supportsToolSearch` anchor additive tool changes at their message; everything else sends the current tool list at the top level.
 
 ## Context Serialization
 
@@ -1786,8 +1770,6 @@ await models.complete(model, context);
 // Logout
 await models.logout('anthropic');
 ```
-
-For Anthropic OAuth, set `localCallbackServer: false` on the login interaction to use manual code entry without opening any loopback listener. Concurrent attempts retain separate PKCE/state. Cancellation ends the wait even if a custom prompt ignores its abort signal; prompt implementations should still honor that signal to dispose their UI.
 
 ### Vertex AI
 

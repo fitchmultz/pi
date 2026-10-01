@@ -5,26 +5,12 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import { type Component, Container, type Focusable, type TUI } from "../../tui/src/tui.ts";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import { AuthStorage } from "../src/core/auth-storage.ts";
-import { CheckpointActivity } from "../src/core/checkpoint.ts";
-import { createEventBus } from "../src/core/event-bus.ts";
-import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
-import { ExtensionRunner } from "../src/core/extensions/runner.ts";
-import type { AutocompleteProviderFactory, ExtensionAPI } from "../src/core/extensions/types.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
+import type { QuietStartup } from "../src/core/settings-manager.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
-import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
-import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
-
-const checkpointCallback = Reflect.get(InteractiveMode.prototype, "checkpointCallback") as <
-	Args extends unknown[],
-	Result,
->(
-	callback: (...args: Args) => Result | Promise<Result>,
-) => (...args: Args) => Promise<Result>;
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -94,7 +80,7 @@ describe("InteractiveMode.showStatus", () => {
 
 	test("coalesces immediately-sequential status messages", () => {
 		const fakeThis: any = {
-			chatContainer: new ChatContainer(),
+			chatContainer: new Container(),
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
@@ -113,7 +99,7 @@ describe("InteractiveMode.showStatus", () => {
 
 	test("appends a new status line if something else was added in between", () => {
 		const fakeThis: any = {
-			chatContainer: new ChatContainer(),
+			chatContainer: new Container(),
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
@@ -138,7 +124,7 @@ describe("InteractiveMode.showManagedToolStatus", () => {
 
 	test("renders tool updates as one contiguous group", () => {
 		const fakeThis: any = {
-			chatContainer: new ChatContainer(),
+			chatContainer: new Container(),
 			ui: { requestRender: vi.fn() },
 			managedToolStatusStarted: false,
 			lastStatusSpacer: undefined,
@@ -162,14 +148,12 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		const header = { setExpanded: vi.fn() };
 		const loadedResourcesChild = { setExpanded: vi.fn() };
 		const chatChild = { setExpanded: vi.fn() };
-		const pendingChild = { setExpanded: vi.fn() };
 		const fakeThis: any = {
 			toolOutputExpanded: false,
 			customHeader: undefined,
 			builtInHeader: header,
 			loadedResourcesContainer: { children: [loadedResourcesChild] },
-			chatContainer: { children: [chatChild], setExpanded: vi.fn() },
-			pendingMessagesContainer: { children: [pendingChild] },
+			chatContainer: { children: [chatChild] },
 			ui: { requestRender: vi.fn() },
 			showStatus: vi.fn(),
 		};
@@ -180,7 +164,6 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(header.setExpanded).toHaveBeenCalledWith(true);
 		expect(loadedResourcesChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
-		expect(pendingChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Tool output: expanded");
 	});
 });
@@ -197,8 +180,7 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 			}),
 		};
 		const fakeThis: any = {
-			checkpointCallback,
-			session: { settingsManager, notifyCheckpointStateChanged: vi.fn() },
+			session: { settingsManager },
 			settingsManager,
 			themeController: {
 				setThemeInstance: vi.fn(() => ({ success: true })),
@@ -228,8 +210,7 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 			setTheme: vi.fn(),
 		};
 		const fakeThis: any = {
-			checkpointCallback,
-			session: { settingsManager, notifyCheckpointStateChanged: vi.fn() },
+			session: { settingsManager },
 			settingsManager,
 			themeController: {
 				setThemeInstance: vi.fn(() => ({ success: true })),
@@ -268,15 +249,10 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			throw new Error("closeReplacement was not initialized");
 		};
 		const fakeThis = {
-			checkpointCallback,
-			checkpointUIActivity: new CheckpointActivity(),
-			session: { notifyCheckpointStateChanged: vi.fn() },
 			editor,
 			editorContainer,
 			keybindings: {},
 			ui,
-			renderer: ui,
-			pendingCustomFocus: new WeakMap<Component, Component | null>(),
 			disposeActiveSelector: vi.fn(),
 		};
 		const showExtensionCustom = <T>(
@@ -330,8 +306,6 @@ describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () 
 	test("stores wrapper factories and rebuilds autocomplete immediately", () => {
 		const wrapper: AutocompleteProviderFactory = (current) => current;
 		const fakeThis = {
-			checkpointCallback,
-			session: { notifyCheckpointStateChanged: vi.fn() },
 			autocompleteProviderWrappers: [] as AutocompleteProviderFactory[],
 			setupAutocompleteProvider: vi.fn(),
 		};
@@ -345,32 +319,6 @@ describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () 
 });
 
 describe("InteractiveMode.setupAutocompleteProvider", () => {
-	test("preserves line context and suggestion options through checkpoint tracking", async () => {
-		const base = new CombinedAutocompleteProvider([], "/tmp/project");
-		const getSuggestions = vi.spyOn(base, "getSuggestions").mockResolvedValue(null);
-		const defaultEditor = { setAutocompleteProvider: vi.fn() };
-		const fakeThis = {
-			createBaseAutocompleteProvider: () => base,
-			defaultEditor,
-			editor: defaultEditor,
-			checkpointCallback,
-			checkpointUIActivity: new CheckpointActivity(),
-			session: { notifyCheckpointStateChanged: vi.fn() },
-			autocompleteProviderWrappers: [],
-		};
-		const setup = Reflect.get(InteractiveMode.prototype, "setupAutocompleteProvider") as (
-			this: typeof fakeThis,
-		) => void;
-		setup.call(fakeThis);
-		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
-		const options = { signal: new AbortController().signal, slashCommands: false, force: false };
-
-		expect(provider.inputContext).toBe("line");
-		await provider.getSuggestions(["/model so"], 0, 9, options);
-		expect(getSuggestions).toHaveBeenCalledWith(["/model so"], 0, 9, options);
-		expect(fakeThis.checkpointUIActivity.busy).toBe(false);
-	});
-
 	test("stacks wrapper factories over a fresh base provider", () => {
 		const defaultEditor = { setAutocompleteProvider: vi.fn() };
 		const customEditor = { setAutocompleteProvider: vi.fn() };
@@ -409,7 +357,6 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
 			defaultEditor,
 			editor: customEditor,
-			checkpointCallback,
 			autocompleteProviderWrappers: [wrap1, wrap2],
 		};
 
@@ -419,7 +366,6 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 		expect(customEditor.setAutocompleteProvider).toHaveBeenCalledTimes(1);
 		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
 		expect(provider).toBe(customEditor.setAutocompleteProvider.mock.calls[0]?.[0]);
-		expect(provider.inputContext).toBeUndefined();
 		expect(provider.shouldTriggerFileCompletion?.(["foo"], 0, 3)).toBe(true);
 		expect(calls).toEqual(["shouldTrigger:wrap2", "shouldTrigger:wrap1"]);
 	});
@@ -441,7 +387,6 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
 			defaultEditor,
 			editor: customEditor,
-			checkpointCallback,
 			autocompleteProviderWrappers: [passThrough(["$"]), passThrough(["!"])],
 		};
 
@@ -457,107 +402,6 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 });
 
 describe("InteractiveMode.createBaseAutocompleteProvider", () => {
-	test("keeps extension command and argument suggestions live without rebuilding the provider", async () => {
-		const cwd = "/tmp/project";
-		const runtime = createExtensionRuntime();
-		let registerCommand!: ExtensionAPI["registerCommand"];
-		const extension = await loadExtensionFromFactory(
-			(pi) => {
-				registerCommand = pi.registerCommand;
-				pi.registerCommand("mcp:cached", { description: "Cached prompt", handler: async () => {} });
-			},
-			cwd,
-			createEventBus(),
-			runtime,
-			"builtin:mcp",
-		);
-		const extensionRunner = new ExtensionRunner(
-			[extension],
-			runtime,
-			cwd,
-			SessionManager.inMemory(cwd),
-			await createInMemoryModelRegistry(AuthStorage.inMemory()),
-		);
-		const defaultEditor = { setAutocompleteProvider: vi.fn() };
-		const wrapper = vi.fn<AutocompleteProviderFactory>((current) => ({
-			inputContext: current.inputContext,
-			getSuggestions: (...args) => current.getSuggestions(...args),
-			applyCompletion: (...args) => current.applyCompletion(...args),
-			shouldTriggerFileCompletion: current.shouldTriggerFileCompletion?.bind(current),
-		}));
-		const fakeThis = {
-			session: {
-				promptTemplates: [{ name: "template", description: "Prompt template" }],
-				extensionRunner,
-				resourceLoader: {
-					getSkills: () => ({
-						skills: [{ name: "research", description: "Research skill", filePath: "/tmp/skill/SKILL.md" }],
-					}),
-				},
-			},
-			settingsManager: { getEnableSkillCommands: () => true },
-			skillCommands: new Map<string, string>(),
-			sessionManager: { getCwd: () => cwd },
-			fdPath: null,
-			getAutocompleteSourceTag: Reflect.get(InteractiveMode.prototype, "getAutocompleteSourceTag"),
-			prefixAutocompleteDescription: Reflect.get(InteractiveMode.prototype, "prefixAutocompleteDescription"),
-			createBaseAutocompleteProvider: Reflect.get(InteractiveMode.prototype, "createBaseAutocompleteProvider"),
-			checkpointCallback,
-			checkpointUIActivity: new CheckpointActivity(),
-			defaultEditor,
-			editor: defaultEditor,
-			autocompleteProviderWrappers: [wrapper],
-		};
-		const setup = Reflect.get(InteractiveMode.prototype, "setupAutocompleteProvider") as (
-			this: typeof fakeThis,
-		) => void;
-		setup.call(fakeThis);
-		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
-		const suggest = (line: string) =>
-			provider.getSuggestions([line], 0, line.length, { signal: new AbortController().signal });
-		const cached = { value: "mcp:cached", label: "mcp:cached", description: "Cached prompt" };
-
-		expect((await suggest("/mcp"))?.items).toEqual([cached]);
-		expect(await suggest("/mcp:research dr")).toBeNull();
-
-		registerCommand("mcp:research", {
-			description: "Draft prompt",
-			getArgumentCompletions: (prefix) => (prefix === "dr" ? [{ value: "draft", label: "Draft" }] : null),
-			handler: async () => {},
-		});
-		expect((await suggest("/mcp"))?.items).toEqual([
-			cached,
-			{ value: "mcp:research", label: "mcp:research", description: "Draft prompt" },
-		]);
-		expect(await suggest("/mcp:research dr")).toEqual({
-			prefix: "dr",
-			items: [{ value: "draft", label: "Draft" }],
-		});
-
-		registerCommand("mcp:research", {
-			description: "Published prompt",
-			getArgumentCompletions: async (prefix) => (prefix === "dr" ? [{ value: "publish", label: "Publish" }] : null),
-			handler: async () => {},
-		});
-		expect((await suggest("/mcp"))?.items).toEqual([
-			cached,
-			{ value: "mcp:research", label: "mcp:research", description: "Published prompt" },
-		]);
-		expect(await suggest("/mcp:research dr")).toEqual({
-			prefix: "dr",
-			items: [{ value: "publish", label: "Publish" }],
-		});
-
-		extension.commands.delete("mcp:research");
-		expect((await suggest("/mcp"))?.items).toEqual([cached]);
-		expect(await suggest("/mcp:research dr")).toBeNull();
-		const commands = (await suggest("/"))?.items.map((item) => item.value);
-		expect(commands).toEqual(expect.arrayContaining(["model", "template", "mcp:cached", "skill:research"]));
-		expect((await suggest("/rsc"))?.items.map((item) => item.value)).toContain("skill:research");
-		expect(wrapper).toHaveBeenCalledTimes(1);
-		expect(defaultEditor.setAutocompleteProvider).toHaveBeenCalledTimes(1);
-	});
-
 	test("matches model command arguments across provider/model order", async () => {
 		type TestModel = { id: string; provider: string; name: string };
 		type FakeInteractiveMode = {
@@ -643,9 +487,10 @@ describe("InteractiveMode.createBaseAutocompleteProvider", () => {
 			sessionManager: { getCwd: () => "/tmp" },
 			fdPath: null,
 			getLoginProviderOptions: () => [
-				{ id: "anthropic", name: "Anthropic", authType: "oauth" },
-				{ id: "anthropic", name: "Anthropic", authType: "api_key" },
+				{ id: "anthropic", name: "Anthropic", authType: "oauth", subscription: true },
+				{ id: "anthropic", name: "Anthropic", authType: "api_key", subscription: true },
 				{ id: "openai", name: "OpenAI", authType: "api_key" },
+				{ id: "radius", name: "Radius", authType: "oauth", subscription: false },
 			],
 		};
 
@@ -662,6 +507,13 @@ describe("InteractiveMode.createBaseAutocompleteProvider", () => {
 				description: "Anthropic · subscription/API key",
 			},
 		]);
+
+		// OAuth sign-in without a subscription, such as Radius, is an account.
+		const radiusLine = "/login radius";
+		const radiusSuggestions = await provider.getSuggestions([radiusLine], 0, radiusLine.length, {
+			signal: new AbortController().signal,
+		});
+		expect(radiusSuggestions?.items).toEqual([{ value: "radius", label: "radius", description: "Radius · account" }]);
 	});
 });
 describe("InteractiveMode.showLoadedResources", () => {
@@ -670,7 +522,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 	});
 
 	function createShowLoadedResourcesThis(options: {
-		quietStartup: boolean;
+		quietStartup: QuietStartup;
 		verbose?: boolean;
 		toolOutputExpanded?: boolean;
 		cwd?: string;
@@ -686,7 +538,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			options: { verbose: options.verbose ?? false },
 			toolOutputExpanded: options.toolOutputExpanded ?? false,
 			loadedResourcesContainer: new Container(),
-			chatContainer: new ChatContainer(),
+			chatContainer: new Container(),
 			settingsManager: {
 				getQuietStartup: () => options.quietStartup,
 			},
@@ -718,6 +570,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 				(InteractiveMode as any).prototype.formatExtensionDisplayPath.call(fakeThis, p),
 			formatContextPath: (p: string) => (InteractiveMode as any).prototype.formatContextPath.call(fakeThis, p),
 			getStartupExpansionState: () => (InteractiveMode as any).prototype.getStartupExpansionState.call(fakeThis),
+			shouldShowStartupDetails: () => (InteractiveMode as any).prototype.shouldShowStartupDetails.call(fakeThis),
 			buildScopeGroups: () => [],
 			formatScopeGroups: () => "resource-list",
 			isPackageSource: (sourceInfo?: SourceInfo) =>
@@ -1387,6 +1240,28 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(fakeThis.loadedResourcesContainer.children).toHaveLength(0);
+	});
+
+	test("hides resource listing but keeps the startup header with header-only quiet startup", () => {
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: "header",
+			skills: [{ filePath: "/tmp/skill/SKILL.md", name: "commit" }],
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		expect(fakeThis.loadedResourcesContainer.children).toHaveLength(0);
+		expect((InteractiveMode as any).prototype.shouldShowStartupHeader.call(fakeThis)).toBe(true);
+		expect((InteractiveMode as any).prototype.shouldShowStartupDetails.call(fakeThis)).toBe(false);
+	});
+
+	test("hides the startup header with full quiet startup unless verbose", () => {
+		const quiet = createShowLoadedResourcesThis({ quietStartup: true });
+		expect((InteractiveMode as any).prototype.shouldShowStartupHeader.call(quiet)).toBe(false);
+		const verbose = createShowLoadedResourcesThis({ quietStartup: "header", verbose: true });
+		expect((InteractiveMode as any).prototype.shouldShowStartupDetails.call(verbose)).toBe(true);
 	});
 
 	test("still shows diagnostics on quiet startup when requested", () => {

@@ -1,9 +1,4 @@
-import {
-	type AssistantMessage,
-	getCurrentSystemPrompt,
-	getCurrentTools,
-	type ToolResultMessage,
-} from "@earendil-works/pi-ai";
+import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_COMPACTION_SETTINGS,
@@ -129,61 +124,6 @@ describe("session context edits", () => {
 
 		session.branch(targetId);
 		expect(text(session.buildSessionProjection().messages[0] as { content: string })).toBe("original");
-	});
-
-	it("projects edits across compactions without replaying an older loadout", () => {
-		const session = SessionManager.inMemory();
-		session.appendMessage({
-			role: "system",
-			content: "",
-			sections: { policy: "old policy" },
-			toolsAdded: [{ name: "old", description: "old tool", parameters: { type: "object" } }],
-			timestamp: Date.now(),
-		});
-		const oldInput = session.appendMessage({ role: "user", content: "earlier window", timestamp: Date.now() });
-		session.appendMessage(assistant("old answer"));
-		session.appendCompaction("earlier summary", oldInput, 100);
-		const compactionId = session.appendCompaction("exact handoff", null, 100);
-		const rawCompaction = session.getEntry(compactionId);
-		const inputId = session.appendMessage({ role: "user", content: "original input", timestamp: Date.now() });
-		session.appendMessage(assistant("answer"));
-		session.appendMessage({
-			role: "system",
-			content: "",
-			sections: { policy: "current policy" },
-			toolsRemoved: [{ name: "old" }],
-			toolsAdded: [{ name: "current", description: "current tool", parameters: { type: "object" } }],
-			timestamp: Date.now(),
-		});
-		session.appendCompaction("current summary", compactionId, 80);
-		session.appendContextEdit(inputId, { content: "edited current input" });
-		const projection = session.buildSessionProjection();
-		expect(projection.entries.find((entry) => entry.sourceEntry.id === compactionId)?.sourceEntry).toBe(
-			rawCompaction,
-		);
-		expect(projection.messages.filter((message) => message.role === "system")).toHaveLength(1);
-		expect(getCurrentSystemPrompt(projection.messages)).toContain("current policy");
-		expect(getCurrentTools(projection.messages).map((tool) => tool.name)).toEqual(["current"]);
-		expect(JSON.stringify(projection.messages)).toContain("current summary");
-		expect(JSON.stringify(projection.messages)).toContain("edited current input");
-		expect(JSON.stringify(projection.messages)).not.toContain("earlier window");
-		expect(JSON.stringify(projection.messages)).not.toContain("earlier summary");
-		expect(rawCompaction).toMatchObject({ systemMessage: { toolsAdded: [{ name: "old" }] } });
-		expect(session.getEntry(inputId)).toMatchObject({ message: { content: "original input" } });
-
-		session.appendMessage({ role: "user", content: "next input ".repeat(100), timestamp: Date.now() });
-		const preparation = prepareCompaction(session.getBranch(), {
-			...DEFAULT_COMPACTION_SETTINGS,
-			keepRecentTokens: 1,
-		});
-		expect(JSON.stringify(preparation)).not.toContain("earlier window");
-		expect(JSON.stringify(preparation)).toContain("edited current input");
-		session.appendCompaction("second handoff", null, 50);
-		session.appendContextEdit(inputId, { content: "must not resurrect the previous window" });
-		expect(JSON.stringify(session.buildSessionContext().messages)).not.toContain("must not resurrect");
-		session.branch(inputId);
-		expect(JSON.stringify(session.buildSessionContext().messages)).toContain("original input");
-		expect(getCurrentTools(session.buildSessionContext().messages).map((tool) => tool.name)).toEqual(["old"]);
 	});
 
 	it("uses a self-referencing compaction to retain no preceding entries", () => {

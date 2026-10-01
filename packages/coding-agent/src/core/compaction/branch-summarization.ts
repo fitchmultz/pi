@@ -156,8 +156,7 @@ export function collectEntriesForBranchSummary(
 function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	switch (entry.type) {
 		case "message":
-			// System state is omitted by serialization and must not consume the conversation budget.
-			// Skip tool results - context is in assistant's tool call.
+			// System declarations are not conversation; tool results are represented by the assistant's tool call.
 			if (entry.message.role === "system" || entry.message.role === "toolResult") return undefined;
 			return entry.message;
 

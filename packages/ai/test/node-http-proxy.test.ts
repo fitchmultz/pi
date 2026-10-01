@@ -37,6 +37,16 @@ afterEach(() => {
 });
 
 describe("node HTTP proxy resolution", () => {
+	it("matches DNS root dots on targets and exclusions without bypassing other hosts or ports", () => {
+		resetProxyEnv();
+		const env = { HTTPS_PROXY: "http://proxy.example:8080", NO_PROXY: "example.com" };
+		expect(resolveHttpProxyUrlForTarget("https://example.com./", env)).toBeUndefined();
+		env.NO_PROXY = ".example.com.:443";
+		expect(resolveHttpProxyUrlForTarget("https://api.example.com/", env)).toBeUndefined();
+		expect(resolveHttpProxyUrlForTarget("https://api.example.com:8443/", env)?.hostname).toBe("proxy.example");
+		expect(resolveHttpProxyUrlForTarget("https://notexample.com/", env)?.hostname).toBe("proxy.example");
+	});
+
 	it("respects NO_PROXY exclusions", () => {
 		resetProxyEnv();
 		process.env.HTTPS_PROXY = "http://proxy.example:8080";
@@ -72,19 +82,6 @@ describe("node HTTP proxy resolution", () => {
 		expect(() => resolveHttpProxyUrlForTarget("https://bedrock-runtime.us-east-1.amazonaws.com")).toThrow(
 			UNSUPPORTED_PROXY_PROTOCOL_MESSAGE,
 		);
-	});
-
-	it("normalizes DNS root dots without changing wildcard or port boundaries", () => {
-		resetProxyEnv();
-		process.env.HTTPS_PROXY = "http://proxy.example:8080";
-		process.env.NO_PROXY = "*.example.com., service.test.:8443";
-
-		expect(resolveHttpProxyUrlForTarget("https://api.example.com")).toBeUndefined();
-		expect(resolveHttpProxyUrlForTarget("https://api.example.com.")).toBeUndefined();
-		expect(resolveHttpProxyUrlForTarget("https://notexample.com.")?.toString()).toBe("http://proxy.example:8080/");
-		expect(resolveHttpProxyUrlForTarget("https://service.test:8443")).toBeUndefined();
-		expect(resolveHttpProxyUrlForTarget("https://service.test.:8443")).toBeUndefined();
-		expect(resolveHttpProxyUrlForTarget("https://service.test")?.toString()).toBe("http://proxy.example:8080/");
 	});
 
 	it("handles subdomain wildcards, IPv6, and ports in NO_PROXY", () => {

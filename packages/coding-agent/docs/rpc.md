@@ -55,8 +55,6 @@ Do not use a generic line reader that treats Unicode line or paragraph separator
 
 Read stdout continuously. Pi honors stdout backpressure, but a client that stops reading can stall the process. Honor stdin backpressure when writing commands. Stdout is reserved for protocol records; diagnostics and application logging go to stderr.
 
-`RpcClient` frames incoming bytes on LF and assembles JSON tokens without accumulating a whole-record string. It preserves complete response and event objects, including entry trees and message arrays. Full-data getters and event collection still need heap for the values the caller requests; `onEvent()` avoids retaining the entire feed. Malformed records are skipped with diagnostics retained by `getStderr()`, and truncated final records are never delivered. Valid final objects without LF remain accepted when the pipe closes.
-
 ## Run lifecycle
 
 A successful `prompt` response means the prompt was accepted, queued, or handled. It does not mean model work completed:
@@ -68,13 +66,17 @@ A successful `prompt` response means the prompt was accepted, queued, or handled
 
 `data.disposition` reports what happened to the prompt. If it is `"handled"`, no run started for this prompt, so don't wait for `agent_settled`. See [RPC Commands](rpc-commands.md#prompt) for all values.
 
-Continue consuming [events](json.md) after that response. `agent_end` marks the end of one low-level agent run, but retries, overflow recovery, compaction or queued input can still follow. Wait for `agent_settled` when the client needs to know Pi will not continue automatically.
+Continue consuming [events](json.md) after that response. `agent_end` marks the end of one low-level agent run, but retries, overflow recovery, compaction, steering, or follow-up work can still follow. Wait for `agent_settled` when the client needs to know Pi will not continue automatically.
 
-Subscribe before sending a prompt to avoid missing a fast completion. `RpcClient.promptAndWait()` subscribes before prompting, waits for acceptance and native idle, then returns collected events. Its timeout covers both acceptance and completion, and subscriptions are removed on success or failure.
+Subscribe before sending a prompt to avoid missing a fast completion. `RpcClient.promptAndWait()` does this internally. If using separate `RpcClient` calls, install the event listener before `prompt()` and call `waitForIdle()` only while a run is active.
 
-`RpcClient.waitForIdle(timeout)` uses [`wait_for_idle`](rpc-commands.md#wait_for_idle), so it also succeeds after settlement or input handled without a model run. The default timeout is 60 seconds. Timeout/process exit rejects and releases the client request without aborting host work; late responses are ignored. Await prompt acceptance before waiting for that prompt's completion.
+## Live terminal handoff
 
-Durable background shell jobs may complete after local settlement; inspect their ordinary completion receipts. PTY-backed clients can transfer frontend ownership with [`attach_tui`](rpc-commands.md#attach_tui); ordinary pipes cannot attach a TUI.
+On POSIX, start `--mode rpc` with stdin and stdout connected to the same controlling PTY to enable [`attach_tui`](rpc-commands.md#attach_tui). Ordinary pipes cannot attach. The existing session, model work, and pending extension UI stay alive while the interactive TUI owns the terminal.
+
+After the successful attachment response, stop parsing JSONL and display subsequent output as terminal bytes. Send user keystrokes to the PTY, not RPC commands. Send `SIGUSR2` to Pi to return to RPC. Match the current attachment token in the framed `tui_detached` record before resuming JSONL parsing; it contains a fresh session snapshot, and unresolved extension UI requests replay afterward. Query `get_entries` or `get_messages` to recover activity that occurred while attached; events are not buffered for replay.
+
+Attachment does not emit another `session_start`. Reload and session replacement still use their normal lifecycle, with `ctx.mode` reflecting the current frontend. RPC startup still completes extension binding before reading commands: startup handlers must not await UI that needs client input or attachment. Hosts that need pre-startup attachment must provide their own startup coordination. Exit commands in the TUI shut down Pi rather than detach. Windows does not support this POSIX signal-based handoff.
 
 ## Errors
 
@@ -92,11 +94,7 @@ Malformed JSON produces a parse response without a request ID:
 
 A success response only covers command handling. Provider failures and aborts after a prompt is accepted appear in the message and event stream.
 
-All `RpcClient` command helpers reject with the host's error on `success: false`, including helpers with no return data. Clients must also handle child-process startup failures, unexpected exits, stderr diagnostics, cancellation, and their own deadlines. Do not parse stderr as protocol data.
-
-## Reloading resources
-
-An extension command can call `ctx.reload()` to refresh resources and reinitialize cached factories. Reload applies extension code and resources in the current process. Restart the subprocess for core changes or a clean process, and use `--session` to resume saved work.
+Clients must also handle child-process startup failures, unexpected exits, stderr diagnostics, cancellation, and their own deadlines. Do not parse stderr as protocol data.
 
 ## Shutdown
 

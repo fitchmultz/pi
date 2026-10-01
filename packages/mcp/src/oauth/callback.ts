@@ -146,7 +146,7 @@ export class OAuthCallbackServer {
 			return;
 		}
 		const iss = url.searchParams.get("iss");
-		pending.resolve({ code, state, ...(iss !== null ? { iss } : {}) });
+		pending.resolve({ code, state, ...(iss ? { iss } : {}) });
 		this.reply(response, 200, { ok: true });
 	}
 }

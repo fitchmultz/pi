@@ -5,7 +5,7 @@ export type ScrollViewScrollbar = "hidden" | "auto" | "always";
 
 export interface ScrollViewOptions {
 	axis?: "vertical";
-	follow?: "none" | "start" | "end";
+	follow?: "none" | "end";
 	primary?: boolean;
 	overscroll?: "chain" | "contain";
 	scrollbar?: ScrollViewScrollbar;
@@ -15,13 +15,13 @@ export interface ScrollViewOptions {
 }
 
 export interface ScrollViewScrollToOptions {
-	/** Keep following disabled even when the target is the configured follow edge. */
+	/** Keep follow-end disabled even when the target is the current content end. */
 	disableFollow?: boolean;
 }
 
 export class ScrollView extends Container {
 	private readonly child: Component;
-	private follow: "none" | "start" | "end";
+	readonly followEnd: boolean;
 	readonly primary: boolean;
 	readonly overscroll: "chain" | "contain";
 	readonly scrollbarTrackStyle: (text: string) => string;
@@ -31,10 +31,8 @@ export class ScrollView extends Container {
 	private currentScrollTop = 0;
 	private contentHeight = 0;
 	private currentViewportHeight = 0;
-	private following: boolean;
-	private followSuppressed = false;
-	private previousContentLines: readonly string[] | undefined;
-	private rowChange: { start: number; oldEnd: number; newEnd: number; retained: Map<number, number> } | undefined;
+	private followingEnd: boolean;
+	private followSuppressedAtEnd = false;
 	private requestRenderCallback: (() => void) | undefined;
 	private transientScrollbarVisible = false;
 	private scrollbarActive = false;
@@ -47,8 +45,8 @@ export class ScrollView extends Container {
 		}
 		this.child = component;
 		this.children.push(component);
-		this.follow = options.follow ?? "none";
-		this.following = this.follow !== "none";
+		this.followEnd = (options.follow ?? "none") === "end";
+		this.followingEnd = this.followEnd;
 		this.primary = options.primary ?? false;
 		this.overscroll = options.overscroll ?? "chain";
 		this.currentScrollbar = options.scrollbar ?? "hidden";
@@ -61,33 +59,8 @@ export class ScrollView extends Container {
 		return this.currentScrollTop;
 	}
 
-	get followEnd(): boolean {
-		return this.follow === "end";
-	}
-
-	get followStart(): boolean {
-		return this.follow === "start";
-	}
-
 	get isFollowingEnd(): boolean {
-		return this.followEnd && this.following;
-	}
-
-	get isFollowingStart(): boolean {
-		return this.followStart && this.following;
-	}
-
-	/** Change the followed edge and immediately return to it. "none" preserves the current offset. */
-	setFollow(follow: "none" | "start" | "end"): void {
-		if (this.follow === follow) return;
-		this.follow = follow;
-		this.previousContentLines = undefined;
-		this.rowChange = undefined;
-		this.followSuppressed = false;
-		this.following = follow !== "none";
-		if (follow === "start") this.scrollToStart();
-		else if (follow === "end") this.scrollToEnd();
-		this.requestRenderCallback?.();
+		return this.followingEnd;
 	}
 
 	get viewportHeight(): number {
@@ -155,20 +128,19 @@ export class ScrollView extends Container {
 		const requested = Number.isFinite(scrollTop) ? Math.trunc(scrollTop) : this.currentScrollTop;
 		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
 		const next = Math.max(0, Math.min(maxScrollTop, requested));
-		const atFollowEdge = this.followStart ? next === 0 : this.followEnd && next === maxScrollTop;
-		const nextFollowSuppressed = options.disableFollow === true && atFollowEdge;
-		const nextFollowing = !nextFollowSuppressed && atFollowEdge;
+		const nextFollowSuppressedAtEnd = options.disableFollow === true && next === maxScrollTop;
+		const nextFollowingEnd = !nextFollowSuppressedAtEnd && this.followEnd && next === maxScrollTop;
 		if (
 			next === this.currentScrollTop &&
-			nextFollowing === this.following &&
-			nextFollowSuppressed === this.followSuppressed
+			nextFollowingEnd === this.followingEnd &&
+			nextFollowSuppressedAtEnd === this.followSuppressedAtEnd
 		) {
 			return;
 		}
 		const moved = next !== this.currentScrollTop;
 		this.currentScrollTop = next;
-		this.following = nextFollowing;
-		this.followSuppressed = nextFollowSuppressed;
+		this.followingEnd = nextFollowingEnd;
+		this.followSuppressedAtEnd = nextFollowSuppressedAtEnd;
 		if (moved) this.markScrollbarActivity();
 		this.requestRenderCallback?.();
 	}
@@ -176,104 +148,55 @@ export class ScrollView extends Container {
 	scrollBy(lines: number): number {
 		const requested = Number.isFinite(lines) ? Math.trunc(lines) : 0;
 		if (requested === 0) return 0;
-		const start = this.currentScrollTop;
-		this.scrollTo(start + requested);
-		return requested - (this.currentScrollTop - start);
+		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
+		const start = this.followingEnd ? maxScrollTop : this.currentScrollTop;
+		const next = Math.max(0, Math.min(maxScrollTop, start + requested));
+		const moved = next - start;
+		const wasFollowingEnd = this.followingEnd;
+		this.currentScrollTop = next;
+		this.followingEnd = this.followEnd && next === maxScrollTop;
+		this.followSuppressedAtEnd = false;
+		if (moved !== 0) this.markScrollbarActivity();
+		if (moved !== 0 || this.followingEnd !== wasFollowingEnd) this.requestRenderCallback?.();
+		return requested - moved;
 	}
 
 	scrollToStart(): void {
-		this.scrollTo(0);
+		const changed =
+			this.currentScrollTop !== 0 ||
+			this.followingEnd !== (this.followEnd && this.contentHeight <= this.currentViewportHeight);
+		this.currentScrollTop = 0;
+		this.followingEnd = this.followEnd && this.contentHeight <= this.currentViewportHeight;
+		this.followSuppressedAtEnd = false;
+		if (changed) {
+			this.markScrollbarActivity();
+			this.requestRenderCallback?.();
+		}
 	}
 
 	scrollToEnd(): void {
-		this.scrollTo(Math.max(0, this.contentHeight - this.currentViewportHeight));
-	}
-
-	/** Map an unchanged row from the previous layout; edited/deleted rows have no stable position. */
-	rebaseContentRow(row: number): number | undefined {
-		const change = this.rowChange;
-		if (!change || row < change.start) return row;
-		if (row >= change.oldEnd) return row + change.newEnd - change.oldEnd;
-		return change.retained.get(row);
-	}
-
-	updateLayout(
-		contentHeight: number,
-		viewportHeight: number,
-		requestRender: () => void,
-		contentLines?: readonly string[],
-	): void {
-		this.rowChange = undefined;
-		if (this.followStart && contentLines) {
-			const previous = this.previousContentLines;
-			if (previous) {
-				let oldEnd = previous.length;
-				let newEnd = contentLines.length;
-				while (oldEnd > 0 && newEnd > 0 && previous[oldEnd - 1] === contentLines[newEnd - 1]) {
-					oldEnd--;
-					newEnd--;
-				}
-				let start = 0;
-				while (start < oldEnd && start < newEnd && previous[start] === contentLines[start]) start++;
-				// Coalesced tool updates can change both ends around an unchanged middle.
-				// Shared unique rows anchor that middle; equal neighbors retain repeated detail rows.
-				const oldRows = new Map<string, number>();
-				const newRows = new Map<string, number>();
-				for (let row = start; row < oldEnd; row++) {
-					const line = previous[row]!;
-					oldRows.set(line, oldRows.has(line) ? -1 : row);
-				}
-				for (let row = start; row < newEnd; row++) {
-					const line = contentLines[row]!;
-					newRows.set(line, newRows.has(line) ? -1 : row);
-				}
-				const retained = new Map<number, number>();
-				const claimed = new Set<number>();
-				for (const [line, oldRow] of oldRows) {
-					const newRow = newRows.get(line);
-					if (oldRow < 0 || newRow === undefined || newRow < 0 || retained.has(oldRow) || claimed.has(newRow)) {
-						continue;
-					}
-					retained.set(oldRow, newRow);
-					claimed.add(newRow);
-					for (const direction of [-1, 1]) {
-						let before = oldRow + direction;
-						let after = newRow + direction;
-						while (
-							before >= start &&
-							before < oldEnd &&
-							after >= start &&
-							after < newEnd &&
-							!retained.has(before) &&
-							!claimed.has(after) &&
-							previous[before] === contentLines[after]
-						) {
-							retained.set(before, after);
-							claimed.add(after);
-							before += direction;
-							after += direction;
-						}
-					}
-				}
-				this.rowChange = { start, oldEnd, newEnd, retained };
-				if (!this.following) {
-					this.currentScrollTop = this.rebaseContentRow(this.currentScrollTop) ?? this.currentScrollTop;
-				}
-			}
-			this.previousContentLines = [...contentLines];
+		const next = Math.max(0, this.contentHeight - this.currentViewportHeight);
+		const changed = this.currentScrollTop !== next || this.followingEnd !== this.followEnd;
+		this.currentScrollTop = next;
+		this.followingEnd = this.followEnd;
+		this.followSuppressedAtEnd = false;
+		if (changed) {
+			this.markScrollbarActivity();
+			this.requestRenderCallback?.();
 		}
+	}
+
+	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
 		this.contentHeight = Math.max(0, Math.floor(contentHeight));
 		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
 		this.requestRenderCallback = requestRender;
 		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
-		if (this.isFollowingEnd) this.currentScrollTop = maxScrollTop;
-		else if (this.isFollowingStart) this.currentScrollTop = 0;
+		if (this.followingEnd) this.currentScrollTop = maxScrollTop;
 		else this.currentScrollTop = Math.max(0, Math.min(this.currentScrollTop, maxScrollTop));
-		const atFollowEdge = this.followStart
-			? this.currentScrollTop === 0
-			: this.followEnd && this.currentScrollTop === maxScrollTop;
-		if (!atFollowEdge) this.followSuppressed = false;
-		this.following = atFollowEdge && !this.followSuppressed;
+		if (this.currentScrollTop < maxScrollTop) this.followSuppressedAtEnd = false;
+		if (this.followEnd && this.currentScrollTop === maxScrollTop && !this.followSuppressedAtEnd) {
+			this.followingEnd = true;
+		}
 		if (this.contentHeight <= this.currentViewportHeight) this.hideTransientScrollbar();
 	}
 
@@ -290,20 +213,12 @@ export class ScrollView extends Container {
 	}
 
 	override render(width: number): string[] {
-		return renderScrollView(this[LAYOUT_NODE](), width);
+		const contentWidth = this.getContentWidth(width);
+		const lines = this.child.render(contentWidth);
+		return contentWidth === width ? lines : lines.map((line) => `${line} `);
 	}
 
 	[LAYOUT_NODE](): ScrollLayoutNode {
 		return { type: "scroll", component: this.child, state: this };
 	}
-}
-
-export function renderScrollView(
-	node: ScrollLayoutNode,
-	width: number,
-	renderChild = (component: Component, childWidth: number): string[] => component.render(childWidth),
-): string[] {
-	const contentWidth = node.state.getContentWidth(width);
-	const lines = renderChild(node.component, contentWidth);
-	return contentWidth === width ? lines : lines.map((line) => `${line} `);
 }

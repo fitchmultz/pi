@@ -17,19 +17,6 @@ Use `/name` or `--name` to assign a recognizable session name. Run `/session` to
 
 The session picker lets you search, rename, and delete sessions. It can also show paths, change sorting, and limit results to named sessions. See [Keybindings](keybindings.md#sessions) for its shortcuts.
 
-## Overriding a saved session's working directory
-
-By default, `--session` uses the saved header's working directory. To resume the same session elsewhere, such as after removing its original worktree:
-
-```bash
-pi --session /path/to/session.jsonl --session-cwd /path/to/project
-pi --session <id> --session-cwd ../project
-```
-
-The directory must exist. Relative paths resolve from the launching directory; `~` is supported. Pi uses it for tools, project settings, and resource discovery before extensions start. The file, ID, history, and header cwd stay unchanged. Pass the override on each continuation; it is not a saved default. A cross-project ID resumes that same file without a fork prompt when this flag is supplied.
-
-`--session-cwd` requires `--session` and cannot combine with `--fork`, `--continue`, `--resume`, `--session-id`, or `--no-session`. `--session-dir` controls storage and lookup, not the working directory.
-
 ## Choose how to branch
 
 Pi stores entries as a tree, so returning to an earlier point does not erase the branch you leave.
@@ -66,30 +53,9 @@ Use `--no-session` for an ephemeral run. An ephemeral session cannot be resumed 
 
 Use `--session` when you already know the session path or ID. Use `--fork` to create a new session from an existing session before interactive mode starts.
 
-Saved history is indexed by byte offsets. Session settings, usage, tree previews, and context selection do not load unrelated historical extension data. Branching and conversion copy records individually, preserving full values. A requested full value or active model context still needs enough memory to hold it.
-
-## Restart or checkpoint a session
-
-The Node CLI's [managed restart](restart.md) resumes the same saved session after a staged core runtime update or when a clean process is needed. `/reload` applies extension code and resource changes in the current process.
-
-[Working-session checkpoints](checkpoint.md) also preserve exact branch/model/tool selection and accepted queues. Restore the matching files before using `--checkpoint`; a stale artifact must not overwrite newer work. Checkpoints do not serialize arbitrary extension memory or running processes.
-
-## Convert a legacy fork session
-
-Stop every process that could write the source journal before conversion:
-
-```sh
-pi convert-session SOURCE NEW_PATH
-pi --session NEW_PATH
-```
-
-Conversion makes an exclusive new copy and preserves the original; an existing output is refused. Unsafe, unsettled, or uncertain work is refused, not replayed. Resuming the converted copy starts a fresh provider request rather than continuing a live response. Do not delete the source until you have inspected the converted session. See [Command Line](cli.md#convert-a-legacy-session).
-
 ## Export or share a session
 
-Use `/export` to write the current session as HTML or JSONL. JSONL preserves the selected branch; HTML includes the complete tree, images, and custom tool rendering in one self-contained file. Both write records individually. The HTML viewer decodes requested records and shows history in 50-entry pages with Earlier/Later controls. Tree navigation and search retain access to the full history. Large files still require browser memory to load, and one requested full value must fit its consumer; exports are never silently truncated.
-
-Use `/share` to upload the completed export file and get a viewer link. Pi uses a Radius artifact when Radius authentication is configured; otherwise, it uses a private GitHub gist. Radius streams the exact JSONL file bytes with its stat-derived content length.
+Use `/export` to write the current session as HTML or JSONL. Use `/share` to upload it and get a viewer link. Pi uses a Radius artifact when Radius authentication is configured; otherwise, it uses a private GitHub gist.
 
 Review exported or shared sessions first. They can contain prompts, model responses, tool arguments, command output, file contents, and extension messages.
 

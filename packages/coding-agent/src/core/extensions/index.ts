@@ -34,12 +34,7 @@ export type {
 	// App keybindings (for custom editors)
 	AppKeybinding,
 	AutocompleteProviderFactory,
-	AutoRetryEndEvent,
-	AutoRetryStartEvent,
 	// Events - Tool (ToolCallEvent types)
-	BackgroundCommandToolCallEvent,
-	BackgroundCommandToolResultEvent,
-	BashCwdHook,
 	BashToolCallEvent,
 	BashToolResultEvent,
 	BeforeAgentStartEvent,
@@ -161,8 +156,6 @@ export type {
 	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
 	SessionBoundaryDraft,
-	SessionCheckpointEvent,
-	SessionCheckpointResult,
 	SessionCompactEvent,
 	SessionCompactFailedEvent,
 	SessionEvent,
@@ -175,9 +168,6 @@ export type {
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,
-	SummarizationRetryAttemptStartEvent,
-	SummarizationRetryFinishedEvent,
-	SummarizationRetryScheduledEvent,
 	TerminalInputHandler,
 	ThinkingLevelSelectEvent,
 	ToolAnnotations,
@@ -207,7 +197,6 @@ export type {
 	UIPromptEndEvent,
 	UIPromptKind,
 	UIPromptStartEvent,
-	UsageContribution,
 	// Events - User Bash
 	UserBashEvent,
 	UserBashEventResult,
@@ -219,7 +208,6 @@ export type {
 // Type guards
 export {
 	defineTool,
-	isBackgroundCommandToolResult,
 	isBashToolResult,
 	isEditToolResult,
 	isFindToolResult,

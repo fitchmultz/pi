@@ -3,16 +3,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionBeforeCompactEvent } from "../../src/core/extensions/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
-function seedHistory(harness: Harness, totalTokens = 650, messageLength = 400): string {
+function seedHistory(harness: Harness, totalTokens = 650): string {
 	const model = harness.session.model!;
 	let recentUserId = "";
 	for (const label of ["old", "recent"]) {
 		recentUserId = harness.sessionManager.appendMessage({
 			role: "user",
-			content: [{ type: "text", text: label.padEnd(messageLength, "x") }],
+			content: [{ type: "text", text: label.padEnd(400, "x") }],
 			timestamp: Date.now() - 2000,
 		});
-		const assistant = fauxAssistantMessage(label.padEnd(messageLength, "y"), { timestamp: Date.now() - 1000 });
+		const assistant = fauxAssistantMessage(label.padEnd(400, "y"), { timestamp: Date.now() - 1000 });
 		harness.sessionManager.appendMessage({
 			...assistant,
 			api: model.api,
@@ -163,75 +163,15 @@ describe("AgentSession compaction model overrides", () => {
 		harness.setResponses([fauxAssistantMessage("small response"), fauxAssistantMessage("big response")]);
 		await harness.session.prompt("continue on small");
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
-		// A model switch invalidates reported usage; the full history must cross the new threshold too.
-		seedHistory(harness, 2500, 2400);
-		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThan(2000);
-		expect(harness.session.getContextUsage()?.tokens).toBeLessThan(3990);
+		// Retain usage from the small model: the next check must use the active big model's policy.
+		seedHistory(harness, 2500);
 		await harness.session.setModel(harness.getModel("big")!);
-		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThan(2000);
-		expect(harness.session.getContextUsage()?.tokens).toBeLessThan(3990);
 		await harness.session.prompt("continue on big");
 		expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
 		expect(harness.eventsOfType("compaction_end")[0]?.result?.summary).toBe("big model summary");
 		expect(harness.settingsManager.getCompactionReserveTokens()).toBe(10);
 		await harness.session.setModel(harness.getModel("small")!);
 		expect(harness.settingsManager.getCompactionReserveTokens(harness.session.model)).toBe(10);
-	});
-
-	it("keeps the captured model and budgets when an asynchronous automatic hook changes models and declines", async () => {
-		const preparations: SessionBeforeCompactEvent[] = [];
-		const harness = await createHarness({
-			models: [
-				{ id: "first", contextWindow: 4000, maxTokens: 3000 },
-				{ id: "second", contextWindow: 10000 },
-			],
-			tools: [],
-			settings: {
-				compaction: {
-					modelOverrides: {
-						"faux/first": { reserveTokens: 2000, keepRecentTokens: 150 },
-						"faux/second": { reserveTokens: 4000, keepRecentTokens: 20000 },
-					},
-				},
-			},
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", async (event, ctx) => {
-						preparations.push(event);
-						await Promise.resolve();
-						await pi.setModel(ctx.modelRegistry.find("faux", "second")!);
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		const recentUserId = seedHistory(harness, 2500);
-		const auth = vi.spyOn(harness.session.modelRuntime, "getAuth");
-		const requests: Array<{ id: string; maxTokens: number | undefined }> = [];
-		harness.setResponses([
-			(_context, options, _state, model) => {
-				requests.push({ id: model.id, maxTokens: options?.maxTokens });
-				return fauxAssistantMessage("captured model summary");
-			},
-			(_context, _options, _state, model) => {
-				expect(model.id).toBe("second");
-				return fauxAssistantMessage("continued on second");
-			},
-		]);
-		await harness.session.prompt("continue");
-		expect(auth.mock.calls[0]?.[0]).toMatchObject({ id: "first" });
-		expect(requests).toEqual([{ id: "first", maxTokens: 1600 }]);
-		expect(preparations).toHaveLength(1);
-		expect(preparations[0]?.preparation.settings).toEqual({
-			enabled: true,
-			reserveTokens: 2000,
-			keepRecentTokens: 150,
-		});
-		expect(harness.sessionManager.getEntries().find((entry) => entry.type === "compaction")).toMatchObject({
-			firstKeptEntryId: recentUserId,
-			summary: "captured model summary",
-		});
-		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
 	it("captures model identity before awaiting summarization auth", async () => {

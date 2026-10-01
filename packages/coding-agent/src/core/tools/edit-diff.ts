@@ -5,7 +5,7 @@
 import * as Diff from "diff";
 import { constants } from "fs";
 import { access, readFile } from "fs/promises";
-import { splitBom } from "../../utils/text.ts";
+import { decodeUtf8, splitBom } from "../../utils/text.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
@@ -34,7 +34,7 @@ export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string 
 export function normalizeForFuzzyMatch(text: string): string {
 	return normalizeUnicode(text)
 		.split("\n")
-		.map((line) => line.trimEnd())
+		.map((line) => line.replace(/[^\S\r\n]+$/u, ""))
 		.join("\n");
 }
 
@@ -64,28 +64,22 @@ interface MatchedEdit {
 	newText: string;
 }
 
-type TextReplacement = Pick<MatchedEdit, "matchIndex" | "matchLength" | "newText">;
-
-function applyReplacements(content: string, replacements: TextReplacement[]): string {
+function applyReplacements(content: string, replacements: MatchedEdit[]): string {
 	let result = content;
 	for (let i = replacements.length - 1; i >= 0; i--) {
 		const replacement = replacements[i];
-		const matchIndex = replacement.matchIndex;
 		result =
-			result.substring(0, matchIndex) + replacement.newText + result.substring(matchIndex + replacement.matchLength);
+			result.substring(0, replacement.matchIndex) +
+			replacement.newText +
+			result.substring(replacement.matchIndex + replacement.matchLength);
 	}
 	return result;
 }
 
-/** Map a normalized line offset back to a boundary that can be split without changing either side. */
+/** Find an original code-point boundary, then verify that normalization does not cross it. */
 function originalLineOffset(line: string, offset: number): number {
 	const normalized = normalizeUnicode(line);
 	if (line === normalized) return offset;
-
-	// The substitutions after NFKC preserve UTF-16 length, so offset also indexes
-	// the NFKC view. NFKD decomposes without composing: canonical reordering can
-	// change order, but not the sum of the decomposed code points' lengths.
-	// Use that sum to locate the only possible original code-point boundary.
 	const decomposedOffset = line.normalize("NFKC").slice(0, offset).normalize("NFKD").length;
 	let decomposedLength = 0;
 	let boundary = 0;
@@ -94,16 +88,13 @@ function originalLineOffset(line: string, offset: number): number {
 		decomposedLength += char.normalize("NFKD").length;
 		boundary += char.length;
 	}
-
-	// Lengths only nominate a candidate. Normalization is not closed under
-	// concatenation (e.g. ㄱ + ㅏ), so verify each side against the whole-line view.
+	// Lengths nominate a candidate; composition and canonical reordering can invalidate it.
 	if (
 		decomposedLength === decomposedOffset &&
 		normalizeUnicode(line.slice(0, boundary)) === normalized.slice(0, offset) &&
 		normalizeUnicode(line.slice(boundary)) === normalized.slice(offset)
-	) {
+	)
 		return boundary;
-	}
 	throw new Error(
 		"Cannot split a Unicode normalization expansion at the match boundary. Include the whole character in oldText.",
 	);
@@ -116,8 +107,7 @@ function originalFuzzyOffset(content: string, offset: number, side: "start" | "e
 		const fuzzyLine = normalizeForFuzzyMatch(line);
 		const localOffset = offset - fuzzyStart;
 		if (localOffset <= fuzzyLine.length) {
-			// A match starting at a newline leaves the preceding trailing spaces
-			// alone. A match ending before that newline leaves them alone too.
+			// Starting at a newline skips its preceding spaces; ending there leaves those spaces intact.
 			return (
 				originalStart +
 				(side === "start" && localOffset === fuzzyLine.length ? line.length : originalLineOffset(line, localOffset))
@@ -202,11 +192,9 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 }
 
 function countOccurrences(content: string, oldText: string): number {
-	let count = 0;
-	for (let index = content.indexOf(oldText); index !== -1; index = content.indexOf(oldText, index + 1)) {
-		count++;
-	}
-	return count;
+	const fuzzyContent = normalizeForFuzzyMatch(content);
+	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+	return fuzzyContent.split(fuzzyOldText).length - 1;
 }
 
 function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
@@ -251,9 +239,8 @@ function getNoChangeError(path: string, totalEdits: number): Error {
  * Apply one or more exact-text replacements to LF-normalized content.
  *
  * All edits are matched against the same original content. Replacements are
- * then applied in reverse order so offsets remain stable. Fuzzy match boundaries
- * are mapped back to the original content; text outside those ranges is never
- * rewritten from the normalized view.
+ * then applied in reverse order so offsets remain stable. Fuzzy boundaries are
+ * mapped back to the original content so only the matched spans change.
  */
 export function applyEditsToNormalizedContent(
 	normalizedContent: string,
@@ -269,6 +256,9 @@ export function applyEditsToNormalizedContent(
 		if (normalizedEdits[i].oldText.length === 0) {
 			throw getEmptyOldTextError(path, i, normalizedEdits.length);
 		}
+		if (!normalizedEdits[i].oldText.isWellFormed() || !normalizedEdits[i].newText.isWellFormed()) {
+			throw new Error("Edit text must not split Unicode surrogate pairs.");
+		}
 	}
 
 	const matchedEdits: MatchedEdit[] = [];
@@ -279,10 +269,7 @@ export function applyEditsToNormalizedContent(
 			throw getNotFoundError(path, i, normalizedEdits.length);
 		}
 
-		const occurrences = countOccurrences(
-			matchResult.contentForReplacement,
-			matchResult.usedFuzzyMatch ? normalizeForFuzzyMatch(edit.oldText) : edit.oldText,
-		);
+		const occurrences = countOccurrences(normalizedContent, edit.oldText);
 		if (occurrences > 1) {
 			throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
 		}
@@ -489,9 +476,7 @@ export async function computeEditsDiff(
 		}
 
 		// Read the file
-		const rawContent = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
-			await readFile(absolutePath),
-		);
+		const rawContent = decodeUtf8(await readFile(absolutePath));
 
 		// Strip BOM before matching (LLM won't include invisible BOM in oldText)
 		const { text: content } = splitBom(rawContent);

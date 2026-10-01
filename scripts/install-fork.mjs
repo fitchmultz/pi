@@ -3,17 +3,20 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-	chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
-	realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+	chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync,
+	renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { installCodingAgentConsumer, packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
-import { getPublicWorkspacePackages } from "./release-packages.mjs";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import lockfile from "proper-lockfile";
+import { claimForkReleaseStore } from "../packages/coding-agent/src/utils/fork-release-store.ts";
+import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
+import { findPackageDirectories } from "./package-workspaces.mjs";
 
 const codingAgentName = "@earendil-works/pi-coding-agent";
 const receiptFile = "fork-release.json";
+const restartWorker = "dist/bundle/cli-worker.js";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function run(command, args, options = {}) {
@@ -41,6 +44,8 @@ export function resolveBuildTools() {
 
 export function isolatedEnvironment(home, tools) {
 	mkdirSync(join(home, "tmp"), { recursive: true });
+	const npmGlobalConfig = join(home, "npm-globalconfig");
+	writeFileSync(npmGlobalConfig, "");
 	return {
 		PATH: tools.path,
 		HOME: home,
@@ -56,6 +61,7 @@ export function isolatedEnvironment(home, tools) {
 		JITI_FS_CACHE: "0",
 		npm_config_cache: join(home, "npm-cache"),
 		npm_config_userconfig: join(home, ".npmrc"),
+		npm_config_globalconfig: npmGlobalConfig,
 		...(process.platform === "android" ? {
 			PREFIX: process.env.PREFIX,
 			LD_PRELOAD: process.env.LD_PRELOAD,
@@ -119,6 +125,36 @@ export function prepareTermuxCompiler(source, tools, env) {
 	replaceSymlink(binary, join(source, "node_modules/.bin/tsc"));
 }
 
+function packageNameFromLockPath(lockPath) {
+	const marker = "node_modules/";
+	const index = lockPath.lastIndexOf(marker);
+	if (index === -1) return undefined;
+	const parts = lockPath.slice(index + marker.length).split("/");
+	return parts[0]?.startsWith("@") ? `${parts[0]}/${parts[1]}` : parts[0];
+}
+
+// npm does not reliably honor a local-file package's nested shrinkwrap. Install the
+// generated install lock instead, replacing only the locally built packages.
+export function installFrozenConsumer(directory, tarballs, lockDirectory, tools, env) {
+	mkdirSync(directory, { recursive: true });
+	const local = Object.fromEntries([...tarballs].map(([name, path]) => [name, `file:./${relative(directory, path)}`]));
+	if (!local[codingAgentName]) throw new Error("Missing coding-agent tarball");
+	const manifest = JSON.parse(readFileSync(join(lockDirectory, "package.json"), "utf8"));
+	manifest.dependencies = { [codingAgentName]: local[codingAgentName] };
+	manifest.overrides = { ...manifest.overrides, ...local };
+	const lock = JSON.parse(readFileSync(join(lockDirectory, "package-lock.json"), "utf8"));
+	lock.packages[""].dependencies = manifest.dependencies;
+	for (const [path, entry] of Object.entries(lock.packages)) {
+		const name = packageNameFromLockPath(path);
+		if (!tarballs.has(name)) continue;
+		entry.resolved = local[name];
+		entry.integrity = `sha512-${createHash("sha512").update(readFileSync(tarballs.get(name))).digest("base64")}`;
+	}
+	writeFileSync(join(directory, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
+	writeFileSync(join(directory, "package-lock.json"), `${JSON.stringify(lock, null, "\t")}\n`);
+	run(tools.node, [tools.npm, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: directory, env });
+}
+
 export function releaseIdentity(receipt) {
 	return `${receipt.commit}-${receipt.catalogSha256.slice(0, 16)}-node${receipt.node}-${receipt.platform}-${receipt.arch}`;
 }
@@ -139,7 +175,7 @@ export function readVerifiedRelease(directory) {
 	}
 	const pkg = packagePath(directory);
 	const manifest = JSON.parse(readFileSync(join(pkg, "package.json"), "utf8"));
-	if (manifest.name !== codingAgentName || !existsSync(join(pkg, "dist/bundle/cli-worker.js"))) {
+	if (manifest.name !== codingAgentName || !existsSync(join(pkg, restartWorker))) {
 		throw new Error(`Missing installed coding-agent/restart worker: ${pkg}`);
 	}
 	return { receipt, directory, packageDir: pkg };
@@ -165,7 +201,25 @@ function replaceSymlink(target, selector) {
 	}
 }
 
+async function withMutationLock(releases, selector, action) {
+	mkdirSync(dirname(selector), { recursive: true });
+	// Synchronous builds can block heartbeats. Never steal a lock based on age.
+	const release = await lockfile.lock(selector, { realpath: false, stale: Infinity, update: 1000 });
+	try {
+		selectorTarget(selector);
+		selectorTarget(`${selector}.previous`);
+		const ownerSelector = claimForkReleaseStore(releases, selector);
+		return await action(ownerSelector);
+	} finally {
+		await release();
+	}
+}
+
 export function activateRelease(releases, identity, selector) {
+	return withMutationLock(releases, selector, () => activateLockedRelease(releases, identity, selector));
+}
+
+function activateLockedRelease(releases, identity, selector) {
 	const release = readVerifiedRelease(releasePath(releases, identity));
 	const previous = selectorTarget(selector);
 	if (previous === release.packageDir) return { ...release, previous, changed: false };
@@ -197,147 +251,68 @@ function resolvedLink(link) {
 }
 
 export function pruneReleases({ releases, selector, keep }, livePaths = liveProcessPaths) {
-	const selected = [selector, `${selector}.previous`].map(resolvedLink);
-	const live = livePaths();
-	const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
-	const validated = [];
-	for (const identity of readdirSync(releases)) {
-		const directory = join(releases, identity);
-		try {
-			readVerifiedRelease(directory);
-		} catch {
-			continue; // Legacy releases and installations still in progress have no valid receipt.
+	return withMutationLock(releases, selector, (ownerSelector) => {
+		const selected = [selector, `${selector}.previous`].map(resolvedLink);
+		const live = livePaths();
+		const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
+		const validated = [];
+		for (const identity of readdirSync(releases)) {
+			const directory = join(releases, identity);
+			let receipt;
+			try {
+				receipt = readVerifiedRelease(directory).receipt;
+			} catch {
+				continue; // Legacy releases and installations still in progress have no valid receipt.
+			}
+			validated.push({ directory, ownerSelector: receipt.ownerSelector, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
 		}
-		validated.push({ directory, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
-	}
-	validated.sort((a, b) => b.validatedAt - a.validatedAt);
-	const removed = [];
-	for (const { directory } of validated.slice(keep)) {
-		const real = realpathSync(directory);
-		if (selected.some((path) => path === real || path?.startsWith(`${real}/`)) || mentioned(directory) || mentioned(real)) {
-			continue;
+		validated.sort((a, b) => b.validatedAt - a.validatedAt);
+		const removed = [];
+		for (const { directory, ownerSelector: releaseOwner } of validated.slice(keep)) {
+			if (releaseOwner !== ownerSelector) continue; // Pre-adoption releases have unknown ownership.
+			const real = realpathSync(directory);
+			if (selected.some((path) => path === real || path?.startsWith(`${real}/`)) || mentioned(directory) || mentioned(real)) {
+				continue;
+			}
+			rmSync(directory, { recursive: true, force: true });
+			removed.push(basename(directory));
 		}
-		rmSync(directory, { recursive: true, force: true });
-		removed.push(basename(directory));
-	}
-	return { kept: validated.length - removed.length, removed };
+		return { kept: validated.length - removed.length, removed };
+	});
 }
 
 // The callback builds/installs/tests only a NEW candidate. The receipt is written
 // last, and is the only reusable success marker. Existing releases are never modified.
 export async function installRelease({ releases, receipt, selector, stage = false }, installAndValidate) {
-	const identity = releaseIdentity(receipt);
-	const directory = releasePath(releases, identity);
-	mkdirSync(resolve(releases), { recursive: true });
-	let created = false;
-	try {
-		mkdirSync(directory);
-		created = true;
-	} catch (error) {
-		if (error.code !== "EEXIST") throw error;
-		const existing = readVerifiedRelease(directory).receipt;
-		for (const key of ["commit", "catalogSha256", "archiveSha256", "node", "platform", "arch"]) {
-			if (existing[key] !== receipt[key]) throw new Error(`Existing release has a different ${key}: ${directory}`);
-		}
-	}
-	if (created) {
+	return withMutationLock(releases, selector, async (ownerSelector) => {
+		const identity = releaseIdentity(receipt);
+		const directory = releasePath(releases, identity);
+		mkdirSync(resolve(releases), { recursive: true });
+		let created = false;
 		try {
-			await installAndValidate(directory);
-			writeFileSync(join(directory, receiptFile), `${JSON.stringify({ ...receipt, validated: true }, null, 2)}\n`, { flag: "wx" });
-			readVerifiedRelease(directory);
+			mkdirSync(directory);
+			created = true;
 		} catch (error) {
-			// This invocation owns this unselected, incomplete directory, not an active release.
-			rmSync(directory, { recursive: true, force: true });
-			throw error;
+			if (error.code !== "EEXIST") throw error;
+			const existing = readVerifiedRelease(directory).receipt;
+			for (const key of ["commit", "catalogSha256", "archiveSha256", "node", "platform", "arch"]) {
+				if (existing[key] !== receipt[key]) throw new Error(`Existing release has a different ${key}: ${directory}`);
+			}
 		}
-	}
-	return stage ? { ...readVerifiedRelease(directory), reused: !created, changed: false }
-		: { ...activateRelease(releases, identity, selector), reused: !created };
-}
-
-export function smokeTestInstalledRuntime(directory, tools, env) {
-	const pkg = packagePath(directory);
-	const cli = join(pkg, "dist/bundle/cli.js");
-	smokeTestCodingAgentConsumer(directory, tools.node, { path: tools.path });
-	run(tools.node, [cli, "--help"], { cwd: env.HOME, env });
-	run(tools.node, [cli, "restart", "--help"], { cwd: env.HOME, env });
-	const entry = join(directory, "fork-smoke.mjs");
-	const extension = join(directory, "fork-smoke-extension.ts");
-	try {
-		writeFileSync(extension, `import { getPackageDir } from "${codingAgentName}";
-export default function(pi) {
-  pi.on("session_start", (_event, ctx) => {
-    if (!ctx.sessionManager.getEntries().some(entry => entry.customType === "fork-smoke")) {
-      pi.appendEntry("fork-smoke", { packageDir: getPackageDir() });
-    }
-  });
-}
-`);
-		writeFileSync(entry, `import assert from "node:assert/strict";
-import { mkdirSync, readdirSync, realpathSync } from "node:fs";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { CodemodeSandbox } from "@earendil-works/pi-codemode";
-import { parseJsonRpcMessage } from "@earendil-works/pi-mcp";
-import { createAgentSession, DefaultResourceLoader, getPackageDir, ModelRuntime, SessionManager, SettingsManager,
-  readSessionCheckpoint, writeSessionCheckpoint } from "${codingAgentName}";
-import { getRestartRuntimeWorker } from ${JSON.stringify(pathToFileURL(join(pkg, "dist/cli/launcher.js")).href)};
-const expected = realpathSync(${JSON.stringify(pkg)});
-assert.equal(realpathSync(getPackageDir()), expected);
-assert.equal(getRestartRuntimeWorker(expected), realpathSync(join(expected, "dist/bundle/cli-worker.js")));
-assert.equal(parseJsonRpcMessage({ jsonrpc: "2.0", id: 1, result: {} }).id, 1);
-const chunks = join(expected, "dist/bundle/chunks");
-const worker = readdirSync(chunks).find(name => name === "codemode-worker.js");
-assert.ok(worker, "Missing bundled codemode worker");
-for (const workerUrl of [undefined, pathToFileURL(join(chunks, worker))]) {
-  const sandbox = new CodemodeSandbox({ workerUrl, timeoutMs: 10000 });
-  try {
-    const result = await sandbox.execute("return 6 * 7;");
-    assert.equal(result.ok, true, JSON.stringify(result));
-    assert.equal(result.value, 42);
-  } finally { await sandbox.close(); }
-}
-const cwd = join(process.env.HOME, "sdk-work");
-mkdirSync(cwd);
-const agentDir = process.env.PI_CODING_AGENT_DIR;
-const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
-const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, allowModelNetwork: false });
-async function create(checkpoint) {
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
-    additionalExtensionPaths: [${JSON.stringify(extension)}], noSkills: true, noPromptTemplates: true, noThemes: true });
-  await resourceLoader.reload();
-  assert.deepEqual(resourceLoader.getExtensions().errors, []);
-  const result = await createAgentSession({ cwd, agentDir, resourceLoader, settingsManager, modelRuntime,
-    ...(checkpoint ? { checkpoint } : { sessionManager: SessionManager.create(cwd, join(cwd, "sessions")) }) });
-  await result.session.bindExtensions({});
-  return result.session;
-}
-const session = await create();
-const checkpointPath = join(cwd, "checkpoint.json");
-try {
-  const hold = await session.acquireCheckpoint({ boundary: "settled", signal: AbortSignal.timeout(10000), quiesce: () => () => {} });
-  try {
-    assert.equal(hold.sleepReady, true, hold.sleepBlockers.join("; "));
-    const marker = hold.checkpoint.entries.find(entry => entry.customType === "fork-smoke");
-    assert.equal(realpathSync(marker.data.packageDir), expected);
-    writeSessionCheckpoint(checkpointPath, hold.checkpoint);
-  } finally { hold.release(); }
-} finally { session.dispose(); }
-const checkpoint = readSessionCheckpoint(checkpointPath);
-const restored = await create(checkpoint);
-try {
-  assert.equal(restored.sessionId, checkpoint.selection.sessionId);
-  assert.equal(restored.sessionManager.getLeafId(), checkpoint.selection.leafId);
-  assert.equal(restored.model, undefined);
-  assert.deepEqual(restored.getActiveToolNames(), checkpoint.selection.activeTools);
-} finally { restored.dispose(); }
-console.log("Installed SDK, MCP, WASM, both codemode workers, extension identity and native checkpoint restore passed.");
-`);
-		run(tools.node, [entry], { cwd: env.HOME, env, timeout: 60_000 });
-	} finally {
-		rmSync(entry, { force: true });
-		rmSync(extension, { force: true });
-	}
+		if (created) {
+			try {
+				await installAndValidate(directory);
+				writeFileSync(join(directory, receiptFile), `${JSON.stringify({ ...receipt, validated: true, ownerSelector }, null, 2)}\n`, { flag: "wx" });
+				readVerifiedRelease(directory);
+			} catch (error) {
+				// This invocation owns this unselected, incomplete directory, not an active release.
+				rmSync(directory, { recursive: true, force: true });
+				throw error;
+			}
+		}
+		return stage ? { ...readVerifiedRelease(directory), reused: !created, changed: false }
+			: { ...activateLockedRelease(releases, identity, selector), reused: !created };
+	});
 }
 
 function printUsage() {
@@ -349,15 +324,16 @@ function printUsage() {
 Builds an exact local commit (default HEAD) with the checkout's ALREADY hydrated
 model-data snapshot using create-source-archive.sh and build:offline. An optional
 --source-archive with its adjacent source.commit reuses an already frozen input.
-No fetch or model generation. npm may download frozen dependencies. Requires Node
-with npm installed alongside it, Git, tar, and tmux for real-terminal validation.
+No fetch or model generation. npm may download frozen dependencies. Requires macOS,
+Linux or Termux, Node >=22.19 with npm installed alongside it, Git, bash, tar, gzip,
+and tmux. Termux also needs Go >=1.26 when Android blocks the compiler's fanotify probe.
 
 --source-archive <file> Use a frozen source archive and adjacent source.commit
 --stage                 Build/install/validate without changing the selector
 --activate <identity>   Select an existing validated release, without rebuilding
 --rollback <identity>   Select an older validated release (same native operation)
 --prune --keep <count>  Delete validated releases older than the newest <count>,
-                        except selected, .previous and visibly running ones
+                        except legacy, selected, .previous and visibly running ones
 --releases <directory>  Default: ~/.local/share/pi-fork/releases
 --selector <symlink>    Default: ~/.local/share/npm-global/lib/node_modules/${codingAgentName}
 -h, --help              Show this help
@@ -367,11 +343,14 @@ Exit codes: 0 success, 1 failure.
 
 Selection atomically replaces only the package symlink; its old target is kept
 at <selector>.previous. Existing releases and user settings/auth/sessions are
-never edited. Run native pi restart from the current session to load the
-selected release, then verify its loaded identity. Use --runtime <printed
-package directory> to try a staged release or pin a runtime across later
-restarts; a full CLI launch returns to selector-following behavior. An
-already-running older launcher needs one full CLI launch to follow selections.
+never edited. Running sessions keep their runtime until restarted.
+All release mutations share <selector>.lock. Concurrent operations fail; an
+abandoned lock must be removed only after confirming its updater/installer stopped.
+Each store records one canonical owning selector in .owner-selector, adopting
+unowned existing stores without removing releases. Other selectors must use their
+own --releases directory; all mutations, including staging and pruning, refuse them.
+Only newly installed releases are stamped with ownership and eligible for pruning.
+Legacy releases without the matching owner stamp are kept until removed by hand.
 `);
 }
 
@@ -403,7 +382,7 @@ export async function main(args = process.argv.slice(2)) {
 			throw new Error("--prune cannot combine with installation or activation");
 		}
 		if (!/^\d+$/.test(options.keep)) throw new Error("--keep requires a non-negative integer");
-		const result = pruneReleases({ ...options, keep: Number(options.keep) });
+		const result = await pruneReleases({ ...options, keep: Number(options.keep) });
 		console.log(JSON.stringify(result, null, 2));
 		return result;
 	}
@@ -411,7 +390,7 @@ export async function main(args = process.argv.slice(2)) {
 		throw new Error("Activation cannot combine with --stage, --ref or --source-archive");
 	}
 	if (selection) {
-		const result = activateRelease(options.releases, selection, options.selector);
+		const result = await activateRelease(options.releases, selection, options.selector);
 		console.log(JSON.stringify(result, null, 2));
 		return result;
 	}
@@ -461,15 +440,18 @@ export async function main(args = process.argv.slice(2)) {
 			run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: source, env });
 			if (process.platform === "android") prepareTermuxCompiler(source, tools, env);
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
-			const packages = getPublicWorkspacePackages(join(source, "packages"));
-			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { npm: tools.npm, env });
-			installCodingAgentConsumer(directory, tarballs, tools.npm, {
-				env, lockDirectory: join(source, "packages/coding-agent/install-lock"),
-			});
-			smokeTestInstalledRuntime(directory, tools, env);
+			const packages = findPackageDirectories(join(source, "packages"))
+				.map((directory) => ({ directory, ...JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) }))
+				.filter((pkg) => pkg.private !== true);
+			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { ...tools, env });
+			installFrozenConsumer(directory, tarballs, join(source, "packages/coding-agent/install-lock"), tools, env);
+			smokeTestCodingAgentConsumer(directory, tools.node);
+			const cli = join(packagePath(directory), "dist/bundle/cli.js");
+			run(tools.node, [cli, "--help"], { cwd: env.HOME, env });
+			run(tools.node, [join(source, "scripts/smoke-test-background-command-bundle.mjs"), cli], { cwd: env.HOME, env });
 			run(tools.node, [join(source, "node_modules/vitest/vitest.mjs"), "run", "test/restart-tui.test.ts", "--maxWorkers=1"], {
 				cwd: join(source, "packages/coding-agent"),
-				env: { ...env, PI_TEST_CLI: join(packagePath(directory), "dist/bundle/cli.js") },
+				env: { ...env, PI_TEST_CLI: cli },
 			});
 		});
 		console.log(JSON.stringify(result, null, 2));

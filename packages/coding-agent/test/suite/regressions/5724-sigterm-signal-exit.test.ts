@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { InteractiveMode, type InteractiveModeOptions } from "../../../src/modes/interactive/interactive-mode.ts";
+import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 
 // Regression for https://github.com/earendil-works/pi/issues/5724
 //
@@ -9,11 +9,9 @@ import { InteractiveMode, type InteractiveModeOptions } from "../../../src/modes
 // registered until async terminal cleanup has completed.
 
 type ShutdownThis = {
-	options: Pick<InteractiveModeOptions, "onShutdownRequested">;
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
 	runtimeHost: { dispose: () => Promise<void> };
-	session: { beginShutdown: () => void };
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	themeController: { disableAutoSync: () => void };
 	stop: () => void;
@@ -59,9 +57,7 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 		const order: string[] = [];
 		const dispose = deferred();
 		const context: ShutdownThis = {
-			options: {},
 			isShuttingDown: false,
-			session: { beginShutdown: vi.fn() },
 			unregisterSignalHandlers: vi.fn(() => {
 				order.push("unregister");
 			}),
@@ -93,6 +89,6 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 		dispose.resolve();
 		await shutdownPromise;
 
-		expect(order).toEqual(["dispose", "drainInput", "stop", "unregister"]);
+		expect(order).toEqual(["dispose", "drainInput", "stop"]);
 	});
 });

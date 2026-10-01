@@ -5,22 +5,14 @@
       // DATA LOADING
       // ============================================================
 
-      function decodeRecord(element) {
-        const binary = atob(element.textContent);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        return JSON.parse(new TextDecoder('utf-8').decode(bytes));
+      const base64 = document.getElementById('session-data').textContent;
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
       }
-      const data = decodeRecord(document.getElementById('session-data'));
-      const { header, leafId: defaultLeafId, systemPrompt, tools } = data;
-      const entries = Array.from(document.querySelectorAll('.session-index'), decodeRecord);
-      // ponytail: one requested body/page and the HTML document must fit the browser; history is never joined.
-      function recordFor(entry) {
-        return decodeRecord(document.getElementById(`session-entry-${entry.record}`));
-      }
-      function fullEntry(entry) {
-        return recordFor(entry).entry;
-      }
+      const data = JSON.parse(new TextDecoder('utf-8').decode(bytes));
+      const { header, entries, leafId: defaultLeafId, systemPrompt, tools, renderedTools } = data;
 
       // ============================================================
       // URL PARAMETER HANDLING
@@ -44,6 +36,21 @@
       const byId = new Map();
       for (const entry of entries) {
         byId.set(entry.id, entry);
+      }
+
+      // Tool call lookup (toolCallId -> {name, arguments})
+      const toolCallMap = new Map();
+      for (const entry of entries) {
+        if (entry.type === 'message' && entry.message.role === 'assistant') {
+          const content = entry.message.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === 'toolCall') {
+                toolCallMap.set(block.id, { name: block.name, arguments: block.arguments });
+              }
+            }
+          }
+        }
       }
 
       // Label lookup (entryId -> label string)
@@ -91,12 +98,14 @@
           }
         }
 
-        // Sort each node directly; long single-child histories do not need recursive walks.
-        for (const node of nodeMap.values()) {
+        // Sort children by timestamp
+        function sortChildren(node) {
           node.children.sort((a, b) =>
             new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime()
           );
+          node.children.forEach(sortChildren);
         }
+        roots.forEach(sortChildren);
 
         return roots;
       }
@@ -125,14 +134,14 @@
         const path = [];
         let current = byId.get(targetId);
         while (current) {
-          path.push(current);
+          path.unshift(current);
           // Stop if no parent or self-referencing (root)
           if (!current.parentId || current.parentId === current.id) {
             break;
           }
           current = byId.get(current.parentId);
         }
-        return path.reverse();
+        return path;
       }
 
       // Tree node lookup for finding leaves
@@ -147,12 +156,12 @@
         // Build tree node map lazily
         if (!treeNodeMap) {
           treeNodeMap = new Map();
-          const stack = buildTree();
-          while (stack.length) {
-            const node = stack.pop();
+          const tree = buildTree();
+          function mapNodes(node) {
             treeNodeMap.set(node.entry.id, node);
-            for (const child of node.children) stack.push(child);
+            node.children.forEach(mapNodes);
           }
+          tree.forEach(mapNodes);
         }
 
         const node = treeNodeMap.get(nodeId);
@@ -175,13 +184,24 @@
         const result = [];
         const multipleRoots = roots.length > 1;
 
-        // The active path already includes every ancestor of the selected leaf.
+        // Mark which subtrees contain the active leaf
+        const containsActive = new Map();
+        function markActive(node) {
+          let has = activePathIds.has(node.entry.id);
+          for (const child of node.children) {
+            if (markActive(child)) has = true;
+          }
+          containsActive.set(node, has);
+          return has;
+        }
+        roots.forEach(markActive);
+
         // Stack: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
         const stack = [];
 
         // Add roots (prioritize branch containing active leaf)
         const orderedRoots = [...roots].sort((a, b) =>
-          Number(activePathIds.has(b.entry.id)) - Number(activePathIds.has(a.entry.id))
+          Number(containsActive.get(b)) - Number(containsActive.get(a))
         );
         for (let i = orderedRoots.length - 1; i >= 0; i--) {
           const isLast = i === orderedRoots.length - 1;
@@ -198,7 +218,7 @@
 
           // Order children (active branch first)
           const orderedChildren = [...children].sort((a, b) =>
-            Number(activePathIds.has(b.entry.id)) - Number(activePathIds.has(a.entry.id))
+            Number(containsActive.get(b)) - Number(containsActive.get(a))
           );
 
           // Calculate child indent (matches tree-selector.ts)
@@ -362,7 +382,7 @@
           // Hide assistant messages with only tool calls (no text) unless error/aborted
           if (entry.type === 'message' && entry.message.role === 'assistant') {
             const msg = entry.message;
-            const hasText = msg.hasText;
+            const hasText = hasTextContent(msg.content);
             const isErrorOrAborted = msg.stopReason && msg.stopReason !== 'stop' && msg.stopReason !== 'toolUse';
             if (!hasText && !isErrorOrAborted) return false;
           }
@@ -393,8 +413,7 @@
 
           // Apply search filter
           if (searchTokens.length > 0) {
-            const searchable = ['message', 'custom_message', 'branch_summary'].includes(entry.type) ? fullEntry(entry) : entry;
-            const nodeText = getSearchableText(searchable, label);
+            const nodeText = getSearchableText(entry, label);
             if (!searchTokens.every(t => nodeText.includes(t))) return false;
           }
 
@@ -552,8 +571,40 @@
         return p;
       }
 
-      function toolDisplayName(tool) {
-        return tool.name;
+      function formatToolCall(name, args) {
+        switch (name) {
+          case 'read': {
+            const path = shortenPath(String(args.path || args.file_path || ''));
+            const offset = args.offset;
+            const limit = args.limit;
+            let display = path;
+            if (offset !== undefined || limit !== undefined) {
+              const start = offset ?? 1;
+              const end = limit !== undefined ? start + limit - 1 : '';
+              display += `:${start}${end ? `-${end}` : ''}`;
+            }
+            return `[read: ${display}]`;
+          }
+          case 'write':
+            return `[write: ${shortenPath(String(args.path || args.file_path || ''))}]`;
+          case 'edit':
+            return `[edit: ${shortenPath(String(args.path || args.file_path || ''))}]`;
+          case 'bash': {
+            const rawCmd = String(args.command || '');
+            const cmd = rawCmd.replace(/[\n\t]/g, ' ').trim().slice(0, 50);
+            return `[bash: ${cmd}${rawCmd.length > 50 ? '...' : ''}]`;
+          }
+          case 'grep':
+            return `[grep: /${args.pattern || ''}/ in ${shortenPath(String(args.path || '.'))}]`;
+          case 'find':
+            return `[find: ${args.pattern || ''} in ${shortenPath(String(args.path || '.'))}]`;
+          case 'ls':
+            return `[ls: ${shortenPath(String(args.path || '.'))}]`;
+          default: {
+            const argsStr = JSON.stringify(args).slice(0, 40);
+            return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? '...' : ''}]`;
+          }
+        }
       }
 
       function escapeHtml(text) {
@@ -578,60 +629,72 @@
       }
 
       /**
+       * Truncate string to maxLen chars, append "..." if truncated.
+       */
+      function truncate(s, maxLen = 100) {
+        if (s.length <= maxLen) return s;
+        return s.slice(0, maxLen) + '...';
+      }
+
+      /**
        * Get display text for tree node (returns HTML string).
        */
       function getTreeNodeDisplayHtml(entry, label) {
+        const normalize = s => s.replace(/[\n\t]/g, ' ').trim();
         const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : '';
 
         switch (entry.type) {
           case 'message': {
             const msg = entry.message;
             if (msg.role === 'user') {
-              if (msg.skill) {
-                let treeHtml = labelHtml + `<span class="tree-role-skill">skill:</span> ${escapeHtml(msg.skill.name)}`;
-                if (msg.skill.userMessage) {
-                  treeHtml += ` · <span class="tree-role-user">user:</span> ${escapeHtml(msg.skill.userMessage)}`;
+              const rawContent = extractContent(msg.content);
+              const skillBlock = parseSkillBlock(rawContent);
+              if (skillBlock) {
+                let treeHtml = labelHtml + `<span class="tree-role-skill">skill:</span> ${escapeHtml(skillBlock.name)}`;
+                if (skillBlock.userMessage) {
+                  treeHtml += ` · <span class="tree-role-user">user:</span> ${escapeHtml(truncate(normalize(skillBlock.userMessage)))}`;
                 }
                 return treeHtml;
               }
-              return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(msg.preview)}`;
+              const content = truncate(normalize(rawContent));
+              return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(content)}`;
             }
             if (msg.role === 'assistant') {
-              if (msg.preview) {
-                return labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(msg.preview)}`;
+              const textContent = truncate(normalize(extractContent(msg.content)));
+              if (textContent) {
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(textContent)}`;
               }
               if (msg.stopReason === 'aborted') {
                 return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(aborted)</span>`;
               }
               if (msg.errorMessage) {
-                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(msg.errorMessage)}</span>`;
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(truncate(msg.errorMessage))}</span>`;
               }
               return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(no text)</span>`;
             }
             if (msg.role === 'toolResult') {
-              const path = buildActivePathIds(currentLeafId).has(entry.id) ? currentPath : getPath(findNewestLeaf(entry.id));
-              let toolCall;
-              for (const candidate of path) {
-                if (candidate.type !== 'message' || candidate.message.role !== 'assistant') continue;
-                toolCall = candidate.message.toolPreviews.find(call => call.id === msg.toolCallId);
-                if (toolCall) break;
-              }
+              const toolCall = msg.toolCallId ? toolCallMap.get(msg.toolCallId) : null;
               if (toolCall) {
-                return labelHtml + `<span class="tree-role-tool">${escapeHtml(toolCall.preview)}</span>`;
+                return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall.name, toolCall.arguments))}</span>`;
               }
-              return labelHtml + `<span class="tree-role-tool">[${escapeHtml(toolDisplayName({ name: msg.toolName || 'tool' }))}]</span>`;
+              return labelHtml + `<span class="tree-role-tool">[${escapeHtml(msg.toolName || 'tool')}]</span>`;
             }
             if (msg.role === 'bashExecution') {
-              return labelHtml + `<span class="tree-role-tool">[bash]:</span> ${escapeHtml(msg.command)}`;
+              const cmd = truncate(normalize(msg.command || ''));
+              return labelHtml + `<span class="tree-role-tool">[bash]:</span> ${escapeHtml(cmd)}`;
             }
             return labelHtml + `<span class="tree-muted">[${escapeHtml(msg.role)}]</span>`;
           }
           case 'compaction':
             return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
-          case 'branch_summary':
-            return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(entry.preview)}`;
-          case 'custom_message':
-            return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(entry.preview)}`;
+          case 'branch_summary': {
+            const summary = truncate(normalize(entry.summary || ''));
+            return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
+          }
+          case 'custom_message': {
+            const content = typeof entry.content === 'string' ? entry.content : extractContent(entry.content);
+            return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalize(content)))}`;
+          }
           case 'model_change':
             return labelHtml + `<span class="tree-muted">[model: ${escapeHtml(entry.modelId)}]</span>`;
           case 'thinking_level_change':
@@ -649,7 +712,6 @@
 
       let currentLeafId = leafId;
       let currentTargetId = urlTargetId || leafId;
-      let currentPath = getPath(leafId);
       let treeRendered = false;
 
       function renderTree() {
@@ -778,10 +840,10 @@
       }
 
       function findToolResult(toolCallId) {
-        for (const entry of currentPath) {
+        for (const entry of entries) {
           if (entry.type === 'message' && entry.message.role === 'toolResult') {
             if (entry.message.toolCallId === toolCallId) {
-              return fullEntry(entry);
+              return entry.message;
             }
           }
         }
@@ -845,8 +907,7 @@
       }
 
       function renderToolCall(call) {
-        const resultEntry = findToolResult(call.id);
-        const result = resultEntry?.message;
+        const result = findToolResult(call.id);
         const isError = result?.isError || false;
         const statusClass = result ? (isError ? 'error' : 'success') : 'pending';
 
@@ -886,12 +947,12 @@
 
         const toolDomId = `tool-call-${escapeHtml(call.id)}`;
         let html = `<div class="tool-execution ${statusClass}" id="${toolDomId}">`;
-        const args = call.arguments ?? {};
-        const name = toolDisplayName(call);
+        const args = call.arguments || {};
+        const name = call.name;
 
         const invalidArg = '<span class="tool-error">[invalid arg]</span>';
 
-        switch (call.name) {
+        switch (name) {
           case 'bash': {
             const command = str(args.command);
             const cmdDisplay = command === null ? invalidArg : escapeHtml(command || '...');
@@ -908,7 +969,6 @@
             const limit = args.limit;
 
             let pathHtml = filePath === null ? invalidArg : escapeHtml(shortenPath(filePath || ''));
-            if (args.json !== undefined) pathHtml += ` json=${escapeHtml(JSON.stringify(args.json))}`;
             if (filePath !== null && (offset !== undefined || limit !== undefined)) {
               const startLine = offset ?? 1;
               const endLine = limit !== undefined ? startLine + limit - 1 : '';
@@ -919,7 +979,7 @@
             if (result) {
               html += renderResultImages();
               const output = getResultText();
-              const lang = isError ? null : args.json !== undefined ? 'json' : filePath ? getLanguageFromPath(filePath) : null;
+              const lang = filePath ? getLanguageFromPath(filePath) : null;
               if (output) html += formatExpandableOutput(output, 10, lang);
             }
             break;
@@ -983,32 +1043,24 @@
           }
           default: {
             // Check for pre-rendered custom tool HTML
-            const callEntry = currentPath.find(entry => entry.type === 'message' && entry.message.role === 'assistant' &&
-              entry.message.toolPreviews.some(preview => preview.id === call.id));
-            const renderedCall = callEntry ? recordFor(callEntry).renderedTools?.[call.id] : undefined;
-            const resultIndex = resultEntry ? byId.get(resultEntry.id) : undefined;
-            const renderedResult = resultIndex ? recordFor(resultIndex).renderedTools?.[call.id] : undefined;
-            const rendered = { calls: renderedCall?.calls, results: renderedResult?.results };
-            const callHtml = rendered?.calls?.[JSON.stringify(args)];
-            const resultHtml = rendered?.results?.[resultEntry?.id];
-            if (callHtml || resultHtml?.collapsed || resultHtml?.expanded) {
+            const rendered = renderedTools?.[call.id];
+            if (rendered?.callHtml || rendered?.resultHtmlCollapsed || rendered?.resultHtmlExpanded) {
               // Custom tool with pre-rendered HTML from TUI renderer
-              if (callHtml) {
-                html += `<div class="tool-header ansi-rendered">${callHtml}</div>`;
+              if (rendered.callHtml) {
+                html += `<div class="tool-header ansi-rendered">${rendered.callHtml}</div>`;
               } else {
                 html += `<div class="tool-header"><span class="tool-name">${escapeHtml(name)}</span></div>`;
-                html += `<div class="tool-output"><pre>${escapeHtml(JSON.stringify(args, null, 2))}</pre></div>`;
               }
 
-              if (resultHtml?.collapsed && resultHtml.expanded && resultHtml.collapsed !== resultHtml.expanded) {
+              if (rendered.resultHtmlCollapsed && rendered.resultHtmlExpanded && rendered.resultHtmlCollapsed !== rendered.resultHtmlExpanded) {
                 // Both collapsed and expanded differ - render expandable section
                 html += `<div class="tool-output expandable ansi-rendered" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
-                  <div class="output-preview">${resultHtml.collapsed}</div>
-                  <div class="output-full">${resultHtml.expanded}</div>
+                  <div class="output-preview">${rendered.resultHtmlCollapsed}</div>
+                  <div class="output-full">${rendered.resultHtmlExpanded}</div>
                 </div>`;
-              } else if (resultHtml?.expanded) {
+              } else if (rendered.resultHtmlExpanded) {
                 // Only expanded exists (or collapsed is identical) - show directly
-                html += `<div class="tool-output ansi-rendered">${resultHtml.expanded}</div>`;
+                html += `<div class="tool-output ansi-rendered">${rendered.resultHtmlExpanded}</div>`;
               } else if (result) {
                 // No pre-rendered result HTML - fallback to JSON
                 const output = getResultText();
@@ -1036,11 +1088,18 @@
        * Reconstructs the original format: header line + entry lines.
        */
       window.downloadSessionJson = function() {
-        // Blob parts retain complete bytes without a session-wide string or decoded body array.
-        const parts = [];
-        if (header) parts.push(JSON.stringify(header));
-        for (const entry of entries) parts.push(new Blob(['\n', JSON.stringify(fullEntry(entry))]));
-        const blob = new Blob(parts, { type: 'application/x-ndjson' });
+        // Build JSONL content: header first, then all entries
+        const lines = [];
+        if (header) {
+          lines.push(JSON.stringify({ type: 'header', ...header }));
+        }
+        for (const entry of entries) {
+          lines.push(JSON.stringify(entry));
+        }
+        const jsonlContent = lines.join('\n');
+
+        // Create download
+        const blob = new Blob([jsonlContent], { type: 'application/x-ndjson' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1309,7 +1368,7 @@
                   cost.cacheWrite += msg.usage.cost.cacheWrite || 0;
                 }
               }
-              toolCalls += msg.toolCalls;
+              toolCalls += msg.content.filter(c => c.type === 'toolCall').length;
             }
             if (msg.role === 'toolResult') toolResults++;
           } else if (entry.type === 'compaction') {
@@ -1393,7 +1452,7 @@
               ${tools.map(t => {
                 const hasParams = t.parameters && typeof t.parameters === 'object' && t.parameters.properties && Object.keys(t.parameters.properties).length > 0;
                 if (!hasParams) {
-                  return `<div class="tool-item"><span class="tool-item-name">${escapeHtml(toolDisplayName(t))}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span></div>`;
+                  return `<div class="tool-item"><span class="tool-item-name">${escapeHtml(t.name)}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span></div>`;
                 }
                 const params = t.parameters;
                 const properties = params.properties;
@@ -1409,7 +1468,7 @@
                   }
                   paramsHtml += `</div>`;
                 }
-                return `<div class="tool-item" onclick="if(window.getSelection().toString())return;this.classList.toggle('params-expanded')"><span class="tool-item-name">${escapeHtml(toolDisplayName(t))}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span> <span class="tool-params-hint"></span><div class="tool-params-content">${paramsHtml}</div></div>`;
+                return `<div class="tool-item" onclick="if(window.getSelection().toString())return;this.classList.toggle('params-expanded')"><span class="tool-item-name">${escapeHtml(t.name)}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span> <span class="tool-params-hint"></span><div class="tool-params-content">${paramsHtml}</div></div>`;
               }).join('')}
             </div>
           </div>`;
@@ -1422,8 +1481,8 @@
       // NAVIGATION
       // ============================================================
 
-      const PAGE_SIZE = 50;
-      let pageStart = 0;
+      // Cache for rendered entry DOM nodes
+      const entryCache = new Map();
 
       function getScrollTargetElementId(entryId) {
         const entry = byId.get(entryId);
@@ -1436,15 +1495,27 @@
       }
 
       function renderEntryToNode(entry) {
-        if (!['message', 'custom_message', 'compaction', 'branch_summary', 'model_change'].includes(entry.type)) return null;
-        const html = renderEntry(fullEntry(entry));
+        // Check cache first
+        if (entryCache.has(entry.id)) {
+          return entryCache.get(entry.id).cloneNode(true);
+        }
+
+        // Render to HTML string, then parse to node
+        const html = renderEntry(entry);
         if (!html) return null;
+
         const template = document.createElement('template');
         template.innerHTML = html;
-        return template.content.firstElementChild;
+        const node = template.content.firstElementChild;
+
+        // Cache the node
+        if (node) {
+          entryCache.set(entry.id, node.cloneNode(true));
+        }
+        return node;
       }
 
-      function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null, requestedStart = null) {
+      function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null) {
         currentLeafId = targetId;
         currentTargetId = scrollToEntryId || targetId;
         const targetEntry = byId.get(currentTargetId);
@@ -1452,8 +1523,6 @@
           setHiddenMessagesVisible(true);
         }
         const path = getPath(targetId);
-        currentPath = path;
-        treeRendered = false;
 
         renderTree();
 
@@ -1464,24 +1533,13 @@
         const messagesEl = document.getElementById('messages');
         const fragment = document.createDocumentFragment();
 
-        const selected = Math.max(0, path.findIndex(entry => entry.id === currentTargetId));
-        pageStart = requestedStart ?? (scrollMode === 'none' && !scrollToEntryId ? 0 : Math.floor(selected / PAGE_SIZE) * PAGE_SIZE);
-        function pageButton(text, start) {
-          const button = document.createElement('button');
-          button.type = 'button';
-          button.textContent = text;
-          button.addEventListener('click', () => navigateTo(targetId, 'none', currentTargetId, start));
-          fragment.appendChild(button);
-        }
-        if (pageStart > 0) pageButton('Earlier messages', Math.max(0, pageStart - PAGE_SIZE));
-        for (const entry of path.slice(pageStart, pageStart + PAGE_SIZE)) {
+        for (const entry of path) {
           const node = renderEntryToNode(entry);
           if (node) {
             fragment.appendChild(node);
           }
         }
 
-        if (pageStart + PAGE_SIZE < path.length) pageButton('Later messages', pageStart + PAGE_SIZE);
         messagesEl.innerHTML = '';
         messagesEl.appendChild(fragment);
 

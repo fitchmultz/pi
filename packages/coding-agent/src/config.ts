@@ -1,5 +1,5 @@
-import { createRequire } from "node:module";
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from "fs";
+import { createRequire } from "module";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -401,29 +401,6 @@ export function getPackageDir(): string {
 	return findNodePackageDir(__dirname);
 }
 
-/** Launch a detached shell worker in the same source, SDK, bundle, or standalone distribution. */
-export function getBackgroundCommandWorker(): { command: string; args: string[]; cwd: string } {
-	// PI_PACKAGE_DIR selects assets, not executable code from another installation.
-	const cwd = isBunBinary ? dirname(process.execPath) : findNodePackageDir(__dirname);
-	if (isBunBinary) return { command: process.execPath, args: ["--internal-background-command"], cwd };
-	if (isBundledNode) {
-		return { command: process.execPath, args: [join(cwd, "dist", "bundle", "background-command-worker.js")], cwd };
-	}
-	if (__filename.endsWith(".ts")) {
-		return {
-			command: process.execPath,
-			args: [
-				...(isBunRuntime
-					? []
-					: ["--import", pathToFileURL(join(cwd, "src", "experimental", "source-resolver.ts")).href]),
-				join(cwd, "src", "background-command-worker.ts"),
-			],
-			cwd,
-		};
-	}
-	return { command: process.execPath, args: [join(cwd, "dist", "background-command-worker.js")], cwd };
-}
-
 /**
  * Get path to built-in themes directory (shipped with package)
  * - For Bun binary: theme/ next to executable
@@ -512,19 +489,50 @@ export function getQuickJSWasmPath(): string {
 	return embeddedQuickJSWasmPath ?? createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm");
 }
 
-/**
- * Get the URL of the codemode worker entry (`src/extensions/codemode/worker.ts`), or undefined to use
- * the worker file that ships next to pi-codemode's own module.
- * - For Bun binary: the build passes the worker as an extra entrypoint. Bun embeds it at its path
- *   relative to the common directory of all entrypoints (the package root, since the main entry is
- *   dist/bun/cli.js) with a .js extension, and all bundled code sees the executable as import.meta.url.
- * - For the Node bundle: the build emits codemode-worker.js next to the chunk that contains this module.
- * - For Node.js (dist/ or src/): pi-codemode's own worker.
- */
-export function getCodemodeWorkerUrl(): URL | undefined {
-	if (isBunBinary) return new URL("./src/extensions/codemode/worker.js", import.meta.url);
-	if (isBundledNode) return new URL("./codemode-worker.js", import.meta.url);
+/** Resolve the codemode worker entry for a release runtime. */
+export function resolveCodemodeWorkerSpecifier(
+	runtime: "bun-binary" | "bundled-node" | "unbundled",
+	moduleUrl: string,
+): string | URL | undefined {
+	// Bun embeds explicit source entrypoints, but on Windows Bun 1.3 cannot map an absolute
+	// B:\~BUN URL back to one. A relative string with the original source extension works on
+	// every Bun platform.
+	if (runtime === "bun-binary") return "./src/extensions/codemode/worker.ts";
+	if (runtime === "bundled-node") return new URL("./codemode-worker.js", moduleUrl);
 	return undefined;
+}
+
+/**
+ * Get the codemode worker entry, or undefined to use the worker that ships next to pi-codemode.
+ * The Bun and Node release builds both pass the worker as an extra entrypoint.
+ */
+export function getCodemodeWorkerSpecifier(): string | URL | undefined {
+	const runtime = isBunBinary ? "bun-binary" : isBundledNode ? "bundled-node" : "unbundled";
+	return resolveCodemodeWorkerSpecifier(runtime, import.meta.url);
+}
+
+/** Resolve executable code from this runtime, not the PI_PACKAGE_DIR asset override. */
+export function getBackgroundCommandWorker(): { command: string; args: string[]; cwd: string } {
+	const cwd = isBunBinary ? dirname(process.execPath) : findNodePackageDir(__dirname);
+	if (isBunBinary) return { command: process.execPath, args: ["--internal-background-command"], cwd };
+	if (isBundledNode) {
+		return {
+			command: process.execPath,
+			args: [fileURLToPath(new URL("./background-command-worker.js", import.meta.url))],
+			cwd,
+		};
+	}
+	const source = __filename.endsWith(".ts");
+	return {
+		command: process.execPath,
+		args: [
+			...(source && !isBunRuntime
+				? ["--import", pathToFileURL(join(cwd, "src", "experimental", "source-resolver.ts")).href]
+				: []),
+			join(cwd, source ? "src" : "dist", "extensions", "background-command", source ? "worker.ts" : "worker.js"),
+		],
+		cwd,
+	};
 }
 
 // =============================================================================

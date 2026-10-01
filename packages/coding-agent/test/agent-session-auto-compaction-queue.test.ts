@@ -10,7 +10,6 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
-import { createHarness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 describe("AgentSession auto-compaction queue resume", () => {
@@ -54,53 +53,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 		vi.restoreAllMocks();
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
-		}
-	});
-
-	it("lets an extension replace automatic compaction with summary-free rollover", async () => {
-		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", (event, ctx) => {
-						if (event.reason === "manual") return;
-						pi.appendEntry("posthorse-boundary", {});
-						return {
-							compaction: {
-								summary: "",
-								firstKeptEntryId: ctx.sessionManager.getLeafId()!,
-								tokensBefore: event.preparation.tokensBefore,
-							},
-						};
-					});
-				},
-			],
-		});
-		try {
-			harness.sessionManager.appendMessage({ role: "user", content: "old request ".repeat(100), timestamp: 1 });
-			harness.sessionManager.appendMessage(fauxAssistantMessage("old response ".repeat(100)));
-			harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-
-			const runAutoCompaction = (
-				harness.session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
-				}
-			)._runAutoCompaction.bind(harness.session);
-
-			await expect(runAutoCompaction("overflow", true)).resolves.toBe(true);
-
-			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
-			expect(harness.session.messages.map((message) => message.role)).toEqual(["compactionSummary"]);
-			expect(harness.faux.state.callCount).toBe(0);
-			expect(harness.eventsOfType("compaction_end")).toContainEqual(
-				expect.objectContaining({
-					reason: "overflow",
-					result: expect.objectContaining({ summary: "" }),
-					willRetry: true,
-				}),
-			);
-		} finally {
-			harness.cleanup();
 		}
 	});
 
@@ -337,12 +289,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now() + 1000,
 		};
 
-		// Restore canonical history; agent.state.messages is only its inspection cache.
-		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1000 });
-		sessionManager.appendMessage(successfulAssistant);
-		sessionManager.appendMessage({ role: "user", content: "another prompt", timestamp: Date.now() + 500 });
-		sessionManager.appendMessage(errorAssistant);
-		session.refreshContext();
+		// Put both messages into agent state so estimateContextTokens can find the successful one
+		session.agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
+			successfulAssistant,
+			{ role: "user", content: [{ type: "text", text: "another prompt" }], timestamp: Date.now() + 500 },
+			errorAssistant,
+		];
 
 		const runAutoCompactionSpy = vi
 			.spyOn(
@@ -387,9 +340,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now(),
 		};
 
-		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1000 });
-		sessionManager.appendMessage(errorAssistant);
-		session.refreshContext();
+		session.agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
+			errorAssistant,
+		];
 
 		const runAutoCompactionSpy = vi
 			.spyOn(
@@ -464,10 +418,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now(),
 		};
 
-		// Retained usage stays before the native compaction; the new error has no useful usage.
-		sessionManager.appendMessage({ role: "user", content: "new prompt", timestamp: Date.now() - 500 });
-		sessionManager.appendMessage(errorAssistant);
-		session.refreshContext();
+		// Agent state has the kept assistant (pre-compaction) and the error (post-compaction)
+		session.agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: "kept user msg" }], timestamp: preCompactionTimestamp - 1000 },
+			keptAssistant,
+			{ role: "user", content: [{ type: "text", text: "new prompt" }], timestamp: Date.now() - 500 },
+			errorAssistant,
+		];
 
 		const runAutoCompactionSpy = vi
 			.spyOn(

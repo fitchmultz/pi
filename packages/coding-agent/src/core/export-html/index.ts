@@ -1,22 +1,6 @@
-import { randomUUID } from "node:crypto";
-import {
-	closeSync,
-	existsSync,
-	fchmodSync,
-	fchownSync,
-	openSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
-import { setImmediate } from "node:timers/promises";
 import type { AgentState } from "@earendil-works/pi-agent-core";
-import { resolveLocalFileTarget } from "@earendil-works/pi-agent-core/node";
-import type { ToolCall } from "@earendil-works/pi-ai";
-import { contentText } from "@earendil-works/pi-ai/utils/text";
+import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
+import { basename, join, resolve } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
@@ -41,12 +25,11 @@ export interface ToolHtmlRenderer {
 	): { collapsed?: string; expanded?: string } | undefined;
 }
 
-/** Presentation variants for a call's snapshots and branch-specific results. */
+/** Pre-rendered HTML for a custom tool call and result */
 interface RenderedToolHtml {
-	/** Call previews keyed by serialized display arguments, including branch-specific arguments. */
-	calls?: Record<string, string>;
-	/** Results keyed by their raw journal entry ID. */
-	results?: Record<string, { collapsed?: string; expanded?: string }>;
+	callHtml?: string;
+	resultHtmlCollapsed?: string;
+	resultHtmlExpanded?: string;
 }
 
 export interface ExportOptions {
@@ -54,7 +37,6 @@ export interface ExportOptions {
 	themeName?: string;
 	/** Optional tool renderer for custom tools */
 	toolRenderer?: ToolHtmlRenderer;
-	signal?: AbortSignal;
 }
 
 /** Parse a color string to RGB values. Supports hex (#RRGGBB) and rgb(r,g,b) formats. */
@@ -147,28 +129,49 @@ function generateThemeVars(themeName?: string): string {
 
 interface SessionData {
 	header: ReturnType<SessionManager["getHeader"]>;
+	entries: ReturnType<SessionManager["getEntries"]>;
 	leafId: string | null;
 	systemPrompt?: string;
-	tools?: Array<Pick<ToolDefinition, "name" | "namespace" | "description" | "parameters">>;
+	tools?: Array<Pick<ToolDefinition, "name" | "description" | "parameters">>;
+	/** Pre-rendered HTML for custom tool calls/results, keyed by tool call ID */
+	renderedTools?: Record<string, RenderedToolHtml>;
 }
 
-/** Template assets are small; history is written independently below. */
-function htmlTemplate(themeName?: string): string {
+/**
+ * Core HTML generation logic shared by both export functions.
+ */
+function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const templateDir = getExportTemplateDir();
-	const template = readFileSync(join(templateDir, "template.html"), "utf8");
+	const template = readFileSync(join(templateDir, "template.html"), "utf-8");
+	const templateCss = readFileSync(join(templateDir, "template.css"), "utf-8");
+	const templateJs = readFileSync(join(templateDir, "template.js"), "utf-8");
+	const markedJs = readFileSync(join(templateDir, "vendor", "marked.min.js"), "utf-8");
+	const hljsJs = readFileSync(join(templateDir, "vendor", "highlight.min.js"), "utf-8");
+
+	const themeVars = generateThemeVars(themeName);
 	const colors = getResolvedThemeColors(themeName);
-	const exported = getThemeExportColors(themeName);
-	const derived = deriveExportColors(colors.userMessageBg || "#343541");
-	const css = readFileSync(join(templateDir, "template.css"), "utf8")
-		.replace("{{THEME_VARS}}", generateThemeVars(themeName))
-		.replace("{{BODY_BG}}", exported.pageBg ?? derived.pageBg)
-		.replace("{{CONTAINER_BG}}", exported.cardBg ?? derived.cardBg)
-		.replace("{{INFO_BG}}", exported.infoBg ?? derived.infoBg);
+	const themeExport = getThemeExportColors(themeName);
+	const derivedExportColors = deriveExportColors(colors.userMessageBg || "#343541");
+	const bodyBg = themeExport.pageBg ?? derivedExportColors.pageBg;
+	const containerBg = themeExport.cardBg ?? derivedExportColors.cardBg;
+	const infoBg = themeExport.infoBg ?? derivedExportColors.infoBg;
+
+	// Base64 encode session data to avoid escaping issues
+	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toString("base64");
+
+	// Build the CSS with theme variables injected
+	const css = templateCss
+		.replace("{{THEME_VARS}}", themeVars)
+		.replace("{{BODY_BG}}", bodyBg)
+		.replace("{{CONTAINER_BG}}", containerBg)
+		.replace("{{INFO_BG}}", infoBg);
+
 	return template
 		.replace("{{CSS}}", css)
-		.replace("{{JS}}", readFileSync(join(templateDir, "template.js"), "utf8"))
-		.replace("{{MARKED_JS}}", readFileSync(join(templateDir, "vendor", "marked.min.js"), "utf8"))
-		.replace("{{HIGHLIGHT_JS}}", readFileSync(join(templateDir, "vendor", "highlight.min.js"), "utf8"));
+		.replace("{{JS}}", templateJs)
+		.replace("{{SESSION_DATA}}", sessionDataBase64)
+		.replace("{{MARKED_JS}}", markedJs)
+		.replace("{{HIGHLIGHT_JS}}", hljsJs);
 }
 
 /** Tools rendered directly by the HTML template (not pre-rendered via TUI→ANSI→HTML pipeline) */
@@ -178,235 +181,59 @@ const TEMPLATE_RENDERED_TOOLS = new Set(["bash", "read", "write", "edit", "ls"])
  * Pre-render custom tools to HTML using their TUI renderers.
  */
 function preRenderCustomTools(
-	entry: SessionEntry,
+	entries: SessionEntry[],
 	toolRenderer: ToolHtmlRenderer,
-	manager: SessionManager,
 ): Record<string, RenderedToolHtml> {
-	const renderedTools: Record<string, RenderedToolHtml> = Object.create(null);
+	const renderedTools: Record<string, RenderedToolHtml> = {};
 
-	const findCall = (entry: SessionEntry, toolCallId: string): ToolCall | undefined => {
-		let current: SessionEntry | undefined = entry;
-		while (current) {
-			if (current.type === "message" && current.message.role === "assistant") {
-				const block = current.message.content.find((block) => block.type === "toolCall" && block.id === toolCallId);
-				if (block?.type === "toolCall") {
-					return block;
+	for (const entry of entries) {
+		if (entry.type !== "message") continue;
+		const msg = entry.message;
+
+		// Find tool calls in assistant messages
+		if (msg.role === "assistant" && Array.isArray(msg.content)) {
+			for (const block of msg.content) {
+				if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
+					const callHtml = toolRenderer.renderCall(block.id, block.name, block.arguments);
+					if (callHtml) {
+						renderedTools[block.id] = { callHtml };
+					}
 				}
 			}
-			current = current.parentId && current.parentId !== current.id ? manager.getEntry(current.parentId) : undefined;
 		}
-		return undefined;
-	};
 
-	const renderCall = (call: ToolCall) => {
-		const args = call.arguments;
-		const callHtml = toolRenderer.renderCall(call.id, call.name, args);
-		if (callHtml) {
-			renderedTools[call.id] ??= {};
-			const rendered = renderedTools[call.id];
-			rendered.calls ??= Object.create(null) as NonNullable<RenderedToolHtml["calls"]>;
-			rendered.calls[JSON.stringify(args)] = callHtml;
-		}
-	};
-
-	if (entry.type !== "message") return renderedTools;
-	const msg = entry.message;
-	if (msg.role === "assistant") {
-		for (const block of msg.content) {
-			if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
-				renderCall(findCall(entry, block.id) ?? block);
+		// Find tool results
+		if (msg.role === "toolResult" && msg.toolCallId) {
+			const toolName = msg.toolName || "";
+			// Only render if we have a pre-rendered call OR it's not template-rendered
+			const existing = renderedTools[msg.toolCallId];
+			if (existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)) {
+				const rendered = toolRenderer.renderResult(
+					msg.toolCallId,
+					toolName,
+					msg.content,
+					msg.details,
+					msg.isError || false,
+				);
+				if (rendered) {
+					renderedTools[msg.toolCallId] = {
+						...existing,
+						resultHtmlCollapsed: rendered.collapsed,
+						resultHtmlExpanded: rendered.expanded,
+					};
+				}
 			}
 		}
 	}
-	if (msg.role === "toolResult" && !TEMPLATE_RENDERED_TOOLS.has(msg.toolName)) {
-		// Restore this branch's arguments for the result renderer's context.
-		const call = findCall(entry, msg.toolCallId);
-		if (call) renderCall(call);
-		const rendered = toolRenderer.renderResult(msg.toolCallId, msg.toolName, msg.content, msg.details, msg.isError);
-		if (rendered) {
-			renderedTools[msg.toolCallId] ??= {};
-			renderedTools[msg.toolCallId].results = { [entry.id]: rendered };
-		}
-	}
+
 	return renderedTools;
 }
 
-function assertDistinctExportTarget(sourceFile: string, outputPath: string): void {
-	const source = statSync(sourceFile);
+function assertNotSessionJournal(inputPath: string, outputPath: string): void {
+	const input = statSync(inputPath);
 	const output = statSync(outputPath, { throwIfNoEntry: false });
-	if (output && output.dev === source.dev && output.ino === source.ino) {
-		throw new Error(`Cannot export HTML over the source session file: ${outputPath}`);
-	}
-}
-
-function treePreview(text: string): string {
-	const normalized = text.replace(/[\n\t]/g, " ").trim();
-	return normalized.length > 100 ? `${normalized.slice(0, 100)}...` : normalized;
-}
-
-function shortenToolPath(path: string): string {
-	if (path.startsWith("/Users/") || path.startsWith("/home/")) {
-		const parts = path.split("/");
-		if (parts.length > 2) return `~${path.slice(`/${parts[1]}/${parts[2]}`.length)}`;
-	}
-	return path;
-}
-
-function toolPreview(tool: ToolCall): string {
-	const args = tool.arguments ?? {};
-	switch (tool.name) {
-		case "read": {
-			let display = shortenToolPath(String(args.path || args.file_path || ""));
-			const offset = args.offset as number | undefined;
-			const limit = args.limit as number | undefined;
-			if (args.json !== undefined) display += ` json=${JSON.stringify(args.json)}`;
-			if (offset !== undefined || limit !== undefined) {
-				const start = offset ?? 1;
-				const end = limit !== undefined ? start + limit - 1 : "";
-				display += `:${start}${end ? `-${end}` : ""}`;
-			}
-			return `[read: ${display}]`;
-		}
-		case "write":
-		case "edit":
-			return `[${tool.name}: ${shortenToolPath(String(args.path || args.file_path || ""))}]`;
-		case "bash": {
-			const raw = String(args.command || "");
-			const command = raw
-				.replace(/[\n\t]/g, " ")
-				.trim()
-				.slice(0, 50);
-			return `[bash: ${command}${raw.length > 50 ? "..." : ""}]`;
-		}
-		case "grep":
-			return `[grep: /${args.pattern || ""}/ in ${shortenToolPath(String(args.path || "."))}]`;
-		case "find":
-			return `[find: ${args.pattern || ""} in ${shortenToolPath(String(args.path || "."))}]`;
-		case "ls":
-			return `[ls: ${shortenToolPath(String(args.path || "."))}]`;
-		default: {
-			const serialized = JSON.stringify(args);
-			return `[${tool.name}: ${serialized.slice(0, 40)}${serialized.length > 40 ? "..." : ""}]`;
-		}
-	}
-}
-
-/** Structural and display facts; arbitrary bodies remain in the individual encoded records. */
-function entryIndex(entry: SessionEntry, record: number): object {
-	const index: Record<string, unknown> = {
-		id: entry.id,
-		parentId: entry.parentId,
-		timestamp: entry.timestamp,
-		type: entry.type,
-		record,
-	};
-	if (entry.type === "message") {
-		const message = entry.message;
-		const calls = message.role === "assistant" ? message.content.filter((part) => part.type === "toolCall") : [];
-		const messageIndex: Record<string, unknown> = {
-			role: message.role,
-			...(message.role === "assistant"
-				? {
-						model: message.model,
-						provider: message.provider,
-						usage: message.usage,
-						stopReason: message.stopReason,
-						errorMessage: message.errorMessage
-							? `${message.errorMessage.slice(0, 100)}${message.errorMessage.length > 100 ? "..." : ""}`
-							: undefined,
-						preview: treePreview(contentText(message.content, "")),
-						toolCalls: calls.length,
-						toolPreviews: calls.map((call) => ({ id: call.id, preview: toolPreview(call) })),
-						hasText: message.content.some((part) => part.type === "text" && part.text.trim().length > 0),
-					}
-				: {}),
-			...(message.role === "toolResult" ? { toolCallId: message.toolCallId, toolName: message.toolName } : {}),
-			...(message.role === "bashExecution" ? { command: treePreview(message.command || "") } : {}),
-		};
-		if (message.role === "user") {
-			const text = contentText(message.content, "");
-			const skill = text.match(
-				/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/,
-			);
-			if (skill) messageIndex.skill = { name: skill[1], userMessage: skill[4] ? treePreview(skill[4]) : undefined };
-			else messageIndex.preview = treePreview(text);
-		}
-		index.message = messageIndex;
-	} else if (entry.type === "label") {
-		index.targetId = entry.targetId;
-		index.label = entry.label;
-	} else if (entry.type === "custom" || entry.type === "custom_message") {
-		index.customType = entry.customType;
-		if (entry.type === "custom_message") {
-			index.display = entry.display;
-			index.preview = treePreview(contentText(entry.content, ""));
-		}
-	} else if (entry.type === "model_change") {
-		index.provider = entry.provider;
-		index.modelId = entry.modelId;
-	} else if (entry.type === "thinking_level_change") index.thinkingLevel = entry.thinkingLevel;
-	else if (entry.type === "compaction") index.tokensBefore = entry.tokensBefore;
-	else if (entry.type === "branch_summary") index.preview = treePreview(entry.summary || "");
-	else if (entry.type === "context_edit") {
-		index.targetId = entry.targetId;
-		index.replacement = entry.replacement === null ? null : {};
-	}
-	return index;
-}
-
-async function writeHtml(
-	manager: SessionManager,
-	data: SessionData,
-	outputPath: string,
-	options: ExportOptions,
-): Promise<void> {
-	options.signal?.throwIfAborted();
-	const target = await resolveLocalFileTarget(resolve(outputPath));
-	assertDistinctExportTarget(manager.getSessionFile()!, target);
-	const previous = statSync(target, { throwIfNoEntry: false });
-	if (previous && !previous.isFile()) throw new Error("HTML export requires a regular file");
-	const stage = join(dirname(target), `.pi-write-${randomUUID()}`);
-	const fd = openSync(stage, "wx", previous ? 0o600 : 0o666);
-	let closed = false;
-	try {
-		const [before, after] = htmlTemplate(options.themeName).split("{{SESSION_DATA}}");
-		writeFileSync(fd, before);
-		// ponytail: a requested record/rendered value must fit its consumer; never encode the whole history.
-		writeFileSync(fd, Buffer.from(JSON.stringify(data)).toString("base64"));
-		writeFileSync(fd, "</script>\n");
-		let record = 0;
-		for (const entry of manager.getEntries()) {
-			options.signal?.throwIfAborted();
-			const renderedTools = options.toolRenderer
-				? preRenderCustomTools(entry, options.toolRenderer, manager)
-				: undefined;
-			for (const [kind, value] of [
-				["index", entryIndex(entry, record)],
-				["entry", { entry, renderedTools }],
-			] as const) {
-				writeFileSync(
-					fd,
-					`<script id="session-${kind}-${record}" type="application/json"${kind === "index" ? ' class="session-index"' : ""}>`,
-				);
-				writeFileSync(fd, Buffer.from(JSON.stringify(value)).toString("base64"));
-				writeFileSync(fd, "</script>\n");
-			}
-			record++;
-			await setImmediate();
-		}
-		writeFileSync(fd, after.replace(/^\s*<\/script>/, ""));
-		if (previous) {
-			fchownSync(fd, previous.uid, previous.gid);
-			fchmodSync(fd, previous.mode & 0o777);
-		}
-		closeSync(fd);
-		closed = true;
-		options.signal?.throwIfAborted();
-		assertDistinctExportTarget(manager.getSessionFile()!, target);
-		renameSync(stage, target);
-	} finally {
-		if (!closed) closeSync(fd);
-		rmSync(stage, { force: true });
+	if (resolve(inputPath) === resolve(outputPath) || (output && input.dev === output.dev && input.ino === output.ino)) {
+		throw new Error("Cannot export HTML over the session journal");
 	}
 }
 
@@ -429,16 +256,28 @@ export async function exportSessionToHtml(
 		throw new Error("Nothing to export yet - start a conversation first");
 	}
 
+	const entries = sm.getEntries();
+
+	// Pre-render custom tools if a tool renderer is provided
+	let renderedTools: Record<string, RenderedToolHtml> | undefined;
+	if (opts.toolRenderer) {
+		renderedTools = preRenderCustomTools(entries, opts.toolRenderer);
+		// Only include if we actually rendered something
+		if (Object.keys(renderedTools).length === 0) {
+			renderedTools = undefined;
+		}
+	}
+
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
+		entries,
 		leafId: sm.getLeafId(),
 		systemPrompt: state?.systemPrompt,
-		tools: state?.tools?.map((tool) => ({
-			name: tool.name,
-			description: tool.description,
-			parameters: tool.parameters,
-		})),
+		tools: state?.tools?.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
+		renderedTools,
 	};
+
+	const html = generateHtml(sessionData, opts.themeName);
 
 	let outputPath = opts.outputPath ? normalizePath(opts.outputPath) : undefined;
 	if (!outputPath) {
@@ -446,8 +285,8 @@ export async function exportSessionToHtml(
 		outputPath = `${APP_NAME}-session-${sessionBasename}.html`;
 	}
 
-	assertDistinctExportTarget(sessionFile, outputPath);
-	await writeHtml(sm, sessionData, outputPath, opts);
+	assertNotSessionJournal(sessionFile, outputPath);
+	writeFileSync(outputPath, html, "utf8");
 	return outputPath;
 }
 
@@ -463,22 +302,25 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw new Error(`File not found: ${resolvedInputPath}`);
 	}
 
-	let outputPath = opts.outputPath ? normalizePath(opts.outputPath) : undefined;
-	if (!outputPath) {
-		const inputBasename = basename(resolvedInputPath, ".jsonl");
-		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
-	}
-	assertDistinctExportTarget(resolvedInputPath, outputPath);
-
 	const sm = SessionManager.open(resolvedInputPath);
 
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
+		entries: sm.getEntries(),
 		leafId: sm.getLeafId(),
 		systemPrompt: undefined,
 		tools: undefined,
 	};
 
-	await writeHtml(sm, sessionData, outputPath, opts);
+	const html = generateHtml(sessionData, opts.themeName);
+
+	let outputPath = opts.outputPath ? normalizePath(opts.outputPath) : undefined;
+	if (!outputPath) {
+		const inputBasename = basename(resolvedInputPath, ".jsonl");
+		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
+	}
+
+	assertNotSessionJournal(resolvedInputPath, outputPath);
+	writeFileSync(outputPath, html, "utf8");
 	return outputPath;
 }

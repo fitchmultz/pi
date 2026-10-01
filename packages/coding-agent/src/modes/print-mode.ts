@@ -6,12 +6,11 @@
  * - `pi --mode json "prompt"` - JSON event stream
  */
 
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
-import { writeJsonRecordToStdout } from "../core/json-record-writer.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
-import { jsonEventLayout, toJsonEvent } from "./json-event.ts";
+import { toJsonEvent } from "./json-event.ts";
 
 /**
  * Options for print mode.
@@ -37,8 +36,6 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
-
-	let queuedInputCount = messages.length + (initialMessage ? 1 : 0);
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
@@ -76,10 +73,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
-
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
-			getQueuedInputCount: () => queuedInputCount,
 			commandContextActions: {
 				waitForIdle: () => session.waitForIdle(),
 				newSession: async (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
@@ -112,7 +107,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
 			if (mode === "json") {
-				writeJsonRecordToStdout(toJsonEvent(event), jsonEventLayout);
+				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
 			}
 		});
 		unsubscribeBackpressure =
@@ -127,54 +122,26 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		if (mode === "json") {
 			const header = session.sessionManager.getHeader();
 			if (header) {
-				writeJsonRecordToStdout(header, jsonEventLayout);
+				writeRawStdout(`${JSON.stringify(header)}\n`);
 			}
 		}
 
 		await rebindSession();
 
 		if (initialMessage) {
-			await session.waitForIdle();
-			queuedInputCount--;
 			await session.prompt(initialMessage, { images: initialImages });
 		}
 
 		for (const message of messages) {
-			await session.waitForIdle();
-			queuedInputCount--;
-
 			await session.prompt(message);
 		}
 
-		// Settlement handlers can start another turn after the prompt's own run ends.
-		await session.waitForIdle();
-
 		if (mode === "text") {
-			const activeLastMessage = session.state.messages.at(-1);
-			// Compaction and trailing context can hide the answer, but a newer user or tool
-			// message must prevent falling back to an earlier answer on the selected branch.
-			let assistantMsg = activeLastMessage?.role === "assistant" ? activeLastMessage : undefined;
-			if (!assistantMsg) {
-				for (let id = session.sessionManager.getLeafId(); id; ) {
-					const metadata = session.sessionManager.getEntryMetadata(id);
-					if (!metadata) break;
-					if (metadata.type === "message") {
-						const { role, stopReason } = metadata.message;
-						if (role === "assistant" || role === "user" || role === "toolResult") {
-							if (role === "assistant" && stopReason !== "toolUse") {
-								const entry = session.sessionManager.getEntry(id);
-								if (entry?.type === "message" && entry.message.role === "assistant") {
-									assistantMsg = entry.message;
-								}
-							}
-							break;
-						}
-					}
-					id = metadata.parentId;
-				}
-			}
+			const state = session.state;
+			const lastMessage = state.messages[state.messages.length - 1];
 
-			if (assistantMsg && assistantMsg.stopReason !== "toolUse") {
+			if (lastMessage?.role === "assistant") {
+				const assistantMsg = lastMessage as AssistantMessage;
 				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
 					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 					exitCode = 1;

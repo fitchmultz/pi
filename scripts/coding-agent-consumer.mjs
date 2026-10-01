@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { packageNameFromLockPath, readJson } from "./coding-agent-lock-helpers.mjs";
 import { getPublicWorkspacePackages } from "./release-packages.mjs";
 
 const codingAgentName = "@earendil-works/pi-coding-agent";
@@ -26,13 +24,15 @@ function run(command, args, options = {}) {
 	return result.stdout;
 }
 
-export function packReleasePackages(packages, tarballDirectory, { npm = "npm", env = process.env } = {}) {
+export function packReleasePackages(packages, tarballDirectory, { node = process.execPath, npm, env = process.env } = {}) {
 	mkdirSync(tarballDirectory, { recursive: true });
 	const tarballs = new Map();
 	for (const pkg of packages) {
 		const manifest = JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"));
 		if (manifest.name !== pkg.name) throw new Error(`Unexpected package name in ${pkg.directory}`);
-		const output = run(npm, ["pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory], { cwd: pkg.directory, env });
+		const output = run(npm ? node : "npm", [
+			...(npm ? [npm] : []), "pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory,
+		], { cwd: pkg.directory, env });
 		// npm <11.6 returns an array; newer npm can return an object keyed by package name.
 		const parsed = JSON.parse(output);
 		const packed = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
@@ -41,10 +41,7 @@ export function packReleasePackages(packages, tarballDirectory, { npm = "npm", e
 	return tarballs;
 }
 
-export function installCodingAgentConsumer(directory, tarballs, packageManager = "npm", {
-	env = process.env,
-	lockDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "../packages/coding-agent/install-lock"),
-} = {}) {
+export function installCodingAgentConsumer(directory, tarballs, packageManager = "npm") {
 	mkdirSync(directory, { recursive: true });
 	const overrides = Object.fromEntries([...tarballs].map(([name, path]) => [
 		name, `file:./${relative(directory, path).replaceAll("\\", "/")}`,
@@ -53,27 +50,13 @@ export function installCodingAgentConsumer(directory, tarballs, packageManager =
 	// Only coding-agent is a direct dependency. Overrides select local artifacts
 	// for declared transitive dependencies without installing undeclared packages.
 	const manifest = {
-		...readJson(join(lockDirectory, "package.json")),
+		private: true,
 		dependencies: { [codingAgentName]: overrides[codingAgentName] },
+		overrides,
 	};
-	manifest.overrides = { ...manifest.overrides, ...overrides };
-	// Local-file packages do not reliably load their nested shrinkwrap in npm.
-	// Freeze the consumer root instead, changing only the internal artifacts.
-	const lock = readJson(join(lockDirectory, "package-lock.json"));
-	lock.packages[""].dependencies = manifest.dependencies;
-	for (const [path, entry] of Object.entries(lock.packages)) {
-		const name = packageNameFromLockPath(path);
-		const tarball = tarballs.get(name);
-		if (!tarball) continue;
-		entry.resolved = overrides[name];
-		entry.integrity = `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`;
-	}
 	writeFileSync(join(directory, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
-	writeFileSync(join(directory, "package-lock.json"), `${JSON.stringify(lock, null, "\t")}\n`);
-	const installArgs = packageManager === "bun"
-		? ["install", "--production"]
-		: ["ci", "--omit=dev", "--no-audit", "--no-fund"];
-	run(packageManager, [...installArgs, "--ignore-scripts"], { cwd: directory, env });
+	const installArgs = packageManager === "bun" ? ["--production"] : ["--omit=dev", "--no-audit", "--no-fund"];
+	run(packageManager, ["install", "--ignore-scripts", ...installArgs], { cwd: directory });
 }
 
 function checkInstalledPackages(nodeModules, seen = new Set()) {
@@ -94,7 +77,7 @@ function checkInstalledPackages(nodeModules, seen = new Set()) {
 	}
 }
 
-export function smokeTestCodingAgentConsumer(directory, runtime = process.execPath, { path = process.env.PATH } = {}) {
+export function smokeTestCodingAgentConsumer(directory, runtime = process.execPath) {
 	checkInstalledPackages(join(directory, "node_modules"));
 	const packageDir = join(directory, "node_modules", codingAgentName);
 	const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
@@ -104,7 +87,7 @@ export function smokeTestCodingAgentConsumer(directory, runtime = process.execPa
 	const home = mkdtempSync(join(directory, "smoke-home-"));
 	const entry = join(directory, "smoke-sdk.mjs");
 	const env = {
-		PATH: path,
+		PATH: process.env.PATH,
 		HOME: home,
 		USERPROFILE: home,
 		APPDATA: home,
@@ -148,19 +131,7 @@ for (const subpath of ["/client", "/experimental/plugin"]) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-	if (process.argv.length === 3 && (process.argv[2] === "-h" || process.argv[2] === "--help")) {
-		console.log(`Usage: node scripts/coding-agent-consumer.mjs
-
-Pack release packages, install the coding agent in an isolated consumer, and smoke-test its SDK and CLI.
-
-Examples:
-  node scripts/coding-agent-consumer.mjs
-  node scripts/coding-agent-consumer.mjs --help
-
-Exit codes: 0 on success or help; nonzero on invalid arguments or smoke-test failure.`);
-		process.exit(0);
-	}
-	if (process.argv.length !== 2) throw new Error("Usage: node scripts/coding-agent-consumer.mjs [-h|--help]");
+	if (process.argv.length !== 2) throw new Error("Usage: node scripts/coding-agent-consumer.mjs");
 	const root = mkdtempSync(join(tmpdir(), "pi-package-consumer-"));
 	try {
 		const tarballs = packReleasePackages(getPublicWorkspacePackages(), join(root, "tarballs"));

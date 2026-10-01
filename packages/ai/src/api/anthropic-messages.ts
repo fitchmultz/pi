@@ -1,7 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { type ClientOptions } from "@anthropic-ai/sdk";
 import type {
-	BetaInputTransformation,
 	BetaStopReason,
+	BetaThinkingDroppedInputTransformation,
 	BetaTool,
 	BetaCacheControlEphemeral as CacheControlEphemeral,
 	BetaContentBlockParam as ContentBlockParam,
@@ -10,6 +10,13 @@ import type {
 	BetaRawMessageStreamEvent as RawMessageStreamEvent,
 	BetaRefusalStopDetails as RefusalStopDetails,
 } from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
+import {
+	ANTHROPIC_FEDERATION_RULE_ID_ENV,
+	ANTHROPIC_IDENTITY_TOKEN_FILE_ENV,
+	ANTHROPIC_ORGANIZATION_ID_ENV,
+	ANTHROPIC_SERVICE_ACCOUNT_ID_ENV,
+	ANTHROPIC_WORKSPACE_ID_ENV,
+} from "../env-api-keys.ts";
 import { calculateCost } from "../models.ts";
 import type {
 	Api,
@@ -31,7 +38,6 @@ import type {
 	ToolResultMessage,
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
-import { assertContextFits } from "../utils/estimate.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
@@ -41,8 +47,6 @@ import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
-	collapseSystemMessages,
-	declarationsEqual,
 	getCurrentTools,
 	getDeclaredTools,
 	getInitialSystemMessage,
@@ -51,7 +55,11 @@ import {
 	type TranscriptContext,
 } from "../utils/transcript.ts";
 
-import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
+import {
+	getJsonSchemaToolParameters,
+	resolveJsonSchemaStrictSampling,
+	type UnsupportedStrictSchemaKeywordCheck,
+} from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampMaxTokensToContext } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
@@ -187,63 +195,6 @@ const SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01";
 const MID_CONVERSATION_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026-07-01";
 const THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01";
 const MID_CONVERSATION_TOOL_CHANGES_BETA = "mid-conversation-tool-changes-2026-07-01";
-const INLINE_TOOLS_BETA = "inline-tools-2026-09-15";
-
-type ToolChangeProtocol = typeof INLINE_TOOLS_BETA | typeof MID_CONVERSATION_TOOL_CHANGES_BETA | null;
-
-/** Retained responses from an earlier window must not bind a newly rebuilt prefix. */
-function getBoundToolProtocol(
-	model: Model<"anthropic-messages">,
-	context: TranscriptContext,
-): ToolChangeProtocol | undefined {
-	const windowTimestamp = getInitialSystemMessage(context.messages)?.timestamp ?? 0;
-	for (const message of context.messages) {
-		if (
-			message.role !== "assistant" ||
-			message.api !== model.api ||
-			message.provider !== model.provider ||
-			message.model !== model.id
-		)
-			continue;
-		const binding = message.diagnostics?.find((entry) => entry.type === "anthropic_tool_protocol")?.details;
-		if (binding) {
-			if (binding.windowTimestamp !== windowTimestamp || binding.baseUrl !== model.baseUrl) continue;
-			if (
-				binding.beta === null ||
-				binding.beta === INLINE_TOOLS_BETA ||
-				binding.beta === MID_CONVERSATION_TOOL_CHANGES_BETA
-			)
-				return binding.beta;
-			continue;
-		}
-		// Unmarked historical requests used the reference protocol, never inline definitions.
-		// Explicit bindings above remain valid when a monotonic prefix timestamp leads wall time.
-		if (message.timestamp < windowTimestamp) continue;
-		return model.compat?.supportsMidConvoToolChanges && model.compat.supportsMidConvoSystemMessages
-			? MID_CONVERSATION_TOOL_CHANGES_BETA
-			: null;
-	}
-	return undefined;
-}
-
-function getConfiguredBetas(model: Model<"anthropic-messages">, options?: AnthropicOptions): string[] | undefined {
-	let configured: string | null | undefined;
-	for (const headers of [model.headers, options?.headers]) {
-		for (const [name, value] of Object.entries(headers ?? {})) {
-			if (name.toLowerCase() === "anthropic-beta") configured = value;
-		}
-	}
-	return configured === undefined
-		? undefined
-		: [
-				...new Set(
-					(configured ?? "")
-						.split(",")
-						.map((value) => value.trim())
-						.filter(Boolean),
-				),
-			];
-}
 
 /**
  * Stable deferred tool declared whenever native tool changes are in use. Anthropic adds
@@ -364,17 +315,68 @@ function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean 
 	return false;
 }
 
-function assertRequestAuth(provider: string, apiKey: string | undefined, headers: ProviderHeaders | undefined): void {
-	if (apiKey) return;
-	if (
+function hasRequestAuth(apiKey: string | undefined, headers: ProviderHeaders | undefined): boolean {
+	return (
+		!!apiKey ||
 		hasHeader(headers, "authorization") ||
 		hasHeader(headers, "x-api-key") ||
 		hasHeader(headers, "cf-aig-authorization")
-	) {
-		return;
-	}
-	throw new Error(`No API key for provider: ${provider}`);
+	);
 }
+
+function assertRequestAuth(provider: string, apiKey: string | undefined, headers: ProviderHeaders | undefined): void {
+	if (!hasRequestAuth(apiKey, headers)) throw new Error(`No API key for provider: ${provider}`);
+}
+
+/**
+ * Anthropic SDK client that never runs the SDK's own credential chain
+ * (ANTHROPIC_PROFILE config files, federation env vars). Without this, every
+ * client built with `apiKey: null, authToken: null` for header-owned auth would
+ * also resolve and exchange SDK credentials behind pi's auth resolver.
+ */
+class PiAnthropic extends Anthropic {
+	protected override _shouldResolveDefaultCredentials(): boolean {
+		return false;
+	}
+}
+
+type AnthropicFederationConfig = NonNullable<ClientOptions["config"]>;
+
+/**
+ * Workload identity federation config from the ANTHROPIC_* variables the
+ * Anthropic SDK documents; the SDK performs the token exchange and refresh.
+ * Only for the anthropic provider, since the exchange is an Anthropic API
+ * endpoint, and only when no key or auth header was resolved.
+ */
+function getAnthropicFederation(
+	model: Model<"anthropic-messages">,
+	apiKey: string | undefined,
+	headers: ProviderHeaders | undefined,
+	env: ProviderEnv | undefined,
+): AnthropicFederationConfig | undefined {
+	if (model.provider !== "anthropic" || hasRequestAuth(apiKey, headers)) return undefined;
+	const federationRuleId = getProviderEnvValue(ANTHROPIC_FEDERATION_RULE_ID_ENV, env);
+	const organizationId = getProviderEnvValue(ANTHROPIC_ORGANIZATION_ID_ENV, env);
+	const identityTokenFile = getProviderEnvValue(ANTHROPIC_IDENTITY_TOKEN_FILE_ENV, env);
+	if (!federationRuleId || !organizationId || !identityTokenFile) return undefined;
+	return {
+		organization_id: organizationId,
+		workspace_id: getProviderEnvValue(ANTHROPIC_WORKSPACE_ID_ENV, env),
+		authentication: {
+			type: "oidc_federation",
+			federation_rule_id: federationRuleId,
+			service_account_id: getProviderEnvValue(ANTHROPIC_SERVICE_ACCOUNT_ID_ENV, env),
+			identity_token: { source: "file", path: identityTokenFile },
+		},
+	};
+}
+
+/**
+ * The SDK caches the federated access token per client, but pi creates a client
+ * per request. Keep one client for the current federation config and fetch, and
+ * clone it per request with `withOptions()`, which shares the token cache.
+ */
+let federationClient: { key: string; fetch: typeof globalThis.fetch | undefined; client: Anthropic } | undefined;
 
 interface ServerSentEvent {
 	event: string | null;
@@ -574,53 +576,8 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const compat = getAnthropicCompat(model);
-	const configuredBetas = getConfiguredBetas(model, options);
-	const boundProtocol = getBoundToolProtocol(model, context);
-	let toolProtocol = boundProtocol;
-	if (toolProtocol === undefined) {
-		toolProtocol = null;
-		if (configuredBetas !== undefined) {
-			if (configuredBetas.includes(INLINE_TOOLS_BETA)) toolProtocol = INLINE_TOOLS_BETA;
-			else if (configuredBetas.includes(MID_CONVERSATION_TOOL_CHANGES_BETA))
-				toolProtocol = MID_CONVERSATION_TOOL_CHANGES_BETA;
-		} else if (compat.supportsMidConvoSystemMessages && compat.supportsMidConvoToolChanges) {
-			const official =
-				model.provider === "anthropic" &&
-				(model.baseUrl === "https://api.anthropic.com" || model.baseUrl.startsWith("https://api.anthropic.com/"));
-			toolProtocol = official ? INLINE_TOOLS_BETA : MID_CONVERSATION_TOOL_CHANGES_BETA;
-		}
-	}
-	const inlineToolDefinitions = toolProtocol === INLINE_TOOLS_BETA;
-	const normalizedContext = resolveTranscript(
-		context,
-		compat.supportsMidConvoSystemMessages,
-		inlineToolDefinitions ? undefined : toolProtocol === MID_CONVERSATION_TOOL_CHANGES_BETA ? "descriptions" : "all",
-		{
-			contextWindow: model.contextWindow,
-			transform: (messages) => transformMessages(messages, model, normalizeToolCallId),
-			tools: inlineToolDefinitions
-				? "inline"
-				: toolProtocol === MID_CONVERSATION_TOOL_CHANGES_BETA
-					? "declared"
-					: "current",
-		},
-	);
+	const normalizedContext = resolveTranscript(context, getAnthropicCompat(model).supportsMidConvoSystemMessages);
 	const currentTools = getCurrentTools(normalizedContext.messages);
-	const windowTimestamp = getInitialSystemMessage(context.messages)?.timestamp ?? 0;
-	let strictToolsFallback = context.messages.some(
-		(message) =>
-			message.role === "assistant" &&
-			message.api === model.api &&
-			message.provider === model.provider &&
-			message.model === model.id &&
-			message.diagnostics?.some(
-				(entry) =>
-					entry.type === "anthropic_strict_tool_fallback" &&
-					entry.details?.windowTimestamp === windowTimestamp &&
-					entry.details?.baseUrl === model.baseUrl,
-			),
-	);
 
 	(async () => {
 		const providerThinkingLevel = model.compat?.supportsMidConvoEffort ? (options?.effort ?? "high") : undefined;
@@ -647,14 +604,15 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			let client: Anthropic;
 			let isOAuth: boolean;
 			let usageModel = model;
-			let inputTransformations: BetaInputTransformation[] | undefined;
+			let inputTransformations: BetaThinkingDroppedInputTransformation[] | undefined;
 
 			if (options?.client) {
 				client = options.client;
 				isOAuth = false;
 			} else {
 				const apiKey = options?.apiKey;
-				assertRequestAuth(model.provider, apiKey, options?.headers);
+				const federation = getAnthropicFederation(model, apiKey, options?.headers, options?.env);
+				if (!federation) assertRequestAuth(model.provider, apiKey, options?.headers);
 
 				let copilotDynamicHeaders: Record<string, string> | undefined;
 				if (model.provider === "github-copilot") {
@@ -675,109 +633,29 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					options?.fetch,
 					copilotDynamicHeaders,
 					cacheSessionId,
+					federation,
 				);
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			const originalParams = buildParams(model, normalizedContext, isOAuth, toolProtocol, options);
-			const declarations = normalizedContext.messages.flatMap((message) =>
-				message.role === "system" ? (message.toolsAdded ?? []) : [],
-			);
-			const preferredNames = new Set(
-				declarations
-					.filter(
-						(tool) =>
-							tool.constrainedSampling &&
-							tool.constrainedSampling.type === "json_schema" &&
-							tool.constrainedSampling.strict === "prefer",
-					)
-					.map((tool) => (isOAuth ? toClaudeCodeName(tool.name) : tool.name)),
-			);
-			for (const tool of declarations) {
-				if (
-					tool.constrainedSampling &&
-					tool.constrainedSampling.type === "json_schema" &&
-					tool.constrainedSampling.strict === "require"
-				)
-					preferredNames.delete(isOAuth ? toClaudeCodeName(tool.name) : tool.name);
-			}
-			// Each attempt starts before hooks, so additive transformations run exactly once.
-			let params = structuredClone(originalParams);
-			if (strictToolsFallback) relaxPreferredStrictTools(params, preferredNames);
+			let params = buildParams(model, normalizedContext, isOAuth, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
 			}
-			appendAssistantMessageDiagnostic(output, {
-				type: "anthropic_tool_protocol",
-				timestamp: Date.now(),
-				details: {
-					inline: toolProtocol === INLINE_TOOLS_BETA,
-					beta: toolProtocol,
-					windowTimestamp,
-					baseUrl: model.baseUrl,
+			const requestOptions = {
+				...(options?.signal ? { signal: options.signal } : {}),
+				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+				maxRetries: 0,
+			};
+			const response = await retryProviderRequest(
+				() => client.beta.messages.create(params, requestOptions).asResponse(),
+				{
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
 				},
-			});
-			const configuredProtocols = configuredBetas?.filter(
-				(beta) => beta === INLINE_TOOLS_BETA || beta === MID_CONVERSATION_TOOL_CHANGES_BETA,
 			);
-			if (
-				boundProtocol !== undefined &&
-				configuredProtocols &&
-				(configuredProtocols.length !== (toolProtocol === null ? 0 : 1) ||
-					configuredProtocols[0] !== (toolProtocol ?? undefined))
-			) {
-				appendAssistantMessageDiagnostic(output, {
-					type: "provider_configuration_warning",
-					timestamp: Date.now(),
-					details: {
-						message: `Ignoring conflicting anthropic-beta tool protocol headers: this context window is bound to ${toolProtocol ?? "no tool-change beta"}.`,
-					},
-				});
-			}
-			const request = () =>
-				retryProviderRequest(
-					() =>
-						client.beta.messages
-							.create(params, {
-								headers: { "anthropic-beta": params.betas?.join(",") ?? null },
-								...(options?.signal ? { signal: options.signal } : {}),
-								...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-								maxRetries: 0,
-							})
-							.asResponse(),
-					{
-						maxRetries: options?.maxRetries,
-						maxRetryDelayMs: options?.maxRetryDelayMs,
-						signal: options?.signal,
-					},
-				);
-			let response: Response;
-			try {
-				response = await request();
-			} catch (error) {
-				if (
-					strictToolsFallback ||
-					options?.signal?.aborted ||
-					!(error instanceof Anthropic.BadRequestError) ||
-					error.type !== "invalid_request_error" ||
-					!/compiled grammar is too large|schema is too complex for compilation/i.test(error.message)
-				)
-					throw error;
-				const retryParams = structuredClone(originalParams);
-				if (!relaxPreferredStrictTools(retryParams, preferredNames)) throw error;
-				const replacement = await options?.onPayload?.(retryParams, model);
-				params = { ...((replacement ?? retryParams) as MessageCreateParamsStreaming), stream: true };
-				response = await request();
-				strictToolsFallback = true;
-			}
-			if (strictToolsFallback) {
-				appendAssistantMessageDiagnostic(output, {
-					type: "anthropic_strict_tool_fallback",
-					timestamp: Date.now(),
-					details: { windowTimestamp, baseUrl: model.baseUrl },
-				});
-			}
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -1024,30 +902,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	return stream;
 };
 
-function getToolDefinitions(params: MessageCreateParamsStreaming): BetaTool[] {
-	const definitions = [...(params.tools ?? [])];
-	for (const message of params.messages) {
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			if (block.type === "tool_addition" && block.tool.type === "tool_definition") {
-				definitions.push(block.tool.definition);
-			}
-		}
-	}
-	return definitions.filter((tool): tool is BetaTool => "input_schema" in tool);
-}
-
-function relaxPreferredStrictTools(params: MessageCreateParamsStreaming, preferred: ReadonlySet<string>): boolean {
-	let changed = false;
-	for (const tool of getToolDefinitions(params)) {
-		if (tool.strict && preferred.has(tool.name)) {
-			delete tool.strict;
-			changed = true;
-		}
-	}
-	return changed;
-}
-
 /**
  * Map ThinkingLevel to Anthropic effort levels for adaptive thinking.
  * Note: effort "max" is available on all adaptive-thinking Claude models, while native
@@ -1078,7 +932,9 @@ export const streamSimple: StreamFunction<"anthropic-messages", SimpleStreamOpti
 	context: TranscriptContext,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	assertRequestAuth(model.provider, options?.apiKey, options?.headers);
+	if (!getAnthropicFederation(model, options?.apiKey, options?.headers, options?.env)) {
+		assertRequestAuth(model.provider, options?.apiKey, options?.headers);
+	}
 
 	const base = {
 		...buildBaseOptions(model, context, options, options?.apiKey),
@@ -1132,10 +988,11 @@ function createClient(
 	fetch?: typeof globalThis.fetch,
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
+	federation?: AnthropicFederationConfig,
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Copilot: Bearer auth.
 	if (model.provider === "github-copilot") {
-		const client = new Anthropic({
+		const client = new PiAnthropic({
 			apiKey: null,
 			authToken: apiKey ?? null,
 			baseURL: model.baseUrl,
@@ -1157,7 +1014,7 @@ function createClient(
 
 	// OAuth: Bearer auth, Claude Code identity headers
 	if (apiKey && isOAuthToken(apiKey)) {
-		const client = new Anthropic({
+		const client = new PiAnthropic({
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
@@ -1178,7 +1035,7 @@ function createClient(
 		return { client, isOAuthToken: true };
 	}
 
-	// API key or header-owned auth.
+	// API key, header-owned auth, or workload identity federation.
 	const compat = getAnthropicCompat(model);
 	const sessionAffinityHeaders: ProviderHeaders = {};
 	if (sessionId && compat.sendSessionAffinityHeaders) {
@@ -1194,7 +1051,23 @@ function createClient(
 		model.headers,
 		optionsHeaders,
 	);
-	const client = new Anthropic({
+	if (federation) {
+		const key = JSON.stringify([model.baseUrl, federation]);
+		if (federationClient?.key !== key || federationClient.fetch !== fetch) {
+			const client = new PiAnthropic({
+				apiKey: null,
+				authToken: null,
+				config: federation,
+				baseURL: model.baseUrl,
+				dangerouslyAllowBrowser: true,
+				fetch,
+			});
+			federationClient = { key, fetch, client };
+		}
+		return { client: federationClient.client.withOptions({ defaultHeaders }), isOAuthToken: false };
+	}
+
+	const client = new PiAnthropic({
 		apiKey: apiKey ?? null,
 		authToken: null,
 		baseURL: model.baseUrl,
@@ -1210,15 +1083,26 @@ function getBetaFeatures(
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
 	isOAuthToken: boolean,
-	toolProtocol: ToolChangeProtocol,
+	nativeToolChanges: boolean,
 	options?: AnthropicOptions,
 ): NonNullable<MessageCreateParamsStreaming["betas"]> {
-	const configured = getConfiguredBetas(model, options);
-	if (configured !== undefined)
+	let configuredFeatures: string | null | undefined;
+	for (const headers of [model.headers, options?.headers]) {
+		for (const [name, value] of Object.entries(headers ?? {})) {
+			if (name.toLowerCase() === "anthropic-beta") configuredFeatures = value;
+		}
+	}
+	if (configuredFeatures === null) return [];
+	if (configuredFeatures !== undefined) {
 		return [
-			...configured.filter((beta) => beta !== INLINE_TOOLS_BETA && beta !== MID_CONVERSATION_TOOL_CHANGES_BETA),
-			...(toolProtocol ? [toolProtocol] : []),
+			...new Set(
+				configuredFeatures
+					.split(",")
+					.map((feature) => feature.trim())
+					.filter((feature) => feature.length > 0),
+			),
 		];
+	}
 
 	const features: NonNullable<MessageCreateParamsStreaming["betas"]> = [];
 	if (isOAuthToken) features.push("claude-code-20250219", "oauth-2025-04-20");
@@ -1235,7 +1119,7 @@ function getBetaFeatures(
 	if (model.compat?.supportsMidConvoEffort === true) {
 		features.push(MID_CONVERSATION_OUTPUT_CONFIG_BETA, THINKING_BINDING_CONTROLS_BETA);
 	}
-	if (toolProtocol) features.push(toolProtocol);
+	if (nativeToolChanges) features.push(MID_CONVERSATION_TOOL_CHANGES_BETA);
 	return [...new Set(features)];
 }
 
@@ -1243,7 +1127,6 @@ function buildParams(
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
 	isOAuthToken: boolean,
-	toolProtocol: ToolChangeProtocol,
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention, options?.env);
@@ -1252,29 +1135,15 @@ function buildParams(
 	const initialSystemText = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 	const conversationMessages = initialSystemMessage ? transformedMessages.slice(1) : transformedMessages;
-	// Reference additions need an initial active tool; all-deferred lists are rejected.
-	// Inline redefinitions retain each original declaration and update it in place.
+	// Native tool changes reference tools by name, so a redefined name cannot be expressed,
+	// and Anthropic rejects a tool list where every tool is deferred, so there must be an
+	// initial active tool to anchor the deferred ones. Otherwise the current tool list is sent.
 	const initialTools = initialSystemMessage?.toolsAdded ?? [];
-	const inlineToolDefinitions = toolProtocol === INLINE_TOOLS_BETA;
 	const nativeToolChanges =
 		compat.supportsMidConvoSystemMessages &&
 		compat.supportsMidConvoToolChanges &&
-		toolProtocol !== null &&
-		(inlineToolDefinitions || (initialTools.length > 0 && !hasToolRedefinitions(context.messages)));
-	const betaFeatures = getBetaFeatures(model, context, isOAuthToken, toolProtocol, options);
-	const requestTools = nativeToolChanges
-		? inlineToolDefinitions && initialTools.length === 0
-			? []
-			: getDeclaredTools(context.messages, "first")
-		: getCurrentTools(context.messages);
-	// Inline definitions also carry redefinitions, so every declaration may reach the wire.
-	const strictTools = selectStrictTools(
-		inlineToolDefinitions && nativeToolChanges
-			? context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []) : []))
-			: requestTools,
-		compat.supportsStrictTools,
-	);
-	assertContextFits(model, transformedMessages, inlineToolDefinitions && nativeToolChanges ? undefined : requestTools);
+		initialTools.length > 0 &&
+		!hasToolRedefinitions(context.messages);
 	const converted = convertMessages(
 		conversationMessages,
 		isOAuthToken,
@@ -1282,17 +1151,9 @@ function buildParams(
 		compat.allowEmptySignature,
 		model.compat?.supportsMidConvoEffort === true ? model.provider : undefined,
 		nativeToolChanges,
-		inlineToolDefinitions
-			? {
-					initialTools,
-					supportsEagerToolInputStreaming: compat.supportsEagerToolInputStreaming,
-					strictTools,
-				}
-			: undefined,
 	);
-	if (converted.requiresRebuild)
-		return buildParams(model, collapseSystemMessages(context), isOAuthToken, toolProtocol, options);
 	const activeEffort = options?.effort ?? "high";
+	const betaFeatures = getBetaFeatures(model, context, isOAuthToken, nativeToolChanges, options);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
 		messages:
@@ -1342,13 +1203,17 @@ function buildParams(
 	}
 
 	const toolCacheControl = compat.supportsCacheControlOnTools ? cacheControl : undefined;
-	if (nativeToolChanges && initialTools.length > 0) {
+	const strictTools = selectStrictTools(
+		nativeToolChanges ? getDeclaredTools(context.messages) : getCurrentTools(context.messages),
+		compat.supportsStrictTools,
+	);
+	if (nativeToolChanges) {
 		// Initial tools stay active with the cache breakpoint on the last one. Every later
 		// declaration is deferred and only surfaced by its `tool_addition` block; removed
 		// tools stay declared and are withdrawn by `tool_removal`. The request-level list
 		// therefore only grows, keeping the cached prefix intact across tool changes.
 		const initialNames = new Set(initialTools.map((tool) => tool.name));
-		const laterTools = requestTools.filter((tool) => !initialNames.has(tool.name));
+		const laterTools = getDeclaredTools(context.messages).filter((tool) => !initialNames.has(tool.name));
 		params.tools = [
 			...convertTools(
 				initialTools,
@@ -1364,9 +1229,10 @@ function buildParams(
 			})),
 		];
 	} else {
-		if (requestTools.length > 0) {
+		const tools = getCurrentTools(context.messages);
+		if (tools.length > 0) {
 			params.tools = convertTools(
-				requestTools,
+				tools,
 				isOAuthToken,
 				compat.supportsEagerToolInputStreaming,
 				strictTools,
@@ -1446,7 +1312,6 @@ function convertToolResult(msg: ToolResultMessage): ContentBlockParam {
 }
 
 interface ConvertedAnthropicMessages {
-	requiresRebuild: boolean;
 	messages: MessageParam[];
 	assistantLevels: Map<number, AnthropicEffort>;
 }
@@ -1458,14 +1323,8 @@ function convertMessages(
 	allowEmptySignature = false,
 	managedProvider?: string,
 	nativeToolChanges = false,
-	inlineTools?: {
-		initialTools: Tool[];
-		supportsEagerToolInputStreaming: boolean;
-		strictTools: ReadonlySet<Tool>;
-	},
 ): ConvertedAnthropicMessages {
 	const params: MessageParam[] = [];
-	const definitions = new Map(inlineTools?.initialTools.map((tool) => [tool.name, tool]));
 	const assistantLevels = new Map<number, AnthropicEffort>();
 	// Later system messages are held back and emitted directly before the next assistant
 	// message (or at the end of the transcript). Anthropic requires `tool_result` blocks to
@@ -1473,14 +1332,7 @@ function convertMessages(
 	// also mirrors where the managed-effort system messages are inserted. As a result an
 	// update placed before a user message in the transcript lands after it on the wire.
 	const pendingSystemMessages: MessageParam[] = [];
-	let requiresRebuild = false;
 	const flushPendingSystemMessages = (): void => {
-		if (pendingSystemMessages.length > 0 && params.at(-1)?.role !== "user") {
-			// Pi does not replay server-tool-result blocks; an assistant tail (including
-			// pause_turn) is not a legal boundary. Rebuild rather than defer a safety update.
-			requiresRebuild = true;
-			return;
-		}
 		params.push(...pendingSystemMessages);
 		pendingSystemMessages.length = 0;
 	};
@@ -1502,25 +1354,10 @@ function convertMessages(
 					});
 				}
 				for (const tool of msg.toolsAdded ?? []) {
-					const previous = definitions.get(tool.name);
 					blocks.push({
 						type: "tool_addition",
-						tool:
-							inlineTools &&
-							((!previous && inlineTools.initialTools.length === 0) ||
-								(previous && !declarationsEqual(previous, tool)))
-								? {
-										type: "tool_definition",
-										definition: convertTools(
-											[tool],
-											isOAuthToken,
-											inlineTools.supportsEagerToolInputStreaming,
-											inlineTools.strictTools,
-										)[0],
-									}
-								: { type: "tool_reference", name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name },
+						tool: { type: "tool_reference", name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name },
 					});
-					definitions.set(tool.name, tool);
 				}
 			}
 			if (blocks.length > 0) pendingSystemMessages.push({ role: "system", content: blocks });
@@ -1563,6 +1400,7 @@ function convertMessages(
 				});
 			}
 		} else if (msg.role === "assistant") {
+			flushPendingSystemMessages();
 			const blocks: ContentBlockParam[] = [];
 
 			for (const block of msg.content) {
@@ -1617,7 +1455,6 @@ function convertMessages(
 				}
 			}
 			if (blocks.length === 0) continue;
-			flushPendingSystemMessages();
 			const messageIndex = params.length;
 			params.push({
 				role: "assistant",
@@ -1680,7 +1517,7 @@ function convertMessages(
 		}
 	}
 
-	return { messages: params, assistantLevels, requiresRebuild };
+	return { messages: params, assistantLevels };
 }
 
 function isAnthropicEffort(value: unknown): value is AnthropicEffort {
@@ -1710,18 +1547,49 @@ function shouldUseFineGrainedToolStreamingBeta(
 	return getCurrentTools(context.messages).length > 0 && !getAnthropicCompat(model).supportsEagerToolInputStreaming;
 }
 
-// Anthropic's request-wide limits across all strict schemas. Strict conversion requires every
-// property, so the separate optional-parameter limit cannot bind.
-const MAX_STRICT_TOOLS = 20;
-const MAX_STRICT_UNION_PARAMETERS = 16;
+// Keywords Anthropic strict tool use rejects with a 400 for the whole request.
+// https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations
+const ANTHROPIC_STRICT_UNSUPPORTED_KEYWORDS = new Set([
+	"minimum",
+	"maximum",
+	"exclusiveMinimum",
+	"exclusiveMaximum",
+	"multipleOf",
+	"maxItems",
+	"uniqueItems",
+	"minContains",
+	"maxContains",
+	"minProperties",
+	"maxProperties",
+]);
+const ANTHROPIC_STRICT_STRING_FORMATS = new Set([
+	"date-time",
+	"time",
+	"date",
+	"duration",
+	"email",
+	"hostname",
+	"uri",
+	"ipv4",
+	"ipv6",
+	"uuid",
+]);
 
-/** Parameters Anthropic counts as unions (`anyOf` or type arrays), at any depth. */
+const isAnthropicStrictUnsupportedKeyword: UnsupportedStrictSchemaKeywordCheck = (key, value) => {
+	if (ANTHROPIC_STRICT_UNSUPPORTED_KEYWORDS.has(key)) return true;
+	if (key === "minItems") return value !== 0 && value !== 1;
+	if (key === "format") return typeof value !== "string" || !ANTHROPIC_STRICT_STRING_FORMATS.has(value);
+	return false;
+};
+
+// Request-wide limits: https://platform.claude.com/docs/en/build-with-claude/structured-outputs#schema-complexity-limits
+// Strict conversion requires every property, so the 24 optional-parameter limit cannot bind.
 function countUnionParameters(schema: unknown): number {
 	if (typeof schema !== "object" || schema === null) return 0;
 	const { properties, items, anyOf } = schema as {
 		properties?: Record<string, unknown>;
 		items?: unknown;
-		anyOf?: unknown;
+		anyOf?: unknown[];
 	};
 	let count = 0;
 	for (const child of [...Object.values(properties ?? {}), ...(items === undefined ? [] : [items])]) {
@@ -1729,41 +1597,26 @@ function countUnionParameters(schema: unknown): number {
 		if (Array.isArray(union) || Array.isArray(type)) count++;
 		count += countUnionParameters(child);
 	}
-	for (const variant of Array.isArray(anyOf) ? anyOf : []) count += countUnionParameters(variant);
+	for (const variant of anyOf ?? []) count += countUnionParameters(variant);
 	return count;
 }
 
-/**
- * Admit strict tools in declaration order while the request stays within Anthropic's limits.
- * Earlier tools keep their mode as later ones are appended, so the cached prefix stays stable.
- */
-function selectStrictTools(tools: readonly Tool[], supportsStrictTools: boolean): Set<Tool> {
-	const selected = new Set<Tool>();
-	const declared = new Map<string, Tool>();
-	let count = 0;
+function selectStrictTools(tools: readonly Tool[], supported: boolean): Set<string> {
+	const selected = new Set<string>();
 	let unions = 0;
+	// Declaration order preserves earlier strict modes when native deferred tools are appended.
 	for (const tool of tools) {
-		const previous = declared.get(tool.name);
-		// An identical re-declaration reaches the wire at most once, so it shares the first decision.
-		if (previous && declarationsEqual(previous, tool)) {
-			if (selected.has(previous)) selected.add(tool);
-			continue;
-		}
-		declared.set(tool.name, tool);
-		if (resolveJsonSchemaStrictSampling(tool, supportsStrictTools) !== true) continue;
+		if (resolveJsonSchemaStrictSampling(tool, supported, isAnthropicStrictUnsupportedKeyword) !== true) continue;
 		const cost = countUnionParameters(getJsonSchemaToolParameters(tool, true));
-		if (count < MAX_STRICT_TOOLS && unions + cost <= MAX_STRICT_UNION_PARAMETERS) {
-			selected.add(tool);
-			count++;
+		if (selected.size < 20 && unions + cost <= 16) {
+			selected.add(tool.name);
 			unions += cost;
 		} else if (
 			tool.constrainedSampling &&
 			tool.constrainedSampling.type === "json_schema" &&
 			tool.constrainedSampling.strict === "require"
 		) {
-			throw new Error(
-				`Tool "${tool.name}" requires JSON-schema constrained sampling, but the request exceeds Anthropic's strict tool limits.`,
-			);
+			throw new Error(`Tool "${tool.name}" requires strict sampling, but exceeds Anthropic's strict tool limits.`);
 		}
 	}
 	return selected;
@@ -1773,13 +1626,13 @@ function convertTools(
 	tools: Tool[],
 	isOAuthToken: boolean,
 	supportsEagerToolInputStreaming: boolean,
-	strictTools: ReadonlySet<Tool>,
+	strictTools: ReadonlySet<string>,
 	cacheControl?: CacheControlEphemeral,
 ): BetaTool[] {
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
-		const strict = strictTools.has(tool);
+		const strict = strictTools.has(tool.name);
 		const parameters = getJsonSchemaToolParameters(tool, strict);
 		const schema = parameters as { properties?: unknown; required?: string[] };
 		const legacyInputSchema = {

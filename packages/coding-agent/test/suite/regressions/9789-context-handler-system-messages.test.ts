@@ -6,7 +6,6 @@ import {
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { SessionManager } from "../../../src/core/session-manager.ts";
 import type { ExtensionFactory } from "../../../src/index.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -85,44 +84,29 @@ describe("context handlers and system messages", () => {
 		expect(request.messages.filter((message) => message.role === "system")).toHaveLength(1);
 	});
 
-	it.each(["unchanged", "inserted", "cloned insertion"] as const)(
-		"preserves prompt sections when a handler returns %s conversation",
-		async (transform) => {
-			let turn = 0;
-			const harness = await createHarness({
-				extensionFactories: [
-					(pi) => {
-						pi.on("before_agent_start", (event) => {
-							if (++turn === 2) event.systemPromptOptions.sections.plan_mode = "Plan only.";
-						});
-						pi.on("context", async (event) => {
-							const messages =
-								transform === "cloned insertion" ? structuredClone(event.messages) : event.messages;
-							if (transform !== "unchanged" && messages.length > 1)
-								messages.splice(-1, 0, { role: "user", content: "inserted", timestamp: 0 });
-							return { messages };
-						});
-					},
-				],
-			});
-			harnesses.push(harness);
-			harness.setResponses([fauxAssistantMessage("one")]);
-			await harness.session.prompt("first");
-			const getRequest = captureRequest(harness, "two");
+	it("keeps mid-conversation system messages in place when a handler leaves the conversation unchanged", async () => {
+		let turn = 0;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) => {
+						if (++turn === 2) event.systemPromptOptions.sections.plan_mode = "Plan only.";
+					});
+					pi.on("context", async (event) => ({ messages: event.messages }));
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one")]);
+		await harness.session.prompt("first");
+		const getRequest = captureRequest(harness, "two");
 
-			await harness.session.prompt("second");
+		await harness.session.prompt("second");
 
-			const systemMessages = getRequest().messages.filter((message) => message.role === "system");
-			expect(systemMessages).toHaveLength(transform === "unchanged" ? 2 : 1);
-			expect(systemMessages.at(-1)?.sections?.plan_mode).toBe("<plan_mode>\nPlan only.\n</plan_mode>");
-			expect(toolNames(getRequest())).toEqual(harness.session.getActiveToolNames());
-			expect(getRequest().messages.map((message) => message.role)).toEqual(
-				transform === "unchanged"
-					? ["system", "user", "assistant", "system", "user"]
-					: ["system", "user", "assistant", "user", "user"],
-			);
-		},
-	);
+		const systemMessages = getRequest().messages.filter((message) => message.role === "system");
+		expect(systemMessages).toHaveLength(2);
+		expect(systemMessages[1]?.sections).toEqual({ plan_mode: "<plan_mode>\nPlan only.\n</plan_mode>" });
+	});
 
 	it("applies in-place edits to event.messages without a return value", async () => {
 		const harness = await createHarness({
@@ -215,14 +199,8 @@ describe("context_with_system handlers", () => {
 		expect(toolNames(getRequest())).toEqual(harness.session.getActiveToolNames().filter((name) => name !== "bash"));
 	});
 
-	it.each([false, true])("reports a dropped head but honors the handler output (resumed=%s)", async (resumed) => {
-		const sessionManager = SessionManager.inMemory();
-		if (resumed) {
-			sessionManager.appendMessage({ role: "system", content: "", sections: { preamble: "OLD" }, timestamp: 1 });
-			sessionManager.appendMessage(fauxAssistantMessage("bound legacy response"));
-		}
+	it("reports a handler that drops the leading system message but honors its output", async () => {
 		const harness = await createHarness({
-			sessionManager,
 			extensionFactories: [
 				(pi) => {
 					pi.on("context_with_system", async (event) => ({
@@ -232,7 +210,6 @@ describe("context_with_system handlers", () => {
 			],
 		});
 		harnesses.push(harness);
-		harness.session.refreshContext();
 		const errors: string[] = [];
 		harness.session.extensionRunner.onError((error) => {
 			errors.push(`${error.event}: ${error.error}`);
@@ -241,7 +218,7 @@ describe("context_with_system handlers", () => {
 
 		await harness.session.prompt("hello");
 
-		expect(getRequest().messages.map((message) => message.role)).toEqual(resumed ? ["assistant", "user"] : ["user"]);
+		expect(getRequest().messages.map((message) => message.role)).toEqual(["user"]);
 		expect(errors).toEqual([
 			expect.stringMatching(/^context_with_system: Handler removed the leading system message/),
 		]);

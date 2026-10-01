@@ -29,7 +29,6 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
-	| { id?: string; type: "wait_for_idle" }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -108,7 +107,7 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
-	pendingExtensionUIRequests: RpcExtensionUIRequest[];
+	pendingExtensionUIRequests?: RpcExtensionUIRequest[];
 }
 
 export interface RpcTuiDetachedEvent {
@@ -141,17 +140,10 @@ export type RpcResponse =
 			data: { steering: string[]; followUp: string[] };
 	  }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
-	| {
-			id?: string;
-			type: "response";
-			command: "attach_tui";
-			success: true;
-			data: { token: string };
-	  }
+	| { id?: string; type: "response"; command: "attach_tui"; success: true; data: { token: string } }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
-	| { id?: string; type: "response"; command: "wait_for_idle"; success: true }
 
 	// Model
 	| {
@@ -266,6 +258,7 @@ export type RpcResponse =
 
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =
+	| { type: "extension_ui_request"; id: string; method: "custom" }
 	| { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number }
 	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
 	| {
@@ -277,7 +270,6 @@ export type RpcExtensionUIRequest =
 			timeout?: number;
 	  }
 	| { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string }
-	| { type: "extension_ui_request"; id: string; method: "custom" }
 	| {
 			type: "extension_ui_request";
 			id: string;

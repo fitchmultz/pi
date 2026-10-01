@@ -4,14 +4,6 @@ import { Input } from "../src/components/input.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 
 describe("Input component", () => {
-	it("inserts xterm modifyOtherKeys printable text without inserting shortcuts", () => {
-		const input = new Input();
-		for (const key of ["\x1b[27;2;69~", "\x1b[27;2;196~", "\x1b[27;2;32~", "\x1b[27;6;69~"]) {
-			input.handleInput(key);
-		}
-		assert.strictEqual(input.getValue(), "EÄ ");
-	});
-
 	it("submits value including backslash on Enter", () => {
 		const input = new Input();
 		let submitted: string | undefined;
@@ -42,35 +34,35 @@ describe("Input component", () => {
 		assert.strictEqual(input.getValue(), "\\x");
 	});
 
-	describe("setValue", () => {
+	// Regression for fitchmultz/pi#46.
+	it("keeps movement and editing on grapheme boundaries after setValue", () => {
 		for (const value of ["😀", "e\u0301", "👩‍💻"]) {
-			it(`keeps edits on grapheme boundaries after replacing text with ${value}`, () => {
-				for (const [key, expected] of [
-					["x", `x${value}`],
-					["\x7f", value],
-					["\x1b[3~", ""],
-				]) {
-					const input = new Input();
-					input.setValue("a");
-					input.handleInput("\x05");
-					input.setValue(value);
-					input.handleInput(key);
-					assert.strictEqual(input.getValue(), expected);
-				}
-			});
-		}
-
-		it("preserves valid cursor positions and clamps to the new end", () => {
+			for (const [key, expected] of [
+				["x", `x${value}`],
+				["\x7f", value],
+				["\x1b[3~", ""],
+			]) {
+				const input = new Input();
+				input.handleInput("a");
+				input.setValue(value);
+				input.handleInput(key);
+				assert.strictEqual(input.getValue(), expected);
+			}
 			const input = new Input();
-			input.setValue("abc");
+			input.handleInput("a");
+			input.setValue(value);
 			input.handleInput("\x1b[C");
-			input.setValue("def");
 			input.handleInput("x");
-			assert.strictEqual(input.getValue(), "dxef");
-			input.setValue("a");
-			input.handleInput("x");
-			assert.strictEqual(input.getValue(), "ax");
-		});
+			assert.strictEqual(input.getValue(), `${value}x`);
+		}
+	});
+
+	it("inserts printable xterm keys but not modified shortcuts", () => {
+		const input = new Input();
+		input.handleInput("\x1b[27;2;69~");
+		input.handleInput("\x1b[27;2;196~");
+		input.handleInput("\x1b[27;6;69~");
+		assert.strictEqual(input.getValue(), "EÄ");
 	});
 
 	describe("render", () => {

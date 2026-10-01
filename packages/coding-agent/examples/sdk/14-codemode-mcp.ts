@@ -6,8 +6,8 @@
  *
  * `codemode` and `tool_search` are registered inactive. Enable them through the `defaultTools` setting
  * (`tools` would also restrict the session to the named tools, which hides MCP tools), or let the
- * MCP extension activate them: `codemode` for servers with `codemode` or `codemode-deferred` exposure,
- * `tool_search` for servers with `deferred` exposure.
+ * MCP extension activate them: `codemode` for servers with `codemode` exposure, `tool_search` for
+ * servers with `deferred` exposure.
  */
 
 import {
@@ -29,7 +29,7 @@ const resourceLoader = new DefaultResourceLoader({
 	extensionFactories: [
 		createCodemodeExtension({ mode: "on" }),
 		createToolSearchExtension(),
-		// Reads shared, Pi-global and trusted-project mcp.json with the CLI's lazy default.
+		// Reads mcp.json from the agent directory and the trusted project, like the CLI.
 		createMcpExtension(),
 	],
 });
@@ -46,7 +46,7 @@ const { session } = await createAgentSession({
 });
 
 try {
-	// Restores matching catalogs without connecting lazy servers; explicit eager servers connect.
+	// Emits session_start, which connects the MCP servers in the background.
 	await session.bindExtensions({});
 	console.log("Active tools:", session.getActiveToolNames().join(", "));
 	session.subscribe((event) => {

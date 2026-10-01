@@ -316,9 +316,6 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	toolExecution?: ToolExecutionMode;
 
-	/** Current callable tools, rechecked immediately before execution to honor revocation during hooks. */
-	getTools?: () => readonly AgentTool[];
-
 	/**
 	 * Called before a tool is executed, after arguments have been validated.
 	 *

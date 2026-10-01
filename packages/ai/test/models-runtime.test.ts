@@ -107,6 +107,29 @@ function testOAuth(overrides?: Partial<OAuthAuth>): OAuthAuth {
 }
 
 describe("Models runtime", () => {
+	it("keeps healthy models available and reports only the provider whose auth check failed", async () => {
+		const models = createModels();
+		models.setProvider(testProvider({ id: "healthy" }));
+		models.setProvider(
+			testProvider({
+				id: "broken",
+				auth: {
+					apiKey: {
+						name: "Broken",
+						check: async () => {
+							throw new Error("auth unavailable");
+						},
+						resolve: async () => undefined,
+					},
+				},
+			}),
+		);
+		expect((await models.getAvailable()).map((model) => model.provider)).toEqual(["healthy"]);
+		expect((await models.getAllAvailable()).map((model) => model.provider)).toEqual(["healthy"]);
+		expect([...(await models.getAvailability()).errors.keys()]).toEqual(["broken"]);
+		await expect(models.getAvailable("broken")).rejects.toThrow("broken");
+	});
+
 	it("enumerates credential metadata without exposing secrets", async () => {
 		const credentials = new InMemoryCredentialStore();
 		await credentials.modify("api-provider", async () => ({ type: "api_key", key: "secret" }));

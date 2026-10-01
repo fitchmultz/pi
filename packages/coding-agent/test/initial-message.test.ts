@@ -16,10 +16,10 @@ describe("buildInitialMessage", () => {
 		const parsed = createArgs(["Summarize the text given"]);
 		const result = buildInitialMessage({
 			parsed,
-			stdinContent: "README contents\n",
+			stdinContent: "README contents",
 		});
 
-		expect(result.initialMessage).toBe("README contents\n\n\nSummarize the text given");
+		expect(result.initialMessage).toBe("README contents\n\nSummarize the text given");
 		expect(parsed.messages).toEqual([]);
 	});
 
@@ -46,12 +46,12 @@ describe("buildInitialMessage", () => {
 		expect(parsed.messages).toEqual(["Second message"]);
 	});
 
-	test.each(["", " \n\t"])("does not submit an otherwise empty prompt %j", (stdinContent) => {
-		expect(buildInitialMessage({ parsed: createArgs(), stdinContent }).initialMessage).toBeUndefined();
-	});
-
-	test("preserves whitespace input when an instruction is present", () => {
-		const result = buildInitialMessage({ parsed: createArgs(["Count the spaces"]), stdinContent: "  " });
-		expect(result.initialMessage).toBe("  \n\nCount the spaces");
+	test("does not start a turn for whitespace-only combined input", () => {
+		const result = buildInitialMessage({
+			parsed: createArgs([" \t"]),
+			stdinContent: "\n ",
+			fileText: " \r\n",
+		});
+		expect(result.initialMessage).toBeUndefined();
 	});
 });

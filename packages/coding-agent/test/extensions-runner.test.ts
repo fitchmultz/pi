@@ -8,7 +8,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { DEFAULT_COMPACTION_SETTINGS } from "../src/core/compaction/index.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
 import {
 	createExtensionRuntime,
@@ -81,7 +80,6 @@ describe("ExtensionRunner", () => {
 	};
 
 	const extensionActions: ExtensionActions = {
-		recordUsage: () => {},
 		sendMessage: () => {},
 		sendUserMessage: () => {},
 		appendEntry: () => {},
@@ -108,7 +106,6 @@ describe("ExtensionRunner", () => {
 		hasPendingMessages: () => false,
 		shutdown: () => {},
 		getContextUsage: () => undefined,
-		getCompactionSettings: () => ({ ...DEFAULT_COMPACTION_SETTINGS }),
 		compact: () => {},
 		getSystemPrompt: () => "",
 		getScopedModels: () => [],

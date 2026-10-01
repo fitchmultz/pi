@@ -245,6 +245,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	protected doRender(): void {
+		if (this.stopped) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;

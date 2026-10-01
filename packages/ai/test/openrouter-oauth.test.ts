@@ -281,7 +281,7 @@ describe.sequential("OpenRouter OAuth", () => {
 			},
 		});
 
-		await expect(login).rejects.toMatchObject({ name: "AbortError" });
+		await expect(login).rejects.toThrow("Login cancelled");
 		expect(callbackUrl).toBeDefined();
 		await expect(nativeFetch(callbackUrl!)).rejects.toThrow();
 	});
@@ -315,7 +315,7 @@ describe.sequential("OpenRouter OAuth", () => {
 			},
 		});
 
-		await expect(login).rejects.toMatchObject({ name: "AbortError" });
+		await expect(login).rejects.toThrow("Login cancelled");
 		expect(callbackUrl?.hostname).toBe("localhost");
 	});
 });

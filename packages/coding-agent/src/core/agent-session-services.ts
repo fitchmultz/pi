@@ -54,9 +54,6 @@ export interface CreateAgentSessionServicesOptions {
 export interface CreateAgentSessionFromServicesOptions {
 	services: AgentSessionServices;
 	sessionManager: SessionManager;
-	checkpoint?: CreateAgentSessionOptions["checkpoint"];
-	checkpointFile?: CreateAgentSessionOptions["checkpointFile"];
-	deferBackgroundCommandNotifications?: boolean;
 	sessionStartEvent?: SessionStartEvent;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
@@ -194,7 +191,7 @@ export async function createAgentSessionServices(
 		}
 	}
 	extensionsResult.runtime.pendingVirtualModelRegistrations = [];
-	await modelRuntime.refresh({ allowNetwork: false, signal: options.modelRuntimeSignal });
+	await modelRuntime.refresh({ allowNetwork: false });
 	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
 
 	return {
@@ -224,9 +221,6 @@ export async function createAgentSessionFromServices(
 		settingsManager: options.services.settingsManager,
 		resourceLoader: options.services.resourceLoader,
 		sessionManager: options.sessionManager,
-		checkpoint: options.checkpoint,
-		checkpointFile: options.checkpointFile,
-		deferBackgroundCommandNotifications: options.deferBackgroundCommandNotifications,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
 		scopedModels: options.scopedModels,

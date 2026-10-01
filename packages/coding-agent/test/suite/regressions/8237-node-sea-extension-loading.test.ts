@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => {
@@ -14,9 +11,7 @@ const state = vi.hoisted(() => {
 		originalGetBuiltinModule,
 		jitiModuleLoads: 0,
 		virtualModulesLoads: 0,
-		createJiti: vi.fn((_id: unknown, options: unknown) => ({
-			options,
-			transform: vi.fn(() => ""),
+		createJiti: vi.fn((_id: unknown, _options: unknown) => ({
 			import: vi.fn(async () => () => {}),
 		})),
 	};
@@ -53,23 +48,19 @@ afterAll(() => {
 
 describe("Node SEA extension loading", () => {
 	// Regression test for #8237 and #9540.
-	it("loads jiti and bundled virtual modules only when importing an extension", async ({ onTestFinished }) => {
+	it("loads jiti and bundled virtual modules only when importing an extension", async () => {
 		expect(state.jitiModuleLoads).toBe(0);
 		expect(state.virtualModulesLoads).toBe(0);
 
-		const cwd = mkdtempSync(join(tmpdir(), "pi-sea-extension-"));
-		onTestFinished(() => rmSync(cwd, { recursive: true, force: true }));
-		const entry = join(cwd, "extension.ts");
-		writeFileSync(entry, "export default () => {};");
-		const result = await loadExtensions([entry], cwd);
+		const result = await loadExtensions(["/extension.ts"], "/");
 
 		expect(result.errors).toEqual([]);
 		expect(state.jitiModuleLoads).toBe(1);
 		expect(state.virtualModulesLoads).toBe(1);
 		expect(result.extensions).toHaveLength(1);
-		expect(state.createJiti).toHaveBeenCalled();
+		expect(state.createJiti).toHaveBeenCalledOnce();
 
-		const options = state.createJiti.mock.lastCall?.[1] as JitiOptionsProbe;
+		const options = state.createJiti.mock.calls[0][1] as JitiOptionsProbe;
 		// Source TypeScript also uses virtual modules, so tryNative: false is what
 		// proves the compiled-binary branch took precedence over the source branch.
 		expect(options.tryNative).toBe(false);

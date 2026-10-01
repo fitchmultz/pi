@@ -47,6 +47,49 @@ async function createCloudflareRuntime(): Promise<{ modelRuntime: ModelRuntime; 
 const CLOUDFLARE_COMPAT_URL = "https://gateway.ai.cloudflare.com/v1/test-account/test-gateway/compat/chat/completions";
 
 describe("ModelRegistry Cloudflare compat streaming", () => {
+	// #127: Cloudflare /anthropic passes the model ID through without translating dots.
+	it("sends Anthropic's hyphenated Claude ID from the bundled catalog", async () => {
+		const { modelRuntime } = await createCloudflareRuntime();
+		const model = modelRuntime.getModel("cloudflare-ai-gateway", "claude-opus-4-6");
+		expect(model).toBeDefined();
+		let payload: Record<string, unknown> | undefined;
+		let url: string | undefined;
+		const fetch: typeof globalThis.fetch = async (input, init) => {
+			const request = new Request(input, init);
+			url = request.url;
+			payload = (await request.json()) as Record<string, unknown>;
+			const events = [
+				{
+					type: "message_start",
+					message: {
+						id: "offline",
+						type: "message",
+						role: "assistant",
+						content: [],
+						model: "claude-opus-4-6",
+						stop_reason: null,
+						stop_sequence: null,
+						usage: { input_tokens: 1, output_tokens: 0 },
+					},
+				},
+				{
+					type: "message_delta",
+					delta: { stop_reason: "end_turn", stop_sequence: null },
+					usage: { output_tokens: 1 },
+				},
+				{ type: "message_stop" },
+			];
+			return new Response(
+				events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		};
+		const result = await modelRuntime.completeSimple(model!, { messages: [] }, { fetch });
+		expect(result.stopReason).toBe("stop");
+		expect(payload?.model).toBe("claude-opus-4-6");
+		expect(new URL(url!).pathname).toBe("/v1/test-account/test-gateway/anthropic/v1/messages");
+	});
+
 	it("materializes the Cloudflare endpoint through ModelRuntime streaming", async () => {
 		const { modelRuntime } = await createCloudflareRuntime();
 		const model = modelRuntime.getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");

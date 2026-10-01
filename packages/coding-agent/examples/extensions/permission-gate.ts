@@ -1,23 +1,20 @@
 /**
  * Permission Gate Extension
  *
- * Prompts before potentially dangerous bash commands and background_command starts.
+ * Prompts for confirmation before running potentially dangerous bash commands.
  * Patterns checked: rm -rf, sudo, chmod/chown 777
  */
 
-import { type ExtensionAPI, isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
 	const dangerousPatterns = [/\brm\s+(-rf?|--recursive)/i, /\bsudo\b/i, /\b(chmod|chown)\b.*777/i];
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (
-			!isToolCallEventType("bash", event) &&
-			!(isToolCallEventType("background_command", event) && event.input.action === "start")
-		)
+		if (event.toolName !== "bash" && !(event.toolName === "background_command" && event.input.action === "start"))
 			return undefined;
 
-		const command = event.input.command ?? "";
+		const command = event.input.command as string;
 		const isDangerous = dangerousPatterns.some((p) => p.test(command));
 
 		if (isDangerous) {

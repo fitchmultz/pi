@@ -37,7 +37,6 @@ export * from "./session-resources.ts";
 export * from "./types.ts";
 export * from "./utils/assistant-message-frame.ts";
 export * from "./utils/diagnostics.ts";
-export { assertContextFits } from "./utils/estimate.ts";
 export * from "./utils/event-stream.ts";
 export * from "./utils/json-parse.ts";
 export * from "./utils/overflow.ts";

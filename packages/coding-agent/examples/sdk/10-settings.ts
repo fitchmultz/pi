@@ -4,13 +4,7 @@
  * Override settings using SettingsManager.
  */
 
-import {
-	createAgentSession,
-	DefaultResourceLoader,
-	getAgentDir,
-	SessionManager,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 const cwd = process.cwd();
 
@@ -18,10 +12,8 @@ const cwd = process.cwd();
 const settingsManagerFromDisk = SettingsManager.create(cwd);
 console.log("Current settings:", JSON.stringify(settingsManagerFromDisk.getGlobalSettings(), null, 2));
 
-// Load resources before applying temporary overrides: reload resets them.
+// Override specific settings
 const settingsManager = SettingsManager.create(cwd);
-const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), settingsManager });
-await resourceLoader.reload();
 settingsManager.applyOverrides({
 	compaction: { enabled: false },
 	retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
@@ -29,7 +21,6 @@ settingsManager.applyOverrides({
 
 const { session: customSettingsSession } = await createAgentSession({
 	settingsManager,
-	resourceLoader,
 	sessionManager: SessionManager.inMemory(),
 });
 console.log("Session created with custom settings");

@@ -2,11 +2,16 @@ import { collapseSystemMessages, fauxAssistantMessage, fauxToolCall, getCurrentT
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
-import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
-import instructionGroups, { type InstructionGroupCollector } from "../../src/extensions/instruction-groups.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
+import {
+	createCodemodeExtension,
+	type InstructionGroupCollector,
+	instructionGroupsExtension,
+} from "../../src/index.ts";
 import { createHarness, getToolResult, type Harness } from "./harness.ts";
 
 const full = "Full browser safety instructions: inspect before acting. Preserve all owner guidance.";
+const later = "Full later instructions";
 function owner(pi: ExtensionAPI) {
 	let managed = () => false;
 	pi.events.on("pi:instruction-groups", (data) => {
@@ -27,14 +32,14 @@ function owner(pi: ExtensionAPI) {
 			parameters: Type.Object({}),
 			defaultActive: name === "browse",
 			exposure: name === "hidden" ? "hidden" : "direct",
-			execute: async () => ({ content: [{ type: "text", text: "acted" }], details: {} }),
+			execute: async () => ({ content: [{ type: "text", text: "acted" }], details: undefined }),
 		});
 	pi.registerTool({
 		name: "plain",
 		label: "plain",
 		description: "Unrelated action",
 		parameters: Type.Object({}),
-		execute: async () => ({ content: [{ type: "text", text: "plain ran" }], details: {} }),
+		execute: async () => ({ content: [{ type: "text", text: "plain ran" }], details: undefined }),
 	});
 	pi.registerTool({
 		name: "nested",
@@ -48,10 +53,12 @@ function owner(pi: ExtensionAPI) {
 		if (!managed()) event.systemPromptOptions.appendSystemPrompt += full;
 	});
 }
-const discover = () =>
-	fauxAssistantMessage([fauxToolCall("discover_tools", { enable: ["browser"] })], { stopReason: "toolUse" });
+const discover = (enable = ["browser"]) =>
+	fauxAssistantMessage([fauxToolCall("discover_tools", { enable })], { stopReason: "toolUse" });
+const done = () => fauxAssistantMessage("done");
 
-describe("grouped instructions through the public lifecycle", () => {
+// These exercise the real request, nested-call, branch, and compaction boundaries with no provider traffic.
+describe("on-demand instruction groups", () => {
 	const harnesses: Harness[] = [];
 	afterEach(() => {
 		while (harnesses.length) harnesses.pop()?.cleanup();
@@ -59,7 +66,7 @@ describe("grouped instructions through the public lifecycle", () => {
 	async function setup(options: Parameters<typeof createHarness>[0] = {}) {
 		const harness = await createHarness({
 			initialActiveToolNames: [],
-			extensionFactories: [instructionGroups, owner],
+			extensionFactories: [instructionGroupsExtension, owner],
 			...options,
 		});
 		harnesses.push(harness);
@@ -67,250 +74,284 @@ describe("grouped instructions through the public lifecycle", () => {
 		return harness;
 	}
 
-	it("delivers full instructions before actions, blocks same-batch direct and nested calls, and never activates optional tools", async () => {
-		const harness = await setup();
-		const active = harness.session.getActiveToolNames();
-		const callable = harness.session.getCallableToolNames();
-		harness.setResponses([
-			(context) => {
-				expect(getCurrentTools(context.messages).map((tool) => tool.name)).not.toContain("browse");
-				expect(JSON.stringify(context.messages)).not.toContain(full);
-				return fauxAssistantMessage(
-					[
-						fauxToolCall("discover_tools", { enable: ["browser"] }),
-						fauxToolCall("browse", {}),
-						fauxToolCall("nested", {}),
-					],
-					{ stopReason: "toolUse" },
-				);
-			},
-			(context) => {
-				expect(JSON.stringify(context.messages)).toContain(full);
-				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toContain("browse");
-				expect(getToolResult(harness, "browse").isError).toBe(true);
-				expect(getToolResult(harness, "nested").content).toEqual(
-					expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining("prior turn") })]),
-				);
-				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
-			},
-			fauxAssistantMessage("done"),
-		]);
-		await harness.session.prompt("go");
-		expect(getToolResult(harness, "browse").content).toEqual([{ type: "text", text: "acted" }]);
-		expect(harness.session.getActiveToolNames()).toEqual(active);
-		expect(harness.session.getCallableToolNames()).toEqual(callable);
-		expect(active).not.toContain("optional");
-		expect(callable).not.toContain("hidden");
-	});
-
-	it("does not advertise groups whose tools are excluded, and supports eager owner fallback when discovery is inactive", async () => {
-		const denied = await setup({ excludedToolNames: ["browse", "optional", "hidden"] });
-		denied.setResponses([
-			fauxAssistantMessage([fauxToolCall("discover_tools", {})], { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
-		]);
-		await denied.session.prompt("list");
-		expect(getToolResult(denied, "discover_tools").content).toEqual([
-			{ type: "text", text: "No instruction groups available." },
-		]);
-		const plain = await setup({ excludedToolNames: ["discover_tools"] });
-		plain.setResponses([
-			(context) => {
-				expect(JSON.stringify(context.messages)).toContain(full);
-				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
-			},
-			fauxAssistantMessage("done"),
-		]);
-		await plain.session.prompt("act");
-		expect(getToolResult(plain, "browse").isError).not.toBe(true);
-	});
-
-	it("blocks same-batch codemode actions and permits them after the next instruction-bearing request", async () => {
-		const harness = await setup({
-			initialActiveToolNames: ["codemode"],
-			extensionFactories: [instructionGroups, owner, createCodemodeExtension()],
-		});
-		const code = () => fauxToolCall("codemode", { code: "return await tools.browse({});" });
-		harness.setResponses([
-			fauxAssistantMessage([fauxToolCall("discover_tools", { enable: ["browser"] }), code()], {
-				stopReason: "toolUse",
-			}),
-			() => {
-				expect(getToolResult(harness, "codemode").isError).toBe(true);
-				expect(JSON.stringify(getToolResult(harness, "codemode").content)).toContain("prior turn");
-				return fauxAssistantMessage([code()], { stopReason: "toolUse" });
-			},
-			fauxAssistantMessage("done"),
-		]);
-		await harness.session.prompt("discover and use codemode");
-		expect(JSON.stringify(getToolResult(harness, "codemode").content)).toContain("acted");
-	});
-
 	it.each(["parallel", "sequential"] as const)(
-		"runs unchanged plain and codemode siblings after discovery in %s mode",
-		async (toolExecution) => {
+		"gates direct, nested, and codemode calls until the next read in %s execution",
+		async (mode) => {
 			const harness = await setup({
-				initialActiveToolNames: ["plain", "codemode"],
-				extensionFactories: [instructionGroups, owner, createCodemodeExtension()],
+				initialActiveToolNames: ["codemode"],
+				extensionFactories: [instructionGroupsExtension, owner, createCodemodeExtension()],
 			});
-			harness.session.agent.toolExecution = toolExecution;
+			harness.session.agent.toolExecution = mode;
+			const active = harness.session.getActiveToolNames();
+			const callable = harness.session.getCallableToolNames();
 			harness.setResponses([
-				fauxAssistantMessage(
-					[
-						fauxToolCall("discover_tools", { enable: ["browser"] }),
-						fauxToolCall("plain", {}),
-						fauxToolCall("codemode", { code: "return 1;" }),
-					],
-					{ stopReason: "toolUse" },
-				),
-				fauxAssistantMessage("done"),
+				(context) => {
+					expect(getCurrentTools(context.messages).map((tool) => tool.name)).not.toContain("browse");
+					expect(JSON.stringify(context.messages)).not.toContain(full);
+					return fauxAssistantMessage(
+						[
+							fauxToolCall("discover_tools", { enable: ["browser"] }),
+							fauxToolCall("browse", {}),
+							fauxToolCall("nested", {}),
+							fauxToolCall("codemode", { code: "return await tools.browse({});" }),
+							fauxToolCall("plain", {}),
+						],
+						{ stopReason: "toolUse" },
+					);
+				},
+				(context) => {
+					expect(JSON.stringify(context.messages)).toContain(full);
+					expect(getCurrentTools(context.messages).map((tool) => tool.name)).toContain("browse");
+					expect(JSON.stringify(getToolResult(harness, "browse").content)).toContain("not found");
+					for (const name of ["nested", "codemode"])
+						expect(JSON.stringify(getToolResult(harness, name).content)).toContain("prior turn");
+					expect(getToolResult(harness, "plain")).toMatchObject({
+						isError: false,
+						content: [{ type: "text", text: "plain ran" }],
+					});
+					return fauxAssistantMessage(
+						[
+							fauxToolCall("browse", {}),
+							fauxToolCall("nested", {}),
+							fauxToolCall("codemode", { code: "return await tools.browse({});" }),
+						],
+						{ stopReason: "toolUse" },
+					);
+				},
+				done(),
 			]);
-			await harness.session.prompt("discover and run unrelated tools");
-			expect(getToolResult(harness, "plain")).toMatchObject({
-				isError: false,
-				content: [{ type: "text", text: "plain ran" }],
-			});
-			expect(getToolResult(harness, "codemode")).toMatchObject({
-				isError: false,
-				content: expect.arrayContaining([{ type: "text", text: "1" }]),
-			});
+			await harness.session.prompt("discover and act");
+			for (const name of ["browse", "nested", "codemode"]) {
+				expect(getToolResult(harness, name).isError).toBe(false);
+				expect(JSON.stringify(getToolResult(harness, name).content)).toContain("acted");
+			}
+			expect(harness.session.getActiveToolNames()).toEqual([
+				...active.filter((name) => name !== "browse"),
+				"browse",
+			]);
+			expect(harness.session.getCallableToolNames()).toEqual(callable);
+			expect(active).not.toContain("optional");
+			expect(callable).not.toContain("hidden");
+			expect(callable).not.toContain("discover_tools");
 		},
 	);
 
-	it("does not authorize from instructions removed by forced prompt projection", async () => {
-		let prune = false;
-		const harness = await setup({
-			extensionFactories: [
-				instructionGroups,
-				owner,
-				(pi) => {
-					pi.on("before_agent_start", (event) => {
-						event.systemPromptOptions.forceSystemPrompt = "Forced prompt";
-					});
-					pi.on("context", (event) =>
-						prune ? { messages: event.messages.filter((message) => message.role === "user") } : undefined,
-					);
-				},
-			],
-		});
-		harness.setResponses([discover(), fauxAssistantMessage("enabled")]);
-		await harness.session.prompt("enable");
-		prune = true;
+	it("lists without enabling and rejects unavailable or duplicate enables without changing state", async () => {
+		const harness = await setup();
 		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("discover_tools", {})], { stopReason: "toolUse" }),
 			(context) => {
-				expect(JSON.stringify(context.messages)).not.toContain(full);
-				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
+				expect(getToolResult(harness, "discover_tools").content).toEqual([
+					{ type: "text", text: "browser: Browser actions" },
+				]);
+				expect(getCurrentTools(context.messages).map((tool) => tool.name)).not.toContain("browse");
+				return fauxAssistantMessage([fauxToolCall("discover_tools", { enable: ["browser", "missing"] })], {
+					stopReason: "toolUse",
+				});
 			},
-			fauxAssistantMessage("done"),
+			() => {
+				expect(getToolResult(harness, "discover_tools").isError).toBe(true);
+				return fauxAssistantMessage([fauxToolCall("discover_tools", { enable: ["browser", "browser"] })], {
+					stopReason: "toolUse",
+				});
+			},
+			done(),
 		]);
-		await harness.session.prompt("act");
-		expect(getToolResult(harness, "browse").isError).toBe(true);
+		await harness.session.prompt("list and invalid enables");
+		expect(getToolResult(harness, "discover_tools").isError).toBe(true);
+		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "custom")).toMatchObject([
+			{ data: { enabled: [], inactive: ["browse"] } },
+		]);
 	});
 
-	it("does not authorize from superseded instruction sections absent from the provider context", async () => {
-		let prune = false;
-		const harness = await setup({
+	it("respects exclusions and allowlists, and keeps owners eager when discovery is inactive", async () => {
+		for (const options of [
+			{ excludedToolNames: ["browse", "optional", "hidden"] },
+			{ allowedToolNames: ["discover_tools", "plain"] },
+		]) {
+			const denied = await setup(options);
+			denied.setResponses([
+				fauxAssistantMessage([fauxToolCall("discover_tools", {})], { stopReason: "toolUse" }),
+				done(),
+			]);
+			await denied.session.prompt("list");
+			expect(getToolResult(denied, "discover_tools").content).toEqual([
+				{ type: "text", text: "No instruction groups available." },
+			]);
+		}
+		const eager = await setup({ excludedToolNames: ["discover_tools"] });
+		eager.setResponses([
+			(context) => {
+				expect(JSON.stringify(context.messages)).toContain(full);
+				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toContain("browse");
+				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
+			},
+			done(),
+		]);
+		await eager.session.prompt("act");
+		expect(getToolResult(eager, "browse").isError).toBe(false);
+	});
+
+	it("collects synchronously and rejects invalid, duplicate, and late registrations", async () => {
+		let collector: InstructionGroupCollector | undefined;
+		const errors: string[] = [];
+		await setup({
 			extensionFactories: [
-				instructionGroups,
+				instructionGroupsExtension,
 				owner,
 				(pi) => {
-					pi.on("before_agent_start", (event) => {
-						if (prune) event.systemPromptOptions.appendSystemPrompt = "";
-					});
-					pi.on("context", (event) => {
-						if (!prune) return;
-						for (const message of event.messages) {
-							if (message.role === "toolResult" && message.toolName === "discover_tools")
-								message.content = [{ type: "text", text: "Result omitted by context budget policy" }];
+					pi.events.on("pi:instruction-groups", (data) => {
+						collector = data as InstructionGroupCollector;
+						for (const group of [
+							{ name: "browser", description: "duplicate", tools: ["browse"], instructions: () => full },
+							{ name: "invalid", description: "invalid", tools: ["discover_tools"], instructions: () => full },
+						]) {
+							try {
+								collector.register(group);
+							} catch (error) {
+								errors.push(error instanceof Error ? error.message : String(error));
+							}
 						}
 					});
 				},
 			],
 		});
-		harness.setResponses([discover(), fauxAssistantMessage("enabled")]);
-		await harness.session.prompt("enable");
-		harness.setResponses([
-			(context) => {
-				expect(JSON.stringify(collapseSystemMessages(context))).toContain(full);
-				return fauxAssistantMessage("done");
-			},
-		]);
-		await harness.session.prompt("persist instruction section");
-		prune = true;
-		harness.setResponses([
-			(context) => {
-				expect(JSON.stringify(context)).toContain(full);
-				expect(JSON.stringify(collapseSystemMessages(context))).not.toContain(full);
-				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
-			},
-			fauxAssistantMessage("done"),
-		]);
-		await harness.session.prompt("act");
-		expect(getToolResult(harness, "browse").isError).toBe(true);
+		expect(collector).toBeDefined();
+		expect(collector?.isManaged()).toBe(true);
+		expect(errors).toEqual(["Invalid or duplicate instruction group", "Invalid or duplicate instruction group"]);
+		expect(() =>
+			collector?.register({ name: "late", description: "late", tools: ["browse"], instructions: () => full }),
+		).toThrow("must register synchronously");
 	});
 
-	it("restores enabled names from the selected raw branch and recalculates declarations", async () => {
+	it.each(["forced", "superseded"] as const)(
+		"does not authorize full instructions removed from the effective %s prompt",
+		async (projection) => {
+			let prune = false;
+			const harness = await setup({
+				extensionFactories: [
+					instructionGroupsExtension,
+					owner,
+					(pi) => {
+						pi.on("before_agent_start", (event) => {
+							if (projection === "forced") event.systemPromptOptions.forceSystemPrompt = "Forced prompt";
+							else if (prune) event.systemPromptOptions.appendSystemPrompt = "";
+						});
+						pi.on("context", (event) => {
+							if (!prune) return;
+							if (projection === "forced")
+								return { messages: event.messages.filter((message) => message.role === "user") };
+							for (const message of event.messages) {
+								if (message.role === "toolResult" && message.toolName === "discover_tools")
+									message.content = [{ type: "text", text: "Result omitted" }];
+							}
+						});
+					},
+				],
+			});
+			harness.setResponses([discover(), done()]);
+			await harness.session.prompt("enable");
+			harness.setResponses([done()]);
+			await harness.session.prompt("persist instruction section");
+			prune = true;
+			harness.setResponses([
+				(context) => {
+					expect(JSON.stringify(collapseSystemMessages(context))).not.toContain(full);
+					return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
+				},
+				done(),
+			]);
+			await harness.session.prompt("act");
+			expect(getToolResult(harness, "browse").isError).toBe(true);
+		},
+	);
+
+	it("restores only the selected branch on tree navigation, then restores enabled names in a fresh runtime", async () => {
 		const harness = await setup();
-		harness.setResponses([fauxAssistantMessage("before")]);
-		await harness.session.prompt("before discovery");
+		harness.setResponses([done()]);
+		await harness.session.prompt("before");
 		const before = harness.sessionManager.getLeafId()!;
-		harness.setResponses([discover(), fauxAssistantMessage("enabled")]);
+		const pending = await setup({
+			sessionManager: SessionManager.inMemory(harness.tempDir, undefined, [
+				harness.sessionManager.getHeader()!,
+				...harness.sessionManager.getBranch(),
+			]),
+		});
+		pending.setResponses([discover(), done()]);
+		await pending.session.prompt("enable after resume");
+		expect(pending.session.getActiveToolNames()).toContain("browse");
+		expect(pending.session.getActiveToolNames()).not.toContain("optional");
+		harness.setResponses([discover(), done()]);
 		await harness.session.prompt("enable");
 		const after = harness.sessionManager.getLeafId()!;
 		await harness.session.navigateTree(before);
 		harness.setResponses([
 			(context) => {
 				expect(getCurrentTools(context.messages).map((tool) => tool.name)).not.toContain("browse");
-				return fauxAssistantMessage("old branch");
+				expect(JSON.stringify(context.messages)).not.toContain(full);
+				return done();
 			},
 		]);
-		await harness.session.prompt("old");
+		await harness.session.prompt("old branch");
+		expect(harness.session.getActiveToolNames()).not.toContain("browse");
 		await harness.session.navigateTree(after);
-		// Rebinding emits session_start and recollects owner registrations.
-		await harness.session.bindExtensions({});
 		harness.setResponses([
 			(context) => {
-				expect(JSON.stringify(context.messages)).toContain(full);
 				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toContain("browse");
 				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
 			},
-			fauxAssistantMessage("done"),
+			done(),
 		]);
-		await harness.session.prompt("restored");
-		expect(getToolResult(harness, "browse").isError).not.toBe(true);
+		await harness.session.prompt("enabled branch");
+		expect(getToolResult(harness, "browse").isError).toBe(false);
+		const restored = await setup({
+			sessionManager: SessionManager.inMemory(harness.tempDir, undefined, [
+				harness.sessionManager.getHeader()!,
+				...harness.sessionManager.getBranch(),
+			]),
+		});
+		restored.setResponses([
+			(context) => {
+				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toContain("browse");
+				expect(restored.session.systemPrompt).toContain(full);
+				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
+			},
+			done(),
+		]);
+		await restored.session.prompt("resumed");
+		expect(getToolResult(restored, "browse").isError).toBe(false);
+		expect(restored.session.getActiveToolNames()).not.toContain("optional");
 	});
 
-	it("keeps the compaction repair stable when another group is discovered later", async () => {
+	it("repairs only groups enabled at each compaction boundary, including after resume", async () => {
 		const repairs: unknown[] = [];
-		const harness = await setup({
-			settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
-			extensionFactories: [
-				instructionGroups,
-				owner,
-				(pi) => {
-					pi.events.on("pi:instruction-groups", (data) =>
-						(data as InstructionGroupCollector).register({
-							name: "later",
-							description: "Later instructions",
-							tools: ["nested"],
-							instructions: () => "Full later instructions",
-						}),
-					);
-					pi.on("session_before_compact", (event) => ({
-						compaction: {
-							summary: "compacted",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-						},
-					}));
-					pi.on("context_with_system", (event) => {
-						const index = event.messages.findLastIndex((message) => message.role === "compactionSummary");
-						if (index >= 0) repairs.push(event.messages[index + 1]);
-					});
+		const extra = (pi: ExtensionAPI) => {
+			pi.events.on("pi:instruction-groups", (data) =>
+				(data as InstructionGroupCollector).register({
+					name: "later",
+					description: "Later",
+					tools: ["nested"],
+					instructions: () => later,
+				}),
+			);
+			pi.on("session_before_compact", (event) => ({
+				compaction: {
+					summary: "compacted",
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
+					tokensBefore: event.preparation.tokensBefore,
 				},
-			],
-		});
-		harness.setResponses([discover(), fauxAssistantMessage("enabled")]);
+			}));
+			pi.on("context_with_system", (event) => {
+				const index = event.messages.findLastIndex((message) => message.role === "compactionSummary");
+				if (index >= 0) repairs.push(event.messages[index + 1]);
+			});
+		};
+		const options = {
+			settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+			extensionFactories: [instructionGroupsExtension, owner, extra],
+		};
+		const harness = await setup(options);
+		harness.setResponses([discover(), done()]);
 		await harness.session.prompt("enable browser");
 		await harness.session.compact();
 		expect(
@@ -319,34 +360,40 @@ describe("grouped instructions through the public lifecycle", () => {
 			),
 		).toBe(false);
 		const boundary = harness.sessionManager.getBranch().findLast((entry) => entry.type === "compaction")!;
-		harness.setResponses([
-			fauxAssistantMessage([fauxToolCall("discover_tools", { enable: ["later"] }), fauxToolCall("browse", {})], {
-				stopReason: "toolUse",
-			}),
-			(context) => {
-				expect(JSON.stringify(context.messages)).toContain("Full later instructions");
-				return fauxAssistantMessage("done");
-			},
-		]);
-		await harness.session.prompt("enable later group");
-		expect(getToolResult(harness, "browse").isError).not.toBe(true);
+		harness.setResponses([discover(["later"]), done()]);
+		await harness.session.prompt("enable later");
 		expect(repairs).toHaveLength(2);
 		expect(repairs[0]).toEqual(repairs[1]);
 		expect(repairs[0]).toMatchObject({
 			role: "custom",
+			display: false,
 			content: `## browser\n\n${full}`,
 			timestamp: Date.parse(boundary.timestamp),
 		});
+		const resumed = await setup({
+			...options,
+			sessionManager: SessionManager.inMemory(harness.tempDir, undefined, [
+				harness.sessionManager.getHeader()!,
+				...harness.sessionManager.getBranch(),
+			]),
+		});
+		resumed.setResponses([done()]);
+		await resumed.session.prompt("resume after compaction");
+		expect(repairs.at(-1)).toEqual(repairs[0]);
+		await resumed.session.compact();
+		resumed.setResponses([done()]);
+		await resumed.session.prompt("after second compaction");
+		expect(repairs.at(-1)).toMatchObject({ content: `## browser\n\n${full}\n\n## later\n\n${later}` });
 	});
 
-	it("repairs instructions immediately after compaction when discovery mid-run triggers automatic compaction", async () => {
+	it("repairs discovery immediately when automatic compaction removes its result mid-run", async () => {
 		const large = full + " guidance".repeat(1800);
-		const repairs: unknown[] = [];
+		const repairs: { headRole: string; message: unknown }[] = [];
 		const harness = await setup({
 			models: [{ id: "faux-1", contextWindow: 12000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, reserveTokens: 6000, keepRecentTokens: 1 } },
 			extensionFactories: [
-				instructionGroups,
+				instructionGroupsExtension,
 				(pi) => {
 					pi.events.on("pi:instruction-groups", (data) =>
 						(data as InstructionGroupCollector).register({
@@ -361,7 +408,7 @@ describe("grouped instructions through the public lifecycle", () => {
 						label: "browse",
 						description: "browse",
 						parameters: Type.Object({}),
-						execute: async () => ({ content: [{ type: "text", text: "acted" }], details: {} }),
+						execute: async () => ({ content: [{ type: "text", text: "acted" }], details: undefined }),
 					});
 					pi.on("session_before_compact", (event) => ({
 						compaction: {
@@ -372,30 +419,30 @@ describe("grouped instructions through the public lifecycle", () => {
 					}));
 					pi.on("context_with_system", (event) => {
 						const index = event.messages.findLastIndex((message) => message.role === "compactionSummary");
-						if (index >= 0) {
-							const repair = event.messages[index + 1];
-							expect(repair).toMatchObject({
-								role: "custom",
-								display: false,
-								content: `## browser\n\n${large}`,
-							});
-							expect(event.messages[0].role).toBe("system");
-							repairs.push(repair);
-						}
+						if (index < 0) return;
+						repairs.push({ headRole: event.messages[0].role, message: event.messages[index + 1] });
 					});
 				},
 			],
 		});
-		harness.setResponses([fauxAssistantMessage("Earlier answer")]);
+		harness.setResponses([done()]);
 		await harness.session.prompt("Earlier context ".repeat(800));
 		harness.setResponses([
 			discover(),
 			fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
+			done(),
 		]);
 		await harness.session.prompt("discover then act");
 		expect(harness.eventsOfType("compaction_end").length).toBeGreaterThan(0);
 		expect(repairs.length).toBeGreaterThan(0);
-		expect(getToolResult(harness, "browse").isError).not.toBe(true);
+		for (const repair of repairs) {
+			expect(repair.headRole).toBe("system");
+			expect(repair.message).toMatchObject({
+				role: "custom",
+				display: false,
+				content: `## browser\n\n${large}`,
+			});
+		}
+		expect(getToolResult(harness, "browse").isError).toBe(false);
 	});
 });

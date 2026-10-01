@@ -8,7 +8,7 @@ import {
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import {
 	CacheWarmer,
@@ -26,12 +26,7 @@ import { createEventBus } from "../src/core/event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
-import {
-	getSessionEntryMetadata,
-	type SessionEntry,
-	SessionManager,
-	type UsageEntry,
-} from "../src/core/session-manager.ts";
+import { type SessionEntry, SessionManager, type UsageEntry } from "../src/core/session-manager.ts";
 import type { CacheWarmingMode } from "../src/core/settings-manager.ts";
 import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
 
@@ -109,13 +104,7 @@ function fakeRuntime(
 				} as unknown as AssistantMessageEventStream;
 			},
 		},
-		{
-			appendUsage,
-			getLeafId: () => state.branch.at(-1)?.id ?? null,
-			*iterateEntryMetadata() {
-				for (const entry of [...state.branch].reverse()) yield getSessionEntryMetadata(entry);
-			},
-		},
+		{ appendUsage, getBranch: () => state.branch },
 		() => state.mode,
 		async (event) => {
 			events.push(event);
@@ -132,11 +121,7 @@ function request(model: Model<Api> = adaptiveModel, options: ModelsSimpleStreamO
 
 const current = () => true;
 
-beforeEach(() => vi.stubEnv("PI_CACHE_RETENTION", "short"));
-afterEach(() => {
-	vi.useRealTimers();
-	vi.unstubAllEnvs();
-});
+afterEach(() => vi.useRealTimers());
 
 describe("cache warming", () => {
 	it("derives eligibility and timing from retention and provider behavior", () => {

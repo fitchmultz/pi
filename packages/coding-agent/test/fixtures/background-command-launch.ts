@@ -1,4 +1,4 @@
-import { startBackgroundCommand } from "../../src/core/background-command.ts";
+import { startBackgroundCommand } from "../../src/extensions/background-command/jobs.ts";
 import { getShellEnv } from "../../src/utils/shell.ts";
 
 const [root, cwd, command] = process.argv.slice(2);

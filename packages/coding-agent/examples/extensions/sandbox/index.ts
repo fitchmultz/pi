@@ -8,8 +8,6 @@
  * Note: this example intentionally overrides the built-in `bash` tool to show
  * how built-in tools can be replaced. Alternatively, you could sandbox `bash`
  * via `tool_call` input mutation without replacing the tool.
- * Background starts are blocked while enabled: detached workers cannot serialize
- * this process's sandbox backend. Status and cancellation remain available.
  *
  * Config files (merged, project takes precedence):
  * - ~/.pi/agent/extensions/sandbox.json (global)
@@ -48,13 +46,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-	type BashOperations,
-	CONFIG_DIR_NAME,
-	createBashTool,
-	getAgentDir,
-	isToolCallEventType,
-} from "@earendil-works/pi-coding-agent";
+import { type BashOperations, CONFIG_DIR_NAME, createBashTool, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 interface SandboxConfig extends SandboxRuntimeConfig {
 	enabled?: boolean;
@@ -139,7 +131,7 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
 
 function createSandboxedBashOps(): BashOperations {
 	return {
-		async exec(command, cwd, { onData, onEnd, signal, timeout }) {
+		async exec(command, cwd, { onData, signal, timeout }) {
 			if (!existsSync(cwd)) {
 				throw new Error(`Working directory does not exist: ${cwd}`);
 			}
@@ -153,15 +145,30 @@ function createSandboxedBashOps(): BashOperations {
 					stdio: ["ignore", "pipe", "pipe"],
 				});
 
-				let settled = false;
-				const ended = new Set<"stdout" | "stderr">();
-				const end = (source: "stdout" | "stderr") => {
-					if (ended.has(source)) return;
-					ended.add(source);
-					onEnd(source);
-				};
 				let timedOut = false;
 				let timeoutHandle: NodeJS.Timeout | undefined;
+
+				if (timeout !== undefined && timeout > 0) {
+					timeoutHandle = setTimeout(() => {
+						timedOut = true;
+						if (child.pid) {
+							try {
+								process.kill(-child.pid, "SIGKILL");
+							} catch {
+								child.kill("SIGKILL");
+							}
+						}
+					}, timeout * 1000);
+				}
+
+				child.stdout?.on("data", onData);
+				child.stderr?.on("data", onData);
+
+				child.on("error", (err) => {
+					if (timeoutHandle) clearTimeout(timeoutHandle);
+					reject(err);
+				});
+
 				const onAbort = () => {
 					if (child.pid) {
 						try {
@@ -172,54 +179,20 @@ function createSandboxedBashOps(): BashOperations {
 					}
 				};
 
-				const finish = (error?: Error, code: number | null = null) => {
-					if (settled) return;
-					settled = true;
+				signal?.addEventListener("abort", onAbort, { once: true });
+
+				child.on("close", (code) => {
 					if (timeoutHandle) clearTimeout(timeoutHandle);
 					signal?.removeEventListener("abort", onAbort);
-					child.stdout.removeListener("data", onStdout);
-					child.stderr.removeListener("data", onStderr);
-					child.stdout.removeListener("end", onStdoutEnd);
-					child.stderr.removeListener("end", onStderrEnd);
-					if (error) onAbort();
-					child.stdout.destroy();
-					child.stderr.destroy();
-					try {
-						end("stdout");
-						end("stderr");
-					} catch (e) {
-						reject(e);
-						return;
-					}
-					if (error) {
-						reject(error);
-					} else if (signal?.aborted) {
+
+					if (signal?.aborted) {
 						reject(new Error("aborted"));
 					} else if (timedOut) {
 						reject(new Error(`timeout:${timeout}`));
 					} else {
 						resolve({ exitCode: code });
 					}
-				};
-				const onStdout = (data: Buffer) => onData(data, "stdout");
-				const onStderr = (data: Buffer) => onData(data, "stderr");
-				const onStdoutEnd = () => end("stdout");
-				const onStderrEnd = () => end("stderr");
-				child.stdout.on("data", onStdout);
-				child.stderr.on("data", onStderr);
-				child.stdout.once("end", onStdoutEnd);
-				child.stderr.once("end", onStderrEnd);
-				child.stdout.on("error", finish);
-				child.stderr.on("error", finish);
-				child.on("error", finish);
-				signal?.addEventListener("abort", onAbort, { once: true });
-				if (timeout !== undefined && timeout > 0) {
-					timeoutHandle = setTimeout(() => {
-						timedOut = true;
-						onAbort();
-					}, timeout * 1000);
-				}
-				child.on("close", (code) => finish(undefined, code));
+				});
 			});
 		},
 	};
@@ -238,12 +211,11 @@ export default function (pi: ExtensionAPI) {
 	let sandboxEnabled = false;
 	let sandboxInitialized = false;
 
-	// Detached workers cannot serialize this process's custom sandbox backend.
 	pi.on("tool_call", (event) => {
-		if (sandboxEnabled && isToolCallEventType("background_command", event) && event.input.action === "start") {
+		if (sandboxEnabled && event.toolName === "background_command" && event.input.action === "start") {
 			return {
 				block: true,
-				reason: "Background commands do not support this sandbox. Use the sandboxed bash tool.",
+				reason: "Sandbox mode does not support detached background commands. Use sandboxed bash.",
 			};
 		}
 	});

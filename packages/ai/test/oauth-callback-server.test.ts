@@ -71,6 +71,9 @@ describe.sequential("OAuth callback server", () => {
 		expect(success).toMatchObject({ status: 200, contentType: "text/html; charset=utf-8" });
 		expect(success.body).toContain("Authentication successful");
 		expect(success.body).toContain("Signed in to Example.");
+		expect(success.body).toContain('fill="#F09082"');
+		expect(success.body).toContain('fill="#4D9ABF"');
+		expect(success.body).toContain('fill="#F1BE58"');
 		await expect(server.wait()).resolves.toBe("completed:the-code");
 	});
 
@@ -155,6 +158,13 @@ describe.sequential("OAuth callback server", () => {
 		await expect(start<string>({ signal: alreadyAborted.signal })).rejects.toThrow("Login cancelled");
 	});
 
+	it("closes a listener when cancellation arrives during binding", async () => {
+		const controller = new AbortController();
+		const starting = start<string>({ signal: controller.signal });
+		controller.abort();
+		await expect(starting).rejects.toThrow("Login cancelled");
+	});
+
 	it("fails instead of picking another port when the requested port is taken", async () => {
 		const blocker: Server = createServer();
 		await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
@@ -169,30 +179,18 @@ describe.sequential("OAuth callback server", () => {
 });
 
 describe.sequential("waitForCallbackOrManualInput", () => {
-	it("aborts a non-cooperative manual prompt and suppresses a pre-aborted prompt", async () => {
+	it("cancels manual input even when the prompt ignores its abort signal", async () => {
 		const controller = new AbortController();
-		let promptSignal: AbortSignal | undefined;
-		const prompt = vi.fn((input: AuthPrompt) => {
-			promptSignal = input.signal;
-			return new Promise<string>(() => {});
-		});
-		const result = waitForCallbackOrManualInput(interaction(prompt, controller.signal), undefined, {
-			message: "paste",
-			placeholder: "code",
-		});
-		await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+		const result = waitForCallbackOrManualInput(
+			interaction(() => new Promise(() => {}), controller.signal),
+			undefined,
+			{ message: "paste", placeholder: "" },
+		);
 		controller.abort(new Error("cancelled"));
-		await expect(result).rejects.toThrow("cancelled");
-		expect(promptSignal?.aborted).toBe(true);
 		await expect(
-			waitForCallbackOrManualInput(interaction(prompt, controller.signal), undefined, {
-				message: "paste",
-				placeholder: "code",
-			}),
+			Promise.race([result, new Promise((resolve) => setTimeout(() => resolve("hung"), 50))]),
 		).rejects.toThrow("cancelled");
-		expect(prompt).toHaveBeenCalledOnce();
 	});
-
 	it("returns the browser callback and aborts the manual prompt", async () => {
 		let manualSignal: AbortSignal | undefined;
 		const server = await startOAuthCallbackServer({

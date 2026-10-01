@@ -1,10 +1,18 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { join, resolve } from "node:path";
 import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import lockfile from "proper-lockfile";
 import { selectConfig } from "./cli/config-selector.ts";
-import { getActiveManagedInstallRoot } from "./cli/managed-install.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import {
 	APP_NAME,
@@ -28,6 +36,7 @@ import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./utils/child-process.ts";
 import { runForkUpdate } from "./utils/fork-update.ts";
+import { canonicalizePath, getCwdRelativePath } from "./utils/paths.ts";
 import { getPiUserAgent } from "./utils/pi-user-agent.ts";
 import { formatVersionCheckError, getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.ts";
 import {
@@ -45,7 +54,35 @@ type UpdateTarget =
 	| { type: "models" };
 
 const DEFAULT_INSTALLER_API_BASE = "https://pi.dev/api/installer/releases";
+const MANAGED_INSTALL_MARKER = "managed-install.json";
 const MANAGED_RELEASE_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+function getActiveManagedInstallRoot(): string | undefined {
+	const configuredRoot = process.env.PI_MANAGED_INSTALL_ROOT?.trim();
+	if (!configuredRoot) return undefined;
+
+	const managedRoot = resolve(configuredRoot);
+	const releasesDir = canonicalizePath(join(managedRoot, "releases"));
+	// The launcher environment is inherited by child processes. Do not classify a
+	// source checkout or another Pi installation launched from managed Pi as managed.
+	if (getCwdRelativePath(canonicalizePath(getPackageDir()), releasesDir) === undefined) return undefined;
+
+	const markerPath = join(managedRoot, MANAGED_INSTALL_MARKER);
+	try {
+		const marker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+			kind?: unknown;
+			layout?: unknown;
+			schemaVersion?: unknown;
+		};
+		if (marker.kind !== "pi-managed-install" || marker.schemaVersion !== 1 || marker.layout !== "releases-v1") {
+			throw new Error();
+		}
+	} catch {
+		throw new Error(`Managed install marker is missing or invalid: ${markerPath}`);
+	}
+
+	return managedRoot;
+}
 
 async function fetchInstallerArtifact(url: string, label: string): Promise<string> {
 	const response = await fetch(url, { headers: { "User-Agent": getPiUserAgent(VERSION) } });
@@ -119,7 +156,7 @@ function cleanupManagedStaging(managedRoot: string): void {
 export function cleanupManagedInstall(): void {
 	let managedRoot: string | undefined;
 	try {
-		managedRoot = getActiveManagedInstallRoot(getPackageDir());
+		managedRoot = getActiveManagedInstallRoot();
 	} catch {
 		return;
 	}
@@ -333,7 +370,7 @@ adjacent npm, Git, bash, tar, gzip, tmux, and network access.
 Supports macOS/Linux/Termux arm64/x64, not Windows, ordinary npm directories, or other
 install methods. No existing checkout needed. Does not update extensions/settings
 or restart running sessions. Cannot combine with other targets or --force.
-Initial setup: https://github.com/fitchmultz/pi/blob/main/FORK.md
+Initial setup: https://github.com/fitchmultz/pi/blob/main/packages/coding-agent/docs/quickstart.md#fork-installation
 Exit status: 0 on success/help, 1 on invalid options or failed update.
 `);
 			return;
@@ -1026,7 +1063,7 @@ export async function handlePackageCommand(
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
-					const managedInstallRoot = getActiveManagedInstallRoot(getPackageDir());
+					const managedInstallRoot = getActiveManagedInstallRoot();
 					if (managedInstallRoot && options.force) {
 						console.error(
 							chalk.red(

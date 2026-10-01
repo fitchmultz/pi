@@ -5,7 +5,6 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { statSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { setCapabilityOverrides } from "@earendil-works/pi-tui";
@@ -27,14 +26,11 @@ import {
 	printAuthCommandHelp,
 	validateAuthCommandArgs,
 } from "./cli/auth-command.ts";
-import { CHECKPOINT_SOCKET_ENV, startCheckpointControl } from "./cli/checkpoint-control.ts";
 import { resolveCredentialForPrint } from "./cli/credential-print.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
-import { createManagedRestart, prepareRestartCheckpoint, restoreRestartSession } from "./cli/restart-worker.ts";
-import { runSessionConversionCommand } from "./cli/session-conversion-command.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
@@ -46,12 +42,6 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
-import {
-	CHECKPOINT_EXIT_PATH_ENV,
-	openSessionCheckpointFile,
-	prepareCheckpointExit,
-	readSessionCheckpointState,
-} from "./core/checkpoint.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
@@ -73,6 +63,7 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { builtInExtensions } from "./extensions/index.ts";
 import { loadMcpCommand } from "./extensions/mcp/cli.lazy.ts";
+import restartExtension, { createManagedRestart } from "./extensions/restart/index.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
@@ -93,12 +84,17 @@ async function readPipedStdin(): Promise<string | undefined> {
 		return undefined;
 	}
 
-	let data = "";
-	process.stdin.setEncoding("utf8");
-	for await (const chunk of process.stdin) {
-		data += chunk;
-	}
-	return data || undefined;
+	return new Promise((resolve) => {
+		let data = "";
+		process.stdin.setEncoding("utf8");
+		process.stdin.on("data", (chunk) => {
+			data += chunk;
+		});
+		process.stdin.on("end", () => {
+			resolve(data.trim() || undefined);
+		});
+		process.stdin.resume();
+	});
 }
 
 function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]): void {
@@ -340,31 +336,9 @@ function validateSessionIdFlags(parsed: Args): void {
 	}
 }
 
-function validateSessionCwdFlags(parsed: Args): void {
-	if (parsed.sessionCwd === undefined) return;
-
-	if (!parsed.session) {
-		console.error(chalk.red("Error: --session-cwd requires --session"));
-		process.exit(1);
-	}
-
-	const conflictingFlags = [
-		parsed.fork !== undefined ? "--fork" : undefined,
-		parsed.continue ? "--continue" : undefined,
-		parsed.resume ? "--resume" : undefined,
-		parsed.sessionId !== undefined ? "--session-id" : undefined,
-		parsed.noSession ? "--no-session" : undefined,
-	].filter((flag): flag is string => flag !== undefined);
-
-	if (conflictingFlags.length > 0) {
-		console.error(chalk.red(`Error: --session-cwd cannot be combined with ${conflictingFlags.join(", ")}`));
-		process.exit(1);
-	}
-}
-
-function openSessionOrExit(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
+function openSessionOrExit(path: string, sessionDir?: string): SessionManager {
 	try {
-		return SessionManager.open(path, sessionDir, cwdOverride);
+		return SessionManager.open(path, sessionDir);
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(chalk.red(`Error: ${message}`));
@@ -388,22 +362,8 @@ export async function createSessionManager(
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
 ): Promise<SessionManager> {
-	let sessionCwd: string | undefined;
-	if (parsed.sessionCwd !== undefined) {
-		try {
-			sessionCwd = resolvePath(parsed.sessionCwd, cwd);
-			if (!statSync(sessionCwd).isDirectory()) {
-				throw new Error(`Not a directory: ${sessionCwd}`);
-			}
-		} catch (error: unknown) {
-			const message = error instanceof Error ? error.message : String(error);
-			console.error(chalk.red(`Error: Invalid --session-cwd: ${message}`));
-			process.exit(1);
-		}
-	}
-
 	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
-		return SessionManager.inMemory(cwd, { id: parsed.sessionId, sessionDir });
+		return SessionManager.inMemory(cwd, parsed.sessionId !== undefined ? { id: parsed.sessionId } : undefined);
 	}
 
 	if (parsed.fork) {
@@ -435,10 +395,9 @@ export async function createSessionManager(
 		switch (resolved.type) {
 			case "path":
 			case "local":
-				return openSessionOrExit(resolved.path, sessionDir, sessionCwd);
+				return openSessionOrExit(resolved.path, sessionDir);
 
 			case "global": {
-				if (sessionCwd !== undefined) return openSessionOrExit(resolved.path, sessionDir, sessionCwd);
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
 				const shouldFork = await promptConfirm("Fork this session into current directory?");
 				if (!shouldFork) {
@@ -508,6 +467,12 @@ function buildSessionOptions(
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
+	if (parsed.provider && !parsed.model) {
+		diagnostics.push({
+			type: "error",
+			message: `--provider requires --model (for example: --provider ${parsed.provider} --model <pattern>)`,
+		});
+	}
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -533,9 +498,7 @@ function buildSessionOptions(
 	}
 
 	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
-		// Scope resolution retains models with failed auth checks (without marking them
-		// configured), so a matching saved default is not replaced by a healthy payer.
-		// A scope excluding that model, or an explicit --model above, still wins.
+		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
 		const savedModel = savedProvider && savedModelId ? modelRuntime.getModel(savedProvider, savedModelId) : undefined;
@@ -609,31 +572,8 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
-	if (runSessionConversionCommand(args)) return;
 	resetTimings();
-	const exitCheckpointPath = process.env[CHECKPOINT_EXIT_PATH_ENV];
-	let exitRestoreCheckpoint: ReturnType<typeof readSessionCheckpointState> | undefined;
-	let writeExitCheckpoint: ReturnType<typeof prepareCheckpointExit> | undefined;
-	if (exitCheckpointPath) {
-		// Load a shared restore/output path first, but clear old proof even if another restore input fails.
-		try {
-			const restorePath = parseArgs(args).checkpoint;
-			if (restorePath) exitRestoreCheckpoint = readSessionCheckpointState(resolvePath(restorePath, process.cwd()));
-		} finally {
-			writeExitCheckpoint = prepareCheckpointExit(exitCheckpointPath);
-		}
-	}
-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
-	const restart = createManagedRestart(args);
-	const managedInteractive =
-		restart &&
-		!startupBenchmark &&
-		resolveAppMode(parseArgs(args), process.stdin.isTTY, process.stdout.isTTY) === "interactive";
-	const extensionFactories = [
-		...builtInExtensions,
-		...(options?.extensionFactories ?? []),
-		...(managedInteractive ? [restart.extension] : []),
-	];
+	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
@@ -710,6 +650,17 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
+	const managedRestart =
+		appMode === "interactive" &&
+		!parsed.help &&
+		parsed.listModels === undefined &&
+		!isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK)
+			? createManagedRestart()
+			: undefined;
+	if (managedRestart) {
+		// Lifecycle control is always present in managed sessions, even with -ne.
+		extensionFactories.push({ name: "restart", factory: restartExtension, hidden: true });
+	}
 	const shouldTakeOverStdout = appMode !== "interactive" && !isPlainRuntimeMetadataCommand(parsed);
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
@@ -720,43 +671,6 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	if (
-		parsed.checkpoint &&
-		(appMode !== "interactive" ||
-			parsed.session ||
-			parsed.sessionCwd ||
-			parsed.sessionId ||
-			parsed.fork ||
-			parsed.continue ||
-			parsed.resume ||
-			parsed.noSession ||
-			parsed.name ||
-			parsed.messages.length ||
-			parsed.fileArgs.length ||
-			parsed.model ||
-			parsed.provider ||
-			parsed.thinking ||
-			parsed.tools ||
-			parsed.noTools ||
-			parsed.noBuiltinTools ||
-			parsed.excludeTools)
-	) {
-		throw new Error(
-			"--checkpoint requires interactive mode without startup prompts or session/model/tool selection overrides",
-		);
-	}
-	if (restart?.handoff?.checkpoint.files && appMode !== "interactive")
-		throw new Error("Managed restart checkpoint requires interactive mode");
-	const checkpointFile = restart?.handoff
-		? ((await prepareRestartCheckpoint(restart.handoff, parsed)) ??
-			(parsed.checkpoint ? resolvePath(parsed.checkpoint, cwd) : undefined))
-		: parsed.checkpoint
-			? resolvePath(parsed.checkpoint, cwd)
-			: undefined;
-	const checkpoint =
-		exitRestoreCheckpoint ?? (checkpointFile ? readSessionCheckpointState(checkpointFile) : undefined);
-
-	validateSessionCwdFlags(parsed);
 	validateForkFlags(parsed);
 	validateSessionIdFlags(parsed);
 
@@ -788,13 +702,9 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	let sessionManager = checkpoint
-		? openSessionCheckpointFile(checkpointFile!).sessionManager
-		: await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
-	if (restart?.handoff) restoreRestartSession(sessionManager, restart.handoff);
+	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
-		if (checkpoint) throw new MissingSessionCwdError(missingSessionCwdIssue);
 		if (appMode === "interactive") {
 			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
 			if (!selectedCwd) {
@@ -826,7 +736,6 @@ export async function main(args: string[], options?: MainOptions) {
 	const projectTrustByCwd = new Map<string, boolean>();
 
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
-	restart?.setExtensions(resolvedExtensionPaths ?? []);
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
@@ -853,11 +762,7 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
-			// Services reads this separately for initial restoration and the post-extension barrier.
-			// Bound each model/auth phase, not user time at project trust or extension loading.
-			get modelRuntimeSignal() {
-				return AbortSignal.timeout(15_000);
-			},
+			modelRuntimeSignal: AbortSignal.timeout(15_000),
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderReloadOptions: shouldResolveProjectTrust
 				? {
@@ -912,13 +817,6 @@ export async function main(args: string[], options?: MainOptions) {
 				message: `Extension package "${path}": ${warning}`,
 			})),
 		];
-		// A failed provider extension cannot supply the cold model. Report its actual
-		// startup error before checkpoint construction would mask it as a missing model.
-		if (isInitialRuntime && checkpoint && resourceLoader.getExtensions().errors.length > 0) {
-			reportDiagnostics(deduplicateDiagnostics(diagnostics));
-			console.error(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT));
-			process.exit(1);
-		}
 
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
@@ -949,46 +847,18 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 		}
 
-		// A cold checkpoint's restrictions may never have appeared in argv. Carry the
-		// effective configuration through managed restart and later session replacements.
-		const toolConfiguration = checkpoint?.toolConfiguration ??
-			restart?.handoff?.toolConfiguration ?? {
-				allowedToolNames: sessionOptions.tools ?? (sessionOptions.noTools === "all" ? [] : undefined),
-				excludedToolNames: sessionOptions.excludeTools,
-				noBuiltinTools: sessionOptions.noTools === "builtin" || undefined,
-			};
 		const created = await createAgentSessionFromServices({
-			checkpointFile: isInitialRuntime ? checkpointFile : undefined,
 			services,
 			sessionManager,
 			sessionStartEvent,
-			deferBackgroundCommandNotifications: true,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
-			tools: toolConfiguration.allowedToolNames,
-			excludeTools: toolConfiguration.excludedToolNames,
-			noTools: toolConfiguration.noBuiltinTools ? "builtin" : undefined,
+			tools: sessionOptions.tools,
+			excludeTools: sessionOptions.excludeTools,
+			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
-		restart?.setToolConfiguration(toolConfiguration);
-		if (isInitialRuntime && restart?.handoff) {
-			// Transcript restoration cannot know about newly installed extension tools. Admit them
-			// before session_start so extension startup choices still govern restart's new-tool merge.
-			// getAllTools() is registry-filtered; optional built-ins must not become defaults here.
-			const knownTools = new Set(restart.handoff.checkpoint.knownTools);
-			const added = created.session
-				.getAllTools()
-				.filter(
-					(tool) =>
-						tool.sourceInfo.source !== "builtin" &&
-						!knownTools.has(tool.name) &&
-						(tool.exposure === "direct" || tool.exposure === "model-only") &&
-						created.session.getToolDefinition(tool.name)?.defaultActive !== false,
-				)
-				.map((tool) => tool.name);
-			created.session.setActiveToolsByName([...new Set([...created.session.getActiveToolNames(), ...added])]);
-		}
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);
@@ -1008,7 +878,6 @@ export async function main(args: string[], options?: MainOptions) {
 	});
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
-	restart?.setInitialProvider(session.model?.provider);
 	const { settingsManager, modelRuntime, resourceLoader } = services;
 	setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides());
 	applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
@@ -1066,13 +935,12 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createAgentSession");
 
-	// RPC, like the TUI, supports pre-login commands and session inspection without a model.
-	// Actual model runs still reject through AgentSession's native admission checks.
-	if (appMode !== "interactive" && appMode !== "rpc" && !session.model) {
+	if (appMode !== "interactive" && !session.model) {
 		console.error(chalk.red(formatNoModelsAvailableMessage()));
 		process.exit(1);
 	}
 
+	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);
@@ -1089,45 +957,37 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (appMode === "rpc") {
-		printTimings();
 		const interactiveMode =
-			process.stdin.isTTY && process.stdout.isTTY
+			process.platform !== "win32" && process.stdin.isTTY && process.stdout.isTTY
 				? new InteractiveMode(runtime, {
-						migratedProviders,
-						modelFallbackMessage,
 						autoTrustOnReloadCwd,
 						verbose: parsed.verbose,
 						tuiMode: parsed.tuiMode,
 						initialThemeSetting: parsed.useTheme,
 					})
 				: undefined;
+		printTimings();
 		await runRpcMode(runtime, { interactiveMode });
 	} else if (appMode === "interactive") {
 		const interactiveMode = new InteractiveMode(runtime, {
+			managedRestart,
 			migratedProviders,
 			startupDiagnostics,
 			modelFallbackMessage,
 			autoTrustOnReloadCwd,
-			initialMessage: restart?.handoff?.message
-				? `[Pi restart continuation]${restart.handoff.failure ? `\n${restart.handoff.failure}` : ""}\n${restart.handoff.message}`
-				: initialMessage,
+			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
 			tuiMode: parsed.tuiMode,
 			initialThemeSetting: parsed.useTheme,
-			onShutdownRequested: restart?.shutdownRequested,
-			prepareRestartCheckpoint: restart?.prepareShutdownCheckpoint,
-			writeExitCheckpoint,
 		});
-		await interactiveMode.init();
-		time("interactiveMode.init");
 		if (startupBenchmark) {
-			console.error("PI_STARTUP_READY");
+			await interactiveMode.init();
+			time("interactiveMode.init");
 			// Give the TUI's stdin handler a brief chance to consume terminal query replies
 			// (Kitty keyboard protocol, device attributes, cell size) before restoring the terminal.
 			await new Promise((resolve) => setTimeout(resolve, 150));
-			await runtime.dispose();
 			interactiveMode.stop();
 			stopThemeWatcher();
 			printTimings();
@@ -1140,25 +1000,8 @@ export async function main(args: string[], options?: MainOptions) {
 			return;
 		}
 
-		if (restart) {
-			if (!(await restart.ready())) return;
-		}
-		let closeCheckpointControl: (() => void) | undefined;
-		if (process.env[CHECKPOINT_SOCKET_ENV]) {
-			closeCheckpointControl = await startCheckpointControl({
-				path: process.env[CHECKPOINT_SOCKET_ENV]!,
-				getSession: () => runtime.session,
-				quiesce: () => interactiveMode.quiesceForCheckpoint(),
-				canQuiesce: () => interactiveMode.canQuiesceForCheckpoint(),
-			});
-		}
-		time("interactiveMode.ready");
 		printTimings();
-		try {
-			await interactiveMode.run();
-		} finally {
-			closeCheckpointControl?.();
-		}
+		await interactiveMode.run();
 	} else {
 		printTimings();
 		const exitCode = await runPrintMode(runtime, {

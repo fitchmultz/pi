@@ -1,16 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AgentSessionEvent } from "../core/agent-session.ts";
-import type { JsonRecordLayout } from "../core/json-record-writer.ts";
-
-/** Native event aggregates; arbitrary message/entry payloads remain native leaves. */
-export const jsonEventLayout: JsonRecordLayout = {
-	fields: {
-		messages: { items: {} },
-		toolResults: { items: {} },
-		steering: { items: {} },
-		followUp: { items: {} },
-	},
-};
 
 type WithoutPartial<T> = T extends { partial: unknown } ? Omit<T, "partial"> : T;
 

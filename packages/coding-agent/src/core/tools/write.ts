@@ -1,6 +1,5 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { publishLocalFile } from "@earendil-works/pi-agent-core/node";
-import { mkdir as fsMkdir } from "fs/promises";
+import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
@@ -32,7 +31,8 @@ export interface WriteOperations {
 	mkdir: (dir: string) => Promise<void>;
 }
 
-const defaultWriteOperations: Pick<WriteOperations, "mkdir"> = {
+const defaultWriteOperations: WriteOperations = {
+	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
 	mkdir: (dir) => fsMkdir(dir, { recursive: true }).then(() => {}),
 };
 
@@ -67,7 +67,8 @@ export function createWriteToolDefinition(
 			return withFileMutationQueue(absolutePath, async () => {
 				// Do not reject from an abort event listener here: that would release the
 				// mutation queue while an in-flight filesystem operation may still finish.
-				// Once publication succeeds, late cancellation must not report it as failed.
+				// Checking signal.aborted after each await observes the same aborts while
+				// keeping the queue locked until the current operation has settled.
 				const throwIfAborted = (): void => {
 					if (signal?.aborted) throw new Error("Operation aborted");
 				};
@@ -78,8 +79,8 @@ export function createWriteToolDefinition(
 				throwIfAborted();
 
 				// Write the file contents.
-				if (options?.operations) await options.operations.writeFile(absolutePath, content);
-				else await publishLocalFile(absolutePath, content, signal);
+				await ops.writeFile(absolutePath, content);
+				throwIfAborted();
 
 				return {
 					content: [{ type: "text", text: `Successfully wrote to ${path}` }],

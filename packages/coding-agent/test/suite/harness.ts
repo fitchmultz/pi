@@ -109,9 +109,6 @@ export function createTestUiContext(overrides: Partial<ExtensionUIContext> = {})
 }
 
 export interface HarnessOptions {
-	cwd?: string;
-	sessionManager?: SessionManager;
-	settingsManager?: SettingsManager;
 	models?: FauxModelDefinition[];
 	settings?: Partial<Settings>;
 	tools?: AgentTool[];
@@ -122,6 +119,8 @@ export interface HarnessOptions {
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
+	/** Session to continue, for example to test a resume. Default: a new in-memory session. */
+	sessionManager?: SessionManager;
 }
 
 export interface Harness {
@@ -160,7 +159,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
 	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
-	const settingsManager = options.settingsManager ?? SettingsManager.inMemory(options.settings);
+	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
 	if (withConfiguredAuth) {
@@ -225,23 +224,16 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		},
 	});
 	const extensionsResult = options.extensionFactories
-		? await createTestExtensionsResult(options.extensionFactories, options.cwd ?? tempDir)
+		? await createTestExtensionsResult(options.extensionFactories, tempDir)
 		: undefined;
 	const resourceLoader =
 		options.resourceLoader ?? createTestResourceLoader(extensionsResult ? { extensionsResult } : undefined);
-	const factories = options.extensionFactories;
-	if (factories && !options.resourceLoader) {
-		resourceLoader.reload = async () => {
-			const refreshed = await createTestExtensionsResult(factories, options.cwd ?? tempDir);
-			resourceLoader.getExtensions = () => refreshed;
-		};
-	}
 
 	const session = new AgentSession({
 		agent,
 		sessionManager,
 		settingsManager,
-		cwd: options.cwd ?? tempDir,
+		cwd: tempDir,
 		modelRuntime: getModelRuntime(modelRegistry),
 		resourceLoader,
 		baseToolsOverride: toolMap,

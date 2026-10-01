@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
-import * as bashExecutor from "../../../src/core/bash-executor.ts";
-import { CheckpointActivity } from "../../../src/core/checkpoint.ts";
 import type { ExtensionAPI, UserBashEvent, UserBashEventResult } from "../../../src/core/extensions/types.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
@@ -29,16 +27,10 @@ vi.mock("../../../src/modes/interactive/components/bash-execution.js", () => ({
 	BashExecutionComponent: class {
 		appendOutput(): void {}
 		setComplete(): void {}
-		setExpanded(): void {}
 	},
 }));
 
-vi.mock("../../../src/core/json-record-writer.ts", () => ({
-	writeJsonRecordToStdout: (value: unknown) => rpcIo.outputLines.push(`${JSON.stringify(value)}\n`),
-}));
-
 vi.mock("../../../src/modes/rpc/jsonl.js", () => ({
-	rpcOutputLayout: { fields: {} },
 	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
 		rpcIo.lineHandler = onLine;
 		return () => {
@@ -123,10 +115,6 @@ async function startRpcHarness(extension: (pi: ExtensionAPI) => void): Promise<{
 }
 
 type InteractiveBashContext = {
-	checkpointUIActivity: CheckpointActivity;
-	checkpointCallback: <Args extends unknown[], Result>(
-		callback: (...args: Args) => Result | Promise<Result>,
-	) => (...args: Args) => Promise<Result>;
 	defaultEditor: { onSubmit?: (text: string) => Promise<void> | void };
 	editor: { addToHistory?: (text: string) => void };
 	session: Harness["session"];
@@ -194,7 +182,7 @@ afterEach(() => {
 describe("RPC user_bash failure handling (#9068)", () => {
 	test.each(rpcCases)("$name", async ({ extension, error, executeCount }) => {
 		const rpc = await startRpcHarness(extension);
-		const executeBash = vi.spyOn(bashExecutor, "executeBashWithOperations").mockResolvedValue(localResult);
+		const executeBash = vi.spyOn(rpc.harness.session, "executeBash").mockResolvedValue(localResult);
 
 		try {
 			rpc.send({ id: "bash-request", type: "bash", command: "pwd" });
@@ -247,10 +235,8 @@ describe("Interactive user_bash failure handling (#9068)", () => {
 				},
 			],
 		});
-		const executeBash = vi.spyOn(bashExecutor, "executeBashWithOperations").mockResolvedValue(localResult);
+		const executeBash = vi.spyOn(harness.session, "executeBash").mockResolvedValue(localResult);
 		const context: InteractiveBashContext = {
-			checkpointUIActivity: new CheckpointActivity(),
-			checkpointCallback: Reflect.get(InteractiveMode.prototype, "checkpointCallback"),
 			defaultEditor: {},
 			editor: { addToHistory: vi.fn() },
 			session: harness.session,

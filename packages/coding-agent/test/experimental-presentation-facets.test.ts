@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { readFacetBundleManifest } from "@earendil-works/chord/node";
@@ -18,7 +18,6 @@ import { PresentationPlugins } from "../src/experimental/services/plugins.ts";
 const runtimes = new Set<ClientRuntime>();
 const runningServers = new Set<RunningServer>();
 const directories = new Set<string>();
-const socketTmpDir = process.platform === "android" ? resolve(dirname(process.execPath), "../tmp") : "/tmp";
 
 afterEach(async () => {
 	await Promise.allSettled([...runtimes].map((runtime) => runtime.dispose()));
@@ -41,7 +40,7 @@ describe("server-selected presentation facets", () => {
 	});
 
 	test("restores plugin package selections for later server generations", async () => {
-		const directory = await mkdtemp(join(socketTmpDir, "pp-"));
+		const directory = await mkdtemp("/tmp/pi-presentation-profile-");
 		directories.add(directory);
 		const serverId = randomUUID();
 		const packagePaths = [join(directory, "first-plugin"), join(directory, "second-plugin")];
@@ -52,7 +51,7 @@ describe("server-selected presentation facets", () => {
 	});
 
 	test("builds conventional plugin entries into the server-owned plugin cache", async () => {
-		const directory = await mkdtemp(join(socketTmpDir, "pp-"));
+		const directory = await mkdtemp("/tmp/pi-presentation-package-");
 		directories.add(directory);
 		const serverId = randomUUID();
 		const packagePath = join(directory, "pi-example-plugin");
@@ -157,7 +156,7 @@ describe("server-selected presentation facets", () => {
 	});
 
 	test("builds the example plugin package without a package-owned build script", async () => {
-		const directory = await mkdtemp(join(socketTmpDir, "pp-"));
+		const directory = await mkdtemp("/tmp/pi-example-plugin-");
 		directories.add(directory);
 		const serverId = randomUUID();
 		const packagePath = fileURLToPath(new URL("../examples/plugins/pi-example-plugin", import.meta.url));

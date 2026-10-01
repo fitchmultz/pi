@@ -18,7 +18,7 @@ Browse the [model catalog](https://pi.dev/models) for current providers, model I
 
 Run `/login` and select a provider. Pi stores credentials in [`auth.json`](configuration.md#agent-directory). Run `/logout` to remove stored credentials for a provider.
 
-You can instead provide an API key through the provider's environment variable. This is useful in CI and other environments where Pi should not write credentials. [Provider Authentication](providers.md) lists the variables and cloud-provider setup.
+You can instead provide an API key through the provider's environment variable. This is useful in CI and other environments where Pi should not write credentials. [Providers](providers.md) lists the variables and provider-specific setup.
 
 When several credential sources are configured, Pi uses a runtime `--api-key` first, then a stored `auth.json` credential, an `apiKey` from `models.json`, and finally the provider's environment variables or ambient cloud credentials. Provider extensions can define their own authentication behavior.
 
@@ -33,6 +33,18 @@ Run `/thinking` to select the thinking level for the current model. Press `Ctrl+
 `Ctrl+P` cycles through available models. Use `/scoped-models` to control that cycle and save the selection, or configure model patterns through [Settings](settings.md#model-cycling).
 
 A session records model and thinking-level changes. Resuming the session restores them without changing defaults for new sessions.
+
+### Ultrafast cost estimates
+
+OpenAI Responses (API keys and Sign in with ChatGPT) and legacy Codex Responses price exact
+`gpt-6-astra` at 6x standard only when the terminal response confirms `service_tier: "ultrafast"`.
+The multiplier covers input, cached input, cache writes, and output after any long-context tier
+is selected. Missing, unknown, or `default` returned tiers do not confirm Ultrafast; other models,
+including Sol preview, are unchanged. The 8x subscription-allowance consumption rate is not
+a monetary estimate.
+
+Request and returned tiers are observable through the existing `before_provider_request` and
+`provider_stream_event` extension hooks. This does not add a tier setting or persist tier metadata.
 
 ## Connect local models
 
@@ -63,9 +75,7 @@ Use [`models.json`](configuration.md#agent-directory) when an endpoint speaks an
 
 The dummy key makes the model available to Pi; Ollama ignores it. For an authenticated endpoint, `apiKey` and header values can use `$NAME` or `${NAME}` environment interpolation, a literal value, or a leading `!command`. Commands in `models.json` run at request time and are not cached by Pi.
 
-Opening `/model` reloads the file. A `models` entry adds or replaces a model with the same ID on that provider. Use `modelOverrides` to change metadata for a built-in, custom, or extension-provided model without replacing the provider's model list. Custom entries and extension replacements are composed first, then matching overrides apply; model-definition header keys take precedence. Unknown override IDs are ignored.
-
-GPT-6 Astra, Sol and Luna use standard request-boundary tools. On supported official OpenAI and Codex routes, ordinary stateless requests can preserve initial reasoning effort with between-request `configuration_update` items; this is not live steering. Explicit `compat` settings and model overrides take precedence over catalog defaults. See [bounded cache-prefix preservation](../../ai/README.md#bounded-cache-prefix-preservation) for provider-specific constraints.
+Opening `/model` reloads the file. A `models` entry adds or replaces a model with the same ID on that provider. Use `modelOverrides` to change metadata for an existing built-in or extension-provided model without replacing the provider's model list. Unknown override IDs are ignored.
 
 ### Describe model input and caching
 
@@ -100,10 +110,6 @@ Use `promptCache` to declare the provider's best-effort cache lifetime in second
 
 Choose the conservative end of any published range. A model without a lifetime for the active tier is not eligible for cache warming. A `modelOverrides` entry can set `inputLimits` or `promptCache` for a built-in or extension model, including a model accessed through a validated proxy. See [`cacheWarming`](settings.md#model-and-thinking).
 
-Cloudflare AI Gateway Anthropic model IDs need hyphens, such as `claude-sonnet-5-5`: its Anthropic passthrough forwards IDs unchanged, so dotted Anthropic versions can be rejected upstream. The generated catalog and remote catalog overlay normalize dotted versions on that route. Other provider routes are not normalized merely because they contain dotted versions.
-
-For cache-sensitive tool changes, supported Responses routes retain bounded declaration history but rebuild the prefix for schema changes or context pressure. Official Anthropic routes with both mid-conversation capabilities use inline schemas for new prefixes; older unannotated prefixes retain the reference protocol. Correctness, security, provider changes, and rollover may reset a prefix. Offline payload checks do not establish live cache hit rates or latency. See [bounded cache-prefix preservation](../../ai/README.md#bounded-cache-prefix-preservation).
-
 Compatibility settings should describe verified differences in the endpoint's request or response behavior. Do not enable them based only on an endpoint advertising OpenAI or Anthropic compatibility.
 
 ## Use classifier models
@@ -137,9 +143,30 @@ const result = await models.classify(jev, {
 return result.answers;
 ```
 
+[Codemode](codemode.md#classify) describes the question and answer types.
+
 When the service reports token counts, as all System One services do, `result.usage` carries them with their cost. Pi adds the usage of a script's classifier calls to the `codemode` tool result, so it counts toward the session cost in the footer and `/session`. The cost uses the model's catalog price; models without one, such as TypeSafe's direct `jev-latest`, report tokens at no cost.
 
 Extensions call classifiers through `ctx.modelRegistry.classify()`, without codemode. [Virtual models](virtual-models.md#route-requests) can use them to route requests; see the `jev-router.ts` example.
+
+## Use image models
+
+Image models generate images from a prompt and optional input images. Pi lists OpenRouter's image models, such as `google/gemini-2.5-flash-image` and `black-forest-labs/flux.2-pro`, under the `openrouter` provider; they use the same `OPENROUTER_API_KEY` or `/login` credential as its chat models.
+
+Like classifier models, image models do not appear in `/model`; the model reaches them through the [`codemode`](cli.md#enable-codemode) tool. Scripts list them with `models.getAvailableOfType("image")` and call `models.generateImages(model, { input })`. The result's `output` holds base64 image blocks, which `image()` attaches to the `codemode` result so the model sees them:
+
+```js
+const painter = await models.getModelOfType("image", "openrouter", "google/gemini-2.5-flash-image");
+const result = await models.generateImages(painter, {
+  input: [{ type: "text", text: "A red fox in the snow, watercolor" }],
+});
+if (result.stopReason !== "stop") return result.errorMessage;
+for (const block of result.output) if (block.type === "image") image(block);
+```
+
+`input` can also contain `{ type: "image", data, mimeType }` blocks to edit or use as references. Pi adds the usage of a script's image calls to the `codemode` tool result, like classifier calls. Generated images are not saved to disk. [Codemode](codemode.md#generate-images) describes the full API.
+
+Extensions generate images through `ctx.modelRegistry.generateImages()`, without codemode.
 
 ## Add a custom provider
 
@@ -150,8 +177,6 @@ Use an extension when the provider needs custom streaming, model discovery, or a
 ### A model does not appear
 
 Confirm that its provider has usable authentication. Custom models can load from `models.json` but remain unavailable in `/model` until Pi can resolve credentials. For llama.cpp, only models currently loaded by the router appear.
-
-A failed provider availability check is distinct from unconfigured authentication. Pi retains an existing saved/default model rather than silently selecting another provider; prompt admission reports that provider's error. Healthy providers remain available. See [ambient authentication](custom-provider.md#ambient-authentication) for shared-account integrations.
 
 ### Authentication works in one shell only
 

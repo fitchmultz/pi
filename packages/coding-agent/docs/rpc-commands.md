@@ -23,7 +23,7 @@ With images:
 {"type": "prompt", "message": "New instruction", "streamingBehavior": "steer"}
 ```
 
-- `"steer"`: Send live input on supported Responses WebSocket routes; otherwise queue it for the next turn. Native async work can continue while steering is processed.
+- `"steer"`: Queue the message while the agent is running. It is delivered after the current assistant turn finishes executing its tool calls, before the next LLM call.
 - `"followUp"`: Wait until the agent finishes. Message is delivered only when agent stops.
 
 If the agent is streaming and no `streamingBehavior` is specified, the command returns an error.
@@ -45,7 +45,7 @@ The `images` field is optional. Each image uses `ImageContent` format: `{"type":
 
 ### steer
 
-Steer the active response on supported Responses WebSocket routes; otherwise queue it for the next turn. Skills, prompt templates, and images are prepared before delivery. Extension commands are not allowed (use `prompt` instead). Success acknowledges local admission; [steering events](json.md#steering) report remote acceptance and application.
+Queue a steering message while the agent is running. It is delivered after the current assistant turn finishes executing its tool calls, before the next LLM call. Skill commands and prompt templates are expanded. Extension commands are not allowed (use `prompt` instead).
 
 ```json
 {"type": "steer", "message": "Stop and do this instead"}
@@ -125,7 +125,7 @@ Response:
 }
 ```
 
-To implement interactive Esc behavior, send `clear_queue` before `abort`, then restore the returned text in the client editor. Aborting does not consume retained queues. Cancellation-persistent custom messages are saved at the safe flush boundary without starting another turn; next-turn asides remain deferred.
+To implement interactive Esc behavior, send `clear_queue` before `abort`, then restore the returned text in the client editor. `abort` continues queued messages when they remain in the session.
 
 ### new_session
 
@@ -150,18 +150,20 @@ If an extension canceled:
 {"type": "response", "command": "new_session", "success": true, "data": {"cancelled": true}}
 ```
 
+## Terminal ownership
+
 ### attach_tui
 
-Transfer the controlling PTY from RPC JSONL to the interactive TUI. Start `--mode rpc` with stdin/stdout on the same PTY; pipe-based RPC cannot attach. No additional startup flag is needed.
+Transfer a POSIX controlling PTY from RPC JSONL to the live interactive TUI. Both stdin and stdout must be terminals connected to the same PTY; ordinary pipes return `success: false`.
 
 ```json
-{"id":"attach-1","type":"attach_tui"}
-{"id":"attach-1","type":"response","command":"attach_tui","success":true,"data":{"token":"per-attach-token"}}
+{"id":"attach-1","type":"attach_tui","token":"01234567-89ab-cdef-0123-456789abcdef"}
+{"id":"attach-1","type":"response","command":"attach_tui","success":true,"data":{"token":"01234567-89ab-cdef-0123-456789abcdef"}}
 ```
 
-A reconnecting client can provide a cryptographically random UUID as `token` in the command to persist the boundary before attachment. After success, stop parsing JSONL and display subsequent PTY output as terminal bytes. Send input to that PTY; only the active frontend may issue commands to the shared live session.
+`token` is optional: Pi generates a UUID if omitted. A reconnecting client can supply a cryptographically random UUID and persist it before attachment. Invalid UUIDs fail without changing frontend ownership. After success, stop parsing JSONL and display terminal output. Only the active frontend may issue commands.
 
-Send `SIGUSR2` to Pi to return to RPC. After restoring the terminal, Pi writes `RS <token> RS {"type":"tui_detached","state":{...}} LF`, where RS is byte `0x1e` and no spaces surround the token. Match the current attachment token, discard preceding terminal bytes, parse the JSON line, and resume JSONL. Unresolved extension UI requests replay immediately afterward.
+Send `SIGUSR2` to Pi to return. Pi restores the terminal, then writes `RS <token> RS {"type":"tui_detached","state":{...}} LF`, where RS is byte `0x1e` and there are no spaces around the token. Match the current token, discard preceding terminal bytes, parse that JSON line, and resume JSONL. `state` has the `get_state` shape. Unresolved extension UI requests replay immediately afterward. Repeated detach signals while already in RPC do nothing.
 
 ## State
 
@@ -191,24 +193,14 @@ Response:
     "sessionName": "my-feature-work",
     "autoCompactionEnabled": true,
     "messageCount": 5,
-    "pendingMessageCount": 0,
-    "pendingExtensionUIRequests": []
+    "pendingMessageCount": 0
   }
 }
 ```
 
-The `model` field is a full [Model](#model-object) object, or omitted when no model is selected. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `pendingExtensionUIRequests` contains unresolved blocking UI requests for reconnecting clients.
+`pendingExtensionUIRequests` lists unresolved dialog/custom requests, including their IDs, for reconnecting clients. Empty lists mean no interaction is pending.
 
-### wait_for_idle
-
-Join native prompt preparation, the active run, automatic continuations, and compaction. Already-idle sessions respond immediately, including after settlement or input handled without model work.
-
-```json
-{"id":"idle-1","type":"wait_for_idle"}
-{"id":"idle-1","type":"response","command":"wait_for_idle","success":true}
-```
-
-The command does not start/abort work or block other commands. Pre-admission input interception, detached extension work, and user Bash remain outside agent idle. Await prompt acceptance before waiting for that prompt's completion.
+The `model` field is a full [Model](#model-object) object, or omitted when no model is selected. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set.
 
 ### get_messages
 
@@ -355,7 +347,7 @@ Response:
 
 ### set_steering_mode
 
-Control how queued steering messages are delivered. Supported live WebSocket steering sends each prepared input immediately.
+Control how steering messages (from `steer`) are delivered.
 
 ```json
 {"type": "set_steering_mode", "mode": "one-at-a-time"}

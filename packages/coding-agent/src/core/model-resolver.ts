@@ -367,13 +367,8 @@ export async function resolveModelScopeWithDiagnostics(
 	options?: AuthOperationOptions,
 ): Promise<ResolveModelScopeResult> {
 	const available = await modelRuntime.getAvailable(undefined, options);
-	// A requested scope is selection intent, not an auth claim. Keep failed checks
-	// in matching so a broken first choice cannot silently become another payer.
-	const candidates = [
-		...available,
-		...modelRuntime.getModels().filter((model) => modelRuntime.getAuthCheckError(model.provider)),
-	];
-	return resolveModelScopeFromModels(patterns, candidates);
+	const failed = modelRuntime.getModels().filter((model) => modelRuntime.getAuthCheckError(model.provider));
+	return resolveModelScopeFromModels(patterns, [...available, ...failed]);
 }
 
 export async function resolveModelScope(
@@ -533,11 +528,7 @@ export function resolveCliModel(options: {
 			const rawExactMatches = availableModels.filter(
 				(m) => m.id.toLowerCase() === cliModel.toLowerCase() && !modelsAreEqual(m, model),
 			);
-			if (
-				rawExactMatches.length > 0 &&
-				!modelRuntime.hasConfiguredAuth(model.provider) &&
-				!modelRuntime.getAuthCheckError(model.provider)
-			) {
+			if (rawExactMatches.length > 0 && !modelRuntime.hasConfiguredAuth(model.provider)) {
 				const authenticatedRawMatches = rawExactMatches.filter((m) => modelRuntime.hasConfiguredAuth(m.provider));
 				if (authenticatedRawMatches.length === 1) {
 					return {
@@ -683,7 +674,7 @@ export async function findInitialModel(options: {
 		};
 	}
 
-	// 3. Use the saved default when configured, or retain it when its auth check failed.
+	// 3. Try saved default from settings if auth is configured.
 	if (defaultProvider && defaultModelId) {
 		const found = modelRuntime.getModel(defaultProvider, defaultModelId);
 		if (found && (modelRuntime.hasConfiguredAuth(found.provider) || modelRuntime.getAuthCheckError(found.provider))) {
@@ -734,7 +725,7 @@ export async function restoreModelFromSession(
 	// Check if restored model exists and still has auth configured
 	const hasConfiguredAuth = restoredModel ? modelRuntime.hasConfiguredAuth(restoredModel.provider) : false;
 
-	if (restoredModel && (hasConfiguredAuth || modelRuntime.getAuthCheckError(restoredModel.provider))) {
+	if (restoredModel && hasConfiguredAuth) {
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Restored model: ${savedProvider}/${savedModelId}`));
 		}
