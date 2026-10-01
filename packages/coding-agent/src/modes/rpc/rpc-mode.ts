@@ -105,13 +105,28 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			resolve?: (value: RpcExtensionUIResponse) => void;
 			reject: (error: Error) => void;
 			present?: () => void;
+			replacesEditor?: boolean;
 		}
 	>();
+	let activeReplacementRequestId: string | undefined;
 
 	// Shutdown request flag
 	let shutdownRequested = false;
 	let shuttingDown = false;
 	const signalCleanupHandlers: Array<() => void> = [];
+
+	function presentPendingRequests(): void {
+		if (frontend !== "tui" || transitioning || shuttingDown) return;
+		// Replacement components share one editor container; overlays render independently.
+		for (const [id, pending] of pendingExtensionRequests) {
+			if (!pending.present) continue;
+			if (pending.replacesEditor) {
+				if (activeReplacementRequestId) continue;
+				activeReplacementRequestId = id;
+			}
+			pending.present();
+		}
+	}
 
 	/** Helper for dialog methods with signal/timeout support */
 	function createDialogPromise<T>(
@@ -135,6 +150,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				opts?.signal?.removeEventListener("abort", onAbort);
 				pendingExtensionRequests.delete(id);
 				nativeController?.abort();
+				if (activeReplacementRequestId === id) activeReplacementRequestId = undefined;
+				presentPendingRequests();
 			};
 
 			const onAbort = () => {
@@ -160,6 +177,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					reject(error);
 				},
 				request: rpcRequest,
+				replacesEditor: true,
 				present: present
 					? () => {
 							if (nativeController) return;
@@ -182,7 +200,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					: undefined,
 			});
 			output(rpcRequest);
-			if (frontend === "tui") pendingExtensionRequests.get(id)?.present?.();
+			presentPendingRequests();
 		});
 	}
 
@@ -277,11 +295,20 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					void interactiveUI
 						.custom(factory, customOptions)
 						.then(resolve, reject)
-						.finally(() => pendingExtensionRequests.delete(id));
+						.finally(() => {
+							pendingExtensionRequests.delete(id);
+							if (activeReplacementRequestId === id) activeReplacementRequestId = undefined;
+							presentPendingRequests();
+						});
 				};
-				pendingExtensionRequests.set(id, { request, reject, present });
+				pendingExtensionRequests.set(id, {
+					request,
+					reject,
+					present,
+					replacesEditor: !customOptions?.overlay,
+				});
 				output(request);
-				if (frontend === "tui") present();
+				presentPendingRequests();
 			});
 		},
 		pasteToEditor: (text) => {
@@ -776,13 +803,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				interactiveRunStarted = true;
 				void interactiveMode.runHosted().catch(() => shutdown(1));
 			}
-			for (const pending of pendingExtensionRequests.values()) pending.present?.();
 		} catch {
 			await shutdown(1);
 		} finally {
 			transitioning = false;
 		}
 		if (returnRequested) await activateRpcFrontend();
+		else presentPendingRequests();
 	}
 
 	async function activateRpcFrontend(): Promise<void> {
