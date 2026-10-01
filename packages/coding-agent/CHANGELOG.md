@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added the replaceable `discover_tools` builtin for full on-demand extension instructions, with declaration hiding, prior-turn read gating, and branch-aware persistence and compaction repair. SDK hosts can opt in with `instructionGroupsExtension`.
+
 ## [1.0.0] - 2026-10-01
 
 ### New Features
