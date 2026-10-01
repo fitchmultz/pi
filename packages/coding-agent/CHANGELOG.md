@@ -20,6 +20,7 @@
 - Fixed empty quoted prompt-template arguments shifting later positional arguments.
 - Fixed piped stdin, file text, and an explicit CLI prompt being concatenated without separators.
 - Fixed whitespace-only combined CLI input starting an initial turn.
+- Fixed automatic overflow recovery through `session_before_compact` hooks when no history is old enough to summarize, such as an overflow right after a reset. Hooks now receive a whole-window preparation, Pi never runs its own summarizer on it, and a persisted overflow error is ordered by its session position instead of its provider timestamp. See [session_before_compact](docs/compaction.md#session_before_compact).
 
 ## [1.0.0] - 2026-10-01
 
