@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added opt-in `ignoreStoredCredentials` provider registration and `ModelRuntime.supportsIgnoreStoredCredentials` feature detection for routing providers; explicit keys and persistent login/logout remain unchanged.
+- Added deduplicated, non-fatal diagnostics for extension handlers blocking synchronously for over 100 ms and custom footer renders exceeding 16 ms; awaited work is excluded.
 - Added JSON selection to the `read` tool. `json: { path?, fields? }` selects a JSON Pointer target and, optionally, immediate object keys before paging and output limits. See [JSON selection with read](docs/sdk.md#json-selection-with-read).
 - Added the replaceable `discover_tools` builtin for full on-demand extension instructions, with deferred activation, prior-turn read gating, and branch-aware persistence and compaction repair. SDK hosts can opt in with `instructionGroupsExtension`.
 - Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle saved-session resume, staged runtime and extension activation, and one-shot startup rollback. See [Managed restarts](docs/restart.md).
@@ -21,6 +23,9 @@
 - Fixed piped stdin, file text, and an explicit CLI prompt being concatenated without separators.
 - Fixed whitespace-only combined CLI input starting an initial turn.
 - Fixed automatic overflow recovery through `session_before_compact` hooks when no history is old enough to summarize, such as an overflow right after a reset. Hooks now receive a whole-window preparation, Pi never runs its own summarizer on it, and a persisted overflow error is ordered by its session position instead of its provider timestamp. See [session_before_compact](docs/compaction.md#session_before_compact).
+- Fixed confirmed GPT-6 Astra Ultrafast cost estimates in OpenAI and legacy Codex Responses, including cached input and long-context pricing.
+- Fixed legacy Codex Responses Fast cost estimates to match priority pricing.
+- Fixed dotted Claude IDs from bundled and refreshed Cloudflare AI Gateway catalogs being sent unchanged to the `/anthropic` passthrough.
 
 ## [1.0.0] - 2026-10-01
 

@@ -72,6 +72,45 @@ async function refreshProvider(
 afterEach(() => vi.restoreAllMocks());
 
 describe("remote catalog provider", () => {
+	// #127: newer pi.dev overlays must not reintroduce the invalid dotted passthrough ID.
+	it("normalizes fetched and restored Cloudflare Claude IDs before merging with the baseline", async () => {
+		const baseline: Model<"anthropic-messages"> = {
+			...model("claude-opus-4-6"),
+			api: "anthropic-messages",
+			compat: undefined,
+			provider: "cloudflare-ai-gateway",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/account/gateway/anthropic",
+		};
+		const dynamic = { ...baseline, id: "claude-opus-4.6", name: "Updated Claude" };
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify([dynamic])));
+		const makeProvider = () =>
+			withRemoteCatalog(
+				createProvider({
+					id: "cloudflare-ai-gateway",
+					auth: { apiKey: { name: "Offline", resolve: async () => ({ auth: {} }) } },
+					models: [baseline],
+					api: {
+						stream: () => {
+							throw new Error("unused");
+						},
+						streamSimple: () => {
+							throw new Error("unused");
+						},
+					},
+				}),
+			);
+		const store = new InMemoryModelsStore();
+		const provider = makeProvider();
+		await refreshProvider(provider, store);
+		expect(provider.getModels().map(({ id, name }) => ({ id, name }))).toEqual([
+			{ id: "claude-opus-4-6", name: "Updated Claude" },
+		]);
+		const restored = makeProvider();
+		await refreshProvider(restored, store, { allowNetwork: false });
+		expect(restored.getModels()).toEqual(provider.getModels());
+		expect(restored.getAllModels?.()).toEqual(provider.getModels());
+	});
+
 	it("parses keyed catalogs, sends version headers, observes the refresh TTL, and supports forced refreshes", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			async () =>

@@ -88,6 +88,29 @@ OAuth callbacks are UI-neutral. They can open an authorization URL, show a devic
 
 Never write access tokens, refresh tokens, authorization headers, or complete provider responses to ordinary logs.
 
+### Isolate a routing provider from stored credentials
+
+Routing extensions that supply their own account token can opt out of saved authentication:
+
+```typescript
+pi.registerProvider("openai-codex", {
+  ignoreStoredCredentials: true,
+  apiKey: "routing-placeholder",
+  api: "openai-codex-responses",
+  streamSimple: routeWithSelectedAccount,
+});
+```
+
+This bypasses saved API keys and OAuth credentials during request preflight, availability checks,
+and catalog refresh. Expired or revoked standalone credentials cannot block the routing provider.
+Explicit request and runtime (CLI) keys still take priority. `/login`, `/logout`, and credential
+listing retain their normal persistent behavior; the flag does not delete or migrate credentials.
+Unregistering the override restores built-in authentication.
+
+Extensions supporting other hosts can feature-detect
+`ModelRuntime.supportsIgnoreStoredCredentials === true` from `@earendil-works/pi-coding-agent`.
+The flag is supported on the named `ProviderConfig` registration form.
+
 ## Supply and refresh models
 
 Every model needs an ID, display name, input capabilities, and cost metadata. Chat and classifier models also need a context window; chat models need an output limit and reasoning support; image models declare their output modalities. Choose the API implementation at the provider level unless one model requires an override.

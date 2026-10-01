@@ -169,6 +169,9 @@ function mergeHeaders(
 
 /** Configured pi-ai Models collection used by coding-agent and SDK consumers. */
 export class ModelRuntime implements Models {
+	/** Feature detection for extensions that also run on hosts without credential isolation. */
+	static readonly supportsIgnoreStoredCredentials = true;
+
 	private readonly models: MutableModels;
 	private readonly credentials: RuntimeCredentials;
 	private readonly defaultBuiltins: ReadonlyMap<string, Provider>;
@@ -208,7 +211,21 @@ export class ModelRuntime implements Models {
 		this.modelNetworkEnabled = modelNetworkEnabled;
 		this.defaultBuiltins = new Map(providers.map((provider) => [provider.id, provider]));
 		for (const [providerId, provider] of this.defaultBuiltins) this.builtins.set(providerId, provider);
-		this.models = createModels({ credentials, modelsStore });
+		this.models = createModels({
+			credentials: {
+				read: (id, options) => {
+					options?.signal?.throwIfAborted();
+					return this.extensionProviders.get(id)?.ignoreStoredCredentials === true &&
+						!credentials.hasRuntimeApiKey(id)
+						? Promise.resolve(undefined)
+						: credentials.read(id, options);
+				},
+				list: (options) => credentials.list(options),
+				modify: (id, fn, options) => credentials.modify(id, fn, options),
+				delete: (id, options) => credentials.delete(id, options),
+			},
+			modelsStore,
+		});
 		this.rebuildProviders();
 	}
 
@@ -637,7 +654,12 @@ export class ModelRuntime implements Models {
 
 	getProviderAuthStatus(providerId: string): AuthStatus {
 		if (this.credentials.hasRuntimeApiKey(providerId)) return { configured: true, source: "runtime" };
-		if (this.snapshot.storedProviders.has(providerId)) return { configured: true, source: "stored" };
+		if (
+			this.snapshot.storedProviders.has(providerId) &&
+			this.extensionProviders.get(providerId)?.ignoreStoredCredentials !== true
+		) {
+			return { configured: true, source: "stored" };
+		}
 		const configured = configuredRequestAuthStatus(
 			this.config.getProvider(providerId),
 			this.extensionProviders.get(providerId),
@@ -903,7 +925,10 @@ export class ModelRuntime implements Models {
 		configuredStatus: AuthStatus | undefined,
 		type: AuthType,
 	): void {
-		if (!this.snapshot.storedProviders.has(providerId) && !configuredStatus?.configured) return;
+		const hasStored =
+			this.snapshot.storedProviders.has(providerId) &&
+			this.extensionProviders.get(providerId)?.ignoreStoredCredentials !== true;
+		if (!hasStored && !this.credentials.hasRuntimeApiKey(providerId) && !configuredStatus?.configured) return;
 		const configuredProviders = new Set(this.snapshot.configuredProviders).add(providerId);
 		const auth = new Map(this.snapshot.auth);
 		// Never clobber a real check result.
@@ -929,6 +954,16 @@ export class ModelRuntime implements Models {
 			if (value !== undefined) (effective as Record<string, unknown>)[key] = value;
 		}
 		this.extensionProviders.set(providerId, effective);
+		if (effective.ignoreStoredCredentials === true) {
+			// A saved credential's old check must not survive isolation or an in-flight refresh.
+			++this.availabilityRefreshSeq;
+			this.providerAvailabilitySeq.set(providerId, (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1);
+			const configuredProviders = new Set(this.snapshot.configuredProviders);
+			const auth = new Map(this.snapshot.auth);
+			configuredProviders.delete(providerId);
+			auth.delete(providerId);
+			this.snapshot = { ...this.snapshot, configuredProviders, auth };
+		}
 		this.recomposeProvider(providerId);
 		this.updateModelSnapshot();
 		this.markProvisionallyConfigured(
