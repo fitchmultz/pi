@@ -2,8 +2,8 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
-import type { ContextUsage } from "../../../core/extensions/types.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import { SessionMetadataCursor } from "../../../core/session-metadata-cursor.ts";
 import { addUsageToTotals, createUsageTotals, type UsageTotals } from "../../../core/usage-totals.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -45,14 +45,8 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 }
 
 interface SessionStats {
-	session: AgentSession;
-	sessionId: string;
-	leafId: string | null;
-	entriesRevision: number;
-	limitsModel: unknown;
 	usageTotals: UsageTotals;
 	latestCacheHitRate: number | undefined;
-	contextUsage: ContextUsage | undefined;
 	sessionName: string | undefined;
 }
 
@@ -65,6 +59,7 @@ export class FooterComponent implements Component {
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
 	private sessionStats?: SessionStats;
+	private readonly statsCursor = new SessionMetadataCursor();
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -95,34 +90,20 @@ export class FooterComponent implements Component {
 		// Git watcher cleanup handled by provider
 	}
 
-	/**
-	 * Usage totals and context usage scan the whole session, and the footer renders on every frame.
-	 * The entry revision also changes when a session is reloaded with the same IDs and count.
-	 * Keep the name in this cache because finding the latest name scans session entries.
-	 */
+	/** Replay once, then accumulate only new journal entries; navigation does not change billed totals. */
 	private getSessionStats(): SessionStats {
-		const sessionManager = this.session.sessionManager;
-		const entriesRevision = sessionManager.getEntriesRevision();
-		const sessionId = sessionManager.getSessionId();
-		const leafId = sessionManager.getLeafId();
-		const limitsModel = this.session.routedModel?.model ?? this.session.model;
-		const cached = this.sessionStats;
-		if (
-			cached &&
-			cached.session === this.session &&
-			cached.sessionId === sessionId &&
-			cached.leafId === leafId &&
-			cached.entriesRevision === entriesRevision &&
-			cached.limitsModel === limitsModel
-		) {
-			return cached;
-		}
-
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		const usageTotals = createUsageTotals();
-		let latestCacheHitRate: number | undefined;
-
-		for (const entry of sessionManager.iterateEntryMetadata()) {
+		const { entries, reset } = this.statsCursor.read(this.session.sessionManager);
+		const stats: SessionStats =
+			!reset && this.sessionStats
+				? this.sessionStats
+				: {
+						usageTotals: createUsageTotals(),
+						latestCacheHitRate: undefined,
+						sessionName: undefined,
+					};
+		const usageTotals = stats.usageTotals;
+		for (const entry of entries) {
+			if (entry.type === "session_info") stats.sessionName = entry.name?.trim() || undefined;
 			if (entry.type === "usage") {
 				addUsageToTotals(usageTotals, entry.usage);
 			} else if (entry.type === "message" && entry.message.role === "assistant") {
@@ -130,7 +111,7 @@ export class FooterComponent implements Component {
 
 				const latestPromptTokens =
 					entry.message.usage!.input + entry.message.usage!.cacheRead + entry.message.usage!.cacheWrite;
-				latestCacheHitRate =
+				stats.latestCacheHitRate =
 					latestPromptTokens > 0 ? (entry.message.usage!.cacheRead / latestPromptTokens) * 100 : undefined;
 			} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
 				addUsageToTotals(usageTotals, entry.message.usage!);
@@ -139,27 +120,14 @@ export class FooterComponent implements Component {
 			}
 		}
 
-		// Calculate context usage from session (handles compaction correctly).
-		// After compaction, tokens are unknown until the next LLM response.
-		const contextUsage = this.session.getContextUsage();
-		const sessionName = sessionManager.getSessionName();
-		this.sessionStats = {
-			session: this.session,
-			sessionId,
-			leafId,
-			entriesRevision,
-			limitsModel,
-			usageTotals,
-			latestCacheHitRate,
-			contextUsage,
-			sessionName,
-		};
-		return this.sessionStats;
+		this.sessionStats = stats;
+		return stats;
 	}
 
 	render(width: number): string[] {
 		const state = this.session.state;
-		const { usageTotals, latestCacheHitRate, contextUsage, sessionName } = this.getSessionStats();
+		const { usageTotals, latestCacheHitRate, sessionName } = this.getSessionStats();
+		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
@@ -203,7 +171,7 @@ export class FooterComponent implements Component {
 		const contextPercentDisplay =
 			contextPercent === "?"
 				? `?/${formatTokens(contextWindow)}${autoIndicator}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+				: `${contextUsage?.source === "estimated" ? "~" : ""}${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
 		if (contextPercentValue > 90) {
 			contextPercentStr = theme.fg("error", contextPercentDisplay);
 		} else if (contextPercentValue > 70) {

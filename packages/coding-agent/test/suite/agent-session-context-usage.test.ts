@@ -70,7 +70,7 @@ describe("AgentSession context usage estimate", () => {
 			if (mode === "pending tools")
 				session.state.tools[0] = { ...session.state.tools[0], description: "Pending changed declaration" };
 			const expected = session.getContextUsage();
-			expect(expected?.source).toBe(mode === "reported" ? "reported" : "estimated");
+			expect(expected?.source).toBe("reported");
 			const state = structuredClone(session.messages);
 			for (let i = 0; i < 10; i++) expect(session.getContextUsage()).toEqual(expected);
 			expect(session.messages).toEqual(state);
@@ -129,30 +129,37 @@ describe("AgentSession context usage estimate", () => {
 		}
 	});
 
-	it("refreshes cached usage for in-place SDK message, usage and tool-schema edits", async () => {
+	it("refreshes cached usage for SDK message and tool replacements and new provider reports", async () => {
+		let reported = 50_000;
 		const harness = await createHarness({
 			tools: [],
 			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("message_end", (event) => {
+						if (event.message.role === "assistant") event.message.usage = usage(reported);
+					});
+				},
+			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("done")]);
+		harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("again")]);
 		await harness.session.prompt("initial");
 		const session = harness.session;
-		const response = session.messages.at(-1) as AssistantMessage;
 		const initial = session.getContextUsage()!;
+		expect(initial).toMatchObject({ tokens: 50_000, source: "reported" });
 		initial.tokens = -1;
-		expect(session.getContextUsage()!.tokens).toBeGreaterThan(0);
-		response.usage = usage(50_000);
-		expect(session.getContextUsage()).toMatchObject({ tokens: 50_000, source: "reported" });
-		response.usage.totalTokens = 60_000;
+		expect(session.getContextUsage()!.tokens).toBe(50_000);
+		reported = 60_000;
+		await session.prompt("next");
 		expect(session.getContextUsage()).toMatchObject({ tokens: 60_000, source: "reported" });
-		const user = session.messages.find((message) => message.role === "user")!;
-		if (typeof user.content === "string" || user.content[0]?.type !== "text")
-			throw new Error("Expected normalized text");
-		user.content[0].text = "edited input";
+		const index = session.messages.findIndex((message) => message.role === "user");
+		const user = session.messages[index];
+		if (user.role !== "user") throw new Error("Expected user");
+		session.messages[index] = { ...user, content: "edited input" };
 		expect(session.getContextUsage()).toMatchObject({ source: "estimated" });
 		expect(session.getContextUsage()!.tokens).toBeLessThan(60_000);
-		user.content[0].text = "initial";
+		session.messages[index] = user;
 		expect(session.getContextUsage()).toMatchObject({ tokens: 60_000, source: "reported" });
 
 		session.state.tools.push({
@@ -163,7 +170,10 @@ describe("AgentSession context usage estimate", () => {
 			execute: async () => ({ content: [], details: {} }),
 		});
 		const beforeSchema = session.getContextUsage()!.tokens!;
-		session.state.tools[0].parameters.description = "new schema ".repeat(400);
+		session.state.tools[0] = {
+			...session.state.tools[0],
+			parameters: Type.Object({ query: Type.String() }, { description: "new schema ".repeat(400) }),
+		};
 		expect(session.getContextUsage()!.tokens).toBeGreaterThan(beforeSchema);
 	});
 
@@ -217,6 +227,225 @@ describe("AgentSession context usage estimate", () => {
 		sm.resetLeaf();
 		sync();
 		expect(harness.session.getContextUsage()?.tokens).toBeGreaterThan(0);
+	});
+
+	it("keeps cache hits payload-free and invalidates model-window and prompt-option changes", async () => {
+		const harness = await createHarness({ tools: [], settings: { compaction: { enabled: false } } });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		await harness.session.prompt("input");
+		const session = harness.session;
+		const expected = session.getContextUsage()!;
+		const metadata = vi.spyOn(harness.sessionManager, "iterateEntryMetadata");
+		const user = session.messages.find((message) => message.role === "user")!;
+		const content = user.content;
+		let reads = 0;
+		Object.defineProperty(user, "content", {
+			configurable: true,
+			get() {
+				reads++;
+				return content;
+			},
+		});
+		for (let i = 0; i < 20; i++) expect(session.getContextUsage()).toEqual(expected);
+		expect(reads).toBe(0);
+		expect(metadata).not.toHaveBeenCalled();
+		session.state.model = { ...harness.getModel(), contextWindow: expected.contextWindow * 2 };
+		expect(session.getContextUsage()).toMatchObject({ tokens: expected.tokens, percent: expected.percent! / 2 });
+		const options = session.extensionRunner.createCommandContext().getSystemPromptOptions();
+		options.sections ??= {};
+		options.sections.policy = "x".repeat(400);
+		expect(session.getContextUsage()!.tokens).toBeGreaterThan(expected.tokens!);
+		delete options.sections.policy;
+		expect(session.getContextUsage()!.tokens).toBe(expected.tokens);
+	});
+
+	it("reuses usage across streaming frames until counted state changes", async () => {
+		const harness = await createHarness({ tools: [], settings: { compaction: { enabled: false } } });
+		harnesses.push(harness);
+		const metadata = vi.spyOn(harness.sessionManager, "iterateEntryMetadata");
+		let updates = 0;
+		let expected: ReturnType<typeof harness.session.getContextUsage>;
+		harness.session.subscribe((event) => {
+			if (event.type === "message_start" && event.message.role === "assistant") {
+				expected = harness.session.getContextUsage();
+				metadata.mockClear();
+			}
+			if (event.type !== "message_update") return;
+			updates++;
+			expect.soft(harness.session.getContextUsage()).toEqual(expected);
+			expect.soft(metadata).not.toHaveBeenCalled();
+		});
+		harness.setResponses([fauxAssistantMessage("streamed answer with multiple chunks")]);
+		await harness.session.prompt("new input");
+		expect(updates).toBeGreaterThan(1);
+		expect(harness.session.getContextUsage()?.source).toBe("reported");
+	});
+
+	it.each([false, true])(
+		"retains reported usage in tool preflight after a hook shortens input (persisted: %s)",
+		async (persisted) => {
+			const directory = mkdtempSync(join(tmpdir(), "pi-shortened-preflight-"));
+			const measured: number[] = [];
+			const harness = await createHarness({
+				sessionManager: persisted
+					? SessionManager.create(directory, directory)
+					: SessionManager.inMemory(directory),
+				tools: [
+					{
+						name: "echo",
+						label: "Echo",
+						description: "Echo",
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
+					},
+				],
+				models: [{ id: "faux-1", contextWindow: 4000, maxTokens: 100 }],
+				settings: {
+					compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
+					retry: { enabled: false },
+				},
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_agent_start", (event) => {
+							event.systemPromptOptions.customPrompt = "Short prompt";
+						});
+						pi.on("context_with_system", (event) => ({
+							messages: event.messages.map((message) =>
+								message.role === "user" ? { ...message, content: "short" } : message,
+							),
+						}));
+						pi.on("message_end", (event) => {
+							if (event.message.role === "assistant") event.message.usage = usage(100);
+						});
+						pi.on("session_before_compact", () => ({ cancel: true }));
+						pi.on("turn_end", (_event, ctx) => {
+							expect(ctx.getContextUsage()?.source).toBe("reported");
+							measured.push(ctx.getContextUsage()!.tokens!);
+						});
+					},
+				],
+			});
+			try {
+				harness.setResponses([
+					fauxAssistantMessage(fauxToolCall("echo", {}), { stopReason: "toolUse" }),
+					fauxAssistantMessage("done"),
+				]);
+				await harness.session.prompt("x".repeat(16000));
+				expect(harness.faux.state.callCount).toBe(2);
+				expect(measured).toEqual([101, 100]);
+				expect(harness.eventsOfType("compaction_start")).toEqual([]);
+			} finally {
+				harness.cleanup();
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("calibrates input density independently of response output when switching back to a model", async () => {
+		const estimates: number[] = [];
+		for (const output of [1, 441, 12000]) {
+			let input = 0;
+			const harness = await createHarness({
+				cwd: "/tmp",
+				tools: [],
+				models: [
+					{ id: "faux-1", contextWindow: 1_000_000 },
+					{ id: "other", contextWindow: 1_000_000 },
+				],
+				settings: { compaction: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("message_end", (event) => {
+							if (event.message.role === "assistant")
+								event.message.usage = { ...usage(input + output), input: 0, cacheRead: input, output };
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				(context) => {
+					input = estimateContextTokens(context.messages, { useReportedUsage: false }).tokens;
+					return fauxAssistantMessage("plan");
+				},
+				fauxAssistantMessage("ok"),
+			]);
+			await harness.session.prompt("hi");
+			await harness.session.setModel(harness.getModel("other")!);
+			await harness.session.prompt("y".repeat(400_000));
+			await harness.session.setModel(harness.getModel("faux-1")!);
+			const uncalibrated = estimateContextTokens(harness.session.messages, { useReportedUsage: false }).tokens;
+			const estimate = harness.session.getContextUsage()!;
+			expect(estimate).toMatchObject({ source: "estimated" });
+			expect(estimate.tokens).toBeGreaterThanOrEqual(uncalibrated);
+			estimates.push(estimate.tokens!);
+		}
+		expect(estimates[1]).toBe(estimates[0]);
+		expect(estimates[2]).toBe(estimates[0]);
+	});
+
+	it("adds post-response handler content to reported usage", async () => {
+		const harness = await createHarness({
+			tools: [],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("message_end", (event) => {
+						if (event.message.role === "assistant") {
+							event.message.usage = usage(100);
+							event.message.content.push({ type: "text", text: "x".repeat(4000) });
+						}
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		await harness.session.prompt("input");
+		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 1100, source: "reported" });
+		harness.session.refreshContext();
+		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 1100, source: "reported" });
+		const options = harness.session.extensionRunner.createCommandContext().getSystemPromptOptions();
+		options.sections ??= {};
+		options.sections.policy = "x".repeat(400);
+		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 1205, source: "reported" });
+	});
+
+	it("calibrates fallback for opaque reasoning within 1–4 chars/token and keeps samples model-local", async () => {
+		const harness = await createHarness({
+			tools: [],
+			models: [
+				{ id: "faux-1", contextWindow: 1_000_000 },
+				{ id: "other", contextWindow: 1_000_000 },
+			],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("message_end", (event) => {
+						if (event.message.role === "assistant") event.message.usage = usage(500_000);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage({ type: "thinking", thinking: "", thinkingSignature: "s".repeat(40_000) }),
+		]);
+		await harness.session.prompt("input");
+		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 500_000, source: "reported" });
+		const user = harness.sessionManager
+			.buildContextEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "user")!;
+		harness.sessionManager.appendContextEdit(user.id, { content: "edited" });
+		harness.session.refreshContext();
+		const uncalibrated = estimateContextTokens(harness.session.messages, { useReportedUsage: false }).tokens;
+		expect(uncalibrated).toBeGreaterThanOrEqual(10_000);
+		expect(harness.session.getContextUsage()).toMatchObject({ tokens: uncalibrated * 4, source: "estimated" });
+		await harness.session.setModel(harness.getModel("other")!);
+		expect(harness.session.getContextUsage()).toMatchObject({ tokens: uncalibrated, source: "estimated" });
+		await harness.session.setModel(harness.getModel("faux-1")!);
+		expect(harness.session.getContextUsage()?.tokens).toBe(uncalibrated * 4);
 	});
 
 	it("counts the system prompt and tool definitions before the model reports usage", async () => {
@@ -481,7 +710,7 @@ describe("AgentSession context usage estimate", () => {
 					const lastReported = (session.messages.at(-1) as AssistantMessage).usage.totalTokens;
 					const previousEstimate = estimateContextTokens(session.messages, { useReportedUsage: false }).tokens;
 					expect(session.getContextUsage()!.tokens).toBe(lastReported + pendingEstimate() - previousEstimate);
-					expect(session.getContextUsage()).toMatchObject({ source: "estimated" });
+					expect(session.getContextUsage()).toMatchObject({ source: "reported" });
 				} finally {
 					session.dispose();
 				}
@@ -633,9 +862,24 @@ describe("AgentSession context usage estimate", () => {
 			});
 			harnesses.push(harness);
 			const root = harness.sessionManager.appendCustomEntry("root");
-			harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+			let requestEstimate = 0;
+			harness.setResponses([
+				(context) => {
+					requestEstimate = estimateContextTokens(context.messages, { useReportedUsage: false }).tokens;
+					return fauxAssistantMessage("first");
+				},
+				fauxAssistantMessage("second"),
+			]);
 			await harness.session.prompt("first");
-			(harness.session.messages.at(-1) as AssistantMessage).usage = usage(8000);
+			const response = harness.session.messages.at(-1) as AssistantMessage;
+			const charsPerToken = Math.max(
+				1,
+				Math.min(
+					4,
+					(4 * requestEstimate) / (response.usage.input + response.usage.cacheRead + response.usage.cacheWrite),
+				),
+			);
+			response.usage = usage(8000);
 			expect(harness.session.getContextUsage()?.tokens).toBe(8000);
 			expect(harness.session.systemPrompt).toBe(getCurrentSystemPrompt(harness.session.messages));
 
@@ -678,10 +922,13 @@ describe("AgentSession context usage estimate", () => {
 				],
 				{ model: harness.getModel(), useReportedUsage: false },
 			).tokens;
-			expect(harness.session.getContextUsage()?.tokens).toBe(
-				change === "navigation" ? expected : 8000 + expected - previousEstimate,
-			);
-			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
+			if (change === "navigation") {
+				// Navigation has no anchor; apply the latest live sample rather than the old fixed chars/4 count.
+				expect(harness.session.getContextUsage()!.tokens).toBe(Math.ceil((expected * 4) / charsPerToken));
+			} else expect(harness.session.getContextUsage()?.tokens).toBe(8000 + expected - previousEstimate);
+			expect(harness.session.getContextUsage()).toMatchObject({
+				source: change === "navigation" ? "estimated" : "reported",
+			});
 			expect(expected).toBeLessThan(8000);
 			expect(harness.session.systemPrompt).not.toContain("Temporary guidance.");
 			override = false;
@@ -992,7 +1239,7 @@ describe("AgentSession context usage estimate", () => {
 			expect(session.getContextUsage()).toMatchObject({
 				tokens: 500_000 + prefixTokens(prompt) - beforePrefix + 400,
 				contextWindow: 600_000,
-				source: "estimated",
+				source: "reported",
 			});
 			expect(session.getSessionStats().tokens).toEqual(billed.tokens);
 			expect(session.getSessionStats().cost).toBe(billed.cost);
@@ -1029,11 +1276,11 @@ describe("AgentSession context usage estimate", () => {
 		const options = session.extensionRunner.createCommandContext().getSystemPromptOptions();
 		options.sections = { ...options.sections, policy: "p".repeat(400) };
 		// The 400-character policy plus its XML section framing estimates to 105 tokens.
-		expect(session.getContextUsage()).toMatchObject({ tokens: 500_105, source: "estimated" });
+		expect(session.getContextUsage()).toMatchObject({ tokens: 500_105, source: "reported" });
 		await session.sendCustomMessage({ customType: "tail", content: "t".repeat(1600), display: false });
-		expect(session.getContextUsage()).toMatchObject({ tokens: 500_505, source: "estimated" });
+		expect(session.getContextUsage()).toMatchObject({ tokens: 500_505, source: "reported" });
 		delete options.sections.policy;
-		expect(session.getContextUsage()).toMatchObject({ tokens: 500_400, source: "estimated" });
+		expect(session.getContextUsage()).toMatchObject({ tokens: 500_400, source: "reported" });
 	});
 
 	it.each([
@@ -1119,12 +1366,8 @@ describe("AgentSession context usage estimate", () => {
 		await harness.session.prompt("look up the result");
 		expect(sent).toContain("original result");
 		expect(transformed).toContain("original result");
-		if (decoration !== "tool-result block" && !decoration.startsWith("whole message")) {
-			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
-			expect(harness.session.getContextUsage()!.tokens!).toBeLessThan(500_000);
-			return;
-		}
-		expect(sent).toContain(decoration === "tool-result block" ? "Duration: 1s" : "Session name: context-usage");
+		if (decoration === "tool-result block" || decoration.startsWith("whole message"))
+			expect(sent).toContain(decoration === "tool-result block" ? "Duration: 1s" : "Session name: context-usage");
 		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 500_000, source: "reported" });
 		harness.session.refreshContext();
 		expect(harness.session.getContextUsage()).toMatchObject({ tokens: 500_000, source: "reported" });
@@ -1134,7 +1377,7 @@ describe("AgentSession context usage estimate", () => {
 	});
 
 	it.each(["context", "message_end"])(
-		"does not apply reported usage to conversation omitted by a %s hook",
+		"retains provider-reported usage when a %s hook omits conversation",
 		async (hook) => {
 			const harness = await createHarness({
 				tools: [],
@@ -1159,8 +1402,7 @@ describe("AgentSession context usage estimate", () => {
 			harnesses.push(harness);
 			harness.setResponses([fauxAssistantMessage("done")]);
 			await harness.session.prompt("omitted input");
-			expect(harness.session.getContextUsage()?.tokens).toBeLessThan(500_000);
-			expect(harness.session.getContextUsage()).toMatchObject({ source: "estimated" });
+			expect(harness.session.getContextUsage()).toMatchObject({ tokens: 500_000, source: "reported" });
 		},
 	);
 
@@ -1196,10 +1438,15 @@ describe("AgentSession context usage estimate", () => {
 		if (change === "SDK deletion")
 			session.state.messages = session.messages.filter((message) => message.role !== "user");
 		if (change === "SDK replacement") {
-			const user = session.messages.find((message) => message.role === "user")!;
-			user.content = "replacement";
+			session.state.messages = session.messages.map((message) =>
+				message.role === "user" ? { ...message, content: "replacement" } : message,
+			);
 		}
-		if (change === "SDK reasoning deletion") (session.messages.at(-1) as AssistantMessage).content = [];
+		if (change === "SDK reasoning deletion")
+			session.messages[session.messages.length - 1] = {
+				...(session.messages.at(-1) as AssistantMessage),
+				content: [],
+			};
 		if (change === "summary-free compaction") {
 			harness.sessionManager.appendCompaction("", null, 500_000);
 			session.refreshContext();

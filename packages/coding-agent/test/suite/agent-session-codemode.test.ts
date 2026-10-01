@@ -12,7 +12,7 @@ import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
-import type { CustomEntry } from "../../src/core/session-manager.ts";
+import { type CustomEntry, SessionManager } from "../../src/core/session-manager.ts";
 import { createToolDefinitionFromAgentTool } from "../../src/core/tools/tool-definition-wrapper.ts";
 import { readCodemodeStore } from "../../src/extensions/codemode/execute.ts";
 import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
@@ -500,22 +500,13 @@ describe("codemode options and store", () => {
 	});
 
 	it("folds store entries from the root, ignoring malformed data", () => {
-		const entry = (data: unknown, customType = CODEMODE_STORE_ENTRY_TYPE): CustomEntry => ({
-			type: "custom",
-			customType,
-			data,
-			id: Math.random().toString(36).slice(2),
-			parentId: null,
-			timestamp: new Date(0).toISOString(),
-		});
-		expect(
-			readCodemodeStore([
-				entry({ set: { a: 1, b: { c: 2 } }, delete: [] }),
-				entry({ set: { a: 3 }, delete: ["b"] }),
-				entry({ set: { z: 1 } }),
-				entry({ set: { other: 1 }, delete: [] }, "other-extension"),
-			]),
-		).toEqual({ a: 3 });
+		const manager = SessionManager.inMemory();
+		manager.appendCustomEntry(CODEMODE_STORE_ENTRY_TYPE, { set: { a: 1, b: { c: 2 } }, delete: [] });
+		expect(readCodemodeStore(manager)).toEqual({ a: 1, b: { c: 2 } });
+		manager.appendCustomEntry(CODEMODE_STORE_ENTRY_TYPE, { set: { a: 3 }, delete: ["b"] });
+		manager.appendCustomEntry(CODEMODE_STORE_ENTRY_TYPE, { set: { z: 1 } });
+		manager.appendCustomEntry("other-extension", { set: { other: 1 }, delete: [] });
+		expect(readCodemodeStore(manager)).toEqual({ a: 3 });
 	});
 });
 

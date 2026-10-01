@@ -30,6 +30,8 @@ export interface JsonProjectionOptions {
 	fatalUtf8?: boolean;
 	/** Explicit preview fields may retain a prefix; required fields remain untruncated. */
 	stringLimit?: (path: JsonPath) => number;
+	/** Retained metadata must not keep the input chunk alive through sliced strings. */
+	detachStrings?: boolean;
 	/** Internal source-copy sink; tokens remain unpacked and do not assemble ignored values. */
 	onToken?: (token: Token, path: JsonPath) => void;
 	/** Scalar traits are measured before optional preview truncation. */
@@ -131,6 +133,14 @@ export class JsonTokenProjection {
 		this.scalar.value += retained;
 	}
 
+	private detachString(value: string): string {
+		// V8 copies short substrings, but slices strings of 13+ code units.
+		// UTF-16 preserves lone surrogates too, unlike a UTF-8 round trip.
+		return this.options.detachStrings && value.length >= 13
+			? Buffer.from(value, "utf16le").toString("utf16le")
+			: value;
+	}
+
 	private token(token: Token): void {
 		const tokenPath =
 			token.name === "endObject" || token.name === "endArray"
@@ -157,8 +167,9 @@ export class JsonTokenProjection {
 			case "endKey":
 				this.readingKey = false;
 				this.stack.at(-1)!.key = this.key;
+				// Object property names are internalized; only fields retains the parsed string itself.
 				if (this.stack.length === 1 && !this.fields.includes(this.key) && !this.keyTooLong)
-					this.fields.push(this.key);
+					this.fields.push(this.detachString(this.key));
 				break;
 			case "startObject":
 			case "startArray": {
@@ -203,7 +214,11 @@ export class JsonTokenProjection {
 			case "endNumber": {
 				const scalar = this.scalar!;
 				if (!scalar.number && scalar.mode !== "skip") this.options.onStringValue?.(scalar.path, scalar.nonblank);
-				this.complete(scalar.path, scalar.number ? Number(scalar.value) : scalar.value, scalar.mode);
+				this.complete(
+					scalar.path,
+					scalar.number ? Number(scalar.value) : this.detachString(scalar.value),
+					scalar.mode,
+				);
 				this.scalar = undefined;
 				break;
 			}

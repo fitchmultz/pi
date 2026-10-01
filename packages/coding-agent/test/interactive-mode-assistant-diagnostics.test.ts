@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, test } from "vitest";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -51,7 +52,7 @@ const message: AssistantMessage = {
 type NoticeContext = {
 	chatContainer: ChatContainer;
 	settingsManager: { getShowCacheMissNotices(): boolean };
-	sessionManager: { getBranch(): Array<{ type: "message"; message: AssistantMessage }> };
+	sessionManager: SessionManager;
 };
 
 const maybeShowThinkingDropNotice = Reflect.get(InteractiveMode.prototype, "maybeShowThinkingDropNotice") as (
@@ -65,7 +66,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 		const enabled = {
 			chatContainer: new ChatContainer(),
 			settingsManager: { getShowCacheMissNotices: () => true },
-			sessionManager: { getBranch: () => [] },
+			sessionManager: SessionManager.inMemory(),
 		};
 		maybeShowThinkingDropNotice.call(enabled, message);
 		const output = stripAnsi(enabled.chatContainer.render(120).join("\n"));
@@ -74,7 +75,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 		const disabled = {
 			chatContainer: new ChatContainer(),
 			settingsManager: { getShowCacheMissNotices: () => false },
-			sessionManager: { getBranch: () => [] },
+			sessionManager: SessionManager.inMemory(),
 		};
 		maybeShowThinkingDropNotice.call(disabled, message);
 		expect(disabled.chatContainer.children).toHaveLength(0);
@@ -88,7 +89,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 			{
 				chatContainer,
 				settingsManager: { getShowCacheMissNotices: () => true },
-				sessionManager: { getBranch: () => [] },
+				sessionManager: SessionManager.inMemory(),
 			},
 			message,
 		);
@@ -101,10 +102,12 @@ describe("InteractiveMode assistant diagnostics", () => {
 
 	test("does not repeat unchanged Anthropic thinking drops", () => {
 		initTheme("dark");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(message);
 		const context = {
 			chatContainer: new ChatContainer(),
 			settingsManager: { getShowCacheMissNotices: () => true },
-			sessionManager: { getBranch: () => [{ type: "message" as const, message }] },
+			sessionManager,
 		};
 
 		maybeShowThinkingDropNotice.call(context, { ...message, timestamp: 2 });

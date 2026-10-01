@@ -44,7 +44,7 @@ import {
 	createWriteTool,
 	withFileMutationQueue,
 } from "./tools/index.ts";
-import { getBranchSelection } from "./virtual-models.ts";
+import { getSessionSelection } from "./virtual-models.ts";
 
 // Preserve the pre-0.81 fallback for extensions that construct Agent instances
 // or invoke low-level agent loops without supplying streamFn. Agent core remains
@@ -222,9 +222,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Check if session has existing data to restore
 	const existingSession = sessionManager.buildSessionContext();
 	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = Array.from(
-		sessionManager.iterateEntryMetadata({ branchFrom: sessionManager.getLeafId() }),
-	).some((entry) => entry.type === "thinking_level_change");
+	const hasThinkingEntry = sessionManager.getBranchState().thinkingLevelEntryId !== null;
 
 	let model = checkpoint
 		? checkpoint.selection.model
@@ -236,9 +234,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Assistant messages name the physical model that answered, so a virtual selection is only in
 	// model_change entries.
-	const sessionModel = getBranchSelection(
-		sessionManager.iterateEntryMetadata({ branchFrom: sessionManager.getLeafId() }),
-		(provider, modelId) => modelRuntime.getModel(provider, modelId),
+	const sessionModel = getSessionSelection(sessionManager, (provider, modelId) =>
+		modelRuntime.getModel(provider, modelId),
 	);
 
 	// If session has data, try to restore model from it

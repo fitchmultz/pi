@@ -3670,6 +3670,18 @@ export class InteractiveMode {
 		});
 	}
 
+	private getEntriesAfterCompaction(compactionId: string): Set<string> {
+		const ids = new Set<string>();
+		for (const entry of this.sessionManager.iterateEntryMetadata({
+			branchFrom: this.sessionManager.getLeafId(),
+			reverse: true,
+		})) {
+			if (entry.id === compactionId) break;
+			ids.add(entry.id);
+		}
+		return ids;
+	}
+
 	private async handleEvent(event: AgentSessionEvent): Promise<void> {
 		if (!this.isInitialized) {
 			await this.init();
@@ -3731,9 +3743,7 @@ export class InteractiveMode {
 					const entries = this.sessionManager.buildContextEntries();
 					if (entries[0]?.id !== event.entry.id) break;
 					this.chatContainer.clear();
-					const branch = this.sessionManager.getBranch();
-					const compactionIndex = branch.findIndex((entry) => entry.id === event.entry.id);
-					const entriesAfterCompaction = new Set(branch.slice(compactionIndex + 1).map((entry) => entry.id));
+					const entriesAfterCompaction = this.getEntriesAfterCompaction(event.entry.id);
 					const retainedEntries = entries.slice(1);
 					this.renderSessionEntries(retainedEntries.filter((entry) => !entriesAfterCompaction.has(entry.id)));
 					this.addMessageToChat(
@@ -3987,9 +3997,7 @@ export class InteractiveMode {
 					}
 					this.chatContainer.clear();
 					// Model context prepends the summary; the transcript keeps newly admitted input after it.
-					const branch = this.sessionManager.getBranch();
-					const compactionIndex = branch.findIndex((entry) => entry.id === entries[0].id);
-					const entriesAfterCompaction = new Set(branch.slice(compactionIndex + 1).map((entry) => entry.id));
+					const entriesAfterCompaction = this.getEntriesAfterCompaction(entries[0].id);
 					const retainedEntries = entries.slice(1);
 					this.renderSessionEntries(retainedEntries.filter((entry) => !entriesAfterCompaction.has(entry.id)));
 					this.addMessageToChat(
@@ -4020,12 +4028,18 @@ export class InteractiveMode {
 
 			case "auto_retry_start": {
 				// Persist presentation state without rewriting the failed message or its diagnostics.
-				const failedEntry =
-					this.failedAttemptMessage &&
-					this.sessionManager
-						.getBranch()
-						.reverse()
-						.find((entry) => entry.type === "message" && entry.message === this.failedAttemptMessage);
+				let failedEntry: SessionEntry | undefined;
+				if (this.failedAttemptMessage) {
+					for (const metadata of this.sessionManager.iterateEntryMetadata({
+						branchFrom: this.sessionManager.getLeafId(),
+						reverse: true,
+					})) {
+						if (metadata.type !== "message" || metadata.message.role !== "assistant") continue;
+						const entry = this.sessionManager.getEntry(metadata.id);
+						if (entry?.type === "message" && entry.message === this.failedAttemptMessage) failedEntry = entry;
+						break;
+					}
+				}
 				if (failedEntry) this.sessionManager.appendCustomEntry("pi:retried-message", { messageId: failedEntry.id });
 				this.failedAttemptMessage = undefined;
 				for (const component of this.failedAttemptComponents) this.chatContainer.removeChild(component);
@@ -4455,13 +4469,15 @@ export class InteractiveMode {
 		let previousDroppedCount = 0;
 		// message_end reaches the UI before the current message is persisted,
 		// so the branch's last assistant message is the previous response.
-		const branch = this.sessionManager.getBranch();
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i];
-			if (entry.type === "message" && entry.message.role === "assistant") {
+		for (const metadata of this.sessionManager.iterateEntryMetadata({
+			branchFrom: this.sessionManager.getLeafId(),
+			reverse: true,
+		})) {
+			if (metadata.type !== "message" || metadata.message.role !== "assistant") continue;
+			const entry = this.sessionManager.getEntry(metadata.id);
+			if (entry?.type === "message" && entry.message.role === "assistant")
 				previousDroppedCount = InteractiveMode.countDroppedThinkingBlocks(entry.message);
-				break;
-			}
+			break;
 		}
 		if (droppedCount <= previousDroppedCount) return;
 

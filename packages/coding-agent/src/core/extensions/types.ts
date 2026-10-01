@@ -201,7 +201,8 @@ export interface ExtensionUIContext {
 	 *
 	 * The factory receives a FooterDataProvider for data not otherwise accessible:
 	 * git branch and extension statuses from setStatus(). Context usage is on
-	 * ctx.getContextUsage(), token stats on ctx.sessionManager.getEntries(), model info on ctx.model.
+	 * ctx.getContextUsage(), model info on ctx.model. Accumulate billing stats from metadata
+	 * outside render(); getEntries() and getBranch() return full history, not a bounded window.
 	 */
 	setFooter(
 		factory:
@@ -309,7 +310,18 @@ export interface ExtensionUIContext {
 // ============================================================================
 
 export interface ContextUsage {
-	/** Whether token usage is provider-reported, estimated, or unavailable. */
+	/**
+	 * "reported": provider usage anchors the retained conversation, including request-local hook
+	 * transformations. Positive content deltas added by message_end handlers, later messages and
+	 * pending prompt/tool changes are estimated; removing response content keeps the provider baseline.
+	 * "estimated": heuristic-only count, including opaque reasoning/signatures and tool schemas.
+	 * Session-local chars/token calibration is 4 * request estimate / (input + cacheRead + cacheWrite),
+	 * clamped to [1, 4], default 4; zero input totals are skipped and output tokens are excluded.
+	 * "unknown": no matching response since compaction; tokens/percent are null (preflight still estimates).
+	 * Streaming-only events do not invalidate usage; streaming state is counted at message_end.
+	 * SDK callers must replace edited message/tool objects or arrays; unsignalled nested mutation
+	 * is not observed. Use AgentSession.refreshContext() after canonical journal changes.
+	 */
 	source: "reported" | "estimated" | "unknown";
 	/** Estimated context tokens, or null if unknown (e.g. right after compaction, before next LLM response). */
 	tokens: number | null;
@@ -995,6 +1007,7 @@ export type SessionBoundaryDraft =
 	| ContextEditEntryDraft
 	| CompactionEntryDraft;
 
+/** Payloads are built on first access, independently for each handler. Pending queues are read per dispatch. */
 export interface BoundaryContextPreview {
 	contextEntries: ProjectedSessionEntry[];
 	contextMessages: AgentMessage[];

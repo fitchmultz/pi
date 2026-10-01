@@ -320,16 +320,53 @@ restart a live old-format session directly into this runtime.
 
 ### Continuing contracts
 
+The active-path index is keyed by entries revision and leaf. Child appends extend
+it in O(1); navigation, reload and validated reconciliation rebuild it once.
+Bounded newest-first metadata queries scale with entries visited, while complete
+branch/tree/export results remain output-sensitive. Retained metadata strings
+are detached from journal-line backing storage on both scan and append.
+
+Context-usage cache hits inspect shallow message/tool array and element identities,
+internal message revisions, journal/branch state, prompt options, model and usage
+anchor, never archived payloads. SDK messages and tools are immutable inputs:
+replace edited objects or arrays; nested in-place edits are not observed until
+replacement, `refreshContext()` after journal changes, or another tracked change.
+Provider usage applicability follows canonical entry identity, retaining the
+reported baseline when context handlers alter the sent payload. Content added to
+assistant responses by `message_end` handlers contributes a positive estimated
+delta; removal keeps the provider baseline. Streaming-only events do not invalidate
+usage; streaming state is counted at `message_end`. Heuristic
+fallback counts opaque signatures and schemas and uses session-local comparable
+input-density samples (`4 × request estimate / (input + cacheRead + cacheWrite)`)
+with chars/token clamped to [1, 4], default 4; zero input totals are skipped and
+output tokens do not calibrate input.
+Unknown post-compaction usage
+remains unknown for display, not for internal preflight.
+
 Persisted context projections retain at most 16 MiB of pristine serialized active
 record bodies; each projection decodes its own mutable messages. Compaction and
 branch changes discard inactive cache records, while archived payloads remain lazy.
 Journal generation and digest checks still reject changed history; external source
 changes require validated reconciliation, not an unchecked append-tail shortcut.
-Request provenance excludes admitted but unpersisted input. Unchanged boundary
-previews reuse the projection with independent messages and freshly read queues;
+Request provenance excludes admitted but unpersisted input. Request ownership
+isolation also covers in-memory and unflushed persisted content. Boundary previews
+lazily reuse the dispatch-time projection with independent per-handler messages
+and freshly read queues. First access after history changes still reflects the
+captured leaf, with an O(captured branch length) fallback; automatic compaction's
+full `branchEntries` is lazy.
+Handler-free `emitContext` passes through request-owned messages without cloning;
 idle background monitoring reuses immutable receipt IDs until journal revision or
 session identity changes. These optimizations do not change provider payloads,
 input persistence timing, completion acknowledgement, or runtime selection.
+
+Extension handlers whose synchronous invocation exceeds 100 ms and custom footer
+renders exceeding 16 ms produce one non-fatal diagnostic per loaded extension and
+kind. Those blocking budgets protect input/turn responsiveness across several
+frames and one TUI frame respectively. Handler timing stops at return or first
+`await`; awaited I/O, dialogs and later work are not attributed. Use
+[profiling](packages/coding-agent/docs/profiling.md) for those costs. Diagnostics
+do not cancel work or alter handler results and use the existing interactive,
+print and RPC extension diagnostic paths.
 
 Session performance work is consolidated in PR #162; PR #163 is superseded, not
 an additional merge. One bounded serialized cache serves context projection,

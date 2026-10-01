@@ -1,6 +1,7 @@
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "../core/extensions/types.ts";
+import { SessionMetadataCursor } from "../core/session-metadata-cursor.ts";
 
 export interface InstructionGroup {
 	name: string;
@@ -33,14 +34,23 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		if (!text.trim()) throw new Error(`Instruction group ${group.name} returned empty instructions`);
 		return `## ${group.name}\n\n${text}`;
 	};
-	const replay = (ctx: ExtensionContext, boundary?: string) => {
-		const names = new Set<string>();
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.id === boundary) break;
-			if (entry.type !== "custom" || entry.customType !== stateType || !Array.isArray(entry.data)) continue;
+	const cursor = new SessionMetadataCursor();
+	const names = new Set<string>();
+	let atBoundary = new Set<string>();
+	const replay = (ctx: ExtensionContext) => {
+		const { entries, reset } = cursor.read(ctx.sessionManager, true);
+		if (reset) {
+			names.clear();
+			atBoundary.clear();
+		}
+		for (const metadata of entries) {
+			if (metadata.type === "compaction") atBoundary = new Set(names);
+			if (metadata.type !== "custom" || metadata.customType !== stateType) continue;
+			const entry = ctx.sessionManager.getEntry(metadata.id);
+			if (entry?.type !== "custom" || !Array.isArray(entry.data)) continue;
 			for (const name of entry.data) if (typeof name === "string") names.add(name);
 		}
-		return names;
+		return new Set(names);
 	};
 	const restore = (ctx: ExtensionContext) => {
 		ready.clear();
@@ -135,10 +145,11 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		ready.clear();
 		if (!isManaged()) return;
 		let messages = event.messages;
-		const boundary = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "compaction");
+		replay(ctx);
+		const boundaryId = ctx.sessionManager.getBranchState().contextStartId;
+		const boundary = boundaryId ? ctx.sessionManager.getEntryMetadata(boundaryId) : undefined;
 		const summaryIndex = messages.findLastIndex((message) => message.role === "compactionSummary");
-		if (boundary && summaryIndex >= 0) {
-			const atBoundary = replay(ctx, boundary.id);
+		if (boundary?.type === "compaction" && summaryIndex >= 0) {
 			const text = available()
 				.filter((group) => atBoundary.has(group.name))
 				.map((group) => section(group, ctx))

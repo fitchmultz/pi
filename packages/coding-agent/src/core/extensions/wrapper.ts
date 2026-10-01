@@ -32,7 +32,7 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: Exten
 		executionBindings.set(runner, bindings);
 	}
 	const createContext = (toolCallId: string, signal: AbortSignal | undefined) =>
-		runner.createToolContext(toolCallId, signal);
+		runner.createToolContext(toolCallId, signal, sourceInfo.path);
 	const tool = wrapToolDefinition(definition, createContext);
 	let binding = bindings.get(definition);
 	if (!binding || !isDeepStrictEqual(binding.sourceInfo, sourceInfo)) {
