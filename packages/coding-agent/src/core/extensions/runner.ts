@@ -2,6 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
+import { performance } from "node:perf_hooks";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
@@ -219,6 +220,33 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
+const SLOW_HANDLER_MS = 100;
+// A footer alone must not consume the TUI's entire 16 ms render interval.
+const SLOW_FOOTER_MS = 16;
+const slowWarnings = new WeakMap<Extension, Set<string>>();
+
+function warnSlowCall(
+	extension: Extension,
+	event: string,
+	elapsed: number,
+	threshold: number,
+	report: ExtensionErrorListener,
+): void {
+	if (elapsed <= threshold) return;
+	let warned = slowWarnings.get(extension);
+	if (!warned) {
+		warned = new Set();
+		slowWarnings.set(extension, warned);
+	}
+	if (warned.has(event)) return;
+	warned.add(event);
+	report({
+		extensionPath: extension.path,
+		event,
+		error: `Non-fatal performance warning: ${event} took ${elapsed.toFixed(1)} ms (budget ${threshold} ms). This includes awaited time; no work was cancelled. Avoid full-history queries on hot paths. Further warnings for this extension and kind are suppressed until reload.`,
+	});
+}
+
 type BoundaryBaseEvent =
 	| Omit<TurnEndEvent, "entries" | "continue" | "context">
 	| Omit<AgentBeforeSettleEvent, "entries" | "continue" | "context">;
@@ -306,6 +334,7 @@ export async function emitProjectTrustEvent(
 		// A single extension may register multiple handlers for the same event.
 		// The first project_trust handler that returns yes/no wins; undecided falls through.
 		for (const handler of handlers) {
+			const started = performance.now();
 			try {
 				const handlerResult = (await handler(event, ctx)) as ProjectTrustEventResult;
 				if (handlerResult.trusted === "undecided") {
@@ -319,6 +348,8 @@ export async function emitProjectTrustEvent(
 					error: error instanceof Error ? error.message : String(error),
 					stack: error instanceof Error ? error.stack : undefined,
 				});
+			} finally {
+				warnSlowCall(ext, event.type, performance.now() - started, SLOW_HANDLER_MS, (error) => errors.push(error));
 			}
 		}
 	}
@@ -400,6 +431,14 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
+	private extensionUIContexts = new Map<Extension, ExtensionUIContext>();
+	private reportPerformanceWarning: ExtensionErrorListener = (error) => {
+		try {
+			this.emitError(error);
+		} catch {
+			// A diagnostic listener must not replace an extension's result or error.
+		}
+	};
 
 	readonly checkpointActivity: CheckpointActivity;
 
@@ -418,7 +457,9 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				event.signal.throwIfAborted();
 				// Unlike notification events, a failed persistence barrier rejects the checkpoint.
-				const result = (await handler(event, ctx)) as SessionCheckpointResult | undefined;
+				const result = (await this.callHandler(extension, handler, event, ctx)) as
+					| SessionCheckpointResult
+					| undefined;
 				if (result?.sleepReady !== true)
 					blockers.push(`Extension not resumable: ${extension.path}${result?.reason ? `: ${result.reason}` : ""}`);
 			}
@@ -604,6 +645,7 @@ export class ExtensionRunner {
 	}
 
 	setUIContext(uiContext?: ExtensionUIContext, mode: ExtensionMode = "print"): void {
+		this.extensionUIContexts.clear();
 		this.uiContext = uiContext ? this.wrapUIPromptContext(uiContext) : noOpUIContext;
 		this.mode = mode;
 	}
@@ -757,7 +799,10 @@ export class ExtensionRunner {
 						shortcut.extensionPath,
 					);
 				}
-				extensionShortcuts.set(normalizedKey, shortcut);
+				extensionShortcuts.set(normalizedKey, {
+					...shortcut,
+					handler: (ctx) => shortcut.handler(this.withExtensionUI(ctx, ext)),
+				});
 			}
 		}
 		return extensionShortcuts;
@@ -850,7 +895,10 @@ export class ExtensionRunner {
 
 		for (const ext of this.extensions) {
 			for (const command of ext.commands.values()) {
-				commands.push(command);
+				commands.push({
+					...command,
+					handler: (args, ctx) => command.handler(args, this.withExtensionUI(ctx, ext)),
+				});
 				counts.set(command.name, (counts.get(command.name) ?? 0) + 1);
 			}
 		}
@@ -908,6 +956,75 @@ export class ExtensionRunner {
 	getActiveTools(): string[] {
 		this.assertActive();
 		return this.runtime.getActiveTools();
+	}
+
+	private withExtensionUI<T extends ExtensionContext>(ctx: T, extension: Extension): T {
+		const runner = this;
+		return new Proxy(ctx, {
+			get(target, key, receiver) {
+				if (key !== "ui") return Reflect.get(target, key, receiver);
+				runner.assertActive();
+				let ui = runner.extensionUIContexts.get(extension);
+				if (!ui) {
+					const base = ctx.ui;
+					ui = Object.create(base) as ExtensionUIContext;
+					ui.setFooter = (factory) =>
+						base.setFooter(
+							factory
+								? (...args) => {
+										const component = factory(...args);
+										return {
+											render(width) {
+												const started = performance.now();
+												try {
+													return component.render(width);
+												} finally {
+													warnSlowCall(
+														extension,
+														"footer",
+														performance.now() - started,
+														SLOW_FOOTER_MS,
+														// Do not mutate the UI tree during its render pass.
+														(error) => queueMicrotask(() => runner.reportPerformanceWarning(error)),
+													);
+												}
+											},
+											invalidate: () => component.invalidate(),
+											dispose: () => component.dispose?.(),
+											handleInput: component.handleInput?.bind(component),
+											handleMouse: component.handleMouse?.bind(component),
+											get wantsKeyRelease() {
+												return component.wantsKeyRelease;
+											},
+										};
+									}
+								: undefined,
+						);
+					runner.extensionUIContexts.set(extension, ui);
+				}
+				return ui;
+			},
+		});
+	}
+
+	private async callHandler(
+		extension: Extension,
+		handler: (...args: unknown[]) => Promise<unknown>,
+		event: ExtensionEvent,
+		ctx: ExtensionContext,
+	): Promise<unknown> {
+		const started = performance.now();
+		try {
+			return await handler(event, this.withExtensionUI(ctx, extension));
+		} finally {
+			warnSlowCall(
+				extension,
+				event.type,
+				performance.now() - started,
+				SLOW_HANDLER_MS,
+				this.reportPerformanceWarning,
+			);
+		}
 	}
 
 	/**
@@ -1018,10 +1135,16 @@ export class ExtensionRunner {
 	 * Create the context for executing the tool call `toolCallId`: the extension context plus
 	 * `tools` and `executeTool()`. `signal` is the default signal of nested calls.
 	 */
-	createToolContext(toolCallId: string, signal: AbortSignal | undefined): ExtensionToolContext {
+	createToolContext(
+		toolCallId: string,
+		signal: AbortSignal | undefined,
+		extensionPath?: string,
+	): ExtensionToolContext {
 		const runner = this;
+		const extension = this.extensions.find((ext) => ext.path === extensionPath);
+		const ctx = this.createContext();
 		// createContext() returns a fresh object, so adding properties does not affect other contexts.
-		return Object.defineProperties(this.createContext() as ExtensionToolContext, {
+		return Object.defineProperties((extension ? this.withExtensionUI(ctx, extension) : ctx) as ExtensionToolContext, {
 			tools: {
 				get() {
 					runner.assertActive();
@@ -1105,7 +1228,7 @@ export class ExtensionRunner {
 					context,
 				} as TurnEndEvent | AgentBeforeSettleEvent;
 				try {
-					const handlerResult = (await handler(event, ctx)) as BoundaryResult | undefined;
+					const handlerResult = (await this.callHandler(ext, handler, event, ctx)) as BoundaryResult | undefined;
 					if (handlerResult?.entries !== undefined) entries = handlerResult.entries;
 					if (handlerResult?.continue !== undefined) shouldContinue = handlerResult.continue;
 				} catch (err) {
@@ -1153,7 +1276,7 @@ export class ExtensionRunner {
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
 			for (const handler of handlers) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.callHandler(ext, handler, event, ctx);
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
@@ -1185,7 +1308,9 @@ export class ExtensionRunner {
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
 			for (const handler of handlers) {
 				try {
-					const result = (await handler(event, ctx)) as CacheWarmingDecisionEventResult | undefined;
+					const result = (await this.callHandler(ext, handler, event, ctx)) as
+						| CacheWarmingDecisionEventResult
+						| undefined;
 					if (result?.action !== undefined) action = result.action;
 				} catch (err) {
 					this.emitError({
@@ -1210,7 +1335,9 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
-					const handlerResult = (await handler(currentEvent, ctx)) as MessageEndEventResult | undefined;
+					const handlerResult = (await this.callHandler(ext, handler, currentEvent, ctx)) as
+						| MessageEndEventResult
+						| undefined;
 					if (!handlerResult?.message) continue;
 
 					if (handlerResult.message.role !== currentMessage.role) {
@@ -1248,7 +1375,9 @@ export class ExtensionRunner {
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "tool_result")) {
 			for (const handler of handlers) {
 				try {
-					const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
+					const handlerResult = (await this.callHandler(ext, handler, currentEvent, ctx)) as
+						| ToolResultEventResult
+						| undefined;
 					if (!handlerResult) continue;
 
 					if (handlerResult.content !== undefined) {
@@ -1303,9 +1432,9 @@ export class ExtensionRunner {
 		const ctx = this.createContext();
 		let result: ToolCallEventResult | undefined;
 
-		for (const { handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {
 			for (const handler of handlers) {
-				const handlerResult = await handler(event, ctx);
+				const handlerResult = await this.callHandler(ext, handler, event, ctx);
 
 				if (handlerResult) {
 					result = handlerResult as ToolCallEventResult;
@@ -1325,7 +1454,7 @@ export class ExtensionRunner {
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "user_bash")) {
 			for (const handler of handlers) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.callHandler(ext, handler, event, ctx);
 					if (handlerResult === undefined) continue;
 					if (!isUserBashEventResult(handlerResult)) {
 						throw new Error(
@@ -1367,7 +1496,9 @@ export class ExtensionRunner {
 					const visibleMessages = currentMessages.filter((message) => message.role !== "system");
 					const visibleSnapshot = visibleMessages.slice();
 					const event: ContextEvent = { type: "context", messages: visibleMessages };
-					const handlerResult = (await handler(event, ctx)) as ContextEventResult | undefined;
+					const handlerResult = (await this.callHandler(ext, handler, event, ctx)) as
+						| ContextEventResult
+						| undefined;
 
 					// Handlers may return a new list or edit event.messages in place.
 					const returned =
@@ -1393,7 +1524,9 @@ export class ExtensionRunner {
 				try {
 					const hadLeadingSystemMessage = currentMessages[0]?.role === "system";
 					const event: ContextWithSystemEvent = { type: "context_with_system", messages: currentMessages };
-					const handlerResult = (await handler(event, ctx)) as ContextEventResult | undefined;
+					const handlerResult = (await this.callHandler(ext, handler, event, ctx)) as
+						| ContextEventResult
+						| undefined;
 					currentMessages = handlerResult?.messages ?? currentMessages;
 					// Providers read the prompt and initial tools from the leading system message.
 					// Losing it is never intended; report it but honor the handler's output.
@@ -1431,7 +1564,7 @@ export class ExtensionRunner {
 						type: "before_provider_request",
 						payload: currentPayload,
 					};
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.callHandler(ext, handler, event, ctx);
 					if (handlerResult !== undefined) {
 						currentPayload = handlerResult;
 					}
@@ -1462,7 +1595,7 @@ export class ExtensionRunner {
 						type: "before_provider_headers",
 						headers,
 					};
-					await handler(event, ctx);
+					await this.callHandler(ext, handler, event, ctx);
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
@@ -1508,7 +1641,7 @@ export class ExtensionRunner {
 						},
 						systemPromptOptions: currentOptions,
 					};
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.callHandler(ext, handler, event, ctx);
 
 					if (handlerResult) {
 						const result = handlerResult as BeforeAgentStartEventResult;
@@ -1550,7 +1683,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.callHandler(ext, handler, event, ctx);
 					const result = handlerResult as ResourcesDiscoverResult | undefined;
 
 					if (result?.skillPaths?.length) {
@@ -1599,7 +1732,7 @@ export class ExtensionRunner {
 						source,
 						streamingBehavior,
 					};
-					const result = (await handler(event, ctx)) as InputEventResult | undefined;
+					const result = (await this.callHandler(ext, handler, event, ctx)) as InputEventResult | undefined;
 					if (result?.action === "handled") return result;
 					if (result?.action === "transform") {
 						currentText = result.text;

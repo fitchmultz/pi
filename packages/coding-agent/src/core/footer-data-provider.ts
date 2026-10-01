@@ -94,7 +94,8 @@ function shouldPollGitHead(repoDir: string): boolean {
 
 /**
  * Provides git branch and extension statuses - data not otherwise accessible to extensions.
- * Context usage on ctx.getContextUsage(), token stats on ctx.sessionManager.getEntries(), model info on ctx.model.
+ * Context usage on ctx.getContextUsage(), model info on ctx.model. Accumulate billing stats
+ * outside render() with metadata queries; never enumerate full history per frame.
  */
 export class FooterDataProvider {
 	private cwd: string;

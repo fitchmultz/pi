@@ -14,11 +14,13 @@
 - Added `pi convert-session SOURCE NEW_PATH` for settled legacy sessions, writing a new copy without replaying uncertain work.
 - Added extension-owned on-demand instruction groups without broadening tool permissions.
 - Added JSON path and field selection before `read` output truncation, optional compact transcript view, background external usage accounting, and PTY-backed RPC TUI handoff.
+- Added bounded newest-first session metadata queries, `getBranchState()`, non-fatal slow-extension diagnostics, and an opt-in offline session-scaling benchmark.
 
 ### Changed
 
 - Changed `pi mcp list` to inspect configuration and cached catalogs without connecting; use `--connect` for a live probe.
 - Kept deferred native MCP schemas and server usage instructions out of inline codemode declarations; discover them by server or namespace.
+- Changed context-usage caching to use shallow message/tool identity; SDK callers must replace edited objects or arrays instead of mutating nested content in place. Heuristic footer percentages now carry `~`.
 
 ### Fixed
 
@@ -34,6 +36,8 @@
 - Fixed unchanged queued extension and built-in tools being rejected after unrelated or identical registration, while preserving executor, owner, schema, argument-preparation, execution-mode, withdrawal, and reload admission safeguards.
 - Fixed cold extension loading on Node 24.0 when native CommonJS resolution supplies iterable conditions rather than an array.
 - Fixed new sessions intermittently ignoring the saved default model, or warning that no models are available, when it belongs to an extension-registered native provider with a stored credential ([#9962](https://github.com/earendil-works/pi/issues/9962)).
+- Fixed long-session frame and turn costs growing with archived history through incremental active paths, lazy hook previews, cached context usage, and incremental history consumers.
+- Fixed metadata strings retaining complete journal lines, and preserved reported usage after request-local context transforms with signature-aware, model-local calibrated fallback estimates.
 
 ## [0.99.1] - 2026-09-29
 

@@ -201,7 +201,8 @@ export interface ExtensionUIContext {
 	 *
 	 * The factory receives a FooterDataProvider for data not otherwise accessible:
 	 * git branch and extension statuses from setStatus(). Context usage is on
-	 * ctx.getContextUsage(), token stats on ctx.sessionManager.getEntries(), model info on ctx.model.
+	 * ctx.getContextUsage(), model info on ctx.model. Accumulate billing stats from metadata
+	 * outside render(); getEntries() and getBranch() return full history, not a bounded window.
 	 */
 	setFooter(
 		factory:

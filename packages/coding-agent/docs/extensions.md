@@ -64,6 +64,7 @@ Automatic retries, recovery, compaction, or queued work can continue afterward.
 <a id="agent_start--agent_end--agent_before_settle--agent_settled"></a>
 
 `turn_end` and `agent_before_settle` are actionable boundaries. Their handlers can chain proposed `custom`, `custom_message`, `context_edit`, or `compaction` entries and return `continue: true` for one next model request. Guard continuation conditions because an unconditional continuation can loop. Use the exported event declarations for the complete validation and ordering contract.
+Their `event.context` message, entry-body, LLM-message, and pending-message payloads are lazy: each handler gets independent mutable payloads on first access. Queue membership and continuation facts are refreshed between handlers; draft validation is still eager. Read only the fields you need. Spreading or serializing the whole preview forces its getters.
 `agent_settled` is final and notification-only; use it when an integration needs to know Pi will not continue automatically.
 
 <a id="extensionapi-methods"></a>
@@ -133,6 +134,7 @@ A `user_bash` handler that returns `undefined` passes the command to the next ha
 ### Context boundaries and persistence
 
 `session_before_compact` is the upstream compaction boundary for threshold, overflow, and manual requests. It can cancel or provide a custom compaction result; inspect `event.reason` and `event.preparation`. Posthorse can return a compaction result with an empty summary and its own handoff state, including on early and post-reset overflow when stock compaction has no cut; if it declines that special case, Pi does not call the default summarizer. The fork-only native context-window methods are retired. See [Compaction](compaction.md).
+Automatic compaction prepares only the retained context. Its `branchEntries` property lazily returns the **complete original branch** if read; prefer `preparation` when that is sufficient. Manual compaction retains the full-branch hook contract.
 
 `session_checkpoint` is the optional awaited persistence barrier for [working-session checkpoints](checkpoint.md). Use its signal and invalidation callback to keep owned background work quiescent while a receipt is held. It does not run shutdown just to save.
 
@@ -247,6 +249,56 @@ These operations are command-only because calling them from lifecycle handlers c
 
 Session replacement invalidates the old context. Capture only plain data before switching, then use the fresh context supplied to `withSession` for session-bound work.
 
+### Keep hot paths bounded
+
+A footer can render once per frame, and a stream can dispatch many events per response. A full-history scan in either place multiplies with session length, even after compaction.
+
+| API / operation | Cost |
+|---|---|
+| `sessionManager.getLeafId()`, `getEntriesRevision()`, `getEntryMetadata(id)`; scalar `ctx` state such as `model`, `isIdle()`, and pending counts | O(1) |
+| `sessionManager.getBranchState()` | O(1) on a warm active-path index |
+| `iterateEntryMetadata({ branchFrom, reverse, limit })` | O(entries visited) on a warm active path; no payload decoding |
+| `ctx.getContextUsage()` cache hit | O(active message count + tool count + prompt-option count) shallow identity checks, independent of archived history and payload bytes |
+| Usage cache miss; `buildContextEntries()`, `buildSessionProjection()`, `buildSessionContext()` | O(active context), including decoding/estimating payload bytes when needed |
+| `getBranch()`, `getEntries()`, `getTree()`, complete metadata iteration | O(total requested history/output); inspecting lazy message bodies additionally costs their bytes |
+| `getEntry(id)` | O(1) lookup; reading its lazy body costs that record's bytes |
+
+The active-path index is keyed by entries revision and leaf. Appending a child extends it in O(1); the first query after navigation, reload, or reconciliation rebuilds it in O(branch length). An off-path forward query also builds that requested path; reverse off-path queries follow parents lazily. Metadata strings do not retain whole journal lines. Projections still return independently decoded mutable messages, not shared decoded history.
+
+In footers, use `ctx.getContextUsage()`, `ctx.model`, and cached extension totals. Accumulate billing or other history-derived state outside `render()`, process appends incrementally, and replay once on session replacement, navigation, or reload. Revision alone does not detect leaf-only navigation: include the leaf and session identity in branch-sensitive caches. Avoid `getBranch()`, `getEntries()`, `getTree()`, and full iteration on per-frame or per-event paths.
+
+Use `getBranchState()` for `contextStartId`, `modelEntryId`, and `thinkingLevelEntryId`, then `getEntryMetadata(id)` for small facts. `contextStartId` is the latest compaction (including retain-none resets), or the root without compaction; an empty path returns null. Kept raw messages can precede that compaction. `modelEntryId` can identify an assistant response or an explicit model change.
+
+For a recent-history display, bound visits rather than materializing the branch:
+
+```typescript
+for (const entry of ctx.sessionManager.iterateEntryMetadata({
+  branchFrom: ctx.sessionManager.getLeafId(),
+  reverse: true,
+  limit: 32,
+})) {
+  // Inspect only the newest 32 entries; decode a selected body only if needed.
+  if (entry.type === "message" && entry.message.role === "assistant") {
+    // Use entry.message.usage, entry.id, etc.
+    break;
+  }
+}
+```
+
+`limit` is an optional non-negative safe integer and bounds entries visited, not matches; invalid limits throw when iteration starts. Do not cap a correctness-sensitive search arbitrarily: omit `limit` and stop at its actual boundary or qualifying entry. Do not spread the iterator before stopping. Omitted `branchFrom` means physical journal order, including abandoned branches; `branchFrom: null` is empty. `reverse` applies to either ordering.
+
+### Context usage and immutability
+
+`ContextUsage.source` distinguishes:
+
+- `reported`: provider usage anchors the retained conversation. It already describes the payload changed by `context` or `context_with_system` handlers; those changes do **not** discard the baseline. Later messages and pending prompt/tool differences may still be estimated.
+- `estimated`: heuristic-only usage, counting text, opaque thinking/tool-call signatures, and tool schemas. The built-in footer prefixes the percentage with `~`.
+- `unknown`: no qualifying current-model response since compaction. Tokens and percent are null (the footer shows `?`); internal compaction preflight still estimates.
+
+Fallback starts at four characters per token. The latest comparable live request calibrates **input-side density** for its provider/API/model: `4 × request estimate / reported input tokens`, where reported input is `input + cacheRead + cacheWrite`. The ratio is clamped to [1, 4], so calibration never lowers the old chars/4 estimate; output tokens do not participate. Calibration is session-local, not persisted. On resume, without the original sent-request receipt, historical usage uses the conservative maximum of report-plus-tail and physical estimate; it cannot calibrate from an unknown transformed request.
+
+Usage cache hits are keyed by journal revision, branch state, message/tool array and element identity, internal message revisions, system-prompt options, model, and usage anchor. **Treat SDK messages and tools as immutable.** Replace the edited object or its array. Nested in-place edits within an existing message or tool object are not observed until the object/array is replaced, `AgentSession.refreshContext()` runs after journal changes, or another tracked input changes. Returned usage objects are defensive copies. Request-local context transforms operate on separate request-owned messages; when neither context event has handlers, dispatch does not clone them again.
+
 <a id="state-management"></a>
 <a id="persist-state"></a>
 
@@ -293,6 +345,10 @@ Keep tool and event behavior independent from rendering so non-interactive modes
 ### Errors and cleanup
 
 Pi reports handler errors and continues where possible. A `tool_call` handler failure blocks the tool as a fail-safe; a tool execution failure becomes an error result for the model.
+
+Pi also reports **non-fatal performance warnings** once per loaded extension and event kind for handlers exceeding 100 ms, and once per extension for custom footer renders exceeding 16 ms (one TUI frame interval). Timing includes awaited time, so an intentional dialog or I/O wait can trigger a warning; it is not a CPU profiler or a timeout. Results, cancellation, and error handling are unchanged. Reloading the extension resets suppression.
+
+Warnings use the existing extension diagnostic channel: interactive notices, stderr in print/JSON mode, and `extension_error` records in RPC. The message explicitly says “Non-fatal performance warning”; no protocol or configuration setting is added. Footer notices are deferred until after the render pass. Use [local profiling](profiling.md#session-history-scaling) to distinguish deliberate waits from repeated history work.
 
 Release resources in `session_shutdown` even when normal operation attempted cleanup.
 Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path.
