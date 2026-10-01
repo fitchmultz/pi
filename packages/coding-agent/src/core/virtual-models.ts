@@ -23,12 +23,7 @@ import {
 	type Provider,
 	type ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import {
-	getSessionEntryMetadata,
-	type ReadonlySessionManager,
-	type SessionEntry,
-	type SessionEntryMetadata,
-} from "./session-manager.ts";
+import type { ReadonlySessionManager } from "./session-manager.ts";
 import { SessionMetadataCursor } from "./session-metadata-cursor.ts";
 
 /** API id of virtual catalog entries. Requests for it fail unless routed first. */
@@ -123,41 +118,10 @@ export function findLatestResponse(messages: readonly AgentMessage[]): Assistant
 	return undefined;
 }
 
-/**
- * The model selection a session branch records. A virtual `model_change` holds until the next
- * `model_change`, because responses name the physical models it routed to. Otherwise the latest
- * physical response wins, as in sessions without virtual models. A virtual model that is no longer
- * registered does not hold, so the selection falls back to the physical model that answered last.
- * Only the last model change can hold, so at most one catalog lookup is needed.
- */
-export function getBranchSelection(
-	branch: Iterable<SessionEntry | SessionEntryMetadata>,
-	getModel: (provider: string, modelId: string) => Model<Api> | undefined,
-): { provider: string; modelId: string } | undefined {
-	let change: { provider: string; modelId: string } | undefined;
-	let response: { provider: string; modelId: string } | undefined;
-	for (const source of branch) {
-		const entry = "sequence" in source ? source : getSessionEntryMetadata(source);
-		if (entry.type === "model_change") {
-			change = { provider: entry.provider, modelId: entry.modelId };
-			response = undefined;
-		} else if (
-			entry.type === "message" &&
-			entry.message.role === "assistant" &&
-			entry.message.api !== VIRTUAL_MODEL_API
-		) {
-			response = { provider: entry.message.provider!, modelId: entry.message.model! };
-		}
-	}
-	if (!response) return change;
-	const model = change && getModel(change.provider, change.modelId);
-	return model && isVirtualModel(model) ? change : response;
-}
-
 interface BranchModelState {
 	cursor: SessionMetadataCursor;
-	change?: SessionEntryMetadata;
-	response?: SessionEntryMetadata;
+	change?: { provider: string; modelId: string };
+	response?: { provider: string; modelId: string };
 	states: Map<string, string>;
 }
 const branchStates = new WeakMap<ReadonlySessionManager, BranchModelState>();
@@ -176,14 +140,14 @@ function readBranchModelState(manager: ReadonlySessionManager): BranchModelState
 	}
 	for (const entry of entries) {
 		if (entry.type === "model_change") {
-			state.change = entry;
+			state.change = { provider: entry.provider, modelId: entry.modelId };
 			state.response = undefined;
 		} else if (
 			entry.type === "message" &&
 			entry.message.role === "assistant" &&
 			entry.message.api !== VIRTUAL_MODEL_API
 		)
-			state.response = entry;
+			state.response = { provider: entry.message.provider!, modelId: entry.message.model! };
 		else if (entry.type === "custom" && entry.customType === VIRTUAL_MODEL_STATE_ENTRY) {
 			const source = manager.getEntry(entry.id);
 			const data = source?.type === "custom" ? (source.data as VirtualModelStateData | undefined) : undefined;
@@ -193,16 +157,18 @@ function readBranchModelState(manager: ReadonlySessionManager): BranchModelState
 	return state;
 }
 
-/** Incremental counterpart of getBranchSelection for live sessions. */
+/**
+ * Incremental branch selection. A still-registered virtual model holds until the next model change;
+ * otherwise the latest physical response wins. Resolve the catalog live, with at most one lookup.
+ */
 export function getSessionSelection(
 	manager: ReadonlySessionManager,
 	getModel: (provider: string, modelId: string) => Model<Api> | undefined,
 ): { provider: string; modelId: string } | undefined {
-	const state = readBranchModelState(manager);
-	return getBranchSelection(
-		[state.change, state.response].filter((entry) => entry !== undefined),
-		getModel,
-	);
+	const { change, response } = readBranchModelState(manager);
+	const model = response && change && getModel(change.provider, change.modelId);
+	const selection = response && !(model && isVirtualModel(model)) ? response : change;
+	return selection ? { ...selection } : undefined;
 }
 
 /** Latest router state, incrementally replayed on the active branch. */

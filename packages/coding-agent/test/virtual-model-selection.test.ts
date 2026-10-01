@@ -1,7 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it, vi } from "vitest";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { createVirtualModel, getBranchSelection } from "../src/core/virtual-models.ts";
+import { createVirtualModel, getSessionSelection } from "../src/core/virtual-models.ts";
 
 // Upstream #10198: model selection must not query a refreshed catalog for every saved response.
 it.each([
@@ -18,20 +18,40 @@ it.each([
 		}
 		const virtual = createVirtualModel({ provider: "catalog", id: "router", name: "Router" });
 		const getModel = vi.fn(() => (registered ? virtual : undefined));
-		for (const branch of [manager.getBranch(), manager.iterateEntryMetadata({ branchFrom: manager.getLeafId() })]) {
+		for (let read = 0; read < 2; read++) {
 			getModel.mockClear();
-			expect(getBranchSelection(branch, getModel)).toEqual({ provider: "catalog", modelId: expected });
+			expect(getSessionSelection(manager, getModel)).toEqual({ provider: "catalog", modelId: expected });
 			expect(getModel).toHaveBeenCalledTimes(1);
 		}
 		manager.appendModelChange("catalog", "new-selection");
 		getModel.mockClear();
-		expect(getBranchSelection(manager.getBranch(), getModel)).toEqual({
+		expect(getSessionSelection(manager, getModel)).toEqual({
 			provider: "catalog",
 			modelId: "new-selection",
 		});
 		expect(getModel).not.toHaveBeenCalled();
 	},
 );
+
+it("returns independent selections and refreshes catalog and branch changes after hydration", () => {
+	const manager = SessionManager.inMemory();
+	const virtual = createVirtualModel({ provider: "catalog", id: "router", name: "Router" });
+	let registered = true;
+	const getModel = () => (registered ? virtual : undefined);
+	const root = manager.appendModelChange("catalog", "router");
+	manager.appendMessage({ ...fauxAssistantMessage("routed"), provider: "catalog", model: "first" });
+	const first = getSessionSelection(manager, getModel)!;
+	first.modelId = "mutated";
+	expect(getSessionSelection(manager, getModel)).toEqual({ provider: "catalog", modelId: "router" });
+	registered = false;
+	expect(getSessionSelection(manager, getModel)).toEqual({ provider: "catalog", modelId: "first" });
+	manager.appendMessage({ ...fauxAssistantMessage("next"), provider: "catalog", model: "second" });
+	expect(getSessionSelection(manager, getModel)).toEqual({ provider: "catalog", modelId: "second" });
+	manager.branch(root);
+	expect(getSessionSelection(manager, getModel)).toEqual({ provider: "catalog", modelId: "router" });
+	manager.appendModelChange("catalog", "sibling");
+	expect(getSessionSelection(manager, getModel)).toEqual({ provider: "catalog", modelId: "sibling" });
+});
 
 it("does not let an older virtual selection survive a later physical selection or failed virtual response", () => {
 	const manager = SessionManager.inMemory();
@@ -47,7 +67,7 @@ it("does not let an older virtual selection survive a later physical selection o
 	});
 	const virtual = createVirtualModel({ provider: "catalog", id: "router", name: "Router" });
 	const getModel = vi.fn((_: string, id: string) => (id === "router" ? virtual : undefined));
-	expect(getBranchSelection(manager.getBranch(), getModel)).toEqual({ provider: "catalog", modelId: "latest" });
+	expect(getSessionSelection(manager, getModel)).toEqual({ provider: "catalog", modelId: "latest" });
 	expect(getModel).toHaveBeenCalledExactlyOnceWith("catalog", "physical");
-	expect(getBranchSelection([], getModel)).toBeUndefined();
+	expect(getSessionSelection(SessionManager.inMemory(), getModel)).toBeUndefined();
 });
