@@ -428,8 +428,10 @@ export {
 	type RpcEventListener,
 	type RpcExtensionUIRequest,
 	type RpcExtensionUIResponse,
+	type RpcModeOptions,
 	type RpcResponse,
 	type RpcSessionState,
+	type RpcTuiDetachedEvent,
 	runPrintMode,
 	runRpcMode,
 } from "./modes/index.ts";

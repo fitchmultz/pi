@@ -70,6 +70,14 @@ Continue consuming [events](json.md) after that response. `agent_end` marks the 
 
 Subscribe before sending a prompt to avoid missing a fast completion. `RpcClient.promptAndWait()` does this internally. If using separate `RpcClient` calls, install the event listener before `prompt()` and call `waitForIdle()` only while a run is active.
 
+## Live terminal handoff
+
+On POSIX, start `--mode rpc` with stdin and stdout connected to the same controlling PTY to enable [`attach_tui`](rpc-commands.md#attach_tui). Ordinary pipes cannot attach. The existing session, model work, and pending extension UI stay alive while the interactive TUI owns the terminal.
+
+After the successful attachment response, stop parsing JSONL and display subsequent output as terminal bytes. Send user keystrokes to the PTY, not RPC commands. Send `SIGUSR2` to Pi to return to RPC. Match the current attachment token in the framed `tui_detached` record before resuming JSONL parsing; it contains a fresh session snapshot, and unresolved extension UI requests replay afterward. Query `get_entries` or `get_messages` to recover activity that occurred while attached; events are not buffered for replay.
+
+Attachment does not emit another `session_start`. Reload and session replacement still use their normal lifecycle, with `ctx.mode` reflecting the current frontend. RPC startup still completes extension binding before reading commands: startup handlers must not await UI that needs client input or attachment. Hosts that need pre-startup attachment must provide their own startup coordination. Exit commands in the TUI shut down Pi rather than detach. Windows does not support this POSIX signal-based handoff.
+
 ## Errors
 
 A failed command returns one response with `success: false`:
