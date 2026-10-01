@@ -1,5 +1,5 @@
 import type { TextContent } from "@earendil-works/pi-ai";
-import type { Component } from "@earendil-works/pi-tui";
+import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
@@ -17,18 +17,21 @@ export class CustomMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
 	private outputPad: number;
+	private compactView: boolean;
 
 	constructor(
 		message: CustomMessage<unknown>,
 		customRenderer?: MessageRenderer,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
+		compactView = false,
 	) {
 		super();
 		this.message = message;
 		this.customRenderer = customRenderer;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
+		this.compactView = compactView;
 
 		this.addChild(new Spacer(1));
 
@@ -57,6 +60,28 @@ export class CustomMessageComponent extends Container {
 		this.rebuild();
 	}
 
+	setCompactView(compactView: boolean): void {
+		if (this.compactView === compactView) return;
+		this.compactView = compactView;
+		this.rebuild();
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		const result = super.handleMouse(event);
+		if (result || !this.compactView || event.type !== "click" || event.button !== "left") return result;
+		this.setExpanded(!this._expanded);
+		return {
+			handled: true,
+			target: {
+				component: this,
+				originX: event.screenX - event.x,
+				originY: event.screenY - event.y,
+				width: event.width,
+				height: event.height,
+			},
+		};
+	}
+
 	private rebuild(): void {
 		// Remove previous content component
 		if (this.customComponent) {
@@ -70,7 +95,7 @@ export class CustomMessageComponent extends Container {
 			try {
 				const component = this.customRenderer(
 					this.message,
-					{ expanded: this._expanded, outputPad: this.outputPad },
+					{ expanded: this._expanded, outputPad: this.outputPad, compactView: this.compactView },
 					theme,
 				);
 				if (component) {

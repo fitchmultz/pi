@@ -10,6 +10,7 @@ import {
 	Text,
 	type TUI,
 	type TuiMouseEvent,
+	truncateToWidth,
 } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.ts";
 import type { Theme } from "../theme/theme.ts";
@@ -33,6 +34,7 @@ export interface ToolRenderers {
 }
 
 import { formatToolCallWithArgs, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -40,6 +42,7 @@ import { keyHint } from "./keybinding-hints.ts";
 const FALLBACK_PREVIEW_LINES = 10;
 
 export interface ToolExecutionOptions {
+	compactView?: boolean;
 	showImages?: boolean;
 	imageWidthCells?: number;
 }
@@ -59,6 +62,10 @@ export class ToolExecutionComponent extends Container {
 	private toolCallId: string;
 	private args: any;
 	private expanded = false;
+	private compactView: boolean;
+	private compactRows: number[] = [];
+	private compactHeight = 0;
+	private compactPreview?: { width: number; source: string[]; resultStart: number; lines: string[] };
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private isPartial = true;
@@ -92,6 +99,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolCallId = toolCallId;
 		this.args = args;
 		this.toolDefinition = toolDefinition;
+		this.compactView = options.compactView ?? false;
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
 		this.ui = ui;
@@ -174,7 +182,7 @@ export class ToolExecutionComponent extends Container {
 
 	private createResultRegion(component: Component): MouseRegion {
 		return new MouseRegion(component, (event) => {
-			if (!this.result || event.type !== "click" || event.button !== "left") return undefined;
+			if ((!this.result && !this.compactView) || event.type !== "click" || event.button !== "left") return undefined;
 			this.setExpanded(!this.expanded);
 			return { handled: true };
 		});
@@ -246,6 +254,16 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	getActivityStatus(): "running" | "error" | "complete" {
+		return this.isPartial ? "running" : this.result?.isError ? "error" : "complete";
+	}
+
+	setCompactView(compactView: boolean): void {
+		if (this.compactView === compactView) return;
+		this.compactView = compactView;
+		this.updateDisplay();
+	}
+
 	setShowImages(show: boolean): void {
 		this.showImages = show;
 		this.updateDisplay();
@@ -264,6 +282,43 @@ export class ToolExecutionComponent extends Container {
 	override render(width: number): string[] {
 		if (this.hideComponent) {
 			return [];
+		}
+
+		if (this.compactView && !this.expanded) {
+			// Keep native child layouts live for inner card clicks and asynchronous renderers.
+			const source = super.render(width);
+			const self = this.getRenderShell() === "self";
+			const padding = self ? 0 : 1;
+			const container = self ? this.selfRenderContainer : this.contentBox;
+			const resultStart =
+				this.hasRendererDefinition() && this.result
+					? 1 + padding + (container.children[0]?.render(Math.max(1, width - padding * 2)).length ?? 0)
+					: 0;
+			const cached = this.compactPreview;
+			if (
+				cached?.width === width &&
+				cached.resultStart === resultStart &&
+				cached.source.length === source.length &&
+				cached.source.every((line, i) => line === source[i])
+			) {
+				return cached.lines;
+			}
+			const rows = source.flatMap((line, y) =>
+				/\x1b(?:_G|\]1337;File=)/.test(line) || stripAnsi(line).trim() ? [y] : [],
+			);
+			const second = rows.find((y) => y > rows[0] && y >= resultStart) ?? rows[1];
+			this.compactRows = [rows[0], second].filter((y) => y !== undefined);
+			this.compactHeight = source.length;
+			const lines = this.compactRows.map((y) => {
+				const line = source[y];
+				const imageStart = line.search(/\x1b(?:_G|\]1337;File=)/);
+				return truncateToWidth(
+					imageStart === -1 ? line : stripAnsi(line.slice(0, imageStart)) + theme.fg("muted", "[image]"),
+					width,
+				);
+			});
+			this.compactPreview = { width, source, resultStart, lines };
+			return lines;
 		}
 
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
@@ -295,6 +350,10 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		if (this.compactView && !this.expanded) {
+			const y = this.compactRows[event.y];
+			return y === undefined ? undefined : super.handleMouse({ ...event, y, height: this.compactHeight });
+		}
 		if (!this.hasRendererDefinition() || this.getRenderShell() !== "self") return super.handleMouse(event);
 		if (event.y <= 0 || event.y > this.selfRenderHeight) return undefined;
 		return this.selfRenderContainer.handleMouse({
@@ -305,6 +364,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
+		this.compactPreview = undefined;
 		const bgFn = this.isPartial
 			? (text: string) => theme.bg("toolPendingBg", text)
 			: this.result?.isError
@@ -381,7 +441,7 @@ export class ToolExecutionComponent extends Container {
 		}
 		this.imageSpacers = [];
 
-		if (this.result) {
+		if (this.result && (!this.compactView || this.expanded)) {
 			const imageBlocks = this.result.content.filter((c) => c.type === "image");
 			const caps = getCapabilities();
 			for (let i = 0; i < imageBlocks.length; i++) {
@@ -415,13 +475,13 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private getTextOutput(): string {
-		return getRenderedTextOutput(this.result, this.showImages);
+		return getRenderedTextOutput(this.result, this.showImages && (!this.compactView || this.expanded));
 	}
 
 	private formatToolExecution(): string {
 		let text = theme.fg("toolTitle", theme.bold(this.toolName));
 		const content = JSON.stringify(this.args, null, 2);
-		if (content) {
+		if (content && (!this.compactView || this.expanded)) {
 			text += `\n\n${content}`;
 		}
 		const output = this.getTextOutput();

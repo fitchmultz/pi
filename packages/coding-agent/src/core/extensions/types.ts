@@ -1481,6 +1481,8 @@ export interface SessionBeforeTreeResult {
 // ============================================================================
 
 export interface MessageRenderOptions {
+	/** Compact transcript density; independent of expansion. */
+	compactView?: boolean;
 	expanded: boolean;
 	/** Horizontal padding configured by the outputPad setting. */
 	outputPad: number;

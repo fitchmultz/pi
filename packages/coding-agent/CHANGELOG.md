@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added optional `compactView` (off by default), `/compact-view`, and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Hybrid opens groups by default while keeping cards compact.
+
 ## [1.0.0] - 2026-10-01
 
 ### New Features
