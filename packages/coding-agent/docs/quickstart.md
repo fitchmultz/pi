@@ -72,6 +72,10 @@ not stolen based on age: after an unclean termination, remove an abandoned lock
 directory only after confirming every updater/installer using that selector has
 stopped.
 
+Dependency installs and packing use an isolated environment and an empty temporary
+npm global configuration, not the native Node prefix's registry credentials or
+ambient provider keys and `NODE_OPTIONS`.
+
 ## 2. Start Pi
 
 Change to the folder you want Pi to work with, then start it:

@@ -14,6 +14,7 @@
 ### Fixed
 
 - Fixed concurrent fork installation, activation, rollback, and pruning bypassing the updater's selector lock and potentially deleting the selected runtime.
+- Fixed isolated fork builds reading native-prefix npm configuration and standalone package packing inheriting ambient credentials and `NODE_OPTIONS`.
 
 ## [1.0.0] - 2026-10-01
 

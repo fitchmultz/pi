@@ -24,13 +24,15 @@ function run(command, args, options = {}) {
 	return result.stdout;
 }
 
-export function packReleasePackages(packages, tarballDirectory) {
+export function packReleasePackages(packages, tarballDirectory, { node = process.execPath, npm, env = process.env } = {}) {
 	mkdirSync(tarballDirectory, { recursive: true });
 	const tarballs = new Map();
 	for (const pkg of packages) {
 		const manifest = JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"));
 		if (manifest.name !== pkg.name) throw new Error(`Unexpected package name in ${pkg.directory}`);
-		const output = run("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory], { cwd: pkg.directory });
+		const output = run(npm ? node : "npm", [
+			...(npm ? [npm] : []), "pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory,
+		], { cwd: pkg.directory, env });
 		// npm <11.6 returns an array; newer npm can return an object keyed by package name.
 		const parsed = JSON.parse(output);
 		const packed = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];

@@ -1,4 +1,14 @@
-import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import {
+	accessSync,
+	constants,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readlinkSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
@@ -87,6 +97,8 @@ export async function runForkUpdate(): Promise<void> {
 		const source = join(temporary, "source");
 		mkdirSync(join(home, "tmp"), { recursive: true });
 		mkdirSync(source);
+		const npmGlobalConfig = join(home, "npm-globalconfig");
+		writeFileSync(npmGlobalConfig, "");
 		// Do not expose real settings, credentials, Git hooks/config, or npm lifecycle hooks to the build.
 		const env: NodeJS.ProcessEnv = {
 			PATH: `${dirname(node)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -104,6 +116,7 @@ export async function runForkUpdate(): Promise<void> {
 			GIT_TERMINAL_PROMPT: "0",
 			npm_config_cache: join(home, "npm-cache"),
 			npm_config_userconfig: join(home, ".npmrc"),
+			npm_config_globalconfig: npmGlobalConfig,
 			...(termux
 				? {
 						PREFIX: process.env.PREFIX,

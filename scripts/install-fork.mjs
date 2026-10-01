@@ -43,6 +43,8 @@ export function resolveBuildTools() {
 
 export function isolatedEnvironment(home, tools) {
 	mkdirSync(join(home, "tmp"), { recursive: true });
+	const npmGlobalConfig = join(home, "npm-globalconfig");
+	writeFileSync(npmGlobalConfig, "");
 	return {
 		PATH: tools.path,
 		HOME: home,
@@ -58,6 +60,7 @@ export function isolatedEnvironment(home, tools) {
 		JITI_FS_CACHE: "0",
 		npm_config_cache: join(home, "npm-cache"),
 		npm_config_userconfig: join(home, ".npmrc"),
+		npm_config_globalconfig: npmGlobalConfig,
 		...(process.platform === "android" ? {
 			PREFIX: process.env.PREFIX,
 			LD_PRELOAD: process.env.LD_PRELOAD,
@@ -431,7 +434,7 @@ export async function main(args = process.argv.slice(2)) {
 			const packages = findPackageDirectories(join(source, "packages"))
 				.map((directory) => ({ directory, ...JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) }))
 				.filter((pkg) => pkg.private !== true);
-			const tarballs = packReleasePackages(packages, join(directory, "tarballs"));
+			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { ...tools, env });
 			installFrozenConsumer(directory, tarballs, join(source, "packages/coding-agent/install-lock"), tools, env);
 			smokeTestCodingAgentConsumer(directory, tools.node);
 			const cli = join(packagePath(directory), "dist/bundle/cli.js");

@@ -56,6 +56,7 @@ describe.skipIf(process.platform === "win32").each(platforms)("fork update boots
 		vi.stubEnv("ANTHROPIC_API_KEY", "must-not-leak");
 		vi.stubEnv("PI_RESTART_SOCKET", "must-not-leak");
 		vi.stubEnv("NODE_OPTIONS", "");
+		vi.stubEnv("NPM_CONFIG_GLOBALCONFIG", join(root, "ambient-npmrc"));
 		vi.stubEnv("PREFIX", join(root, "termux-prefix"));
 		// An empty preload avoids loading a real Android library on the host.
 		vi.stubEnv("LD_PRELOAD", "");
@@ -81,6 +82,9 @@ const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).
 assert.equal(args[args.indexOf('--ref') + 1], commit);
 assert.equal(readFileSync('marker', 'utf8'), 'pinned main');
 assert.equal(readFileSync('hydrated', 'utf8'), 'ready');
+assert.equal(readFileSync(process.env.npm_config_globalconfig, 'utf8'), '');
+assert.equal(process.env.NPM_CONFIG_GLOBALCONFIG, undefined);
+assert.equal(process.env.npm_config_globalconfig, process.env.HOME + '/npm-globalconfig');
 assert.equal(existsSync(${JSON.stringify(`${selector}.lock`)}), false, 'installer must acquire its own mutation lock');
 writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ args, commit, env: process.env }));
 `,

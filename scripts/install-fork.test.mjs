@@ -104,7 +104,7 @@ function installFixture(f, options = {}) {
 		mkdirSync(lockDirectory, { recursive: true });
 		writeFileSync(join(lockDirectory, "package.json"), JSON.stringify(manifest));
 		writeFileSync(join(lockDirectory, "package-lock.json"), JSON.stringify(lock));
-		const tarballs = packReleasePackages(pkgs, join(directory, "tarballs"));
+		const tarballs = packReleasePackages(pkgs, join(directory, "tarballs"), { ...tools, env: f.env });
 		if (options.brokenTarball) writeFileSync(tarballs.get(name), "not an npm tarball");
 		installFrozenConsumer(directory, tarballs, lockDirectory, tools, f.env);
 		smokeTestCodingAgentConsumer(directory, tools.node);
@@ -348,6 +348,56 @@ test("isolates ambient Pi/npm config and resolves native Node/npm before HOME ch
 	assert.equal(execFileSync(tools.node, [tools.npm, "--version"], { env: f.env, encoding: "utf8" }).trim(), tools.npmVersion);
 	assert.equal(execFileSync("node", ["-p", "process.execPath"], { env: f.env, encoding: "utf8" }).trim(), tools.node);
 	assert.notEqual(releaseIdentity(receipt()), releaseIdentity(receipt("a", "e")));
+});
+
+test("isolated npm cannot read registry credentials or settings from the native prefix", (t) => {
+	const f = fixture(t);
+	const prefix = join(f.root, "native-prefix");
+	mkdirSync(join(prefix, "etc"), { recursive: true });
+	writeFileSync(join(prefix, "etc/npmrc"), "registry=https://credential-fixture.invalid/\n//credential-fixture.invalid/:_authToken=synthetic-secret\n");
+	const inherited = { ...f.env, npm_config_prefix: prefix };
+	const registry = () => execFileSync(tools.node, [tools.npm, "config", "get", "registry"], {
+		cwd: f.root, env: inherited, encoding: "utf8",
+	}).trim();
+	assert.equal(readFileSync(f.env.npm_config_globalconfig, "utf8"), "");
+	assert.equal(f.env.NPM_CONFIG_GLOBALCONFIG, undefined);
+	assert.equal(registry(), "https://registry.npmjs.org/");
+	// Confirm that this fixture actually reaches prefix/etc/npmrc without isolation.
+	delete inherited.npm_config_globalconfig;
+	assert.equal(registry(), "https://credential-fixture.invalid/");
+});
+
+test("packing uses the resolved native Node/npm and isolated environment", (t) => {
+	const f = fixture(t);
+	const observed = join(f.root, "packing-env.json");
+	const npm = join(f.root, "npm-observer.cjs");
+	writeFileSync(npm, `const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ node: process.execPath, env: process.env }));
+require(${JSON.stringify(tools.npm)});
+`);
+	const inherited = { HOME: process.env.HOME, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, NODE_OPTIONS: process.env.NODE_OPTIONS };
+	const preload = join(f.root, "ambient-preload.cjs");
+	const leaked = join(f.root, "preload-ran");
+	writeFileSync(preload, `require("node:fs").writeFileSync(${JSON.stringify(leaked)}, "leaked");`);
+	try {
+		process.env.HOME = join(f.root, "ambient-home");
+		process.env.ANTHROPIC_API_KEY = "synthetic-secret";
+		process.env.NODE_OPTIONS = `--require ${preload}`;
+		const tarballs = packReleasePackages(packages(f), join(f.root, "tarballs"), { node: tools.node, npm, env: f.env });
+		assert.ok(existsSync(tarballs.get(name)));
+		const result = JSON.parse(readFileSync(observed, "utf8"));
+		assert.equal(result.node, tools.node);
+		assert.equal(result.env.HOME, f.env.HOME);
+		assert.equal(result.env.ANTHROPIC_API_KEY, undefined);
+		assert.equal(result.env.NODE_OPTIONS, undefined);
+		assert.equal(result.env.npm_config_globalconfig, f.env.npm_config_globalconfig);
+		assert.equal(existsSync(leaked), false);
+	} finally {
+		for (const [name, value] of Object.entries(inherited)) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
 });
 
 test("keeps only Termux's exec wrapper, prefix and native shell in the isolated environment", (t) => {
