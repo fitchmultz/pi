@@ -37,30 +37,33 @@ export async function runForkUpdate(): Promise<void> {
 	}
 	const selector = join(globalRoot, PACKAGE_NAME);
 	const bin = termux ? join(homedir(), ".local/bin/pi") : resolve(globalRoot, "../../bin/pi");
-	try {
-		if (!lstatSync(selector).isSymbolicLink()) {
+	const validateSelector = (): void => {
+		try {
+			if (!lstatSync(selector).isSymbolicLink()) {
+				throw new Error(
+					"the package must already be an immutable fork selector symlink; ordinary npm directories are not migrated",
+				);
+			}
+			if (realpathSync(selector) !== realpathSync(getPackageDir())) {
+				throw new Error("the package selector does not select this running Pi installation");
+			}
+			if (resolve(dirname(bin), readlinkSync(bin)) !== join(selector, "dist/bundle/cli.js")) {
+				throw new Error(`${bin} must point through the package selector to dist/bundle/cli.js`);
+			}
+			accessSync(dirname(selector), constants.W_OK);
+			try {
+				if (!lstatSync(`${selector}.previous`).isSymbolicLink())
+					throw new Error("the .previous backup is not a symlink");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		} catch (error) {
 			throw new Error(
-				"the package must already be an immutable fork selector symlink; ordinary npm directories are not migrated",
+				`Cannot safely update ${selector}: ${error instanceof Error ? error.message : String(error)}. Initial setup: https://github.com/fitchmultz/pi/blob/main/packages/coding-agent/docs/quickstart.md#fork-installation (the installation was not changed).`,
 			);
 		}
-		if (realpathSync(selector) !== realpathSync(getPackageDir())) {
-			throw new Error("the package selector does not select this running Pi installation");
-		}
-		if (resolve(dirname(bin), readlinkSync(bin)) !== join(selector, "dist/bundle/cli.js")) {
-			throw new Error(`${bin} must point through the package selector to dist/bundle/cli.js`);
-		}
-		accessSync(dirname(selector), constants.W_OK);
-		try {
-			if (!lstatSync(`${selector}.previous`).isSymbolicLink())
-				throw new Error("the .previous backup is not a symlink");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
-	} catch (error) {
-		throw new Error(
-			`Cannot safely update ${selector}: ${error instanceof Error ? error.message : String(error)}. Initial setup: https://github.com/fitchmultz/pi/blob/main/packages/coding-agent/docs/quickstart.md#fork-installation (the installation was not changed).`,
-		);
-	}
+	};
+	validateSelector();
 	for (const [command, args] of [
 		["git", ["--version"]],
 		["bash", ["--version"]],
@@ -71,9 +74,14 @@ export async function runForkUpdate(): Promise<void> {
 		capture(command, [...args]);
 	}
 
-	const releaseLock = await lockfile.lock(selector, { realpath: false });
+	let releaseLock: (() => Promise<void>) | undefined = await lockfile.lock(selector, {
+		realpath: false,
+		stale: Infinity,
+		update: 1000,
+	});
 	let temporary: string | undefined;
 	try {
+		validateSelector();
 		temporary = mkdtempSync(join(tmpdir(), "pi-fork-update-"));
 		const home = join(temporary, "home");
 		const source = join(temporary, "source");
@@ -117,6 +125,10 @@ export async function runForkUpdate(): Promise<void> {
 		await run("git", ["checkout", "--detach", commit]);
 		await run(node, [npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
 		await run(node, [npm, "run", "hydrate:model-data"]);
+		// The installer revalidates and locks all release mutations itself. Hand off
+		// ownership rather than allowing a child to bypass the shared selector lock.
+		await releaseLock();
+		releaseLock = undefined;
 		await run(node, [
 			join(source, "scripts/install-fork.mjs"),
 			"--ref",
@@ -134,7 +146,7 @@ export async function runForkUpdate(): Promise<void> {
 		try {
 			if (temporary) rmSync(temporary, { recursive: true, force: true });
 		} finally {
-			await releaseLock();
+			await releaseLock?.();
 		}
 	}
 }

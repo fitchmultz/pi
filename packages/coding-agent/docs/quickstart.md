@@ -66,6 +66,12 @@ The installer also supports `--stage`, `--activate <identity>`, and
 The prior package target is preserved as `<selector>.previous`.
 Run `node scripts/install-fork.mjs --help` for options and pruning safeguards.
 
+Updates, staging, activation, rollback, and pruning share `<selector>.lock`.
+Concurrent mutations fail rather than using stale protection snapshots. Locks are
+not stolen based on age: after an unclean termination, remove an abandoned lock
+directory only after confirming every updater/installer using that selector has
+stopped.
+
 ## 2. Start Pi
 
 Change to the folder you want Pi to work with, then start it:

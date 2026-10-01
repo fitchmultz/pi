@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
+import lockfile from "proper-lockfile";
 import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import {
 	activateRelease, installFrozenConsumer, installRelease, isolatedEnvironment, main, prepareTermuxCompiler, pruneReleases, releaseIdentity, resolveBuildTools,
@@ -134,7 +135,7 @@ test("stages real npm artifacts, selects atomically, reuses without rebuilding, 
 	assert.deepEqual(readFileSync(join(first.directory, "fork-release.json")), before);
 	assert.equal(lstatSync(first.packageDir).ino, inode);
 	const selectorInode = lstatSync(f.selector).ino;
-	assert.equal(activateRelease(f.releases, releaseIdentity(receipt()), f.selector).changed, false);
+	assert.equal((await activateRelease(f.releases, releaseIdentity(receipt()), f.selector)).changed, false);
 	assert.equal(lstatSync(f.selector).ino, selectorInode);
 
 	const second = await installRelease({ ...f, receipt: receipt("d") }, installFixture(f));
@@ -219,20 +220,20 @@ test("never overwrites an existing incomplete release or an unrelated selector f
 	const realSelector = join(f.root, "real-package");
 	mkdirSync(realSelector);
 	writeFileSync(join(realSelector, "keep"), "keep");
-	assert.throws(() => activateRelease(f.releases, basename(valid.directory), realSelector), /non-symlink/);
+	await assert.rejects(activateRelease(f.releases, basename(valid.directory), realSelector), /non-symlink/);
 	assert.equal(readFileSync(join(realSelector, "keep"), "utf8"), "keep");
-	assert.throws(() => activateRelease(f.releases, "../outside", f.selector), /identity/);
+	await assert.rejects(activateRelease(f.releases, "../outside", f.selector), /identity/);
 });
 
 test("native selection replaces the link inode and leaves no temporary selectors", async (t) => {
 	const f = fixture(t);
 	const a = await installRelease({ ...f, receipt: receipt(), stage: true }, installFixture(f));
 	const b = await installRelease({ ...f, receipt: receipt("d"), stage: true }, installFixture(f));
-	activateRelease(f.releases, releaseIdentity(receipt()), f.selector);
+	await activateRelease(f.releases, releaseIdentity(receipt()), f.selector);
 	for (const candidate of [b, a, b, a]) {
 		const previous = readlinkSync(f.selector);
 		const previousInode = lstatSync(f.selector).ino;
-		activateRelease(f.releases, releaseIdentity(candidate.receipt), f.selector);
+		await activateRelease(f.releases, releaseIdentity(candidate.receipt), f.selector);
 		assert.notEqual(lstatSync(f.selector).ino, previousInode);
 		assert.equal(readlinkSync(f.selector), candidate.packageDir);
 		assert.equal(readlinkSync(`${f.selector}.previous`), previous);
@@ -252,17 +253,17 @@ function validatedRelease(f, commit, validatedAt) {
 	return { identity: basename(directory), directory };
 }
 
-test("prunes old validated releases except selected, previous and visibly running ones", (t) => {
+test("prunes old validated releases except selected, previous and visibly running ones", async (t) => {
 	const f = fixture(t);
 	const [previous, selected, running, old, newer, newest] = ["1", "2", "3", "4", "5", "6"]
 		.map((commit, index) => validatedRelease(f, commit, 1_000 + index));
-	activateRelease(f.releases, previous.identity, f.selector);
-	activateRelease(f.releases, selected.identity, f.selector);
+	await activateRelease(f.releases, previous.identity, f.selector);
+	await activateRelease(f.releases, selected.identity, f.selector);
 	const legacy = join(f.releases, "legacy-release");
 	const installing = join(f.releases, releaseIdentity(receipt("7")));
 	for (const directory of [legacy, installing]) mkdirSync(directory, { recursive: true });
 
-	const result = pruneReleases({ releases: f.releases, selector: f.selector, keep: 2 },
+	const result = await pruneReleases({ releases: f.releases, selector: f.selector, keep: 2 },
 		() => `p1\nn${running.directory}/node_modules/native.node\n`);
 
 	assert.deepEqual(result, { kept: 5, removed: [old.identity] });
@@ -284,6 +285,51 @@ test("prune is a separate operation and requires an explicit keep count", async 
 	await assert.rejects(main(["--prune", "--keep", "1", "--stage", ...paths]), /cannot combine/);
 	await assert.rejects(main(["--prune", "--keep", "1", "--rollback", "x", ...paths]), /cannot combine/);
 	assertPreserved(f);
+});
+
+test("prune cannot delete a runtime selected after its protection snapshot", async (t) => {
+	const f = fixture(t);
+	const a = validatedRelease(f, "1", 1_000);
+	const b = validatedRelease(f, "2", 1_001);
+	await activateRelease(f.releases, a.identity, f.selector);
+	let activation;
+	await pruneReleases({ releases: f.releases, selector: f.selector, keep: 0 }, () => {
+		// A different process tries to select B after prune has read its protected links.
+		activation = spawnSync(tools.node, [fileURLToPath(new URL("./install-fork.mjs", import.meta.url)),
+			"--activate", b.identity, "--releases", f.releases, "--selector", f.selector], {
+			env: f.env, encoding: "utf8",
+		});
+		return "";
+	});
+	assert.equal(activation.status, 1);
+	assert.match(activation.stderr, /Lock file is already being held/);
+	assert.ok(existsSync(f.selector), "Pruning must never leave the selected runtime dangling");
+	assert.equal(readlinkSync(f.selector), join(a.directory, "node_modules", name));
+	assert.equal(existsSync(b.directory), false);
+	assert.equal(existsSync(`${f.selector}.lock`), false);
+});
+
+test("installation, activation, rollback and pruning honor the updater's selector lock", async (t) => {
+	const f = fixture(t);
+	const candidate = validatedRelease(f, "1", 1_000);
+	const release = await lockfile.lock(f.selector, { realpath: false, stale: Infinity, update: 1000 });
+	try {
+		await assert.rejects(installRelease({ ...f, receipt: receipt() }, () => assert.fail("must not build")), { code: "ELOCKED" });
+		for (const args of [
+			["--activate", candidate.identity], ["--rollback", candidate.identity], ["--prune", "--keep", "0"],
+		]) {
+			await assert.rejects(main([...args, "--selector", f.selector, "--releases", f.releases]), { code: "ELOCKED" });
+		}
+		assertPreserved(f);
+		assert.ok(existsSync(candidate.directory));
+	} finally {
+		await release();
+	}
+	// A paused long build or SIGKILL must not permit another operation to steal the lock.
+	mkdirSync(`${f.selector}.lock`);
+	utimesSync(`${f.selector}.lock`, new Date(0), new Date(0));
+	await assert.rejects(activateRelease(f.releases, candidate.identity, f.selector), { code: "ELOCKED" });
+	rmSync(`${f.selector}.lock`, { recursive: true });
 });
 
 test("isolates ambient Pi/npm config and resolves native Node/npm before HOME changes", (t) => {

@@ -11,6 +11,10 @@
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 - Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
 
+### Fixed
+
+- Fixed concurrent fork installation, activation, rollback, and pruning bypassing the updater's selector lock and potentially deleting the selected runtime.
+
 ## [1.0.0] - 2026-10-01
 
 ### New Features

@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PACKAGE_NAME } from "../src/config.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
@@ -74,12 +75,13 @@ describe.skipIf(process.platform === "win32").each(platforms)("fork update boots
 			`
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 assert.equal(args[args.indexOf('--ref') + 1], commit);
 assert.equal(readFileSync('marker', 'utf8'), 'pinned main');
 assert.equal(readFileSync('hydrated', 'utf8'), 'ready');
+assert.equal(existsSync(${JSON.stringify(`${selector}.lock`)}), false, 'installer must acquire its own mutation lock');
 writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ args, commit, env: process.env }));
 `,
 		);
@@ -192,6 +194,19 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 		expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("Fork commit"));
 		expect(readlinkSync(selector)).toBe(oldPackage);
 		expect(existsSync(temporarySource!)).toBe(false);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it("revalidates selection after acquiring the shared mutation lock", async () => {
+		const acquire = lockfile.lock.bind(lockfile);
+		vi.spyOn(lockfile, "lock").mockImplementation(async (path, options) => {
+			const release = await acquire(path, options);
+			rmSync(selector);
+			symlinkSync(root, selector);
+			return release;
+		});
+		await expect(runForkUpdate()).rejects.toThrow("does not select this running Pi installation");
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
 		expect(existsSync(`${selector}.lock`)).toBe(false);
 	});
 

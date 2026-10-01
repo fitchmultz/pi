@@ -9,6 +9,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import lockfile from "proper-lockfile";
 import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import { findPackageDirectories } from "./package-workspaces.mjs";
 
@@ -196,7 +197,24 @@ function replaceSymlink(target, selector) {
 	}
 }
 
+async function withMutationLock(selector, action) {
+	mkdirSync(dirname(selector), { recursive: true });
+	// Synchronous builds can block heartbeats. Never steal a lock based on age.
+	const release = await lockfile.lock(selector, { realpath: false, stale: Infinity, update: 1000 });
+	try {
+		selectorTarget(selector);
+		selectorTarget(`${selector}.previous`);
+		return await action();
+	} finally {
+		await release();
+	}
+}
+
 export function activateRelease(releases, identity, selector) {
+	return withMutationLock(selector, () => activateLockedRelease(releases, identity, selector));
+}
+
+function activateLockedRelease(releases, identity, selector) {
 	const release = readVerifiedRelease(releasePath(releases, identity));
 	const previous = selectorTarget(selector);
 	if (previous === release.packageDir) return { ...release, previous, changed: false };
@@ -228,62 +246,66 @@ function resolvedLink(link) {
 }
 
 export function pruneReleases({ releases, selector, keep }, livePaths = liveProcessPaths) {
-	const selected = [selector, `${selector}.previous`].map(resolvedLink);
-	const live = livePaths();
-	const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
-	const validated = [];
-	for (const identity of readdirSync(releases)) {
-		const directory = join(releases, identity);
-		try {
-			readVerifiedRelease(directory);
-		} catch {
-			continue; // Legacy releases and installations still in progress have no valid receipt.
+	return withMutationLock(selector, () => {
+		const selected = [selector, `${selector}.previous`].map(resolvedLink);
+		const live = livePaths();
+		const mentioned = (path) => new RegExp(`${path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:[/\\s]|$)`, "m").test(live);
+		const validated = [];
+		for (const identity of readdirSync(releases)) {
+			const directory = join(releases, identity);
+			try {
+				readVerifiedRelease(directory);
+			} catch {
+				continue; // Legacy releases and installations still in progress have no valid receipt.
+			}
+			validated.push({ directory, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
 		}
-		validated.push({ directory, validatedAt: statSync(join(directory, receiptFile)).mtimeMs });
-	}
-	validated.sort((a, b) => b.validatedAt - a.validatedAt);
-	const removed = [];
-	for (const { directory } of validated.slice(keep)) {
-		const real = realpathSync(directory);
-		if (selected.some((path) => path === real || path?.startsWith(`${real}/`)) || mentioned(directory) || mentioned(real)) {
-			continue;
+		validated.sort((a, b) => b.validatedAt - a.validatedAt);
+		const removed = [];
+		for (const { directory } of validated.slice(keep)) {
+			const real = realpathSync(directory);
+			if (selected.some((path) => path === real || path?.startsWith(`${real}/`)) || mentioned(directory) || mentioned(real)) {
+				continue;
+			}
+			rmSync(directory, { recursive: true, force: true });
+			removed.push(basename(directory));
 		}
-		rmSync(directory, { recursive: true, force: true });
-		removed.push(basename(directory));
-	}
-	return { kept: validated.length - removed.length, removed };
+		return { kept: validated.length - removed.length, removed };
+	});
 }
 
 // The callback builds/installs/tests only a NEW candidate. The receipt is written
 // last, and is the only reusable success marker. Existing releases are never modified.
 export async function installRelease({ releases, receipt, selector, stage = false }, installAndValidate) {
-	const identity = releaseIdentity(receipt);
-	const directory = releasePath(releases, identity);
-	mkdirSync(resolve(releases), { recursive: true });
-	let created = false;
-	try {
-		mkdirSync(directory);
-		created = true;
-	} catch (error) {
-		if (error.code !== "EEXIST") throw error;
-		const existing = readVerifiedRelease(directory).receipt;
-		for (const key of ["commit", "catalogSha256", "archiveSha256", "node", "platform", "arch"]) {
-			if (existing[key] !== receipt[key]) throw new Error(`Existing release has a different ${key}: ${directory}`);
-		}
-	}
-	if (created) {
+	return withMutationLock(selector, async () => {
+		const identity = releaseIdentity(receipt);
+		const directory = releasePath(releases, identity);
+		mkdirSync(resolve(releases), { recursive: true });
+		let created = false;
 		try {
-			await installAndValidate(directory);
-			writeFileSync(join(directory, receiptFile), `${JSON.stringify({ ...receipt, validated: true }, null, 2)}\n`, { flag: "wx" });
-			readVerifiedRelease(directory);
+			mkdirSync(directory);
+			created = true;
 		} catch (error) {
-			// This invocation owns this unselected, incomplete directory, not an active release.
-			rmSync(directory, { recursive: true, force: true });
-			throw error;
+			if (error.code !== "EEXIST") throw error;
+			const existing = readVerifiedRelease(directory).receipt;
+			for (const key of ["commit", "catalogSha256", "archiveSha256", "node", "platform", "arch"]) {
+				if (existing[key] !== receipt[key]) throw new Error(`Existing release has a different ${key}: ${directory}`);
+			}
 		}
-	}
-	return stage ? { ...readVerifiedRelease(directory), reused: !created, changed: false }
-		: { ...activateRelease(releases, identity, selector), reused: !created };
+		if (created) {
+			try {
+				await installAndValidate(directory);
+				writeFileSync(join(directory, receiptFile), `${JSON.stringify({ ...receipt, validated: true }, null, 2)}\n`, { flag: "wx" });
+				readVerifiedRelease(directory);
+			} catch (error) {
+				// This invocation owns this unselected, incomplete directory, not an active release.
+				rmSync(directory, { recursive: true, force: true });
+				throw error;
+			}
+		}
+		return stage ? { ...readVerifiedRelease(directory), reused: !created, changed: false }
+			: { ...activateLockedRelease(releases, identity, selector), reused: !created };
+	});
 }
 
 function printUsage() {
@@ -315,6 +337,8 @@ Exit codes: 0 success, 1 failure.
 Selection atomically replaces only the package symlink; its old target is kept
 at <selector>.previous. Existing releases and user settings/auth/sessions are
 never edited. Running sessions keep their runtime until restarted.
+All release mutations share <selector>.lock. Concurrent operations fail; an
+abandoned lock must be removed only after confirming its updater/installer stopped.
 `);
 }
 
@@ -346,7 +370,7 @@ export async function main(args = process.argv.slice(2)) {
 			throw new Error("--prune cannot combine with installation or activation");
 		}
 		if (!/^\d+$/.test(options.keep)) throw new Error("--keep requires a non-negative integer");
-		const result = pruneReleases({ ...options, keep: Number(options.keep) });
+		const result = await pruneReleases({ ...options, keep: Number(options.keep) });
 		console.log(JSON.stringify(result, null, 2));
 		return result;
 	}
@@ -354,7 +378,7 @@ export async function main(args = process.argv.slice(2)) {
 		throw new Error("Activation cannot combine with --stage, --ref or --source-archive");
 	}
 	if (selection) {
-		const result = activateRelease(options.releases, selection, options.selector);
+		const result = await activateRelease(options.releases, selection, options.selector);
 		console.log(JSON.stringify(result, null, 2));
 		return result;
 	}
