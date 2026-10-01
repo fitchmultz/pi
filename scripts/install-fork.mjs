@@ -448,6 +448,7 @@ export async function main(args = process.argv.slice(2)) {
 			smokeTestCodingAgentConsumer(directory, tools.node);
 			const cli = join(packagePath(directory), "dist/bundle/cli.js");
 			run(tools.node, [cli, "--help"], { cwd: env.HOME, env });
+			run(tools.node, [join(source, "scripts/smoke-test-background-command-bundle.mjs"), cli], { cwd: env.HOME, env });
 			run(tools.node, [join(source, "node_modules/vitest/vitest.mjs"), "run", "test/restart-tui.test.ts", "--maxWorkers=1"], {
 				cwd: join(source, "packages/coding-agent"),
 				env: { ...env, PI_TEST_CLI: cli },

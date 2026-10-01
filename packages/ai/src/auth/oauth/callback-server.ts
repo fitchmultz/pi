@@ -186,6 +186,9 @@ export async function waitForCallbackOrManualInput<T>(
 		const input = await raceWithAbortSignal(manual, interaction.signal);
 		if (manualError) throw manualError;
 		return { type: "manual", input: input ?? "" };
+	} catch (error) {
+		if (interaction.signal.aborted) throw new Error("Login cancelled");
+		throw error;
 	} finally {
 		manualAbort.abort();
 	}
