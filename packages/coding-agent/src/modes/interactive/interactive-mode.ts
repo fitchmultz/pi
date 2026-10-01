@@ -121,6 +121,7 @@ import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { addMcpServerConfig, loadMcpConfig } from "../../extensions/mcp/config.ts";
+import type { ManagedRestart } from "../../extensions/restart/index.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardFilePaths, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
@@ -420,6 +421,8 @@ function formatLoginProviderCompletionDescription(provider: LoginProviderComplet
  * Options for InteractiveMode initialization.
  */
 export interface InteractiveModeOptions {
+	/** Managed Node CLI lifecycle only; absent for SDK hosts and standalone binaries. */
+	managedRestart?: ManagedRestart;
 	/** Providers that were migrated to auth.json (shows warning) */
 	migratedProviders?: string[];
 	/** Diagnostics collected before the interactive TUI was initialized. */
@@ -660,6 +663,17 @@ export class InteractiveMode {
 			onChanged: () => this.updateEditorBorderColor(),
 			initialThemeSetting: options.initialThemeSetting,
 		});
+		options.managedRestart?.bindInput(() => ({
+			busy:
+				this.session.isBashRunning ||
+				process.stdin.isPaused() ||
+				this.editorContainer.children[0] !== this.editor ||
+				this.renderer.hasOverlayEntries,
+			pendingInput:
+				this.pendingUserInputs.length > 0 ||
+				this.compactionQueuedMessages.length > 0 ||
+				this.session.hasPendingNextTurnMessages,
+		}));
 	}
 
 	private getAutocompleteSourceTag(sourceInfo?: SourceInfo): string | undefined {
@@ -1132,6 +1146,7 @@ export class InteractiveMode {
 	 */
 	async run(): Promise<void> {
 		await this.init();
+		await this.options.managedRestart?.ready();
 
 		if (!process.env.PI_OFFLINE) {
 			const controller = new AbortController();
@@ -1234,6 +1249,8 @@ export class InteractiveMode {
 				}
 			}
 		}
+
+		this.options.managedRestart?.start();
 
 		// Main interactive loop
 		while (true) {
@@ -2015,7 +2032,7 @@ export class InteractiveMode {
 			shutdownHandler: () => {
 				this.shutdownRequested = true;
 				if (this.session.isIdle) {
-					void this.shutdown();
+					void this.shutdown({ fromExtension: true });
 				}
 			},
 			onError: (error) => {
@@ -3621,6 +3638,7 @@ export class InteractiveMode {
 			}
 
 			case "compaction_end": {
+				if (event.aborted) this.options.managedRestart?.interrupt();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -3686,6 +3704,7 @@ export class InteractiveMode {
 			}
 
 			case "auto_retry_end": {
+				if (!event.success) this.options.managedRestart?.interrupt();
 				// Restore escape handler
 				if (this.retryEscapeHandler) {
 					this.defaultEditor.onEscape = this.retryEscapeHandler;
@@ -4208,7 +4227,10 @@ export class InteractiveMode {
 	 */
 	private isShuttingDown = false;
 
-	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+	private async shutdown(options?: { fromSignal?: boolean; fromExtension?: boolean }): Promise<void> {
+		const restarting = this.options.managedRestart?.beginShutdown(
+			options?.fromSignal ? "signal" : options?.fromExtension ? "extension" : "user",
+		);
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
 		// Keep signal handlers registered until terminal cleanup has completed.
@@ -4236,10 +4258,12 @@ export class InteractiveMode {
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		this.themeController.disableAutoSync();
-		await this.ui.terminal.drainInput(1000);
+		// Freeze admission immediately on restart; draining would discard a newly typed draft.
+		if (!restarting) await this.ui.terminal.drainInput(1000);
 
 		this.stop();
 		await this.runtimeHost.dispose();
+		await this.options.managedRestart?.completeShutdown();
 
 		const resumeCommand = formatResumeCommand(this.sessionManager);
 		if (resumeCommand) {
@@ -4298,7 +4322,7 @@ export class InteractiveMode {
 	 */
 	private async checkShutdownRequested(): Promise<void> {
 		if (!this.shutdownRequested) return;
-		await this.shutdown();
+		await this.shutdown({ fromExtension: true });
 	}
 
 	private registerSignalHandlers(): void {
@@ -4653,6 +4677,7 @@ export class InteractiveMode {
 	}
 
 	private restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
+		if (options?.abort) this.options.managedRestart?.interrupt();
 		const { steering, followUp } = this.clearAllQueues();
 		const allQueued = [...steering, ...followUp];
 		if (allQueued.length === 0) {

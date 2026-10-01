@@ -1,0 +1,70 @@
+# Managed restarts
+
+The bundled Node CLI runs Pi inside a worker, with a small launcher outside the agent process. Restart replaces the worker and opens the **same saved session file**. It does not replay startup prompts, attachments, completed commands, or provider requests.
+
+Use `/reload` for changed extension source and resources in the current process. Use restart for core/runtime changes or a clean process.
+
+## Request a restart
+
+From a Pi shell tool:
+
+```bash
+pi restart --message "Verify the updated tool, then continue the task"
+```
+
+The response says **Restart queued**, not ready or successfully activated. Pi waits for final idle: no streaming, running tools, automatic retry/compaction, or queued steering/follow-up messages. It runs `session_shutdown` handlers, exits gracefully, then starts the replacement.
+
+In the TUI, `/restart` does the same. `/restart <text>` supplies a continuation. Without text, the replacement waits for input. Supplied text is sent once, labelled `[Restart continuation]`.
+
+Requests require a saved session. Ephemeral sessions, stale session IDs, invalid runtime/extension paths, unsent editor drafts, and pending input that would be lost are refused. Drafts or pending input arriving after queueing cancel the restart rather than being discarded. An external editor or blocking dialog postpones restart; a returned draft cancels it. Interrupting the run, retry, or compaction cancels a pending restart. Normal quit and termination signals never request a replacement.
+
+`pi restart --help` lists options, examples and exit codes. Exit 0 means queued (or help); exit 1 means invalid options, unavailable control endpoint, or a refused request. Outside a managed interactive Pi shell, the command fails with a clear error.
+
+## Stage changes without overwriting the working version
+
+```bash
+pi restart -e /staged/my-tool-v2.ts -e /path/to/keep.ts \
+  --message "Confirm the updated tool and continue"
+```
+
+Supplying `-e` / `--extension` **replaces the explicit CLI extension list**. Include every explicit extension you want to keep. Omitting it preserves that list. Local paths resolve from the requesting shell's working directory; `builtin:<name>` is also accepted. Discovery, tool-selection and trust flags are retained; restart does not enable discovery or silently approve a project.
+
+For runtime changes:
+
+```bash
+pi restart --runtime /staged/pi-coding-agent \
+  --message "Validate the new runtime and continue"
+```
+
+The package directory must contain `dist/bundle/cli-worker.js`. `--runtime` pins that exact worker for later restarts. Another `--runtime` changes the pin; a full CLI launch returns to following the original invocation path.
+
+Without a pin, each restart re-resolves the original invocation path, including the npm-global package symlink. A concrete release path or source entrypoint stays at that location. There is no managed-installer version-pointer protocol.
+
+**Keep the working runtime, dependencies and extension files intact.** Activate separate staged paths. Rollback selects the previous worker and arguments; it cannot undo file edits, restore Git state, or reverse external side effects.
+
+## Startup recovery
+
+Readiness is signalled only after TUI initialization. If the selected worker cannot start, exits before readiness (even with exit 0), or is not ready within 60 seconds, the launcher starts the **exact previous worker and arguments once**, resuming the same saved session with the previous explicit extensions and pin policy. The labelled continuation includes the startup failure notice, even when no message was supplied. If recovery also fails, Pi stops; it never loops.
+
+Readiness is not proof that every provider or tool works. Validate candidates first. Failures after readiness are not automatically rolled back or replayed, because work may already have had side effects.
+
+Session history remains the authority. Original CLI options are retained except session-selection flags and consumed startup prompts/attachments; `--session` selects the saved journal. Extensions must persist their own state with ordinary session entries and shutdown handlers. In-memory queues and extension internals are not transferred: restart waits for runnable queues to drain and refuses pending next-turn context. This is a saved-session resume, not an in-memory snapshot or a migration facility.
+
+## Scope and development
+
+Print, JSON and RPC modes do not expose the interactive control endpoint. SDK hosts and standalone binaries retain their existing lifecycle. Managed control remains available with `-ne`, which still disables ordinary extension discovery.
+
+The local socket lives inside a private temporary directory (a named pipe on Windows). It is recreated on reload/session replacement and removed on shutdown. It is not a security boundary against other code running as the same user. Extensions remain trusted code; see [Security](security.md).
+
+The launcher stays loaded across worker replacements. Launcher changes require a full CLI launch. Source development uses `src/cli-launcher.ts`; `src/cli.ts` remains the ordinary worker entrypoint. The bundle emits these as `dist/bundle/cli.js` and `dist/bundle/cli-worker.js`. The installer helper `getRestartRuntimeWorker` remains exported from `dist/cli/launcher.js`.
+
+## Validation
+
+After building the runtime packages, from `packages/coding-agent`:
+
+```bash
+node ../../node_modules/vitest/dist/cli.js --run \
+  test/restart-launcher.test.ts test/restart-tui.test.ts --maxWorkers=1
+```
+
+The terminal test requires tmux, uses a private socket and isolated HOME, and makes no network or paid provider calls. Set `PI_TEST_CLI=/installed/release/dist/bundle/cli.js` to test an installed release. Tests verify actual process replacement, same-session resume, continuation exactly once, no replay of completed side effects, explicit extension replacement, and one-shot startup rollback.

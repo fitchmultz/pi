@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -144,6 +144,7 @@ function outputBytes(metafiles) {
 
 for (const entry of [
 	join(codingAgentDistDir, "cli.js"),
+	join(codingAgentDistDir, "cli-launcher.js"),
 	join(codingAgentDistDir, "index.js"),
 	join(codingAgentDistDir, "rpc-entry.js"),
 	join(codingAgentDistDir, "utils", "image-resize-worker.js"),
@@ -163,7 +164,8 @@ const mainResult = await build({
 	...commonBuildOptions(),
 	entryNames: "[name]",
 	entryPoints: {
-		"cli-runtime": join(codingAgentDistDir, "cli.js"),
+		cli: join(codingAgentDistDir, "cli-launcher.js"),
+		"cli-worker": join(codingAgentDistDir, "cli.js"),
 		index: join(codingAgentDistDir, "index.js"),
 		"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
 	},
@@ -225,17 +227,10 @@ if (dirname(configOutput) !== dirname(bedrockLoaderOutput)) {
 }
 
 validateExternalImports([mainResult.metafile, lazyResult.metafile]);
-const cliLauncher = `#!/usr/bin/env node
-import { createRequire, enableCompileCache } from "node:module";
-
-enableCompileCache();
-createRequire(import.meta.url)("./cli-runtime.js");
-`;
-writeFileSync(join(bundleDir, "cli.js"), cliLauncher);
 chmodSync(join(bundleDir, "cli.js"), 0o755);
 chmodSync(join(bundleDir, "rpc-entry.js"), 0o755);
 
 const files =
-	new Set([...Object.keys(mainResult.metafile.outputs), ...Object.keys(lazyResult.metafile.outputs)]).size + 1;
-const mib = (outputBytes([mainResult.metafile, lazyResult.metafile]) + cliLauncher.length) / (1024 * 1024);
+	new Set([...Object.keys(mainResult.metafile.outputs), ...Object.keys(lazyResult.metafile.outputs)]).size;
+const mib = outputBytes([mainResult.metafile, lazyResult.metafile]) / (1024 * 1024);
 console.log(`Built ${relative(repoRoot, bundleDir)} (${files} files, ${mib.toFixed(1)} MiB)`);

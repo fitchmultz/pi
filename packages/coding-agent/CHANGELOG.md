@@ -6,6 +6,7 @@
 
 - Added JSON selection to the `read` tool. `json: { path?, fields? }` selects a JSON Pointer target and, optionally, immediate object keys before paging and output limits. See [JSON selection with read](docs/sdk.md#json-selection-with-read).
 - Added the replaceable `discover_tools` builtin for full on-demand extension instructions, with declaration hiding, prior-turn read gating, and branch-aware persistence and compaction repair. SDK hosts can opt in with `instructionGroupsExtension`.
+- Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle saved-session resume, staged runtime and extension activation, and one-shot startup rollback. See [Managed restarts](docs/restart.md).
 
 ## [1.0.0] - 2026-10-01
 
