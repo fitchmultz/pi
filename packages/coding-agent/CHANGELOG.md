@@ -21,7 +21,6 @@
 - Fixed empty quoted prompt-template arguments shifting later positional arguments.
 - Fixed piped stdin, file text, and an explicit CLI prompt being concatenated without separators.
 - Fixed whitespace-only combined CLI input starting an initial turn.
-- Fixed automatic overflow recovery through `session_before_compact` hooks when no history is old enough to summarize, such as an overflow right after a reset. Hooks now receive a whole-window preparation, Pi never runs its own summarizer on it, and a persisted overflow error is ordered by its session position instead of its provider timestamp. See [session_before_compact](docs/compaction.md#session_before_compact).
 - Fixed confirmed GPT-6 Astra Ultrafast cost estimates in OpenAI and legacy Codex Responses, including cached input and long-context pricing.
 - Fixed legacy Codex Responses Fast cost estimates to match priority pricing.
 - Fixed dotted Claude IDs from bundled and refreshed Cloudflare AI Gateway catalogs being sent unchanged to the `/anthropic` passthrough.
