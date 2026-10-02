@@ -13,7 +13,6 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { estimateTokens } from "../../src/core/compaction/index.ts";
-import type { SessionCompactFailedEvent } from "../../src/core/extensions/index.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
@@ -858,123 +857,6 @@ describe("AgentSession compaction characterization", () => {
 			willRetry: false,
 		});
 		expect(harness.faux.state.callCount).toBe(1);
-	});
-
-	// Summary-free hooks (Posthorse) must recover overflows that leave nothing old enough to summarize.
-	it.each([false, true])("offers an early overflow to compaction hooks (after reset: %s)", async (afterReset) => {
-		let hooks = 0;
-		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 100_000 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", (event) => {
-						hooks++;
-						return {
-							compaction: {
-								summary: "",
-								firstKeptEntryId: event.preparation.firstKeptEntryId,
-								tokensBefore: event.preparation.tokensBefore,
-							},
-						};
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		if (afterReset) {
-			const id = harness.sessionManager.appendMessage({ role: "user", content: "old", timestamp: Date.now() });
-			harness.sessionManager.appendCompaction("", id, 1, undefined, true);
-			harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-		}
-		harness.setResponses([
-			fauxAssistantMessage("", {
-				stopReason: "error",
-				errorMessage: "maximum context length exceeded",
-				// A provider clock can trail a reset that completed just before the request.
-				timestamp: afterReset ? 1 : Date.now(),
-			}),
-			fauxAssistantMessage("recovered"),
-		]);
-
-		await harness.session.prompt("overflow");
-
-		expect(hooks).toBe(1);
-		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.session.getLastAssistantText()).toBe("recovered");
-		const compactions = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
-		expect(compactions).toHaveLength(afterReset ? 2 : 1);
-	});
-
-	it("does not summarize an early overflow that compaction hooks decline", async () => {
-		let hooks = 0;
-		const failures: SessionCompactFailedEvent[] = [];
-		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 100_000 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", () => {
-						hooks++;
-					});
-					pi.on("session_compact_failed", (event) => {
-						failures.push(event);
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" }),
-		]);
-
-		await harness.session.prompt("overflow");
-
-		expect(hooks).toBe(1);
-		expect(harness.faux.state.callCount).toBe(1);
-		expect(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
-		const errorMessage =
-			"Context overflow recovery failed: nothing is old enough to summarize, and no extension provided a compaction";
-		expect(harness.eventsOfType("compaction_end").at(-1)).toEqual({
-			type: "compaction_end",
-			reason: "overflow",
-			result: undefined,
-			aborted: false,
-			willRetry: false,
-			errorMessage,
-		});
-		// The attempt still pairs with a terminal outcome for telemetry extensions.
-		expect(failures).toEqual([
-			{
-				type: "session_compact_failed",
-				reason: "overflow",
-				errorMessage,
-				aborted: false,
-				willRetry: false,
-				fromExtension: false,
-			},
-		]);
-	});
-
-	it("does not offer threshold compaction to hooks when nothing is old enough to summarize", async () => {
-		let hooks = 0;
-		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 100_000 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", () => {
-						hooks++;
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("one")]);
-		await harness.session.prompt("first");
-		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
-
-		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toBe(false);
-
-		expect(hooks).toBe(0);
-		expect(harness.eventsOfType("compaction_start")).toEqual([]);
 	});
 
 	it("ignores stale pre-compaction assistant usage on pre-prompt checks", async () => {

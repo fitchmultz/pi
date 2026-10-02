@@ -14,7 +14,6 @@ v1.0.0. It is upstream plus the features below. Everything else follows upstream
 | Compact activity view (`compactView: false \| true \| "hybrid"`) | Small interactive-mode renderer patch | [settings.md](packages/coding-agent/docs/settings.md) |
 | `pi update --fork` | Updater that builds pinned `fitchmultz/pi` main and activates it through `scripts/install-fork.mjs` (`src/utils/fork-update.ts`, `package-manager-cli.ts`) | [Install and activate](#install-and-activate) |
 | Termux (Android) support | Installer compiler/environment handling, `test.sh`, and short Unix-socket paths for restart and the experimental server | [Install and activate](#install-and-activate) |
-| Overflow recovery through compaction hooks when nothing is old enough to summarize (Posthorse early and after-reset rollover) | Small core patch: `prepareCompactionForExtension()` (`src/core/compaction/compaction.ts`) plus overflow handling in `_runAutoCompaction()` and `_checkCompaction()` (`src/core/agent-session.ts`) | [compaction.md](packages/coding-agent/docs/compaction.md#session_before_compact) |
 | File and credential safety | Atomic auth/settings/journal rewrites, canonical credential locks, UTF-8 and boundary-safe edits, HTML journal guard, and private shell spill logs | [Changelog](packages/coding-agent/CHANGELOG.md#unreleased) |
 | Provider correctness fixes | Provider-local auth availability and saved/scoped selection, OAuth cleanup, detached Codex continuation, Responses terminal usage, Anthropic strict budgets, schema validation, proxy exclusions, retry delays, and signature token estimates | [AI changelog](packages/ai/CHANGELOG.md), [coding-agent changelog](packages/coding-agent/CHANGELOG.md) |
 | Opt-in provider credential isolation (`ignoreStoredCredentials`) | Credential-read adapter in `src/core/model-runtime.ts` plus registration types; used by account-routing extensions | [custom-provider.md](packages/coding-agent/docs/custom-provider.md) |
@@ -45,10 +44,12 @@ old session-performance internals, `pi.recordUsage`, atomic write/edit publicati
 task-cost and profiling scripts. Also dropped: the fork's native-MCP changes (the owner runs
 `pi-mcp-adapter`, which already loads servers lazily on 1.0) and the old prompt-cache protection
 framework (1.0 already keeps prompts deterministic; only the observed instruction-group prefix
-rewrite needed a fix).
-
-Dropped after the rebuild: the live PTY RPC-to-TUI handoff (`attach_tui`). It is Axiom-specific;
-Axiom pins `fitchmultz/pi` 7ca602dd and carries its own port. Reference implementation: 63401a044.
+rewrite needed a fix). Dropped after the rebuild: overflow recovery through compaction hooks when
+nothing is old enough to summarize. It offered tiny, misreported overflows to hooks, against
+Posthorse's native-eligibility contract, and official 1.0 recovers a real full-window overflow
+after a reset on the next prompt. The live PTY RPC-to-TUI handoff (`attach_tui`) is also dropped:
+it is Axiom-specific, and Axiom pins `fitchmultz/pi` 7ca602dd and carries its own port. Reference
+implementation: 63401a044.
 
 ## Remotes and history
 
@@ -110,15 +111,25 @@ a staged release without selecting it. See [restart.md](packages/coding-agent/do
 
 `pi update --fork` does the fetch, build, stage and activate steps for you from the latest
 `fitchmultz/pi` main. It only updates an existing selector installation and leaves the previous
-release selectable at `<selector>.previous`. On Termux the selector is
+release selectable at `<selector>.previous`. Its selector is
+`$(npm root -g)/@earendil-works/pi-coding-agent`; on Termux it is
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` with `~/.local/bin/pi`.
 
 ### Cutover from the 0.99 fork
 
-Sessions started by the 0.99 fork must quit and relaunch (`pi -c` or `pi --session <file>`) to run
-on 1.0. `/restart` from such a session is refused by the new worker and stays on 0.99. Keep the 0.99
-release on disk until the new release is verified; to roll back, `--rollback` (or flip the selector
-to `<selector>.previous`) and fully relaunch.
+Do the first 1.0 install from a fork checkout (`npm ci --ignore-scripts`,
+`npm run hydrate:model-data`, then
+`node scripts/install-fork.mjs --selector "$(npm root -g)/@earendil-works/pi-coding-agent"`, so it
+activates the selector that `pi` and `pi update --fork` use; on Termux omit `--selector`). A 0.99
+`pi update --fork` holds `<selector>.lock` while it runs the 1.0 installer, which needs the same
+lock, so it fails with `Lock file is already being held` and changes nothing. Later updates can use
+`pi update --fork`.
+
+Sessions started by the 0.99 fork must quit and relaunch to run on 1.0. `/restart` from such a
+session is refused by the new worker and stays on 0.99. Relaunch with `pi --session <path|id>`:
+`pi -c` opens the directory's most recently modified session, which can be another live session
+when several share the directory. Keep the 0.99 release on disk until the new release is verified;
+to roll back, `--rollback` (or flip the selector to `<selector>.previous`) and fully relaunch.
 
 ## Testing
 

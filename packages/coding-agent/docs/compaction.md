@@ -297,8 +297,6 @@ Extensions can intercept and customize both compaction and branch summarization.
 
 Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file.
 
-Overflow recovery (`reason: "overflow"`) also fires this event when no history is older than `keepRecentTokens`, for example on an overflow right after a reset. The preparation then covers the whole active window: `firstKeptEntryId` names the first active entry and `messagesToSummarize` holds every active message. Return a compaction to recover. If no handler does, Pi skips its own summarizer, appends no compaction, schedules no retry, and reports the failed recovery through `session_compact_failed`. Threshold compaction and `/compact` still skip a window with nothing old enough to summarize.
-
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {
   const { preparation, branchEntries, customInstructions, reason, willRetry, signal } = event;
