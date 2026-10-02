@@ -33,6 +33,7 @@
 - Fixed shell spill logs being created with permissions that expose output to other users.
 - Fixed failed session migration and whole-file rewrites truncating the existing journal.
 - Fixed a provider's auth-check failure hiding healthy models or silently replacing saved and scoped provider selections.
+- Fixed bundled `brace-expansion` 5.0.9 being vulnerable to GHSA-qhr7-859c-m2p7, GHSA-6j4f-fj2g-mc7p, and GHSA-q2hr-2g5m-vwhr by updating it to 5.0.12.
 
 ## [1.0.0] - 2026-10-01
 
