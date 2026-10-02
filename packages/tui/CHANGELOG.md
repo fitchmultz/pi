@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed fullscreen Kitty images collapsing to a one-row strip after scrolling in WezTerm ([#10319](https://github.com/earendil-works/pi/issues/10319)).
 - Fixed input mouse placement with custom prompts and horizontally scrolled wide characters.
 - Fixed input cursor movement and editing splitting graphemes after replacing the value.
 - Fixed printable xterm modifyOtherKeys input being ignored.

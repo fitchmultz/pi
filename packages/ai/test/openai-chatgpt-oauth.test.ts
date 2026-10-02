@@ -127,6 +127,28 @@ describe("OpenAI ChatGPT OAuth", () => {
 		});
 	});
 
+	it("fails before exposing authorization when the callback port is occupied", async () => {
+		const server = createServer();
+		try {
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(1455, "127.0.0.1", resolve);
+			});
+			const interaction = loginInteraction({ callbackClientId: "oaiapp_issued" });
+			const notify = vi.spyOn(interaction, "notify");
+			const prompt = vi.spyOn(interaction, "prompt");
+			const fetch = stubTokenEndpoint(tokenResponse());
+			await expect(openaiChatGPTOAuth.login(interaction, { getDeviceId: () => DEVICE_ID })).rejects.toThrow(
+				"Port 1455 is in use",
+			);
+			expect(notify).not.toHaveBeenCalled();
+			expect(prompt).not.toHaveBeenCalled();
+			expect(fetch).not.toHaveBeenCalled();
+		} finally {
+			server.close();
+		}
+	});
+
 	it.each(["notify", "prompt"] as const)("closes the listener when %s throws", async (method) => {
 		const interaction = loginInteraction();
 		interaction[method] = () => {
