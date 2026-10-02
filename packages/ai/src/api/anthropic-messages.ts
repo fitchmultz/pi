@@ -1,7 +1,7 @@
 import Anthropic, { type ClientOptions } from "@anthropic-ai/sdk";
 import type {
+	BetaMessage,
 	BetaStopReason,
-	BetaThinkingDroppedInputTransformation,
 	BetaTool,
 	BetaCacheControlEphemeral as CacheControlEphemeral,
 	BetaContentBlockParam as ContentBlockParam,
@@ -37,6 +37,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { createCacheTrace } from "../utils/cache-trace.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
@@ -602,13 +603,19 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 
 		try {
 			let client: Anthropic;
+			const trace = createCacheTrace(model, options, undefined, () => ({
+				...model.compat,
+				...getAnthropicCompat(model),
+			}));
 			let isOAuth: boolean;
 			let usageModel = model;
-			let inputTransformations: BetaThinkingDroppedInputTransformation[] | undefined;
+			let inputTransformations: BetaMessage["input_transformations"];
 
 			if (options?.client) {
 				client = options.client;
 				isOAuth = false;
+				trace?.gap("injected_client_wire_unobserved");
+				trace?.gap("logical_capture_incomplete");
 			} else {
 				const apiKey = options?.apiKey;
 				const federation = getAnthropicFederation(model, apiKey, options?.headers, options?.env);
@@ -630,12 +637,14 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					model,
 					apiKey,
 					options?.headers,
-					options?.fetch,
+					federation ? options?.fetch : (trace?.wrapFetch(options?.fetch) ?? options?.fetch),
 					copilotDynamicHeaders,
 					cacheSessionId,
 					federation,
 				);
 				client = created.client;
+				// Keep the federation owner's shared credential cache and original fetch identity.
+				if (federation && trace) client = client.withOptions({ fetch: trace.wrapFetch(options?.fetch) });
 				isOAuth = created.isOAuthToken;
 			}
 			let params = buildParams(model, normalizedContext, isOAuth, options);
@@ -649,7 +658,10 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				maxRetries: 0,
 			};
 			const response = await retryProviderRequest(
-				() => client.beta.messages.create(params, requestOptions).asResponse(),
+				() => {
+					if (options?.client) trace?.attempt("sse");
+					return client.beta.messages.create(params, requestOptions).asResponse();
+				},
 				{
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
@@ -663,6 +675,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			const blocks = output.content as Block[];
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
+				trace?.terminal(event);
 				await options?.onProviderStreamEvent?.(event, model);
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
@@ -688,6 +701,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(usageModel, output.usage);
+					trace?.parsed(output.usage);
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "fallback") {
 						if (output.content.length > 0) {
@@ -857,6 +871,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(usageModel, output.usage);
+					trace?.parsed(output.usage, Boolean(event.usage));
 				}
 			}
 
