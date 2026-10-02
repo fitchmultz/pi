@@ -133,8 +133,7 @@ function packageNameFromLockPath(lockPath) {
 	return parts[0]?.startsWith("@") ? `${parts[0]}/${parts[1]}` : parts[0];
 }
 
-// npm does not reliably honor a local-file package's nested shrinkwrap. Install the
-// generated install lock instead, replacing only the locally built packages.
+// Install the upstream runtime lock, replacing only the locally built packages.
 export function installFrozenConsumer(directory, tarballs, lockDirectory, tools, env) {
 	mkdirSync(directory, { recursive: true });
 	const local = Object.fromEntries([...tarballs].map(([name, path]) => [name, `file:./${relative(directory, path)}`]));

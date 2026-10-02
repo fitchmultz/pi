@@ -5,7 +5,15 @@ import type { Model, Tool } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 interface AnthropicToolPayload {
-	tools?: Array<{ strict?: boolean; input_schema: Record<string, unknown> }>;
+	tools?: Array<{ name: string; strict?: boolean; input_schema: Record<string, unknown> }>;
+	messages: Array<{
+		content:
+			| string
+			| Array<{
+					type: string;
+					tool?: { definition?: { name: string; strict?: boolean; input_schema: Record<string, unknown> } };
+			  }>;
+	}>;
 }
 
 class PayloadCaptured extends Error {
@@ -68,6 +76,77 @@ async function captureFirstTool(tool: Tool): Promise<NonNullable<AnthropicToolPa
 }
 
 describe("Anthropic strict tool schemas", () => {
+	it.each([
+		{ limit: 20, optional: false, strict: "prefer" },
+		{ limit: 20, optional: false, strict: "require" },
+		{ limit: 16, optional: true, strict: "prefer" },
+		{ limit: 16, optional: true, strict: "require" },
+	] as const)(
+		"shares the $limit-definition strict budget across initial tools and inline $strict redefinitions",
+		async ({ limit, optional, strict }) => {
+			const value = optional ? Type.Optional(Type.String()) : Type.String();
+			const initial = createStrictTool(Type.Object({ value }));
+			const later = Array.from({ length: limit - 1 }, (_, index) => ({
+				...createStrictTool(Type.Object({ value })),
+				name: `late_${index}`,
+			}));
+			const redefined = {
+				...createTool(Type.Object({ replacement: value }), { type: "json_schema", strict }),
+				description: "Redefined lookup",
+			};
+			const model = createModel();
+			model.compat = {
+				...model.compat,
+				supportsMidConvoSystemMessages: true,
+				supportsMidConvoToolChanges: true,
+			};
+			let payload: AnthropicToolPayload | undefined;
+			const result = await streamAnthropic(
+				model,
+				normalizeContext({
+					tools: [initial],
+					messages: [
+						{ role: "user", content: "test", timestamp: 0 },
+						{ role: "system", content: "", toolsAdded: later, timestamp: 1 },
+						{
+							role: "system",
+							content: "",
+							toolsRemoved: [{ name: initial.name }],
+							toolsAdded: [redefined],
+							timestamp: 2,
+						},
+					],
+				}),
+				{
+					apiKey: "test-key",
+					onPayload: (value) => {
+						payload = value as AnthropicToolPayload;
+						throw new PayloadCaptured();
+					},
+				},
+			).result();
+			if (strict === "require") {
+				expect(payload).toBeUndefined();
+				expect(result.errorMessage).toContain("exceeds Anthropic's strict tool limits");
+			} else {
+				expect(payload?.tools?.[0]).toMatchObject({ name: initial.name, strict: true });
+				expect(payload?.tools?.[0].input_schema.properties).toHaveProperty("value");
+				expect(payload?.tools).toHaveLength(2);
+				const definitions = payload?.messages.flatMap((message) =>
+					typeof message.content === "string"
+						? []
+						: message.content.flatMap((block) =>
+								block.type === "tool_addition" && block.tool?.definition ? [block.tool.definition] : [],
+							),
+				);
+				expect(definitions?.filter((tool) => tool.strict)).toHaveLength(limit - 1);
+				expect(definitions?.at(-1)).toMatchObject({ name: initial.name });
+				expect(definitions?.at(-1)?.strict).toBeUndefined();
+				expect(definitions?.at(-1)?.input_schema.properties).toHaveProperty("replacement");
+			}
+		},
+	);
+
 	it.each(["prefer", "require"] as const)(
 		"budgets strict unions without silently relaxing %s tools",
 		async (strict) => {

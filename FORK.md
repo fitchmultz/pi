@@ -1,7 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0. It is upstream plus the features below. Everything else follows upstream behavior and APIs.
+v1.0.0 and synchronized through upstream `69f0be6f0` (2026-10-02). It is upstream plus the features
+below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
 
@@ -25,8 +26,17 @@ v1.0.0. It is upstream plus the features below. Everything else follows upstream
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
-`background_command`, and no upstream publishing, binary or issue-analysis workflows. It uses
-upstream's pre-commit hook and `npm run check`.
+`background_command`, and no upstream publishing, binary or issue-analysis workflows. Nix builds
+follow upstream; its automatic catalog-pin commits and stable-branch promotion are upstream-only.
+The fork uses upstream's install lock, not the removed npm shrinkwrap, and keeps its immutable
+installer. It uses upstream's pre-commit hook and `npm run check`.
+
+Anthropic native tool changes follow upstream's inline definitions and fixed initial tool list,
+including same-name redefinitions. The fork retains request-wide strict-schema budgets and passive
+cache tracing. ChatGPT OAuth follows upstream's mandatory callback listener and port-conflict
+failure while keeping the fork's cancellation, state validation and cleanup safeguards. Cloudflare
+Claude-ID normalization remains necessary for older bundled and remote catalogs; the generator
+shares that helper rather than duplicating upstream's replacement.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`
 owner, not the user-only run hook. Forced text stays run-scoped and unpersisted. Child

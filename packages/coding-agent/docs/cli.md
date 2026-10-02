@@ -295,6 +295,8 @@ restart to load the selected release. `--fork` cannot combine with another updat
 target, a source, `--extension`, or `--force`. Exit status is `0` on success/help
 and `1` for invalid options or a failed update.
 
+`pi update` cannot update Pi when another package manager provides it, such as Nix. Update Pi with that package manager, for example `nix profile upgrade pi`. Package and model catalog updates still work.
+
 ### Aliases and command options
 
 - `pi uninstall <source>` is an alias for `pi remove <source>`.

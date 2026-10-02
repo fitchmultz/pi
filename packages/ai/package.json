@@ -67,7 +67,7 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@anthropic-ai/sdk": "0.124.0",
+		"@anthropic-ai/sdk": "0.129.0",
 		"@aws-sdk/client-bedrock-runtime": "3.1127.0",
 		"@earendil-works/pi-telemetry": "^1.0.0",
 		"@google/genai": "2.21.0",
