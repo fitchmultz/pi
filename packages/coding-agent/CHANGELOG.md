@@ -6,7 +6,6 @@
 
 - Added opt-in `ignoreStoredCredentials` provider registration and `ModelRuntime.supportsIgnoreStoredCredentials` feature detection for routing providers; explicit keys and persistent login/logout remain unchanged.
 - Added deduplicated, non-fatal diagnostics for extension handlers blocking synchronously for over 100 ms and custom footer renders exceeding 16 ms; awaited work is excluded.
-- Added live POSIX PTY RPC-to-TUI handoff via `attach_tui`, token-framed `SIGUSR2` return, and pending extension UI transfer without restarting the session. Ordinary pipe RPC is unchanged.
 - Added JSON selection to the `read` tool. `json: { path?, fields? }` selects a JSON Pointer target and, optionally, immediate object keys before paging and output limits. See [JSON selection with read](docs/sdk.md#json-selection-with-read).
 - Added the replaceable `discover_tools` builtin for full on-demand extension instructions, with deferred activation, prior-turn read gating, and branch-aware persistence and compaction repair. SDK hosts can opt in with `instructionGroupsExtension`.
 - Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle saved-session resume, staged runtime and extension activation, and one-shot startup rollback. Restarts requested by an older fork launcher are refused with relaunch instructions. See [Managed restarts](docs/restart.md).

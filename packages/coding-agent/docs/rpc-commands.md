@@ -150,21 +150,6 @@ If an extension canceled:
 {"type": "response", "command": "new_session", "success": true, "data": {"cancelled": true}}
 ```
 
-## Terminal ownership
-
-### attach_tui
-
-Transfer a POSIX controlling PTY from RPC JSONL to the live interactive TUI. Both stdin and stdout must be terminals connected to the same PTY; ordinary pipes return `success: false`.
-
-```json
-{"id":"attach-1","type":"attach_tui","token":"01234567-89ab-cdef-0123-456789abcdef"}
-{"id":"attach-1","type":"response","command":"attach_tui","success":true,"data":{"token":"01234567-89ab-cdef-0123-456789abcdef"}}
-```
-
-`token` is optional: Pi generates a UUID if omitted. A reconnecting client can supply a cryptographically random UUID and persist it before attachment. Invalid UUIDs fail without changing frontend ownership. After success, stop parsing JSONL and display terminal output. Only the active frontend may issue commands.
-
-Send `SIGUSR2` to Pi to return. Pi restores the terminal, then writes `RS <token> RS {"type":"tui_detached","state":{...}} LF`, where RS is byte `0x1e` and there are no spaces around the token. Match the current token, discard preceding terminal bytes, parse that JSON line, and resume JSONL. `state` has the `get_state` shape. Unresolved extension UI requests replay immediately afterward. Repeated detach signals while already in RPC do nothing.
-
 ## State
 
 ### get_state
@@ -197,8 +182,6 @@ Response:
   }
 }
 ```
-
-`pendingExtensionUIRequests` lists unresolved dialog/custom requests, including their IDs, for reconnecting clients. Empty lists mean no interaction is pending.
 
 The `model` field is a full [Model](#model-object) object, or omitted when no model is selected. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set.
 

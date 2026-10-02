@@ -20,7 +20,6 @@ v1.0.0. It is upstream plus the features below. Everything else follows upstream
 | GPT-6 Astra Ultrafast and Codex Fast cost estimates | Service-tier pricing in `packages/ai/src/api/openai-responses.ts` and `openai-codex-responses.ts` | [models.md](packages/coding-agent/docs/models.md) |
 | Slow-extension diagnostics (handler over 100 ms, footer render over 16 ms) | Timing at handler dispatch and extension footers in `src/core/extensions/runner.ts` | [extensions.md](packages/coding-agent/docs/extensions.md) |
 | Cloudflare AI Gateway Claude IDs | `normalizeCloudflareModelId()` in `packages/ai/src/api/cloudflare.ts`, used by the generator, the provider and remote catalogs | [providers.md](packages/coding-agent/docs/providers.md) |
-| Live PTY RPC-to-TUI handoff (`attach_tui`) | `src/modes/rpc/rpc-mode.ts` plus a hosted interactive-mode lifecycle | [rpc.md](packages/coding-agent/docs/rpc.md) |
 | Small confirmed fixes | TUI input, keys and links; resized-image coordinate notes; branch-summary budgets; prompt-template and piped-input handling | [Changelog](packages/coding-agent/CHANGELOG.md#unreleased) |
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
@@ -48,7 +47,9 @@ framework (1.0 already keeps prompts deterministic; only the observed instructio
 rewrite needed a fix). Dropped after the rebuild: overflow recovery through compaction hooks when
 nothing is old enough to summarize. It offered tiny, misreported overflows to hooks, against
 Posthorse's native-eligibility contract, and official 1.0 recovers a real full-window overflow
-after a reset on the next prompt.
+after a reset on the next prompt. The live PTY RPC-to-TUI handoff (`attach_tui`) is also dropped:
+it is Axiom-specific, and Axiom pins `fitchmultz/pi` 7ca602dd and carries its own port. Reference
+implementation: 63401a044.
 
 ## Remotes and history
 
