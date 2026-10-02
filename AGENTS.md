@@ -135,6 +135,8 @@ User instructions, including existing explicit or standing authorization, govern
 
 ### Standing Fork Delivery Authorization
 
-Owner-authorized implementation in `fitchmultz/pi` includes necessary model-data refreshes, local builds, test-artifact regeneration, environment repairs, tests/checks, commits, pushes, PRs, review, CI and merge. Complete that workflow; do not stop at local-only changes or ask again for these routine steps. Planning and review-only requests remain read-only.
+Owner-authorized implementation in `fitchmultz/pi` includes necessary model-data refreshes, local builds, test-artifact regeneration, environment repairs, tests/checks, commits, pushes, PRs, review, CI and merge, followed by staging, verifying and activating the merged fork runtime with rollback preserved. Complete that workflow; neither local-only changes nor merge alone is the delivery endpoint. Follow `FORK.md` for fresh model data, catalog comparison, immutable installation and activation. Do not ask again for these established steps. Planning and review-only requests remain read-only.
 
-Runtime installation/activation, releases, paid provider probes, credential changes, destructive actions affecting user data and material scope expansions require separate authorization. Preserve shared-worktree coordination and all verification gates.
+After activation, all agents must immediately restart and continue under the new runtime. Coordinate connected sessions, preserve their saved work, and verify this session's actual running runtime after restart; selector activation or a queued restart alone is not completion.
+
+Public package releases/publishing, paid provider probes, credential changes, destructive actions affecting user data and material scope expansions require separate authorization. Preserve shared-worktree coordination and all verification gates.
