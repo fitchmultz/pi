@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { arch, platform, release, tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
@@ -15,6 +15,24 @@ import type { Api, Context, Model } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const originalTraceDir = process.env.PI_CACHE_TRACE_DIR;
+const traceDirectories: string[] = [];
+
+function enableCacheTrace(): () => Record<string, unknown>[] {
+	const directory = mkdtempSync(join(tmpdir(), "pi-codex-cache-trace-"));
+	traceDirectories.push(directory);
+	process.env.PI_CACHE_TRACE_DIR = directory;
+	return () =>
+		readdirSync(directory)
+			.filter((file) => file.endsWith(".jsonl"))
+			.flatMap((file) =>
+				readFileSync(join(directory, file), "utf8")
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line) as Record<string, unknown>),
+			);
+}
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -27,6 +45,9 @@ afterEach(() => {
 	resetOpenAICodexWebSocketDebugStats();
 	vi.useRealTimers();
 	vi.restoreAllMocks();
+	if (originalTraceDir === undefined) delete process.env.PI_CACHE_TRACE_DIR;
+	else process.env.PI_CACHE_TRACE_DIR = originalTraceDir;
+	for (const directory of traceDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 function mockToken(accountId = "acc_test"): string {
@@ -98,6 +119,124 @@ function buildSSEPayload({
 }
 
 describe("openai-codex streaming", () => {
+	it.each([undefined, 0, 4])(
+		"records first-terminal cached presence without changing normalized usage: %s",
+		async (cached) => {
+			const records = enableCacheTrace();
+			const model: Model<"openai-codex-responses"> = {
+				id: "test",
+				name: "test",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl: "https://example.test",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 10000,
+				maxTokens: 1000,
+			};
+			const terminal = (value: number | undefined) => ({
+				type: "response.done",
+				response: {
+					id: "resp_first",
+					status: "completed",
+					usage: {
+						input_tokens: 20,
+						output_tokens: 7,
+						total_tokens: 27,
+						input_tokens_details: value === undefined ? {} : { cached_tokens: value },
+					},
+				},
+			});
+			const result = await streamOpenAICodexResponses(model, normalizeContext({ messages: [] }), {
+				apiKey: mockToken(),
+				transport: "sse",
+				fetch: async () =>
+					new Response(
+						[terminal(cached), terminal(19)].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+					),
+			}).result();
+			expect(result.usage).toMatchObject({ input: 20 - (cached ?? 0), cacheRead: cached ?? 0, output: 7 });
+			const terminals = records().filter((record) => record.kind === "terminal");
+			expect(terminals).toHaveLength(1);
+			expect(terminals[0]).toMatchObject({
+				type: "response.done",
+				fields: {
+					"input_tokens_details.cached_tokens":
+						cached === undefined
+							? { present: false, type: "undefined" }
+							: { present: true, type: "number", value: cached },
+				},
+			});
+		},
+	);
+
+	it.each([false, true])(
+		"keeps failed-terminal retry usage provenance when successful usage is present: %s",
+		async (successfulUsage) => {
+			const records = enableCacheTrace();
+			let sends = 0;
+			class MockWebSocket extends EventTarget {
+				constructor() {
+					super();
+					queueMicrotask(() => this.dispatchEvent(new Event("open")));
+				}
+				send(): void {
+					const failed = sends++ === 0;
+					const event = {
+						type: failed ? "response.failed" : "response.completed",
+						response: {
+							id: failed ? "resp_failed" : "resp_success",
+							status: failed ? "failed" : "completed",
+							...(failed ? { error: { code: "previous_response_not_found", message: "expired" } } : {}),
+							...(failed || successfulUsage
+								? {
+										usage: {
+											input_tokens: failed ? 20 : 30,
+											output_tokens: 7,
+											total_tokens: failed ? 27 : 37,
+											input_tokens_details: { cached_tokens: failed ? 3 : 0 },
+										},
+									}
+								: {}),
+						},
+					};
+					queueMicrotask(() =>
+						this.dispatchEvent(Object.assign(new Event("message"), { data: JSON.stringify(event) })),
+					);
+				}
+				close(): void {}
+			}
+			vi.stubGlobal("WebSocket", MockWebSocket);
+			const model: Model<"openai-codex-responses"> = {
+				id: "test",
+				name: "test",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl: "https://example.test",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 10000,
+				maxTokens: 1000,
+			};
+			const result = await streamOpenAICodexResponses(model, normalizeContext({ messages: [] }), {
+				apiKey: mockToken(),
+				transport: "websocket-cached",
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.errorMessage).toBeUndefined();
+			expect(result.usage).toMatchObject({ input: successfulUsage ? 30 : 17, cacheRead: successfulUsage ? 0 : 3 });
+			const terminals = records().filter((record) => record.kind === "terminal");
+			expect(terminals.map((record) => record.type)).toEqual(["response.failed", "response.completed"]);
+			const parsed = records().filter((record) => record.kind === "parsed_usage");
+			expect(parsed).toHaveLength(2);
+			expect(parsed[0].attemptId).not.toBe(parsed[1].attemptId);
+			expect(parsed[1].consumedUsage).toBe(successfulUsage);
+			expect(parsed[1].usageSourceAttemptId).toBe(successfulUsage ? parsed[1].attemptId : parsed[0].attemptId);
+		},
+	);
+
 	it("preserves failed terminal usage and provider error codes", async () => {
 		const model: Model<"openai-codex-responses"> = {
 			id: "test",
@@ -1640,6 +1779,7 @@ describe("openai-codex streaming", () => {
 	});
 
 	it("falls back to SSE when websocket connect does not open before the connect timeout", async () => {
+		const records = enableCacheTrace();
 		vi.useFakeTimers();
 		const token = mockToken();
 		const encoder = new TextEncoder();
@@ -1724,9 +1864,27 @@ describe("openai-codex streaming", () => {
 			websocketFallbackActive: true,
 			lastWebSocketError: "WebSocket connect timeout after 50ms",
 		});
+		const second = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			sessionId: "ws-connect-timeout",
+			transport: "auto",
+		}).result();
+		expect(second.stopReason).toBe("stop");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(records().filter((record) => record.kind === "transport")).toMatchObject([
+			{ stickySse: false },
+			{ stickySse: true },
+		]);
+		expect(
+			records()
+				.filter((record) => record.kind === "attempt")
+				.map((record) => record.transport),
+		).toEqual(["websocket", "sse", "sse"]);
+		expect(records().filter((record) => record.kind === "handshake")).toHaveLength(0);
 	});
 
 	it("reconnects once when the websocket connection limit is reached before output starts", async () => {
+		const records = enableCacheTrace();
 		const token = mockToken();
 		let connections = 0;
 
@@ -1782,6 +1940,10 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(connections).toBe(2);
 		expect(fetchMock).not.toHaveBeenCalled();
+		expect(records().filter((record) => record.kind === "retry")).toMatchObject([
+			{ reason: "websocket_connection_limit_reached", started: false },
+		]);
+		expect(records().filter((record) => record.kind === "attempt")).toHaveLength(2);
 	});
 
 	it("falls back to SSE when a websocket is idle before the first event", async () => {
@@ -2076,6 +2238,7 @@ describe("openai-codex streaming", () => {
 	});
 
 	it.each([false, true])("sends cached deltas with retained-payload mutation: %s", async (mutatePayload) => {
+		const records = enableCacheTrace();
 		const token = mockToken();
 		const sentBodies: unknown[] = [];
 		let retainedPayload: Record<string, unknown> | undefined;
@@ -2250,11 +2413,28 @@ describe("openai-codex streaming", () => {
 			lastDeltaInputItems: 2,
 			lastPreviousResponseId: "resp_1",
 		});
+		const sends = records().filter((record) => record.kind === "send");
+		expect(sends).toMatchObject([
+			{ full: true, reused: false, inputItems: 1, logicalInputItems: 1 },
+			{ full: false, reused: true, inputItems: 2, logicalInputItems: 4 },
+		]);
+		expect(sends[1].generation).toBe(sends[0].generation);
+		expect(records().filter((record) => record.kind === "handshake")).toHaveLength(1);
+		const logical = records().filter((record) => record.kind === "logical");
+		const inputs = logical.map((record) =>
+			(record.components as { group: string; hmac: string }[]).filter((item) => item.group === "input"),
+		);
+		expect(inputs[0]).toHaveLength(1);
+		expect(inputs[1]).toHaveLength(4);
+		expect(inputs[1][0].hmac).toBe(inputs[0][0].hmac);
+		const wires = records().filter((record) => record.kind === "wire");
+		expect(wires[1].envelope).not.toEqual(logical[1].fullBody);
 	});
 
 	it.each(["websocket", "sse"] as const)(
 		"recovers a missing cached websocket continuation via %s",
 		async (recoveryTransport) => {
+			const records = enableCacheTrace();
 			const token = mockToken();
 			const sessionId = `missing-continuation-${recoveryTransport}`;
 			const encoder = new TextEncoder();
@@ -2466,6 +2646,18 @@ describe("openai-codex streaming", () => {
 				websocketFailures: recoveryTransport === "sse" ? 1 : 0,
 				sseFallbacks: recoveryTransport === "sse" ? 1 : 0,
 			});
+			expect(records().filter((record) => record.kind === "retry")).toMatchObject([
+				{ reason: "previous_response_not_found" },
+			]);
+			expect(
+				records()
+					.filter((record) => record.kind === "attempt")
+					.map((record) => record.transport),
+			).toEqual(
+				recoveryTransport === "sse"
+					? ["websocket", "websocket", "websocket", "sse"]
+					: ["websocket", "websocket", "websocket"],
+			);
 		},
 	);
 

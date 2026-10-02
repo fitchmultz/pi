@@ -19,6 +19,7 @@ v1.0.0. It is upstream plus the features below. Everything else follows upstream
 | Opt-in provider credential isolation (`ignoreStoredCredentials`) | Credential-read adapter in `src/core/model-runtime.ts` plus registration types; used by account-routing extensions | [custom-provider.md](packages/coding-agent/docs/custom-provider.md) |
 | GPT-6 Astra Ultrafast and Codex Fast cost estimates | Service-tier pricing in `packages/ai/src/api/openai-responses.ts` and `openai-codex-responses.ts` | [models.md](packages/coding-agent/docs/models.md) |
 | Slow-extension diagnostics (handler over 100 ms, footer render over 16 ms) | Timing at handler dispatch and extension footers in `src/core/extensions/runner.ts` | [extensions.md](packages/coding-agent/docs/extensions.md) |
+| Temporary passive cache investigation | Opt-in private HMAC recorder at native send/usage boundaries, SDK provenance, and read-only `scripts/cache-trace-report.mjs`; no provider probes or cache-policy changes | [cache-tracing.md](packages/coding-agent/docs/cache-tracing.md) |
 | Cloudflare AI Gateway Claude IDs | `normalizeCloudflareModelId()` in `packages/ai/src/api/cloudflare.ts`, used by the generator, the provider and remote catalogs | [providers.md](packages/coding-agent/docs/providers.md) |
 | Small confirmed fixes | TUI input, keys and links; resized-image coordinate notes; branch-summary budgets; prompt-template and piped-input handling | [Changelog](packages/coding-agent/CHANGELOG.md#unreleased) |
 
@@ -26,6 +27,13 @@ The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the is
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
 `background_command`, and no upstream publishing, binary or issue-analysis workflows. It uses
 upstream's pre-commit hook and `npm run check`.
+
+Cache investigation keeps persistent restart guidance in its existing `context_with_system`
+owner, not the user-only run hook. Forced text stays run-scoped and unpersisted. Child
+finalization recovery remains a conditional source risk: managed saved-session attempts create
+new contracts, and no reachable unchanged-contract reset was reproduced. Do not restore an old
+phase for a new contract or apply a speculative recovery patch. Passive tracing records unknown
+coverage explicitly; remove it when the investigation ends.
 
 ## Conventions
 

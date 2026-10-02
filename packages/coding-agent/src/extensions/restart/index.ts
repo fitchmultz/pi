@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
+import type { SystemMessage } from "@earendil-works/pi-ai";
 import chalk from "chalk";
 import { getRestartRuntimeWorker } from "../../cli/launcher.ts";
 import {
@@ -226,7 +227,32 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			if (!ctx) return;
 			if (event.systemPromptOptions.forceSystemPrompt !== undefined)
 				event.systemPromptOptions.forceSystemPrompt += `\n\n${guidance}`;
-			else event.systemPromptOptions.sections.restart = guidance;
+		});
+		pi.on("context_with_system", (event) => {
+			if (!ctx) return;
+			const first = event.messages[0];
+			const head: SystemMessage =
+				first?.role === "system" ? first : { role: "system", content: "", timestamp: Date.now() };
+			const tail = first?.role === "system" ? event.messages.slice(1) : event.messages;
+			return {
+				messages: [
+					{ ...head, sections: { ...head.sections, restart: `<restart>\n${guidance}\n</restart>` } },
+					...tail.flatMap((message) => {
+						if (message.role !== "system" || !Object.hasOwn(message.sections ?? {}, "restart")) return [message];
+						const sections = { ...message.sections };
+						delete sections.restart;
+						const patch: SystemMessage = { ...message, sections };
+						if (Object.keys(sections).length === 0) delete patch.sections;
+						// Drop only empty owned patches; preserve content, tool deltas and any other fields.
+						if (
+							patch.content.length === 0 &&
+							Object.keys(patch).every((key) => key === "role" || key === "content" || key === "timestamp")
+						)
+							return [];
+						return [patch];
+					}),
+				],
+			};
 		});
 		pi.registerCommand("restart", {
 			description: "Restart Pi on the same saved session; optional text continues afterward",
