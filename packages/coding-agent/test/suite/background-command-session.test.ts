@@ -423,29 +423,38 @@ describe("background command extension delivery", () => {
 	it("lists newest first with capped pagination and activeOnly filtering", async () => {
 		const h = await harness();
 		const root = backgroundCommandDirectory(h.sessionManager);
-		for (let i = 0; i < 23; i++) {
-			const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
-			const directory = join(root, id);
-			mkdirSync(directory, { recursive: true });
-			writeFileSync(
-				join(directory, "job.json"),
-				JSON.stringify({
-					job: {
-						id,
-						command: `job ${i}`,
-						cwd: h.tempDir,
-						createdAt: new Date(i * 1000).toISOString(),
-						logFile: join(directory, "output.log"),
-						status: "succeeded",
-						exitCode: 0,
-					},
-				}),
-			);
-		}
-		await startBackgroundCommand(root, "sleep 600", { command: "sleep 600", cwd: h.tempDir, env: getShellEnv() });
 		const snapshots: { jobs: { commandPreview: string }[]; total: number; nextOffset: number | null }[] = [];
 		h.setResponses([
-			fauxAssistantMessage(fauxToolCall("background_command", { action: "status" }), { stopReason: "toolUse" }),
+			async () => {
+				// Seed completed jobs during the run, not while idle delivery can wake the session.
+				for (let i = 0; i < 23; i++) {
+					const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+					const directory = join(root, id);
+					mkdirSync(directory, { recursive: true });
+					writeFileSync(
+						join(directory, "job.json"),
+						JSON.stringify({
+							job: {
+								id,
+								command: `job ${i}`,
+								cwd: h.tempDir,
+								createdAt: new Date(i * 1000).toISOString(),
+								logFile: join(directory, "output.log"),
+								status: "succeeded",
+								exitCode: 0,
+							},
+						}),
+					);
+				}
+				await startBackgroundCommand(root, "sleep 600", {
+					command: "sleep 600",
+					cwd: h.tempDir,
+					env: getShellEnv(),
+				});
+				return fauxAssistantMessage(fauxToolCall("background_command", { action: "status" }), {
+					stopReason: "toolUse",
+				});
+			},
 			() => {
 				snapshots.push(JSON.parse(getMessageText(getToolResult(h, "background_command"))));
 				return fauxAssistantMessage(fauxToolCall("background_command", { action: "status", offset: 20 }), {
