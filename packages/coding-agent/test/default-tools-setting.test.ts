@@ -171,13 +171,16 @@ describe("defaultTools setting", () => {
 		const writeSettings = (settings: object) =>
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings));
 
-		async function createFileSession(options: ToolOptions = {}) {
+		async function createFileSession(
+			options: ToolOptions = {},
+			extensionFactories: InlineExtension[] = [inactiveTool],
+		) {
 			const settingsManager = SettingsManager.create(tempDir, agentDir);
 			const resourceLoader = new DefaultResourceLoader({
 				cwd: tempDir,
 				agentDir,
 				settingsManager,
-				extensionFactories: [inactiveTool],
+				extensionFactories,
 			});
 			await resourceLoader.reload();
 			return (
@@ -210,6 +213,46 @@ describe("defaultTools setting", () => {
 			expect(session.getActiveToolNames().sort()).toEqual(["edit", "grep", "inactive_tool", "read", "write"]);
 			session.dispose();
 		});
+
+		it.each([{ defaultTools: ["read"] }, { defaultTools: ["read", "default_tool"] }])(
+			"keeps deselected extension defaults off while activating new defaults: $defaultTools",
+			async ({ defaultTools }) => {
+				writeSettings({ defaultTools });
+				let reloaded = false;
+				const session = await createFileSession({}, [
+					(pi) => {
+						for (const name of reloaded
+							? ["default_tool", "new_default", "surfaced_tool"]
+							: ["default_tool", "surfaced_tool"]) {
+							pi.registerTool({
+								name,
+								label: name,
+								description: "Reload selection control",
+								parameters: Type.Object({}),
+								exposure: name === "surfaced_tool" && !reloaded ? "hidden" : "direct",
+								execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+							});
+						}
+					},
+				]);
+				expect(session.getActiveToolNames().sort()).toEqual(["default_tool", "read"]);
+				session.setActiveToolsByName(["read"]);
+				reloaded = true;
+				await session.reload();
+				expect(session.getActiveToolNames().sort()).toEqual(["new_default", "read", "surfaced_tool"]);
+
+				session.setActiveToolsByName(["read"]);
+				await session.reload();
+				expect(session.getActiveToolNames()).toEqual(["read"]);
+
+				writeSettings({ defaultTools: ["read", "default_tool"] });
+				await session.reload();
+				expect(session.getActiveToolNames().sort()).toEqual(
+					defaultTools.includes("default_tool") ? ["read"] : ["default_tool", "read"],
+				);
+				session.dispose();
+			},
+		);
 
 		it("keeps explicit tool options on reload", async () => {
 			const allowlisted = await createFileSession({ tools: ["read"] });

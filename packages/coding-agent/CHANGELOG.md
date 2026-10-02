@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Fixed `/reload` re-enabling previously deselected default-active extension tools; new defaults and tools newly added to `defaultTools` still activate.
 - Fixed resized-image coordinate notes to use separate, unrounded x and y scales.
 - Fixed branch-summary budgets counting system declarations instead of conversation history.
 - Fixed empty quoted prompt-template arguments shifting later positional arguments.
