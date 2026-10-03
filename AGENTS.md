@@ -147,5 +147,6 @@ Pi is a CLI monorepo. There is no dev server to boot. Validate with `npm run che
 
 - Agent shells resolve `node` to `/exec-daemon/node`, which can be older than Pi's Node >=22.19 requirement. Install puts Node 22.22.2 on disk at `/usr/local/lib/nodejs`. Prefix commands with `export PATH="/usr/local/lib/nodejs/bin:$PATH"`.
 - `packages/ai/src/providers/data/` is gitignored. Hydrate it from the revision in `nix/model-catalog.json` via `https://pi.dev/api/models/revisions/<revision>?types=chat,image,classifier` and `node packages/ai/scripts/hydrate-model-catalog.ts`, then `npm run build:offline`. Install dependencies with `npm ci --ignore-scripts`, matching CI.
+- Checkout removes gitignored `node_modules`, `packages/*/dist`, and provider data. Install copies those trees to `/opt/pi-dev-cache`, and boot symlinks them back when they are missing.
 - CI image libraries and tools: `libcairo2-dev`, `libpango1.0-dev`, `libjpeg-dev`, `libgif-dev`, `librsvg2-dev`, `fd-find` (symlinked as `/usr/local/bin/fd`), `ripgrep`, and `tmux`.
 - `./pi-test.sh --offline` skips startup network. `--list-models` reads the hydrated catalog.
