@@ -18,7 +18,11 @@ export function serializeJsonLine(value: unknown): string {
  * Unicode separators that are valid inside JSON strings and therefore does not
  * implement strict JSONL framing.
  */
-export function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
+export function attachJsonlLineReader(
+	stream: Readable,
+	onLine: (line: string) => void,
+	onPending?: (pending: boolean) => void,
+): () => void {
 	const decoder = new StringDecoder("utf8");
 	let buffer = "";
 
@@ -32,6 +36,12 @@ export function attachJsonlLineReader(stream: Readable, onLine: (line: string) =
 		while (true) {
 			const newlineIndex = buffer.indexOf("\n");
 			if (newlineIndex === -1) {
+				onPending?.(
+					buffer.length > 0 ||
+						(typeof chunk === "string"
+							? !chunk.endsWith("\n")
+							: chunk.length > 0 && chunk[chunk.length - 1] !== 10),
+				);
 				return;
 			}
 
@@ -46,6 +56,7 @@ export function attachJsonlLineReader(stream: Readable, onLine: (line: string) =
 			emitLine(buffer);
 			buffer = "";
 		}
+		onPending?.(false);
 	};
 
 	stream.on("data", onData);

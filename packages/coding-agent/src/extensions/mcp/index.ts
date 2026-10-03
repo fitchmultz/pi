@@ -39,6 +39,7 @@ import type {
 } from "../../core/extensions/types.ts";
 import { mcpNamespace } from "../../core/mcp-servers.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
+import type { WorkingSessionSaveEvent } from "../../core/working-session.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { CODEMODE_TOOL_NAME, isCodemodeTool } from "../codemode/tool.ts";
 import { isToolSearchTool, TOOL_SEARCH_TOOL_NAME } from "../tool-search/tool.ts";
@@ -299,6 +300,9 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 		let credentials = options.credentials;
 		/** The session's model registry, which resolves `auth.provider` tokens. */
 		let modelRegistry: ModelRegistry | undefined;
+		let saving: WorkingSessionSaveEvent | undefined;
+		const deferredRegistrations = new Set<McpServerConnection>();
+		let pendingAuth = 0;
 		let serverLog: McpServerLog | undefined;
 		const openUrl = options.openUrl ?? openBrowser;
 		const updateConfig =
@@ -360,6 +364,10 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 		const definitions = new Map<string, ToolDefinition<TSchema, McpToolDetails>>();
 
 		const registerTools = (connection: McpServerConnection) => {
+			if (saving) {
+				deferredRegistrations.add(connection);
+				return;
+			}
 			const server = connection.entry.name;
 			const entry = findServer(server)?.entry ?? connection.entry;
 			const description = entry.config.description?.trim();
@@ -523,7 +531,23 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 				cwd: sessionCwd,
 				createTransport: options.createTransport ?? runtime.createDefaultTransport,
 				credentials: getCredentials(runtime),
-				providerToken: async (provider) => modelRegistry?.getApiKeyForProvider(provider),
+				providerToken: async (provider) => {
+					if (saving) {
+						saving.invalidate("MCP provider authentication started during native save");
+						throw new Error("Native working session is reserved for saving");
+					}
+					pendingAuth++;
+					try {
+						return await modelRegistry?.getApiKeyForProvider(provider);
+					} finally {
+						pendingAuth--;
+					}
+				},
+				beforeRequest: () => {
+					if (!saving) return;
+					saving.invalidate("MCP request started during native save");
+					throw new Error("Native working session is reserved for saving");
+				},
 				log: getServerLog(runtime),
 				onTools: registerTools,
 				onChange: onConnectionChange,
@@ -1121,6 +1145,30 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			}
 			if (current !== generation) return;
 			reportProblems(ctx, connecting);
+		});
+
+		pi.on("working_session_save", (event) => {
+			saving = event;
+			event.signal.addEventListener(
+				"abort",
+				() => {
+					saving = undefined;
+					const registrations = [...deferredRegistrations];
+					deferredRegistrations.clear();
+					for (const connection of registrations) {
+						if (connections().includes(connection)) registerTools(connection);
+					}
+				},
+				{ once: true },
+			);
+			return {
+				blockers: [
+					...(pendingAuth ? ["Native MCP authentication is in progress"] : []),
+					...connections()
+						.filter((connection) => connection.pendingRequests > 0)
+						.map((connection) => `Native MCP requests to ${connection.name} are in progress`),
+				],
+			};
 		});
 
 		pi.on("session_shutdown", async () => {

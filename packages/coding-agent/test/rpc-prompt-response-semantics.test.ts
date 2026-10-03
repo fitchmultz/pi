@@ -9,6 +9,7 @@ import {
 	getModel,
 	type Model,
 } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
@@ -23,6 +24,8 @@ import { createTestExtensionsResult, createTestResourceLoader } from "./utilitie
 const rpcIo = vi.hoisted(() => ({
 	outputLines: [] as string[],
 	lineHandler: undefined as ((line: string) => void) | undefined,
+	ready: undefined as Promise<void> | undefined,
+	notifyingReady: false,
 }));
 
 vi.mock("../src/core/output-guard.js", () => ({
@@ -35,6 +38,13 @@ vi.mock("../src/core/output-guard.js", () => ({
 }));
 
 vi.mock("../src/modes/interactive/theme/theme.js", () => ({ theme: {} }));
+
+vi.mock("../src/cli/restart-protocol.js", () => ({
+	notifyCliReady: async () => {
+		rpcIo.notifyingReady = true;
+		await rpcIo.ready;
+	},
+}));
 
 vi.mock("../src/modes/rpc/jsonl.js", () => ({
 	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
@@ -105,6 +115,8 @@ async function createRuntimeHost(options: {
 	runtimeHost: AgentSessionRuntime;
 	cleanup: () => Promise<void>;
 }> {
+	const signalListeners = { SIGTERM: process.listeners("SIGTERM"), SIGHUP: process.listeners("SIGHUP") };
+	const endListeners = process.stdin.listeners("end");
 	const tempDir = join(tmpdir(), `pi-rpc-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 
@@ -167,6 +179,11 @@ async function createRuntimeHost(options: {
 				// ignore test cleanup failures
 			}
 			session.dispose();
+			for (const signal of ["SIGTERM", "SIGHUP"] as const)
+				for (const listener of process.listeners(signal))
+					if (!signalListeners[signal].includes(listener)) process.off(signal, listener);
+			for (const listener of process.stdin.listeners("end"))
+				if (!endListeners.includes(listener)) process.stdin.off("end", listener as () => void);
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true });
 			}
@@ -177,6 +194,7 @@ async function createRuntimeHost(options: {
 async function startRpcMode(options: Parameters<typeof createRuntimeHost>[0]): Promise<{
 	lineHandler: (line: string) => void;
 	cleanup: () => Promise<void>;
+	runtimeHost: AgentSessionRuntime;
 }> {
 	rpcIo.outputLines = [];
 	rpcIo.lineHandler = undefined;
@@ -185,13 +203,72 @@ async function startRpcMode(options: Parameters<typeof createRuntimeHost>[0]): P
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
-	return { lineHandler: rpcIo.lineHandler!, cleanup };
+	return { lineHandler: rpcIo.lineHandler!, cleanup, runtimeHost };
 }
 
 describe("RPC prompt response semantics", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
+		rpcIo.ready = undefined;
+		rpcIo.notifyingReady = false;
+	});
+
+	it("keeps a native hold valid while launcher readiness notification completes", async () => {
+		const { runtimeHost, cleanup } = await createRuntimeHost({ withAuth: true, responseDelayMs: 0 });
+		runtimeHost.session.setWorkingSessionReady(false);
+		let ready!: () => void;
+		rpcIo.ready = new Promise<void>((resolve) => {
+			ready = resolve;
+		});
+		rpcIo.lineHandler = undefined;
+		void runRpcMode(runtimeHost);
+		await vi.waitFor(() => expect(rpcIo.notifyingReady).toBe(true));
+		const hold = await runtimeHost.session.acquireWorkingSession();
+		try {
+			ready();
+			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+			expect(hold.invalidated.aborted).toBe(false);
+			hold.assertHeld();
+		} finally {
+			ready();
+			await hold.release();
+			await cleanup();
+		}
+	});
+
+	it("keeps readonly polls safe and preserves ordered mutations until hold release", async () => {
+		const { lineHandler, cleanup, runtimeHost } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		const hold = await runtimeHost.session.acquireWorkingSession();
+		try {
+			lineHandler(JSON.stringify({ id: "poll", type: "get_state" }));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({ id: "poll", success: true }),
+				),
+			);
+			expect(hold.invalidated.aborted).toBe(false);
+			lineHandler(JSON.stringify({ id: "one", type: "set_session_name", name: "first" }));
+			lineHandler(JSON.stringify({ id: "two", type: "set_session_name", name: "second" }));
+			expect(hold.invalidated.aborted).toBe(true);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(parseOutputLines(rpcIo.outputLines).filter((line) => line.id === "one" || line.id === "two")).toEqual(
+				[],
+			);
+			await hold.release();
+			await vi.waitFor(() =>
+				expect(
+					parseOutputLines(rpcIo.outputLines).filter((line) => line.id === "one" || line.id === "two"),
+				).toMatchObject([
+					{ id: "one", success: true },
+					{ id: "two", success: true },
+				]),
+			);
+			expect(runtimeHost.session.sessionName).toBe("second");
+		} finally {
+			await hold.release();
+			await cleanup();
+		}
 	});
 
 	it("emits one failure response when prompt preflight rejects", async () => {
@@ -232,6 +309,92 @@ describe("RPC prompt response semantics", () => {
 			await cleanup();
 		}
 	});
+
+	it.each(["input", "before_agent_start", "command"] as const)(
+		"rejects missing saved tools before RPC acknowledgement and preserves context for %s repair",
+		async (repair) => {
+			const savedTool = {
+				name: "saved",
+				label: "Saved",
+				description: "Reconnect tool",
+				defaultActive: false,
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [], details: {} }),
+			};
+			const original = await createRuntimeHost({
+				withAuth: true,
+				responseDelayMs: 0,
+				extensionsResult: await createTestExtensionsResult([(pi) => pi.registerTool(savedTool)]),
+			});
+			original.runtimeHost.session.setActiveToolsByName(["saved"]);
+			await original.runtimeHost.session.sendCustomMessage(
+				{ customType: "retained", content: "Consume exactly once", display: false },
+				{ deliverAs: "nextTurn" },
+			);
+			const captured = await original.runtimeHost.session.acquireWorkingSession();
+			await captured.release();
+			await original.cleanup();
+			const { lineHandler, cleanup, runtimeHost } = await startRpcMode({
+				withAuth: true,
+				responseDelayMs: 0,
+				extensionsResult: await createTestExtensionsResult([
+					(pi) => {
+						if (repair === "command") {
+							pi.registerCommand("repair", { handler: async () => pi.registerTool(savedTool) });
+						} else if (repair === "input") {
+							pi.on("input", (event) => {
+								if (event.text === "repair") pi.registerTool(savedTool);
+							});
+						} else {
+							pi.on("before_agent_start", (event) => {
+								if (event.prompt === "repair") pi.registerTool(savedTool);
+							});
+						}
+					},
+				]),
+			});
+			runtimeHost.session.restoreWorkingSession(captured.state);
+			try {
+				lineHandler(JSON.stringify({ id: "missing", type: "prompt", message: "unavailable" }));
+				await vi.waitFor(() => {
+					expect(getPromptResponses(rpcIo.outputLines, "missing")).toEqual([
+						expect.objectContaining({ success: false, error: expect.stringContaining("Saved tools") }),
+					]);
+				});
+				expect(runtimeHost.session.hasPendingNextTurnMessages).toBe(true);
+				expect(parseOutputLines(rpcIo.outputLines).filter((event) => event.type === "agent_start")).toEqual([]);
+				const retained = await runtimeHost.session.acquireWorkingSession();
+				expect(retained.state.nextTurn).toEqual(captured.state.nextTurn);
+				await retained.release();
+				if (repair === "command") {
+					lineHandler(JSON.stringify({ id: "register", type: "prompt", message: "/repair" }));
+					await vi.waitFor(() =>
+						expect(getPromptResponses(rpcIo.outputLines, "register")).toEqual([
+							expect.objectContaining({ success: true, data: { disposition: "handled" } }),
+						]),
+					);
+				}
+				lineHandler(JSON.stringify({ id: "retry", type: "prompt", message: "repair" }));
+				await vi.waitFor(() =>
+					expect(getPromptResponses(rpcIo.outputLines, "retry")).toEqual([
+						expect.objectContaining({ success: true, data: { disposition: "started" } }),
+					]),
+				);
+				await vi.waitFor(() => expect(runtimeHost.session.isIdle).toBe(true));
+				expect(runtimeHost.session.hasPendingNextTurnMessages).toBe(false);
+				lineHandler(JSON.stringify({ id: "next", type: "prompt", message: "next" }));
+				await vi.waitFor(() => expect(getPromptResponses(rpcIo.outputLines, "next")).toHaveLength(1));
+				await vi.waitFor(() => expect(runtimeHost.session.isIdle).toBe(true));
+				expect(
+					runtimeHost.session.messages.filter(
+						(message) => message.role === "custom" && message.customType === "retained",
+					),
+				).toEqual(captured.state.nextTurn);
+			} finally {
+				await cleanup();
+			}
+		},
+	);
 
 	// #9098: a successful prompt may start an agent run or be consumed by an extension.
 	it("emits one started response when prompt preflight succeeds", async () => {

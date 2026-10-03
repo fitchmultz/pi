@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { FullscreenExitOutput, TuiMode } from "../src/core/settings-manager.ts";
+import { WorkingSessionGate } from "../src/core/working-session.ts";
 import {
 	BranchSummaryStatusIndicator,
 	CompactionStatusIndicator,
@@ -188,6 +189,7 @@ describe("InteractiveMode right-click paste", () => {
 		const target = { render: () => [], invalidate: () => {}, handleInput } satisfies Component;
 		const requestRender = vi.fn();
 		const context = {
+			session: { workingSessionGate: new WorkingSessionGate() },
 			renderer: { getFocusedComponent: () => target },
 			ui: { requestRender },
 		};

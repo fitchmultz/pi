@@ -7,6 +7,7 @@
  */
 
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import { notifyCliReady } from "../cli/restart-protocol.ts";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
@@ -32,6 +33,11 @@ export interface PrintModeOptions {
  */
 export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages } = options;
+	let pending: Array<{ text: string; images?: ImageContent[] }> = [
+		...(initialMessage ? [{ text: initialMessage, images: initialImages }] : []),
+		...messages.map((text) => ({ text })),
+	];
+	let restored = false;
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
@@ -73,6 +79,26 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		session.bindWorkingSessionHost({
+			kind: mode === "json" ? "json" : "print",
+			readiness: () => {},
+			capture: () => pending,
+			restore: (data) => {
+				if (
+					!Array.isArray(data) ||
+					!data.every(
+						(message) =>
+							message &&
+							typeof message === "object" &&
+							typeof message.text === "string" &&
+							(message.images === undefined || Array.isArray(message.images)),
+					)
+				)
+					throw new Error("Invalid native print working-session buffers");
+				pending = [...data, ...pending];
+				restored = true;
+			},
+		});
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
 			commandContextActions: {
@@ -116,6 +142,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 						await waitForRawStdoutBackpressure();
 					})
 				: undefined;
+		session.setWorkingSessionReady(true);
 	};
 
 	try {
@@ -127,13 +154,16 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 
 		await rebindSession();
+		await notifyCliReady();
 
-		if (initialMessage) {
-			await session.prompt(initialMessage, { images: initialImages });
-		}
-
-		for (const message of messages) {
-			await session.prompt(message);
+		// Restored accepted buffers wait for an explicit new native input, never startup replay.
+		if (!restored || initialMessage || messages.length) {
+			while (pending.length) {
+				while (session.workingSessionGate.reserved) await session.workingSessionGate.waitForRelease();
+				const message = pending.shift()!;
+				if (message.images) await session.prompt(message.text, { images: message.images });
+				else await session.prompt(message.text);
+			}
 		}
 
 		if (mode === "text") {

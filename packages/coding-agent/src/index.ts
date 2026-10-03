@@ -240,6 +240,7 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.ts";
 export { DefaultPackageManager } from "./core/package-manager.ts";
+export type { ProviderAuthFallback } from "./core/provider-composer.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 // SDK for programmatic usage
@@ -401,6 +402,19 @@ export {
 	type VirtualModelDefinition,
 	type VirtualModelStateData,
 } from "./core/virtual-models.ts";
+export {
+	openWorkingSession,
+	parseWorkingSession,
+	readWorkingSession,
+	type WorkingSession,
+	type WorkingSessionBoundary,
+	type WorkingSessionHold,
+	type WorkingSessionHost,
+	type WorkingSessionLaunch,
+	type WorkingSessionReadiness,
+	type WorkingSessionSaveEvent,
+	writeWorkingSession,
+} from "./core/working-session.ts";
 // Built-in extensions. The CLI loads them; SDK sessions add them to their extension factories.
 export { createBackgroundCommandExtension } from "./extensions/background-command/index.ts";
 export { type CodemodeExtensionOptions, createCodemodeExtension } from "./extensions/codemode/index.ts";

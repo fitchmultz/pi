@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
 	fauxAssistantMessage,
 	fauxProvider,
@@ -41,7 +41,8 @@ async function managedFixture(
 	expect(process.send).toBeTypeOf("function");
 	expect(process.connected).toBe(true);
 	vi.stubEnv(MANAGED_CLI_ENV, "1");
-	expect(createManagedRestart()).toBeDefined();
+	const managed = createManagedRestart();
+	expect(managed).toBeDefined();
 	const faux = fauxProvider();
 	const sessionManager = options.sessionFile
 		? SessionManager.open(options.sessionFile)
@@ -108,7 +109,14 @@ async function managedFixture(
 		await close();
 		rmSync(root, { recursive: true, force: true });
 	});
-	await h.session.bindExtensions({ mode: options.mode ?? "tui", uiContext: createTestUiContext() });
+	let shutdownRequested = false;
+	await h.session.bindExtensions({
+		mode: options.mode ?? "tui",
+		uiContext: createTestUiContext(),
+		shutdownHandler: () => {
+			shutdownRequested = true;
+		},
+	});
 	await h.session.setModel(faux.getModel());
 	if (options.mode !== "print") expect(process.env[RESTART_SOCKET_ENV]).toBeDefined();
 	const requests: TranscriptContext[] = [];
@@ -127,7 +135,7 @@ async function managedFixture(
 			{ triggerTurn: true },
 		);
 	};
-	return { h, faux, requests, response, wake, close };
+	return { h, faux, requests, response, wake, close, managed: managed!, shutdownRequested: () => shutdownRequested };
 }
 
 interface Payload {
@@ -202,6 +210,47 @@ function restartSection(context: TranscriptContext): string {
 }
 
 describe("actual managed restart guidance", () => {
+	it.skipIf(process.platform === "win32")(
+		"captures restart privately without changing a group-writable journal directory",
+		async () => {
+			const f = await managedFixture();
+			f.faux.setResponses([f.response()]);
+			await f.h.session.prompt("save the native journal");
+			const journalDir = f.h.sessionManager.getSessionDir();
+			chmodSync(journalDir, 0o775);
+			f.managed.bindInput(() => ({ busy: false, pendingInput: false }));
+			f.managed.start();
+			await f.h.session.prompt("/restart");
+			await vi.waitFor(() => expect(f.shutdownRequested()).toBe(true));
+			expect(f.managed.beginShutdown("extension")).toBe(true);
+			const writeSpy = vi.spyOn(process, "send");
+			try {
+				expect(await f.managed.captureFinal(f.h.session)).toBe(true);
+				await f.managed.completeShutdown();
+				const message = writeSpy.mock.calls
+					.map(([message]) => message)
+					.find(
+						(message) =>
+							typeof message === "object" &&
+							message !== null &&
+							"type" in message &&
+							message.type === "pi:restart",
+					);
+				if (!message || typeof message !== "object" || !("session" in message))
+					throw new Error("Missing restart handoff");
+				const session = message.session as { workingSession: string };
+				expect(dirname(session.workingSession)).not.toBe(journalDir);
+				expect(statSync(dirname(session.workingSession)).mode & 0o777).toBe(0o700);
+				expect(statSync(session.workingSession).mode & 0o777).toBe(0o600);
+				expect(JSON.parse(readFileSync(session.workingSession, "utf8")).header.id).toBe(f.h.session.sessionId);
+				expect(statSync(journalDir).mode & 0o777).toBe(0o775);
+				expect(existsSync(f.h.session.sessionFile!)).toBe(true);
+				rmSync(dirname(session.workingSession), { recursive: true });
+			} finally {
+				writeSpy.mockRestore();
+			}
+		},
+	);
 	it.each(["idle", "deferred"] as const)(
 		"keeps the serialized head across %s wake, tools, and next user without extra hooks",
 		async (delivery) => {

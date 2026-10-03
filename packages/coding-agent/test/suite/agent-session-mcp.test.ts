@@ -635,6 +635,18 @@ return { docs, sameForAliases: aliases.every((alias) => JSON.stringify(alias) ==
 		expect(description()).toBe(before);
 	});
 
+	it("defers reconnectable MCP tool publication while saving and publishes after release", async () => {
+		const { harness } = await setupSlow({}, 60);
+		const controller = new AbortController();
+		const hold = await harness.session.acquireWorkingSession({ signal: controller.signal });
+		expect(hold.sleepReady).toBe(true);
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(harness.session.getCallableToolNames()).not.toContain("mcp__slow__search");
+		expect(hold.invalidated.aborted).toBe(false);
+		controller.abort();
+		await vi.waitFor(() => expect(harness.session.getCallableToolNames()).toContain("mcp__slow__search"));
+	});
+
 	it("lists a server before it connects and appends its summary with the next prompt", async () => {
 		const { harness } = await setupSlow({ instructions: "Slow docs.\nMore." }, 30);
 		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);

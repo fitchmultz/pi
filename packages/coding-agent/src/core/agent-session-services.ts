@@ -4,6 +4,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { applyProviderRegistrations } from "./extensions/provider-registrations.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import {
 	DefaultResourceLoader,
@@ -14,6 +15,7 @@ import {
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
+import { parseWorkingSession, readWorkingSession, type WorkingSession } from "./working-session.ts";
 
 /**
  * Non-fatal issues collected while creating services or sessions.
@@ -36,6 +38,7 @@ export interface AgentSessionRuntimeDiagnostic {
  */
 export interface CreateAgentSessionServicesOptions {
 	cwd: string;
+	workingSession?: CreateAgentSessionOptions["workingSession"];
 	agentDir?: string;
 	settingsManager?: SettingsManager;
 	modelRuntime?: ModelRuntime;
@@ -55,6 +58,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	services: AgentSessionServices;
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
+	workingSession?: CreateAgentSessionOptions["workingSession"];
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -77,6 +81,7 @@ export interface AgentSessionServices {
 	settingsManager: SettingsManager;
 	resourceLoader: ResourceLoader;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+	workingSessionResourcesPrepared?: WorkingSession;
 }
 
 function applyExtensionFlagValues(
@@ -135,8 +140,18 @@ function applyExtensionFlagValues(
 export async function createAgentSessionServices(
 	options: CreateAgentSessionServicesOptions,
 ): Promise<AgentSessionServices> {
-	const cwd = resolvePath(options.cwd);
-	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getAgentDir();
+	const saved =
+		typeof options.workingSession === "string"
+			? readWorkingSession(options.workingSession)
+			: options.workingSession
+				? parseWorkingSession(JSON.stringify(options.workingSession))
+				: undefined;
+	const cwd = resolvePath(saved?.cwd ?? options.cwd);
+	const agentDir = resolvePath(saved?.launch?.agentDir ?? options.agentDir ?? getAgentDir());
+	if (saved?.launch?.offline !== undefined) {
+		if (saved.launch.offline) process.env.PI_OFFLINE = "1";
+		else delete process.env.PI_OFFLINE;
+	}
 	const modelRuntime =
 		options.modelRuntime ??
 		(await ModelRuntime.create({
@@ -144,54 +159,30 @@ export async function createAgentSessionServices(
 			modelsPath: join(agentDir, "models.json"),
 			signal: options.modelRuntimeSignal,
 		}));
-	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	if (saved?.launch?.offline !== undefined) modelRuntime.setOffline(saved.launch.offline);
+	const settingsManager =
+		options.settingsManager ?? SettingsManager.create(cwd, agentDir, { projectTrusted: saved?.launch?.trustProject });
+	if (saved?.launch?.trustProject !== undefined) settingsManager.setProjectTrusted(saved.launch.trustProject);
+	if (saved) settingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
+	const reloadOptions = saved ? { workingSession: saved } : options.resourceLoaderReloadOptions;
 	const resourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
 		cwd,
 		agentDir,
 		settingsManager,
 	});
-	await resourceLoader.reload(options.resourceLoaderReloadOptions);
+	await resourceLoader.reload(reloadOptions);
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	const extensionsResult = resourceLoader.getExtensions();
-	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
-		try {
-			modelRuntime.registerProvider(name, config);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			diagnostics.push({
-				type: "error",
-				message: `Extension "${extensionPath}" error: ${message}`,
-			});
-		}
-	}
-	extensionsResult.runtime.pendingProviderRegistrations = [];
-	for (const { provider, extensionPath } of extensionsResult.runtime.pendingNativeProviderRegistrations) {
-		try {
-			modelRuntime.registerNativeProvider(provider);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			diagnostics.push({
-				type: "error",
-				message: `Extension "${extensionPath}" error: ${message}`,
-			});
-		}
-	}
-	extensionsResult.runtime.pendingNativeProviderRegistrations = [];
-	for (const { definition, extensionPath } of extensionsResult.runtime.pendingVirtualModelRegistrations) {
-		try {
-			modelRuntime.registerVirtualModel(definition);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			diagnostics.push({
-				type: "error",
-				message: `Extension "${extensionPath}" error: ${message}`,
-			});
-		}
-	}
-	extensionsResult.runtime.pendingVirtualModelRegistrations = [];
-	await modelRuntime.refresh({ allowNetwork: false });
+	const errors = await applyProviderRegistrations(extensionsResult.runtime, modelRuntime);
+	extensionsResult.errors.push(...errors.map((error) => ({ path: error.extensionPath, error: error.error })));
+	diagnostics.push(
+		...errors.map((error) => ({
+			type: "error" as const,
+			message: `Extension "${error.extensionPath}" error: ${error.error}`,
+		})),
+	);
 	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
 
 	return {
@@ -201,6 +192,7 @@ export async function createAgentSessionServices(
 		settingsManager,
 		resourceLoader,
 		diagnostics,
+		workingSessionResourcesPrepared: reloadOptions?.workingSession,
 	};
 }
 
@@ -229,5 +221,7 @@ export async function createAgentSessionFromServices(
 		noTools: options.noTools,
 		customTools: options.customTools,
 		sessionStartEvent: options.sessionStartEvent,
+		workingSession: options.workingSession,
+		workingSessionResourcesPrepared: options.services.workingSessionResourcesPrepared,
 	});
 }

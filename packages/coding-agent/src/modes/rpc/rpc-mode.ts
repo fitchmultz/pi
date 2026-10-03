@@ -12,6 +12,7 @@
  */
 
 import * as crypto from "node:crypto";
+import { notifyCliReady } from "../../cli/restart-protocol.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
@@ -56,6 +57,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
+	let partialInput = false;
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		writeRawStdout(serializeJsonLine(obj));
@@ -316,6 +318,19 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		session.bindWorkingSessionHost({
+			kind: "rpc",
+			readiness: () => ({
+				blockers: [
+					...(pendingExtensionRequests.size ? ["Unresolved native RPC UI request"] : []),
+					...(partialInput ? ["Unfinished native RPC frame"] : []),
+				],
+			}),
+			capture: () => null,
+			restore: (data) => {
+				if (data !== null) throw new Error("Invalid native RPC working-session buffers");
+			},
+		});
 		await session.bindExtensions({
 			uiContext: createExtensionUIContext(),
 			mode: "rpc",
@@ -361,6 +376,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
 			await waitForRawStdoutBackpressure();
 		});
+		session.setWorkingSessionReady(true);
 	};
 
 	const registerSignalHandlers = (): void => {
@@ -380,6 +396,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	};
 
 	await rebindSession();
+	await notifyCliReady();
 	registerSignalHandlers();
 
 	// Handle a single command
@@ -781,7 +798,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 		const command = parsed as RpcCommand;
 		try {
-			const response = await handleCommand(command);
+			const readonly = typeof command.type === "string" && command.type.startsWith("get_");
+			if (!readonly) {
+				while (session.workingSessionGate.reserved) {
+					session.workingSessionGate.invalidate("RPC command arrived during native save");
+					await session.workingSessionGate.waitForRelease();
+				}
+			}
+			if (shuttingDown) return;
+			const response = readonly
+				? await handleCommand(command)
+				: await session.workingSessionGate.run(async () => handleCommand(command));
 			if (response) {
 				output(response);
 				await waitForRawStdoutBackpressure();
@@ -805,9 +832,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	process.stdin.on("end", onInputEnd);
 
 	detachInput = (() => {
-		const detachJsonl = attachJsonlLineReader(process.stdin, (line) => {
-			void handleInputLine(line);
-		});
+		const detachJsonl = attachJsonlLineReader(
+			process.stdin,
+			(line) => {
+				void handleInputLine(line);
+			},
+			(pending) => {
+				partialInput = pending;
+				if (pending) session.workingSessionGate.invalidate("RPC frame arrived during native save");
+			},
+		);
 		return () => {
 			detachJsonl();
 			process.stdin.off("end", onInputEnd);

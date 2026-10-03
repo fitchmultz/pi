@@ -176,4 +176,48 @@ describe("AgentSession dynamic provider registration", () => {
 
 		session.dispose();
 	});
+
+	it("publishes factory fallback auth before direct SDK selection and disposes it on reload", async () => {
+		const credentials = AuthStorage.inMemory();
+		const modelRuntime = await ModelRuntime.create({ credentials, modelsPath: null });
+		const settingsManager = SettingsManager.inMemory({
+			defaultProvider: "openai-codex",
+			defaultModel: modelRuntime.getProvider("openai-codex")!.getModels()[0]!.id,
+		});
+		let present = true;
+		let resolves = 0;
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			extensionFactories: [
+				(pi) => {
+					if (!present) return;
+					pi.registerProviderAuthFallback("openai-codex", {
+						check: async () => ({ type: "api_key", source: "account" }),
+						resolve: async () => ({ auth: { apiKey: `account-${++resolves}` }, source: "account" }),
+					});
+				},
+			],
+		});
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			modelRuntime,
+			settingsManager,
+			resourceLoader,
+			sessionManager: SessionManager.inMemory(tempDir),
+		});
+		expect(session.model?.provider).toBe("openai-codex");
+		expect(resolves).toBe(0);
+		expect((await modelRuntime.getAuth("openai-codex"))?.auth.apiKey).toBe("account-1");
+		present = false;
+		await session.reload();
+		expect(session.model?.provider).toBe("openai-codex");
+		expect(modelRuntime.hasConfiguredAuth("openai-codex")).toBe(false);
+		expect(await modelRuntime.getAuth("openai-codex")).toBeUndefined();
+		expect(resolves).toBe(1);
+		session.dispose();
+	});
 });

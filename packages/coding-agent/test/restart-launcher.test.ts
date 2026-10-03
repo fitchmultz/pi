@@ -1,10 +1,21 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getRestartArgs, getRestartRuntimeWorker, runCliLauncher, superviseCli } from "../src/cli/launcher.ts";
 import { parseRestartCommand, parseRestartRequest } from "../src/cli/restart-protocol.ts";
+import { createHarness } from "./suite/harness.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -18,16 +29,20 @@ interface Receipt {
 }
 
 function fixture() {
-	const root = mkdtempSync(join(tmpdir(), "pi-launcher-"));
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-launcher-")));
 	roots.push(root);
 	const log = join(root, "launches.jsonl");
 	const selector = join(root, "pi");
 	const request = { message: "Continue once", extensions: [join(root, "v2.ts")] };
-	const session = { sessionId: "same-session", sessionFile: join(root, "session.jsonl") };
+	const session: { sessionId: string; sessionFile: string; workingSession?: string } = {
+		sessionId: "same-session",
+		sessionFile: join(root, "session.jsonl"),
+	};
 	return {
 		root,
 		selector,
 		request,
+		session,
 		release(name: string, body: string) {
 			const runtime = join(root, name);
 			const bundle = join(runtime, "dist", "bundle");
@@ -37,6 +52,7 @@ function fixture() {
 				join(bundle, "cli-worker.js"),
 				`
 import { appendFileSync, existsSync, unlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 const handoff = process.env.PI_RESTART_HANDOFF ? JSON.parse(process.env.PI_RESTART_HANDOFF) : undefined;
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, args: process.argv.slice(2), handoff }) + '\\n');
 const select = (name) => { if (existsSync(${JSON.stringify(selector)})) unlinkSync(${JSON.stringify(selector)}); symlinkSync(${JSON.stringify(root)} + '/' + name + '/dist/bundle/cli.js', ${JSON.stringify(selector)}); };
@@ -76,6 +92,88 @@ function readable(path: string): boolean {
 }
 
 describe("managed restart launcher", () => {
+	it.each(["complete", "metadata", "crash", "stale-worker", "missing", "replaced", "corrupt"])(
+		"attests only the current, ready, fully finalized last worker: %s",
+		async (scenario) => {
+			const h = await createHarness();
+			const hold = await h.session.acquireWorkingSession();
+			const state = JSON.stringify(hold.state);
+			await hold.release();
+			h.cleanup();
+			const f = fixture();
+			const exitPath = join(f.root, "exit.json");
+			writeFileSync(exitPath, "stale previous launch", { mode: 0o600 });
+			const complete = `
+const statePath = process.env.PI_WORKING_SESSION_EXIT_PATH + '.state';
+writeFileSync(statePath, ${JSON.stringify(state)}, {mode:0o600});
+const receipt = {path:statePath,digest:${scenario === "corrupt" ? "'0'.repeat(64)" : `createHash('sha256').update(${JSON.stringify(state)}).digest('hex')`},sessionId:${JSON.stringify(h.session.sessionId)},pid:process.pid,worker:${scenario === "stale-worker" ? "'previous-worker'" : "process.env.PI_WORKING_SESSION_WORKER"},launch:process.env.PI_WORKING_SESSION_LAUNCH};
+await new Promise(resolve => process.send({type:'pi:completed',completed:receipt}, resolve));
+`;
+			const body =
+				scenario === "missing"
+					? "ready();"
+					: `
+${scenario === "metadata" ? "" : "await new Promise(resolve => process.send({type:'pi:ready'}, resolve));"}
+${complete}
+${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario === "crash" ? 17 : 0});`}
+`;
+			const a = f.release("A", body);
+			if (scenario === "replaced") f.release("B", "ready();");
+			f.select(a);
+			const result = superviseCli(getRestartRuntimeWorker(a), [], {
+				invocationPath: f.selector,
+				execArgv: [],
+				env: { ...process.env, PI_WORKING_SESSION_EXIT_PATH: exitPath },
+			});
+			if (scenario === "corrupt") await expect(result).rejects.toThrow("artifact mismatch");
+			else expect(await result).toBe(scenario === "crash" ? 17 : 0);
+			expect(existsSync(exitPath)).toBe(scenario === "complete");
+			if (scenario === "complete") {
+				const receipt = JSON.parse(readFileSync(exitPath, "utf8"));
+				expect(receipt).toMatchObject({
+					version: 1,
+					path: `${exitPath}.state`,
+					sessionId: h.session.sessionId,
+					launcherPid: process.pid,
+				});
+				expect(receipt.worker).toBeTypeOf("string");
+				expect(receipt.launcher).toBe(receipt.launch);
+			}
+		},
+	);
+
+	it.each([
+		[false, false],
+		[false, true],
+		[true, false],
+		[true, true],
+	])(
+		"retires only received restart state after successful readiness; rollback=%s, nativeDirectory=%s",
+		async (rollback, nativeDirectory) => {
+			const f = fixture();
+			const directory = nativeDirectory ? mkdtempSync(join(f.root, "pi-restart-state-")) : f.root;
+			const artifact = join(directory, nativeDirectory ? "working-session.json" : "restart-private.json");
+			const observed = join(f.root, "artifact-at-ready");
+			writeFileSync(artifact, "private native state", { mode: 0o600 });
+			f.session.workingSession = artifact;
+			const record = `writeFileSync(${JSON.stringify(observed)}, String(existsSync(${JSON.stringify(artifact)})));`;
+			const a = f.release("A", `if (!handoff) { select('B'); restart(); } else { ${record} ready(); }`);
+			f.release("B", rollback ? "process.exit(17);" : `${record} ready();`);
+			f.select(a);
+			expect(await f.run(a)).toBe(0);
+			expect(readFileSync(observed, "utf8")).toBe("true");
+			expect(existsSync(artifact)).toBe(false);
+			expect(existsSync(directory)).toBe(!nativeDirectory);
+			const direct = join(f.root, "user-supplied.json");
+			writeFileSync(direct, "user restore authority", { mode: 0o600 });
+			const runtime = f.release("direct", "ready();");
+			expect(
+				await superviseCli(getRestartRuntimeWorker(runtime), ["--working-session", direct], { execArgv: [] }),
+			).toBe(0);
+			expect(readFileSync(direct, "utf8")).toBe("user restore authority");
+		},
+	);
+
 	it.skipIf(process.platform === "win32").each(["SIGINT", "SIGHUP", "SIGTERM"] as const)(
 		"allows a worker to close gracefully after %s without duplicate delivery",
 		async (signal) => {
@@ -127,6 +225,16 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 			}
 		},
 	);
+	it("does not accept cleanup ownership of a nonprivate restart artifact", async () => {
+		const f = fixture();
+		const artifact = join(f.root, "not-launcher-owned.json");
+		writeFileSync(artifact, "must retain", { mode: 0o644 });
+		f.session.workingSession = artifact;
+		const runtime = f.release("A", "if (!handoff) restart({}); else ready();");
+		expect(await superviseCli(getRestartRuntimeWorker(runtime), [], { execArgv: [] })).toBe(0);
+		expect(readFileSync(artifact, "utf8")).toBe("must retain");
+		expect(f.read()).toHaveLength(1);
+	});
 	it("retains parsed options without replaying startup text, session selection, or the launch model", () => {
 		expect(
 			getRestartArgs(

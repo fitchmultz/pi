@@ -17,6 +17,7 @@ import {
 	closeSync,
 	createReadStream,
 	existsSync,
+	fsyncSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -986,6 +987,8 @@ async function listSessionsFromDir(
  * handles compaction summaries and follows the path from root to current leaf.
  */
 export class SessionManager {
+	beforeMutation?: () => void;
+	private writeError?: unknown;
 	private sessionId: string = "";
 	private sessionFile: string | undefined;
 	private sessionDir: string;
@@ -1024,6 +1027,7 @@ export class SessionManager {
 
 	/** Switch to a different session file (used for resume and branching) */
 	setSessionFile(sessionFile: string): void {
+		this.beforeMutation?.();
 		this._setSessionFile(sessionFile);
 	}
 
@@ -1056,6 +1060,7 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
+		this.beforeMutation?.();
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
@@ -1187,10 +1192,16 @@ export class SessionManager {
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
+		this.beforeMutation?.();
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
-		this._persist(entry);
+		try {
+			this._persist(entry);
+		} catch (error) {
+			this.writeError = error;
+			throw error;
+		}
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1575,6 +1586,7 @@ export class SessionManager {
 	 * are not modified or deleted.
 	 */
 	branch(branchFromId: string): void {
+		this.beforeMutation?.();
 		if (!this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
@@ -1587,6 +1599,7 @@ export class SessionManager {
 	 * Use this when navigating to re-edit the first user message.
 	 */
 	resetLeaf(): void {
+		this.beforeMutation?.();
 		this.leafId = null;
 	}
 
@@ -1602,6 +1615,7 @@ export class SessionManager {
 		fromHook?: boolean,
 		usage?: Usage,
 	): string {
+		this.beforeMutation?.();
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
@@ -1628,6 +1642,7 @@ export class SessionManager {
 	 * Returns the new session file path, or undefined if not persisting.
 	 */
 	createBranchedSession(leafId: string): string | undefined {
+		this.beforeMutation?.();
 		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
@@ -1753,6 +1768,39 @@ export class SessionManager {
 	static create(cwd: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 		return new SessionManager(cwd, dir, undefined, true, options);
+	}
+
+	/** Complete-state restore uses prevalidated entries and never parses/repairs a live journal. */
+	static fromWorkingSession(
+		cwd: string,
+		sessionDir: string,
+		sessionFile: string | undefined,
+		entries: FileEntry[],
+		leafId: string | null,
+	): SessionManager {
+		const manager = new SessionManager(cwd, sessionDir, undefined, sessionFile !== undefined, undefined, entries);
+		manager.sessionFile = sessionFile;
+		manager.flushed = sessionFile !== undefined && existsSync(sessionFile);
+		if (leafId === null) manager.resetLeaf();
+		else manager.branch(leafId);
+		manager.flushWorkingSession();
+		return manager;
+	}
+
+	/** Save boundaries force even setup-only state to disk and reject earlier write failures. */
+	flushWorkingSession(): void {
+		if (this.writeError) throw this.writeError;
+		if (!this.persist || !this.sessionFile) return;
+		if (!this.flushed) {
+			this._rewriteFile();
+			this.flushed = true;
+		}
+		const fd = openSync(this.sessionFile, "r");
+		try {
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
 	}
 
 	/**

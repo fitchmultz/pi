@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "crypto";
 import {
 	accessSync,
@@ -7,6 +8,7 @@ import {
 	fchownSync,
 	fstatSync,
 	fsyncSync,
+	lstatSync,
 	openSync,
 	readlinkSync,
 	realpathSync,
@@ -15,7 +17,53 @@ import {
 	statSync,
 	writeFileSync,
 } from "fs";
-import { dirname, resolve } from "path";
+import { dirname, isAbsolute, join, resolve } from "path";
+
+/** Private capability files cannot follow links or expose contents to another user. */
+export function assertPrivateFilePath(path: string): void {
+	if (!isAbsolute(path) || realpathSync(dirname(path)) !== resolve(dirname(path)))
+		throw new Error("Working-session paths must be absolute with a real parent directory");
+	const parent = lstatSync(dirname(path));
+	if (!parent.isDirectory()) throw new Error("Working-session parent must be a directory");
+	const existing = lstatSync(path, { throwIfNoEntry: false });
+	if (existing && !existing.isFile()) throw new Error("Working-session destination must be a regular file");
+	if (process.platform === "win32") {
+		// Node's uid and mode do not describe Windows permissions. Check the real DACL;
+		// the directory must also keep newly created atomic-write files private.
+		execFileSync(
+			join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+			[
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				`
+$ErrorActionPreference = 'Stop'
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$trusted = @($sid, 'S-1-5-18', 'S-1-5-32-544')
+$paths = @([IO.Path]::GetDirectoryName($env:PI_PRIVATE_FILE_PATH))
+if (Test-Path -LiteralPath $env:PI_PRIVATE_FILE_PATH) { $paths += $env:PI_PRIVATE_FILE_PATH }
+foreach ($p in $paths) {
+	$acl = Get-Acl -LiteralPath $p
+	$descriptor = New-Object Security.AccessControl.RawSecurityDescriptor ($acl.GetSecurityDescriptorSddlForm('All'))
+	if ($null -eq $descriptor.DiscretionaryAcl) { throw 'Working-session path has an unrestricted DACL' }
+	if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid) { throw 'Working-session path must be owned by this user' }
+	foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+		if ($rule.AccessControlType -eq 'Allow' -and $trusted -notcontains $rule.IdentityReference.Value) {
+			throw 'Working-session path grants access to another user'
+		}
+	}
+}
+`,
+			],
+			{ env: { ...process.env, PI_PRIVATE_FILE_PATH: path }, stdio: ["ignore", "pipe", "pipe"] },
+		);
+		return;
+	}
+	if (parent.uid !== process.getuid?.() || (parent.mode & 0o022) !== 0)
+		throw new Error("Working-session directory must be owned by this user and not writable by others");
+	if (existing && (existing.uid !== parent.uid || (existing.mode & 0o077) !== 0))
+		throw new Error("Working-session destination must be a private regular file owned by this user");
+}
 
 /** Resolve existing or dangling file symlinks without creating their targets. */
 export function resolveFileTarget(path: string): string {

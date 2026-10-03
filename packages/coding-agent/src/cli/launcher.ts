@@ -1,9 +1,12 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { realpathSync, statSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
+import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
 import { parseArgs } from "./args.ts";
 import {
+	type CompletedWorkingSession,
 	MANAGED_CLI_ENV,
 	parseRestartCommand,
 	parseRestartRequest,
@@ -12,12 +15,25 @@ import {
 	type RestartHandoff,
 	type RestartWorkerMessage,
 	requestRestart,
+	WORKING_SESSION_LAUNCH_ENV,
+	WORKING_SESSION_WORKER_ENV,
 } from "./restart-protocol.ts";
 
 interface Launch {
 	worker: string;
 	args: string[];
 	pinnedWorker?: string;
+}
+
+function removeRestartArtifact(path: string): void {
+	rmSync(path, { force: true });
+	if (basename(path) !== "working-session.json" || !basename(dirname(path)).startsWith("pi-restart-state-")) return;
+	// Only remove the empty native artifact directory, never recursively delete an IPC path.
+	try {
+		rmdirSync(dirname(path));
+	} catch (error) {
+		if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+	}
 }
 
 export function getCliWorkerPath(launcherPath: string): string {
@@ -49,6 +65,7 @@ export function getRestartArgs(args: string[], extensions?: string[]): string[] 
 		"--name",
 		"-n",
 		"--thinking",
+		"--working-session",
 	]);
 	// The resumed session restores its current model; a runtime --api-key still needs the launch model.
 	if (parseArgs(args).apiKey === undefined) {
@@ -77,7 +94,14 @@ export async function superviseCli(
 	let handoff: RestartHandoff | undefined;
 	let child: ChildProcess | undefined;
 	let stopping: NodeJS.Signals | undefined;
+	const restartArtifacts = new Set<string>();
 	const env = { ...(options.env ?? process.env) };
+	const launchId = randomUUID();
+	const exitPath = env.PI_WORKING_SESSION_EXIT_PATH;
+	if (exitPath) {
+		assertPrivateFilePath(exitPath);
+		rmSync(exitPath, { force: true });
+	}
 	delete env[RESTART_SOCKET_ENV];
 	delete env[RESTART_HANDOFF_ENV];
 	delete env[MANAGED_CLI_ENV];
@@ -97,6 +121,8 @@ export async function superviseCli(
 	try {
 		while (!stopping) {
 			let ready = false;
+			const workerId = randomUUID();
+			let completed: CompletedWorkingSession | undefined;
 			let timedOut = false;
 			let restart: Extract<RestartWorkerMessage, { type: "pi:restart" }> | undefined;
 			let timeout: NodeJS.Timeout | undefined;
@@ -106,6 +132,8 @@ export async function superviseCli(
 				env: {
 					...env,
 					[MANAGED_CLI_ENV]: "1",
+					[WORKING_SESSION_LAUNCH_ENV]: launchId,
+					[WORKING_SESSION_WORKER_ENV]: workerId,
 					...(handoff ? { [RESTART_HANDOFF_ENV]: JSON.stringify(handoff) } : {}),
 				},
 			});
@@ -115,7 +143,29 @@ export async function superviseCli(
 				if (value.type === "pi:ready") {
 					ready = true;
 					fallback = undefined;
+					for (const path of restartArtifacts) removeRestartArtifact(path);
+					restartArtifacts.clear();
 					clearTimeout(timeout);
+				} else if (value.type === "pi:completed" && exitPath && "completed" in value) {
+					const receipt = value.completed;
+					if (
+						receipt &&
+						typeof receipt === "object" &&
+						"path" in receipt &&
+						receipt.path === `${exitPath}.state` &&
+						"digest" in receipt &&
+						typeof receipt.digest === "string" &&
+						/^[a-f0-9]{64}$/.test(receipt.digest) &&
+						"sessionId" in receipt &&
+						typeof receipt.sessionId === "string" &&
+						"pid" in receipt &&
+						receipt.pid === current.pid &&
+						"worker" in receipt &&
+						receipt.worker === workerId &&
+						"launch" in receipt &&
+						receipt.launch === launchId
+					)
+						completed = receipt as CompletedWorkingSession;
 				} else if (value.type === "pi:restart" && ready && "session" in value && "request" in value) {
 					try {
 						const session = value.session;
@@ -128,9 +178,17 @@ export async function superviseCli(
 							typeof session.sessionId !== "string"
 						)
 							return;
+						if ("workingSession" in session && typeof session.workingSession === "string")
+							assertPrivateFilePath(session.workingSession);
 						restart = {
 							type: "pi:restart",
-							session: { sessionFile: session.sessionFile, sessionId: session.sessionId },
+							session: {
+								sessionFile: session.sessionFile,
+								sessionId: session.sessionId,
+								...("workingSession" in session && typeof session.workingSession === "string"
+									? { workingSession: session.workingSession }
+									: {}),
+							},
 							request: parseRestartRequest(value.request),
 						};
 					} catch {
@@ -158,11 +216,15 @@ export async function superviseCli(
 			const exitCode = result.signal ? 128 + constants.signals[result.signal] : timedOut ? 1 : (result.code ?? 1);
 			if (stopping) return exitCode;
 			if (restart && result.code === 0 && !result.signal) {
+				if (restart.session.workingSession) restartArtifacts.add(restart.session.workingSession);
+				const selection = restart.session.workingSession
+					? ["--working-session", restart.session.workingSession]
+					: ["--session", restart.session.sessionFile];
 				const previous: Launch = {
 					...launch,
-					args: [...getRestartArgs(launch.args), "--session", restart.session.sessionFile],
+					args: [...getRestartArgs(launch.args), ...selection],
 				};
-				handoff = { ...restart.session, message: restart.request.message };
+				handoff = { ...restart.session, message: restart.request.message, extensions: restart.request.extensions };
 				try {
 					const pinnedWorker = restart.request.runtime
 						? getRestartRuntimeWorker(restart.request.runtime)
@@ -173,11 +235,7 @@ export async function superviseCli(
 							(options.invocationPath
 								? realpathSync(getCliWorkerPath(realpathSync(options.invocationPath)))
 								: launch.worker),
-						args: [
-							...getRestartArgs(launch.args, restart.request.extensions),
-							"--session",
-							restart.session.sessionFile,
-						],
+						args: [...getRestartArgs(launch.args, restart.request.extensions), ...selection],
 						pinnedWorker,
 					};
 					fallback = previous;
@@ -197,13 +255,38 @@ export async function superviseCli(
 				console.error(`${failure} Returning to the previous launch configuration once.`);
 				launch = fallback;
 				fallback = undefined;
-				handoff = { ...handoff, failure };
+				handoff = { ...handoff, failure, extensions: undefined };
 				continue;
+			}
+			if (ready && completed && result.code === 0 && !result.signal && exitPath) {
+				assertPrivateFilePath(completed.path);
+				assertPrivateFilePath(exitPath);
+				const bytes = readFileSync(completed.path);
+				// Native finalization owns the full codec; the launcher checks its exact identity and bytes.
+				const artifact: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+				if (
+					createHash("sha256").update(bytes).digest("hex") !== completed.digest ||
+					!artifact ||
+					typeof artifact !== "object" ||
+					!("version" in artifact) ||
+					artifact.version !== 1 ||
+					!("header" in artifact) ||
+					!artifact.header ||
+					typeof artifact.header !== "object" ||
+					!("id" in artifact.header) ||
+					artifact.header.id !== completed.sessionId
+				)
+					throw new Error("Native completed-exit artifact mismatch");
+				atomicWriteFileSync(
+					exitPath,
+					`${JSON.stringify({ version: 1, ...completed, launcherPid: process.pid, launcher: launchId })}\n`,
+				);
 			}
 			return exitCode;
 		}
 		return stopping ? 128 + constants.signals[stopping] : 1;
 	} finally {
+		for (const path of restartArtifacts) removeRestartArtifact(path);
 		for (const remove of removers) remove();
 		process.off("exit", killChild);
 	}

@@ -28,6 +28,7 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 		let ownerKey: string | undefined;
 		let wakeSuppressed = false;
 		let stopped = false;
+		let saving = false;
 		const seen = new Set<string>();
 		const pending = new Set<string>();
 
@@ -124,7 +125,7 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 			};
 		}
 		function inspect(): void {
-			if (!context) return;
+			if (!context || saving) return;
 			try {
 				if (!context.isIdle()) return;
 				const notice = completion(context);
@@ -172,6 +173,22 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 		pi.on("turn_end", boundary);
 		pi.on("agent_before_settle", boundary);
 		pi.on("agent_settled", () => pending.clear());
+		pi.on("working_session_save", (event) => {
+			saving = true;
+			event.signal.addEventListener(
+				"abort",
+				() => {
+					saving = false;
+				},
+				{ once: true },
+			);
+			const jobs = root ? listBackgroundCommands(root) : [];
+			return {
+				blockers: jobs
+					.filter((job) => !backgroundCommandFinished(job))
+					.map((job) => `Background command ${job.id} is ${job.status}`),
+			};
+		});
 		pi.on("session_shutdown", stop);
 	};
 }

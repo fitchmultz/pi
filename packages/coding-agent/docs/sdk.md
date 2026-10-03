@@ -59,6 +59,12 @@ See the checked [sessions example](../examples/sdk/11-sessions.ts) for creating,
 
 After a runtime replacement, subscriptions belong to the old `AgentSession` and must be rebound. See the [session runtime example](../examples/sdk/13-session-runtime.ts).
 
+### Complete working-session save and restore
+
+`session.acquireWorkingSession()` reserves an awaited native cut and returns complete private state with separate invalidation and release lifetimes. `createAgentSession({ workingSession })` restores the selected leaf, all branches, full pending payloads and native loadout before extension startup, without replaying interrupted work. See [Native Working Sessions](working-session.md) for readiness, persistence hooks, mode buffers and the conditional CLI socket/final-exit contract.
+
+Saved trust, offline policy and effective settings are applied before native resource discovery and extension factories. Global/project settings layers retain relative resource origins and global-only preferences without rewriting settings files. Required saved extension failures reject restoration.
+
 <a id="background-commands"></a>
 
 ### Background commands
@@ -121,7 +127,7 @@ Each boundary can be supplied explicitly:
 - `resourceLoader` supplies extensions, skills, prompt templates, themes, and context files.
 - `tools`, `noTools`, `excludeTools`, and `customTools` control the active tool set.
 
-Use `DefaultResourceLoader` when you want standard discovery with selected overrides. Supply a custom `ResourceLoader` when the host owns resource storage and discovery completely.
+Use `DefaultResourceLoader` when you want standard discovery with selected overrides. Supply a custom `ResourceLoader` when the host owns resource storage and discovery completely. Its `getWorkingSessionResources()` returns the current explicit extension, skill, prompt and theme paths, discovery switches and prompt inputs for native capture; `reload({ workingSession })` restores those selections before discovery.
 
 `PI_CACHE_TRACE_DIR` enables temporary private native request tracing with SDK session, purpose
 and reload provenance. Low-level request options accept an optional `cacheTraceContext` for

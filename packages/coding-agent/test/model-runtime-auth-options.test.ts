@@ -47,6 +47,74 @@ describe("ModelRuntime auth options", () => {
 		expect((await runtime.getAuth("anthropic"))?.auth.apiKey).toBe("stored-key");
 	});
 
+	it("composes fresh fallback envelopes with the effective provider and never crosses a local auth failure", async () => {
+		const credentials = new InMemoryCredentialStore();
+		const runtime = await ModelRuntime.create({ credentials, modelsPath: null });
+		const base = runtime.getProvider("openai-codex")!;
+		let resolved = 0;
+		const fallback = {
+			check: async () => ({ type: "api_key" as const, source: "selected account" }),
+			resolve: async () => ({
+				auth: { headers: { "x-account": String(++resolved) }, baseUrl: "https://account.test" },
+				env: { ACCOUNT_ENV: "private" },
+				source: "selected account",
+			}),
+		};
+		const oldDispose = runtime.registerProviderAuthFallback(base.id, fallback);
+		const dispose = runtime.registerProviderAuthFallback(base.id, fallback);
+		oldDispose();
+		await runtime.refresh({ allowNetwork: false });
+		expect(resolved).toBe(0);
+		expect(runtime.hasConfiguredAuth(base.id)).toBe(true);
+		expect(runtime.getProvider(base.id)?.auth.oauth?.login).toBe(base.auth.oauth?.login);
+		expect(runtime.getProvider(base.id)?.auth.apiKey?.login).toBeUndefined();
+		expect(await runtime.getAuth(base.id)).toEqual({
+			auth: { headers: { "x-account": "1" }, baseUrl: "https://account.test" },
+			env: { ACCOUNT_ENV: "private" },
+			source: "selected account",
+		});
+		expect((await runtime.getAuth(base.id))?.auth.headers).toEqual({ "x-account": "2" });
+		expect(await credentials.list()).toEqual([]);
+
+		runtime.registerNativeProvider({
+			...base,
+			getModels: () => [{ ...base.getModels()[0]!, id: "effective-only" }],
+			getAllModels: () => [{ ...base.getModels()[0]!, id: "effective-only" }],
+			auth: {
+				...base.auth,
+				apiKey: {
+					name: "Local",
+					check: async ({ credential, ctx }) =>
+						credential || (await ctx.env("LOCAL_ACCOUNT_KEY")) ? { type: "api_key", source: "local" } : undefined,
+					resolve: async ({ credential, ctx }) => {
+						if (credential) throw new Error("local failed");
+						const key = await ctx.env("LOCAL_ACCOUNT_KEY");
+						return key ? { auth: { apiKey: key }, source: "local" } : undefined;
+					},
+				},
+			},
+		});
+		await runtime.refresh({ allowNetwork: false });
+		expect(runtime.getModel(base.id, "effective-only")).toBeDefined();
+		expect((await runtime.getAuth(base.id, { env: { LOCAL_ACCOUNT_KEY: "local-key" } }))?.auth.apiKey).toBe(
+			"local-key",
+		);
+		expect(resolved).toBe(2);
+		await credentials.modify(base.id, async () => ({ type: "api_key", key: "broken" }));
+		await expect(runtime.getAuth(base.id)).rejects.toThrow("API key auth failed");
+		expect(resolved).toBe(2);
+		await credentials.delete(base.id);
+		runtime.registerProvider(base.id, { apiKey: "$ABSENT_SELECTED_KEY" });
+		await expect(runtime.getAuth(base.id)).rejects.toThrow("API key auth failed");
+		expect(resolved).toBe(2);
+		runtime.unregisterProvider(base.id);
+		expect((await runtime.getAuth(base.id))?.auth.headers).toEqual({ "x-account": "3" });
+		dispose();
+		await runtime.refresh({ allowNetwork: false });
+		expect(runtime.hasConfiguredAuth(base.id)).toBe(false);
+		expect(runtime.getProvider(base.id)?.auth.apiKey).toBeUndefined();
+	});
+
 	it("scopes provider availability reads and records refresh failures", async () => {
 		const base = new InMemoryCredentialStore();
 		const reads: string[] = [];
@@ -245,6 +313,35 @@ describe("ModelRuntime auth options", () => {
 			method: { name: "API key" },
 		});
 		expect(options[0]?.method.login).toBeTypeOf("function");
+	});
+
+	it("keeps API-key login for a configured key alongside OAuth", async () => {
+		const credentials = AuthStorage.inMemory();
+		const runtime = await ModelRuntime.create({ credentials, modelsPath: null });
+		runtime.registerProvider("key-and-oauth", {
+			api: "openai-completions",
+			baseUrl: "https://example.test/v1",
+			apiKey: "configured-key",
+			oauth: {
+				name: "Account",
+				login: async () => ({ access: "oauth", refresh: "refresh", expires: 60000 }),
+				refreshToken: async (credential) => credential,
+				getApiKey: (credential) => credential.access,
+			},
+			models: [testModel("both")],
+		});
+		const prompt = async (request: { message: string }) => {
+			expect(request.message).toBe("Enter API key");
+			return "entered-key";
+		};
+		expect(
+			await runtime.login("key-and-oauth", "api_key", {
+				prompt,
+				notify() {},
+			}),
+		).toEqual({ type: "api_key", key: "entered-key" });
+		expect((await runtime.getAuth("key-and-oauth"))?.auth.apiKey).toBe("entered-key");
+		expect((await runtime.getAuth("key-and-oauth", { apiKey: "explicit-key" }))?.auth.apiKey).toBe("explicit-key");
 	});
 
 	it("resolves configured auth from request-scoped environment overrides", async () => {

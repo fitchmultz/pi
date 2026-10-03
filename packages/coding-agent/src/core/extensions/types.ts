@@ -67,6 +67,7 @@ import type { McpServerConfig, McpServerRegistry, RegisteredMcpServer } from "..
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
+import type { ProviderAuthFallback } from "../provider-composer.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -100,6 +101,7 @@ import type {
 	WriteToolInput,
 } from "../tools/index.ts";
 import type { ModelRoute, ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
+import type { WorkingSessionReadiness, WorkingSessionSaveEvent } from "../working-session.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
@@ -1351,6 +1353,7 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 
 /** Union of all event types */
 export type ExtensionEvent =
+	| WorkingSessionSaveEvent
 	| ProjectTrustEvent
 	| ResourcesDiscoverEvent
 	| McpServersChangeEvent
@@ -1566,6 +1569,10 @@ export interface ExtensionAPI {
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): () => void;
 	on(event: "session_compact_failed", handler: ExtensionHandler<SessionCompactFailedEvent>): () => void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): () => void;
+	on(
+		event: "working_session_save",
+		handler: ExtensionHandler<WorkingSessionSaveEvent, WorkingSessionReadiness>,
+	): () => void;
 	on(event: "mcp_servers_change", handler: ExtensionHandler<McpServersChangeEvent>): () => void;
 	on(
 		event: "session_before_tree",
@@ -1724,6 +1731,9 @@ export interface ExtensionAPI {
 	 */
 	setActiveTools(toolNames: string[]): void;
 
+	/** Rebuild tools and re-run prepareLoadout without replacing the active selection or pending restored tools. */
+	refreshTools(): void;
+
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
 
@@ -1804,6 +1814,9 @@ export interface ExtensionAPI {
 	 */
 	registerProvider(provider: Provider): void;
 	registerProvider(name: string, config: ProviderConfig): void;
+
+	/** Register nonpersistent fallback auth without replacing the effective native provider. */
+	registerProviderAuthFallback(providerId: string, fallback: ProviderAuthFallback): () => void;
 
 	/**
 	 * Unregister a previously registered provider.
@@ -2086,7 +2099,7 @@ export type GetCommandsHandler = () => SlashCommandInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => void;
 
-export type RefreshToolsHandler = () => void;
+export type RefreshToolsHandler = (preserveSelection?: boolean) => void;
 
 export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
 
@@ -2101,7 +2114,12 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
  * Contains flag values (defaults set during registration, CLI values set after).
  */
 export interface ExtensionRuntimeState {
+	beforeMutation?: () => void;
+	runWorkingSessionActivity?: <T>(action: () => Promise<T>) => Promise<T>;
 	flagValues: Map<string, boolean | string>;
+	authFallbacks: Array<{ providerId: string; fallback: ProviderAuthFallback; dispose?: () => void; active: boolean }>;
+	registerProviderAuthFallback: (providerId: string, fallback: ProviderAuthFallback) => () => void;
+	bindProviderAuthFallbacks: (register: (providerId: string, fallback: ProviderAuthFallback) => () => void) => boolean;
 	/** Legacy provider-config registrations queued during extension loading, processed when runner binds. */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
 	/** Native pi-ai provider registrations queued during extension loading, processed when runner binds. */

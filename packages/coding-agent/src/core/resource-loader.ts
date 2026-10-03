@@ -39,6 +39,7 @@ import {
 	type SourceInfo,
 } from "./source-info.ts";
 import { resetTimings } from "./timings.ts";
+import type { WorkingSession, WorkingSessionLaunch } from "./working-session.ts";
 
 export interface ResourceExtensionPaths {
 	skillPaths?: Array<{ path: string; metadata: PathMetadata }>;
@@ -48,6 +49,8 @@ export interface ResourceExtensionPaths {
 
 export interface ResourceLoaderReloadOptions {
 	resolveProjectTrust?: (input: { extensionsResult: LoadExtensionsResult }) => Promise<boolean>;
+	/** Restore native selection before discovery; settings follow file reload but precede factories. */
+	workingSession?: WorkingSession;
 }
 
 const HOST_PROVIDED_EXTENSION_PACKAGES = new Set([
@@ -151,6 +154,7 @@ function omitReplacedExtensions(
 }
 
 export interface ResourceLoader {
+	getWorkingSessionResources(): Omit<WorkingSessionLaunch, "agentDir" | "trustProject" | "offline">;
 	getExtensions(): LoadExtensionsResult;
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
@@ -355,7 +359,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private systemPrompt?: string;
 	private systemPromptSourcePath?: string;
 	private appendSystemPrompt: string[];
-	private appendSystemPromptSourcePaths: string[];
+	private appendSystemPromptSourcePaths: Array<string | undefined>;
 	private lastSkillPaths: string[];
 	private extensionSkillSourceInfos: Map<string, SourceInfo>;
 	private extensionPromptSourceInfos: Map<string, SourceInfo>;
@@ -422,6 +426,29 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return this.extensionsResult;
 	}
 
+	getWorkingSessionResources(): Omit<WorkingSessionLaunch, "agentDir" | "trustProject" | "offline"> {
+		return {
+			extensions: this.additionalExtensionPaths.map((path) =>
+				isLocalPath(path) ? this.resolveResourcePath(path) : path,
+			),
+			skills: this.additionalSkillPaths.map((path) => this.resolveResourcePath(path)),
+			prompts: this.additionalPromptTemplatePaths.map((path) => this.resolveResourcePath(path)),
+			themes: this.additionalThemePaths.map((path) => this.resolveResourcePath(path)),
+			noExtensions: this.noExtensions,
+			noSkills: this.noSkills,
+			noPromptTemplates: this.noPromptTemplates,
+			noThemes: this.noThemes,
+			noContextFiles: this.noContextFiles,
+			systemPrompt:
+				this.systemPromptSource === undefined
+					? undefined
+					: (this.systemPromptSourcePath ?? this.systemPromptSource),
+			appendSystemPrompt: this.appendSystemPromptSource?.map(
+				(source, index) => this.appendSystemPromptSourcePaths[index] ?? source,
+			),
+		};
+	}
+
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] } {
 		return { skills: this.skills, diagnostics: this.skillDiagnostics };
 	}
@@ -451,7 +478,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	getAppendSystemPromptSources(): Array<{ path: string }> {
-		return this.appendSystemPromptSourcePaths.map((path) => ({ path }));
+		return this.appendSystemPromptSourcePaths.flatMap((path) => (path ? [{ path }] : []));
 	}
 
 	extendResources(paths: ResourceExtensionPaths): void {
@@ -505,12 +532,35 @@ export class DefaultResourceLoader implements ResourceLoader {
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
 		resetTimings("extensions");
 
+		const saved = options?.workingSession;
+		if (saved) {
+			if (
+				resolvePath(saved.cwd) !== this.cwd ||
+				(saved.launch && resolvePath(saved.launch.agentDir) !== this.agentDir)
+			)
+				throw new Error("Working session and supplied resource loader directories disagree");
+			if (saved.launch) {
+				const launch = saved.launch;
+				if (launch.trustProject !== undefined) this.settingsManager.setProjectTrusted(launch.trustProject);
+				this.additionalExtensionPaths = launch.extensions;
+				this.additionalSkillPaths = launch.skills;
+				this.additionalPromptTemplatePaths = launch.prompts;
+				this.additionalThemePaths = launch.themes;
+				this.noExtensions = launch.noExtensions ?? false;
+				this.noSkills = launch.noSkills ?? false;
+				this.noPromptTemplates = launch.noPromptTemplates ?? false;
+				this.noThemes = launch.noThemes ?? false;
+				this.noContextFiles = launch.noContextFiles ?? false;
+				this.systemPromptSource = launch.systemPrompt;
+				this.appendSystemPromptSource = launch.appendSystemPrompt;
+			}
+		}
 		if (this.loaded) {
 			clearExtensionCache();
 		}
 
 		let preTrustExtensions: LoadExtensionsResult | undefined;
-		if (options?.resolveProjectTrust) {
+		if (options?.resolveProjectTrust && !saved) {
 			preTrustExtensions = await this.loadProjectTrustExtensions();
 			const projectTrusted = await options.resolveProjectTrust({ extensionsResult: preTrustExtensions });
 			this.settingsManager.setProjectTrusted(projectTrusted);
@@ -518,6 +568,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		// reload() preserves SettingsManager.projectTrusted and reloads settings for that trust state.
 		await this.settingsManager.reload();
+		if (saved) this.settingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
 		const resolvedPaths = await this.packageManager.resolve();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
@@ -659,9 +710,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.appendSystemPrompt = this.appendSystemPromptOverride
 			? this.appendSystemPromptOverride(baseAppend)
 			: baseAppend;
-		this.appendSystemPromptSourcePaths = appendSources
-			.filter((source) => existsSync(source))
-			.map((source) => resolvePath(source));
+		this.appendSystemPromptSourcePaths = appendSources.map((source) =>
+			existsSync(source) ? resolvePath(source) : undefined,
+		);
 		this.loaded = true;
 	}
 

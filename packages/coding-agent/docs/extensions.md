@@ -185,6 +185,8 @@ For optional full instructions, register a group through the synchronous `pi:ins
 
 Register every tool first, keep optional tools inactive, and use `pi.setActiveTools()` from a loader tool to select the desired active tools. Names must already be registered; unknown names are ignored.
 
+Use `pi.refreshTools()` to re-run `prepareLoadout` after changing extension state without replacing the active selection or discarding unregistered tools pending working-session restoration. Tool registration already refreshes the loadout.
+
 Pi records the initial prompt and tool set in the transcript's first system message, then appends tool and prompt changes before the next model request. Providers that cannot represent the transition receive a complete transcript checkpoint, which can invalidate the cached prefix.
 
 ### MCP servers

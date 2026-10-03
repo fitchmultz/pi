@@ -26,7 +26,7 @@ import type {
 	ProviderHeaders,
 } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "./model-runtime.ts";
-import type { AuthStatus, ProviderConfigInput } from "./provider-composer.ts";
+import type { AuthStatus, ProviderAuthFallback, ProviderConfigInput } from "./provider-composer.ts";
 import type { VirtualModelDefinition } from "./virtual-models.ts";
 
 export type { ProviderConfigInput } from "./provider-composer.ts";
@@ -220,6 +220,10 @@ export class ModelRegistry {
 
 	unregisterProvider(providerName: string): void {
 		this.runtime.unregisterProvider(providerName);
+	}
+
+	registerProviderAuthFallback(providerId: string, fallback: ProviderAuthFallback): () => void {
+		return this.runtime.registerProviderAuthFallback(providerId, fallback);
 	}
 
 	registerVirtualModel(definition: VirtualModelDefinition): void {

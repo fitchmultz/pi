@@ -31,6 +31,7 @@ describe("issue #7193 extension event-bus lifecycle", () => {
 		};
 		let extensionsResult = await loadExtensions();
 		const resourceLoader: ResourceLoader = {
+			getWorkingSessionResources: () => ({ extensions: [], skills: [], prompts: [], themes: [] }),
 			getExtensions: () => extensionsResult,
 			getSkills: () => ({ skills: [], diagnostics: [] }),
 			getPrompts: () => ({ prompts: [], diagnostics: [] }),
