@@ -1,14 +1,15 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { Text, type TUI } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
-import type { ExtensionContext } from "../../src/core/extensions/types.ts";
+import type { ExtensionContext, ExtensionToolContext } from "../../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -34,6 +35,199 @@ describe("Native working sessions", () => {
 	afterEach(() => {
 		while (harnesses.length) harnesses.pop()!.cleanup();
 	});
+
+	it("joins detached nested execution and its sequential queue before granting sleep", async () => {
+		const execution = deferred();
+		let ctx!: ExtensionToolContext;
+		const calls: ReturnType<ExtensionToolContext["executeTool"]>[] = [];
+		const executed: string[] = [];
+		const h = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerTool({
+						name: "nested",
+						label: "Nested",
+						description: "Detached work",
+						exposure: "deferred",
+						executionMode: "sequential",
+						parameters: Type.Object({ value: Type.String() }),
+						execute: async (_id, args) => {
+							executed.push(args.value);
+							await execution.promise;
+							return { content: [{ type: "text", text: args.value }], details: {} };
+						},
+					});
+					pi.registerTool({
+						name: "launch",
+						label: "Launch",
+						description: "Launch detached work",
+						parameters: Type.Object({}),
+						execute: async (_id, _args, _signal, _update, context) => {
+							ctx = context;
+							calls.push(ctx.executeTool("nested", { value: "first" }));
+							calls.push(ctx.executeTool("nested", { value: "second" }));
+							return { content: [], details: {} };
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(h);
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("launch", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("outer complete"),
+		]);
+		await h.session.prompt("start");
+		await vi.waitFor(() => expect(executed).toEqual(["first"]));
+		let acquired = false;
+		const acquisition = h.session.acquireWorkingSession().then((hold) => {
+			acquired = true;
+			return hold;
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const grantedWhileExecuting = acquired;
+		execution.resolve();
+		// Release a baseline's incorrectly early hold before nested result events run.
+		if (acquired) await (await acquisition).release();
+		const results = await Promise.all(calls);
+		const hold = await acquisition;
+		try {
+			expect(grantedWhileExecuting).toBe(false);
+			expect(executed).toEqual(["first", "second"]);
+			expect(results.map((result) => result.result.content)).toEqual([
+				[{ type: "text", text: "first" }],
+				[{ type: "text", text: "second" }],
+			]);
+			expect(hold.sleepReady).toBe(true);
+			await expect(ctx.executeTool("nested", { value: "held" })).rejects.toThrow("reserved for saving");
+			expect(executed).toEqual(["first", "second"]);
+		} finally {
+			await hold.release();
+		}
+	});
+
+	it.each([{ selection: [] }, { selection: ["read"] }])(
+		"honors all-missing restored tool replacement $selection after registration",
+		async ({ selection }) => {
+			let register!: () => void;
+			const h = await createHarness({
+				initialActiveToolNames: [],
+				extensionFactories: [
+					(pi) => {
+						register = () =>
+							pi.registerTool({
+								name: "saved",
+								label: "Saved",
+								description: "Saved loadout",
+								defaultActive: false,
+								parameters: Type.Object({}),
+								execute: async () => ({ content: [], details: {} }),
+							});
+					},
+				],
+			});
+			harnesses.push(h);
+			const captured = await h.session.acquireWorkingSession();
+			await captured.release();
+			h.session.restoreWorkingSession({ ...captured.state, activeTools: ["saved"] });
+			h.session.setActiveToolsByName(selection);
+			register();
+			expect(h.session.getActiveToolNames()).toEqual(selection);
+			const hold = await h.session.acquireWorkingSession();
+			try {
+				expect(hold.state.pendingTools).toEqual([]);
+			} finally {
+				await hold.release();
+			}
+		},
+	);
+
+	it.each(["system.txt", "Literal base instruction"])(
+		"preserves normal SDK prompt origins across process cwd changes: %s",
+		async (systemPrompt) => {
+			const h = await createHarness();
+			harnesses.push(h);
+			const originalCwd = process.cwd();
+			const otherCwd = join(h.tempDir, "other");
+			const agentDir = join(h.tempDir, "agent");
+			mkdirSync(otherCwd);
+			mkdirSync(agentDir);
+			for (const dir of [h.tempDir, otherCwd]) {
+				for (const file of ["system.txt", "append.txt", "tail.txt"])
+					writeFileSync(join(dir, file), `${dir === h.tempDir ? "Original" : "Wrong"} ${file}`);
+			}
+			const extension = join(h.tempDir, "rebuild.ts");
+			writeFileSync(
+				extension,
+				`export default function(pi) {
+					pi.registerCommand("rebuild", {handler: async () => pi.registerTool({
+						name: "reconnected", label: "Reconnected", description: "Native registration",
+						parameters: {type: "object", properties: {}},
+						execute: async () => ({content: [], details: {}})
+					})});
+				}`,
+			);
+			const appendSystemPrompt = ["Literal before", "append.txt", "Literal middle", "tail.txt", "Literal after"];
+			try {
+				process.chdir(h.tempDir);
+				const loader = new DefaultResourceLoader({
+					cwd: h.tempDir,
+					agentDir,
+					settingsManager: SettingsManager.inMemory({ cacheWarming: "off" }),
+					additionalExtensionPaths: [extension],
+					noSkills: true,
+					noContextFiles: true,
+					systemPrompt,
+					appendSystemPrompt,
+				});
+				await loader.reload();
+				const initial = await createAgentSession({
+					cwd: h.tempDir,
+					agentDir,
+					model: h.getModel(),
+					modelRuntime: h.session.modelRuntime,
+					resourceLoader: loader,
+					sessionManager: SessionManager.inMemory(h.tempDir),
+				});
+				const hold = await initial.session.acquireWorkingSession();
+				await hold.release();
+				initial.session.dispose();
+				process.chdir(otherCwd);
+				const restored = await createAgentSession({
+					workingSession: hold.state,
+					modelRuntime: h.session.modelRuntime,
+				});
+				try {
+					const expectedBase = systemPrompt === "system.txt" ? "Original system.txt" : systemPrompt;
+					expect(restored.session.systemPrompt).toContain(expectedBase);
+					await restored.session.prompt("/rebuild");
+					expect(restored.session.getAllTools().map(({ name }) => name)).toContain("reconnected");
+					expect(restored.session.systemPrompt).toContain(expectedBase);
+					expect(restored.session.systemPrompt).toContain(
+						"Literal before\n\nOriginal append.txt\n\nLiteral middle\n\nOriginal tail.txt\n\nLiteral after",
+					);
+					expect(restored.session.systemPrompt).not.toContain("Wrong");
+					await restored.session.reload();
+					expect(restored.session.systemPrompt).toContain(expectedBase);
+					expect(restored.session.systemPrompt).not.toContain("Wrong");
+					expect(hold.state.launch?.systemPrompt).toBe(
+						systemPrompt === "system.txt" ? join(realpathSync(h.tempDir), systemPrompt) : systemPrompt,
+					);
+					expect(hold.state.launch?.appendSystemPrompt).toEqual([
+						"Literal before",
+						join(realpathSync(h.tempDir), "append.txt"),
+						"Literal middle",
+						join(realpathSync(h.tempDir), "tail.txt"),
+						"Literal after",
+					]);
+				} finally {
+					restored.session.dispose();
+				}
+			} finally {
+				process.chdir(originalCwd);
+			}
+		},
+	);
 
 	it.each([false, true])(
 		"restores settings before SDK discovery and factories; supplied loader=%s",

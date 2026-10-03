@@ -359,7 +359,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private systemPrompt?: string;
 	private systemPromptSourcePath?: string;
 	private appendSystemPrompt: string[];
-	private appendSystemPromptSourcePaths: string[];
+	private appendSystemPromptSourcePaths: Array<string | undefined>;
 	private lastSkillPaths: string[];
 	private extensionSkillSourceInfos: Map<string, SourceInfo>;
 	private extensionPromptSourceInfos: Map<string, SourceInfo>;
@@ -439,8 +439,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 			noPromptTemplates: this.noPromptTemplates,
 			noThemes: this.noThemes,
 			noContextFiles: this.noContextFiles,
-			systemPrompt: this.systemPromptSource,
-			appendSystemPrompt: this.appendSystemPromptSource ? [...this.appendSystemPromptSource] : undefined,
+			systemPrompt:
+				this.systemPromptSource === undefined
+					? undefined
+					: (this.systemPromptSourcePath ?? this.systemPromptSource),
+			appendSystemPrompt: this.appendSystemPromptSource?.map(
+				(source, index) => this.appendSystemPromptSourcePaths[index] ?? source,
+			),
 		};
 	}
 
@@ -473,7 +478,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	getAppendSystemPromptSources(): Array<{ path: string }> {
-		return this.appendSystemPromptSourcePaths.map((path) => ({ path }));
+		return this.appendSystemPromptSourcePaths.flatMap((path) => (path ? [{ path }] : []));
 	}
 
 	extendResources(paths: ResourceExtensionPaths): void {
@@ -705,9 +710,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.appendSystemPrompt = this.appendSystemPromptOverride
 			? this.appendSystemPromptOverride(baseAppend)
 			: baseAppend;
-		this.appendSystemPromptSourcePaths = appendSources
-			.filter((source) => existsSync(source))
-			.map((source) => resolvePath(source));
+		this.appendSystemPromptSourcePaths = appendSources.map((source) =>
+			existsSync(source) ? resolvePath(source) : undefined,
+		);
 		this.loaded = true;
 	}
 

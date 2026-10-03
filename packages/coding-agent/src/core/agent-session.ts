@@ -963,34 +963,39 @@ export class AgentSession {
 		args: unknown,
 		options: ExecuteToolOptions,
 	): Promise<AgentToolCallOutcome> {
-		this._nestedToolCalls ??= new NestedToolCallRunner({
-			getTools: () => this._getCallableTools(),
-			isSequential: () => this.agent.toolExecution === "sequential",
-			runToolCall: (toolCall, parentId, signal, onUpdate) => {
-				const assistantMessage = this._findLastAssistantMessage();
-				if (!assistantMessage) {
-					return Promise.resolve({
-						toolCall,
-						result: { content: [{ type: "text", text: "No assistant message issued this call" }], details: {} },
-						isError: true,
+		return this.workingSessionGate.run(async () => {
+			this._nestedToolCalls ??= new NestedToolCallRunner({
+				getTools: () => this._getCallableTools(),
+				isSequential: () => this.agent.toolExecution === "sequential",
+				runToolCall: (toolCall, parentId, signal, onUpdate) => {
+					const assistantMessage = this._findLastAssistantMessage();
+					if (!assistantMessage) {
+						return Promise.resolve({
+							toolCall,
+							result: {
+								content: [{ type: "text", text: "No assistant message issued this call" }],
+								details: {},
+							},
+							isError: true,
+						});
+					}
+					return runToolCall(toolCall, {
+						tools: this._getCallableTools(),
+						assistantMessage,
+						context: { messages: this.agent.state.messages, tools: this.agent.state.tools },
+						beforeToolCall: (context) => this._beforeToolCall(context, parentId),
+						afterToolCall: (context) => this._afterToolCall(context, parentId),
+						signal,
+						onUpdate,
 					});
-				}
-				return runToolCall(toolCall, {
-					tools: this._getCallableTools(),
-					assistantMessage,
-					context: { messages: this.agent.state.messages, tools: this.agent.state.tools },
-					beforeToolCall: (context) => this._beforeToolCall(context, parentId),
-					afterToolCall: (context) => this._afterToolCall(context, parentId),
-					signal,
-					onUpdate,
-				});
-			},
-			emit: async (event) => {
-				await this._extensionRunner.emit(event);
-				this._emit(event);
-			},
+				},
+				emit: async (event) => {
+					await this._extensionRunner.emit(event);
+					this._emit(event);
+				},
+			});
+			return this._nestedToolCalls.execute(parentToolCallId, name, args, options);
 		});
-		return this._nestedToolCalls.execute(parentToolCallId, name, args, options);
 	}
 
 	/** Whether `projection`, the current session projection, exceeds the compaction threshold of `model`. */
@@ -1760,8 +1765,14 @@ export class AgentSession {
 		this._setActiveTools(toolNames);
 		// A loadout that deactivates a tool replaces the restored one, whose pending tools are dropped.
 		// One that only adds tools, like activating tool_search, keeps them.
+		// With no registered active tools, compare the requested loadout to the pending names.
 		const active = new Set(this.getActiveToolNames());
-		if (previous.some((name) => !active.has(name))) this._pendingToolNames.clear();
+		if (
+			toolNames.length === 0 ||
+			previous.some((name) => !active.has(name)) ||
+			(previous.length === 0 && [...this._pendingToolNames].some((name) => !toolNames.includes(name)))
+		)
+			this._pendingToolNames.clear();
 	}
 
 	private _setActiveTools(toolNames: string[]): void {
@@ -2043,11 +2054,15 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+	private _assertRestoredToolsAvailable(): void {
 		if (this._restoredWorkingSession && this._pendingToolNames.size)
 			throw new Error(
 				`Saved tools have not registered: ${[...this._pendingToolNames].join(", ")}. Wait for native reconnect or explicitly change the tool selection.`,
 			);
+	}
+
+	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		this._assertRestoredToolsAvailable();
 		const restoreForeground = this.workingSessionGate.foreground();
 		this._agentRunAbortRequested = false;
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
@@ -2308,6 +2323,7 @@ export class AgentSession {
 
 		const normalized = await this._normalizePromptImages(currentImages);
 		const userText = normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
+		this._assertRestoredToolsAvailable();
 
 		// Build messages only after hooks and image normalization have completed.
 		const messages: AgentMessage[] = [];

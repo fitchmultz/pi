@@ -9,6 +9,7 @@ import {
 	getModel,
 	type Model,
 } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
@@ -308,6 +309,92 @@ describe("RPC prompt response semantics", () => {
 			await cleanup();
 		}
 	});
+
+	it.each(["input", "before_agent_start", "command"] as const)(
+		"rejects missing saved tools before RPC acknowledgement and preserves context for %s repair",
+		async (repair) => {
+			const savedTool = {
+				name: "saved",
+				label: "Saved",
+				description: "Reconnect tool",
+				defaultActive: false,
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [], details: {} }),
+			};
+			const original = await createRuntimeHost({
+				withAuth: true,
+				responseDelayMs: 0,
+				extensionsResult: await createTestExtensionsResult([(pi) => pi.registerTool(savedTool)]),
+			});
+			original.runtimeHost.session.setActiveToolsByName(["saved"]);
+			await original.runtimeHost.session.sendCustomMessage(
+				{ customType: "retained", content: "Consume exactly once", display: false },
+				{ deliverAs: "nextTurn" },
+			);
+			const captured = await original.runtimeHost.session.acquireWorkingSession();
+			await captured.release();
+			await original.cleanup();
+			const { lineHandler, cleanup, runtimeHost } = await startRpcMode({
+				withAuth: true,
+				responseDelayMs: 0,
+				extensionsResult: await createTestExtensionsResult([
+					(pi) => {
+						if (repair === "command") {
+							pi.registerCommand("repair", { handler: async () => pi.registerTool(savedTool) });
+						} else if (repair === "input") {
+							pi.on("input", (event) => {
+								if (event.text === "repair") pi.registerTool(savedTool);
+							});
+						} else {
+							pi.on("before_agent_start", (event) => {
+								if (event.prompt === "repair") pi.registerTool(savedTool);
+							});
+						}
+					},
+				]),
+			});
+			runtimeHost.session.restoreWorkingSession(captured.state);
+			try {
+				lineHandler(JSON.stringify({ id: "missing", type: "prompt", message: "unavailable" }));
+				await vi.waitFor(() => {
+					expect(getPromptResponses(rpcIo.outputLines, "missing")).toEqual([
+						expect.objectContaining({ success: false, error: expect.stringContaining("Saved tools") }),
+					]);
+				});
+				expect(runtimeHost.session.hasPendingNextTurnMessages).toBe(true);
+				expect(parseOutputLines(rpcIo.outputLines).filter((event) => event.type === "agent_start")).toEqual([]);
+				const retained = await runtimeHost.session.acquireWorkingSession();
+				expect(retained.state.nextTurn).toEqual(captured.state.nextTurn);
+				await retained.release();
+				if (repair === "command") {
+					lineHandler(JSON.stringify({ id: "register", type: "prompt", message: "/repair" }));
+					await vi.waitFor(() =>
+						expect(getPromptResponses(rpcIo.outputLines, "register")).toEqual([
+							expect.objectContaining({ success: true, data: { disposition: "handled" } }),
+						]),
+					);
+				}
+				lineHandler(JSON.stringify({ id: "retry", type: "prompt", message: "repair" }));
+				await vi.waitFor(() =>
+					expect(getPromptResponses(rpcIo.outputLines, "retry")).toEqual([
+						expect.objectContaining({ success: true, data: { disposition: "started" } }),
+					]),
+				);
+				await vi.waitFor(() => expect(runtimeHost.session.isIdle).toBe(true));
+				expect(runtimeHost.session.hasPendingNextTurnMessages).toBe(false);
+				lineHandler(JSON.stringify({ id: "next", type: "prompt", message: "next" }));
+				await vi.waitFor(() => expect(getPromptResponses(rpcIo.outputLines, "next")).toHaveLength(1));
+				await vi.waitFor(() => expect(runtimeHost.session.isIdle).toBe(true));
+				expect(
+					runtimeHost.session.messages.filter(
+						(message) => message.role === "custom" && message.customType === "retained",
+					),
+				).toEqual(captured.state.nextTurn);
+			} finally {
+				await cleanup();
+			}
+		},
+	);
 
 	// #9098: a successful prompt may start an agent run or be consumed by an extension.
 	it("emits one started response when prompt preflight succeeds", async () => {

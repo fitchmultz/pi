@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Custom SDK `ResourceLoader` implementations must provide `getWorkingSessionResources()` to capture explicit resource selections and discovery flags for native working-session restore.
+
 ### Added
 
 - Added a copy key (`app.message.copy`, default `ctrl+x`) to OAuth sign-in screens in `/login`, `/mcp`, and `/mcp login`, which copies the sign-in URL when the browser cannot be opened or the wrapped link cannot be selected.
