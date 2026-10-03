@@ -309,14 +309,14 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		},
 		async captureFinal(session) {
 			if (!committed) return false;
-			if (!session.isIdle || session.isSettling || session.workingSessionGate.busy)
+			if (!session.workingSessionReady || !session.isIdle || session.isSettling || session.workingSessionGate.busy)
 				throw new Error("Managed restart still has admitted work");
 			const hold = await session.acquireWorkingSession();
 			try {
 				// Detached jobs survive worker replacement. Sleep readiness belongs to whole-compute exit.
 				const path = join(
 					realpathSync(session.sessionManager.getSessionDir()),
-					`restart-${session.sessionId}.json`,
+					`restart-${session.sessionId}-${randomUUID()}.json`,
 				);
 				writeWorkingSession(path, hold.state);
 				hold.assertHeld();

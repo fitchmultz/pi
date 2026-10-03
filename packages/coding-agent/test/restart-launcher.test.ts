@@ -34,11 +34,15 @@ function fixture() {
 	const log = join(root, "launches.jsonl");
 	const selector = join(root, "pi");
 	const request = { message: "Continue once", extensions: [join(root, "v2.ts")] };
-	const session = { sessionId: "same-session", sessionFile: join(root, "session.jsonl") };
+	const session: { sessionId: string; sessionFile: string; workingSession?: string } = {
+		sessionId: "same-session",
+		sessionFile: join(root, "session.jsonl"),
+	};
 	return {
 		root,
 		selector,
 		request,
+		session,
 		release(name: string, body: string) {
 			const runtime = join(root, name);
 			const bundle = join(runtime, "dist", "bundle");
@@ -138,6 +142,31 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 		},
 	);
 
+	it.each([false, true])(
+		"retires only received restart state after successful readiness; rollback=%s",
+		async (rollback) => {
+			const f = fixture();
+			const artifact = join(f.root, "restart-private.json");
+			const observed = join(f.root, "artifact-at-ready");
+			writeFileSync(artifact, "private native state", { mode: 0o600 });
+			f.session.workingSession = artifact;
+			const record = `writeFileSync(${JSON.stringify(observed)}, String(existsSync(${JSON.stringify(artifact)})));`;
+			const a = f.release("A", `if (!handoff) { select('B'); restart(); } else { ${record} ready(); }`);
+			f.release("B", rollback ? "process.exit(17);" : `${record} ready();`);
+			f.select(a);
+			expect(await f.run(a)).toBe(0);
+			expect(readFileSync(observed, "utf8")).toBe("true");
+			expect(existsSync(artifact)).toBe(false);
+			const direct = join(f.root, "user-supplied.json");
+			writeFileSync(direct, "user restore authority", { mode: 0o600 });
+			const runtime = f.release("direct", "ready();");
+			expect(
+				await superviseCli(getRestartRuntimeWorker(runtime), ["--working-session", direct], { execArgv: [] }),
+			).toBe(0);
+			expect(readFileSync(direct, "utf8")).toBe("user restore authority");
+		},
+	);
+
 	it.skipIf(process.platform === "win32").each(["SIGINT", "SIGHUP", "SIGTERM"] as const)(
 		"allows a worker to close gracefully after %s without duplicate delivery",
 		async (signal) => {
@@ -189,6 +218,16 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 			}
 		},
 	);
+	it("does not accept cleanup ownership of a nonprivate restart artifact", async () => {
+		const f = fixture();
+		const artifact = join(f.root, "not-launcher-owned.json");
+		writeFileSync(artifact, "must retain", { mode: 0o644 });
+		f.session.workingSession = artifact;
+		const runtime = f.release("A", "if (!handoff) restart({}); else ready();");
+		expect(await superviseCli(getRestartRuntimeWorker(runtime), [], { execArgv: [] })).toBe(0);
+		expect(readFileSync(artifact, "utf8")).toBe("must retain");
+		expect(f.read()).toHaveLength(1);
+	});
 	it("retains parsed options without replaying startup text, session selection, or the launch model", () => {
 		expect(
 			getRestartArgs(

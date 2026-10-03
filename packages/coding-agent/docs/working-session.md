@@ -1,6 +1,6 @@
 # Native working sessions
 
-A working session saves the complete private conversation and its accepted pending input. It preserves the original journal header, all branches, the selected leaf (including no selected leaf), both full steering/follow-up queues, next-turn context, model/thinking/scopes, tool restrictions, effective settings, unsent prompt options and supported native mode buffers. This is separate from a branch export.
+A working session saves the complete private conversation and its accepted pending input. It preserves the original journal header, all branches, the selected leaf (including no selected leaf), both full steering/follow-up queues, next-turn context, model/thinking/scopes, tool restrictions, effective settings and their global/project layers, unsent prompt options and supported native mode buffers. Declaration-merged extension message roles keep their opaque JSON payloads in queues and journal entries. This is separate from a branch export.
 
 Credentials, executable tools, live promises and process memory are not included. Restore the matching private filesystem and native resources as well. Extensions reconstruct supported state from ordinary custom entries, tool details and their private files.
 
@@ -32,6 +32,8 @@ Acquisition waits for native admission/preflight, commands, asynchronous notific
 
 Invalidation and release are different. `hold.invalidated` makes the saved cut unusable; `hold.signal` ends only on release, cancellation or preparation failure. Native mutations are refused before changing state while reserved and invalidate the cut synchronously. Release is idempotent. Do not mutate raw Agent state or returned entry objects around the supported APIs.
 
+Native terminal input and mutating RPC commands received during a hold invalidate the cut and wait for release before delivery. Terminal input also resumes when save preparation fails. Read-only RPC queries and display-only extension UI updates, such as status, notifications and widgets, do not invalidate the hold. Interactive UI callbacks and editor mutation remain admitted through the native gate.
+
 SDK hosts with extra memory-owned state bind one `WorkingSessionHost` using `session.bindWorkingSessionHost({ kind, readiness, capture, restore })`. Its readiness callback returns `{ blockers }` when live memory cannot be restored. `capture` must return JSON-serializable data; `restore` receives it before mode startup. A mode-kind mismatch fails rather than losing buffers.
 
 ## Extension persistence and readiness
@@ -47,9 +49,13 @@ pi.on("working_session_save", async (event) => {
 
 Save handlers are strict: errors fail acquisition. The event's `appendEntry` is the only mutation capability allowed during preparation and expires when that handler returns. Ordinary extension mutation APIs remain guarded even while an asynchronous save handler yields. `event.invalidate(reason)` invalidates the cut without releasing the lifetime. Persisted extensions need no separate state database.
 
+Unresolved settings load or write failures refuse acquisition even after their diagnostics have been displayed. A successful write repairs its scope; an explicit successful reload adopts the persisted settings and clears that scope's failure.
+
 ## Restore
 
 `pi --working-session /private/session/state.json` validates the artifact and matching journal before session, resource, model or extension-start construction. A different or newer journal is refused without repair or overwrite. Missing journals are materialized from the exact saved entries.
+
+SDK and CLI restoration apply saved project trust, offline policy and settings before discovery and extension factories, including when the host supplies native services. The artifact's `settings` is the exact effective configuration; `settingsLayers.global` and `settingsLayers.project` preserve global-only preferences and relative resource origins. Restoration changes settings in memory, never overwrites settings files. Persisted setters still write only the changed fields; ordinary `/reload` reads the current files. Required saved extension-load or provider-registration failures abort restoration.
 
 The selected model and tool policy are retained. Missing selected models fail; missing restored tools retain their pending names and refuse a new request until native registration completes or the user explicitly changes the selection. Restore never selects a different default payer or silently removes required tools.
 
@@ -72,6 +78,8 @@ The bridge owns no archive, polling policy, leases or sleep controller. It follo
 ## Completed exit
 
 `PI_WORKING_SESSION_EXIT_PATH` enables strict final serialization to `${exitPath}.state`. The worker joins its agent, runs shutdown persistence, performs the strict native save and sends a digest-bound completion to the native launcher. Independent unfinished work or failed persistence produces no successful receipt.
+
+An unready session cannot produce completion evidence and does not wait for readiness during quit. Launches without an exit path retain ordinary native shutdown error reporting and cleanup.
 
 The launcher clears any prior receipt at launch and attests only its current ready worker after the final normal zero exit, with no replacement or rollback remaining. The owner-only receipt contains `version: 1`, state `path`, SHA-256 `digest`, `sessionId`, worker `pid`, `worker`, `launch`, `launcherPid` and `launcher` (the same launch nonce). Metadata commands, crashes, stale workers, incomplete finalization and mismatching artifacts produce no receipt.
 

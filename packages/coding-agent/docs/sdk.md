@@ -63,6 +63,8 @@ After a runtime replacement, subscriptions belong to the old `AgentSession` and 
 
 `session.acquireWorkingSession()` reserves an awaited native cut and returns complete private state with separate invalidation and release lifetimes. `createAgentSession({ workingSession })` restores the selected leaf, all branches, full pending payloads and native loadout before extension startup, without replaying interrupted work. See [Native Working Sessions](working-session.md) for readiness, persistence hooks, mode buffers and the conditional CLI socket/final-exit contract.
 
+Saved trust, offline policy and effective settings are applied before native resource discovery and extension factories. Global/project settings layers retain relative resource origins and global-only preferences without rewriting settings files. Required saved extension failures reject restoration.
+
 <a id="background-commands"></a>
 
 ### Background commands

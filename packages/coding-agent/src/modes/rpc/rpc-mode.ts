@@ -798,7 +798,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 		const command = parsed as RpcCommand;
 		try {
-			const response = await session.workingSessionGate.run(async () => handleCommand(command));
+			const readonly = typeof command.type === "string" && command.type.startsWith("get_");
+			if (!readonly) {
+				while (session.workingSessionGate.reserved) {
+					session.workingSessionGate.invalidate("RPC command arrived during native save");
+					await session.workingSessionGate.waitForRelease();
+				}
+			}
+			if (shuttingDown) return;
+			const response = readonly
+				? await handleCommand(command)
+				: await session.workingSessionGate.run(async () => handleCommand(command));
 			if (response) {
 				output(response);
 				await waitForRawStdoutBackpressure();
@@ -837,8 +847,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			process.stdin.off("end", onInputEnd);
 		};
 	})();
-
-	session.setWorkingSessionReady(true);
 
 	// Keep process alive forever
 	return new Promise(() => {});

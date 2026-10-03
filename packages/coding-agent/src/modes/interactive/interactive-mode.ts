@@ -488,6 +488,14 @@ export class InteractiveMode {
 		if (!this.session.workingSessionGate.reserved) return undefined;
 		this.session.workingSessionGate.invalidate("Terminal input arrived during native save");
 		this.heldTerminalInput.push(data);
+		if (this.heldTerminalInput.length === 1) {
+			void this.session.workingSessionGate.waitForRelease().then(() => {
+				const input = this.heldTerminalInput.splice(0);
+				setImmediate(() => {
+					for (const data of input) this.ui.dispatchInput(data);
+				});
+			});
+		}
 		this.showStatus("Saving session; input will resume after release");
 		return { consume: true };
 	};
@@ -2116,17 +2124,7 @@ export class InteractiveMode {
 
 		session.bindWorkingSessionHost({
 			kind: "tui",
-			readiness: (event) => {
-				event.signal.addEventListener(
-					"abort",
-					() => {
-						const input = this.heldTerminalInput.splice(0);
-						setImmediate(() => {
-							for (const data of input) this.ui.dispatchInput(data);
-						});
-					},
-					{ once: true },
-				);
+			readiness: () => {
 				const blockers: string[] = [];
 				if (this.editor.getText().length) blockers.push("Unsent editor text");
 				if (this.editor !== this.defaultEditor) blockers.push("Custom editor memory");
@@ -6131,33 +6129,34 @@ export class InteractiveMode {
 				const selector = new OAuthSelectorComponent(
 					mode,
 					providerOptions,
-					async (providerId: string) => {
-						done();
+					(providerId: string) =>
+						this.session.workingSessionGate.run(async () => {
+							done();
 
-						const providerOption = providerOptions.find((provider) => provider.id === providerId);
-						if (!providerOption) {
-							return;
-						}
+							const providerOption = providerOptions.find((provider) => provider.id === providerId);
+							if (!providerOption) {
+								return;
+							}
 
-						try {
-							await this.session.modelRuntime.logout(providerOption.id, {
-								signal: AbortSignal.timeout(15_000),
-							});
-							await this.updateAvailableProviderCount();
-							const message =
-								providerOption.authType === "oauth"
-									? `Logged out of ${providerOption.name}`
-									: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
-							this.showStatus(message);
-						} catch (error: unknown) {
-							const message = error instanceof Error ? error.message : String(error);
-							this.showError(
-								error instanceof CredentialSynchronizationError
-									? `Credentials removed for ${providerOption.name}, but local model state could not be synchronized: ${message}`
-									: `Logout failed: ${message}`,
-							);
-						}
-					},
+							try {
+								await this.session.modelRuntime.logout(providerOption.id, {
+									signal: AbortSignal.timeout(15_000),
+								});
+								await this.updateAvailableProviderCount();
+								const message =
+									providerOption.authType === "oauth"
+										? `Logged out of ${providerOption.name}`
+										: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
+								this.showStatus(message);
+							} catch (error: unknown) {
+								const message = error instanceof Error ? error.message : String(error);
+								this.showError(
+									error instanceof CredentialSynchronizationError
+										? `Credentials removed for ${providerOption.name}, but local model state could not be synchronized: ${message}`
+										: `Logout failed: ${message}`,
+								);
+							}
+						}),
 					() => {
 						done();
 						this.ui.requestRender();

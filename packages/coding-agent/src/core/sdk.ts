@@ -10,6 +10,7 @@ import { createCacheTraceContext } from "./cache-trace-context.ts";
 import { CacheWarmer } from "./cache-warmer.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { applyProviderRegistrations } from "./extensions/provider-registrations.ts";
 import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
@@ -83,6 +84,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
+	/** Services hosts that already restored settings before discovery may reuse those resources. */
+	workingSessionResourcesPrepared?: WorkingSession;
 
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
@@ -190,12 +193,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		throw new Error("Working session and supplied SessionManager identity disagree");
 	let resourceLoader = options.resourceLoader;
 
+	if (saved?.launch?.offline !== undefined) {
+		if (saved.launch.offline) process.env.PI_OFFLINE = "1";
+		else delete process.env.PI_OFFLINE;
+	}
+
 	const authPath = join(agentDir, "auth.json");
 	const modelsPath = join(agentDir, "models.json");
 	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
 
-	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
-	if (saved) settingsManager.applyOverrides(saved.settings);
+	if (saved?.launch?.offline !== undefined) modelRuntime.setOffline(saved.launch.offline);
+	const settingsManager =
+		options.settingsManager ?? SettingsManager.create(cwd, agentDir, { projectTrusted: saved?.launch?.trustProject });
+	if (saved) {
+		if (saved.launch?.trustProject !== undefined) settingsManager.setProjectTrusted(saved.launch.trustProject);
+		settingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
+	}
 	const sessionManager =
 		savedManager ?? options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
@@ -204,52 +217,31 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			cwd,
 			agentDir,
 			settingsManager,
-			additionalExtensionPaths: saved?.launch?.extensions,
-			additionalSkillPaths: saved?.launch?.skills,
-			additionalPromptTemplatePaths: saved?.launch?.prompts,
-			additionalThemePaths: saved?.launch?.themes,
-			noExtensions: saved?.launch?.noExtensions,
-			noSkills: saved?.launch?.noSkills,
-			noPromptTemplates: saved?.launch?.noPromptTemplates,
-			noThemes: saved?.launch?.noThemes,
-			noContextFiles: saved?.launch?.noContextFiles,
-			systemPrompt: saved?.launch?.systemPrompt,
-			appendSystemPrompt: saved?.launch?.appendSystemPrompt,
 		});
-		await resourceLoader.reload();
+		await resourceLoader.reload(saved ? { workingSession: saved } : undefined);
 		time("resourceLoader.reload");
+	} else if (saved && JSON.stringify(options.workingSessionResourcesPrepared) !== JSON.stringify(saved)) {
+		await resourceLoader.reload({ workingSession: saved });
 	}
 
 	// Direct SDK hosts need factory registrations before native model selection too.
-	const registrations = resourceLoader.getExtensions().runtime;
-	let registrationsChanged = registrations.bindProviderAuthFallbacks((id, fallback) =>
-		modelRuntime.registerProviderAuthFallback(id, fallback),
-	);
-	for (const { name, config } of registrations.pendingProviderRegistrations) {
-		modelRuntime.registerProvider(name, config);
-		registrationsChanged = true;
-	}
-	registrations.pendingProviderRegistrations = [];
-	for (const { provider } of registrations.pendingNativeProviderRegistrations) {
-		modelRuntime.registerNativeProvider(provider);
-		registrationsChanged = true;
-	}
-	registrations.pendingNativeProviderRegistrations = [];
-	for (const { definition } of registrations.pendingVirtualModelRegistrations) {
-		modelRuntime.registerVirtualModel(definition);
-		registrationsChanged = true;
-	}
-	registrations.pendingVirtualModelRegistrations = [];
-	if (registrationsChanged) await modelRuntime.refresh({ allowNetwork: false });
+	const extensions = resourceLoader.getExtensions();
+	let model = options.model;
+	const registrationErrors = await applyProviderRegistrations(extensions.runtime, modelRuntime, () => {
+		// Deliberate factory registration refreshes the selection, as native runner binding does.
+		if (model) model = modelRuntime.getModel(model.provider, model.id) ?? model;
+	});
+	extensions.errors.push(...registrationErrors.map((error) => ({ path: error.extensionPath, error: error.error })));
+	if (saved && extensions.errors.length)
+		throw new Error(
+			`Cannot restore native extensions: ${extensions.errors.map(({ path, error }) => `${path}: ${error}`).join("; ")}`,
+		);
 
 	// Check if session has existing data to restore
 	const existingSession = sessionManager.buildSessionContext();
 	const hasExistingSession = existingSession.messages.length > 0;
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
-	let model = options.model
-		? (modelRuntime.getModel(options.model.provider, options.model.id) ?? options.model)
-		: undefined;
 	if (saved) {
 		model = saved.model ? modelRuntime.getModel(saved.model.provider, saved.model.id) : undefined;
 		if (saved.model && !model)

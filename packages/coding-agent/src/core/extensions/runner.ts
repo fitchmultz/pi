@@ -630,9 +630,15 @@ export class ExtensionRunner {
 				const value: unknown = Reflect.get(target, property, receiver);
 				if (
 					typeof value !== "function" ||
-					["getEditorText", "getEditorComponent", "getTheme", "getAllThemes", "getToolsExpanded"].includes(
-						String(property),
-					)
+					![
+						"pasteToEditor",
+						"setEditorText",
+						"setEditorComponent",
+						"addAutocompleteProvider",
+						"onTerminalInput",
+						"setTheme",
+						"setToolsExpanded",
+					].includes(String(property))
 				)
 					return value;
 				return (...args: unknown[]) => {

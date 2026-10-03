@@ -80,9 +80,14 @@ export class AgentSessionRuntime {
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	private _modelFallbackMessage?: string;
 	private finalization?: (session: AgentSession) => Promise<void>;
+	private strictFinalization = false;
 
-	setFinalization(finalization: (session: AgentSession) => Promise<void>): void {
+	setFinalization(
+		finalization: (session: AgentSession) => Promise<void>,
+		options: { strictShutdown?: boolean } = {},
+	): void {
 		this.finalization = finalization;
+		this.strictFinalization = options.strictShutdown ?? false;
 	}
 
 	constructor(
@@ -420,10 +425,9 @@ export class AgentSessionRuntime {
 			await session.cancelWorkingSession("Native runtime is exiting");
 			await session.abort();
 			const event: SessionShutdownEvent = { type: "session_shutdown", reason: "quit" };
-			if (this.finalization) {
-				await session.extensionRunner.emitShutdownStrict(event);
-				await this.finalization(session);
-			} else await emitSessionShutdownEvent(session.extensionRunner, event);
+			if (this.strictFinalization) await session.extensionRunner.emitShutdownStrict(event);
+			else await emitSessionShutdownEvent(session.extensionRunner, event);
+			await this.finalization?.(session);
 			this.beforeSessionInvalidate?.();
 			session.dispose();
 		});

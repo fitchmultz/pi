@@ -184,7 +184,7 @@ export class ModelRuntime implements Models {
 	private readonly virtualModels = new Map<string, Map<string, RegisteredVirtualModel>>();
 	private readonly compositionErrors = new Map<string, string>();
 	private readonly modelsPath: string | undefined;
-	private readonly modelNetworkEnabled: boolean;
+	private modelNetworkEnabled: boolean;
 	private config: ModelConfig;
 	private snapshot: ModelRuntimeSnapshot = {
 		all: [],
@@ -860,6 +860,11 @@ export class ModelRuntime implements Models {
 			await this.models.logout(providerId, { signal });
 			await this.synchronizeCredentialState(providerId, "logout", undefined, signal);
 		});
+	}
+
+	/** Apply native saved launch policy even when an SDK host supplies this runtime. */
+	setOffline(offline: boolean): void {
+		this.modelNetworkEnabled = !offline;
 	}
 
 	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {

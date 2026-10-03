@@ -23,6 +23,8 @@ import { createTestExtensionsResult, createTestResourceLoader } from "./utilitie
 const rpcIo = vi.hoisted(() => ({
 	outputLines: [] as string[],
 	lineHandler: undefined as ((line: string) => void) | undefined,
+	ready: undefined as Promise<void> | undefined,
+	notifyingReady: false,
 }));
 
 vi.mock("../src/core/output-guard.js", () => ({
@@ -35,6 +37,13 @@ vi.mock("../src/core/output-guard.js", () => ({
 }));
 
 vi.mock("../src/modes/interactive/theme/theme.js", () => ({ theme: {} }));
+
+vi.mock("../src/cli/restart-protocol.js", () => ({
+	notifyCliReady: async () => {
+		rpcIo.notifyingReady = true;
+		await rpcIo.ready;
+	},
+}));
 
 vi.mock("../src/modes/rpc/jsonl.js", () => ({
 	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
@@ -105,6 +114,8 @@ async function createRuntimeHost(options: {
 	runtimeHost: AgentSessionRuntime;
 	cleanup: () => Promise<void>;
 }> {
+	const signalListeners = { SIGTERM: process.listeners("SIGTERM"), SIGHUP: process.listeners("SIGHUP") };
+	const endListeners = process.stdin.listeners("end");
 	const tempDir = join(tmpdir(), `pi-rpc-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 
@@ -167,6 +178,11 @@ async function createRuntimeHost(options: {
 				// ignore test cleanup failures
 			}
 			session.dispose();
+			for (const signal of ["SIGTERM", "SIGHUP"] as const)
+				for (const listener of process.listeners(signal))
+					if (!signalListeners[signal].includes(listener)) process.off(signal, listener);
+			for (const listener of process.stdin.listeners("end"))
+				if (!endListeners.includes(listener)) process.stdin.off("end", listener as () => void);
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true });
 			}
@@ -177,6 +193,7 @@ async function createRuntimeHost(options: {
 async function startRpcMode(options: Parameters<typeof createRuntimeHost>[0]): Promise<{
 	lineHandler: (line: string) => void;
 	cleanup: () => Promise<void>;
+	runtimeHost: AgentSessionRuntime;
 }> {
 	rpcIo.outputLines = [];
 	rpcIo.lineHandler = undefined;
@@ -185,13 +202,72 @@ async function startRpcMode(options: Parameters<typeof createRuntimeHost>[0]): P
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
-	return { lineHandler: rpcIo.lineHandler!, cleanup };
+	return { lineHandler: rpcIo.lineHandler!, cleanup, runtimeHost };
 }
 
 describe("RPC prompt response semantics", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
+		rpcIo.ready = undefined;
+		rpcIo.notifyingReady = false;
+	});
+
+	it("keeps a native hold valid while launcher readiness notification completes", async () => {
+		const { runtimeHost, cleanup } = await createRuntimeHost({ withAuth: true, responseDelayMs: 0 });
+		runtimeHost.session.setWorkingSessionReady(false);
+		let ready!: () => void;
+		rpcIo.ready = new Promise<void>((resolve) => {
+			ready = resolve;
+		});
+		rpcIo.lineHandler = undefined;
+		void runRpcMode(runtimeHost);
+		await vi.waitFor(() => expect(rpcIo.notifyingReady).toBe(true));
+		const hold = await runtimeHost.session.acquireWorkingSession();
+		try {
+			ready();
+			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+			expect(hold.invalidated.aborted).toBe(false);
+			hold.assertHeld();
+		} finally {
+			ready();
+			await hold.release();
+			await cleanup();
+		}
+	});
+
+	it("keeps readonly polls safe and preserves ordered mutations until hold release", async () => {
+		const { lineHandler, cleanup, runtimeHost } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		const hold = await runtimeHost.session.acquireWorkingSession();
+		try {
+			lineHandler(JSON.stringify({ id: "poll", type: "get_state" }));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({ id: "poll", success: true }),
+				),
+			);
+			expect(hold.invalidated.aborted).toBe(false);
+			lineHandler(JSON.stringify({ id: "one", type: "set_session_name", name: "first" }));
+			lineHandler(JSON.stringify({ id: "two", type: "set_session_name", name: "second" }));
+			expect(hold.invalidated.aborted).toBe(true);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(parseOutputLines(rpcIo.outputLines).filter((line) => line.id === "one" || line.id === "two")).toEqual(
+				[],
+			);
+			await hold.release();
+			await vi.waitFor(() =>
+				expect(
+					parseOutputLines(rpcIo.outputLines).filter((line) => line.id === "one" || line.id === "two"),
+				).toMatchObject([
+					{ id: "one", success: true },
+					{ id: "two", success: true },
+				]),
+			);
+			expect(runtimeHost.session.sessionName).toBe("second");
+		} finally {
+			await hold.release();
+			await cleanup();
+		}
 	});
 
 	it("emits one failure response when prompt preflight rejects", async () => {

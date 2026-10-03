@@ -919,8 +919,7 @@ export class DefaultPackageManager implements PackageManager {
 
 	async resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths> {
 		const accumulator = this.createAccumulator();
-		const globalSettings = this.settingsManager.getGlobalSettings();
-		const projectSettings = this.settingsManager.getProjectSettings();
+		const { global: globalSettings, project: projectSettings } = this.settingsManager.getResourceSettings();
 
 		// Collect all packages with scope (project first so cwd resources win collisions)
 		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];

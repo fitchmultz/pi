@@ -54,6 +54,8 @@ Sessions started by the 0.99 fork launcher must **quit and relaunch** using `pi 
 
 Session history remains the authority. Restart uses the complete [native working-session format](working-session.md) to preserve the selected leaf, all branches, effective settings and current loadout. Original CLI options are retained except session-selection flags, consumed startup prompts/attachments, and `--model`/`--provider`/`--thinking`. With `--api-key`, the launch model is kept because the key applies to it; the key is never serialized. Extensions persist their own state with ordinary session entries and shutdown handlers. Restart still waits for runnable queues to drain and refuses pending next-turn context. It does not transfer arbitrary callback memory, migrate the runtime or replay completed effects.
 
+The captured settings are restored before discovery and extension factories. To adopt settings-file edits, use `/reload`. Each restart creates a private state file that remains available through startup rollback; the launcher removes it after a replacement becomes ready or the launch ends. A user-supplied `--working-session` file remains untouched.
+
 ## Scope and development
 
 Print, JSON and RPC modes do not expose the interactive control endpoint. SDK hosts and standalone binaries retain their existing lifecycle. Managed control remains available with `-ne`, which still disables ordinary extension discovery.

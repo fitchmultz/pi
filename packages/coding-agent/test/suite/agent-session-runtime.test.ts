@@ -177,8 +177,15 @@ describe("AgentSessionRuntime characterization", () => {
 				const currentReader = createInterface({ input: current });
 				const currentReplies = currentReader[Symbol.asyncIterator]();
 				current.write(`${JSON.stringify({ action: "acquire", path: statePath, boundary: "settled" })}\n`);
-				expect(JSON.parse((await currentReplies.next()).value!).ok).toBe(true);
+				const currentHold = JSON.parse((await currentReplies.next()).value!);
+				expect(currentHold.ok).toBe(true);
 				expect(readWorkingSession(statePath).header.id).toBe(runtime.session.sessionId);
+				current.write(`${JSON.stringify({ action: "release", token: currentHold.token })}\n`);
+				expect(JSON.parse((await currentReplies.next()).value!)).toEqual({ ok: true });
+				expect(JSON.parse(readFileSync(`${socketPath}.guard`, "utf8"))).toMatchObject({
+					valid: false,
+					reason: "released",
+				});
 				current.destroy();
 				currentReader.close();
 				await vi.waitFor(() => expect(runtime.session.workingSessionGate.reserved).toBe(false));
@@ -262,6 +269,55 @@ describe("AgentSessionRuntime characterization", () => {
 				if (descriptor) Object.defineProperty(process, key, descriptor);
 				else Reflect.deleteProperty(process, key);
 			}
+		}
+	});
+
+	it.each([false, true])(
+		"ordinary restart finalization retains native shutdown error handling; unready=%s",
+		async (unready) => {
+			const { runtime } = await createRuntimeForTest((pi) => {
+				pi.on("session_shutdown", () => {
+					throw new Error("ordinary shutdown error");
+				});
+			});
+			if (unready) runtime.session.setWorkingSessionReady(false);
+			vi.stubEnv("PI_WORKING_SESSION_SOCKET", "");
+			vi.stubEnv("PI_WORKING_SESSION_EXIT_PATH", "");
+			const finalized = vi.fn(async () => false);
+			try {
+				await startWorkingSessionControl(runtime, finalized);
+				await expect(runtime.dispose()).resolves.toBeUndefined();
+				expect(finalized).toHaveBeenCalledOnce();
+			} finally {
+				vi.unstubAllEnvs();
+			}
+		},
+	);
+
+	it("does not await readiness or certify an unready final exit", async () => {
+		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+		runtime.session.setWorkingSessionReady(false);
+		const exitPath = join(realpathSync(tempDir), "unready-exit.json");
+		vi.stubEnv("PI_WORKING_SESSION_SOCKET", "");
+		vi.stubEnv("PI_WORKING_SESSION_EXIT_PATH", exitPath);
+		try {
+			await startWorkingSessionControl(runtime);
+			let finished = false;
+			const disposing = runtime
+				.dispose()
+				.then(() => {
+					finished = true;
+				})
+				.catch(() => {});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			const observed = finished;
+			await runtime.session.cancelWorkingSession("test cleanup");
+			await disposing;
+			expect(observed).toBe(true);
+			expect(existsSync(`${exitPath}.state`)).toBe(false);
+		} finally {
+			await runtime.session.cancelWorkingSession("test cleanup");
+			vi.unstubAllEnvs();
 		}
 	});
 

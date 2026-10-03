@@ -83,6 +83,7 @@ export async function superviseCli(
 	let handoff: RestartHandoff | undefined;
 	let child: ChildProcess | undefined;
 	let stopping: NodeJS.Signals | undefined;
+	const restartArtifacts = new Set<string>();
 	const env = { ...(options.env ?? process.env) };
 	const launchId = randomUUID();
 	const exitPath = env.PI_WORKING_SESSION_EXIT_PATH;
@@ -131,6 +132,8 @@ export async function superviseCli(
 				if (value.type === "pi:ready") {
 					ready = true;
 					fallback = undefined;
+					for (const path of restartArtifacts) rmSync(path, { force: true });
+					restartArtifacts.clear();
 					clearTimeout(timeout);
 				} else if (value.type === "pi:completed" && exitPath && "completed" in value) {
 					const receipt = value.completed;
@@ -164,6 +167,8 @@ export async function superviseCli(
 							typeof session.sessionId !== "string"
 						)
 							return;
+						if ("workingSession" in session && typeof session.workingSession === "string")
+							assertPrivateFilePath(session.workingSession);
 						restart = {
 							type: "pi:restart",
 							session: {
@@ -200,6 +205,7 @@ export async function superviseCli(
 			const exitCode = result.signal ? 128 + constants.signals[result.signal] : timedOut ? 1 : (result.code ?? 1);
 			if (stopping) return exitCode;
 			if (restart && result.code === 0 && !result.signal) {
+				if (restart.session.workingSession) restartArtifacts.add(restart.session.workingSession);
 				const selection = restart.session.workingSession
 					? ["--working-session", restart.session.workingSession]
 					: ["--session", restart.session.sessionFile];
@@ -269,6 +275,7 @@ export async function superviseCli(
 		}
 		return stopping ? 128 + constants.signals[stopping] : 1;
 	} finally {
+		for (const path of restartArtifacts) rmSync(path, { force: true });
 		for (const remove of removers) remove();
 		process.off("exit", killChild);
 	}

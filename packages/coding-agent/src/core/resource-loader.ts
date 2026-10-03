@@ -39,6 +39,7 @@ import {
 	type SourceInfo,
 } from "./source-info.ts";
 import { resetTimings } from "./timings.ts";
+import type { WorkingSession } from "./working-session.ts";
 
 export interface ResourceExtensionPaths {
 	skillPaths?: Array<{ path: string; metadata: PathMetadata }>;
@@ -48,6 +49,8 @@ export interface ResourceExtensionPaths {
 
 export interface ResourceLoaderReloadOptions {
 	resolveProjectTrust?: (input: { extensionsResult: LoadExtensionsResult }) => Promise<boolean>;
+	/** Restore native selection before discovery; settings follow file reload but precede factories. */
+	workingSession?: WorkingSession;
 }
 
 const HOST_PROVIDED_EXTENSION_PACKAGES = new Set([
@@ -505,12 +508,35 @@ export class DefaultResourceLoader implements ResourceLoader {
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
 		resetTimings("extensions");
 
+		const saved = options?.workingSession;
+		if (saved) {
+			if (
+				resolvePath(saved.cwd) !== this.cwd ||
+				(saved.launch && resolvePath(saved.launch.agentDir) !== this.agentDir)
+			)
+				throw new Error("Working session and supplied resource loader directories disagree");
+			if (saved.launch) {
+				const launch = saved.launch;
+				if (launch.trustProject !== undefined) this.settingsManager.setProjectTrusted(launch.trustProject);
+				this.additionalExtensionPaths = launch.extensions;
+				this.additionalSkillPaths = launch.skills;
+				this.additionalPromptTemplatePaths = launch.prompts;
+				this.additionalThemePaths = launch.themes;
+				this.noExtensions = launch.noExtensions ?? false;
+				this.noSkills = launch.noSkills ?? false;
+				this.noPromptTemplates = launch.noPromptTemplates ?? false;
+				this.noThemes = launch.noThemes ?? false;
+				this.noContextFiles = launch.noContextFiles ?? false;
+				this.systemPromptSource = launch.systemPrompt;
+				this.appendSystemPromptSource = launch.appendSystemPrompt;
+			}
+		}
 		if (this.loaded) {
 			clearExtensionCache();
 		}
 
 		let preTrustExtensions: LoadExtensionsResult | undefined;
-		if (options?.resolveProjectTrust) {
+		if (options?.resolveProjectTrust && !saved) {
 			preTrustExtensions = await this.loadProjectTrustExtensions();
 			const projectTrusted = await options.resolveProjectTrust({ extensionsResult: preTrustExtensions });
 			this.settingsManager.setProjectTrusted(projectTrusted);
@@ -518,6 +544,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		// reload() preserves SettingsManager.projectTrusted and reloads settings for that trust state.
 		await this.settingsManager.reload();
+		if (saved) this.settingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
 		const resolvedPaths = await this.packageManager.resolve();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,

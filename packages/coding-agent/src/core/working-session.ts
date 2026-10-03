@@ -38,6 +38,7 @@ export interface WorkingSession {
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
 	settings: Settings;
+	settingsLayers: { global: Settings; project: Settings };
 	prompt: NormalizedBuildSystemPromptOptions;
 	runPrompt?: NormalizedBuildSystemPromptOptions;
 	flags: Array<[string, boolean | string]>;
@@ -129,7 +130,21 @@ function content(value: unknown): boolean {
 }
 
 function message(value: unknown): boolean {
-	if (!record(value) || typeof value.timestamp !== "number") return false;
+	if (!record(value) || typeof value.role !== "string" || !value.role) return false;
+	if (
+		[
+			"user",
+			"system",
+			"assistant",
+			"toolResult",
+			"custom",
+			"bashExecution",
+			"branchSummary",
+			"compactionSummary",
+		].includes(value.role) &&
+		typeof value.timestamp !== "number"
+	)
+		return false;
 	switch (value.role) {
 		case "user":
 		case "system":
@@ -167,7 +182,8 @@ function message(value: unknown): boolean {
 		case "compactionSummary":
 			return typeof value.summary === "string" && typeof value.tokensBefore === "number";
 		default:
-			return false;
+			// AgentMessage is declaration-merged; extension roles own their JSON payload schema.
+			return true;
 	}
 }
 
@@ -356,6 +372,8 @@ export function parseWorkingSession(text: string): WorkingSession {
 	)
 		fail();
 	if (!record(value.settings) || !prompt(value.prompt) || (value.runPrompt !== undefined && !prompt(value.runPrompt)))
+		fail();
+	if (!record(value.settingsLayers) || !record(value.settingsLayers.global) || !record(value.settingsLayers.project))
 		fail();
 	if (
 		!Array.isArray(value.flags) ||

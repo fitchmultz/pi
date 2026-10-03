@@ -547,6 +547,10 @@ export class AgentSession {
 		if (ready && this.isIdle && !this.isSettling) void this._grantWorkingSession("settled");
 	}
 
+	get workingSessionReady(): boolean {
+		return this._workingSessionReady;
+	}
+
 	/** Await a native cut without consuming accepted queues. */
 	async acquireWorkingSession(
 		options: {
@@ -641,10 +645,7 @@ export class AgentSession {
 			if (this._extensionRunner.hasPendingUI) blockers.push("Unresolved extension UI");
 			if (this._workingSessionMode && !this._workingSessionHost)
 				blockers.push(`Native ${this._workingSessionMode.kind} mode has not restored its buffers`);
-			await this.settingsManager.flush();
-			const errors = this.settingsManager.drainErrors();
-			if (errors.length)
-				throw new Error(`Native settings flush failed: ${errors.map((error) => error.error.message).join("; ")}`);
+			await this.settingsManager.flushWorkingSession();
 			this.sessionManager.flushWorkingSession();
 			request.controller.signal.throwIfAborted();
 			invalidated.signal.throwIfAborted();
@@ -685,6 +686,10 @@ export class AgentSession {
 					steeringMode: this.steeringMode,
 					followUpMode: this.followUpMode,
 					settings: this.settingsManager.getSettings(),
+					settingsLayers: {
+						global: this.settingsManager.getGlobalSettings(),
+						project: this.settingsManager.getProjectSettings(),
+					},
 					prompt: this._baseSystemPromptOptions,
 					runPrompt: this._runSystemPromptOptions,
 					flags: [...this._extensionRunner.getFlagValues()],

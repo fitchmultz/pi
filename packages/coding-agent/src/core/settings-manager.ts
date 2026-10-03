@@ -398,6 +398,7 @@ export class SettingsManager {
 	private globalSettingsLoadError: Error | null = null; // Track if global settings file had parse errors
 	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
 	private writeQueue: Promise<void> = Promise.resolve();
+	private readonly writeErrors = new Map<SettingsScope, Error>();
 	private errors: SettingsError[];
 	private settingsPaths: SettingsPaths;
 
@@ -588,6 +589,27 @@ export class SettingsManager {
 		return structuredClone(this.projectSettings);
 	}
 
+	/** Restore memory only. Persisted setters still write just their modified fields. */
+	restoreWorkingSession(settings: Settings, layers: { global: Settings; project: Settings }): void {
+		this.beforeMutation?.();
+		this.globalSettings = structuredClone(layers.global);
+		this.projectSettings = this.projectTrusted ? structuredClone(layers.project) : {};
+		this.settings = structuredClone(settings);
+	}
+
+	/** Resource overrides are transient too; unchanged file settings retain their native origins. */
+	getResourceSettings(): { global: Settings; project: Settings } {
+		const global = this.getGlobalSettings();
+		const project = this.getProjectSettings();
+		const merged = deepMergeSettings(global, project);
+		for (const field of ["packages", "extensions", "skills", "prompts", "themes"] as const) {
+			if (JSON.stringify(this.settings[field]) === JSON.stringify(merged[field])) continue;
+			(global as Record<string, unknown>)[field] = structuredClone(this.settings[field]);
+			delete project[field];
+		}
+		return { global, project };
+	}
+
 	isProjectTrusted(): boolean {
 		return this.projectTrusted;
 	}
@@ -629,6 +651,7 @@ export class SettingsManager {
 		if (!globalLoad.error) {
 			this.globalSettings = globalLoad.settings;
 			this.globalSettingsLoadError = null;
+			this.writeErrors.delete("global");
 		} else {
 			this.globalSettingsLoadError = globalLoad.error;
 			this.recordError("global", globalLoad.error);
@@ -643,6 +666,7 @@ export class SettingsManager {
 		if (!projectLoad.error) {
 			this.projectSettings = projectLoad.settings;
 			this.projectSettingsLoadError = null;
+			this.writeErrors.delete("project");
 		} else {
 			this.projectSettingsLoadError = projectLoad.error;
 			this.recordError("project", projectLoad.error);
@@ -720,9 +744,11 @@ export class SettingsManager {
 					this.assertProjectTrustedForWrite();
 				}
 				task();
+				this.writeErrors.delete(scope);
 				this.clearModifiedScope(scope);
 			})
 			.catch((error) => {
+				this.writeErrors.set(scope, error instanceof Error ? error : new Error(String(error)));
 				this.recordError(scope, error);
 			});
 	}
@@ -805,6 +831,15 @@ export class SettingsManager {
 
 	async flush(): Promise<void> {
 		await this.writeQueue;
+	}
+
+	/** Diagnostics may be drained by UI; unresolved storage failures must still veto a safe cut. */
+	async flushWorkingSession(): Promise<void> {
+		await this.flush();
+		const errors = [this.globalSettingsLoadError, this.projectSettingsLoadError, ...this.writeErrors.values()];
+		const failures = errors.filter((error): error is Error => error !== null);
+		if (failures.length)
+			throw new Error(`Native settings flush failed: ${failures.map((error) => error.message).join("; ")}`);
 	}
 
 	drainErrors(): SettingsError[] {

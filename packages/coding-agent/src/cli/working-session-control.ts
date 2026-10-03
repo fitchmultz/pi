@@ -38,40 +38,49 @@ export async function startWorkingSessionControl(
 		hold.assertHeld();
 	};
 	if (exitPath) assertPrivateFilePath(exitPath);
-	runtime.setFinalization(async (session: AgentSession) => {
-		if (finalized) return;
-		finalized = true;
-		try {
-			const restarting = await onFinalization?.(session);
-			if (!exitPath || restarting) return;
-			// Quit callers are already joined by the runtime; independent activity cannot be certified.
-			if (!session.isIdle || session.isSettling || session.workingSessionGate.busy) return;
-			const hold = await session.acquireWorkingSession();
+	runtime.setFinalization(
+		async (session: AgentSession) => {
+			if (finalized) return;
+			finalized = true;
 			try {
-				if (!hold.sleepReady) return;
-				const statePath = `${exitPath}.state`;
-				save(statePath, hold);
-				await cleanup();
-				if (!launch || !process.send || !process.connected)
-					throw new Error("Native finalization requires the current CLI launcher");
-				const completed: CompletedWorkingSession = {
-					path: statePath,
-					digest: createHash("sha256").update(readFileSync(statePath)).digest("hex"),
-					sessionId: session.sessionId,
-					pid: process.pid,
-					worker,
-					launch,
-				};
-				await new Promise<void>((done, reject) =>
-					process.send!({ type: "pi:completed", completed }, (error) => (error ? reject(error) : done())),
-				);
+				const restarting = await onFinalization?.(session);
+				if (!exitPath || restarting) return;
+				// Quit callers are already joined by the runtime; independent activity cannot be certified.
+				if (
+					!session.workingSessionReady ||
+					!session.isIdle ||
+					session.isSettling ||
+					session.workingSessionGate.busy
+				)
+					return;
+				const hold = await session.acquireWorkingSession();
+				try {
+					if (!hold.sleepReady) return;
+					const statePath = `${exitPath}.state`;
+					save(statePath, hold);
+					await cleanup();
+					if (!launch || !process.send || !process.connected)
+						throw new Error("Native finalization requires the current CLI launcher");
+					const completed: CompletedWorkingSession = {
+						path: statePath,
+						digest: createHash("sha256").update(readFileSync(statePath)).digest("hex"),
+						sessionId: session.sessionId,
+						pid: process.pid,
+						worker,
+						launch,
+					};
+					await new Promise<void>((done, reject) =>
+						process.send!({ type: "pi:completed", completed }, (error) => (error ? reject(error) : done())),
+					);
+				} finally {
+					await hold.release();
+				}
 			} finally {
-				await hold.release();
+				await cleanup();
 			}
-		} finally {
-			await cleanup();
-		}
-	});
+		},
+		{ strictShutdown: exitPath !== undefined && exitPath !== "" },
+	);
 	if (!path) return cleanup;
 	assertPrivateFilePath(guardPath!);
 	// Never remove an existing socket belonging to another live launch.
@@ -100,9 +109,9 @@ export async function startWorkingSessionControl(
 			try {
 				if (guardPublished) mark(false, "released");
 			} finally {
-				controller.abort();
 				await hold?.release();
 				hold = undefined;
+				controller.abort();
 			}
 		};
 		sockets.set(socket, release);

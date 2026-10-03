@@ -725,7 +725,7 @@ export async function main(args: string[], options?: MainOptions) {
 	time("runMigrations");
 
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
-	if (saved) startupSettingsManager.applyOverrides(saved.settings);
+	if (saved) startupSettingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
 	const startupSettingsDiagnostics = collectSettingsDiagnostics(startupSettingsManager);
 
 	// Experimental first-time setup: theme choice and analytics opt-in.
@@ -811,9 +811,9 @@ export async function main(args: string[], options?: MainOptions) {
 				parsed.projectTrustOverride ??
 				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
-		if (isInitialRuntime && saved) runtimeSettingsManager.applyOverrides(saved.settings);
 		const services = await createAgentSessionServices({
 			cwd,
+			workingSession: isInitialRuntime ? saved : undefined,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
 			modelRuntimeSignal: AbortSignal.timeout(15_000),
