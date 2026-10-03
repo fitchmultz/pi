@@ -1731,6 +1731,9 @@ export interface ExtensionAPI {
 	 */
 	setActiveTools(toolNames: string[]): void;
 
+	/** Rebuild tools and re-run prepareLoadout without replacing the active selection or pending restored tools. */
+	refreshTools(): void;
+
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
 

@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import { openWorkingSession } from "../../src/core/working-session.ts";
 import {
 	createCodemodeExtension,
 	type InstructionGroupCollector,
@@ -73,6 +74,79 @@ describe("on-demand instruction groups", () => {
 		await harness.session.bindExtensions({});
 		return harness;
 	}
+
+	it.each([
+		{ boundary: "session_start", discard: false },
+		{ boundary: "session_tree", discard: false },
+		{ boundary: "session_start", discard: true },
+	])(
+		"resyncs all-missing saved tools at $boundary; explicit empty discard=$discard",
+		async ({ boundary, discard }) => {
+			const late = {
+				name: "late",
+				label: "Late",
+				description: "Reconnect-only saved tool",
+				exposure: "deferred" as const,
+				defaultActive: false,
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [], details: undefined }),
+			};
+			const original = await setup({
+				initialActiveToolNames: ["late"],
+				extensionFactories: [instructionGroupsExtension, (pi) => pi.registerTool(late)],
+			});
+			original.session.setActiveToolsByName(["late"]);
+			original.setResponses([done(), done()]);
+			await original.session.prompt("first branch point");
+			const first = original.sessionManager.getLeafId()!;
+			await original.session.prompt("saved leaf");
+			const captured = await original.session.acquireWorkingSession();
+			await captured.release();
+			let register!: () => void;
+			const restored = await createHarness({
+				initialActiveToolNames: [],
+				sessionManager: openWorkingSession(captured.state),
+				extensionFactories: [
+					instructionGroupsExtension,
+					(pi) => {
+						register = () => pi.registerTool(late);
+					},
+				],
+			});
+			harnesses.push(restored);
+			const errors: string[] = [];
+			const bindings = { onError: (error: { error: string }) => errors.push(error.error) };
+			if (boundary === "session_tree") await restored.session.bindExtensions(bindings);
+			restored.session.restoreWorkingSession(captured.state);
+			if (boundary === "session_start") await restored.session.bindExtensions(bindings);
+			else await restored.session.navigateTree(first);
+			expect(errors).toEqual([]);
+			expect(restored.session.getActiveToolNames()).toEqual([]);
+			if (discard) restored.session.setActiveToolsByName([]);
+			const pending = await restored.session.acquireWorkingSession();
+			try {
+				expect(pending.state.pendingTools).toEqual(discard ? [] : ["late"]);
+			} finally {
+				await pending.release();
+			}
+			if (!discard) {
+				await expect(restored.session.prompt("wait for reconnect")).rejects.toThrow(
+					"Saved tools have not registered",
+				);
+				expect(restored.faux.state.callCount).toBe(0);
+			}
+			register();
+			expect(restored.session.getActiveToolNames()).toEqual(discard ? [] : ["late"]);
+			restored.setResponses([
+				(context) => {
+					expect(getCurrentTools(context.messages).map((tool) => tool.name)).toEqual(discard ? [] : ["late"]);
+					return done();
+				},
+			]);
+			await restored.session.prompt("new input after reconnect");
+			expect(restored.faux.state.callCount).toBe(1);
+		},
+	);
 
 	it.each(["parallel", "sequential"] as const)(
 		"gates direct, nested, and codemode calls until the next read in %s execution",

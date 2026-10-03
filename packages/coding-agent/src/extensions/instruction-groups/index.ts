@@ -71,7 +71,7 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		boundary = undefined;
 		processedLeaf = null;
 		replay(ctx);
-		pi.setActiveTools(pi.getActiveTools());
+		pi.refreshTools();
 	};
 
 	pi.registerTool({

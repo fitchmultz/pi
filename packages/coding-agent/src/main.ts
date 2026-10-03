@@ -634,8 +634,9 @@ export async function main(args: string[], options?: MainOptions) {
 	const cwd = saved?.cwd ?? process.cwd();
 	const agentDir = saved?.launch?.agentDir ?? getAgentDir();
 	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+	if (saved) bootstrapSettingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
-	configureHttpDispatcher();
+	configureHttpDispatcher(bootstrapSettingsManager.getHttpIdleTimeoutMs());
 
 	if (await handlePackageCommand(args, { extensionFactories })) {
 		const exitCode = process.exitCode ?? 0;
