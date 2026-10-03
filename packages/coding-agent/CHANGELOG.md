@@ -4,23 +4,24 @@
 
 ### Breaking Changes
 
-- Custom SDK `ResourceLoader` implementations must provide `getWorkingSessionResources()` to capture explicit resource selections and discovery flags for native working-session restore.
+- Complete native working-session capture and restore require a persistence-capable `ResourceLoader`; `getWorkingSessionResources()` is optional for ordinary SDK sessions. Directly constructed sessions must supply an explicit launch owner. Snapshot values must be plain finite JSON; lossy values are rejected.
 
 ### Added
 
 - Added complete native working-session save and restore through the SDK and `--working-session`, with private local control and completed-exit receipts. See [Native working sessions](docs/working-session.md).
 - Added `registerProviderAuthFallback()` for ephemeral provider-scoped authentication with native credential precedence, catalogs and transport. See [Provider authentication fallback](docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider).
 - Added opt-in `ignoreStoredCredentials` provider registration and `ModelRuntime.supportsIgnoreStoredCredentials` feature detection for routing providers; explicit keys and persistent login/logout remain unchanged.
-- Added deduplicated, non-fatal diagnostics for extension handlers blocking synchronously for over 100 ms and custom footer renders exceeding 16 ms; awaited work is excluded.
+- Added opt-in, deduplicated diagnostics for extension handlers blocking synchronously for over 100 ms and custom footer renders exceeding 16 ms. Set `PI_EXTENSION_PERFORMANCE=1`; awaited work is excluded.
 - Added JSON selection to the `read` tool. `json: { path?, fields? }` selects a JSON Pointer target and, optionally, immediate object keys before paging and output limits. See [JSON selection with read](docs/sdk.md#json-selection-with-read).
 - Added the replaceable `discover_tools` builtin for full on-demand extension instructions, with deferred activation, prior-turn read gating, and branch-aware persistence and compaction repair. SDK hosts can opt in with `instructionGroupsExtension`.
-- Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle saved-session resume, staged runtime and extension activation, and one-shot startup rollback. Restarts requested by an older fork launcher are refused with relaunch instructions. See [Managed restarts](docs/restart.md).
+- Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle complete native-state resume, staged runtime and extension activation, and one-shot startup rollback. Journal-only handoffs are refused. See [Managed restarts](docs/restart.md).
 - Added optional `compactView` (off by default), `/compact-view`, and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Hybrid opens groups by default while keeping cards compact.
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
-- Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
+- Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Activation checks frozen provider/model IDs before changing either selector link; intentional removals require explicit acceptance, while explicit rollback remains available. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
 
 ### Fixed
 
+- Fixed native working-session service creation loading resources before rejecting a mismatched journal; SDK, CLI and services now share read-only admission before factories.
 - Fixed `/reload` re-enabling previously deselected default-active extension tools; new defaults and tools newly added to `defaultTools` still activate.
 - Fixed resized-image coordinate notes to use separate, unrounded x and y scales.
 - Fixed branch-summary budgets counting system declarations instead of conversation history.

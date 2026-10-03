@@ -65,21 +65,17 @@ After a runtime replacement, subscriptions belong to the old `AgentSession` and 
 
 Saved trust, offline policy and effective settings are applied before native resource discovery and extension factories. Global/project settings layers retain relative resource origins and global-only preferences without rewriting settings files. Required saved extension failures reject restoration.
 
+Ordinary custom loaders need no persistence method. Complete capture/restore requires `getWorkingSessionResources()` and support for `reload({ workingSession })`; unsupported persistence fails instead of fabricating a manifest. Snapshot values must be plain finite JSON. A launch-less v1 artifact requires an explicitly supplied persistence-capable `resourceLoader` and `agentDir`.
+
+`workingSessionResourcesPrepared` is a trusted-host optimization for resources already loaded under the exact saved cwd, launch, effective/layered settings and flags. It is not journal admission or proof of arbitrary host state. Changed queues or conversation entries do not force another resource reload, but every restore still validates the snapshot and matching journal.
+
 <a id="background-commands"></a>
 
 ### Background commands
 
-The CLI loads `builtin:background-command`. SDK hosts opt in by adding `createBackgroundCommandExtension()` to `DefaultResourceLoader.extensionFactories`, then calling `session.bindExtensions({})` to initialize resume monitoring. The tool registers active by default; explicit allowlists and saved tool selections are preserved.
+The CLI loads `builtin:background-command` for detached local shell jobs that survive exit/restart and deliver bounded completion notices. SDK hosts opt in with `createBackgroundCommandExtension()` in `DefaultResourceLoader.extensionFactories`, then call `session.bindExtensions({})` to initialize resume monitoring.
 
-`background_command` accepts `action: "start" | "status" | "cancel"`. Start requires `command`; optional `cwd` resolves from the session working directory (including `~`), and `timeout` is seconds with no default. Cancel requires a job `id`. Status with an `id` returns a readable output tail capped at 16KB/100 lines. Without an `id`, it lists at most 20 jobs newest first, with `offset`, `nextOffset`, and optional `activeOnly` filtering. Negative offsets and invalid timeouts are rejected.
-
-Detached workers use the effective `shellPath`, `shellCommandPrefix`, shell environment, and current `PI_*` session metadata. Each writes its job record, atomic state, and unchanged raw log beneath `<sessionDir>/background-commands/<sessionId>/<jobId>/`. Paths are absolute. Jobs survive Pi exit and session disposal; resume discovers existing work without restarting it. Missing or inaccessible workers report an unknown outcome. Corrupt records do not hide healthy jobs. In-memory sessions retain job files but have no conversation to resume automatically.
-
-Completion messages enter after the entire foreground tool batch, during idle, or after resume. They include job ID, status, exit code when available, command preview, and `logFile`. Success omits output; other outcomes include up to 2KB/20 lines. Read `logFile` for the full output. Persisted notices and terminal status results acknowledge jobs across reload/resume; one process at a time owns delivery for a shared session. After a crashed delivery owner, its filesystem lease expires (normally about 10 seconds) before another process takes over.
-
-Cancelling the agent leaves jobs running and records completions without waking the model; new user input clears wake suppression. Cancelling the job stops its shell process tree. `waitForIdle()` does not wait for external jobs. Print/JSON invocations may exit before completion; use `bash` when the same invocation must consume the result. Session shutdown releases the completion monitor; a disposed SDK context is cleaned up on its next idle tick without stopping detached jobs.
-
-This tool supports native local execution only, not custom `BashOperations` backends or Bash cwd hooks. It honors `pi-change-working-dir` through the synchronous `pi-change-working-dir:resolve-execution-cwd` event: the owner's valid absolute cwd becomes the base for relative `cwd` parameters. The base is captured before worker admission; later directory changes affect only later calls. Owner errors and invalid replies reject the start instead of falling back to the session cwd. An identifiable `pi-change-working-dir` tool or `/cwd` command that does not answer also rejects the start with an update-and-restart instruction. With no identifiable owner and no reply, the session cwd is used. Overriding or excluding `bash` alone does not intercept this separate tool. Permission guards must also handle `background_command` with `action: "start"`. The shipped sandbox and SSH examples block background starts while their restrictions are active; status and cancellation remain available. The plan-mode example hides the entire tool, including status and cancellation, until plan mode is disabled.
+See [Background commands](background-command.md) for tool parameters, storage, cancellation, print-mode limits and permission/cwd integration.
 
 ## Prompting
 
@@ -127,7 +123,7 @@ Each boundary can be supplied explicitly:
 - `resourceLoader` supplies extensions, skills, prompt templates, themes, and context files.
 - `tools`, `noTools`, `excludeTools`, and `customTools` control the active tool set.
 
-Use `DefaultResourceLoader` when you want standard discovery with selected overrides. Supply a custom `ResourceLoader` when the host owns resource storage and discovery completely. Its `getWorkingSessionResources()` returns the current explicit extension, skill, prompt and theme paths, discovery switches and prompt inputs for native capture; `reload({ workingSession })` restores those selections before discovery.
+Use `DefaultResourceLoader` when you want standard discovery with selected overrides. Supply a custom `ResourceLoader` when the host owns resource storage and discovery completely. Its optional `getWorkingSessionResources()` enables complete persistence by returning the current explicit extension, skill, prompt and theme paths, discovery switches and prompt inputs; `reload({ workingSession })` must restore those selections before discovery under the saved settings.
 
 `PI_CACHE_TRACE_DIR` enables temporary private native request tracing with SDK session, purpose
 and reload provenance. Low-level request options accept an optional `cacheTraceContext` for

@@ -242,6 +242,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		excludedToolNames: options.excludedToolNames,
 		extensionRunnerRef,
 	});
+	if (resourceLoader.getWorkingSessionResources)
+		session.workingSessionLaunch = { agentDir: tempDir, ...resourceLoader.getWorkingSessionResources() };
 
 	const events: AgentSessionEvent[] = [];
 	session.subscribe((event) => {

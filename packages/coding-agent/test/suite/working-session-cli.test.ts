@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { join, resolve } from "node:path";
@@ -81,6 +81,30 @@ async function proxy(label: string) {
 }
 
 describe("CLI working-session bootstrap", () => {
+	it("refuses launch-less artifacts before materializing their missing journal", async () => {
+		const h = await createHarness();
+		try {
+			const hold = await h.session.acquireWorkingSession();
+			const state = hold.state;
+			await hold.release();
+			delete state.launch;
+			state.sessionFile = join(h.tempDir, "refused.jsonl");
+			const statePath = join(h.tempDir, "working-session.json");
+			writeFileSync(statePath, JSON.stringify(state));
+			const result = await runCli(["--working-session", statePath, "--help"], h.tempDir, {
+				...process.env,
+				[ENV_AGENT_DIR]: h.tempDir,
+				PI_OFFLINE: "1",
+			});
+			expect(existsSync(state.sessionFile)).toBe(false);
+			expect(result.signal).toBeNull();
+			expect(result.code).toBe(1);
+			expect(result.stderr).toContain("CLI native restore requires a launch descriptor");
+		} finally {
+			h.cleanup();
+		}
+	});
+
 	it.each([
 		{ args: ["--version"], output: /^\d+\.\d+\.\d+/ },
 		{ args: ["config", "--help"], output: /config/ },

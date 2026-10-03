@@ -15,7 +15,7 @@ import {
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
-import { parseWorkingSession, readWorkingSession, type WorkingSession } from "./working-session.ts";
+import { resolveWorkingSession, type WorkingSession } from "./working-session.ts";
 
 /**
  * Non-fatal issues collected while creating services or sessions.
@@ -140,12 +140,9 @@ function applyExtensionFlagValues(
 export async function createAgentSessionServices(
 	options: CreateAgentSessionServicesOptions,
 ): Promise<AgentSessionServices> {
-	const saved =
-		typeof options.workingSession === "string"
-			? readWorkingSession(options.workingSession)
-			: options.workingSession
-				? parseWorkingSession(JSON.stringify(options.workingSession))
-				: undefined;
+	const saved = resolveWorkingSession(options.workingSession);
+	if (saved && !saved.launch)
+		throw new Error("Launch-less native restore requires an explicit SDK ResourceLoader and agentDir");
 	const cwd = resolvePath(saved?.cwd ?? options.cwd);
 	const agentDir = resolvePath(saved?.launch?.agentDir ?? options.agentDir ?? getAgentDir());
 	if (saved?.launch?.offline !== undefined) {

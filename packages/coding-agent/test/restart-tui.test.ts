@@ -92,19 +92,19 @@ export default function(pi) {
 			);
 			return path;
 		},
-		start(extension: string, options: { env?: Record<string, string>; legacyHandoff?: unknown } = {}) {
+		start(extension: string, options: { env?: Record<string, string>; invalidHandoff?: unknown } = {}) {
 			if (!existsSync(cli)) throw new Error(`Build the coding-agent package first: missing ${cli}`);
 			const script = join(root, "launch.sh");
 			let entry = cli;
-			if (options.legacyHandoff !== undefined) {
-				entry = join(root, "legacy-parent.mjs");
+			if (options.invalidHandoff !== undefined) {
+				entry = join(root, "invalid-parent.mjs");
 				writeFileSync(
 					entry,
 					`
 import {spawn} from 'node:child_process';
 const child = spawn(process.execPath, [${JSON.stringify(join(dirname(cli), "cli-worker.js"))}, ...process.argv.slice(2)], {
  stdio:['inherit','inherit','inherit','ipc'],
- env:{...process.env, PI_MANAGED_CLI:'1', PI_RESTART_HANDOFF:${JSON.stringify(JSON.stringify(options.legacyHandoff))}}
+ env:{...process.env, PI_MANAGED_CLI:'1', PI_RESTART_HANDOFF:${JSON.stringify(JSON.stringify(options.invalidHandoff))}}
 });
 child.on('exit', code => {process.exitCode = code ?? 1;});
 `,
@@ -360,18 +360,18 @@ describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_
 	}, 60_000);
 
 	it.each([
-		{ checkpoint: { session: { sessionId: "legacy-session", sessionFile: "/legacy/session" } } },
-		{ sessionId: "legacy-session", sessionFile: 7 },
-		{ sessionId: 7, sessionFile: "/legacy/session" },
+		{ sessionId: "saved-session", sessionFile: "/saved/session" },
+		{ sessionId: "saved-session", sessionFile: 7, workingSession: "/private/state.json" },
+		{ sessionId: 7, sessionFile: "/saved/session", workingSession: "/private/state.json" },
+		{ sessionId: "saved-session", sessionFile: "/saved/session", workingSession: "relative.json" },
 	])(
-		"rejects legacy handoff before session_start: %j",
-		async (legacyHandoff) => {
+		"rejects incomplete or malformed handoff before session_start: %j",
+		async (invalidHandoff) => {
 			const f = fixture();
-			f.start(f.extension("v1"), { legacyHandoff });
+			f.start(f.extension("v1"), { invalidHandoff });
 			await f.wait(() => existsSync(f.status));
 			expect(readFileSync(f.status, "utf8").trim()).toBe("1");
-			expect(f.screen()).toContain("older Pi launcher");
-			expect(f.screen()).toContain("quit and run pi -c");
+			expect(f.screen()).toContain("Invalid restart handoff");
 			expect(f.read()).toHaveLength(0);
 		},
 		60_000,

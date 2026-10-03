@@ -154,7 +154,8 @@ function omitReplacedExtensions(
 }
 
 export interface ResourceLoader {
-	getWorkingSessionResources(): Omit<WorkingSessionLaunch, "agentDir" | "trustProject" | "offline">;
+	/** Complete persistence also requires honoring reload({ workingSession }) under saved settings. */
+	getWorkingSessionResources?(): Omit<WorkingSessionLaunch, "agentDir" | "trustProject" | "offline">;
 	getExtensions(): LoadExtensionsResult;
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };

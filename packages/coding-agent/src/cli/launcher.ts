@@ -175,19 +175,20 @@ export async function superviseCli(
 							!("sessionFile" in session) ||
 							typeof session.sessionFile !== "string" ||
 							!("sessionId" in session) ||
-							typeof session.sessionId !== "string"
+							typeof session.sessionId !== "string" ||
+							!session.sessionId ||
+							!("workingSession" in session) ||
+							typeof session.workingSession !== "string"
 						)
 							return;
-						if ("workingSession" in session && typeof session.workingSession === "string")
-							assertPrivateFilePath(session.workingSession);
+						assertPrivateFilePath(session.workingSession);
+						if (!statSync(session.workingSession).isFile()) return;
 						restart = {
 							type: "pi:restart",
 							session: {
 								sessionFile: session.sessionFile,
 								sessionId: session.sessionId,
-								...("workingSession" in session && typeof session.workingSession === "string"
-									? { workingSession: session.workingSession }
-									: {}),
+								workingSession: session.workingSession,
 							},
 							request: parseRestartRequest(value.request),
 						};
@@ -216,10 +217,8 @@ export async function superviseCli(
 			const exitCode = result.signal ? 128 + constants.signals[result.signal] : timedOut ? 1 : (result.code ?? 1);
 			if (stopping) return exitCode;
 			if (restart && result.code === 0 && !result.signal) {
-				if (restart.session.workingSession) restartArtifacts.add(restart.session.workingSession);
-				const selection = restart.session.workingSession
-					? ["--working-session", restart.session.workingSession]
-					: ["--session", restart.session.sessionFile];
+				restartArtifacts.add(restart.session.workingSession);
+				const selection = ["--working-session", restart.session.workingSession];
 				const previous: Launch = {
 					...launch,
 					args: [...getRestartArgs(launch.args), ...selection],

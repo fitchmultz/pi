@@ -70,8 +70,14 @@ extensions, or sessions. Running sessions keep their runtime until a full relaun
 or a [managed restart](restart.md).
 
 The installer also supports `--stage`, `--activate <identity>`, and
-`--rollback <identity>`; pass the same `--selector` for each operation.
+`--rollback <identity>`; pass the same `--selector` and `--releases` for each operation.
 The prior package target is preserved as `<selector>.previous`.
+
+Normal install/activation compares frozen provider/model IDs before changing either link.
+Catalog losses refuse selection and leave the validated candidate staged. If removals are
+intentional, review them and run the printed `--activate <identity> --accept-model-removals`
+command from a fork checkout. Explicit `--rollback` skips only the catalog downgrade check;
+missing or invalid catalogs otherwise fail closed. Comparison does not regenerate model data.
 Run `node scripts/install-fork.mjs --help` for options and pruning safeguards.
 
 Updates, staging, activation, rollback, and pruning share `<selector>.lock`.

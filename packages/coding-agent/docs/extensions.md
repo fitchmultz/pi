@@ -267,9 +267,11 @@ Release resources in `session_shutdown` even when normal operation attempted cle
 Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path.
 Use `ctx.shutdown()` to request an orderly process shutdown.
 
-### Non-fatal performance warnings
+### Opt-in performance warnings
 
-Pi reports one warning per loaded extension and event kind when a handler's synchronous
+Set `PI_EXTENSION_PERFORMANCE=1` to enable diagnostics. They are off by default: handler dispatch does not read the clock, and custom footers are not wrapped for timing.
+
+When enabled, Pi reports one warning per loaded extension and event kind when a handler's synchronous
 invocation exceeds 100 ms. Custom footer renders exceeding 16 ms produce one warning per
 extension. These budgets protect input/turn responsiveness and a single TUI frame.
 
