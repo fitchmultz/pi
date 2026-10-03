@@ -10,7 +10,7 @@ export const WORKING_SESSION_WORKER_ENV = "PI_WORKING_SESSION_WORKER";
 
 /** Headless modes become ready only after their native owner and extensions bind. */
 export async function notifyCliReady(): Promise<void> {
-	if (!process.env[WORKING_SESSION_LAUNCH_ENV] || !process.send || !process.connected) return;
+	if (process.env[MANAGED_CLI_ENV] !== "1" || !process.send || !process.connected) return;
 	await new Promise<void>((resolve, reject) =>
 		process.send!({ type: "pi:ready" }, (error) => (error ? reject(error) : resolve())),
 	);

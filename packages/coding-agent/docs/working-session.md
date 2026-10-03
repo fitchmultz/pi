@@ -67,7 +67,11 @@ Restoration waits for new native input. It does not replay a provider action, to
 
 ## Conditional local control
 
-The CLI enables a private Unix-socket bridge only when `PI_WORKING_SESSION_SOCKET` is set. One JSONL connection owns one acquisition:
+The CLI enables a private Unix-socket bridge only when `PI_WORKING_SESSION_SOCKET` is set.
+
+Before loading resources or extension factories, the worker consumes `PI_WORKING_SESSION_SOCKET`, `PI_WORKING_SESSION_EXIT_PATH`, `PI_WORKING_SESSION_LAUNCH` and `PI_WORKING_SESSION_WORKER` into its private control state. Factory-spawned processes and shell tools therefore do not pass the primary launch's transport to nested Pi sessions. The launcher retains its own environment for replacement workers and final receipts. The separate `PI_RESTART_SOCKET` still lets shell tools request a managed restart.
+
+One JSONL connection owns one acquisition:
 
 ```json
 {"action":"acquire","path":"/private/session/state.json","boundary":"settled"}

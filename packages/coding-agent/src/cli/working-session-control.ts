@@ -11,13 +11,35 @@ import {
 	WORKING_SESSION_WORKER_ENV,
 } from "./restart-protocol.ts";
 
+export interface WorkingSessionTransport {
+	path: string | undefined;
+	exitPath: string | undefined;
+	launch: string | undefined;
+	worker: string | undefined;
+}
+
+/** Capture worker-owned transport before extension factories or tools can spawn children. */
+export function consumeWorkingSessionEnvironment(): WorkingSessionTransport {
+	const transport = {
+		path: process.env.PI_WORKING_SESSION_SOCKET,
+		exitPath: process.env.PI_WORKING_SESSION_EXIT_PATH,
+		launch: process.env[WORKING_SESSION_LAUNCH_ENV],
+		worker: process.env[WORKING_SESSION_WORKER_ENV],
+	};
+	delete process.env.PI_WORKING_SESSION_SOCKET;
+	delete process.env.PI_WORKING_SESSION_EXIT_PATH;
+	delete process.env[WORKING_SESSION_LAUNCH_ENV];
+	delete process.env[WORKING_SESSION_WORKER_ENV];
+	return transport;
+}
+
 /** Local same-user capability transport. The workspace owns freezing, archives and sleep policy. */
 export async function startWorkingSessionControl(
 	runtime: AgentSessionRuntime,
 	onFinalization?: (session: AgentSession) => Promise<boolean>,
+	transport = consumeWorkingSessionEnvironment(),
 ): Promise<(() => Promise<void>) | undefined> {
-	const path = process.env.PI_WORKING_SESSION_SOCKET;
-	const exitPath = process.env.PI_WORKING_SESSION_EXIT_PATH;
+	const { path, exitPath, launch } = transport;
 	if (!path && !exitPath) {
 		if (onFinalization)
 			runtime.setFinalization(async (session) => {
@@ -26,8 +48,7 @@ export async function startWorkingSessionControl(
 		return;
 	}
 	if (process.platform === "win32") throw new Error("Native working-session control requires Unix sockets");
-	const launch = process.env[WORKING_SESSION_LAUNCH_ENV];
-	const worker = process.env[WORKING_SESSION_WORKER_ENV] ?? randomUUID();
+	const worker = transport.worker ?? randomUUID();
 	const sockets = new Map<Socket, () => Promise<void>>();
 	const guardPath = path ? `${path}.guard` : undefined;
 	let cleanup = async () => {};
