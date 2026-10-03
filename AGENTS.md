@@ -24,7 +24,7 @@
 - For investigations, read relevant sections and complete functions first. Expand to full files when needed to resolve uncertainty. Read files in full before editing them.
 - No `any` unless absolutely necessary.
 - Inline single-line helpers that have only one call site.
-- Check node_modules for external API types; don't guess.
+- Before adding custom functionality, inspect Pi's APIs and installed dependencies. Trace relevant callers and verify required behavior from source, types, docs, or runtime evidence; resolve discoverable unknowns and state remaining uncertainty rather than guess.
 - **No inline imports** (`await import()`, `import("pkg").Type`, dynamic type imports). Top-level imports only.
 - In `packages/coding-agent`, resolve package assets through helpers in `src/config.ts`. Do not use `__dirname` directly; the helpers account for source checkouts, npm installations, and standalone binaries.
 - Never remove or downgrade code to fix type errors from outdated deps; upgrade the dep instead.

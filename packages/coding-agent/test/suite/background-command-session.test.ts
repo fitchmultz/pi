@@ -428,8 +428,9 @@ describe("background command extension delivery", () => {
 				}
 			};
 			const h = await harness(undefined, [{ factory: owner, path: join(root, "index.ts") }]);
+			const { command } = held(h);
 			h.setResponses([
-				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command: "printf safe" }), {
+				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("Done"),

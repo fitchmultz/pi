@@ -142,7 +142,6 @@ export interface CacheTraceContext {
 	catalogDigest?: string;
 	extensionsDigest?: string;
 	extensions?: { path: string; digest?: string; loaded: boolean }[];
-	declarationsDigest?: string;
 	configGeneration?: string;
 	authGeneration?: number;
 	coverageGaps?: string[];

@@ -152,14 +152,17 @@ async function createRuntimeHost(options: {
 		await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
 	}
 
+	const resourceLoader = createTestResourceLoader({ extensionsResult: options.extensionsResult });
 	const session = new AgentSession({
 		agent,
 		sessionManager,
 		settingsManager,
 		cwd: tempDir,
 		modelRuntime: getModelRuntime(modelRegistry),
-		resourceLoader: createTestResourceLoader({ extensionsResult: options.extensionsResult }),
+		resourceLoader,
 	});
+	if (resourceLoader.getWorkingSessionResources)
+		session.workingSessionLaunch = { agentDir: tempDir, ...resourceLoader.getWorkingSessionResources() };
 
 	const runtimeHost = {
 		session,

@@ -34,7 +34,12 @@ import {
 	withFileMutationQueue,
 } from "./tools/index.ts";
 import { getBranchSelection } from "./virtual-models.ts";
-import { openWorkingSession, parseWorkingSession, readWorkingSession, type WorkingSession } from "./working-session.ts";
+import {
+	openWorkingSession,
+	resolveWorkingSession,
+	type WorkingSession,
+	workingSessionResourcesMatch,
+} from "./working-session.ts";
 
 // Preserve the pre-0.81 fallback for extensions that construct Agent instances
 // or invoke low-level agent loops without supplying streamFn. Agent core remains
@@ -180,18 +185,22 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	const saved =
-		typeof options.workingSession === "string"
-			? readWorkingSession(options.workingSession)
-			: options.workingSession
-				? parseWorkingSession(JSON.stringify(options.workingSession))
-				: undefined;
+	const saved = resolveWorkingSession(options.workingSession);
+	let resourceLoader = options.resourceLoader;
+	if (saved && resourceLoader && !resourceLoader.getWorkingSessionResources)
+		throw new Error("Native working-session restore requires ResourceLoader persistence support");
+	if (saved && !saved.launch) {
+		if (!resourceLoader?.getWorkingSessionResources || !options.agentDir)
+			throw new Error(
+				"Launch-less native restore requires an explicit persistence-capable ResourceLoader and agentDir",
+			);
+		saved.launch = { agentDir: resolvePath(options.agentDir), ...resourceLoader.getWorkingSessionResources() };
+	}
 	const savedManager = saved ? openWorkingSession(saved) : undefined;
 	const cwd = resolvePath(saved?.cwd ?? options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
 	const agentDir = resolvePath(saved?.launch?.agentDir ?? options.agentDir ?? getDefaultAgentDir());
 	if (saved && options.sessionManager && options.sessionManager.getSessionId() !== saved.header.id)
 		throw new Error("Working session and supplied SessionManager identity disagree");
-	let resourceLoader = options.resourceLoader;
 
 	if (saved?.launch?.offline !== undefined) {
 		if (saved.launch.offline) process.env.PI_OFFLINE = "1";
@@ -220,7 +229,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 		await resourceLoader.reload(saved ? { workingSession: saved } : undefined);
 		time("resourceLoader.reload");
-	} else if (saved && JSON.stringify(options.workingSessionResourcesPrepared) !== JSON.stringify(saved)) {
+	} else if (saved && !workingSessionResourcesMatch(saved, options.workingSessionResourcesPrepared)) {
 		await resourceLoader.reload({ workingSession: saved });
 	}
 
@@ -531,8 +540,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 	});
 
+	if (resourceLoader.getWorkingSessionResources)
+		session.workingSessionLaunch = { agentDir, ...resourceLoader.getWorkingSessionResources() };
 	if (saved) session.restoreWorkingSession(saved);
-	session.workingSessionLaunch = { agentDir, ...resourceLoader.getWorkingSessionResources() };
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

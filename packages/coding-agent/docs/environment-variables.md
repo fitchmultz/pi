@@ -86,6 +86,7 @@ These variables are read by Pi itself:
 | `PI_TELEMETRY` | Override install/update telemetry and provider attribution headers: `1`/`true`/`yes` or `0`/`false`/`no` |
 | `PI_CACHE_RETENTION` | Set to `long` for extended provider prompt caching where supported |
 | `PI_CACHE_TRACE_DIR` | Opt in to temporary private, metadata-only native cache tracing; see [Passive cache investigation](cache-tracing.md) for limits, coverage and cleanup |
+| `PI_EXTENSION_PERFORMANCE` | Set to `1` to enable slow-handler and footer-render warnings; off by default. See [Extensions](extensions.md#opt-in-performance-warnings) |
 | `PI_SHARE_VIEWER_URL` | Override the base URL used by `/share` |
 | `PI_RADIUS_GATEWAY` | Override the Radius gateway origin used by `/bug` uploads and Radius relay connections |
 | `PI_HARDWARE_CURSOR` | Set to `1` to show the hardware cursor; see [Terminal setup](terminal-setup.md) |

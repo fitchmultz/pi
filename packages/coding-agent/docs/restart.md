@@ -1,6 +1,6 @@
 # Managed restarts
 
-The bundled Node CLI runs Pi inside a worker, with a small launcher outside the agent process. Restart replaces the worker and opens the **same saved session file**. It does not replay startup prompts, attachments, completed commands, or provider requests.
+The bundled Node CLI runs Pi inside a worker, with a small launcher outside the agent process. Restart replaces the worker using complete native state tied to the **same saved session file**. It does not replay startup prompts, attachments, completed commands, or provider requests.
 
 Use `/reload` for changed extension source and resources in the current process. Use restart for core/runtime changes or a clean process.
 
@@ -48,11 +48,9 @@ Readiness is signalled only after TUI initialization. If the selected worker can
 
 Readiness is not proof that every provider or tool works. Validate candidates first. Failures after readiness are not automatically rolled back or replayed, because work may already have had side effects.
 
-### Upgrading sessions started by the 0.99 fork
+## Complete native state
 
-Sessions started by the 0.99 fork launcher must **quit and relaunch** using `pi -c` or `pi --session <file>` to use the new runtime. Do not `/restart` across the cutover: the new worker rejects the legacy handoff before opening a session, and the old launcher rolls back to the old runtime. In fullscreen mode the old TUI can hide that error. There is no legacy-schema conversion or compatibility layer.
-
-Session history remains the authority. Restart uses the complete [native working-session format](working-session.md) to preserve the selected leaf, all branches, effective settings and current loadout. Original CLI options are retained except session-selection flags, consumed startup prompts/attachments, and `--model`/`--provider`/`--thinking`. With `--api-key`, the launch model is kept because the key applies to it; the key is never serialized. Extensions persist their own state with ordinary session entries and shutdown handlers. Restart still waits for runnable queues to drain and refuses pending next-turn context. It does not transfer arbitrary callback memory, migrate the runtime or replay completed effects.
+Session history remains the authority. Every restart requires an existing private artifact in the complete [native working-session format](working-session.md) to preserve the selected leaf, all branches, effective settings and current loadout. Missing, journal-only or incompatible handoffs are refused; there is no journal-resume fallback. Original CLI options are retained except session-selection flags, consumed startup prompts/attachments, and `--model`/`--provider`/`--thinking`. With `--api-key`, the launch model is kept because the key applies to it; the key is never serialized. Extensions persist their own state with ordinary session entries and shutdown handlers. Restart still waits for runnable queues to drain and refuses pending next-turn context. It does not transfer arbitrary callback memory, migrate the runtime or replay completed effects.
 
 The captured settings are restored before discovery and extension factories. To adopt settings-file edits, use `/reload`. Each restart creates a private state file in its own temporary directory, independently of journal-directory permissions. It remains available through startup rollback; the launcher removes the file and empty directory after a replacement becomes ready or the launch ends. A user-supplied `--working-session` file remains untouched.
 

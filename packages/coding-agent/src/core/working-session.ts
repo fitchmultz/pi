@@ -1,8 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { copyJson } from "@earendil-works/chord";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
+import { resolvePath } from "../utils/paths.ts";
 import { assertValidSessionId, type SessionEntry, type SessionHeader, SessionManager } from "./session-manager.ts";
 import type { Settings } from "./settings-manager.ts";
 import type { NormalizedBuildSystemPromptOptions } from "./system-prompt.ts";
@@ -218,14 +221,12 @@ function prompt(value: unknown): boolean {
 	);
 }
 
-/** Validation precedes SessionManager construction: no journal repair or migration on rejection. */
-export function parseWorkingSession(text: string): WorkingSession {
-	const value: unknown = JSON.parse(text);
+function validateWorkingSession(value: unknown): WorkingSession {
 	const fail: () => never = () => {
 		throw new Error("Invalid native working session");
 	};
-	if (!record(value) || value.version !== 1 || !["turn", "settled"].includes(String(value.boundary))) fail();
 	if (!record(value)) fail();
+	if (value.version !== 1 || !["turn", "settled"].includes(String(value.boundary))) fail();
 	for (const name of ["cwd", "sessionDir", "createdAt"]) if (typeof value[name] !== "string") fail();
 	if (
 		!isAbsolute(String(value.cwd)) ||
@@ -419,16 +420,50 @@ export function parseWorkingSession(text: string): WorkingSession {
 	return value as unknown as WorkingSession;
 }
 
+/** An owned JSON snapshot; executable or lossy values cannot become persistence evidence. */
+export function copyWorkingSession(value: unknown): WorkingSession {
+	return validateWorkingSession(copyJson(value, { omitUndefinedProperties: true }));
+}
+
+export function parseWorkingSession(text: string): WorkingSession {
+	return copyWorkingSession(JSON.parse(text));
+}
+
 export function readWorkingSession(path: string): WorkingSession {
 	return parseWorkingSession(new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path)));
 }
 
-export function writeWorkingSession(path: string, state: WorkingSession): void {
-	assertPrivateFilePath(path);
-	atomicWriteFileSync(path, `${JSON.stringify(state)}\n`);
+/** Read-only admission must precede services, discovery and extension factories. */
+export function resolveWorkingSession(input: WorkingSession | string | undefined): WorkingSession | undefined {
+	const state =
+		input === undefined
+			? undefined
+			: typeof input === "string"
+				? readWorkingSession(input)
+				: copyWorkingSession(input);
+	if (state) assertWorkingSessionJournal(state);
+	return state;
 }
 
-export function openWorkingSession(state: WorkingSession): SessionManager {
+/** Trusted preparation hint, not journal admission or a proof of arbitrary host memory. */
+export function workingSessionResourcesMatch(state: WorkingSession, prepared: WorkingSession | undefined): boolean {
+	if (!prepared) return false;
+	const policy = ({ cwd, launch, settings, settingsLayers, flags }: WorkingSession) => ({
+		cwd: resolvePath(cwd),
+		launch,
+		settings,
+		settingsLayers,
+		flags,
+	});
+	return isDeepStrictEqual(policy(state), policy(prepared));
+}
+
+export function writeWorkingSession(path: string, state: WorkingSession): void {
+	assertPrivateFilePath(path);
+	atomicWriteFileSync(path, `${JSON.stringify(copyWorkingSession(state))}\n`);
+}
+
+function assertWorkingSessionJournal(state: WorkingSession): void {
 	const entries = [state.header, ...state.entries];
 	if (state.sessionFile && existsSync(state.sessionFile)) {
 		const text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(state.sessionFile));
@@ -439,7 +474,19 @@ export function openWorkingSession(state: WorkingSession): SessionManager {
 		if (JSON.stringify(actual) !== JSON.stringify(entries))
 			throw new Error("Native working session journal differs from saved state; refusing to overwrite it");
 	}
-	return SessionManager.fromWorkingSession(state.cwd, state.sessionDir, state.sessionFile, entries, state.leafId);
+}
+
+/** Recheck the live journal immediately before the native manager can materialize it. */
+export function openWorkingSession(state: WorkingSession): SessionManager {
+	const saved = copyWorkingSession(state);
+	assertWorkingSessionJournal(saved);
+	return SessionManager.fromWorkingSession(
+		saved.cwd,
+		saved.sessionDir,
+		saved.sessionFile,
+		[saved.header, ...saved.entries],
+		saved.leafId,
+	);
 }
 
 /** Single native admission gate; no sleep policy or polling. */

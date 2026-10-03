@@ -6,10 +6,12 @@ import {
 	chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync,
 	renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
+import { findPackageJSON } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
+import { validateModelDataDirectory } from "../packages/ai/scripts/model-data.ts";
 import { claimForkReleaseStore } from "../packages/coding-agent/src/utils/fork-release-store.ts";
 import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import { findPackageDirectories } from "./package-workspaces.mjs";
@@ -214,14 +216,64 @@ async function withMutationLock(releases, selector, action) {
 	}
 }
 
-export function activateRelease(releases, identity, selector) {
-	return withMutationLock(releases, selector, () => activateLockedRelease(releases, identity, selector));
+function readCatalogIds(packageDir, catalogSha256) {
+	// Resolve the installed dependency without loading providers, credentials or remote catalogs.
+	const manifest = findPackageJSON("@earendil-works/pi-ai/models", realpathSync(join(packageDir, "package.json")));
+	if (!manifest) throw new Error(`Missing installed pi-ai catalog: ${packageDir}`);
+	const data = join(dirname(manifest), "dist/providers/data");
+	if (catalogSha256 && sha256(join(data, ".manifest.json")) !== catalogSha256) {
+		throw new Error(`Installed catalog does not match its release receipt: ${packageDir}`);
+	}
+	const structure = Object.create(null);
+	const ids = new Set();
+	for (const file of readdirSync(data).filter((file) => file.endsWith(".json") && file !== ".manifest.json").sort()) {
+		const provider = file.slice(0, -5);
+		const groups = JSON.parse(readFileSync(join(data, file), "utf8"));
+		if (!groups || typeof groups !== "object" || Array.isArray(groups)) throw new Error(`Invalid catalog: ${file}`);
+		structure[provider] = Object.create(null);
+		for (const [api, values] of Object.entries(groups)) {
+			if (!values || typeof values !== "object" || Array.isArray(values)) throw new Error(`Invalid catalog API group: ${file}/${api}`);
+			for (const [key, model] of Object.entries(values)) {
+				structure[provider][key] = api;
+				ids.add(JSON.stringify([provider, model?.id]));
+			}
+		}
+	}
+	if (!Object.keys(structure).length) throw new Error(`Empty installed catalog: ${packageDir}`);
+	validateModelDataDirectory(structure, data);
+	return ids;
 }
 
-function activateLockedRelease(releases, identity, selector) {
+export function activateRelease(releases, identity, selector, options = {}) {
+	return withMutationLock(releases, selector, () => activateLockedRelease(releases, identity, selector, options));
+}
+
+function activateLockedRelease(releases, identity, selector, { rollback = false, acceptModelRemovals = false } = {}) {
 	const release = readVerifiedRelease(releasePath(releases, identity));
 	const previous = selectorTarget(selector);
 	if (previous === release.packageDir) return { ...release, previous, changed: false };
+	if (!rollback) {
+		const candidateIds = readCatalogIds(release.packageDir, release.receipt.catalogSha256);
+		if (previous) {
+			const selectedDirectory = resolve(previous, "../../..");
+			const selectedReceipt = existsSync(join(selectedDirectory, receiptFile)) ? readVerifiedRelease(selectedDirectory).receipt : undefined;
+			const selectedIds = readCatalogIds(previous, selectedReceipt?.catalogSha256);
+			const lost = [...selectedIds].filter((id) => !candidateIds.has(id)).sort()
+				.map((id) => JSON.parse(id).join("/"));
+			if (lost.length) {
+				const details = `Model IDs removed from the selected catalog (${lost.length}):\n${lost.map((id) => `  ${id}`).join("\n")}`;
+				if (!acceptModelRemovals) {
+					const command = ["node", "scripts/install-fork.mjs", "--activate", identity,
+						"--accept-model-removals", "--releases", resolve(releases), "--selector", resolve(selector)]
+						.map((arg) => `'${arg.replaceAll("'", "'\"'\"'")}'`).join(" ");
+					throw new Error(`${details}\nRefusing activation; validated release remains staged: ${identity}\nReview the removals, then run from a fork checkout:\n  ${command}\nUse --rollback for explicit recovery.`);
+				}
+				console.warn(`Accepted intentional model removals (--accept-model-removals):\n${details}`);
+			}
+		}
+	} else {
+		console.warn("Explicit rollback: catalog downgrade check skipped.");
+	}
 	mkdirSync(dirname(selector), { recursive: true });
 	if (previous) {
 		selectorTarget(`${selector}.previous`); // Never overwrite an unrelated real file.
@@ -282,7 +334,7 @@ export function pruneReleases({ releases, selector, keep }, livePaths = liveProc
 
 // The callback builds/installs/tests only a NEW candidate. The receipt is written
 // last, and is the only reusable success marker. Existing releases are never modified.
-export async function installRelease({ releases, receipt, selector, stage = false }, installAndValidate) {
+export async function installRelease({ releases, receipt, selector, stage = false, acceptModelRemovals = false }, installAndValidate) {
 	return withMutationLock(releases, selector, async (ownerSelector) => {
 		const identity = releaseIdentity(receipt);
 		const directory = releasePath(releases, identity);
@@ -310,13 +362,13 @@ export async function installRelease({ releases, receipt, selector, stage = fals
 			}
 		}
 		return stage ? { ...readVerifiedRelease(directory), reused: !created, changed: false }
-			: { ...activateLockedRelease(releases, identity, selector), reused: !created };
+			: { ...activateLockedRelease(releases, identity, selector, { acceptModelRemovals }), reused: !created };
 	});
 }
 
 function printUsage() {
 	console.log(`Usage: node scripts/install-fork.mjs [--ref <commit>] [--source-archive <file>] [--stage]
-       node scripts/install-fork.mjs --activate <identity>
+       node scripts/install-fork.mjs --activate <identity> [--accept-model-removals]
        node scripts/install-fork.mjs --rollback <identity>
        node scripts/install-fork.mjs --prune --keep <count>
 
@@ -330,15 +382,21 @@ and tmux. Termux also needs Go >=1.26 when Android blocks the compiler's fanotif
 --source-archive <file> Use a frozen source archive and adjacent source.commit
 --stage                 Build/install/validate without changing the selector
 --activate <identity>   Select an existing validated release, without rebuilding
---rollback <identity>   Select an older validated release (same native operation)
+--rollback <identity>   Explicit recovery: select a validated release without the catalog downgrade check
+--accept-model-removals Accept intentional model-ID losses during install/activation;
+                        removed provider/model IDs are still printed (not valid with stage/prune/rollback)
 --prune --keep <count>  Delete validated releases older than the newest <count>,
                         except legacy, selected, .previous and visibly running ones
 --releases <directory>  Default: ~/.local/share/pi-fork/releases
 --selector <symlink>    Default: ~/.local/share/npm-global/lib/node_modules/${codingAgentName}
 -h, --help              Show this help
 
-Example: node scripts/install-fork.mjs --ref HEAD --stage
-Exit codes: 0 success, 1 failure.
+Examples: node scripts/install-fork.mjs --ref HEAD --stage
+          node scripts/install-fork.mjs --activate <identity> --accept-model-removals
+          node scripts/install-fork.mjs --rollback <identity>
+Exit codes: 0 success, 1 failure (including refused catalog losses; selector/.previous unchanged).
+Normal selection compares frozen installed provider/model IDs under the shared lock.
+Missing/invalid catalogs fail closed; no fresh generation or remote catalog refresh.
 
 Selection atomically replaces only the package symlink; its old target is kept
 at <selector>.previous. Existing releases and user settings/auth/sessions are
@@ -360,21 +418,27 @@ export async function main(args = process.argv.slice(2)) {
 		selector: join(homedir(), ".local/share/npm-global/lib/node_modules", codingAgentName),
 	};
 	let selection;
+	let rollback = false;
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
 		if (arg === "--help" || arg === "-h") { printUsage(); return; }
 		if (arg === "--stage") { options.stage = true; continue; }
 		if (arg === "--prune") { options.prune = true; continue; }
+		if (arg === "--accept-model-removals") { options.acceptModelRemovals = true; continue; }
 		if (!["--ref", "--source-archive", "--releases", "--selector", "--activate", "--rollback", "--keep"].includes(arg)) throw new Error(`Unknown option: ${arg}`);
 		const value = args[++i];
 		if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
 		if (arg === "--activate" || arg === "--rollback") {
 			if (selection) throw new Error("Choose only one activation operation");
 			selection = value;
+			rollback = arg === "--rollback";
 		} else options[arg.slice(2)] = value;
 	}
 	options.releases = resolve(options.releases);
 	options.selector = resolve(options.selector);
+	if (options.acceptModelRemovals && (options.stage || options.prune || rollback)) {
+		throw new Error("--accept-model-removals cannot combine with --stage, --prune or --rollback");
+	}
 	if (options.prune !== (options.keep !== undefined)) throw new Error("Use --prune with --keep <count>");
 	if (options.prune) {
 		if (selection || options.stage || args.includes("--ref") || options["source-archive"]) {
@@ -389,7 +453,7 @@ export async function main(args = process.argv.slice(2)) {
 		throw new Error("Activation cannot combine with --stage, --ref or --source-archive");
 	}
 	if (selection) {
-		const result = await activateRelease(options.releases, selection, options.selector);
+		const result = await activateRelease(options.releases, selection, options.selector, { rollback, acceptModelRemovals: options.acceptModelRemovals });
 		console.log(JSON.stringify(result, null, 2));
 		return result;
 	}

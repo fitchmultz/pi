@@ -59,7 +59,7 @@ describe("TUI cell size responses", () => {
 		});
 	});
 
-	it("consumes cell size responses and still forwards later user input", () => {
+	it("consumes native cell size replies before extension listeners and forwards later user input", () => {
 		withImageTerminal(() => {
 			setCellDimensions({ widthPx: 9, heightPx: 18 });
 
@@ -69,13 +69,20 @@ describe("TUI cell size responses", () => {
 
 			tui.setFocus(recorder);
 			tui.start();
+			const observed: string[] = [];
+			tui.addInputListener((data) => {
+				observed.push(data);
+				if (data.startsWith("\x1b")) return { consume: true };
+			});
 
 			terminal.sendInput("\x1b[6;20;10t");
 			assert.deepStrictEqual(recorder.inputs, []);
+			assert.deepStrictEqual(observed, []);
 			assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 });
 
 			terminal.sendInput("q");
 			assert.deepStrictEqual(recorder.inputs, ["q"]);
+			assert.deepStrictEqual(observed, ["q"]);
 			tui.stop();
 		});
 	});

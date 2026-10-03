@@ -22,7 +22,6 @@ const PROVENANCE_FIELDS = [
 	"release",
 	"catalogDigest",
 	"extensionsDigest",
-	"declarationsDigest",
 	"configGeneration",
 	"authGeneration",
 ] as const;
@@ -836,8 +835,4 @@ export function createCacheTrace(
 		if (w) append(w, { kind: "coverage_gap", reason: "observer_failure", incomplete: true });
 		return undefined;
 	}
-}
-
-export function recordCacheTraceGap(model: TraceModel, options: TraceOptions | undefined, reason: string): void {
-	createCacheTrace(model, options)?.gap(reason);
 }

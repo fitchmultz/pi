@@ -40,6 +40,10 @@
               "path": "restart.md"
             },
             {
+              "title": "Run Background Commands",
+              "path": "background-command.md"
+            },
+            {
               "title": "Run Pi Safely",
               "path": "security.md"
             },

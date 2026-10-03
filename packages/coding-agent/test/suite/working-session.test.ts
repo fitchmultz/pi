@@ -14,10 +14,11 @@ import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager, type SettingsStorage } from "../../src/core/settings-manager.ts";
-import { openWorkingSession, parseWorkingSession } from "../../src/core/working-session.ts";
+import { openWorkingSession, parseWorkingSession, writeWorkingSession } from "../../src/core/working-session.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
+import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, createTestUiContext, type Harness } from "./harness.ts";
 
 function deferred() {
@@ -316,66 +317,94 @@ describe("Native working sessions", () => {
 		},
 	);
 
-	it("restores scoped settings before service factories without flattening project resource origins", async () => {
-		const h = await createHarness();
-		harnesses.push(h);
-		const agentDir = join(h.tempDir, "agent");
-		mkdirSync(agentDir);
-		mkdirSync(join(h.tempDir, ".pi"));
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ cacheWarming: "off", compactView: "hybrid" }));
-		writeFileSync(join(h.tempDir, ".pi", "settings.json"), JSON.stringify({ extensions: ["../relative.ts"] }));
-		writeFileSync(
-			join(h.tempDir, "relative.ts"),
-			`export default function(pi) { pi.registerCommand("relative-owner", {handler: async()=>{}}); }`,
-		);
-		const initial = await createAgentSession({
-			cwd: h.tempDir,
-			agentDir,
-			model: h.getModel(),
-			modelRuntime: h.session.modelRuntime,
-		});
-
-		initial.session.settingsManager.applyOverrides({ shellCommandPrefix: "captured factory input" });
-		const hold = await initial.session.acquireWorkingSession();
-		expect(hold.state.launch?.agentDir).toBe(agentDir);
-		await hold.release();
-		initial.session.dispose();
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ cacheWarming: "idle", compactView: false }));
-		writeFileSync(join(h.tempDir, ".pi", "settings.json"), "{}");
-		let factories = 0;
-		let settingsManager: SettingsManager | undefined;
-		const manager = SettingsManager.create(h.tempDir, agentDir);
-		const services = await createAgentSessionServices({
-			cwd: h.tempDir,
-			workingSession: hold.state,
-			settingsManager: manager,
-			modelRuntime: h.session.modelRuntime,
-			resourceLoaderOptions: {
-				extensionFactories: [
-					() => {
-						factories++;
-						settingsManager = manager;
-						expect(manager.getShellCommandPrefix()).toBe("captured factory input");
-					},
-				],
-			},
-		});
-		const { session } = await createAgentSessionFromServices({
-			services,
-			sessionManager: openWorkingSession(hold.state),
-			workingSession: hold.state,
-		});
-		try {
-			expect(factories).toBe(1);
-			expect(settingsManager?.getCacheWarmingMode()).toBe("off");
-			expect(settingsManager?.getCompactView()).toBe("hybrid");
-			expect(session.extensionRunner.getRegisteredCommands().map((command) => command.name)).toContain(
-				"relative-owner",
+	it.each(["matching", "conversation", "settings", "resources"] as const)(
+		"restores scoped settings before factories and reuses only matching preparation: %s",
+		async (change) => {
+			const h = await createHarness();
+			harnesses.push(h);
+			const agentDir = join(h.tempDir, "agent");
+			mkdirSync(agentDir);
+			mkdirSync(join(h.tempDir, ".pi"));
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ cacheWarming: "off", compactView: "hybrid" }));
+			writeFileSync(join(h.tempDir, ".pi", "settings.json"), JSON.stringify({ extensions: ["../relative.ts"] }));
+			writeFileSync(
+				join(h.tempDir, "relative.ts"),
+				`export default function(pi) { pi.registerCommand("relative-owner", {handler: async()=>{}}); }`,
 			);
-		} finally {
-			session.dispose();
-		}
-	});
+			const initial = await createAgentSession({
+				cwd: h.tempDir,
+				agentDir,
+				model: h.getModel(),
+				modelRuntime: h.session.modelRuntime,
+			});
+			initial.session.settingsManager.applyOverrides({ shellCommandPrefix: "captured factory input" });
+			const hold = await initial.session.acquireWorkingSession();
+			expect(hold.state.launch?.agentDir).toBe(agentDir);
+			await hold.release();
+			initial.session.dispose();
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ cacheWarming: "idle", compactView: false }));
+			writeFileSync(join(h.tempDir, ".pi", "settings.json"), "{}");
+			const observed: Array<string | undefined> = [];
+			const manager = SettingsManager.create(h.tempDir, agentDir);
+			const services = await createAgentSessionServices({
+				cwd: h.tempDir,
+				workingSession: hold.state,
+				settingsManager: manager,
+				modelRuntime: h.session.modelRuntime,
+				resourceLoaderOptions: {
+					extensionFactories: [
+						() => {
+							observed.push(manager.getShellCommandPrefix());
+						},
+					],
+				},
+			});
+			const saved = {
+				...hold.state,
+				...(change === "conversation"
+					? {
+							steering: [{ role: "user" as const, content: "new accepted queue", timestamp: 1 }],
+							steeringText: ["new accepted queue"],
+						}
+					: {}),
+				...(change === "settings"
+					? {
+							settings: { ...hold.state.settings, shellCommandPrefix: "changed factory input" },
+						}
+					: {}),
+				...(change === "resources"
+					? {
+							launch: { ...hold.state.launch!, noContextFiles: true },
+						}
+					: {}),
+			};
+			const { session } = await createAgentSessionFromServices({
+				services,
+				sessionManager: openWorkingSession(saved),
+				workingSession: saved,
+			});
+			try {
+				expect(observed).toEqual(
+					change === "settings"
+						? ["captured factory input", "changed factory input"]
+						: change === "resources"
+							? ["captured factory input", "captured factory input"]
+							: ["captured factory input"],
+				);
+				expect(manager.getCacheWarmingMode()).toBe("off");
+				expect(manager.getCompactView()).toBe("hybrid");
+				expect(session.extensionRunner.getRegisteredCommands().map((command) => command.name)).toContain(
+					"relative-owner",
+				);
+				if (change === "conversation") expect(session.agent.getQueuedMessages().steering).toEqual(saved.steering);
+				if (change === "resources")
+					expect(session.resourceLoader.getWorkingSessionResources?.().noContextFiles).toBe(true);
+				expect(h.faux.state.callCount).toBe(0);
+			} finally {
+				session.dispose();
+			}
+		},
+	);
 
 	it.each(["sdk", "services"] as const)(
 		"captures native %s launch and trust without caller-supplied state",
@@ -675,6 +704,94 @@ describe("Native working sessions", () => {
 		}
 	});
 
+	it("supports ordinary custom loaders while refusing unsupported complete persistence", async () => {
+		const h = await createHarness();
+		harnesses.push(h);
+		const captured = await h.session.acquireWorkingSession();
+		await captured.release();
+		const loader = createTestResourceLoader();
+		delete loader.getWorkingSessionResources;
+		const reload = vi.spyOn(loader, "reload");
+		const options = {
+			cwd: h.tempDir,
+			model: h.getModel(),
+			modelRuntime: h.session.modelRuntime,
+			resourceLoader: loader,
+			sessionManager: SessionManager.inMemory(h.tempDir),
+		};
+		const { session } = await createAgentSession(options);
+		try {
+			h.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+			await session.prompt("ordinary input");
+			expect(session.getLastAssistantText()).toBe("first");
+			await expect(session.acquireWorkingSession()).rejects.toThrow("ResourceLoader persistence support");
+			expect(session.workingSessionGate.reserved).toBe(false);
+			await session.prompt("still usable");
+			expect(session.getLastAssistantText()).toBe("second");
+			expect(() => session.restoreWorkingSession(captured.state)).toThrow("persistence-capable ResourceLoader");
+			await expect(
+				createAgentSession({
+					...options,
+					workingSession: captured.state,
+					workingSessionResourcesPrepared: captured.state,
+				}),
+			).rejects.toThrow("ResourceLoader persistence support");
+			expect(reload).not.toHaveBeenCalled();
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("requires an explicit host owner for launch-less native state", async () => {
+		const h = await createHarness();
+		harnesses.push(h);
+		const captured = await h.session.acquireWorkingSession();
+		await captured.release();
+		const saved = { ...captured.state, launch: undefined };
+		await expect(createAgentSession({ workingSession: saved })).rejects.toThrow("explicit persistence-capable");
+		const { session } = await createAgentSession({
+			workingSession: saved,
+			agentDir: h.tempDir,
+			resourceLoader: h.session.resourceLoader,
+			modelRuntime: h.session.modelRuntime,
+		});
+		try {
+			const hold = await session.acquireWorkingSession();
+			try {
+				expect(hold.state.launch?.agentDir).toBe(h.tempDir);
+				expect(hold.state.entries).toEqual(saved.entries);
+				expect(h.faux.state.callCount).toBe(0);
+			} finally {
+				await hold.release();
+			}
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("rejects lossy host data, releases preparation and leaves prior artifacts intact", async () => {
+		const h = await createHarness();
+		harnesses.push(h);
+		let data: unknown = { lost: () => "callback" };
+		h.session.bindWorkingSessionHost({ kind: "host", readiness: () => {}, capture: () => data, restore: () => {} });
+		await expect(h.session.acquireWorkingSession()).rejects.toThrow("strict JSON");
+		expect(h.session.workingSessionGate.reserved).toBe(false);
+		data = { kept: [null, 0, false] };
+		const hold = await h.session.acquireWorkingSession();
+		try {
+			const artifact = join(realpathSync(h.tempDir), "state.json");
+			writeWorkingSession(artifact, hold.state);
+			const before = readFileSync(artifact);
+			expect(() =>
+				writeWorkingSession(artifact, { ...hold.state, mode: { kind: "host", data: new Date() } }),
+			).toThrow("strict JSON");
+			expect(readFileSync(artifact)).toEqual(before);
+			expect(parseWorkingSession(before.toString()).mode).toEqual({ kind: "host", data });
+		} finally {
+			await hold.release();
+		}
+	});
+
 	it("preserves an ordinary caller's custom model", async () => {
 		const h = await createHarness();
 		harnesses.push(h);
@@ -722,92 +839,105 @@ describe("Native working sessions", () => {
 		expect(failure).toMatchObject({ message: expect.stringContaining(`${kind}.ts`) });
 	});
 
-	it("restores the selected leaf, abandoned branches, full queue tails, loadout and transient settings without replay", async () => {
-		const h = await createHarness({ allowedToolNames: ["read", "bash"], excludedToolNames: ["bash"] });
-		harnesses.push(h);
-		const selected = h.sessionManager.appendMessage({ role: "user", content: "selected branch", timestamp: 10 });
-		const abandoned = h.sessionManager.appendMessage({ role: "user", content: "abandoned branch", timestamp: 11 });
-		h.sessionManager.branch(selected);
-		h.session.refreshContext();
-		h.session.setActiveToolsByName(["read"]);
-		h.settingsManager.applyOverrides({ shellCommandPrefix: "native unsent setting" });
-		h.session.setScopedModels([{ model: h.getModel(), thinkingLevel: "high" }]);
-		const steering: AgentMessage[] = [
-			{
-				role: "user",
-				content: [
-					{ type: "text", text: "first" },
-					{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
-				],
-				timestamp: 20,
-			},
-			{
-				role: "custom",
-				customType: "steer-tail",
-				content: "second",
-				display: false,
-				details: { opaque: [1, 2] },
-				timestamp: 21,
-			},
-		];
-		const followUp: AgentMessage[] = [
-			{
-				role: "custom",
-				customType: "follow-first",
-				content: "third",
-				display: true,
-				details: { owned: "extension" },
-				timestamp: 22,
-			},
-			{ role: "user", content: "fourth", timestamp: 23 },
-		];
-		for (const message of steering) h.session.agent.steer(message);
-		for (const message of followUp) h.session.agent.followUp(message);
-		await h.session.sendCustomMessage(
-			{ customType: "aside", content: "next prompt only", display: false, details: { nested: true } },
-			{ deliverAs: "nextTurn" },
-		);
-		const hold = await h.session.acquireWorkingSession();
-		expect(hold.sleepReady).toBe(true);
-		expect(hold.state.steering).toEqual(steering);
-		expect(hold.state.followUp).toEqual(followUp);
-		const state = parseWorkingSession(JSON.stringify(hold.state));
-		await hold.release();
-		const { session } = await createAgentSession({
-			workingSession: state,
-			modelRuntime: h.session.modelRuntime,
-			resourceLoader: h.session.resourceLoader,
-		});
-		try {
-			expect(session.sessionId).toBe(h.session.sessionId);
-			expect(session.sessionManager.getLeafId()).toBe(selected);
-			expect(session.sessionManager.getEntry(abandoned)).toMatchObject({ message: { content: "abandoned branch" } });
-			expect(
-				session.messages.some((message) => "content" in message && message.content === "abandoned branch"),
-			).toBe(false);
-			expect(session.agent.getQueuedMessages()).toEqual({ steering, followUp });
-			expect(session.getActiveToolNames()).toEqual(["read"]);
-			expect(session.settingsManager.getShellCommandPrefix()).toBe("native unsent setting");
-			expect(session.scopedModels).toMatchObject([{ model: { id: h.getModel().id }, thinkingLevel: "high" }]);
-			expect(session.hasPendingNextTurnMessages).toBe(true);
-			const restored = await session.acquireWorkingSession();
-			expect(restored.state.nextTurn).toEqual([
-				expect.objectContaining({
+	it.each([false, true])(
+		"restores all branches, context edits, full queues and loadout without replay; null leaf=%s",
+		async (nullLeaf) => {
+			const h = await createHarness({ allowedToolNames: ["read", "bash"], excludedToolNames: ["bash"] });
+			harnesses.push(h);
+			const selected = h.sessionManager.appendMessage({ role: "user", content: "selected branch", timestamp: 10 });
+			const abandoned = h.sessionManager.appendMessage({ role: "user", content: "abandoned branch", timestamp: 11 });
+			h.sessionManager.branch(selected);
+			const selectedLeaf = h.sessionManager.appendContextEdit(selected, { content: "edited selected branch" });
+			if (nullLeaf) h.sessionManager.resetLeaf();
+			h.session.refreshContext();
+			h.session.setActiveToolsByName(["read"]);
+			h.settingsManager.applyOverrides({ shellCommandPrefix: "native unsent setting" });
+			h.session.setScopedModels([{ model: h.getModel(), thinkingLevel: "high" }]);
+			const steering: AgentMessage[] = [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "first" },
+						{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+					],
+					timestamp: 20,
+				},
+				{
 					role: "custom",
-					customType: "aside",
-					content: "next prompt only",
+					customType: "steer-tail",
+					content: "second",
 					display: false,
-					details: { nested: true },
-				}),
-			]);
-			expect(restored.state.allowedTools).toEqual(["read", "bash"]);
-			expect(restored.state.excludedTools).toEqual(["bash"]);
-			await restored.release();
-			expect(h.faux.state.callCount).toBe(0);
-		} finally {
-			session.dispose();
-		}
-	});
+					details: { opaque: [1, 2] },
+					timestamp: 21,
+				},
+			];
+			const followUp: AgentMessage[] = [
+				{
+					role: "custom",
+					customType: "follow-first",
+					content: "third",
+					display: true,
+					details: { owned: "extension" },
+					timestamp: 22,
+				},
+				{ role: "user", content: "fourth", timestamp: 23 },
+			];
+			for (const message of steering) h.session.agent.steer(message);
+			for (const message of followUp) h.session.agent.followUp(message);
+			await h.session.sendCustomMessage(
+				{ customType: "aside", content: "next prompt only", display: false, details: { nested: true } },
+				{ deliverAs: "nextTurn" },
+			);
+			const hold = await h.session.acquireWorkingSession();
+			expect(hold.sleepReady).toBe(true);
+			expect(hold.state.steering).toEqual(steering);
+			expect(hold.state.followUp).toEqual(followUp);
+			const state = parseWorkingSession(JSON.stringify(hold.state));
+			await hold.release();
+			const { session } = await createAgentSession({
+				workingSession: state,
+				modelRuntime: h.session.modelRuntime,
+				resourceLoader: h.session.resourceLoader,
+			});
+			try {
+				expect(session.sessionId).toBe(h.session.sessionId);
+				expect(session.sessionManager.getLeafId()).toBe(nullLeaf ? null : selectedLeaf);
+				expect(session.sessionManager.getEntries()).toEqual(state.entries);
+				if (nullLeaf) expect(session.messages).toEqual([]);
+				else
+					expect(session.messages).toContainEqual(
+						expect.objectContaining({ role: "user", content: "edited selected branch" }),
+					);
+				expect(session.sessionManager.getEntry(abandoned)).toMatchObject({
+					message: { content: "abandoned branch" },
+				});
+				expect(
+					session.messages.some((message) => "content" in message && message.content === "abandoned branch"),
+				).toBe(false);
+				expect(session.agent.getQueuedMessages()).toEqual({ steering, followUp });
+				expect(session.getActiveToolNames()).toEqual(["read"]);
+				expect(session.settingsManager.getShellCommandPrefix()).toBe("native unsent setting");
+				expect(session.scopedModels).toMatchObject([{ model: { id: h.getModel().id }, thinkingLevel: "high" }]);
+				expect(session.hasPendingNextTurnMessages).toBe(true);
+				const restored = await session.acquireWorkingSession();
+				expect(restored.state.nextTurn).toEqual([
+					expect.objectContaining({
+						role: "custom",
+						customType: "aside",
+						content: "next prompt only",
+						display: false,
+						details: { nested: true },
+					}),
+				]);
+				expect(restored.state.allowedTools).toEqual(["read", "bash"]);
+				expect(restored.state.excludedTools).toEqual(["bash"]);
+				await restored.release();
+				expect(h.faux.state.callCount).toBe(0);
+			} finally {
+				session.dispose();
+			}
+		},
+	);
 
 	it.each(["retain-none compaction", "root branch summary", "extracted branch summary"])(
 		"restores native %s records without replay and still rejects broken journal references",
@@ -1222,10 +1352,35 @@ describe("Native working sessions", () => {
 			};
 			const malformedPath = join(dir, "malformed.json");
 			writeFileSync(malformedPath, JSON.stringify(malformed), { mode: 0o600 });
-			await expect(createAgentSession({ workingSession: malformedPath })).rejects.toThrow(
-				"Invalid native working session",
-			);
-			expect(existsSync(missing)).toBe(false);
+			let factories = 0;
+			const loader = new DefaultResourceLoader({
+				cwd: h.tempDir,
+				agentDir: h.tempDir,
+				settingsManager: h.settingsManager,
+				extensionFactories: [
+					() => {
+						factories++;
+					},
+				],
+			});
+			for (const services of [false, true]) {
+				const creation = services
+					? createAgentSessionServices({
+							cwd: h.tempDir,
+							workingSession: malformedPath,
+							resourceLoaderOptions: {
+								extensionFactories: [
+									() => {
+										factories++;
+									},
+								],
+							},
+						})
+					: createAgentSession({ workingSession: malformedPath, resourceLoader: loader });
+				await expect(creation).rejects.toThrow("Invalid native working session");
+				expect(existsSync(missing)).toBe(false);
+			}
+			expect(factories).toBe(0);
 			const materialized = openWorkingSession({ ...saved, sessionFile: missing });
 			expect(materialized.getLeafId()).toBe(saved.leafId);
 			expect(readFileSync(missing, "utf8")).toBe(
@@ -1234,7 +1389,30 @@ describe("Native working sessions", () => {
 			manager.appendCustomEntry("newer", { mustRetain: true });
 			const before = readFileSync(manager.getSessionFile()!);
 			expect(() => openWorkingSession(saved)).toThrow("differs");
-			expect(readFileSync(manager.getSessionFile()!)).toEqual(before);
+			for (const services of [false, true]) {
+				const creation = services
+					? createAgentSessionServices({
+							cwd: h.tempDir,
+							workingSession: saved,
+							modelRuntime: h.session.modelRuntime,
+							resourceLoaderOptions: {
+								extensionFactories: [
+									() => {
+										factories++;
+									},
+								],
+							},
+						})
+					: createAgentSession({
+							workingSession: saved,
+							resourceLoader: loader,
+							workingSessionResourcesPrepared: saved,
+							modelRuntime: h.session.modelRuntime,
+						});
+				await expect(creation).rejects.toThrow("differs");
+				expect(readFileSync(manager.getSessionFile()!)).toEqual(before);
+			}
+			expect(factories).toBe(0);
 		} finally {
 			rmSync(dir, { recursive: true });
 		}

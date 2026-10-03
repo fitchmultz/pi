@@ -13,6 +13,11 @@ the earlier cache prefix instead of unhiding historical declarations. Available
 groups have at least one previously selected or callable tool. Direct and nested
 calls share the read gate.
 
+The builtin uses the fork's narrow `refreshTools()` seam to add restored declarations
+at the current request position without rewriting historical cache prefixes. Owner
+registration uses the structural extension-event contract below; the builtin itself
+is not portable to official 1.0 without an equivalent declaration-refresh seam.
+
 Suppression runs at prompt starts; another extension can add a tool mid-batch, which
 is a positional declaration change and does not rewrite the earlier cache prefix.
 `discover_tools` is model-only, so codemode cannot call it internally.

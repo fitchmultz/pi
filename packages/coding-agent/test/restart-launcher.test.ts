@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getRestartArgs, getRestartRuntimeWorker, runCliLauncher, superviseCli } from "../src/cli/launcher.ts";
 import { parseRestartCommand, parseRestartRequest } from "../src/cli/restart-protocol.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const roots: string[] = [];
@@ -24,22 +25,31 @@ afterEach(() => {
 
 interface Receipt {
 	runtime: string;
+	pid: number;
 	args: string[];
-	handoff?: { sessionId: string; message?: string; failure?: string };
+	handoff?: { sessionId: string; workingSession: string; message?: string; failure?: string };
 }
 
-function fixture() {
+async function fixture() {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-launcher-")));
 	roots.push(root);
 	const log = join(root, "launches.jsonl");
 	const selector = join(root, "pi");
 	const request = { message: "Continue once", extensions: [join(root, "v2.ts")] };
+	const h = await createHarness({ sessionManager: SessionManager.create(root, join(root, "sessions")) });
+	const hold = await h.session.acquireWorkingSession();
+	const state = JSON.stringify(hold.state);
+	await hold.release();
+	const defaultArtifact = join(root, "restart-state.json");
 	const session: { sessionId: string; sessionFile: string; workingSession?: string } = {
-		sessionId: "same-session",
-		sessionFile: join(root, "session.jsonl"),
+		sessionId: hold.state.header.id,
+		sessionFile: hold.state.sessionFile!,
+		workingSession: defaultArtifact,
 	};
+	h.cleanup();
 	return {
 		root,
+		state,
 		selector,
 		request,
 		session,
@@ -54,9 +64,14 @@ function fixture() {
 import { appendFileSync, existsSync, unlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 const handoff = process.env.PI_RESTART_HANDOFF ? JSON.parse(process.env.PI_RESTART_HANDOFF) : undefined;
-appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, args: process.argv.slice(2), handoff }) + '\\n');
+appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, pid: process.pid, args: process.argv.slice(2), handoff }) + '\\n');
 const select = (name) => { if (existsSync(${JSON.stringify(selector)})) unlinkSync(${JSON.stringify(selector)}); symlinkSync(${JSON.stringify(root)} + '/' + name + '/dist/bundle/cli.js', ${JSON.stringify(selector)}); };
-const restart = (request = ${JSON.stringify(request)}) => process.send({ type: 'pi:ready' }, () => process.send({ type: 'pi:restart', request, session: ${JSON.stringify(session)} }, () => process.exit(0)));
+const session = ${JSON.stringify(session)};
+${session.workingSession === defaultArtifact ? "session.workingSession += '-' + process.pid;" : ""}
+const restart = (request = ${JSON.stringify(request)}) => process.send({ type: 'pi:ready' }, () => {
+ ${session.workingSession === defaultArtifact ? `writeFileSync(session.workingSession, ${JSON.stringify(state)}, {mode:0o600});` : ""}
+ process.send({ type: 'pi:restart', request, session }, () => process.exit(0));
+});
 const ready = () => process.send({ type: 'pi:ready' }, () => process.exit(0));
 ${body}
 `,
@@ -95,18 +110,13 @@ describe("managed restart launcher", () => {
 	it.each(["complete", "metadata", "crash", "stale-worker", "missing", "replaced", "corrupt"])(
 		"attests only the current, ready, fully finalized last worker: %s",
 		async (scenario) => {
-			const h = await createHarness();
-			const hold = await h.session.acquireWorkingSession();
-			const state = JSON.stringify(hold.state);
-			await hold.release();
-			h.cleanup();
-			const f = fixture();
+			const f = await fixture();
 			const exitPath = join(f.root, "exit.json");
 			writeFileSync(exitPath, "stale previous launch", { mode: 0o600 });
 			const complete = `
 const statePath = process.env.PI_WORKING_SESSION_EXIT_PATH + '.state';
-writeFileSync(statePath, ${JSON.stringify(state)}, {mode:0o600});
-const receipt = {path:statePath,digest:${scenario === "corrupt" ? "'0'.repeat(64)" : `createHash('sha256').update(${JSON.stringify(state)}).digest('hex')`},sessionId:${JSON.stringify(h.session.sessionId)},pid:process.pid,worker:${scenario === "stale-worker" ? "'previous-worker'" : "process.env.PI_WORKING_SESSION_WORKER"},launch:process.env.PI_WORKING_SESSION_LAUNCH};
+writeFileSync(statePath, ${JSON.stringify(f.state)}, {mode:0o600});
+const receipt = {path:statePath,digest:${scenario === "corrupt" ? "'0'.repeat(64)" : `createHash('sha256').update(${JSON.stringify(f.state)}).digest('hex')`},sessionId:${JSON.stringify(f.session.sessionId)},pid:process.pid,worker:${scenario === "stale-worker" ? "'previous-worker'" : "process.env.PI_WORKING_SESSION_WORKER"},launch:process.env.PI_WORKING_SESSION_LAUNCH};
 await new Promise(resolve => process.send({type:'pi:completed',completed:receipt}, resolve));
 `;
 			const body =
@@ -133,7 +143,7 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 				expect(receipt).toMatchObject({
 					version: 1,
 					path: `${exitPath}.state`,
-					sessionId: h.session.sessionId,
+					sessionId: f.session.sessionId,
 					launcherPid: process.pid,
 				});
 				expect(receipt.worker).toBeTypeOf("string");
@@ -150,11 +160,11 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 	])(
 		"retires only received restart state after successful readiness; rollback=%s, nativeDirectory=%s",
 		async (rollback, nativeDirectory) => {
-			const f = fixture();
+			const f = await fixture();
 			const directory = nativeDirectory ? mkdtempSync(join(f.root, "pi-restart-state-")) : f.root;
 			const artifact = join(directory, nativeDirectory ? "working-session.json" : "restart-private.json");
 			const observed = join(f.root, "artifact-at-ready");
-			writeFileSync(artifact, "private native state", { mode: 0o600 });
+			writeFileSync(artifact, f.state, { mode: 0o600 });
 			f.session.workingSession = artifact;
 			const record = `writeFileSync(${JSON.stringify(observed)}, String(existsSync(${JSON.stringify(artifact)})));`;
 			const a = f.release("A", `if (!handoff) { select('B'); restart(); } else { ${record} ready(); }`);
@@ -177,7 +187,7 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 	it.skipIf(process.platform === "win32").each(["SIGINT", "SIGHUP", "SIGTERM"] as const)(
 		"allows a worker to close gracefully after %s without duplicate delivery",
 		async (signal) => {
-			const f = fixture();
+			const f = await fixture();
 			const runtime = f.release(
 				"A",
 				`
@@ -225,16 +235,20 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 			}
 		},
 	);
-	it("does not accept cleanup ownership of a nonprivate restart artifact", async () => {
-		const f = fixture();
-		const artifact = join(f.root, "not-launcher-owned.json");
-		writeFileSync(artifact, "must retain", { mode: 0o644 });
-		f.session.workingSession = artifact;
-		const runtime = f.release("A", "if (!handoff) restart({}); else ready();");
-		expect(await superviseCli(getRestartRuntimeWorker(runtime), [], { execArgv: [] })).toBe(0);
-		expect(readFileSync(artifact, "utf8")).toBe("must retain");
-		expect(f.read()).toHaveLength(1);
-	});
+	it.each(["journal-only", "missing", "nonprivate"])(
+		"does not adopt restart or cleanup ownership for %s state",
+		async (invalid) => {
+			const f = await fixture();
+			const artifact = join(f.root, "not-launcher-owned.json");
+			if (invalid !== "missing")
+				writeFileSync(artifact, f.state, { mode: invalid === "nonprivate" ? 0o644 : 0o600 });
+			f.session.workingSession = invalid === "journal-only" ? undefined : artifact;
+			const runtime = f.release("A", "if (!handoff) restart({}); else ready();");
+			expect(await superviseCli(getRestartRuntimeWorker(runtime), [], { execArgv: [] })).toBe(0);
+			if (invalid !== "missing") expect(readFileSync(artifact, "utf8")).toBe(f.state);
+			expect(f.read()).toHaveLength(1);
+		},
+	);
 	it("retains parsed options without replaying startup text, session selection, or the launch model", () => {
 		expect(
 			getRestartArgs(
@@ -299,24 +313,24 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 		}
 	});
 	it("re-resolves a moved invocation symlink and replaces -e without replay", async () => {
-		const f = fixture();
+		const f = await fixture();
 		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
 		f.release("B", "ready();");
 		f.select(a);
 		expect(await f.run(a)).toBe(0);
 		const receipts = f.read();
 		expect(receipts.map((r) => r.runtime)).toEqual(["A", "B"]);
-		expect(receipts[1].handoff).toMatchObject({ sessionId: "same-session", message: "Continue once" });
+		expect(receipts[1].handoff).toMatchObject({ sessionId: f.session.sessionId, message: "Continue once" });
 		expect(receipts[1].args).toEqual([
 			"--offline",
 			"-e",
 			f.request.extensions[0],
-			"--session",
-			join(f.root, "session.jsonl"),
+			"--working-session",
+			`${f.session.workingSession}-${receipts[0].pid}`,
 		]);
 	});
 	it("pins an explicit runtime across subsequent ordinary restarts", async () => {
-		const f = fixture();
+		const f = await fixture();
 		const b = f.release(
 			"B",
 			`if (!existsSync(${JSON.stringify(join(f.root, "once"))})) { writeFileSync(${JSON.stringify(join(f.root, "once"))}, ''); select('C'); restart({}); } else ready();`,
@@ -334,7 +348,7 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 		"setInterval(() => {}, 1000);",
 		"process.on('SIGTERM', () => process.send({type:'pi:ready'}, () => process.exit(17))); setInterval(() => {}, 1000);",
 	])("rolls back unready candidate once: %s", async (body) => {
-		const f = fixture();
+		const f = await fixture();
 		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
 		f.release("B", body);
 		f.select(a);
@@ -344,14 +358,14 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 		expect(receipts[2].args).toContain(join(f.root, "v1.ts"));
 		expect(receipts[2].args).not.toContain(f.request.extensions[0]);
 		expect(receipts[2].handoff).toMatchObject({
-			sessionId: "same-session",
+			sessionId: f.session.sessionId,
 			message: "Continue once",
 			failure: expect.any(String),
 		});
 		if (body.includes("setInterval")) expect(receipts[2].handoff?.failure).toContain("within 0.2 seconds");
 	});
 	it("stops if the exact previous worker also fails", async () => {
-		const f = fixture();
+		const f = await fixture();
 		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else process.exit(23);');
 		f.release("B", "process.exit(17);");
 		f.select(a);
@@ -359,7 +373,7 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 		expect(f.read().map((r) => r.runtime)).toEqual(["A", "B", "A"]);
 	});
 	it("does not roll back or replay after readiness", async () => {
-		const f = fixture();
+		const f = await fixture();
 		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
 		f.release("B", "process.send({type:'pi:ready'}, () => process.exit(17));");
 		f.select(a);
@@ -368,7 +382,7 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 	});
 	it("normal exit never replaces a worker, with or without readiness", async () => {
 		for (const body of ["ready();", "process.exit(0);"]) {
-			const f = fixture();
+			const f = await fixture();
 			const a = f.release("A", body);
 			f.select(a);
 			expect(await f.run(a)).toBe(0);

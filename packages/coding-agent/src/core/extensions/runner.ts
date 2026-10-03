@@ -250,6 +250,7 @@ function invokeHandler(
 	ctx: ExtensionContext | ProjectTrustContext,
 	report: ExtensionErrorListener,
 ): Promise<unknown> {
+	if (process.env.PI_EXTENSION_PERFORMANCE !== "1") return handler(event, ctx);
 	const started = performance.now();
 	try {
 		return handler(event, ctx);
@@ -942,6 +943,7 @@ export class ExtensionRunner {
 
 	/** Attribute custom footer rendering to the extension that installed it. */
 	scopeContext<T extends ExtensionContext>(ctx: T, extensionPath: string): T {
+		if (process.env.PI_EXTENSION_PERFORMANCE !== "1") return ctx;
 		const extension = this.extensions.find((entry) => entry.path === extensionPath);
 		if (!extension) return ctx;
 		return new Proxy(ctx, {
