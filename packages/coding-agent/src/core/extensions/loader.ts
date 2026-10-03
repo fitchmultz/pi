@@ -17,6 +17,7 @@ import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { type McpServerConfig, McpServerRegistry, mcpNamespace, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
+import type { ProviderAuthFallback } from "../provider-composer.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
@@ -183,6 +184,32 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
 		flagValues: new Map(),
+		authFallbacks: [],
+		registerProviderAuthFallback: (providerId, fallback) => {
+			const entry = { providerId, fallback, active: true, dispose: undefined as (() => void) | undefined };
+			runtime.authFallbacks.push(entry);
+			return () => {
+				entry.active = false;
+				entry.dispose?.();
+			};
+		},
+		bindProviderAuthFallbacks: (register) => {
+			let changed = false;
+			for (const entry of runtime.authFallbacks) {
+				if (!entry.active || entry.dispose) continue;
+				entry.dispose = register(entry.providerId, entry.fallback);
+				changed = true;
+			}
+			runtime.registerProviderAuthFallback = (providerId, fallback) => {
+				const entry = { providerId, fallback, active: true, dispose: register(providerId, fallback) };
+				runtime.authFallbacks.push(entry);
+				return () => {
+					entry.active = false;
+					entry.dispose();
+				};
+			};
+			return changed;
+		},
 		pendingProviderRegistrations: [],
 		pendingNativeProviderRegistrations: [],
 		mcpServers: new McpServerRegistry(),
@@ -196,6 +223,11 @@ export function createExtensionRuntime(): ExtensionRuntime {
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
 			for (const unsubscribe of eventBusUnsubscribers) unsubscribe();
 			eventBusUnsubscribers.clear();
+			for (const entry of runtime.authFallbacks) {
+				entry.active = false;
+				entry.dispose?.();
+			}
+			runtime.authFallbacks.length = 0;
 		},
 		trackEventBusSubscription: (unsubscribe) => {
 			let active = true;
@@ -258,7 +290,10 @@ function createExtensionAPI(
 	};
 	const applyRuntimeChange = (change: () => void) => {
 		if (state === "loading") pendingRuntimeChanges.push(change);
-		else change();
+		else {
+			runtime.beforeMutation?.();
+			change();
+		}
 	};
 	const clearPending = () => {
 		pendingFlagValues.clear();
@@ -287,6 +322,7 @@ function createExtensionAPI(
 
 		registerTool(tool: ToolDefinition): void {
 			assertActive();
+			runtime.beforeMutation?.();
 			if (typeof tool.parameters !== "object" || tool.parameters === null || Array.isArray(tool.parameters)) {
 				throw new Error(
 					`Tool "${tool.name}" registered by extension "${extension.path}" must define an object parameter schema.`,
@@ -301,6 +337,7 @@ function createExtensionAPI(
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
 			assertActive();
+			runtime.beforeMutation?.();
 			if (typeof name !== "string" || name.length === 0) {
 				throw new Error(
 					`Command registered by extension "${extension.path}" must have a non-empty string name. Use pi.registerCommand("name", { description, handler }).`,
@@ -324,7 +361,16 @@ function createExtensionAPI(
 			},
 		): void {
 			assertActive();
-			extension.shortcuts.set(shortcut, { shortcut, extensionPath: extension.path, ...options });
+			runtime.beforeMutation?.();
+			extension.shortcuts.set(shortcut, {
+				shortcut,
+				extensionPath: extension.path,
+				...options,
+				handler: (ctx) =>
+					runtime.runWorkingSessionActivity
+						? runtime.runWorkingSessionActivity(async () => options.handler(ctx))
+						: options.handler(ctx),
+			});
 		},
 
 		registerFlag(
@@ -459,6 +505,21 @@ function createExtensionAPI(
 		unregisterProvider(name: string) {
 			assertActive();
 			applyRuntimeChange(() => runtime.unregisterProvider(name, extension.path));
+		},
+
+		registerProviderAuthFallback(providerId: string, fallback: ProviderAuthFallback) {
+			assertActive();
+			let active = true;
+			let dispose: (() => void) | undefined;
+			applyRuntimeChange(() => {
+				if (active) dispose = runtime.registerProviderAuthFallback(providerId, fallback);
+			});
+			return () => {
+				if (!active) return;
+				runtime.beforeMutation?.();
+				active = false;
+				dispose?.();
+			};
 		},
 
 		registerMcpServer(name: string, config: McpServerConfig) {

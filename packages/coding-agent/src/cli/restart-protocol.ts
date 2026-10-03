@@ -5,6 +5,25 @@ export const RESTART_SOCKET_ENV = "PI_RESTART_SOCKET";
 export const RESTART_HANDOFF_ENV = "PI_RESTART_HANDOFF";
 export const MANAGED_CLI_ENV = "PI_MANAGED_CLI";
 export const MAX_RESTART_BYTES = 64 * 1024;
+export const WORKING_SESSION_LAUNCH_ENV = "PI_WORKING_SESSION_LAUNCH";
+export const WORKING_SESSION_WORKER_ENV = "PI_WORKING_SESSION_WORKER";
+
+/** Headless modes become ready only after their native owner and extensions bind. */
+export async function notifyCliReady(): Promise<void> {
+	if (!process.env[WORKING_SESSION_LAUNCH_ENV] || !process.send || !process.connected) return;
+	await new Promise<void>((resolve, reject) =>
+		process.send!({ type: "pi:ready" }, (error) => (error ? reject(error) : resolve())),
+	);
+}
+
+export interface CompletedWorkingSession {
+	path: string;
+	digest: string;
+	sessionId: string;
+	pid: number;
+	worker: string;
+	launch: string;
+}
 
 export interface RestartRequest {
 	message?: string;
@@ -16,15 +35,18 @@ export interface RestartRequest {
 export interface RestartSession {
 	sessionFile: string;
 	sessionId: string;
+	workingSession?: string;
 }
 
 export interface RestartHandoff extends RestartSession {
 	message?: string;
 	failure?: string;
+	extensions?: string[];
 }
 
 export type RestartWorkerMessage =
 	| { type: "pi:ready" }
+	| { type: "pi:completed"; completed: CompletedWorkingSession }
 	| { type: "pi:restart"; request: RestartRequest; session: RestartSession };
 
 export function parseRestartHandoff(encoded: string): RestartHandoff {
@@ -40,10 +62,15 @@ export function parseRestartHandoff(encoded: string): RestartHandoff {
 		throw new Error("This Pi was started by an older Pi launcher; quit and run pi -c to resume on the new runtime.");
 	}
 	const fields = value as Record<string, unknown>;
-	for (const key of ["message", "failure"] as const) {
+	for (const key of ["message", "failure", "workingSession"] as const) {
 		if (fields[key] !== undefined && typeof fields[key] !== "string")
 			throw new Error(`Invalid restart handoff ${key}`);
 	}
+	if (
+		fields.extensions !== undefined &&
+		(!Array.isArray(fields.extensions) || !fields.extensions.every((path) => typeof path === "string"))
+	)
+		throw new Error("Invalid restart handoff extensions");
 	return value as RestartHandoff;
 }
 

@@ -32,6 +32,7 @@ import {
 	withFileMutationQueue,
 } from "./tools/index.ts";
 import { getBranchSelection } from "./virtual-models.ts";
+import { openWorkingSession, parseWorkingSession, readWorkingSession, type WorkingSession } from "./working-session.ts";
 
 // Preserve the pre-0.81 fallback for extensions that construct Agent instances
 // or invoke low-level agent loops without supplying streamFn. Agent core remains
@@ -39,6 +40,8 @@ import { getBranchSelection } from "./virtual-models.ts";
 setDefaultStreamFn(streamSimple);
 
 export interface CreateAgentSessionOptions {
+	/** Native complete-state resume, validated before services or resource construction. */
+	workingSession?: WorkingSession | string;
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: ~/.pi/agent */
@@ -173,29 +176,84 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
-	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
+	const saved =
+		typeof options.workingSession === "string"
+			? readWorkingSession(options.workingSession)
+			: options.workingSession
+				? parseWorkingSession(JSON.stringify(options.workingSession))
+				: undefined;
+	const savedManager = saved ? openWorkingSession(saved) : undefined;
+	const cwd = resolvePath(saved?.cwd ?? options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
+	const agentDir = resolvePath(saved?.launch?.agentDir ?? options.agentDir ?? getDefaultAgentDir());
+	if (saved && options.sessionManager && options.sessionManager.getSessionId() !== saved.header.id)
+		throw new Error("Working session and supplied SessionManager identity disagree");
 	let resourceLoader = options.resourceLoader;
 
-	const authPath = options.agentDir ? join(agentDir, "auth.json") : undefined;
-	const modelsPath = options.agentDir ? join(agentDir, "models.json") : undefined;
+	const authPath = join(agentDir, "auth.json");
+	const modelsPath = join(agentDir, "models.json");
 	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
-	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+	if (saved) settingsManager.applyOverrides(saved.settings);
+	const sessionManager =
+		savedManager ?? options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
-		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+		resourceLoader = new DefaultResourceLoader({
+			cwd,
+			agentDir,
+			settingsManager,
+			additionalExtensionPaths: saved?.launch?.extensions,
+			additionalSkillPaths: saved?.launch?.skills,
+			additionalPromptTemplatePaths: saved?.launch?.prompts,
+			additionalThemePaths: saved?.launch?.themes,
+			noExtensions: saved?.launch?.noExtensions,
+			noSkills: saved?.launch?.noSkills,
+			noPromptTemplates: saved?.launch?.noPromptTemplates,
+			noThemes: saved?.launch?.noThemes,
+			noContextFiles: saved?.launch?.noContextFiles,
+			systemPrompt: saved?.launch?.systemPrompt,
+			appendSystemPrompt: saved?.launch?.appendSystemPrompt,
+		});
 		await resourceLoader.reload();
 		time("resourceLoader.reload");
 	}
+
+	// Direct SDK hosts need factory registrations before native model selection too.
+	const registrations = resourceLoader.getExtensions().runtime;
+	let registrationsChanged = registrations.bindProviderAuthFallbacks((id, fallback) =>
+		modelRuntime.registerProviderAuthFallback(id, fallback),
+	);
+	for (const { name, config } of registrations.pendingProviderRegistrations) {
+		modelRuntime.registerProvider(name, config);
+		registrationsChanged = true;
+	}
+	registrations.pendingProviderRegistrations = [];
+	for (const { provider } of registrations.pendingNativeProviderRegistrations) {
+		modelRuntime.registerNativeProvider(provider);
+		registrationsChanged = true;
+	}
+	registrations.pendingNativeProviderRegistrations = [];
+	for (const { definition } of registrations.pendingVirtualModelRegistrations) {
+		modelRuntime.registerVirtualModel(definition);
+		registrationsChanged = true;
+	}
+	registrations.pendingVirtualModelRegistrations = [];
+	if (registrationsChanged) await modelRuntime.refresh({ allowNetwork: false });
 
 	// Check if session has existing data to restore
 	const existingSession = sessionManager.buildSessionContext();
 	const hasExistingSession = existingSession.messages.length > 0;
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
-	let model = options.model;
+	let model = options.model
+		? (modelRuntime.getModel(options.model.provider, options.model.id) ?? options.model)
+		: undefined;
+	if (saved) {
+		model = saved.model ? modelRuntime.getModel(saved.model.provider, saved.model.id) : undefined;
+		if (saved.model && !model)
+			throw new Error(`Saved model ${saved.model.provider}/${saved.model.id} is not registered`);
+	}
 	let modelFallbackMessage: string | undefined;
 
 	// Assistant messages name the physical model that answered, so a virtual selection is only in
@@ -205,7 +263,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	);
 
 	// If session has data, try to restore model from it
-	if (!model && hasExistingSession && sessionModel) {
+	if (!saved && !model && hasExistingSession && sessionModel) {
 		const restoredModel = modelRuntime.getModel(sessionModel.provider, sessionModel.modelId);
 		// A failed auth check is not missing auth; keep the session's provider instead of silently switching.
 		if (
@@ -221,7 +279,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	// If still no model, use findInitialModel (checks settings default, then provider defaults)
-	if (!model) {
+	if (!saved && !model) {
 		const result = await findInitialModel({
 			scopedModels: [],
 			isContinuing: hasExistingSession,
@@ -239,7 +297,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
-	let thinkingLevel = options.thinkingLevel;
+	let thinkingLevel = saved?.thinkingLevel ?? options.thinkingLevel;
 
 	// If session has data, restore thinking level from it
 	if (thinkingLevel === undefined && hasExistingSession) {
@@ -266,12 +324,26 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
+	if (saved && thinkingLevel !== saved.thinkingLevel)
+		throw new Error("Saved thinking level is unsupported by the current model");
+	const scopedModels = saved
+		? saved.scopedModels.map((scope) => {
+				const model = modelRuntime.getModel(scope.provider, scope.id);
+				if (!model) throw new Error(`Saved scoped model ${scope.provider}/${scope.id} is not registered`);
+				return { model, thinkingLevel: scope.thinkingLevel };
+			})
+		: options.scopedModels;
+
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
-	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
-	const excludedToolNames = options.excludeTools;
+	const allowedToolNames = saved
+		? saved.allowedTools
+		: (options.tools ?? (options.noTools === "all" ? [] : undefined));
+	const excludedToolNames = saved ? saved.excludedTools : options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
 	const initialActiveToolNames = (
-		options.tools ?? (options.noTools ? [] : (configuredDefaultToolNames ?? DEFAULT_TOOL_NAMES))
+		saved?.activeTools ??
+		options.tools ??
+		(options.noTools ? [] : (configuredDefaultToolNames ?? DEFAULT_TOOL_NAMES))
 	).filter((name) => !excludedToolNameSet?.has(name));
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
@@ -426,12 +498,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 	});
 
-	// Restore missing settings metadata for older sessions.
-	if (hasExistingSession) {
+	// Complete-state startup must not append metadata to the saved journal.
+	if (!saved && hasExistingSession) {
 		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}
-	} else {
+	} else if (!saved) {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
 		if (model) {
 			sessionManager.appendModelChange(model.provider, model.id);
@@ -444,7 +516,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager,
 		settingsManager,
 		cwd,
-		scopedModels: options.scopedModels,
+		scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
 		modelRuntime,
@@ -457,6 +529,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 	});
 
+	if (saved) session.restoreWorkingSession(saved);
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

@@ -31,8 +31,10 @@ import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
+import { parseRestartHandoff, RESTART_HANDOFF_ENV } from "./cli/restart-protocol.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
+import { startWorkingSessionControl } from "./cli/working-session-control.ts";
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
 import {
@@ -61,6 +63,7 @@ import { collectSettingsDiagnostics, deduplicateDiagnostics } from "./core/setti
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
+import { openWorkingSession, readWorkingSession } from "./core/working-session.ts";
 import { builtInExtensions } from "./extensions/index.ts";
 import { loadMcpCommand } from "./extensions/mcp/cli.lazy.ts";
 import restartExtension, { createManagedRestart } from "./extensions/restart/index.ts";
@@ -573,8 +576,46 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
+	// Validate the cut and journal before migrations, setup, resources or model selection.
+	const parsed = parseArgs(args);
+	const saved = parsed.workingSession ? readWorkingSession(resolvePath(parsed.workingSession)) : undefined;
+	if (saved?.mode && !["tui", "rpc", "print", "json"].includes(saved.mode.kind))
+		throw new Error(`Unsupported native working-session mode: ${saved.mode.kind}`);
+	if (
+		saved &&
+		(parsed.session ||
+			parsed.sessionId ||
+			parsed.continue ||
+			parsed.resume ||
+			parsed.fork ||
+			parsed.noSession ||
+			parsed.name)
+	)
+		throw new Error("--working-session cannot be combined with journal selection or --name");
+	const savedManager = saved ? openWorkingSession(saved) : undefined;
+	const handoff = process.env[RESTART_HANDOFF_ENV]
+		? parseRestartHandoff(process.env[RESTART_HANDOFF_ENV]!)
+		: undefined;
+	if (saved?.launch) {
+		const launch = saved.launch;
+		parsed.extensions = handoff?.extensions ?? launch.extensions;
+		parsed.skills = launch.skills;
+		parsed.promptTemplates = launch.prompts;
+		parsed.themes = launch.themes;
+		parsed.noExtensions = launch.noExtensions;
+		parsed.noSkills = launch.noSkills;
+		parsed.noPromptTemplates = launch.noPromptTemplates;
+		parsed.noThemes = launch.noThemes;
+		parsed.noContextFiles = launch.noContextFiles;
+		parsed.systemPrompt = launch.systemPrompt;
+		parsed.appendSystemPrompt = launch.appendSystemPrompt;
+		parsed.projectTrustOverride = launch.trustProject;
+		parsed.unknownFlags = new Map(saved.flags);
+	}
 	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
-	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
+	const offlineMode =
+		saved?.launch?.offline ?? (args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE));
+	if (saved?.launch?.offline === false) delete process.env.PI_OFFLINE;
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
 		process.env.PI_SKIP_VERSION_CHECK = "1";
@@ -589,8 +630,8 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	cleanupManagedInstall();
 
-	const cwd = process.cwd();
-	const agentDir = getAgentDir();
+	const cwd = saved?.cwd ?? process.cwd();
+	const agentDir = saved?.launch?.agentDir ?? getAgentDir();
 	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher();
@@ -618,7 +659,6 @@ export async function main(args: string[], options?: MainOptions) {
 		return;
 	}
 
-	const parsed = parseArgs(args);
 	if (parsed.diagnostics.length > 0) {
 		for (const d of parsed.diagnostics) {
 			const color = d.type === "error" ? chalk.red : chalk.yellow;
@@ -650,6 +690,10 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
+	if (saved?.mode) {
+		const mode = saved.mode.kind;
+		appMode = mode === "tui" ? "interactive" : (mode as AppMode);
+	}
 	const managedRestart =
 		appMode === "interactive" &&
 		!parsed.help &&
@@ -675,15 +719,24 @@ export async function main(args: string[], options?: MainOptions) {
 	validateSessionIdFlags(parsed);
 
 	// Run migrations (pass cwd for project-local migrations)
-	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);
+	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = saved
+		? { migratedAuthProviders: [], deprecationWarnings: [] }
+		: runMigrations(cwd);
 	time("runMigrations");
 
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	if (saved) startupSettingsManager.applyOverrides(saved.settings);
 	const startupSettingsDiagnostics = collectSettingsDiagnostics(startupSettingsManager);
 
 	// Experimental first-time setup: theme choice and analytics opt-in.
 	// Runs before any runtime services are created so the chosen settings apply everywhere.
-	if (appMode === "interactive" && !parsed.help && parsed.listModels === undefined && shouldRunFirstTimeSetup()) {
+	if (
+		!saved &&
+		appMode === "interactive" &&
+		!parsed.help &&
+		parsed.listModels === undefined &&
+		shouldRunFirstTimeSetup()
+	) {
 		await showFirstTimeSetup(startupSettingsManager);
 		time("firstTimeSetup");
 	}
@@ -702,7 +755,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
+	let sessionManager = savedManager ?? (await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager));
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
 		if (appMode === "interactive") {
@@ -758,6 +811,7 @@ export async function main(args: string[], options?: MainOptions) {
 				parsed.projectTrustOverride ??
 				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		if (isInitialRuntime && saved) runtimeSettingsManager.applyOverrides(saved.settings);
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
@@ -818,7 +872,8 @@ export async function main(args: string[], options?: MainOptions) {
 			})),
 		];
 
-		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
+		const modelPatterns =
+			saved && isInitialRuntime ? undefined : (parsed.models ?? settingsManager.getEnabledModels());
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0
 				? await resolveModelScope(modelPatterns, modelRuntime, { signal: AbortSignal.timeout(15_000) })
@@ -828,7 +883,7 @@ export async function main(args: string[], options?: MainOptions) {
 			cliThinkingFromModel,
 			diagnostics: sessionOptionDiagnostics,
 		} = buildSessionOptions(
-			parsed,
+			saved && isInitialRuntime ? { ...parsed, model: undefined, provider: undefined, thinking: undefined } : parsed,
 			scopedModels,
 			sessionManager.buildSessionContext().messages.length > 0,
 			modelRuntime,
@@ -837,6 +892,8 @@ export async function main(args: string[], options?: MainOptions) {
 		diagnostics.push(...sessionOptionDiagnostics);
 
 		if (parsed.apiKey) {
+			if (saved?.model && isInitialRuntime)
+				sessionOptions.model = modelRuntime.getModel(saved.model.provider, saved.model.id);
 			if (!sessionOptions.model) {
 				diagnostics.push({
 					type: "error",
@@ -851,6 +908,7 @@ export async function main(args: string[], options?: MainOptions) {
 			services,
 			sessionManager,
 			sessionStartEvent,
+			workingSession: isInitialRuntime ? saved : undefined,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
@@ -859,8 +917,25 @@ export async function main(args: string[], options?: MainOptions) {
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
+		created.session.setWorkingSessionReady(false);
+		created.session.workingSessionLaunch = {
+			agentDir,
+			extensions: resolvedExtensionPaths ?? [],
+			skills: resolvedSkillPaths ?? [],
+			prompts: resolvedPromptTemplatePaths ?? [],
+			themes: resolvedThemePaths ?? [],
+			noExtensions: parsed.noExtensions,
+			noSkills: parsed.noSkills,
+			noPromptTemplates: parsed.noPromptTemplates,
+			noThemes: parsed.noThemes,
+			noContextFiles: parsed.noContextFiles,
+			systemPrompt: parsed.systemPrompt,
+			appendSystemPrompt: parsed.appendSystemPrompt,
+			trustProject: settingsManager.isProjectTrusted(),
+			offline: offlineMode,
+		};
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
-		if (created.session.model && cliThinkingOverride) {
+		if (!saved && created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);
 		}
 
@@ -945,6 +1020,11 @@ export async function main(args: string[], options?: MainOptions) {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);
 	}
+
+	await startWorkingSessionControl(
+		runtime,
+		managedRestart ? (session) => managedRestart.captureFinal(session) : undefined,
+	);
 
 	// RPC refreshes catalogs here in the background; interactive mode starts its refresh after TUI initialization.
 	if (!offlineMode && appMode === "rpc") {

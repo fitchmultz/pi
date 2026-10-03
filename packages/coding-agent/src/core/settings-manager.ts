@@ -384,6 +384,8 @@ export class InMemorySettingsStorage implements SettingsStorage {
 }
 
 export class SettingsManager {
+	beforeMutation?: () => void;
+	runWorkingSessionActivity?: <T>(action: () => Promise<T>) => Promise<T>;
 	private storage: SettingsStorage;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
@@ -591,6 +593,7 @@ export class SettingsManager {
 	}
 
 	setProjectTrusted(trusted: boolean): void {
+		this.beforeMutation?.();
 		if (this.projectTrusted === trusted) {
 			return;
 		}
@@ -616,6 +619,11 @@ export class SettingsManager {
 	}
 
 	async reload(): Promise<void> {
+		return this.runWorkingSessionActivity ? this.runWorkingSessionActivity(() => this._reload()) : this._reload();
+	}
+
+	private async _reload(): Promise<void> {
+		this.beforeMutation?.();
 		await this.writeQueue;
 		const globalLoad = SettingsManager.tryLoadFromStorage(this.storage, "global");
 		if (!globalLoad.error) {
@@ -645,6 +653,7 @@ export class SettingsManager {
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
+		this.beforeMutation?.();
 		this.settings = deepMergeSettings(this.settings, overrides);
 	}
 
@@ -809,6 +818,7 @@ export class SettingsManager {
 	}
 
 	setLastChangelogVersion(version: string): void {
+		this.beforeMutation?.();
 		this.globalSettings.lastChangelogVersion = version;
 		this.markModified("lastChangelogVersion");
 		this.save();
@@ -828,18 +838,21 @@ export class SettingsManager {
 	}
 
 	setDefaultProvider(provider: string): void {
+		this.beforeMutation?.();
 		this.globalSettings.defaultProvider = provider;
 		this.markModified("defaultProvider");
 		this.save();
 	}
 
 	setDefaultModel(modelId: string): void {
+		this.beforeMutation?.();
 		this.globalSettings.defaultModel = modelId;
 		this.markModified("defaultModel");
 		this.save();
 	}
 
 	setDefaultModelAndProvider(provider: string, modelId: string): void {
+		this.beforeMutation?.();
 		this.globalSettings.defaultProvider = provider;
 		this.globalSettings.defaultModel = modelId;
 		this.markModified("defaultProvider");
@@ -852,6 +865,7 @@ export class SettingsManager {
 	}
 
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
+		this.beforeMutation?.();
 		this.globalSettings.steeringMode = mode;
 		this.markModified("steeringMode");
 		this.save();
@@ -862,6 +876,7 @@ export class SettingsManager {
 	}
 
 	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
+		this.beforeMutation?.();
 		this.globalSettings.followUpMode = mode;
 		this.markModified("followUpMode");
 		this.save();
@@ -879,6 +894,7 @@ export class SettingsManager {
 	}
 
 	setTheme(theme: string): void {
+		this.beforeMutation?.();
 		this.globalSettings.theme = theme;
 		this.markModified("theme");
 		this.save();
@@ -889,6 +905,7 @@ export class SettingsManager {
 	}
 
 	setDefaultThinkingLevel(level: ThinkingLevel): void {
+		this.beforeMutation?.();
 		this.globalSettings.defaultThinkingLevel = level;
 		this.markModified("defaultThinkingLevel");
 		this.save();
@@ -903,6 +920,7 @@ export class SettingsManager {
 	}
 
 	setModelThinkingLevel(provider: string, modelId: string, level: ThinkingLevel): void {
+		this.beforeMutation?.();
 		if (!this.globalSettings.modelThinkingLevels) {
 			this.globalSettings.modelThinkingLevels = {};
 		}
@@ -912,6 +930,7 @@ export class SettingsManager {
 	}
 
 	removeModelThinkingLevel(provider: string, modelId: string): void {
+		this.beforeMutation?.();
 		delete this.globalSettings.modelThinkingLevels?.[`${provider}/${modelId}`];
 		if (
 			this.globalSettings.modelThinkingLevels &&
@@ -928,6 +947,7 @@ export class SettingsManager {
 	}
 
 	setTransport(transport: TransportSetting): void {
+		this.beforeMutation?.();
 		this.globalSettings.transport = transport;
 		this.markModified("transport");
 		this.save();
@@ -938,6 +958,7 @@ export class SettingsManager {
 	}
 
 	setCompactionEnabled(enabled: boolean): void {
+		this.beforeMutation?.();
 		if (!this.globalSettings.compaction) {
 			this.globalSettings.compaction = {};
 		}
@@ -1011,6 +1032,7 @@ export class SettingsManager {
 	}
 
 	setRetryEnabled(enabled: boolean): void {
+		this.beforeMutation?.();
 		if (!this.globalSettings.retry) {
 			this.globalSettings.retry = {};
 		}
@@ -1033,6 +1055,7 @@ export class SettingsManager {
 	}
 
 	setHttpIdleTimeoutMs(timeoutMs: number): void {
+		this.beforeMutation?.();
 		if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
 			throw new Error(`Invalid httpIdleTimeoutMs setting: ${String(timeoutMs)}`);
 		}
@@ -1048,6 +1071,7 @@ export class SettingsManager {
 	}
 
 	setCacheWarmingMode(mode: CacheWarmingMode): void {
+		this.beforeMutation?.();
 		this.globalSettings.cacheWarming = mode;
 		this.markModified("cacheWarming");
 		this.save();
@@ -1075,6 +1099,7 @@ export class SettingsManager {
 	}
 
 	setCompactView(compactView: CompactView): void {
+		this.beforeMutation?.();
 		this.globalSettings.compactView = compactView;
 		this.markModified("compactView");
 		this.save();
@@ -1097,12 +1122,14 @@ export class SettingsManager {
 	}
 
 	setHideThinkingBlock(hide: boolean): void {
+		this.beforeMutation?.();
 		this.globalSettings.hideThinkingBlock = hide;
 		this.markModified("hideThinkingBlock");
 		this.save();
 	}
 
 	setShowCacheMissNotices(show: boolean): void {
+		this.beforeMutation?.();
 		this.globalSettings.showCacheMissNotices = show;
 		this.markModified("showCacheMissNotices");
 		this.save();
@@ -1114,6 +1141,7 @@ export class SettingsManager {
 	}
 
 	setShellPath(path: string | undefined): void {
+		this.beforeMutation?.();
 		this.globalSettings.shellPath = path;
 		this.markModified("shellPath");
 		this.save();
@@ -1125,6 +1153,7 @@ export class SettingsManager {
 	}
 
 	setQuietStartup(quiet: QuietStartup): void {
+		this.beforeMutation?.();
 		this.globalSettings.quietStartup = quiet;
 		this.markModified("quietStartup");
 		this.save();
@@ -1136,6 +1165,7 @@ export class SettingsManager {
 	}
 
 	setDefaultProjectTrust(defaultProjectTrust: DefaultProjectTrust): void {
+		this.beforeMutation?.();
 		this.globalSettings.defaultProjectTrust = defaultProjectTrust;
 		this.markModified("defaultProjectTrust");
 		this.save();
@@ -1146,6 +1176,7 @@ export class SettingsManager {
 	}
 
 	setShellCommandPrefix(prefix: string | undefined): void {
+		this.beforeMutation?.();
 		this.globalSettings.shellCommandPrefix = prefix;
 		this.markModified("shellCommandPrefix");
 		this.save();
@@ -1156,6 +1187,7 @@ export class SettingsManager {
 	}
 
 	setNpmCommand(command: string[] | undefined): void {
+		this.beforeMutation?.();
 		this.globalSettings.npmCommand = command ? [...command] : undefined;
 		this.markModified("npmCommand");
 		this.save();
@@ -1166,6 +1198,7 @@ export class SettingsManager {
 	}
 
 	setCollapseChangelog(collapse: boolean): void {
+		this.beforeMutation?.();
 		this.globalSettings.collapseChangelog = collapse;
 		this.markModified("collapseChangelog");
 		this.save();
@@ -1176,6 +1209,7 @@ export class SettingsManager {
 	}
 
 	setEnableInstallTelemetry(enabled: boolean): void {
+		this.beforeMutation?.();
 		this.globalSettings.enableInstallTelemetry = enabled;
 		this.markModified("enableInstallTelemetry");
 		this.save();
@@ -1191,6 +1225,7 @@ export class SettingsManager {
 
 	/** Set the analytics opt-in preference; generates a tracking identifier on first opt-in */
 	setEnableAnalytics(enabled: boolean): void {
+		this.beforeMutation?.();
 		this.globalSettings.enableAnalytics = enabled;
 		this.markModified("enableAnalytics");
 		if (enabled && !this.globalSettings.trackingId) {
@@ -1219,12 +1254,14 @@ export class SettingsManager {
 	}
 
 	setPackages(packages: PackageSource[]): void {
+		this.beforeMutation?.();
 		this.globalSettings.packages = packages;
 		this.markModified("packages");
 		this.save();
 	}
 
 	setProjectPackages(packages: PackageSource[]): void {
+		this.beforeMutation?.();
 		this.updateProjectSettings("packages", (settings) => {
 			settings.packages = packages;
 		});
@@ -1235,12 +1272,14 @@ export class SettingsManager {
 	}
 
 	setExtensionPaths(paths: string[]): void {
+		this.beforeMutation?.();
 		this.globalSettings.extensions = paths;
 		this.markModified("extensions");
 		this.save();
 	}
 
 	setProjectExtensionPaths(paths: string[]): void {
+		this.beforeMutation?.();
 		this.updateProjectSettings("extensions", (settings) => {
 			settings.extensions = paths;
 		});
@@ -1251,12 +1290,14 @@ export class SettingsManager {
 	}
 
 	setSkillPaths(paths: string[]): void {
+		this.beforeMutation?.();
 		this.globalSettings.skills = paths;
 		this.markModified("skills");
 		this.save();
 	}
 
 	setProjectSkillPaths(paths: string[]): void {
+		this.beforeMutation?.();
 		this.updateProjectSettings("skills", (settings) => {
 			settings.skills = paths;
 		});
@@ -1267,12 +1308,14 @@ export class SettingsManager {
 	}
 
 	setPromptTemplatePaths(paths: string[]): void {
+		this.beforeMutation?.();
 		this.globalSettings.prompts = paths;
 		this.markModified("prompts");
 		this.save();
 	}
 
 	setProjectPromptTemplatePaths(paths: string[]): void {
+		this.beforeMutation?.();
 		this.updateProjectSettings("prompts", (settings) => {
 			settings.prompts = paths;
 		});
@@ -1283,12 +1326,14 @@ export class SettingsManager {
 	}
 
 	setThemePaths(paths: string[]): void {
+		this.beforeMutation?.();
 		this.globalSettings.themes = paths;
 		this.markModified("themes");
 		this.save();
 	}
 
 	setProjectThemePaths(paths: string[]): void {
+		this.beforeMutation?.();
 		this.updateProjectSettings("themes", (settings) => {
 			settings.themes = paths;
 		});
@@ -1299,6 +1344,7 @@ export class SettingsManager {
 	}
 
 	setEnableSkillCommands(enabled: boolean): void {
+		this.beforeMutation?.();
 		this.globalSettings.enableSkillCommands = enabled;
 		this.markModified("enableSkillCommands");
 		this.save();
@@ -1323,6 +1369,7 @@ export class SettingsManager {
 	}
 
 	setShowImages(show: boolean): void {
+		this.beforeMutation?.();
 		if (!this.globalSettings.terminal) {
 			this.globalSettings.terminal = {};
 		}
@@ -1340,6 +1387,7 @@ export class SettingsManager {
 	}
 
 	setImageWidthCells(width: number): void {
+		this.beforeMutation?.();
 		if (!this.globalSettings.terminal) {
 			this.globalSettings.terminal = {};
 		}
@@ -1357,6 +1405,7 @@ export class SettingsManager {
 	}
 
 	setClearOnShrink(enabled: boolean): void {
+		this.beforeMutation?.();
 		if (!this.globalSettings.terminal) {
 			this.globalSettings.terminal = {};
 		}
@@ -1370,6 +1419,7 @@ export class SettingsManager {
 	}
 
 	setShowTerminalProgress(enabled: boolean): void {
+		this.beforeMutation?.();
 		if (!this.globalSettings.terminal) {
 			this.globalSettings.terminal = {};
 		}
@@ -1383,6 +1433,7 @@ export class SettingsManager {
 	}
 
 	setTuiMode(mode: TuiMode): void {
+		this.beforeMutation?.();
 		this.globalSettings.tuiMode = mode;
 		this.markModified("tuiMode");
 		this.save();
@@ -1393,6 +1444,7 @@ export class SettingsManager {
 	}
 
 	setFullscreenExitOutput(output: FullscreenExitOutput): void {
+		this.beforeMutation?.();
 		this.globalSettings.fullscreenExitOutput = output;
 		this.markModified("fullscreenExitOutput");
 		this.save();
@@ -1404,6 +1456,7 @@ export class SettingsManager {
 	}
 
 	setFullscreenScrollbar(mode: ScrollViewScrollbar): void {
+		this.beforeMutation?.();
 		this.globalSettings.fullscreenScrollbar = mode;
 		this.markModified("fullscreenScrollbar");
 		this.save();
@@ -1414,6 +1467,7 @@ export class SettingsManager {
 	}
 
 	setFullscreenCopyOnSelect(enabled: boolean): void {
+		this.beforeMutation?.();
 		this.globalSettings.fullscreenCopyOnSelect = enabled;
 		this.markModified("fullscreenCopyOnSelect");
 		this.save();
@@ -1427,6 +1481,7 @@ export class SettingsManager {
 	}
 
 	setFullscreenWheelScrollLines(lines: WheelScrollLines): void {
+		this.beforeMutation?.();
 		this.globalSettings.fullscreenWheelScrollLines =
 			lines === "auto" ? lines : Math.max(1, Math.min(100, Math.floor(lines)));
 		this.markModified("fullscreenWheelScrollLines");
@@ -1438,6 +1493,7 @@ export class SettingsManager {
 	}
 
 	setImageAutoResize(enabled: boolean): void {
+		this.beforeMutation?.();
 		if (!this.globalSettings.images) {
 			this.globalSettings.images = {};
 		}
@@ -1451,6 +1507,7 @@ export class SettingsManager {
 	}
 
 	setBlockImages(blocked: boolean): void {
+		this.beforeMutation?.();
 		if (!this.globalSettings.images) {
 			this.globalSettings.images = {};
 		}
@@ -1471,6 +1528,7 @@ export class SettingsManager {
 	}
 
 	setEnabledModels(patterns: string[] | undefined): void {
+		this.beforeMutation?.();
 		this.globalSettings.enabledModels = patterns;
 		this.markModified("enabledModels");
 		this.save();
@@ -1481,6 +1539,7 @@ export class SettingsManager {
 	}
 
 	setDoubleEscapeAction(action: "fork" | "tree" | "none"): void {
+		this.beforeMutation?.();
 		this.globalSettings.doubleEscapeAction = action;
 		this.markModified("doubleEscapeAction");
 		this.save();
@@ -1493,6 +1552,7 @@ export class SettingsManager {
 	}
 
 	setTreeFilterMode(mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all"): void {
+		this.beforeMutation?.();
 		this.globalSettings.treeFilterMode = mode;
 		this.markModified("treeFilterMode");
 		this.save();
@@ -1503,6 +1563,7 @@ export class SettingsManager {
 	}
 
 	setShowHardwareCursor(enabled: boolean): void {
+		this.beforeMutation?.();
 		this.globalSettings.showHardwareCursor = enabled;
 		this.markModified("showHardwareCursor");
 		this.save();
@@ -1513,6 +1574,7 @@ export class SettingsManager {
 	}
 
 	setEditorPaddingX(padding: number): void {
+		this.beforeMutation?.();
 		this.globalSettings.editorPaddingX = Math.max(0, Math.min(3, Math.floor(padding)));
 		this.markModified("editorPaddingX");
 		this.save();
@@ -1523,6 +1585,7 @@ export class SettingsManager {
 	}
 
 	setOutputPad(padding: 0 | 1): void {
+		this.beforeMutation?.();
 		this.globalSettings.outputPad = padding;
 		this.markModified("outputPad");
 		this.save();
@@ -1533,6 +1596,7 @@ export class SettingsManager {
 	}
 
 	setAutocompleteMaxVisible(maxVisible: number): void {
+		this.beforeMutation?.();
 		this.globalSettings.autocompleteMaxVisible = Math.max(3, Math.min(20, Math.floor(maxVisible)));
 		this.markModified("autocompleteMaxVisible");
 		this.save();
@@ -1548,6 +1612,7 @@ export class SettingsManager {
 	}
 
 	setMermaidRenderingMode(mode: MermaidRenderingMode): void {
+		this.beforeMutation?.();
 		this.globalSettings.markdown ??= {};
 		this.globalSettings.markdown.mermaid = mode;
 		this.markModified("markdown", "mermaid");
@@ -1559,6 +1624,7 @@ export class SettingsManager {
 	}
 
 	setWarnings(warnings: WarningSettings): void {
+		this.beforeMutation?.();
 		this.globalSettings.warnings = { ...warnings };
 		this.markModified("warnings");
 		this.save();

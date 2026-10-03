@@ -1,10 +1,21 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getRestartArgs, getRestartRuntimeWorker, runCliLauncher, superviseCli } from "../src/cli/launcher.ts";
 import { parseRestartCommand, parseRestartRequest } from "../src/cli/restart-protocol.ts";
+import { createHarness } from "./suite/harness.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -18,7 +29,7 @@ interface Receipt {
 }
 
 function fixture() {
-	const root = mkdtempSync(join(tmpdir(), "pi-launcher-"));
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-launcher-")));
 	roots.push(root);
 	const log = join(root, "launches.jsonl");
 	const selector = join(root, "pi");
@@ -37,6 +48,7 @@ function fixture() {
 				join(bundle, "cli-worker.js"),
 				`
 import { appendFileSync, existsSync, unlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 const handoff = process.env.PI_RESTART_HANDOFF ? JSON.parse(process.env.PI_RESTART_HANDOFF) : undefined;
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, args: process.argv.slice(2), handoff }) + '\\n');
 const select = (name) => { if (existsSync(${JSON.stringify(selector)})) unlinkSync(${JSON.stringify(selector)}); symlinkSync(${JSON.stringify(root)} + '/' + name + '/dist/bundle/cli.js', ${JSON.stringify(selector)}); };
@@ -76,6 +88,56 @@ function readable(path: string): boolean {
 }
 
 describe("managed restart launcher", () => {
+	it.each(["complete", "metadata", "crash", "stale-worker", "missing", "replaced", "corrupt"])(
+		"attests only the current, ready, fully finalized last worker: %s",
+		async (scenario) => {
+			const h = await createHarness();
+			const hold = await h.session.acquireWorkingSession();
+			const state = JSON.stringify(hold.state);
+			await hold.release();
+			h.cleanup();
+			const f = fixture();
+			const exitPath = join(f.root, "exit.json");
+			writeFileSync(exitPath, "stale previous launch", { mode: 0o600 });
+			const complete = `
+const statePath = process.env.PI_WORKING_SESSION_EXIT_PATH + '.state';
+writeFileSync(statePath, ${JSON.stringify(state)}, {mode:0o600});
+const receipt = {path:statePath,digest:${scenario === "corrupt" ? "'0'.repeat(64)" : `createHash('sha256').update(${JSON.stringify(state)}).digest('hex')`},sessionId:${JSON.stringify(h.session.sessionId)},pid:process.pid,worker:${scenario === "stale-worker" ? "'previous-worker'" : "process.env.PI_WORKING_SESSION_WORKER"},launch:process.env.PI_WORKING_SESSION_LAUNCH};
+await new Promise(resolve => process.send({type:'pi:completed',completed:receipt}, resolve));
+`;
+			const body =
+				scenario === "missing"
+					? "ready();"
+					: `
+${scenario === "metadata" ? "" : "await new Promise(resolve => process.send({type:'pi:ready'}, resolve));"}
+${complete}
+${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario === "crash" ? 17 : 0});`}
+`;
+			const a = f.release("A", body);
+			if (scenario === "replaced") f.release("B", "ready();");
+			f.select(a);
+			const result = superviseCli(getRestartRuntimeWorker(a), [], {
+				invocationPath: f.selector,
+				execArgv: [],
+				env: { ...process.env, PI_WORKING_SESSION_EXIT_PATH: exitPath },
+			});
+			if (scenario === "corrupt") await expect(result).rejects.toThrow("artifact mismatch");
+			else expect(await result).toBe(scenario === "crash" ? 17 : 0);
+			expect(existsSync(exitPath)).toBe(scenario === "complete");
+			if (scenario === "complete") {
+				const receipt = JSON.parse(readFileSync(exitPath, "utf8"));
+				expect(receipt).toMatchObject({
+					version: 1,
+					path: `${exitPath}.state`,
+					sessionId: h.session.sessionId,
+					launcherPid: process.pid,
+				});
+				expect(receipt.worker).toBeTypeOf("string");
+				expect(receipt.launcher).toBe(receipt.launch);
+			}
+		},
+	);
+
 	it.skipIf(process.platform === "win32").each(["SIGINT", "SIGHUP", "SIGTERM"] as const)(
 		"allows a worker to close gracefully after %s without duplicate delivery",
 		async (signal) => {

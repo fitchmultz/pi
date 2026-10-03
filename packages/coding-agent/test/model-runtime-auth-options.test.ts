@@ -47,6 +47,74 @@ describe("ModelRuntime auth options", () => {
 		expect((await runtime.getAuth("anthropic"))?.auth.apiKey).toBe("stored-key");
 	});
 
+	it("composes fresh fallback envelopes with the effective provider and never crosses a local auth failure", async () => {
+		const credentials = new InMemoryCredentialStore();
+		const runtime = await ModelRuntime.create({ credentials, modelsPath: null });
+		const base = runtime.getProvider("openai-codex")!;
+		let resolved = 0;
+		const fallback = {
+			check: async () => ({ type: "api_key" as const, source: "selected account" }),
+			resolve: async () => ({
+				auth: { headers: { "x-account": String(++resolved) }, baseUrl: "https://account.test" },
+				env: { ACCOUNT_ENV: "private" },
+				source: "selected account",
+			}),
+		};
+		const oldDispose = runtime.registerProviderAuthFallback(base.id, fallback);
+		const dispose = runtime.registerProviderAuthFallback(base.id, fallback);
+		oldDispose();
+		await runtime.refresh({ allowNetwork: false });
+		expect(resolved).toBe(0);
+		expect(runtime.hasConfiguredAuth(base.id)).toBe(true);
+		expect(runtime.getProvider(base.id)?.auth.oauth?.login).toBe(base.auth.oauth?.login);
+		expect(runtime.getProvider(base.id)?.auth.apiKey?.login).toBeUndefined();
+		expect(await runtime.getAuth(base.id)).toEqual({
+			auth: { headers: { "x-account": "1" }, baseUrl: "https://account.test" },
+			env: { ACCOUNT_ENV: "private" },
+			source: "selected account",
+		});
+		expect((await runtime.getAuth(base.id))?.auth.headers).toEqual({ "x-account": "2" });
+		expect(await credentials.list()).toEqual([]);
+
+		runtime.registerNativeProvider({
+			...base,
+			getModels: () => [{ ...base.getModels()[0]!, id: "effective-only" }],
+			getAllModels: () => [{ ...base.getModels()[0]!, id: "effective-only" }],
+			auth: {
+				...base.auth,
+				apiKey: {
+					name: "Local",
+					check: async ({ credential, ctx }) =>
+						credential || (await ctx.env("LOCAL_ACCOUNT_KEY")) ? { type: "api_key", source: "local" } : undefined,
+					resolve: async ({ credential, ctx }) => {
+						if (credential) throw new Error("local failed");
+						const key = await ctx.env("LOCAL_ACCOUNT_KEY");
+						return key ? { auth: { apiKey: key }, source: "local" } : undefined;
+					},
+				},
+			},
+		});
+		await runtime.refresh({ allowNetwork: false });
+		expect(runtime.getModel(base.id, "effective-only")).toBeDefined();
+		expect((await runtime.getAuth(base.id, { env: { LOCAL_ACCOUNT_KEY: "local-key" } }))?.auth.apiKey).toBe(
+			"local-key",
+		);
+		expect(resolved).toBe(2);
+		await credentials.modify(base.id, async () => ({ type: "api_key", key: "broken" }));
+		await expect(runtime.getAuth(base.id)).rejects.toThrow("API key auth failed");
+		expect(resolved).toBe(2);
+		await credentials.delete(base.id);
+		runtime.registerProvider(base.id, { apiKey: "$ABSENT_SELECTED_KEY" });
+		await expect(runtime.getAuth(base.id)).rejects.toThrow("API key auth failed");
+		expect(resolved).toBe(2);
+		runtime.unregisterProvider(base.id);
+		expect((await runtime.getAuth(base.id))?.auth.headers).toEqual({ "x-account": "3" });
+		dispose();
+		await runtime.refresh({ allowNetwork: false });
+		expect(runtime.hasConfiguredAuth(base.id)).toBe(false);
+		expect(runtime.getProvider(base.id)?.auth.apiKey).toBeUndefined();
+	});
+
 	it("scopes provider availability reads and records refresh failures", async () => {
 		const base = new InMemoryCredentialStore();
 		const reads: string[] = [];

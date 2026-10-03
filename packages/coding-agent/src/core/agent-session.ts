@@ -151,6 +151,15 @@ import {
 	VIRTUAL_MODEL_STATE_ENTRY,
 	type VirtualModelStateData,
 } from "./virtual-models.ts";
+import {
+	type WorkingSession,
+	type WorkingSessionBoundary,
+	WorkingSessionGate,
+	type WorkingSessionHold,
+	type WorkingSessionHost,
+	type WorkingSessionLaunch,
+	type WorkingSessionSaveEvent,
+} from "./working-session.ts";
 
 // ============================================================================
 // Skill Block Parsing
@@ -360,6 +369,20 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 // ============================================================================
 
 export class AgentSession {
+	readonly workingSessionGate = new WorkingSessionGate();
+	private _workingSessionRequest?: {
+		boundary: WorkingSessionBoundary;
+		resolve: (hold: WorkingSessionHold) => void;
+		reject: (error: unknown) => void;
+		controller: AbortController;
+		onInvalidate?: (reason: string) => void;
+	};
+	private _workingSessionHost?: WorkingSessionHost;
+	private _workingSessionReady = true;
+	private _workingSessionMode?: WorkingSession["mode"];
+	workingSessionLaunch?: WorkingSessionLaunch;
+	private _workingSessionRelease?: () => Promise<void>;
+	private _restoredWorkingSession = false;
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
@@ -496,6 +519,224 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
+		this.agent.beforeMutation = this.workingSessionGate.beforeMutation;
+		this.sessionManager.beforeMutation = this.workingSessionGate.beforeMutation;
+		this.settingsManager.beforeMutation = this.workingSessionGate.beforeMutation;
+		this.settingsManager.runWorkingSessionActivity = (action) => this.workingSessionGate.run(action);
+		this.agent.onTurnBoundary = () => this._grantWorkingSession("turn");
+		this.workingSessionGate.onIdle = () => {
+			if (this.isIdle && !this.isSettling) void this._grantWorkingSession("settled");
+		};
+		this.agent.onIdle = this.workingSessionGate.onIdle;
+	}
+
+	bindWorkingSessionHost(host: WorkingSessionHost): void {
+		this.workingSessionGate.beforeMutation();
+		if (this._workingSessionMode) {
+			if (this._workingSessionMode.kind !== host.kind)
+				throw new Error(`Working session requires native ${this._workingSessionMode.kind} mode`);
+			host.restore(this._workingSessionMode.data);
+			this._workingSessionMode = undefined;
+		}
+		this._workingSessionHost = host;
+	}
+
+	setWorkingSessionReady(ready: boolean): void {
+		this.workingSessionGate.beforeMutation();
+		this._workingSessionReady = ready;
+		if (ready && this.isIdle && !this.isSettling) void this._grantWorkingSession("settled");
+	}
+
+	/** Await a native cut without consuming accepted queues. */
+	async acquireWorkingSession(
+		options: {
+			boundary?: WorkingSessionBoundary;
+			signal?: AbortSignal;
+			onInvalidate?: (reason: string) => void;
+		} = {},
+	): Promise<WorkingSessionHold> {
+		if (this.workingSessionGate.inActivity)
+			throw new Error("Cannot acquire a working session from an active native callback");
+		if (this._workingSessionRequest || this.workingSessionGate.reserved)
+			throw new Error("Native working session acquisition already active");
+		options.signal?.throwIfAborted();
+		const controller = new AbortController();
+		return new Promise<WorkingSessionHold>((resolve, reject) => {
+			const abort = () => {
+				const reason = options.signal?.reason ?? new Error("Working session acquisition cancelled");
+				if (this._workingSessionRelease) {
+					this.workingSessionGate.invalidate("Native working-session acquisition cancelled");
+					reject(reason);
+					void this._workingSessionRelease();
+				} else {
+					controller.abort(reason);
+					this._workingSessionRequest = undefined;
+					reject(reason);
+				}
+			};
+			options.signal?.addEventListener("abort", abort, { once: true });
+			this._workingSessionRequest = {
+				boundary: options.boundary ?? "settled",
+				controller,
+				resolve: (hold) => {
+					hold.signal.addEventListener("abort", () => options.signal?.removeEventListener("abort", abort), {
+						once: true,
+					});
+					resolve(hold);
+				},
+				reject: (error) => {
+					options.signal?.removeEventListener("abort", abort);
+					reject(error);
+				},
+				onInvalidate: options.onInvalidate,
+			};
+			if (this.isIdle && !this.isSettling) void this._grantWorkingSession("settled");
+		});
+	}
+
+	private async _grantWorkingSession(boundary: WorkingSessionBoundary): Promise<void> {
+		const request = this._workingSessionRequest;
+		if (
+			!request ||
+			!this._workingSessionReady ||
+			this.workingSessionGate.reserved ||
+			this.workingSessionGate.busy ||
+			(boundary === "turn" && request.boundary !== "turn")
+		)
+			return;
+		if (boundary === "settled" && this.agent.state.isStreaming) return;
+		if (this.isBashRunning || this.isCompacting || this.isRetrying) return;
+		const invalidated = new AbortController();
+		this.workingSessionGate.reserve(invalidated, request.onInvalidate);
+		this._cacheWarmer?.cancel();
+		let active = true;
+		const release = async () => {
+			if (!active) return;
+			active = false;
+			this._workingSessionRelease = undefined;
+			this._workingSessionRequest = undefined;
+			this.workingSessionGate.release();
+			request.controller.abort();
+		};
+		this._workingSessionRelease = release;
+		try {
+			let preparing = true;
+			const event: WorkingSessionSaveEvent = {
+				type: "working_session_save",
+				boundary,
+				signal: request.controller.signal,
+				invalidate: (reason) => this.workingSessionGate.invalidate(reason),
+				appendEntry: (customType, data) => {
+					if (!preparing || !active || request.controller.signal.aborted)
+						throw new Error("Working session save writer expired");
+					this.workingSessionGate.prepareMutation(() => this.sessionManager.appendCustomEntry(customType, data));
+				},
+			};
+			const blockers = await this._extensionRunner.emitWorkingSessionSave(event);
+			if (this._workingSessionHost) {
+				const result = await this._workingSessionHost.readiness(event);
+				blockers.push(...(result?.blockers ?? []));
+			}
+			preparing = false;
+			if (this._extensionRunner.hasPendingUI) blockers.push("Unresolved extension UI");
+			if (this._workingSessionMode && !this._workingSessionHost)
+				blockers.push(`Native ${this._workingSessionMode.kind} mode has not restored its buffers`);
+			await this.settingsManager.flush();
+			const errors = this.settingsManager.drainErrors();
+			if (errors.length)
+				throw new Error(`Native settings flush failed: ${errors.map((error) => error.error.message).join("; ")}`);
+			this.sessionManager.flushWorkingSession();
+			request.controller.signal.throwIfAborted();
+			invalidated.signal.throwIfAborted();
+			if (this.workingSessionGate.busy) throw new Error("Native activity changed during save preparation");
+			const queues = this.agent.getQueuedMessages();
+			const header = this.sessionManager.getHeader();
+			if (!header) throw new Error("Native session header missing");
+			const state: WorkingSession = JSON.parse(
+				JSON.stringify({
+					version: 1,
+					createdAt: new Date().toISOString(),
+					boundary,
+					cwd: this._cwd,
+					sessionFile: this.sessionFile,
+					sessionDir: this.sessionManager.getSessionDir(),
+					header,
+					entries: this.sessionManager.getEntries(),
+					leafId: this.sessionManager.getLeafId(),
+					model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
+					thinkingLevel: this.thinkingLevel,
+					scopedModels: this._scopedModels.map(({ model, thinkingLevel }) => ({
+						provider: model.provider,
+						id: model.id,
+						thinkingLevel,
+					})),
+					activeTools: this.getActiveToolNames(),
+					pendingTools: [...this._pendingToolNames],
+					allowedTools: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
+					excludedTools: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
+					usesDefaultTools: this._usesDefaultTools,
+					steering: queues.steering,
+					followUp: queues.followUp,
+					steeringText: this._steeringMessages,
+					followUpText: this._followUpMessages,
+					nextTurn: this._pendingNextTurnMessages,
+					pendingCustom: this._pendingCustomMessages,
+					pendingBash: this._pendingBashMessages,
+					steeringMode: this.steeringMode,
+					followUpMode: this.followUpMode,
+					settings: this.settingsManager.getSettings(),
+					prompt: this._baseSystemPromptOptions,
+					runPrompt: this._runSystemPromptOptions,
+					flags: [...this._extensionRunner.getFlagValues()],
+					launch: this.workingSessionLaunch,
+					mode: this._workingSessionHost
+						? { kind: this._workingSessionHost.kind, data: this._workingSessionHost.capture() }
+						: this._workingSessionMode,
+				}),
+			);
+			if (boundary === "turn") blockers.unshift("Agent continuation remains active");
+			request.resolve({
+				state,
+				boundary,
+				blockers,
+				sleepReady: blockers.length === 0,
+				signal: request.controller.signal,
+				invalidated: invalidated.signal,
+				assertHeld: () => {
+					if (!active) throw new Error("Native working session released");
+					invalidated.signal.throwIfAborted();
+				},
+				release,
+			});
+			if (boundary === "turn") await this.workingSessionGate.waitForRelease();
+		} catch (error) {
+			request.reject(error);
+			await release();
+		}
+	}
+
+	/** SDK startup hydrates pending payloads directly, before session_start. No input replay. */
+	restoreWorkingSession(state: WorkingSession): void {
+		this.workingSessionGate.beforeMutation();
+		this._restoredWorkingSession = true;
+		this.agent.restoreQueuedMessages(state);
+		this.agent.steeringMode = state.steeringMode;
+		this.agent.followUpMode = state.followUpMode;
+		this._steeringMessages = state.steeringText;
+		this._followUpMessages = state.followUpText;
+		this._pendingNextTurnMessages = state.nextTurn as CustomMessage[];
+		this._pendingCustomMessages = state.pendingCustom as CustomMessage[];
+		this._pendingBashMessages = state.pendingBash as BashExecutionMessage[];
+		this._usesDefaultTools = state.usesDefaultTools;
+		this._allowedToolNames = state.allowedTools ? new Set(state.allowedTools) : undefined;
+		this._excludedToolNames = state.excludedTools ? new Set(state.excludedTools) : undefined;
+		this._pendingToolNames = new Set([...state.activeTools, ...state.pendingTools]);
+		this._setActiveTools(state.activeTools);
+		this._baseSystemPromptOptions = state.prompt;
+		this._runSystemPromptOptions = state.runPrompt;
+		for (const [name, value] of state.flags) this._resourceLoader.getExtensions().runtime.flagValues.set(name, value);
+		this.workingSessionLaunch = state.launch;
+		this._workingSessionMode = state.mode;
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -1011,7 +1252,7 @@ export class AgentSession {
 	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
 		for (const l of this._eventListeners) {
-			l(event);
+			this.workingSessionGate.callback(() => l(event));
 		}
 	}
 
@@ -1364,6 +1605,10 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this.workingSessionGate.invalidate("Native session disposed");
+		if (this._workingSessionRelease) void this._workingSessionRelease();
+		this._workingSessionRequest?.reject(new Error("Native session disposed"));
+		this._workingSessionRequest = undefined;
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -1494,6 +1739,7 @@ export class AgentSession {
 	 * Changes take effect on the next agent turn.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
+		this.workingSessionGate.beforeMutation();
 		const previous = this.getActiveToolNames();
 		this._setActiveTools(toolNames);
 		// A loadout that deactivates a tool replaces the restored one, whose pending tools are dropped.
@@ -1625,6 +1871,7 @@ export class AgentSession {
 
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
+		this.workingSessionGate.beforeMutation();
 		this._scopedModels = scopedModels;
 	}
 
@@ -1781,6 +2028,11 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		if (this._restoredWorkingSession && this._pendingToolNames.size)
+			throw new Error(
+				`Saved tools have not registered: ${[...this._pendingToolNames].join(", ")}. Wait for native reconnect or explicitly change the tool selection.`,
+			);
+		const restoreForeground = this.workingSessionGate.foreground();
 		this._agentRunAbortRequested = false;
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
 		this._failedResponse = undefined;
@@ -1808,6 +2060,7 @@ export class AgentSession {
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
 			await this._emitAgentSettled();
+			restoreForeground();
 		}
 	}
 
@@ -1927,6 +2180,10 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		return this.workingSessionGate.run(() => this._prompt(text, options));
+	}
+
+	private async _prompt(text: string, options?: PromptOptions): Promise<void> {
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
 			return;
@@ -2174,7 +2431,9 @@ export class AgentSession {
 		images?: ImageContent[],
 		options?: { source?: InputSource },
 	): Promise<QueuedInputDisposition> {
-		return this._queueUserInput(text, images, "steer", options?.source ?? "interactive");
+		return this.workingSessionGate.run(() =>
+			this._queueUserInput(text, images, "steer", options?.source ?? "interactive"),
+		);
 	}
 
 	/**
@@ -2190,7 +2449,9 @@ export class AgentSession {
 		images?: ImageContent[],
 		options?: { source?: InputSource },
 	): Promise<QueuedInputDisposition> {
-		return this._queueUserInput(text, images, "followUp", options?.source ?? "interactive");
+		return this.workingSessionGate.run(() =>
+			this._queueUserInput(text, images, "followUp", options?.source ?? "interactive"),
+		);
 	}
 
 	/**
@@ -2252,6 +2513,13 @@ export class AgentSession {
 	 * @param options.deliverAs Delivery mode: "steer", "followUp", or "nextTurn"
 	 */
 	async sendCustomMessage<T = unknown>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	): Promise<void> {
+		return this.workingSessionGate.run(() => this._sendCustomMessage(message, options));
+	}
+
+	private async _sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
@@ -2361,6 +2629,7 @@ export class AgentSession {
 	 * @returns Object with steering and followUp arrays
 	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
+		this.workingSessionGate.beforeMutation();
 		const steering = [...this._steeringMessages];
 		const followUp = [...this._followUpMessages];
 		this._steeringMessages = [];
@@ -2398,6 +2667,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		this.workingSessionGate.beforeMutation();
 		if (this._isAgentRunActive) {
 			this._agentRunAbortRequested = true;
 		}
@@ -2407,6 +2677,17 @@ export class AgentSession {
 		if (this._isBeforeSettle) this._abortDuringBeforeSettle = true;
 		this.agent.abort();
 		await this.waitForIdle();
+	}
+
+	/** Runtime exit cancels this capability before joining the paused agent. */
+	async cancelWorkingSession(reason: string): Promise<void> {
+		this.workingSessionGate.invalidate(reason);
+		if (this._workingSessionRelease) await this._workingSessionRelease();
+		else if (this._workingSessionRequest) {
+			this._workingSessionRequest.controller.abort(new Error(reason));
+			this._workingSessionRequest.reject(new Error(reason));
+			this._workingSessionRequest = undefined;
+		}
 	}
 
 	async waitForIdle(): Promise<void> {
@@ -2441,6 +2722,10 @@ export class AgentSession {
 	 * @throws Error if no auth is configured for the model
 	 */
 	async setModel(model: Model<any>, options: ModelMutationOptions = {}): Promise<void> {
+		return this.workingSessionGate.run(() => this._setModel(model, options));
+	}
+
+	private async _setModel(model: Model<any>, options: ModelMutationOptions): Promise<void> {
 		if (!(await this._modelRuntime.checkAuth(model.provider))) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -2576,6 +2861,7 @@ export class AgentSession {
 	 * Persists the requested level to global defaults only when options.persist is true.
 	 */
 	setThinkingLevel(level: ThinkingLevel, options: ModelMutationOptions = {}): void {
+		this.workingSessionGate.beforeMutation();
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
@@ -2728,6 +3014,10 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		return this.workingSessionGate.run(() => this._compact(customInstructions));
+	}
+
+	private async _compact(customInstructions?: string): Promise<CompactionResult> {
 		await this.abort();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
@@ -3593,6 +3883,8 @@ export class AgentSession {
 		);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
+		extensionsResult.runtime.beforeMutation = this.workingSessionGate.beforeMutation;
+		extensionsResult.runtime.runWorkingSessionActivity = (action) => this.workingSessionGate.run(action);
 		if (options.flagValues) {
 			for (const [name, value] of options.flagValues) {
 				extensionsResult.runtime.flagValues.set(name, value);
@@ -3623,6 +3915,10 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		return this.workingSessionGate.run(() => this._reload(options));
+	}
+
+	private async _reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
@@ -3648,6 +3944,7 @@ export class AgentSession {
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
+		await this._modelRuntime.refresh({ allowNetwork: false });
 
 		const hasBindings =
 			this._extensionUIContext ||
@@ -3807,6 +4104,14 @@ export class AgentSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations },
 	): Promise<BashResult> {
+		return this.workingSessionGate.run(() => this._executeBash(command, onChunk, options));
+	}
+
+	private async _executeBash(
+		command: string,
+		onChunk?: (chunk: string) => void,
+		options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations },
+	): Promise<BashResult> {
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
@@ -3841,6 +4146,7 @@ export class AgentSession {
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
+		this.workingSessionGate.beforeMutation();
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
 			command,
@@ -3928,6 +4234,13 @@ export class AgentSession {
 	async navigateTree(
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
+	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+		return this.workingSessionGate.run(() => this._navigateTree(targetId, options));
+	}
+
+	private async _navigateTree(
+		targetId: string,
+		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish before navigating the session tree.");

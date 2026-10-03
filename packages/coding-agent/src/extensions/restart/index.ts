@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
@@ -16,7 +16,9 @@ import {
 	type RestartRequest,
 	type RestartWorkerMessage,
 } from "../../cli/restart-protocol.ts";
+import type { AgentSession } from "../../core/agent-session.ts";
 import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
+import { writeWorkingSession } from "../../core/working-session.ts";
 
 const guidance =
 	'Use /reload to apply changed extension source and resources. For core/runtime or clean-process changes, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. Restart waits for final idle and does not replay completed commands.';
@@ -33,6 +35,7 @@ export interface ManagedRestart {
 	interrupt(reason?: string): void;
 	beginShutdown(source: "user" | "extension" | "signal"): boolean;
 	completeShutdown(): Promise<void>;
+	captureFinal(session: AgentSession): Promise<boolean>;
 }
 
 let install: ((pi: ExtensionAPI) => void) | undefined;
@@ -277,6 +280,25 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		},
 		async completeShutdown() {
 			if (committed) await send(committed);
+		},
+		async captureFinal(session) {
+			if (!committed) return false;
+			if (!session.isIdle || session.isSettling || session.workingSessionGate.busy)
+				throw new Error("Managed restart still has admitted work");
+			const hold = await session.acquireWorkingSession();
+			try {
+				// Detached jobs survive worker replacement. Sleep readiness belongs to whole-compute exit.
+				const path = join(
+					realpathSync(session.sessionManager.getSessionDir()),
+					`restart-${session.sessionId}.json`,
+				);
+				writeWorkingSession(path, hold.state);
+				hold.assertHeld();
+				committed.session.workingSession = path;
+				return true;
+			} finally {
+				await hold.release();
+			}
 		},
 	};
 }

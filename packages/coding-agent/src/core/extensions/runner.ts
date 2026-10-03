@@ -26,6 +26,7 @@ import {
 	normalizeBuildSystemPromptOptions,
 } from "../system-prompt.ts";
 import type { VirtualModelDefinition } from "../virtual-models.ts";
+import type { WorkingSessionReadiness, WorkingSessionSaveEvent } from "../working-session.ts";
 import type {
 	AgentBeforeSettleEvent,
 	BeforeAgentStartEvent,
@@ -479,6 +480,9 @@ export class ExtensionRunner {
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
 		this.runtime.createContext = () => this.createContext();
+		this.runtime.bindProviderAuthFallbacks((id, fallback) =>
+			this.modelRegistry.registerProviderAuthFallback(id, fallback),
+		);
 
 		// Context actions (required)
 		this.getModel = contextActions.getModel;
@@ -612,7 +616,7 @@ export class ExtensionRunner {
 	}
 
 	private wrapUIPromptContext(ui: ExtensionUIContext): ExtensionUIContext {
-		return {
+		const wrapped: ExtensionUIContext = {
 			...ui,
 			select: (title, options, opts) => this.withUIPrompt("select", title, () => ui.select(title, options, opts)),
 			confirm: (title, message, opts) => this.withUIPrompt("confirm", title, () => ui.confirm(title, message, opts)),
@@ -621,9 +625,26 @@ export class ExtensionRunner {
 			editor: (title, prefill) => this.withUIPrompt("editor", title, () => ui.editor(title, prefill)),
 			custom: (factory, options) => this.withUIPrompt("custom", undefined, () => ui.custom(factory, options)),
 		};
+		return new Proxy(wrapped, {
+			get: (target, property, receiver) => {
+				const value: unknown = Reflect.get(target, property, receiver);
+				if (
+					typeof value !== "function" ||
+					["getEditorText", "getEditorComponent", "getTheme", "getAllThemes", "getToolsExpanded"].includes(
+						String(property),
+					)
+				)
+					return value;
+				return (...args: unknown[]) => {
+					this.runtime.beforeMutation?.();
+					return Reflect.apply(value, target, args);
+				};
+			},
+		});
 	}
 
 	private withUIPrompt<T>(kind: UIPromptKind, title: string | undefined, run: () => Promise<T>): Promise<T> {
+		this.runtime.beforeMutation?.();
 		const outerPrompt = this.uiPromptDepth++ === 0;
 		if (outerPrompt) {
 			this.activeUIPrompt = { kind, title };
@@ -645,7 +666,9 @@ export class ExtensionRunner {
 		};
 
 		try {
-			return run().finally(finish);
+			return (this.runtime.runWorkingSessionActivity ? this.runtime.runWorkingSessionActivity(run) : run()).finally(
+				finish,
+			);
 		} catch (err) {
 			finish();
 			throw err;
@@ -964,9 +987,50 @@ export class ExtensionRunner {
 		event: ExtensionEvent,
 		ctx: ExtensionContext,
 	): Promise<unknown> {
-		return invokeHandler(extension, handler, event, this.scopeContext(ctx, extension.path), (error) =>
-			this.emitError(error),
-		);
+		const action = () =>
+			invokeHandler(extension, handler, event, this.scopeContext(ctx, extension.path), (error) =>
+				this.emitError(error),
+			);
+		return this.runtime.runWorkingSessionActivity ? this.runtime.runWorkingSessionActivity(action) : action();
+	}
+
+	get hasPendingUI(): boolean {
+		return this.uiPromptDepth > 0;
+	}
+
+	/** Save errors propagate. Every handler receives its own revocable persistence writer. */
+	async emitWorkingSessionSave(event: WorkingSessionSaveEvent): Promise<string[]> {
+		const blockers: string[] = [];
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
+			for (const handler of handlers) {
+				let active = true;
+				try {
+					const result = (await invokeHandler(
+						ext,
+						handler,
+						{
+							...event,
+							appendEntry: (customType: string, data?: unknown) => {
+								if (!active) throw new Error("Working session save writer expired");
+								event.appendEntry(customType, data);
+							},
+						},
+						this.scopeContext(this.createContext(), ext.path),
+						(error) => this.emitError(error),
+					)) as WorkingSessionReadiness | undefined;
+					blockers.push(...(result?.blockers ?? []));
+				} finally {
+					active = false;
+				}
+			}
+		}
+		return blockers;
+	}
+
+	async emitShutdownStrict(event: SessionShutdownEvent): Promise<void> {
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
+			for (const handler of handlers) await this.callHandler(ext, handler, event, this.createContext());
+		}
 	}
 
 	/**

@@ -111,6 +111,16 @@ Extensions supporting other hosts can feature-detect
 `ModelRuntime.supportsIgnoreStoredCredentials === true` from `@earendil-works/pi-coding-agent`.
 The flag is supported on the named `ProviderConfig` registration form.
 
+### Supply fallback authentication without replacing a provider
+
+`pi.registerProviderAuthFallback(providerId, { check, resolve })` adds one ephemeral fallback to the effective native provider. Register it in the extension factory so it participates in initial model availability and selection, including direct SDK creation. `ModelRuntime.registerProviderAuthFallback()` exposes the same registration to SDK owners.
+
+`check({ ctx, signal })` returns safe `AuthCheck` metadata or `undefined`; it must not fetch a credential just to report availability. `resolve({ ctx, signal })` returns a fresh full `AuthResult` or `undefined`. Native request headers, provider-scoped environment and auth fields are preserved. Pi does not write or cache the returned credential.
+
+Explicit request/CLI, stored, configured, environment and profile authentication retain native precedence. A local auth failure propagates and never selects another account. Fallback errors also propagate. Provider catalogs, configured Radius gateways, filters, login and transports remain native; OAuth-only providers gain no invented API-key login.
+
+The return value is a disposer. Replacing a fallback makes the old disposer harmless; disposing the current registration removes only that fallback. Extension reload/disposal removes its owned registration independently of complete provider registration.
+
 ## Supply and refresh models
 
 Every model needs an ID, display name, input capabilities, and cost metadata. Chat and classifier models also need a context window; chat models need an output limit and reasoning support; image models declare their output modalities. Choose the API implementation at the provider level unless one model requires an override.

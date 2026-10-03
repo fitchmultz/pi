@@ -179,6 +179,8 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 	private readonly onTools: (connection: McpServerConnection) => void;
 	private readonly onChange: ((connection: McpServerConnection) => void) | undefined;
 	private readonly log: McpServerLog | undefined;
+	private readonly beforeRequest: (() => void) | undefined;
+	pendingRequests = 0;
 
 	constructor(options: {
 		entry: McpServerEntry;
@@ -192,6 +194,7 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 		onChange?: (connection: McpServerConnection) => void;
 		/** Receives the server's log messages (`notifications/message`). */
 		log?: McpServerLog;
+		beforeRequest?: () => void;
 	}) {
 		this.entry = options.entry;
 		this.cwd = options.cwd;
@@ -199,6 +202,7 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 		this.onTools = options.onTools;
 		this.onChange = options.onChange;
 		this.log = options.log;
+		this.beforeRequest = options.beforeRequest;
 		const url = this.oauthUrl;
 		const provider = "url" in this.entry.config ? this.entry.config.auth?.provider : undefined;
 		this.authProvider = url
@@ -288,27 +292,33 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 	 * HTTP error; tool calls are not, since they may have run.
 	 */
 	private async withClient<T>(run: (client: McpClient) => Promise<T>, readOnly = false): Promise<T> {
-		for (let attempt = 1; ; attempt++) {
-			const client = await this.getClient();
-			try {
-				return await run(client);
-			} catch (error) {
-				if (readOnly && attempt === 1 && error instanceof McpHttpError && isTransientError(error)) {
-					await new Promise((resolve) => setTimeout(resolve, CONNECT_RETRY_DELAYS_MS[0]));
-					continue;
+		this.beforeRequest?.();
+		this.pendingRequests++;
+		try {
+			for (let attempt = 1; ; attempt++) {
+				const client = await this.getClient();
+				try {
+					return await run(client);
+				} catch (error) {
+					if (readOnly && attempt === 1 && error instanceof McpHttpError && isTransientError(error)) {
+						await new Promise((resolve) => setTimeout(resolve, CONNECT_RETRY_DELAYS_MS[0]));
+						continue;
+					}
+					if (error instanceof McpSessionExpiredError && attempt === 1) {
+						// The server no longer knows the session (restart, deploy), so it did not run the request.
+						// Retry once on a new session. The old client is detached but not closed: closing would
+						// fail its other in-flight calls, which instead get the same 404 and retry the same way.
+						if (this.client === client) this.client = undefined;
+						continue;
+					}
+					if (!this.needsSignIn(error)) throw error;
+					await this.dropClient(client);
+					this.markNeedsAuth();
+					throw new Error(signInRequiredMessage(this.entry));
 				}
-				if (error instanceof McpSessionExpiredError && attempt === 1) {
-					// The server no longer knows the session (restart, deploy), so it did not run the request.
-					// Retry once on a new session. The old client is detached but not closed: closing would
-					// fail its other in-flight calls, which instead get the same 404 and retry the same way.
-					if (this.client === client) this.client = undefined;
-					continue;
-				}
-				if (!this.needsSignIn(error)) throw error;
-				await this.dropClient(client);
-				this.markNeedsAuth();
-				throw new Error(signInRequiredMessage(this.entry));
 			}
+		} finally {
+			this.pendingRequests--;
 		}
 	}
 

@@ -16,6 +16,9 @@ type FakeSession = {
 	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
 	bindExtensions: ReturnType<typeof vi.fn>;
+	bindWorkingSessionHost: ReturnType<typeof vi.fn>;
+	setWorkingSessionReady: ReturnType<typeof vi.fn>;
+	workingSessionGate: { reserved: boolean };
 	subscribe: ReturnType<typeof vi.fn>;
 	prompt: ReturnType<typeof vi.fn>;
 	reload: ReturnType<typeof vi.fn>;
@@ -69,6 +72,9 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 		state,
 		extensionRunner,
 		bindExtensions: vi.fn(async () => {}),
+		bindWorkingSessionHost: vi.fn(),
+		setWorkingSessionReady: vi.fn(),
+		workingSessionGate: { reserved: false },
 		subscribe: vi.fn(() => () => {}),
 		prompt: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),

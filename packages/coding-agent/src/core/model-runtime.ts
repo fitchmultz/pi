@@ -74,6 +74,7 @@ import {
 	type CompatibilityRequestConfig,
 	composeModelProvider,
 	configuredRequestAuthStatus,
+	type ProviderAuthFallback,
 	type ProviderConfigInput,
 	resolveCompatibilityRequestConfig,
 	resolveConfiguredModelHeaders,
@@ -178,6 +179,7 @@ export class ModelRuntime implements Models {
 	private readonly builtins = new Map<string, Provider>();
 	private readonly nativeExtensionProviders = new Map<string, Provider>();
 	private readonly extensionProviders = new Map<string, ProviderConfigInput>();
+	private readonly authFallbacks = new Map<string, { fallback: ProviderAuthFallback }>();
 	/** Virtual models by provider id, then model id. */
 	private readonly virtualModels = new Map<string, Map<string, RegisteredVirtualModel>>();
 	private readonly compositionErrors = new Map<string, string>();
@@ -318,13 +320,14 @@ export class ModelRuntime implements Models {
 	private composeProvider(providerId: string): Provider | undefined {
 		const base = this.nativeExtensionProviders.get(providerId) ?? this.builtins.get(providerId);
 		const extension = this.extensionProviders.get(providerId);
-		if (!this.config.getProvider(providerId) && !extension) {
+		const fallback = this.authFallbacks.get(providerId)?.fallback;
+		if (!this.config.getProvider(providerId) && !extension && !fallback) {
 			// No overlays: use the builtin untouched so its auth/login/stream behavior is exact.
 			this.compositionErrors.delete(providerId);
 			return base;
 		}
 		try {
-			const provider = composeModelProvider(providerId, base, this.config, extension);
+			const provider = composeModelProvider(providerId, base, this.config, extension, fallback);
 			this.compositionErrors.delete(providerId);
 			return provider;
 		} catch (error) {
@@ -914,6 +917,23 @@ export class ModelRuntime implements Models {
 			provider.auth.oauth && !provider.auth.apiKey ? "oauth" : "api_key",
 		);
 		void this.refresh({ allowNetwork: false });
+	}
+
+	/** One nonpersistent fallback per provider. Disposal never removes a later replacement. */
+	registerProviderAuthFallback(providerId: string, fallback: ProviderAuthFallback): () => void {
+		if (!providerId.trim() || typeof fallback.check !== "function" || typeof fallback.resolve !== "function") {
+			throw new Error("Provider auth fallback requires a provider id, check and resolve.");
+		}
+		const registration = { fallback };
+		this.authFallbacks.set(providerId, registration);
+		this.recomposeProvider(providerId);
+		void this.refresh({ allowNetwork: false });
+		return () => {
+			if (this.authFallbacks.get(providerId) !== registration) return;
+			this.authFallbacks.delete(providerId);
+			this.recomposeProvider(providerId);
+			void this.refresh({ allowNetwork: false });
+		};
 	}
 
 	/**

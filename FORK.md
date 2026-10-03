@@ -17,6 +17,8 @@ v1.0.0. It is upstream plus the features below. Everything else follows upstream
 | File and credential safety | Atomic auth/settings/journal rewrites, canonical credential locks, UTF-8 and boundary-safe edits, HTML journal guard, and private shell spill logs | [Changelog](packages/coding-agent/CHANGELOG.md#unreleased) |
 | Provider correctness fixes | Provider-local auth availability and saved/scoped selection, OAuth cleanup, detached Codex continuation, Responses terminal usage, Anthropic strict budgets, schema validation, proxy exclusions, retry delays, and signature token estimates | [AI changelog](packages/ai/CHANGELOG.md), [coding-agent changelog](packages/coding-agent/CHANGELOG.md) |
 | Opt-in provider credential isolation (`ignoreStoredCredentials`) | Credential-read adapter in `src/core/model-runtime.ts` plus registration types; used by account-routing extensions | [custom-provider.md](packages/coding-agent/docs/custom-provider.md) |
+| Complete native working-session save/resume | One native admission/hold and complete-state codec, mode/builtin readiness bindings, conditional private Unix socket and final-worker launcher attestation | [working-session.md](packages/coding-agent/docs/working-session.md) |
+| Provider-scoped auth fallback | Ephemeral fallback composed with the effective `ModelRuntime` provider; native auth precedence, catalogs and transport retained | [custom-provider.md](packages/coding-agent/docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider) |
 | GPT-6 Astra Ultrafast and Codex Fast cost estimates | Service-tier pricing in `packages/ai/src/api/openai-responses.ts` and `openai-codex-responses.ts` | [models.md](packages/coding-agent/docs/models.md) |
 | Slow-extension diagnostics (handler over 100 ms, footer render over 16 ms) | Timing at handler dispatch and extension footers in `src/core/extensions/runner.ts` | [extensions.md](packages/coding-agent/docs/extensions.md) |
 | Cloudflare AI Gateway Claude IDs | `normalizeCloudflareModelId()` in `packages/ai/src/api/cloudflare.ts`, used by the generator, the provider and remote catalogs | [providers.md](packages/coding-agent/docs/providers.md) |
@@ -50,6 +52,8 @@ Posthorse's native-eligibility contract, and official 1.0 recovers a real full-w
 after a reset on the next prompt. The live PTY RPC-to-TUI handoff (`attach_tui`) is also dropped:
 it is Axiom-specific, and Axiom pins `fitchmultz/pi` 7ca602dd and carries its own port. Reference
 implementation: 63401a044.
+
+The focused native working-session and provider-auth-fallback APIs above are owner-authorized additions to the 1.0 foundation `a74a93cbbb17d8affae01f1b269f5e079cbb9ea3`. They do not restore the old checkpoint stack or `ambientAuth` API. Consumers must record the effective source including these additions; the foundation SHA alone does not identify this behavior.
 
 ## Remotes and history
 

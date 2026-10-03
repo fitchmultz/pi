@@ -25,6 +25,7 @@ export interface Args {
 	name?: string;
 	noSession?: boolean;
 	session?: string;
+	workingSession?: string;
 	sessionId?: string;
 	fork?: string;
 	sessionDir?: string;
@@ -131,6 +132,11 @@ export function parseArgs(args: string[], onOption?: (option: string, tokens: st
 			}
 		} else if (arg === "--no-session") {
 			result.noSession = true;
+		} else if (arg === "--working-session") {
+			const path = args[i + 1];
+			if (path === undefined || path.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--working-session requires a path" });
+			} else result.workingSession = args[++i];
 		} else if (arg === "--session" && i + 1 < args.length) {
 			result.session = args[++i];
 		} else if (arg === "--session-id" && i + 1 < args.length) {
@@ -299,6 +305,7 @@ ${chalk.bold("Options:")}
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
   --session <path|id>            Use specific session file or partial UUID
+  --working-session <path>       Restore complete private native state; wait for new input
   --session-id <id>              Use exact project session ID, creating it if missing
   --fork <path|id>               Fork specific session file or partial UUID into a new session
   --session-dir <dir>            Directory for session storage and lookup

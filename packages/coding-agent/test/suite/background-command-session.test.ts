@@ -226,6 +226,31 @@ describe("background command extension delivery", () => {
 		expect(other.faux.state.callCount).toBe(0);
 		expect(notices(other)).toHaveLength(2);
 	});
+	it("retains compute for an idle detached job and pauses completion delivery until save release", async () => {
+		const h = await harness();
+		const { command, release } = held(h);
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Launched"),
+			fauxAssistantMessage("Completion consumed after release"),
+		]);
+		await h.session.prompt("Start");
+		const hold = await h.session.acquireWorkingSession();
+		expect(hold.sleepReady).toBe(false);
+		expect(hold.blockers).toEqual(
+			expect.arrayContaining([expect.stringMatching(/Background command .* is (starting|running)/)]),
+		);
+		await finish(h, release);
+		await delay(1100);
+		expect(notices(h)).toHaveLength(0);
+		expect(h.faux.state.callCount).toBe(2);
+		expect(hold.invalidated.aborted).toBe(false);
+		await hold.release();
+		await until(() => notices(h).length === 1 && h.session.isIdle);
+		expect(h.faux.state.callCount).toBe(3);
+	});
 	it("retains completions after agent cancellation without waking until user input", async () => {
 		const h = await harness();
 		const { command, release } = held(h);

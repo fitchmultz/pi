@@ -917,7 +917,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.stopped = false;
 		this.beforeTerminalStart();
 		this.terminal.start(
-			(data) => this.handleTerminalInput(data),
+			(data) => this.handleInput(data),
 			() => this.requestRender(),
 		);
 		this.afterTerminalStart();
@@ -1041,11 +1041,17 @@ export abstract class TuiBase extends Container implements TUI {
 		}, delay);
 	}
 
-	private handleTerminalInput(data: string): void {
+	/** Dispatch terminal input through the same listeners and focused component, including held input. */
+	handleInput(data: string): void {
 		if (this.consumeTerminalColorResponse(data)) {
 			return;
 		}
 		if (this.consumeTerminalColorSchemeReport(data)) {
+			return;
+		}
+
+		// Terminal responses are native housekeeping, never user admission.
+		if (this.consumeCellSizeResponse(data)) {
 			return;
 		}
 
@@ -1064,11 +1070,6 @@ export abstract class TuiBase extends Container implements TUI {
 				return;
 			}
 			data = current;
-		}
-
-		// Consume terminal cell size responses without blocking unrelated input.
-		if (this.consumeCellSizeResponse(data)) {
-			return;
 		}
 
 		// Global debug key handler (Shift+Ctrl+D)

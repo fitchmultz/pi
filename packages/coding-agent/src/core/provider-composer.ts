@@ -3,6 +3,7 @@ import {
 	type Api,
 	type ApiKeyAuth,
 	type AssistantMessageEventStream,
+	type AuthCheck,
 	type AuthContext,
 	type AuthInteraction,
 	type AuthResult,
@@ -106,6 +107,12 @@ export interface ProviderConfigInput {
 	oauth?: ExtensionOAuthConfig;
 	models?: ProviderModelConfig[];
 	refreshModels?(context: RefreshModelsContext): Promise<ProviderModelConfig[]>;
+}
+
+/** Ephemeral auth used only when native local authentication is genuinely absent. */
+export interface ProviderAuthFallback {
+	check(input: { ctx: AuthContext; signal: AbortSignal }): Promise<AuthCheck | undefined>;
+	resolve(input: { ctx: AuthContext; signal: AbortSignal }): Promise<AuthResult | undefined>;
 }
 
 export type AuthStatus = {
@@ -402,22 +409,25 @@ function composeApiKeyAuth(
 	base: Provider | undefined,
 	config: ModelsJsonProvider | undefined,
 	extension: ProviderConfigInput | undefined,
+	fallback?: ProviderAuthFallback,
 ): ApiKeyAuth | undefined {
 	const inherited = base?.auth.apiKey;
 	const rawKey = configuredApiKey(config, extension);
 	const oauth = extension?.oauth ?? base?.auth.oauth;
 	// OAuth-only providers get no fabricated API-key login method.
-	if (!inherited && rawKey === undefined && oauth) return undefined;
+	if (!inherited && rawKey === undefined && oauth && !fallback) return undefined;
 	const rawHeaders = configuredHeaders(config, extension);
 	const authHeader = extension?.authHeader ?? config?.authHeader ?? false;
 	return {
 		name: inherited?.name ?? "API key",
 		login:
 			inherited?.login ??
-			(async (interaction: AuthInteraction) => ({
-				type: "api_key",
-				key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
-			})),
+			(!oauth
+				? async (interaction: AuthInteraction) => ({
+						type: "api_key",
+						key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
+					})
+				: undefined),
 		check: async (input) => {
 			if (input.credential) {
 				if (inherited?.check) return inherited.check(input);
@@ -433,9 +443,12 @@ function composeApiKeyAuth(
 				}
 				return { type: "api_key", source: "configured API key" };
 			}
-			if (inherited?.check) return inherited.check(input);
-			const resolved = await inherited?.resolve(input);
-			return resolved ? { type: "api_key", source: resolved.source } : undefined;
+			const native = inherited?.check
+				? await inherited.check(input)
+				: await inherited
+						?.resolve(input)
+						.then((result) => (result ? { type: "api_key" as const, source: result.source } : undefined));
+			return native ?? fallback?.check({ ctx: input.ctx, signal: input.signal });
 		},
 		resolve: async (input) => {
 			let result: AuthResult | undefined;
@@ -452,7 +465,10 @@ function composeApiKeyAuth(
 					? await inherited.resolve({ ...input, credential: { type: "api_key", key } })
 					: { auth: { apiKey: key }, source: "configured API key" };
 			} else {
+				const native = inherited?.check ? await inherited.check(input) : undefined;
 				result = await inherited?.resolve(input);
+				if (!result && native) throw new Error(`Native authentication for "${providerId}" became unresolved`);
+				if (!result) result = await fallback?.resolve({ ctx: input.ctx, signal: input.signal });
 			}
 			if (!result) return undefined;
 			const explicitEnv = { ...(input.credential?.env ?? {}), ...(result.env ?? {}) };
@@ -527,6 +543,7 @@ export function composeModelProvider(
 	base: Provider | undefined,
 	modelConfig: ModelConfig,
 	extension: ProviderConfigInput | undefined,
+	fallback?: ProviderAuthFallback,
 ): Provider {
 	const config = modelConfig.getProvider(providerId);
 	let extensionOAuthCredential: OAuthCredentials | undefined;
@@ -558,7 +575,7 @@ export function composeModelProvider(
 	};
 	// Validate eagerly so registration/reload reports structural errors immediately.
 	getAllModels();
-	const apiKey = composeApiKeyAuth(providerId, base, config, extension);
+	const apiKey = composeApiKeyAuth(providerId, base, config, extension, fallback);
 	const oauth = composeOAuthAuth(providerId, base, config, extension);
 	if (!apiKey && !oauth) throw new Error(`Provider ${providerId}: no authentication method configured.`);
 

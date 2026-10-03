@@ -59,6 +59,10 @@ See the checked [sessions example](../examples/sdk/11-sessions.ts) for creating,
 
 After a runtime replacement, subscriptions belong to the old `AgentSession` and must be rebound. See the [session runtime example](../examples/sdk/13-session-runtime.ts).
 
+### Complete working-session save and restore
+
+`session.acquireWorkingSession()` reserves an awaited native cut and returns complete private state with separate invalidation and release lifetimes. `createAgentSession({ workingSession })` restores the selected leaf, all branches, full pending payloads and native loadout before extension startup, without replaying interrupted work. See [Native Working Sessions](working-session.md) for readiness, persistence hooks, mode buffers and the conditional CLI socket/final-exit contract.
+
 <a id="background-commands"></a>
 
 ### Background commands

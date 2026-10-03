@@ -171,6 +171,14 @@ class PendingMessageQueue {
 	clear(): void {
 		this.messages = [];
 	}
+
+	snapshot(): AgentMessage[] {
+		return this.messages.slice();
+	}
+
+	restore(messages: AgentMessage[]): void {
+		this.messages = messages.slice();
+	}
 }
 
 type ActiveRun = {
@@ -186,6 +194,10 @@ type ActiveRun = {
  * and exposes queueing APIs for steering and follow-up messages.
  */
 export class Agent {
+	/** Native hosts can reserve the awaited completed-turn boundary. */
+	onTurnBoundary?: () => Promise<void>;
+	onIdle?: () => void;
+	beforeMutation?: () => void;
 	private _state: MutableAgentState;
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
 	private readonly steeringQueue: PendingMessageQueue;
@@ -279,6 +291,7 @@ export class Agent {
 
 	/** Controls how queued steering messages are drained. */
 	set steeringMode(mode: QueueMode) {
+		this.beforeMutation?.();
 		this.steeringQueue.mode = mode;
 	}
 
@@ -288,6 +301,7 @@ export class Agent {
 
 	/** Controls how queued follow-up messages are drained. */
 	set followUpMode(mode: QueueMode) {
+		this.beforeMutation?.();
 		this.followUpQueue.mode = mode;
 	}
 
@@ -297,21 +311,25 @@ export class Agent {
 
 	/** Queue a message to be injected after the current assistant turn finishes. */
 	steer(message: AgentMessage): void {
+		this.beforeMutation?.();
 		this.steeringQueue.enqueue(message);
 	}
 
 	/** Queue a message to run only after the agent would otherwise stop. */
 	followUp(message: AgentMessage): void {
+		this.beforeMutation?.();
 		this.followUpQueue.enqueue(message);
 	}
 
 	/** Remove all queued steering messages. */
 	clearSteeringQueue(): void {
+		this.beforeMutation?.();
 		this.steeringQueue.clear();
 	}
 
 	/** Remove all queued follow-up messages. */
 	clearFollowUpQueue(): void {
+		this.beforeMutation?.();
 		this.followUpQueue.clear();
 	}
 
@@ -332,6 +350,18 @@ export class Agent {
 		return steering.length > 0 ? steering : this.followUpQueue.peek();
 	}
 
+	/** Full accepted payloads in both queues, independent of delivery modes. */
+	getQueuedMessages(): { steering: AgentMessage[]; followUp: AgentMessage[] } {
+		return { steering: this.steeringQueue.snapshot(), followUp: this.followUpQueue.snapshot() };
+	}
+
+	restoreQueuedMessages(queues: { steering: AgentMessage[]; followUp: AgentMessage[] }): void {
+		this.beforeMutation?.();
+		if (this.activeRun) throw new Error("Cannot restore queues during an active run");
+		this.steeringQueue.restore(queues.steering);
+		this.followUpQueue.restore(queues.followUp);
+	}
+
 	/** Active abort signal for the current run, if any. */
 	get signal(): AbortSignal | undefined {
 		return this.activeRun?.abortController.signal;
@@ -339,6 +369,7 @@ export class Agent {
 
 	/** Abort the current run, if one is active. */
 	abort(): void {
+		if (this.activeRun) this.beforeMutation?.();
 		this.activeRun?.abortController.abort();
 	}
 
@@ -353,6 +384,7 @@ export class Agent {
 
 	/** Clear conversation state and queues while retaining the replayed prompt/tool baseline. */
 	reset(): void {
+		this.beforeMutation?.();
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before resetting.");
 		}
@@ -371,6 +403,7 @@ export class Agent {
 	async prompt(message: AgentMessage | AgentMessage[]): Promise<void>;
 	async prompt(input: string, images?: ImageContent[]): Promise<void>;
 	async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise<void> {
+		this.beforeMutation?.();
 		if (this.activeRun) {
 			throw new Error(
 				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
@@ -382,6 +415,7 @@ export class Agent {
 
 	/** Continue from the current transcript. The last message must be a user or tool-result message. */
 	async continue(): Promise<void> {
+		this.beforeMutation?.();
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
 		}
@@ -553,6 +587,7 @@ export class Agent {
 		this._state.pendingToolCalls = new Set<string>();
 		this.activeRun?.resolve();
 		this.activeRun = undefined;
+		this.onIdle?.();
 	}
 
 	/**
@@ -609,5 +644,6 @@ export class Agent {
 		for (const listener of this.listeners) {
 			await listener(event, signal);
 		}
+		if (event.type === "turn_end") await this.onTurnBoundary?.();
 	}
 }

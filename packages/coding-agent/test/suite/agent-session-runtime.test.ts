@@ -1,9 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
+import { createInterface } from "node:readline";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { startWorkingSessionControl } from "../../src/cli/working-session-control.ts";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -12,6 +16,7 @@ import {
 } from "../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import { readWorkingSession } from "../../src/core/working-session.ts";
 import type {
 	AgentToolResult,
 	ExtensionAPI,
@@ -21,6 +26,7 @@ import type {
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "../../src/index.ts";
+import { runPrintMode } from "../../src/modes/print-mode.ts";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -121,6 +127,204 @@ describe("AgentSessionRuntime characterization", () => {
 
 		return { runtime, faux, tempDir };
 	}
+
+	it.skipIf(process.platform === "win32")(
+		"owns socket tokens, frozen guard, EOF, replacement and final control cleanup",
+		async () => {
+			const { runtime } = await createRuntimeForTest(() => {});
+			const root = realpathSync(mkdtempSync("/tmp/pi-native-"));
+			const socketPath = join(root, "native.sock");
+			const statePath = join(root, "state.json");
+			vi.stubEnv("PI_WORKING_SESSION_SOCKET", socketPath);
+			vi.stubEnv("PI_WORKING_SESSION_EXIT_PATH", "");
+			const close = await startWorkingSessionControl(runtime);
+			try {
+				const socket = createConnection(socketPath);
+				const reader = createInterface({ input: socket });
+				const replies = reader[Symbol.asyncIterator]();
+				const read = async () => JSON.parse((await replies.next()).value!) as Record<string, unknown>;
+				socket.write(`${JSON.stringify({ action: "acquire", path: statePath, boundary: "settled" })}\n`);
+				const granted = await read();
+				expect(granted).toMatchObject({
+					ok: true,
+					pid: process.pid,
+					sleepReady: true,
+					guardPath: `${socketPath}.guard`,
+				});
+				const guard = () => JSON.parse(readFileSync(`${socketPath}.guard`, "utf8")) as Record<string, unknown>;
+				expect(guard()).toMatchObject({
+					version: 1,
+					token: granted.token,
+					worker: granted.worker,
+					pid: process.pid,
+					valid: true,
+				});
+				expect(readWorkingSession(statePath).header.id).toBe(runtime.session.sessionId);
+				socket.write(`${JSON.stringify({ action: "release", token: "wrong-token" })}\n`);
+				expect(await read()).toMatchObject({ ok: false });
+				expect(runtime.session.workingSessionGate.reserved).toBe(true);
+				expect(() => runtime.session.settingsManager.setShellCommandPrefix("refused")).toThrow("reserved");
+				// Read synchronously, without waiting for the socket invalidation notification.
+				expect(guard()).toMatchObject({ token: granted.token, valid: false });
+				expect(await read()).toMatchObject({ invalidated: true, token: granted.token });
+				socket.destroy();
+				reader.close();
+				await vi.waitFor(() => expect(runtime.session.workingSessionGate.reserved).toBe(false));
+				const oldId = runtime.session.sessionId;
+				await runtime.newSession();
+				expect(runtime.session.sessionId).not.toBe(oldId);
+				const current = createConnection(socketPath);
+				const currentReader = createInterface({ input: current });
+				const currentReplies = currentReader[Symbol.asyncIterator]();
+				current.write(`${JSON.stringify({ action: "acquire", path: statePath, boundary: "settled" })}\n`);
+				expect(JSON.parse((await currentReplies.next()).value!).ok).toBe(true);
+				expect(readWorkingSession(statePath).header.id).toBe(runtime.session.sessionId);
+				current.destroy();
+				currentReader.close();
+				await vi.waitFor(() => expect(runtime.session.workingSessionGate.reserved).toBe(false));
+				await runtime.dispose();
+				expect(existsSync(socketPath)).toBe(false);
+				expect(existsSync(`${socketPath}.guard`)).toBe(false);
+			} finally {
+				await close?.();
+				vi.unstubAllEnvs();
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("produces current-worker completion evidence only after strict shutdown and full native save", async () => {
+		let shutdowns = 0;
+		const { runtime, tempDir } = await createRuntimeForTest((pi) => {
+			pi.on("session_shutdown", () => {
+				shutdowns++;
+			});
+			pi.on("working_session_save", (event) => {
+				event.appendEntry("final-owner-state", { shutdowns });
+			});
+		});
+		await runtime.session.prompt("completed conversation");
+		await runtime.session.steer("accepted tail");
+		const sessionId = runtime.session.sessionId;
+		const exitPath = join(realpathSync(tempDir), "completed.json");
+		const messages: unknown[] = [];
+		const descriptors = {
+			send: Object.getOwnPropertyDescriptor(process, "send"),
+			connected: Object.getOwnPropertyDescriptor(process, "connected"),
+		};
+		// Only adapt IPC transport; the native producer must generate the state and receipt.
+		Object.defineProperty(process, "connected", { configurable: true, value: true });
+		Object.defineProperty(process, "send", {
+			configurable: true,
+			value: (message: unknown, done: (error: Error | null) => void) => {
+				messages.push(message);
+				done(null);
+				return true;
+			},
+		});
+		vi.stubEnv("PI_WORKING_SESSION_SOCKET", "");
+		vi.stubEnv("PI_WORKING_SESSION_EXIT_PATH", exitPath);
+		vi.stubEnv("PI_WORKING_SESSION_LAUNCH", "current-launch");
+		vi.stubEnv("PI_WORKING_SESSION_WORKER", "current-worker");
+		let close: (() => Promise<void>) | undefined;
+		try {
+			close = await startWorkingSessionControl(runtime);
+			await runtime.dispose();
+			const statePath = `${exitPath}.state`;
+			const state = readWorkingSession(statePath);
+			expect(state.header.id).toBe(sessionId);
+			expect(state.steeringText).toEqual(["accepted tail"]);
+			expect(state.entries).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ customType: "final-owner-state", data: { shutdowns: 1 } }),
+				]),
+			);
+			expect(messages).toEqual([
+				{
+					type: "pi:completed",
+					completed: {
+						path: statePath,
+						digest: createHash("sha256").update(readFileSync(statePath)).digest("hex"),
+						sessionId,
+						pid: process.pid,
+						worker: "current-worker",
+						launch: "current-launch",
+					},
+				},
+			]);
+			// The whole launcher, not a worker, owns the final attestation file.
+			expect(existsSync(exitPath)).toBe(false);
+		} finally {
+			await close?.();
+			vi.unstubAllEnvs();
+			for (const key of ["send", "connected"] as const) {
+				const descriptor = descriptors[key];
+				if (descriptor) Object.defineProperty(process, key, descriptor);
+				else Reflect.deleteProperty(process, key);
+			}
+		}
+	});
+
+	it.each(["blocker", "save failure", "shutdown failure"])(
+		"withholds completed-exit evidence for %s",
+		async (scenario) => {
+			let failing = true;
+			let veto = scenario === "blocker";
+			const { runtime, tempDir } = await createRuntimeForTest((pi) => {
+				pi.on("session_shutdown", () => {
+					if (failing && scenario === "shutdown failure") throw new Error("shutdown persistence failed");
+				});
+				pi.on("working_session_save", () => {
+					if (failing && scenario === "save failure") throw new Error("save persistence failed");
+					return { blockers: veto ? ["Independent native owner still running"] : [] };
+				});
+			});
+			const exitPath = join(realpathSync(tempDir), "completed.json");
+			vi.stubEnv("PI_WORKING_SESSION_SOCKET", "");
+			vi.stubEnv("PI_WORKING_SESSION_EXIT_PATH", exitPath);
+			const close = await startWorkingSessionControl(runtime);
+			try {
+				if (scenario === "blocker") await runtime.dispose();
+				else
+					await expect(runtime.dispose()).rejects.toThrow(
+						scenario === "save failure" ? "save persistence failed" : "shutdown persistence failed",
+					);
+				expect(existsSync(exitPath)).toBe(false);
+				expect(existsSync(`${exitPath}.state`)).toBe(false);
+			} finally {
+				failing = false;
+				veto = true;
+				await close?.();
+				vi.unstubAllEnvs();
+			}
+		},
+	);
+
+	it("pauses remaining print inputs under a settled save instead of dequeuing or failing them", async () => {
+		const { runtime, faux } = await createRuntimeForTest(() => {});
+		let finish!: () => void;
+		const response = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		faux.setResponses([
+			async () => {
+				await response;
+				return fauxAssistantMessage("first complete");
+			},
+			fauxAssistantMessage("second complete"),
+		]);
+		const run = runPrintMode(runtime, { mode: "json", messages: ["first input", "second input"] });
+		await vi.waitFor(() => expect(faux.state.callCount).toBe(1));
+		const acquisition = runtime.session.acquireWorkingSession();
+		finish();
+		const hold = await acquisition;
+		expect(hold.sleepReady).toBe(true);
+		expect(hold.state.mode).toEqual({ kind: "json", data: [{ text: "second input" }] });
+		expect(faux.state.callCount).toBe(1);
+		await hold.release();
+		expect(await run).toBe(0);
+		expect(faux.state.callCount).toBe(2);
+	});
 
 	it("persists message_end assistant replacements to the session manager", async () => {
 		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {

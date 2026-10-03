@@ -7,6 +7,7 @@ import {
 	fchownSync,
 	fstatSync,
 	fsyncSync,
+	lstatSync,
 	openSync,
 	readlinkSync,
 	realpathSync,
@@ -15,7 +16,19 @@ import {
 	statSync,
 	writeFileSync,
 } from "fs";
-import { dirname, resolve } from "path";
+import { dirname, isAbsolute, resolve } from "path";
+
+/** Private capability files cannot follow links or expose contents to another user. */
+export function assertPrivateFilePath(path: string): void {
+	if (!isAbsolute(path) || realpathSync(dirname(path)) !== resolve(dirname(path)))
+		throw new Error("Working-session paths must be absolute with a real parent directory");
+	const parent = lstatSync(dirname(path));
+	if (!parent.isDirectory() || parent.uid !== process.getuid?.() || (parent.mode & 0o022) !== 0)
+		throw new Error("Working-session directory must be owned by this user and not writable by others");
+	const existing = lstatSync(path, { throwIfNoEntry: false });
+	if (existing && (!existing.isFile() || existing.uid !== parent.uid || (existing.mode & 0o077) !== 0))
+		throw new Error("Working-session destination must be a private regular file owned by this user");
+}
 
 /** Resolve existing or dangling file symlinks without creating their targets. */
 export function resolveFileTarget(path: string): string {
