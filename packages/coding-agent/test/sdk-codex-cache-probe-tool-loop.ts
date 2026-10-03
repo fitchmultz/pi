@@ -174,6 +174,7 @@ function buildPrompt(turn: number): string {
 
 function createMinimalResourceLoader(systemPrompt: string): ResourceLoader {
 	return {
+		getWorkingSessionResources: () => ({ extensions: [], skills: [], prompts: [], themes: [], systemPrompt }),
 		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),

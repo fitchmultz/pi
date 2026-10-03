@@ -232,6 +232,7 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 	};
 
 	return {
+		getWorkingSessionResources: () => ({ extensions: [], skills: [], prompts: [], themes: [] }),
 		getExtensions: () => extensionsResult,
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),

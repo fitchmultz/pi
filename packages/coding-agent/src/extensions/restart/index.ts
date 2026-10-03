@@ -94,6 +94,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	let directory: string | undefined;
 	let socketPath: string | undefined;
 	let startupWarning: (() => void) | undefined;
+	let artifactDirectory: string | undefined;
 	const sockets = new Set<Socket>();
 
 	const cancel = (reason?: string) => {
@@ -101,6 +102,8 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		pending = undefined;
 		committed = undefined;
 		clearTimeout(timer);
+		if (artifactDirectory) rmSync(artifactDirectory, { recursive: true, force: true });
+		artifactDirectory = undefined;
 		if (requested && reason && ctx) ctx.ui.notify(`Restart cancelled: ${reason}`, "warning");
 	};
 	const cleanup = () => {
@@ -305,7 +308,14 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			return committed !== undefined;
 		},
 		async completeShutdown() {
-			if (committed) await send(committed);
+			if (!committed) return;
+			try {
+				await send(committed);
+				artifactDirectory = undefined;
+			} catch (error) {
+				cancel();
+				throw error;
+			}
 		},
 		async captureFinal(session) {
 			if (!committed) return false;
@@ -314,14 +324,15 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			const hold = await session.acquireWorkingSession();
 			try {
 				// Detached jobs survive worker replacement. Sleep readiness belongs to whole-compute exit.
-				const path = join(
-					realpathSync(session.sessionManager.getSessionDir()),
-					`restart-${session.sessionId}-${randomUUID()}.json`,
-				);
+				artifactDirectory = realpathSync(mkdtempSync(join(tmpdir(), "pi-restart-state-")));
+				const path = join(artifactDirectory, "working-session.json");
 				writeWorkingSession(path, hold.state);
 				hold.assertHeld();
 				committed.session.workingSession = path;
 				return true;
+			} catch (error) {
+				cancel();
+				throw error;
 			} finally {
 				await hold.release();
 			}

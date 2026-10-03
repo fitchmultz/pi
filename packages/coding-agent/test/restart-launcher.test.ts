@@ -142,11 +142,17 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 		},
 	);
 
-	it.each([false, true])(
-		"retires only received restart state after successful readiness; rollback=%s",
-		async (rollback) => {
+	it.each([
+		[false, false],
+		[false, true],
+		[true, false],
+		[true, true],
+	])(
+		"retires only received restart state after successful readiness; rollback=%s, nativeDirectory=%s",
+		async (rollback, nativeDirectory) => {
 			const f = fixture();
-			const artifact = join(f.root, "restart-private.json");
+			const directory = nativeDirectory ? mkdtempSync(join(f.root, "pi-restart-state-")) : f.root;
+			const artifact = join(directory, nativeDirectory ? "working-session.json" : "restart-private.json");
 			const observed = join(f.root, "artifact-at-ready");
 			writeFileSync(artifact, "private native state", { mode: 0o600 });
 			f.session.workingSession = artifact;
@@ -157,6 +163,7 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 			expect(await f.run(a)).toBe(0);
 			expect(readFileSync(observed, "utf8")).toBe("true");
 			expect(existsSync(artifact)).toBe(false);
+			expect(existsSync(directory)).toBe(!nativeDirectory);
 			const direct = join(f.root, "user-supplied.json");
 			writeFileSync(direct, "user restore authority", { mode: 0o600 });
 			const runtime = f.release("direct", "ready();");

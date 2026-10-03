@@ -8,6 +8,7 @@ import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { QuietStartup } from "../src/core/settings-manager.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
+import { WorkingSessionGate } from "../src/core/working-session.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -249,6 +250,7 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			throw new Error("closeReplacement was not initialized");
 		};
 		const fakeThis = {
+			session: { workingSessionGate: new WorkingSessionGate() },
 			editor,
 			editorContainer,
 			keybindings: {},

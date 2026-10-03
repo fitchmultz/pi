@@ -551,6 +551,10 @@ export class AgentSession {
 		return this._workingSessionReady;
 	}
 
+	get workingSessionMode(): WorkingSession["mode"] {
+		return this._workingSessionMode;
+	}
+
 	/** Await a native cut without consuming accepted queues. */
 	async acquireWorkingSession(
 		options: {
@@ -693,7 +697,14 @@ export class AgentSession {
 					prompt: this._baseSystemPromptOptions,
 					runPrompt: this._runSystemPromptOptions,
 					flags: [...this._extensionRunner.getFlagValues()],
-					launch: this.workingSessionLaunch,
+					launch: this.workingSessionLaunch
+						? {
+								agentDir: this.workingSessionLaunch.agentDir,
+								...this._resourceLoader.getWorkingSessionResources(),
+								trustProject: this.settingsManager.isProjectTrusted(),
+								offline: this._modelRuntime.offline,
+							}
+						: undefined,
 					mode: this._workingSessionHost
 						? { kind: this._workingSessionHost.kind, data: this._workingSessionHost.capture() }
 						: this._workingSessionMode,

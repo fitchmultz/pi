@@ -598,7 +598,8 @@ export async function main(args: string[], options?: MainOptions) {
 		: undefined;
 	if (saved?.launch) {
 		const launch = saved.launch;
-		parsed.extensions = handoff?.extensions ?? launch.extensions;
+		if (handoff?.extensions) launch.extensions = handoff.extensions;
+		parsed.extensions = launch.extensions;
 		parsed.skills = launch.skills;
 		parsed.promptTemplates = launch.prompts;
 		parsed.themes = launch.themes;
@@ -918,22 +919,6 @@ export async function main(args: string[], options?: MainOptions) {
 			customTools: sessionOptions.customTools,
 		});
 		created.session.setWorkingSessionReady(false);
-		created.session.workingSessionLaunch = {
-			agentDir,
-			extensions: resolvedExtensionPaths ?? [],
-			skills: resolvedSkillPaths ?? [],
-			prompts: resolvedPromptTemplatePaths ?? [],
-			themes: resolvedThemePaths ?? [],
-			noExtensions: parsed.noExtensions,
-			noSkills: parsed.noSkills,
-			noPromptTemplates: parsed.noPromptTemplates,
-			noThemes: parsed.noThemes,
-			noContextFiles: parsed.noContextFiles,
-			systemPrompt: parsed.systemPrompt,
-			appendSystemPrompt: parsed.appendSystemPrompt,
-			trustProject: settingsManager.isProjectTrusted(),
-			offline: offlineMode,
-		};
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (!saved && created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);

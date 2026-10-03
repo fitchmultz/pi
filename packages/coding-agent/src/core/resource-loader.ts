@@ -39,7 +39,7 @@ import {
 	type SourceInfo,
 } from "./source-info.ts";
 import { resetTimings } from "./timings.ts";
-import type { WorkingSession } from "./working-session.ts";
+import type { WorkingSession, WorkingSessionLaunch } from "./working-session.ts";
 
 export interface ResourceExtensionPaths {
 	skillPaths?: Array<{ path: string; metadata: PathMetadata }>;
@@ -154,6 +154,7 @@ function omitReplacedExtensions(
 }
 
 export interface ResourceLoader {
+	getWorkingSessionResources(): Omit<WorkingSessionLaunch, "agentDir" | "trustProject" | "offline">;
 	getExtensions(): LoadExtensionsResult;
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
@@ -423,6 +424,24 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getExtensions(): LoadExtensionsResult {
 		return this.extensionsResult;
+	}
+
+	getWorkingSessionResources(): Omit<WorkingSessionLaunch, "agentDir" | "trustProject" | "offline"> {
+		return {
+			extensions: this.additionalExtensionPaths.map((path) =>
+				isLocalPath(path) ? this.resolveResourcePath(path) : path,
+			),
+			skills: this.additionalSkillPaths.map((path) => this.resolveResourcePath(path)),
+			prompts: this.additionalPromptTemplatePaths.map((path) => this.resolveResourcePath(path)),
+			themes: this.additionalThemePaths.map((path) => this.resolveResourcePath(path)),
+			noExtensions: this.noExtensions,
+			noSkills: this.noSkills,
+			noPromptTemplates: this.noPromptTemplates,
+			noThemes: this.noThemes,
+			noContextFiles: this.noContextFiles,
+			systemPrompt: this.systemPromptSource,
+			appendSystemPrompt: this.appendSystemPromptSource ? [...this.appendSystemPromptSource] : undefined,
+		};
 	}
 
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] } {

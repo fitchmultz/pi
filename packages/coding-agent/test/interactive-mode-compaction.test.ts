@@ -2,6 +2,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import type { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import type { SessionEntry } from "../src/core/session-manager.ts";
+import { WorkingSessionGate } from "../src/core/working-session.ts";
 import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -251,6 +252,7 @@ describe("InteractiveMode compaction events", () => {
 		const fakeThis = {
 			compactionQueuedMessages: [{ text: "change direction", mode: "steer" as const }],
 			session: {
+				workingSessionGate: new WorkingSessionGate(),
 				clearQueue: vi.fn(),
 				prompt: vi.fn().mockResolvedValue(undefined),
 				steer: vi.fn().mockResolvedValue(undefined),

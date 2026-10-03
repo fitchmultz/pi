@@ -127,7 +127,7 @@ Each boundary can be supplied explicitly:
 - `resourceLoader` supplies extensions, skills, prompt templates, themes, and context files.
 - `tools`, `noTools`, `excludeTools`, and `customTools` control the active tool set.
 
-Use `DefaultResourceLoader` when you want standard discovery with selected overrides. Supply a custom `ResourceLoader` when the host owns resource storage and discovery completely.
+Use `DefaultResourceLoader` when you want standard discovery with selected overrides. Supply a custom `ResourceLoader` when the host owns resource storage and discovery completely. Its `getWorkingSessionResources()` returns the current explicit extension, skill, prompt and theme paths, discovery switches and prompt inputs for native capture; `reload({ workingSession })` restores those selections before discovery.
 
 `PI_CACHE_TRACE_DIR` enables temporary private native request tracing with SDK session, purpose
 and reload provenance. Low-level request options accept an optional `cacheTraceContext` for

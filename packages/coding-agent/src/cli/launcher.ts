@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
@@ -23,6 +23,17 @@ interface Launch {
 	worker: string;
 	args: string[];
 	pinnedWorker?: string;
+}
+
+function removeRestartArtifact(path: string): void {
+	rmSync(path, { force: true });
+	if (basename(path) !== "working-session.json" || !basename(dirname(path)).startsWith("pi-restart-state-")) return;
+	// Only remove the empty native artifact directory, never recursively delete an IPC path.
+	try {
+		rmdirSync(dirname(path));
+	} catch (error) {
+		if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+	}
 }
 
 export function getCliWorkerPath(launcherPath: string): string {
@@ -132,7 +143,7 @@ export async function superviseCli(
 				if (value.type === "pi:ready") {
 					ready = true;
 					fallback = undefined;
-					for (const path of restartArtifacts) rmSync(path, { force: true });
+					for (const path of restartArtifacts) removeRestartArtifact(path);
 					restartArtifacts.clear();
 					clearTimeout(timeout);
 				} else if (value.type === "pi:completed" && exitPath && "completed" in value) {
@@ -275,7 +286,7 @@ export async function superviseCli(
 		}
 		return stopping ? 128 + constants.signals[stopping] : 1;
 	} finally {
-		for (const path of restartArtifacts) rmSync(path, { force: true });
+		for (const path of restartArtifacts) removeRestartArtifact(path);
 		for (const remove of removers) remove();
 		process.off("exit", killChild);
 	}

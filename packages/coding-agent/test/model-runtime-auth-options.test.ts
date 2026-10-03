@@ -315,6 +315,35 @@ describe("ModelRuntime auth options", () => {
 		expect(options[0]?.method.login).toBeTypeOf("function");
 	});
 
+	it("keeps API-key login for a configured key alongside OAuth", async () => {
+		const credentials = AuthStorage.inMemory();
+		const runtime = await ModelRuntime.create({ credentials, modelsPath: null });
+		runtime.registerProvider("key-and-oauth", {
+			api: "openai-completions",
+			baseUrl: "https://example.test/v1",
+			apiKey: "configured-key",
+			oauth: {
+				name: "Account",
+				login: async () => ({ access: "oauth", refresh: "refresh", expires: 60000 }),
+				refreshToken: async (credential) => credential,
+				getApiKey: (credential) => credential.access,
+			},
+			models: [testModel("both")],
+		});
+		const prompt = async (request: { message: string }) => {
+			expect(request.message).toBe("Enter API key");
+			return "entered-key";
+		};
+		expect(
+			await runtime.login("key-and-oauth", "api_key", {
+				prompt,
+				notify() {},
+			}),
+		).toEqual({ type: "api_key", key: "entered-key" });
+		expect((await runtime.getAuth("key-and-oauth"))?.auth.apiKey).toBe("entered-key");
+		expect((await runtime.getAuth("key-and-oauth", { apiKey: "explicit-key" }))?.auth.apiKey).toBe("explicit-key");
+	});
+
 	it("resolves configured auth from request-scoped environment overrides", async () => {
 		const runtime = await ModelRuntime.create({ credentials: AuthStorage.inMemory(), modelsPath: null });
 		runtime.registerProvider("request-env-provider", {

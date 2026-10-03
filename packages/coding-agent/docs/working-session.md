@@ -24,7 +24,7 @@ const { session: restored } = await createAgentSession({
 });
 ```
 
-Paths written through `writeWorkingSession` must be absolute, have a canonical parent directory owned by the current user and not writable by others, and name a missing file or an owner-only regular file. The writer publishes atomically after syncing its contents.
+Paths written through `writeWorkingSession` must be absolute, have a canonical parent directory owned by the current user and not writable by others, and name a missing file or an owner-only regular file. Windows checks the native access control lists on both directory and file; only the current user, System and Administrators may have access. The writer publishes atomically after syncing its contents.
 
 Acquisition waits for native admission/preflight, commands, asynchronous notifications, UI callbacks and settlement handlers. A `turn` request can reserve an awaited completed turn before either queue drains. That intermediate cut has `sleepReady: false` because the current agent continuation is still active. A naturally settled session can satisfy either request with a `settled` cut. Pending idle queues are saved directly; acquisition does not drain them.
 
@@ -55,7 +55,7 @@ Unresolved settings load or write failures refuse acquisition even after their d
 
 `pi --working-session /private/session/state.json` validates the artifact and matching journal before session, resource, model or extension-start construction. A different or newer journal is refused without repair or overwrite. Missing journals are materialized from the exact saved entries.
 
-SDK and CLI restoration apply saved project trust, offline policy and settings before discovery and extension factories, including when the host supplies native services. The artifact's `settings` is the exact effective configuration; `settingsLayers.global` and `settingsLayers.project` preserve global-only preferences and relative resource origins. Restoration changes settings in memory, never overwrites settings files. Persisted setters still write only the changed fields; ordinary `/reload` reads the current files. Required saved extension-load or provider-registration failures abort restoration.
+SDK and service-created sessions capture their agent directory, explicit resource selections and current trust/offline policy automatically. Native TUI state also preserves the effective regular/fullscreen renderer and restores it before constructing the interface. SDK and CLI restoration apply saved project trust, offline policy and settings before discovery and extension factories, including when the host supplies native services. The artifact's `settings` is the exact effective configuration; `settingsLayers.global` and `settingsLayers.project` preserve global-only preferences and relative resource origins. Restoration changes settings in memory, never overwrites settings files. Persisted setters still write only the changed fields; ordinary `/reload` reads the current files. Required saved extension-load or provider-registration failures abort restoration.
 
 The selected model and tool policy are retained. Missing selected models fail; missing restored tools retain their pending names and refuse a new request until native registration completes or the user explicitly changes the selection. Restore never selects a different default payer or silently removes required tools.
 

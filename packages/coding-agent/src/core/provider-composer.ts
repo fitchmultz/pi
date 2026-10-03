@@ -422,7 +422,7 @@ function composeApiKeyAuth(
 		name: inherited?.name ?? "API key",
 		login:
 			inherited?.login ??
-			(!oauth
+			(!(oauth && rawKey === undefined && !inherited)
 				? async (interaction: AuthInteraction) => ({
 						type: "api_key",
 						key: await interaction.prompt({ type: "secret", message: "Enter API key" }),

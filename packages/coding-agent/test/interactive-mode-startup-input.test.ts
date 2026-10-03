@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { WorkingSessionGate } from "../src/core/working-session.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type SubmitContext = {
@@ -8,6 +9,7 @@ type SubmitContext = {
 		setText: (text: string) => void;
 	};
 	session: {
+		workingSessionGate: WorkingSessionGate;
 		isCompacting: boolean;
 		isStreaming: boolean;
 		isBashRunning: boolean;
@@ -19,6 +21,7 @@ type SubmitContext = {
 };
 
 type InputContext = {
+	session: { workingSessionGate: WorkingSessionGate };
 	onInputCallback?: (text: string) => void;
 	pendingUserInputs: string[];
 };
@@ -44,6 +47,7 @@ function createSubmitContext(): SubmitContext {
 			setText: vi.fn(),
 		},
 		session: {
+			workingSessionGate: new WorkingSessionGate(),
 			isCompacting: false,
 			isStreaming: false,
 			isBashRunning: false,
@@ -80,6 +84,7 @@ describe("InteractiveMode startup input", () => {
 
 	it("returns queued startup input before installing a new input callback", async () => {
 		const context: InputContext = {
+			session: { workingSessionGate: new WorkingSessionGate() },
 			pendingUserInputs: ["queued prompt"],
 		};
 

@@ -532,6 +532,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	});
 
 	if (saved) session.restoreWorkingSession(saved);
+	session.workingSessionLaunch = { agentDir, ...resourceLoader.getWorkingSessionResources() };
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

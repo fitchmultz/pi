@@ -1,5 +1,6 @@
 import type * as Tui from "@earendil-works/pi-tui";
 import { afterEach, expect, test, vi } from "vitest";
+import { WorkingSessionGate } from "../src/core/working-session.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 const readClipboardText = vi.hoisted(() => vi.fn<() => Promise<string | null>>());
@@ -22,6 +23,7 @@ afterEach(() => vi.unstubAllEnvs());
 test("native image errors abort paste without reading text or changing the editor", async () => {
 	vi.stubEnv("TERMUX_VERSION", "");
 	const context = {
+		session: { workingSessionGate: new WorkingSessionGate() },
 		editor: { insertTextAtCursor: vi.fn() },
 		showError: vi.fn(),
 		ui: { requestRender: vi.fn() },

@@ -140,16 +140,10 @@ describe("Native working sessions", () => {
 			model: h.getModel(),
 			modelRuntime: h.session.modelRuntime,
 		});
-		initial.session.workingSessionLaunch = {
-			agentDir,
-			extensions: [],
-			skills: [],
-			prompts: [],
-			themes: [],
-			trustProject: true,
-		};
+
 		initial.session.settingsManager.applyOverrides({ shellCommandPrefix: "captured factory input" });
 		const hold = await initial.session.acquireWorkingSession();
+		expect(hold.state.launch?.agentDir).toBe(agentDir);
 		await hold.release();
 		initial.session.dispose();
 		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ cacheWarming: "idle", compactView: false }));
@@ -188,6 +182,91 @@ describe("Native working sessions", () => {
 			session.dispose();
 		}
 	});
+
+	it.each(["sdk", "services"] as const)(
+		"captures native %s launch and trust without caller-supplied state",
+		async (owner) => {
+			const h = await createHarness();
+			harnesses.push(h);
+			const agentDir = join(h.tempDir, "private-agent");
+			mkdirSync(agentDir);
+			mkdirSync(join(h.tempDir, ".pi", "extensions"), { recursive: true });
+			const marker = join(h.tempDir, "excluded-project-executed");
+			writeFileSync(
+				join(h.tempDir, ".pi", "extensions", "excluded.ts"),
+				`import {writeFileSync} from "node:fs"; export default function() {writeFileSync(${JSON.stringify(marker)}, "unsafe");}`,
+			);
+			const selected = join(h.tempDir, "selected.ts");
+			writeFileSync(
+				selected,
+				`export default function(pi) {pi.registerCommand("selected-resource", {handler: async()=>{}});}`,
+			);
+			const settingsManager = SettingsManager.create(h.tempDir, agentDir, { projectTrusted: false });
+			const resourceLoader = new DefaultResourceLoader({
+				cwd: h.tempDir,
+				agentDir,
+				settingsManager,
+				additionalExtensionPaths: [selected],
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+			});
+			await resourceLoader.reload();
+			const options = {
+				cwd: h.tempDir,
+				agentDir,
+				settingsManager,
+				resourceLoader,
+				modelRuntime: h.session.modelRuntime,
+			};
+			const initial =
+				owner === "sdk"
+					? await createAgentSession({ ...options, model: h.getModel() })
+					: await createAgentSessionFromServices({
+							services: await createAgentSessionServices({
+								...options,
+								resourceLoaderOptions: {
+									additionalExtensionPaths: [selected],
+									noSkills: true,
+									noPromptTemplates: true,
+									noThemes: true,
+									noContextFiles: true,
+								},
+							}),
+							sessionManager: SessionManager.create(h.tempDir, join(agentDir, "sessions")),
+							model: h.getModel(),
+						});
+			const hold = await initial.session.acquireWorkingSession();
+			await hold.release();
+			initial.session.dispose();
+			expect(hold.state.launch).toMatchObject({
+				agentDir,
+				extensions: [selected],
+				trustProject: false,
+				noSkills: true,
+				noContextFiles: true,
+			});
+			const restored = await createAgentSession({
+				workingSession: hold.state,
+				modelRuntime: h.session.modelRuntime,
+			});
+			try {
+				expect(existsSync(marker)).toBe(false);
+				expect(restored.session.settingsManager.isProjectTrusted()).toBe(false);
+				expect(restored.session.extensionRunner.getRegisteredCommands().map(({ name }) => name)).toContain(
+					"selected-resource",
+				);
+				restored.session.settingsManager.setProjectTrusted(true);
+				restored.session.modelRuntime.setOffline(true);
+				const changed = await restored.session.acquireWorkingSession();
+				expect(changed.state.launch).toMatchObject({ agentDir, trustProject: true, offline: true });
+				await changed.release();
+			} finally {
+				restored.session.dispose();
+			}
+		},
+	);
 
 	it("uses native SDK registration attribution while draining valid providers and virtual models", async () => {
 		const h = await createHarness();
@@ -716,7 +795,7 @@ describe("Native working sessions", () => {
 				setBeforeSessionInvalidate() {},
 				setRebindSession() {},
 			} as unknown as AgentSessionRuntime,
-			{ terminal: new VirtualTerminal(80, 40) },
+			{ terminal: new VirtualTerminal(80, 40), tuiMode: "regular" },
 		);
 		const view = mode as unknown as {
 			isInitialized: boolean;
@@ -794,6 +873,7 @@ describe("Native working sessions", () => {
 				{ terminal: new VirtualTerminal(80, 40) },
 			);
 			const restoredView = restoredMode as unknown as typeof view;
+			expect(restoredView.ui.mode).toBe("regular");
 			restoredView.isInitialized = true;
 			restoredView.isShuttingDown = true;
 			restoredView.setupEditorSubmitHandler();
@@ -857,7 +937,7 @@ describe("Native working sessions", () => {
 				setBeforeSessionInvalidate() {},
 				setRebindSession() {},
 			} as unknown as AgentSessionRuntime,
-			{ terminal: new VirtualTerminal(80, 40) },
+			{ terminal: new VirtualTerminal(80, 40), tuiMode: "regular" },
 		);
 		const view = mode as unknown as {
 			isInitialized: boolean;

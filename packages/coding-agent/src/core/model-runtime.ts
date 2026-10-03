@@ -867,6 +867,10 @@ export class ModelRuntime implements Models {
 		this.modelNetworkEnabled = !offline;
 	}
 
+	get offline(): boolean {
+		return !this.modelNetworkEnabled;
+	}
+
 	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
 		this.config = await ModelConfig.load(this.modelsPath);
 		this.configureRadiusProviders();

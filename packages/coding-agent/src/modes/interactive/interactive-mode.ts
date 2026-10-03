@@ -623,7 +623,19 @@ export class InteractiveMode {
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
 		setCapabilityOverrides(this.settingsManager.getTerminalCapabilityOverrides());
-		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
+		let tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
+		const savedMode = this.session.workingSessionMode;
+		if (savedMode?.kind === "tui") {
+			const data = savedMode.data;
+			if (
+				!data ||
+				typeof data !== "object" ||
+				!("tuiMode" in data) ||
+				(data.tuiMode !== "regular" && data.tuiMode !== "fullscreen")
+			)
+				throw new Error("Invalid native TUI working-session mode");
+			tuiMode = data.tuiMode;
+		}
 		this.options = { ...options, tuiMode };
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
@@ -2135,6 +2147,7 @@ export class InteractiveMode {
 				return { blockers };
 			},
 			capture: () => ({
+				tuiMode: this.ui.mode,
 				pendingUserInputs: this.pendingUserInputs,
 				compactionQueuedMessages: this.compactionQueuedMessages,
 				draft: this.editor.getExpandedText?.() ?? this.editor.getText(),
@@ -2145,6 +2158,8 @@ export class InteractiveMode {
 				if (
 					!data ||
 					typeof data !== "object" ||
+					!("tuiMode" in data) ||
+					(data.tuiMode !== "regular" && data.tuiMode !== "fullscreen") ||
 					!("pendingUserInputs" in data) ||
 					!Array.isArray(data.pendingUserInputs) ||
 					!data.pendingUserInputs.every((text) => typeof text === "string") ||
@@ -2165,6 +2180,7 @@ export class InteractiveMode {
 					typeof data.toolOutputExpanded !== "boolean"
 				)
 					throw new Error("Invalid native TUI working-session buffers");
+				this.switchTuiMode(data.tuiMode);
 				this.pendingUserInputs = data.pendingUserInputs;
 				this.compactionQueuedMessages = data.compactionQueuedMessages;
 				this.editor.setText(data.draft);
