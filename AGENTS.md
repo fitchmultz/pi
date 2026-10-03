@@ -140,3 +140,12 @@ Owner-authorized implementation in `fitchmultz/pi` includes necessary model-data
 After activation, all agents must immediately restart and continue under the new runtime. Coordinate connected sessions, preserve their saved work, and verify this session's actual running runtime after restart; selector activation or a queued restart alone is not completion.
 
 Public package releases/publishing, paid provider probes, credential changes, destructive actions affecting user data and material scope expansions require separate authorization. Preserve shared-worktree coordination and all verification gates.
+
+## Cursor Cloud specific instructions
+
+Pi is a CLI monorepo. There is no dev server to boot. Validate with `npm run check` and `./test.sh` from the repository root, and run the checkout with `./pi-test.sh`.
+
+- Agent shells resolve `node` to `/exec-daemon/node`, which can be older than Pi's Node >=22.19 requirement. Install puts Node 22.22.2 on disk at `/usr/local/lib/nodejs`. Prefix commands with `export PATH="/usr/local/lib/nodejs/bin:$PATH"`.
+- `packages/ai/src/providers/data/` is gitignored. Hydrate it from the revision in `nix/model-catalog.json` via `https://pi.dev/api/models/revisions/<revision>?types=chat,image,classifier` and `node packages/ai/scripts/hydrate-model-catalog.ts`, then `npm run build:offline`. Install dependencies with `npm ci --ignore-scripts`, matching CI.
+- CI image libraries and tools: `libcairo2-dev`, `libpango1.0-dev`, `libjpeg-dev`, `libgif-dev`, `librsvg2-dev`, `fd-find` (symlinked as `/usr/local/bin/fd`), `ripgrep`, and `tmux`.
+- `./pi-test.sh --offline` skips startup network. `--list-models` reads the hydrated catalog.
