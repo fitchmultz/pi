@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cloudflare AI Gateway Claude models failing with a 404 by using dashed model IDs during generation, provider construction, and remote-catalog loading.
+- Fixed exact `gpt-6-astra` Ultrafast estimates in OpenAI and Codex Responses: terminal-confirmed `ultrafast` costs 6x every standard or long-context component; request-only Ultrafast does not imply delivery.
+- Fixed legacy Codex Responses `fast` pricing to match `priority`, including its existing requested-tier fallback.
+- Fixed a provider's auth-check failure hiding healthy providers; global availability now exposes provider-local diagnostics.
+- Fixed optional null tool arguments inside schema unions being coerced into values instead of omitted.
+- Fixed retained Codex payload objects mutating the cached continuation baseline.
+- Fixed failed Responses streams losing terminal usage, response IDs, and error details.
+- Fixed `NO_PROXY` exclusions not matching trailing DNS root dots.
+- Fixed fractional and overflowed zero retry delays becoming 60-second delays.
+- Fixed context estimates omitting thinking and tool-call signatures.
+- Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
+- Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
+
+## [1.0.1] - 2026-10-03
+
 ### Added
 
 - Added Cloudflare's Clef and Clef Flash classifier models (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`) to the `cloudflare-workers-ai` provider ([#10316](https://github.com/earendil-works/pi/pull/10316) by [@ndisidore](https://github.com/ndisidore), [#10322](https://github.com/earendil-works/pi/pull/10322) by [@RealAlexandreAI](https://github.com/RealAlexandreAI))
@@ -14,21 +31,11 @@
 ### Fixed
 
 - Fixed "Selected model is at capacity" provider errors ending the turn instead of being retried ([#10278](https://github.com/earendil-works/pi/issues/10278))
-- Fixed Cloudflare AI Gateway Claude models failing with a 404 by using dashed model IDs during generation, provider construction, and remote-catalog loading.
+- Fixed Cloudflare AI Gateway Claude models failing with a 404 by using dashed model IDs (`claude-opus-5-5` instead of `claude-opus-5.5`), which Anthropic requires
 - Fixed Sign in with ChatGPT continuing when its callback port is taken by another login, which made the browser show "OAuth state mismatch"; it now fails with a port-in-use error ([#10265](https://github.com/earendil-works/pi/issues/10265))
 - Fixed Amazon Bedrock OpenAI models costing requests above 272k input tokens at the short-context rate; Bedrock models now include the pricing tiers listed on models.dev ([#10326](https://github.com/earendil-works/pi/issues/10326))
 - Fixed Amazon Bedrock Claude requests failing with "Invalid `signature` in `thinking` block" after the system prompt or tools changed; Claude Opus 4.7+, Sonnet 5+, and Fable 5 now drop stale thinking blocks like the Anthropic provider ([#10324](https://github.com/earendil-works/pi/issues/10324))
-- Fixed exact `gpt-6-astra` Ultrafast estimates in OpenAI and Codex Responses: terminal-confirmed `ultrafast` costs 6x every standard or long-context component; request-only Ultrafast does not imply delivery.
-- Fixed legacy Codex Responses `fast` pricing to match `priority`, including its existing requested-tier fallback.
-- Fixed a provider's auth-check failure hiding healthy providers; global availability now exposes provider-local diagnostics.
-- Fixed optional null tool arguments inside schema unions being coerced into values instead of omitted.
-- Fixed retained Codex payload objects mutating the cached continuation baseline.
-- Fixed failed Responses streams losing terminal usage, response IDs, and error details.
-- Fixed `NO_PROXY` exclusions not matching trailing DNS root dots.
-- Fixed fractional and overflowed zero retry delays becoming 60-second delays.
-- Fixed context estimates omitting thinking and tool-call signatures.
-- Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
-- Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
+- Fixed Together DeepSeek V4 Pro losing its thinking level controls after Together renamed it to `deepseek-ai/DeepSeek-V4-Pro-0813` ([#10336](https://github.com/earendil-works/pi/pull/10336) by [@cv](https://github.com/cv))
 
 ## [1.0.0] - 2026-10-01
 
