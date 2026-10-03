@@ -15,6 +15,35 @@ import { createHarness } from "./harness.ts";
 const cliPath = resolve(import.meta.dirname, "../../src/cli.ts");
 const resolverUrl = pathToFileURL(resolve(import.meta.dirname, "../../src/experimental/source-resolver.ts")).href;
 
+async function runCli(args: string[], cwd: string, env: NodeJS.ProcessEnv) {
+	const child = spawn(process.execPath, ["--import", resolverUrl, cliPath, ...args], {
+		cwd,
+		env,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let stdout = "";
+	let stderr = "";
+	child.stdout.on("data", (chunk) => {
+		stdout += chunk.toString();
+	});
+	child.stderr.on("data", (chunk) => {
+		stderr += chunk.toString();
+	});
+	return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }>(
+		(done, reject) => {
+			const timer = setTimeout(() => child.kill("SIGKILL"), 10000);
+			child.on("error", (error) => {
+				clearTimeout(timer);
+				reject(error);
+			});
+			child.on("close", (code, signal) => {
+				clearTimeout(timer);
+				done({ code, signal, stdout, stderr });
+			});
+		},
+	);
+}
+
 async function proxy(label: string) {
 	const origin = http.createServer((request, response) => {
 		if (request.url === "/timeout") {
@@ -52,6 +81,39 @@ async function proxy(label: string) {
 }
 
 describe("CLI working-session bootstrap", () => {
+	it.each([
+		{ args: ["--version"], output: /^\d+\.\d+\.\d+/ },
+		{ args: ["config", "--help"], output: /config/ },
+		{ args: ["update", "--help"], output: /update/ },
+		{ args: ["--print", "--no-extensions", "--no-session"], output: undefined },
+	])(
+		"keeps command routing and normal timeout validation with invalid global settings: $args",
+		async ({ args, output }) => {
+			const h = await createHarness();
+			try {
+				const agentDir = join(h.tempDir, "agent");
+				mkdirSync(agentDir);
+				writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ httpIdleTimeoutMs: "5m" }));
+				const result = await runCli(args, h.tempDir, {
+					...process.env,
+					[ENV_AGENT_DIR]: agentDir,
+					PI_OFFLINE: "1",
+				});
+				expect(result.signal).toBeNull();
+				if (output) {
+					expect(result.stderr).toBe("");
+					expect(result.code).toBe(0);
+					expect(result.stdout).toMatch(output);
+				} else {
+					expect(result.code).toBe(1);
+					expect(result.stderr).toContain("Invalid httpIdleTimeoutMs setting: 5m");
+				}
+			} finally {
+				h.cleanup();
+			}
+		},
+	);
+
 	it.each([false, true])(
 		"restores proxy and effective idle timeout before factories; caller env=%s",
 		async (explicit) => {
@@ -137,31 +199,12 @@ export default async function() {
 				])
 					delete env[key];
 				if (explicit) env.HTTP_PROXY = env.HTTPS_PROXY = callerProxy.url;
-				let stderr = "";
-				const child = spawn(
-					process.execPath,
-					["--import", resolverUrl, cliPath, "--working-session", statePath, "--help"],
-					{
-						cwd: h.tempDir,
-						env,
-						stdio: ["ignore", "ignore", "pipe"],
-					},
+				const { stdout: _stdout, ...result } = await runCli(
+					["--working-session", statePath, "--help"],
+					h.tempDir,
+					env,
 				);
-				child.stderr.on("data", (chunk) => {
-					stderr += chunk.toString();
-				});
-				const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((done, reject) => {
-					const timer = setTimeout(() => child.kill("SIGKILL"), 10000);
-					child.on("error", (error) => {
-						clearTimeout(timer);
-						reject(error);
-					});
-					child.on("close", (code, signal) => {
-						clearTimeout(timer);
-						done({ code, signal });
-					});
-				});
-				expect({ ...result, stderr }).toEqual({ code: 0, signal: null, stderr: "" });
+				expect(result).toEqual({ code: 0, signal: null, stderr: "" });
 				expect(JSON.parse(readFileSync(observation, "utf8"))).toEqual({
 					http: explicit ? callerProxy.url : savedProxy.url,
 					https: explicit ? callerProxy.url : savedProxy.url,

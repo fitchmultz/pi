@@ -76,12 +76,16 @@ describe("on-demand instruction groups", () => {
 	}
 
 	it.each([
-		{ boundary: "session_start", discard: false },
-		{ boundary: "session_tree", discard: false },
-		{ boundary: "session_start", discard: true },
+		{ boundary: "session_start", discard: false, selection: ["late"], allowlist: undefined },
+		{ boundary: "session_tree", discard: false, selection: ["late"], allowlist: undefined },
+		{ boundary: "session_start", discard: true, selection: ["late"], allowlist: undefined },
+		{ boundary: "session_start", discard: false, selection: ["read"], allowlist: ["read", "bash"] },
+		{ boundary: "session_tree", discard: false, selection: ["read"], allowlist: ["read", "bash"] },
+		{ boundary: "session_start", discard: false, selection: [], allowlist: ["read", "bash"] },
+		{ boundary: "session_tree", discard: false, selection: [], allowlist: ["read", "bash"] },
 	])(
-		"resyncs all-missing saved tools at $boundary; explicit empty discard=$discard",
-		async ({ boundary, discard }) => {
+		"resyncs saved $selection at $boundary under $allowlist; explicit empty discard=$discard",
+		async ({ boundary, discard, selection, allowlist }) => {
 			const late = {
 				name: "late",
 				label: "Late",
@@ -92,16 +96,19 @@ describe("on-demand instruction groups", () => {
 				execute: async () => ({ content: [], details: undefined }),
 			};
 			const original = await setup({
-				initialActiveToolNames: ["late"],
+				initialActiveToolNames: selection,
+				allowedToolNames: allowlist,
 				extensionFactories: [instructionGroupsExtension, (pi) => pi.registerTool(late)],
 			});
-			original.session.setActiveToolsByName(["late"]);
+			original.session.setActiveToolsByName(selection);
 			original.setResponses([done(), done()]);
 			await original.session.prompt("first branch point");
 			const first = original.sessionManager.getLeafId()!;
 			await original.session.prompt("saved leaf");
 			const captured = await original.session.acquireWorkingSession();
 			await captured.release();
+			expect(captured.state.activeTools).toEqual(selection);
+			expect(captured.state.allowedTools).toEqual(allowlist);
 			let register!: () => void;
 			const restored = await createHarness({
 				initialActiveToolNames: [],
@@ -118,28 +125,31 @@ describe("on-demand instruction groups", () => {
 			const bindings = { onError: (error: { error: string }) => errors.push(error.error) };
 			if (boundary === "session_tree") await restored.session.bindExtensions(bindings);
 			restored.session.restoreWorkingSession(captured.state);
+			const active = allowlist ? selection : [];
+			expect(restored.session.getActiveToolNames()).toEqual(active);
 			if (boundary === "session_start") await restored.session.bindExtensions(bindings);
 			else await restored.session.navigateTree(first);
 			expect(errors).toEqual([]);
-			expect(restored.session.getActiveToolNames()).toEqual([]);
+			expect(restored.session.getActiveToolNames()).toEqual(active);
 			if (discard) restored.session.setActiveToolsByName([]);
 			const pending = await restored.session.acquireWorkingSession();
 			try {
-				expect(pending.state.pendingTools).toEqual(discard ? [] : ["late"]);
+				expect(pending.state.pendingTools).toEqual(discard || allowlist ? [] : ["late"]);
 			} finally {
 				await pending.release();
 			}
-			if (!discard) {
+			if (!discard && !allowlist) {
 				await expect(restored.session.prompt("wait for reconnect")).rejects.toThrow(
 					"Saved tools have not registered",
 				);
 				expect(restored.faux.state.callCount).toBe(0);
 			}
-			register();
-			expect(restored.session.getActiveToolNames()).toEqual(discard ? [] : ["late"]);
+			if (!allowlist) register();
+			const expected = allowlist ? selection : discard ? [] : ["late"];
+			expect(restored.session.getActiveToolNames()).toEqual(expected);
 			restored.setResponses([
 				(context) => {
-					expect(getCurrentTools(context.messages).map((tool) => tool.name)).toEqual(discard ? [] : ["late"]);
+					expect(getCurrentTools(context.messages).map((tool) => tool.name)).toEqual(expected);
 					return done();
 				},
 			]);

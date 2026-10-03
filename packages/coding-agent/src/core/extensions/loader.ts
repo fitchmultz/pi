@@ -475,7 +475,7 @@ function createExtensionAPI(
 		refreshTools(): void {
 			assertActive();
 			runtime.beforeMutation?.();
-			runtime.refreshTools();
+			runtime.refreshTools(true);
 		},
 
 		getCommands() {

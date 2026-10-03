@@ -2099,7 +2099,7 @@ export type GetCommandsHandler = () => SlashCommandInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => void;
 
-export type RefreshToolsHandler = () => void;
+export type RefreshToolsHandler = (preserveSelection?: boolean) => void;
 
 export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
 

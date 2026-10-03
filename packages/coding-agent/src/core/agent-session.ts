@@ -3711,7 +3711,11 @@ export class AgentSession {
 				getAllTools: () => this.getAllTools(),
 				getSettings: () => this.settingsManager.getSettings(),
 				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
-				refreshTools: () => this._refreshToolRegistry(),
+				refreshTools: (preserveSelection) => {
+					// State-only refresh retains the loadout; registration still rebuilds the registry.
+					if (preserveSelection) this._setActiveTools([...this.getActiveToolNames(), ...this._pendingToolNames]);
+					else this._refreshToolRegistry();
+				},
 				getCommands,
 				setModel: async (model) => {
 					if (!this._modelRuntime.hasConfiguredAuth(model.provider)) return false;
