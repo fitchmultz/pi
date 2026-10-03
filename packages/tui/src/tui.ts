@@ -471,6 +471,7 @@ export interface TUI extends Component {
 	stop(options?: TuiStopOptions): void;
 	renderNow(force?: boolean): void;
 	requestRender(force?: boolean): void;
+	dispatchInput(data: string): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
@@ -917,7 +918,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.stopped = false;
 		this.beforeTerminalStart();
 		this.terminal.start(
-			(data) => this.handleInput(data),
+			(data) => this.dispatchInput(data),
 			() => this.requestRender(),
 		);
 		this.afterTerminalStart();
@@ -1042,7 +1043,7 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	/** Dispatch terminal input through the same listeners and focused component, including held input. */
-	handleInput(data: string): void {
+	dispatchInput(data: string): void {
 		if (this.consumeTerminalColorResponse(data)) {
 			return;
 		}

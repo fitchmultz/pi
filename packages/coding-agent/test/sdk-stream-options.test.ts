@@ -9,8 +9,11 @@ import {
 	normalizeContext,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Type } from "typebox";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { completeSummarization } from "../src/core/compaction/compaction.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
@@ -32,6 +35,7 @@ describe("createAgentSession stream options", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -85,6 +89,7 @@ describe("createAgentSession stream options", () => {
 		requestOptions: SimpleStreamOptions = {},
 		extensionFactory?: ExtensionFactory,
 		providerEvent?: unknown,
+		exercise?: (session: AgentSession, captured: () => SimpleStreamOptions | undefined) => Promise<void>,
 	): Promise<SimpleStreamOptions | undefined> {
 		const model = createModel(api);
 		const settingsManager = SettingsManager.inMemory(settings);
@@ -130,7 +135,9 @@ describe("createAgentSession stream options", () => {
 		});
 
 		try {
-			if (providerEvent === undefined) {
+			if (exercise) {
+				await exercise(session, () => capturedOptions);
+			} else if (providerEvent === undefined) {
 				const stream = await session.agent.streamFunction(
 					model,
 					normalizeContext({ messages: [] }),
@@ -228,9 +235,79 @@ describe("createAgentSession stream options", () => {
 	});
 
 	it("defaults timeoutMs from httpIdleTimeoutMs for all providers", async () => {
+		vi.stubEnv("PI_CACHE_TRACE_DIR", "");
 		const options = await captureStreamOptions("openai-completions", { httpIdleTimeoutMs: 1234 });
 
 		expect(options?.timeoutMs).toBe(1234);
+		expect(options).not.toHaveProperty("cacheTraceContext");
+	});
+
+	it("attributes actual SDK calls across purpose, compaction window, reload and model redirection", async () => {
+		vi.stubEnv("PI_CACHE_TRACE_DIR", join(tempDir, "trace"));
+		vi.stubEnv("PI_SUBAGENT_CHILD", "");
+		const schemaToJSON = vi.fn(() => ({ type: "object" }));
+		const context = normalizeContext({
+			messages: [],
+			tools: [
+				{
+					name: "probe",
+					description: "Caller-owned schema",
+					parameters: Object.assign(Type.Object({}), { toJSON: schemaToJSON }),
+				},
+			],
+		});
+		const captured: NonNullable<SimpleStreamOptions["cacheTraceContext"]>[] = [];
+		await captureStreamOptions("openai-completions", {}, {}, undefined, undefined, async (session, latest) => {
+			const send = async (options: SimpleStreamOptions = {}) => {
+				const stream = await session.agent.streamFunction(
+					{ ...createModel("openai-completions"), id: "physical-redirect" },
+					context,
+					{ sessionId: session.sessionId, ...options },
+				);
+				await stream.result();
+				expect(latest()?.cacheTraceContext).toBeDefined();
+				captured.push(latest()!.cacheTraceContext!);
+			};
+			await send();
+			await send({ sessionId: "unowned-routing" });
+			await completeSummarization(
+				createModel("openai-completions"),
+				normalizeContext({ messages: [] }),
+				{ sessionId: session.sessionId },
+				session.agent.streamFunction,
+			);
+			captured.push(latest()!.cacheTraceContext!);
+			const kept = session.sessionManager.appendMessage({ role: "user", content: "keep", timestamp: 0 });
+			const window = session.sessionManager.appendCompaction("summary", kept, 20);
+			await send();
+			expect(captured.at(-1)?.windowId).toBe(window);
+			await session.reload();
+			await send();
+			vi.stubEnv("PI_SUBAGENT_CHILD", "1");
+			await send();
+		});
+		expect(captured.map(({ purpose }) => purpose)).toEqual([
+			"parent",
+			"unknown",
+			"summary",
+			"parent",
+			"parent",
+			"child",
+		]);
+		expect(captured[0]).toMatchObject({
+			selectedModel: "capture-model",
+			selectedProvider: "capture-provider",
+			reloadGeneration: 0,
+			windowId: "initial",
+			catalogDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+			extensionsDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+			coverageGaps: expect.arrayContaining(["loaded_module_graph_unverified", "auth_generation_unknown"]),
+		});
+		expect(new Set(captured.map(({ runtimeGeneration }) => runtimeGeneration)).size).toBe(1);
+		expect(captured[4].reloadGeneration).toBe(1);
+		expect(captured[4].sessionId).toBe(captured[0].sessionId);
+		// Provenance must not serialize caller-owned schemas before the provider does.
+		expect(schemaToJSON).not.toHaveBeenCalled();
 	});
 
 	it("lets request timeoutMs override httpIdleTimeoutMs for OpenAI Codex", async () => {

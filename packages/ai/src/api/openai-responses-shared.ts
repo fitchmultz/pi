@@ -30,6 +30,7 @@ import type {
 	TranscriptContext,
 	Usage,
 } from "../types.ts";
+import type { CacheTrace } from "../utils/cache-trace.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
@@ -108,6 +109,7 @@ function convertToolResultOutput<TApi extends Api>(
 }
 
 export interface OpenAIResponsesStreamOptions {
+	cacheTrace?: CacheTrace;
 	onProviderStreamEvent?: StreamOptions["onProviderStreamEvent"];
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
@@ -597,9 +599,12 @@ export async function processResponsesStream<TApi extends Api>(
 		if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
 			output.stopReason = "toolUse";
 		}
+		options?.cacheTrace?.parsed(output.usage, Boolean(response?.usage));
 	};
 
 	for await (const event of openaiStream) {
+		// Codex observes the original terminal type before its mapper normalizes it.
+		if (model.api !== "openai-codex-responses") options?.cacheTrace?.terminal(event);
 		await options?.onProviderStreamEvent?.(event, model);
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;

@@ -119,6 +119,63 @@ describe("Native working sessions", () => {
 		}
 	});
 
+	it.each(["retain-none compaction", "root branch summary", "extracted branch summary"])(
+		"restores native %s records without replay and still rejects broken journal references",
+		async (kind) => {
+			const h = await createHarness();
+			harnesses.push(h);
+			const selected = h.sessionManager.appendMessage({ role: "user", content: "retained", timestamp: 1 });
+			if (kind === "retain-none compaction") {
+				h.sessionManager.appendCompaction("native summary", null, 100);
+			} else if (kind === "root branch summary") {
+				h.sessionManager.resetLeaf();
+				h.sessionManager.branchWithSummary(null, "native summary");
+			} else {
+				h.sessionManager.appendMessage({ role: "user", content: "abandoned", timestamp: 2 });
+				const summary = h.sessionManager.branchWithSummary(selected, "native summary");
+				h.sessionManager.createBranchedSession(summary);
+			}
+			h.session.refreshContext();
+			const hold = await h.session.acquireWorkingSession();
+			try {
+				const invalidEntries = [
+					[...hold.state.entries, hold.state.entries[0]],
+					hold.state.entries.map((entry, index) => (index === 0 ? { ...entry, parentId: "missing" } : entry)),
+				];
+				if (kind === "retain-none compaction") {
+					invalidEntries.push(
+						hold.state.entries.map((entry) =>
+							entry.type === "compaction" ? { ...entry, firstKeptEntryId: "missing" } : entry,
+						),
+					);
+				}
+				for (const entries of invalidEntries) {
+					expect(() => parseWorkingSession(JSON.stringify({ ...hold.state, entries }))).toThrow(
+						"Invalid native working session",
+					);
+				}
+				const state = parseWorkingSession(JSON.stringify(hold.state));
+				const { session } = await createAgentSession({
+					workingSession: state,
+					modelRuntime: h.session.modelRuntime,
+					resourceLoader: h.session.resourceLoader,
+				});
+				try {
+					expect(session.sessionManager.getEntries()).toEqual(hold.state.entries);
+					expect(session.sessionManager.getLeafId()).toBe(hold.state.leafId);
+					expect(session.messages).toEqual(
+						expect.arrayContaining([expect.objectContaining({ summary: "native summary" })]),
+					);
+					expect(h.faux.state.callCount).toBe(0);
+				} finally {
+					session.dispose();
+				}
+			} finally {
+				await hold.release();
+			}
+		},
+	);
+
 	it("holds a real completed turn before either queue is consumed and resumes on release", async () => {
 		const response = deferred();
 		const h = await createHarness();
@@ -279,7 +336,7 @@ describe("Native working sessions", () => {
 			const hold = await acquisition;
 			expect(hold.sleepReady).toBe(true);
 			view.ui.setFocus(view.defaultEditor);
-			view.ui.handleInput?.("preserved keystrokes");
+			view.ui.dispatchInput("preserved keystrokes");
 			expect(view.defaultEditor.getText()).toBe("");
 			expect(hold.invalidated.aborted).toBe(true);
 			await hold.release();

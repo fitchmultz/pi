@@ -274,7 +274,7 @@ export function parseWorkingSession(text: string): WorkingSession {
 				if (
 					typeof entry.summary !== "string" ||
 					typeof entry.firstKeptEntryId !== "string" ||
-					!ids.has(entry.firstKeptEntryId) ||
+					(entry.firstKeptEntryId !== entry.id && !ids.has(entry.firstKeptEntryId)) ||
 					typeof entry.tokensBefore !== "number" ||
 					(entry.systemMessage !== undefined &&
 						(!record(entry.systemMessage) ||
@@ -284,7 +284,8 @@ export function parseWorkingSession(text: string): WorkingSession {
 					fail();
 				break;
 			case "branch_summary":
-				if (typeof entry.summary !== "string" || typeof entry.fromId !== "string" || !ids.has(entry.fromId)) fail();
+				// Provenance may name "root" or an abandoned path omitted by createBranchedSession().
+				if (typeof entry.summary !== "string" || typeof entry.fromId !== "string") fail();
 				break;
 			case "custom":
 				if (typeof entry.customType !== "string") fail();

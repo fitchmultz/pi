@@ -3832,7 +3832,9 @@ export class AgentSession {
 			}
 		} else if (options?.includeAllExtensionTools) {
 			for (const tool of wrappedExtensionTools) {
-				if (this._isActivatedOnRegistration(tool.name)) nextActiveToolNames.push(tool.name);
+				if (!previousActivatedOnRegistration.has(tool.name) && this._isActivatedOnRegistration(tool.name)) {
+					nextActiveToolNames.push(tool.name);
+				}
 			}
 		} else if (!options?.activeToolNames) {
 			for (const toolName of this._toolRegistry.keys()) {

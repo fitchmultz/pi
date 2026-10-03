@@ -1,7 +1,7 @@
 import Anthropic, { type ClientOptions } from "@anthropic-ai/sdk";
 import type {
+	BetaInputTransformation,
 	BetaStopReason,
-	BetaThinkingDroppedInputTransformation,
 	BetaTool,
 	BetaCacheControlEphemeral as CacheControlEphemeral,
 	BetaContentBlockParam as ContentBlockParam,
@@ -37,6 +37,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { createCacheTrace } from "../utils/cache-trace.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
@@ -48,9 +49,7 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
 	getCurrentTools,
-	getDeclaredTools,
 	getInitialSystemMessage,
-	hasToolRedefinitions,
 	resolveTranscript,
 	type TranscriptContext,
 } from "../utils/transcript.ts";
@@ -194,14 +193,14 @@ const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
 const SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01";
 const MID_CONVERSATION_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026-07-01";
 const THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01";
-const MID_CONVERSATION_TOOL_CHANGES_BETA = "mid-conversation-tool-changes-2026-07-01";
+const INLINE_TOOLS_BETA = "inline-tools-2026-09-15";
 
 /**
  * Stable deferred tool declared whenever native tool changes are in use. Anthropic adds
- * hidden prompt scaffolding as soon as any tool has `defer_loading`; declaring this
- * placeholder from the first request keeps that scaffolding in the cached prefix, so the
- * first real late tool does not invalidate the cache (measured: full miss without it).
- * It is never activated and the model cannot see it.
+ * hidden prompt scaffolding for mid-conversation tool changes; declaring this placeholder
+ * from the first request keeps that scaffolding in the cached prefix, so the first tool
+ * change does not invalidate the cache (measured: full miss without it). It is never
+ * activated and the model cannot see it.
  */
 const DEFERRED_TOOL_PLACEHOLDER: BetaTool = {
 	name: "__pi_deferred_placeholder__",
@@ -602,13 +601,19 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 
 		try {
 			let client: Anthropic;
+			const trace = createCacheTrace(model, options, undefined, () => ({
+				...model.compat,
+				...getAnthropicCompat(model),
+			}));
 			let isOAuth: boolean;
 			let usageModel = model;
-			let inputTransformations: BetaThinkingDroppedInputTransformation[] | undefined;
+			let inputTransformations: BetaInputTransformation[] | undefined;
 
 			if (options?.client) {
 				client = options.client;
 				isOAuth = false;
+				trace?.gap("injected_client_wire_unobserved");
+				trace?.gap("logical_capture_incomplete");
 			} else {
 				const apiKey = options?.apiKey;
 				const federation = getAnthropicFederation(model, apiKey, options?.headers, options?.env);
@@ -630,12 +635,14 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					model,
 					apiKey,
 					options?.headers,
-					options?.fetch,
+					federation ? options?.fetch : (trace?.wrapFetch(options?.fetch) ?? options?.fetch),
 					copilotDynamicHeaders,
 					cacheSessionId,
 					federation,
 				);
 				client = created.client;
+				// Keep the federation owner's shared credential cache and original fetch identity.
+				if (federation && trace) client = client.withOptions({ fetch: trace.wrapFetch(options?.fetch) });
 				isOAuth = created.isOAuthToken;
 			}
 			let params = buildParams(model, normalizedContext, isOAuth, options);
@@ -649,7 +656,10 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				maxRetries: 0,
 			};
 			const response = await retryProviderRequest(
-				() => client.beta.messages.create(params, requestOptions).asResponse(),
+				() => {
+					if (options?.client) trace?.attempt("sse");
+					return client.beta.messages.create(params, requestOptions).asResponse();
+				},
 				{
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
@@ -663,6 +673,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			const blocks = output.content as Block[];
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
+				trace?.terminal(event);
 				await options?.onProviderStreamEvent?.(event, model);
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
@@ -688,6 +699,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(usageModel, output.usage);
+					trace?.parsed(output.usage);
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "fallback") {
 						if (output.content.length > 0) {
@@ -857,6 +869,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(usageModel, output.usage);
+					trace?.parsed(output.usage, Boolean(event.usage));
 				}
 			}
 
@@ -1119,7 +1132,7 @@ function getBetaFeatures(
 	if (model.compat?.supportsMidConvoEffort === true) {
 		features.push(MID_CONVERSATION_OUTPUT_CONFIG_BETA, THINKING_BINDING_CONTROLS_BETA);
 	}
-	if (nativeToolChanges) features.push(MID_CONVERSATION_TOOL_CHANGES_BETA);
+	if (nativeToolChanges) features.push(INLINE_TOOLS_BETA);
 	return [...new Set(features)];
 }
 
@@ -1135,22 +1148,38 @@ function buildParams(
 	const initialSystemText = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 	const conversationMessages = initialSystemMessage ? transformedMessages.slice(1) : transformedMessages;
-	// Native tool changes reference tools by name, so a redefined name cannot be expressed,
-	// and Anthropic rejects a tool list where every tool is deferred, so there must be an
-	// initial active tool to anchor the deferred ones. Otherwise the current tool list is sent.
+	// Native tool changes keep the request-level tool list fixed and define every later tool
+	// by value in a `tool_addition` block, which also expresses same-name redefinitions.
+	// Anthropic rejects a tool list where every tool is deferred, so there must be an initial
+	// active tool to anchor the placeholder. Otherwise the current tool list is sent.
 	const initialTools = initialSystemMessage?.toolsAdded ?? [];
 	const nativeToolChanges =
-		compat.supportsMidConvoSystemMessages &&
-		compat.supportsMidConvoToolChanges &&
-		initialTools.length > 0 &&
-		!hasToolRedefinitions(context.messages);
+		compat.supportsMidConvoSystemMessages && compat.supportsMidConvoToolChanges && initialTools.length > 0;
+	const strictBudget = { tools: 0, unions: 0 };
+	const requestTools = convertTools(
+		nativeToolChanges ? initialTools : getCurrentTools(context.messages),
+		isOAuthToken,
+		compat.supportsEagerToolInputStreaming,
+		compat.supportsStrictTools,
+		strictBudget,
+		compat.supportsCacheControlOnTools ? cacheControl : undefined,
+	);
 	const converted = convertMessages(
 		conversationMessages,
 		isOAuthToken,
 		cacheControl,
 		compat.allowEmptySignature,
 		model.compat?.supportsMidConvoEffort === true ? model.provider : undefined,
-		nativeToolChanges,
+		nativeToolChanges
+			? (tools) =>
+					convertTools(
+						tools,
+						isOAuthToken,
+						compat.supportsEagerToolInputStreaming,
+						compat.supportsStrictTools,
+						strictBudget,
+					)
+			: undefined,
 	);
 	const activeEffort = options?.effort ?? "high";
 	const betaFeatures = getBetaFeatures(model, context, isOAuthToken, nativeToolChanges, options);
@@ -1202,43 +1231,14 @@ function buildParams(
 		params.temperature = options.temperature;
 	}
 
-	const toolCacheControl = compat.supportsCacheControlOnTools ? cacheControl : undefined;
-	const strictTools = selectStrictTools(
-		nativeToolChanges ? getDeclaredTools(context.messages) : getCurrentTools(context.messages),
-		compat.supportsStrictTools,
-	);
 	if (nativeToolChanges) {
-		// Initial tools stay active with the cache breakpoint on the last one. Every later
-		// declaration is deferred and only surfaced by its `tool_addition` block; removed
-		// tools stay declared and are withdrawn by `tool_removal`. The request-level list
-		// therefore only grows, keeping the cached prefix intact across tool changes.
-		const initialNames = new Set(initialTools.map((tool) => tool.name));
-		const laterTools = getDeclaredTools(context.messages).filter((tool) => !initialNames.has(tool.name));
-		params.tools = [
-			...convertTools(
-				initialTools,
-				isOAuthToken,
-				compat.supportsEagerToolInputStreaming,
-				strictTools,
-				toolCacheControl,
-			),
-			DEFERRED_TOOL_PLACEHOLDER,
-			...convertTools(laterTools, isOAuthToken, compat.supportsEagerToolInputStreaming, strictTools).map((tool) => ({
-				...tool,
-				defer_loading: true,
-			})),
-		];
-	} else {
-		const tools = getCurrentTools(context.messages);
-		if (tools.length > 0) {
-			params.tools = convertTools(
-				tools,
-				isOAuthToken,
-				compat.supportsEagerToolInputStreaming,
-				strictTools,
-				toolCacheControl,
-			);
-		}
+		// Initial tools stay active with the cache breakpoint on the last one, followed by the
+		// placeholder. The list never changes afterwards: later tools are defined by value in
+		// `tool_addition` blocks and withdrawn by `tool_removal`, so the cached prefix survives
+		// every tool change.
+		params.tools = [...requestTools, DEFERRED_TOOL_PLACEHOLDER];
+	} else if (requestTools.length > 0) {
+		params.tools = requestTools;
 	}
 
 	// Managed effort models always use adaptive thinking so prefix mismatches can
@@ -1322,7 +1322,8 @@ function convertMessages(
 	cacheControl?: CacheControlEphemeral,
 	allowEmptySignature = false,
 	managedProvider?: string,
-	nativeToolChanges = false,
+	/** Converts tool definitions for native `tool_addition` blocks; undefined when tool changes are not native. */
+	convertToolDefinitions?: (tools: Tool[]) => BetaTool[],
 ): ConvertedAnthropicMessages {
 	const params: MessageParam[] = [];
 	const assistantLevels = new Map<number, AnthropicEffort>();
@@ -1346,18 +1347,19 @@ function convertMessages(
 			const text = renderSystemMessageUpdate(msg);
 			const blocks: ContentBlockParam[] = [];
 			if (text.length > 0) blocks.push({ type: "text", text: sanitizeSurrogates(text) });
-			if (nativeToolChanges) {
+			if (convertToolDefinitions) {
+				const added = msg.toolsAdded ?? [];
+				const redefined = new Set(added.map((tool) => tool.name));
 				for (const tool of msg.toolsRemoved ?? []) {
+					// A new definition under the same name replaces the old one, so no removal is needed.
+					if (redefined.has(tool.name)) continue;
 					blocks.push({
 						type: "tool_removal",
 						tool: { type: "tool_reference", name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name },
 					});
 				}
-				for (const tool of msg.toolsAdded ?? []) {
-					blocks.push({
-						type: "tool_addition",
-						tool: { type: "tool_reference", name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name },
-					});
+				for (const definition of convertToolDefinitions(added)) {
+					blocks.push({ type: "tool_addition", tool: { type: "tool_definition", definition } });
 				}
 			}
 			if (blocks.length > 0) pendingSystemMessages.push({ role: "system", content: blocks });
@@ -1601,38 +1603,36 @@ function countUnionParameters(schema: unknown): number {
 	return count;
 }
 
-function selectStrictTools(tools: readonly Tool[], supported: boolean): Set<string> {
-	const selected = new Set<string>();
-	let unions = 0;
-	// Declaration order preserves earlier strict modes when native deferred tools are appended.
-	for (const tool of tools) {
-		if (resolveJsonSchemaStrictSampling(tool, supported, isAnthropicStrictUnsupportedKeyword) !== true) continue;
-		const cost = countUnionParameters(getJsonSchemaToolParameters(tool, true));
-		if (selected.size < 20 && unions + cost <= 16) {
-			selected.add(tool.name);
-			unions += cost;
-		} else if (
-			tool.constrainedSampling &&
-			tool.constrainedSampling.type === "json_schema" &&
-			tool.constrainedSampling.strict === "require"
-		) {
-			throw new Error(`Tool "${tool.name}" requires strict sampling, but exceeds Anthropic's strict tool limits.`);
-		}
-	}
-	return selected;
-}
-
 function convertTools(
 	tools: Tool[],
 	isOAuthToken: boolean,
 	supportsEagerToolInputStreaming: boolean,
-	strictTools: ReadonlySet<string>,
+	supportsStrictTools: boolean,
+	strictBudget: { tools: number; unions: number },
 	cacheControl?: CacheControlEphemeral,
 ): BetaTool[] {
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
-		const strict = strictTools.has(tool.name);
+		let strict = resolveJsonSchemaStrictSampling(tool, supportsStrictTools, isAnthropicStrictUnsupportedKeyword);
+		if (strict === true) {
+			const unions = countUnionParameters(getJsonSchemaToolParameters(tool, true));
+			// Budget every emitted definition, including inline redefinitions, in declaration order.
+			if (strictBudget.tools < 20 && strictBudget.unions + unions <= 16) {
+				strictBudget.tools++;
+				strictBudget.unions += unions;
+			} else if (
+				tool.constrainedSampling &&
+				tool.constrainedSampling.type === "json_schema" &&
+				tool.constrainedSampling.strict === "require"
+			) {
+				throw new Error(
+					`Tool "${tool.name}" requires strict sampling, but exceeds Anthropic's strict tool limits.`,
+				);
+			} else {
+				strict = undefined;
+			}
+		}
 		const parameters = getJsonSchemaToolParameters(tool, strict);
 		const schema = parameters as { properties?: unknown; required?: string[] };
 		const legacyInputSchema = {

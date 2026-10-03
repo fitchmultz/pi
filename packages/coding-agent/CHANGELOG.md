@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added a copy key (`app.message.copy`, default `ctrl+x`) to OAuth sign-in screens in `/login`, `/mcp`, and `/mcp login`, which copies the sign-in URL when the browser cannot be opened or the wrapped link cannot be selected.
+- Added `oauth.clientRegistration: "cimd"` for MCP servers, which identifies pi with its Client ID Metadata Document on pi.dev instead of dynamic client registration, so authorization servers can allow pi by URL ([#10302](https://github.com/earendil-works/pi/issues/10302))
+- Added project overrides for user-level MCP servers: a `.pi/mcp.json` entry without `command` or `url` sets only `enabled`, `exposure`, and `toolExposure` of the user-level server, and `/mcp` can enable or disable a server for the current project ([#10277](https://github.com/earendil-works/pi/issues/10277))
+- Added Cloudflare's Clef and Clef Flash classifier models to `cloudflare-workers-ai`, usable from codemode scripts and extensions ([#10316](https://github.com/earendil-works/pi/pull/10316) by [@ndisidore](https://github.com/ndisidore), [#10322](https://github.com/earendil-works/pi/pull/10322) by [@RealAlexandreAI](https://github.com/RealAlexandreAI))
 - Added opt-in `ignoreStoredCredentials` provider registration and `ModelRuntime.supportsIgnoreStoredCredentials` feature detection for routing providers; explicit keys and persistent login/logout remain unchanged.
 - Added deduplicated, non-fatal diagnostics for extension handlers blocking synchronously for over 100 ms and custom footer renders exceeding 16 ms; awaited work is excluded.
 - Added JSON selection to the `read` tool. `json: { path?, fields? }` selects a JSON Pointer target and, optionally, immediate object keys before paging and output limits. See [JSON selection with read](docs/sdk.md#json-selection-with-read).
@@ -13,8 +17,20 @@
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 - Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
 
+### Changed
+
+- `pi update` on global npm installations now recommends migrating to the managed installation from the pi.dev installer, which pins all dependencies.
+
+### Removed
+
+- Removed `npm-shrinkwrap.json` from the published package. npm installations no longer pin transitive dependencies, and library consumers can now override them. Use the pi.dev installer for pinned upstream installations or the immutable fork installer for pinned fork installations ([#5653](https://github.com/earendil-works/pi/issues/5653))
+
 ### Fixed
 
+- Fixed vulnerable `brace-expansion` 5.0.9 by pinning 5.0.12 as a direct dependency (GHSA-q2hr-2g5m-vwhr, GHSA-qhr7-859c-m2p7, GHSA-6j4f-fj2g-mc7p) ([#10288](https://github.com/earendil-works/pi/issues/10288))
+- Fixed a trailing comma in `--models` adding an extra model to the model cycle ([#10334](https://github.com/earendil-works/pi/issues/10334))
+- Fixed a `codemode` script that prints in a loop crashing pi by running out of memory: a script fails once its output passes 16 Mi characters or 100000 items ([#10283](https://github.com/earendil-works/pi/issues/10283))
+- Fixed `/reload` re-enabling previously deselected default-active extension tools; new defaults and tools newly added to `defaultTools` still activate.
 - Fixed resized-image coordinate notes to use separate, unrounded x and y scales.
 - Fixed branch-summary budgets counting system declarations instead of conversation history.
 - Fixed empty quoted prompt-template arguments shifting later positional arguments.
@@ -33,7 +49,6 @@
 - Fixed shell spill logs being created with permissions that expose output to other users.
 - Fixed failed session migration and whole-file rewrites truncating the existing journal.
 - Fixed a provider's auth-check failure hiding healthy models or silently replacing saved and scoped provider selections.
-- Fixed bundled `brace-expansion` 5.0.9 being vulnerable to GHSA-qhr7-859c-m2p7, GHSA-6j4f-fj2g-mc7p, and GHSA-q2hr-2g5m-vwhr by updating it to 5.0.12.
 
 ## [1.0.0] - 2026-10-01
 

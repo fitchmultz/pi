@@ -128,11 +128,33 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
+/** Local cache-investigation provenance; never sent to a provider. Unknown coverage stays explicit. */
+export interface CacheTraceContext {
+	purpose?: "parent" | "child" | "warming" | "summary" | "nested" | "unknown";
+	sessionId?: string;
+	branchId?: string;
+	windowId?: string;
+	runtimeGeneration?: string;
+	reloadGeneration?: number;
+	selectedProvider?: string;
+	selectedModel?: string;
+	release?: string;
+	catalogDigest?: string;
+	extensionsDigest?: string;
+	extensions?: { path: string; digest?: string; loaded: boolean }[];
+	declarationsDigest?: string;
+	configGeneration?: string;
+	authGeneration?: number;
+	coverageGaps?: string[];
+}
+
 /** Authentication, HTTP transport, and lifecycle callbacks shared by provider requests. */
 export interface ProviderRequestOptions<TModel = Model<Api>> {
 	signal?: AbortSignal;
 	/** Explicit parent context for telemetry produced by this logical request. */
 	telemetryContext?: TelemetryContext;
+	/** Metadata for the temporary PI_CACHE_TRACE_DIR opt-in local recorder. */
+	cacheTraceContext?: CacheTraceContext;
 	apiKey?: string;
 	/**
 	 * Optional fetch implementation for provider HTTP requests.
@@ -943,7 +965,7 @@ export interface AnthropicMessagesCompat {
 	supportsMidConvoEffort?: boolean;
 	/** Whether the exact model accepts system-role messages inside the conversation. When false, later system messages are folded into the top-level system prompt. Default: false. */
 	supportsMidConvoSystemMessages?: boolean;
-	/** Whether the exact model accepts mid-conversation `tool_addition` and `tool_removal` blocks. Requires `supportsMidConvoSystemMessages`. Default: false. */
+	/** Whether the exact model accepts mid-conversation `tool_addition` blocks with inline tool definitions (`inline-tools-2026-09-15`) and `tool_removal` blocks. Requires `supportsMidConvoSystemMessages`. Default: false. */
 	supportsMidConvoToolChanges?: boolean;
 	/**
 	 * Models Anthropic accepts in `fallbacks` for server-side refusal fallback,

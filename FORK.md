@@ -1,7 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0. It is upstream plus the features below. Everything else follows upstream behavior and APIs.
+v1.0.0 and synchronized through upstream `69f0be6f0` (2026-10-02). It is upstream plus the features
+below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
 
@@ -21,13 +22,30 @@ v1.0.0. It is upstream plus the features below. Everything else follows upstream
 | Provider-scoped auth fallback | Ephemeral fallback composed with the effective `ModelRuntime` provider; native auth precedence, catalogs and transport retained | [custom-provider.md](packages/coding-agent/docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider) |
 | GPT-6 Astra Ultrafast and Codex Fast cost estimates | Service-tier pricing in `packages/ai/src/api/openai-responses.ts` and `openai-codex-responses.ts` | [models.md](packages/coding-agent/docs/models.md) |
 | Slow-extension diagnostics (handler over 100 ms, footer render over 16 ms) | Timing at handler dispatch and extension footers in `src/core/extensions/runner.ts` | [extensions.md](packages/coding-agent/docs/extensions.md) |
+| Temporary passive cache investigation | Opt-in private HMAC recorder at native send/usage boundaries, SDK provenance, and read-only `scripts/cache-trace-report.mjs`; no provider probes or cache-policy changes | [cache-tracing.md](packages/coding-agent/docs/cache-tracing.md) |
 | Cloudflare AI Gateway Claude IDs | `normalizeCloudflareModelId()` in `packages/ai/src/api/cloudflare.ts`, used by the generator, the provider and remote catalogs | [providers.md](packages/coding-agent/docs/providers.md) |
 | Small confirmed fixes | TUI input, keys and links; resized-image coordinate notes; branch-summary budgets; prompt-template and piped-input handling | [Changelog](packages/coding-agent/CHANGELOG.md#unreleased) |
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
-`background_command`, and no upstream publishing, binary or issue-analysis workflows. It uses
-upstream's pre-commit hook and `npm run check`.
+`background_command`, and no upstream publishing, binary or issue-analysis workflows. Nix builds
+follow upstream; its automatic catalog-pin commits and stable-branch promotion are upstream-only.
+The fork uses upstream's install lock, not the removed npm shrinkwrap, and keeps its immutable
+installer. It uses upstream's pre-commit hook and `npm run check`.
+
+Anthropic native tool changes follow upstream's inline definitions and fixed initial tool list,
+including same-name redefinitions. The fork retains request-wide strict-schema budgets and passive
+cache tracing. ChatGPT OAuth follows upstream's mandatory callback listener and port-conflict
+failure while keeping the fork's cancellation, state validation and cleanup safeguards. Cloudflare
+Claude-ID normalization remains necessary for older bundled and remote catalogs; the generator
+shares that helper rather than duplicating upstream's replacement.
+
+Cache investigation keeps persistent restart guidance in its existing `context_with_system`
+owner, not the user-only run hook. Forced text stays run-scoped and unpersisted. Child
+finalization recovery remains a conditional source risk: managed saved-session attempts create
+new contracts, and no reachable unchanged-contract reset was reproduced. Do not restore an old
+phase for a new contract or apply a speculative recovery patch. Passive tracing records unknown
+coverage explicitly; remove it when the investigation ends.
 
 ## Conventions
 

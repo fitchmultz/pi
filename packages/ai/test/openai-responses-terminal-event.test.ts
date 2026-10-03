@@ -1,8 +1,12 @@
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { describe, expect, it, vi } from "vitest";
 import { stream as streamOpenAIResponses } from "../src/api/openai-responses.ts";
 import { processResponsesStream } from "../src/api/openai-responses-shared.ts";
 import type { Api, AssistantMessage, AssistantMessageEvent, Model } from "../src/types.ts";
+import { createCacheTrace } from "../src/utils/cache-trace.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
@@ -247,6 +251,60 @@ async function* createToolCallsWithoutOutputIndexEvents(): AsyncIterable<Respons
 }
 
 describe("OpenAI Responses terminal event handling", () => {
+	it.each([undefined, 0])("retains raw cached field presence separately from normalized zero: %s", async (cached) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-responses-cache-trace-"));
+		const previous = process.env.PI_CACHE_TRACE_DIR;
+		process.env.PI_CACHE_TRACE_DIR = directory;
+		try {
+			const model = createModel();
+			const output = createOutput(model);
+			const cacheTrace = createCacheTrace(model);
+			cacheTrace?.attempt("sse");
+			async function* events(): AsyncIterable<ResponseStreamEvent> {
+				yield {
+					type: "response.completed",
+					sequence_number: 3,
+					response: {
+						status: "completed",
+						usage: {
+							input_tokens: 20,
+							output_tokens: 7,
+							total_tokens: 27,
+							input_tokens_details: cached === undefined ? {} : { cached_tokens: cached },
+						},
+					},
+				} as ResponseStreamEvent;
+			}
+			await processResponsesStream(events(), output, new AssistantMessageEventStream(), model, { cacheTrace });
+			expect(output.usage.cacheRead).toBe(0);
+			const records = readdirSync(directory)
+				.filter((file) => file.endsWith(".jsonl"))
+				.flatMap((file) =>
+					readFileSync(join(directory, file), "utf8")
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line) as Record<string, unknown>),
+				);
+			expect(records.find((record) => record.kind === "terminal")).toMatchObject({
+				type: "response.completed",
+				sequence: 1,
+				providerSequence: 3,
+				fields: {
+					"input_tokens_details.cached_tokens":
+						cached === undefined
+							? { present: false, type: "undefined" }
+							: { present: true, type: "number", value: 0 },
+				},
+			});
+			const parsed = records.find((record) => record.kind === "parsed_usage");
+			expect(parsed?.usageSourceAttemptId).toBe(parsed?.attemptId);
+		} finally {
+			if (previous === undefined) delete process.env.PI_CACHE_TRACE_DIR;
+			else process.env.PI_CACHE_TRACE_DIR = previous;
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects streams that end before a terminal response event", async () => {
 		const model = createModel();
 		const output = createOutput(model);

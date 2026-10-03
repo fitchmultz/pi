@@ -58,11 +58,21 @@ Session history remains the authority. Restart uses the complete [native working
 
 Print, JSON and RPC modes do not expose the interactive control endpoint. SDK hosts and standalone binaries retain their existing lifecycle. Managed control remains available with `-ne`, which still disables ordinary extension discovery.
 
+While managed control is active, restart guidance is projected into each request's leading system message. It remains available across idle or deferred custom-message wakeups, tool batches, reloads and saved-session resume; it does not depend on a new user prompt. Forced user-run prompts still receive the guidance once, without persisting or restoring the forced text on later runs. This does not change the user-only `before_agent_start` event or initialize the full native base prompt for a fresh custom-message run.
+
 The local socket lives inside a private temporary directory (a named pipe on Windows). It is recreated on reload/session replacement and removed on shutdown. Long Unix socket paths fall back to a short temporary root: the Node runtime's sibling `tmp` directory on Android/Termux, `/tmp` elsewhere. If control cannot initialize on a fresh launch, Pi warns and remains usable without restart; a replacement launch fails so its parent can roll back. It is not a security boundary against other code running as the same user. Extensions remain trusted code; see [Security](security.md).
 
 The launcher stays loaded across worker replacements. Launcher changes require a full CLI launch. Source development uses `src/cli-launcher.ts`; `src/cli.ts` remains the ordinary worker entrypoint. The bundle emits these as `dist/bundle/cli.js` and `dist/bundle/cli-worker.js`. The installer helper `getRestartRuntimeWorker` remains exported from `dist/cli/launcher.js`.
 
 ## Validation
+
+The source-level guidance regression needs no build or installed CLI. From the repository root:
+
+```bash
+./test.sh -- bash -c 'cd packages/coding-agent && node ../../node_modules/vitest/dist/cli.js --run test/restart-guidance.test.ts --maxWorkers=1'
+```
+
+It uses the actual restart factory, native SDK harness, fork IPC and private control socket, with a faux provider. GLM, Responses and Codex payloads are captured before transport to verify unchanged leading instructions and submitted prefixes; this is not a measured provider cache-hit guarantee. It also checks forced-run scope and unrelated system content/tool updates. It does not replace the process-replacement terminal smoke test.
 
 After building the runtime packages, from `packages/coding-agent`:
 
