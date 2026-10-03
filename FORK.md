@@ -55,6 +55,13 @@ coverage explicitly; remove it when the investigation ends.
 - Default to upstream architecture. Do not re-add a dropped feature without the owner's approval.
 - Behavior covered by upstream replaces the fork version; delete the fork path.
 
+After the v1.0.1 sync, the fork carries reviewed leaf patches for YAML 2.9.1, Chalk
+6.0.1 and Ignore 7.0.11, with the root and generated installer locks kept together.
+Return these pins to upstream when it includes the same or newer fixes. Ignore 7.0.12
+is held by the two-day npm release-age gate. Marked 18.0.14 is deferred: its numeric
+entity decoding turns `&#27;[2J` into an active terminal escape in Pi's Markdown renderer.
+Transport, sandbox, schema, provider SDK and major-version updates remain upstream-led.
+
 Dropped in the 1.0 rebuild: working-session checkpoints and safe sleep, `pi convert-session`, the
 old session-performance internals, `pi.recordUsage`, atomic write/edit publication
 (`publishLocalFile`), `/topview`, Responses web-search metadata, cache-miss cause details,

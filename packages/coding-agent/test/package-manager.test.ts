@@ -566,16 +566,19 @@ Content`,
 	});
 
 	describe("ignore files", () => {
-		it("should respect .gitignore in skill directories", async () => {
+		it.each([
+			["venv\n__pycache__\n", "venv/bad-skill"],
+			["f*o/*/*\n", "foo/b/c"],
+		])("should respect .gitignore pattern %j in skill directories", async (pattern, ignoredPath) => {
 			const skillsDir = join(agentDir, "skills");
 			mkdirSync(skillsDir, { recursive: true });
-			writeFileSync(join(skillsDir, ".gitignore"), "venv\n__pycache__\n");
+			writeFileSync(join(skillsDir, ".gitignore"), pattern);
 
 			const goodSkillDir = join(skillsDir, "good-skill");
 			mkdirSync(goodSkillDir, { recursive: true });
 			writeFileSync(join(goodSkillDir, "SKILL.md"), "---\nname: good-skill\ndescription: Good\n---\nContent");
 
-			const ignoredSkillDir = join(skillsDir, "venv", "bad-skill");
+			const ignoredSkillDir = join(skillsDir, ignoredPath);
 			mkdirSync(ignoredSkillDir, { recursive: true });
 			writeFileSync(join(ignoredSkillDir, "SKILL.md"), "---\nname: bad-skill\ndescription: Bad\n---\nContent");
 
@@ -583,7 +586,7 @@ Content`,
 
 			const result = await packageManager.resolve();
 			expect(result.skills.some((r) => r.path.includes("good-skill") && r.enabled)).toBe(true);
-			expect(result.skills.some((r) => r.path.includes("venv") && r.enabled)).toBe(false);
+			expect(result.skills.some((r) => r.path === join(ignoredSkillDir, "SKILL.md"))).toBe(false);
 		});
 
 		it("should not apply parent .gitignore to .pi auto-discovery", async () => {
