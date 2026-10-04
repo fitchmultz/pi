@@ -50,6 +50,41 @@ function testModel(id: string) {
 }
 
 describe("ModelRuntime auth options", () => {
+	// Regression from https://github.com/fitchmultz/pi/pull/179#discussion_r4175398566.
+	it("loads deeply nested sampling parameters as immutable model configuration", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-model-config-depth-"));
+		const path = join(dir, "models.json");
+		const depth = 10_000;
+		try {
+			writeFileSync(
+				path,
+				'{"providers":{"nested":{"api":"anthropic-messages","baseUrl":"https://nested.test","apiKey":"fixture","models":[{"id":"model","samplingParams":{"nested":' +
+					'{"x":'.repeat(depth) +
+					"123" +
+					"}".repeat(depth) +
+					"}}]}}}",
+			);
+			const runtime = await ModelRuntime.create({
+				credentials: AuthStorage.inMemory(),
+				modelsPath: path,
+				modelsStore: new InMemoryModelsStore(),
+			});
+			expect(runtime.getError()).toBeUndefined();
+			expect(runtime.hasConfiguredAuth("nested")).toBe(true);
+			const params = runtime.getModel("nested", "model")?.samplingParams;
+			expect(params).toBeDefined();
+			let value: unknown = params!.nested;
+			for (let i = 0; i < depth; i++) {
+				expect(Object.isFrozen(value)).toBe(true);
+				value = (value as { x: unknown }).x;
+			}
+			expect(value).toBe(123);
+			expect(Reflect.set(params!, "nested", null)).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it.each(["config", "catalog"] as const)(
 		"waits for superseding %s publication before awaited registry reads",
 		async (phase) => {

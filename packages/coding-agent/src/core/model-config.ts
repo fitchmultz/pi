@@ -263,9 +263,14 @@ function formatValidationPath(error: TLocalizedValidationError): string {
 }
 
 function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	for (const child of Object.values(value)) deepFreeze(child);
-	return Object.freeze(value);
+	const pending: unknown[] = [value];
+	while (pending.length > 0) {
+		const current = pending.pop();
+		if (typeof current !== "object" || current === null || Object.isFrozen(current)) continue;
+		Object.freeze(current);
+		for (const child of Object.values(current)) pending.push(child);
+	}
+	return value;
 }
 
 /** One immutable load of models.json. */
@@ -314,7 +319,7 @@ export class ModelConfig {
 		const config = parsed as ModelsJson;
 		const providers = new Map<string, ModelsJsonProvider>();
 		for (const [providerId, provider] of Object.entries(config.providers)) {
-			providers.set(providerId, deepFreeze(structuredClone(provider)));
+			providers.set(providerId, deepFreeze(provider));
 		}
 		return new ModelConfig(providers);
 	}
