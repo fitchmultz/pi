@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Fixed `pi update --fork` failing on Termux when Android denies hard-link publication of the release-store ownership claim; exclusive creation still prevents competing selectors from sharing a store.
 - Fixed overlapping full model refreshes publishing out of order or returning before models and auth are ready, including SDK and CLI startup. Cancelling a later refresh no longer drops pending provider registration or disposal.
 - Fixed nested headless Pi sessions inheriting the primary working-session socket and exit receipt through extension factories and shell tools.
 - Fixed native working-session service creation loading resources before rejecting a mismatched journal; SDK, CLI and services now share read-only admission before factories.

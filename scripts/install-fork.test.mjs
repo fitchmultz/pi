@@ -478,6 +478,27 @@ test("a release store adopts one canonical selector and refuses another without 
 	assert.ok(existsSync(b.directory));
 });
 
+test("an incomplete first claim refuses every mutation without repairing ownership", async (t) => {
+	const f = fixture(t);
+	const candidate = validatedRelease(f, "1", 1_000);
+	const ownerFile = join(f.releases, ".owner-selector");
+	const before = readdirSync(f.releases).sort();
+	for (const contents of ["", f.selector.slice(0, -1)]) {
+		writeFileSync(ownerFile, contents);
+		await assert.rejects(installRelease({ ...f, receipt: receipt("2"), stage: true },
+			() => assert.fail("must not build")), /owned by selector/);
+		for (const args of [
+			["--activate", candidate.identity], ["--rollback", candidate.identity], ["--prune", "--keep", "0"],
+		]) {
+			await assert.rejects(main([...args, "--selector", f.selector, "--releases", f.releases]), /owned by selector/);
+		}
+		assert.equal(readFileSync(ownerFile, "utf8"), contents);
+		assert.deepEqual(readdirSync(f.releases).sort(), [...before, ".owner-selector"].sort());
+		assertPreserved(f);
+		assert.equal(existsSync(`${f.selector}.lock`), false);
+	}
+});
+
 test("simultaneous first adopters with different selector locks cannot share a release store", async (t) => {
 	const f = fixture(t);
 	const candidate = validatedRelease(f, "1", 1_000);
