@@ -966,11 +966,12 @@ export class InteractiveMode {
 		}
 		this.renderer = nextUi;
 		nextUi.addInputListener(this.guardWorkingSessionInput);
-		this.options.tuiMode = mode;
 		this.mountInteractiveTui(nextUi, components);
 		nextUi.invalidate();
 		nextUi.setFocus(focus);
+		// The regular renderer used only for exit output is not a resumable mode change.
 		if (!startRenderer) return true;
+		this.options.tuiMode = mode;
 		nextUi.start();
 		this.themeController.rebindTui();
 		this.rebindExtensionTerminalInputListeners();
@@ -2158,7 +2159,7 @@ export class InteractiveMode {
 				return { blockers };
 			},
 			capture: () => ({
-				tuiMode: this.ui.mode,
+				tuiMode: this.options.tuiMode,
 				pendingUserInputs: this.pendingUserInputs,
 				compactionQueuedMessages: this.compactionQueuedMessages,
 				draft: this.editor.getExpandedText?.() ?? this.editor.getText(),
