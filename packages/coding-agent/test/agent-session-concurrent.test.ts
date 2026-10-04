@@ -65,6 +65,7 @@ function createAssistantMessage(text: string): AssistantMessage {
 describe("AgentSession concurrent prompt guard", () => {
 	let session: AgentSession;
 	let tempDir: string;
+	let firstPrompt: Promise<void> | undefined;
 
 	beforeEach(async () => {
 		tempDir = join(tmpdir(), `pi-concurrent-test-${Date.now()}`);
@@ -75,12 +76,29 @@ describe("AgentSession concurrent prompt guard", () => {
 		delete (globalThis as typeof globalThis & { testExtensionApi?: unknown }).testExtensionApi;
 		delete (globalThis as typeof globalThis & { testCommandRuns?: unknown }).testCommandRuns;
 		if (session) {
+			await session.abort();
+			await firstPrompt?.catch(() => {});
 			session.dispose();
 		}
+		firstPrompt = undefined;
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
 	});
+
+	async function startPrompt() {
+		const started = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe((event) => {
+			if (event.type === "message_start" && event.message.role === "assistant") started.resolve();
+		});
+		try {
+			firstPrompt = session.prompt("First message");
+			await Promise.race([started.promise, firstPrompt]);
+			expect(session.isStreaming).toBe(true);
+		} finally {
+			unsubscribe();
+		}
+	}
 
 	async function createSession() {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -133,56 +151,27 @@ describe("AgentSession concurrent prompt guard", () => {
 
 	it("should throw when prompt() called while streaming", async () => {
 		await createSession();
+		await startPrompt();
 
-		// Start first prompt (don't await, it will block until abort)
-		const firstPrompt = session.prompt("First message");
-
-		// Wait a tick for isStreaming to be set
-		await new Promise((resolve) => setTimeout(resolve, 10));
-
-		// Verify we're streaming
-		expect(session.isStreaming).toBe(true);
-
-		// Second prompt should reject
 		await expect(session.prompt("Second message")).rejects.toThrow(
 			"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 		);
-
-		// Cleanup
-		await session.abort();
-		await firstPrompt.catch(() => {}); // Ignore abort error
 	});
 
 	it("should allow steer() while streaming", async () => {
 		await createSession();
+		await startPrompt();
 
-		// Start first prompt
-		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
-
-		// steer should work while streaming
 		await expect(session.steer("Steering message")).resolves.toBe("queued");
 		expect(session.pendingMessageCount).toBe(1);
-
-		// Cleanup
-		await session.abort();
-		await firstPrompt.catch(() => {});
 	});
 
 	it("should allow followUp() while streaming", async () => {
 		await createSession();
+		await startPrompt();
 
-		// Start first prompt
-		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
-
-		// followUp should work while streaming
 		await expect(session.followUp("Follow-up message")).resolves.toBe("queued");
 		expect(session.pendingMessageCount).toBe(1);
-
-		// Cleanup
-		await session.abort();
-		await firstPrompt.catch(() => {});
 	});
 
 	it("should queue extension-origin steering messages while streaming", async () => {
@@ -268,9 +257,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			}
 		});
 
-		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(session.isStreaming).toBe(true);
+		await startPrompt();
 
 		const pi = (
 			globalThis as typeof globalThis & {
@@ -282,15 +269,13 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(pi).toBeDefined();
 
 		pi!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
-		await new Promise((resolve) => setTimeout(resolve, 25));
-
-		expect(session.pendingMessageCount).toBe(1);
+		await expect.poll(() => session.pendingMessageCount).toBe(1);
 		expect(session.getSteeringMessages()).toContain("Steer from extension");
 		expect(lastInputSource).toBe("extension");
 		expect(queueEvents.some((event) => event.steering.includes("Steer from extension"))).toBe(true);
 
 		await session.abort();
-		await firstPrompt.catch(() => {});
+		await firstPrompt;
 
 		expect(sawSteeringMessage).toBe(true);
 	});

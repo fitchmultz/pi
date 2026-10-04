@@ -152,6 +152,7 @@ import {
 	type VirtualModelStateData,
 } from "./virtual-models.ts";
 import {
+	copyWorkingSession,
 	type WorkingSession,
 	type WorkingSessionBoundary,
 	WorkingSessionGate,
@@ -567,6 +568,10 @@ export class AgentSession {
 			throw new Error("Cannot acquire a working session from an active native callback");
 		if (this._workingSessionRequest || this.workingSessionGate.reserved)
 			throw new Error("Native working session acquisition already active");
+		if (!this._resourceLoader.getWorkingSessionResources)
+			throw new Error("Native working-session capture requires ResourceLoader persistence support");
+		if (!this.workingSessionLaunch)
+			throw new Error("Native working-session capture requires an explicit workingSessionLaunch agent directory");
 		options.signal?.throwIfAborted();
 		const controller = new AbortController();
 		return new Promise<WorkingSessionHold>((resolve, reject) => {
@@ -628,6 +633,8 @@ export class AgentSession {
 		};
 		this._workingSessionRelease = release;
 		try {
+			if (!this.workingSessionLaunch || !this._resourceLoader.getWorkingSessionResources)
+				throw new Error("Native working-session persistence owner is unavailable");
 			let preparing = true;
 			const event: WorkingSessionSaveEvent = {
 				type: "working_session_save",
@@ -657,59 +664,55 @@ export class AgentSession {
 			const queues = this.agent.getQueuedMessages();
 			const header = this.sessionManager.getHeader();
 			if (!header) throw new Error("Native session header missing");
-			const state: WorkingSession = JSON.parse(
-				JSON.stringify({
-					version: 1,
-					createdAt: new Date().toISOString(),
-					boundary,
-					cwd: this._cwd,
-					sessionFile: this.sessionFile,
-					sessionDir: this.sessionManager.getSessionDir(),
-					header,
-					entries: this.sessionManager.getEntries(),
-					leafId: this.sessionManager.getLeafId(),
-					model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
-					thinkingLevel: this.thinkingLevel,
-					scopedModels: this._scopedModels.map(({ model, thinkingLevel }) => ({
-						provider: model.provider,
-						id: model.id,
-						thinkingLevel,
-					})),
-					activeTools: this.getActiveToolNames(),
-					pendingTools: [...this._pendingToolNames],
-					allowedTools: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
-					excludedTools: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
-					usesDefaultTools: this._usesDefaultTools,
-					steering: queues.steering,
-					followUp: queues.followUp,
-					steeringText: this._steeringMessages,
-					followUpText: this._followUpMessages,
-					nextTurn: this._pendingNextTurnMessages,
-					pendingCustom: this._pendingCustomMessages,
-					pendingBash: this._pendingBashMessages,
-					steeringMode: this.steeringMode,
-					followUpMode: this.followUpMode,
-					settings: this.settingsManager.getSettings(),
-					settingsLayers: {
-						global: this.settingsManager.getGlobalSettings(),
-						project: this.settingsManager.getProjectSettings(),
-					},
-					prompt: this._baseSystemPromptOptions,
-					runPrompt: this._runSystemPromptOptions,
-					flags: [...this._extensionRunner.getFlagValues()],
-					launch: this.workingSessionLaunch
-						? {
-								agentDir: this.workingSessionLaunch.agentDir,
-								...this._resourceLoader.getWorkingSessionResources(),
-								trustProject: this.settingsManager.isProjectTrusted(),
-								offline: this._modelRuntime.offline,
-							}
-						: undefined,
-					mode: this._workingSessionHost
-						? { kind: this._workingSessionHost.kind, data: this._workingSessionHost.capture() }
-						: this._workingSessionMode,
-				}),
-			);
+			const state = copyWorkingSession({
+				version: 1,
+				createdAt: new Date().toISOString(),
+				boundary,
+				cwd: this._cwd,
+				sessionFile: this.sessionFile,
+				sessionDir: this.sessionManager.getSessionDir(),
+				header,
+				entries: this.sessionManager.getEntries(),
+				leafId: this.sessionManager.getLeafId(),
+				model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
+				thinkingLevel: this.thinkingLevel,
+				scopedModels: this._scopedModels.map(({ model, thinkingLevel }) => ({
+					provider: model.provider,
+					id: model.id,
+					thinkingLevel,
+				})),
+				activeTools: this.getActiveToolNames(),
+				pendingTools: [...this._pendingToolNames],
+				allowedTools: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
+				excludedTools: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
+				usesDefaultTools: this._usesDefaultTools,
+				steering: queues.steering,
+				followUp: queues.followUp,
+				steeringText: this._steeringMessages,
+				followUpText: this._followUpMessages,
+				nextTurn: this._pendingNextTurnMessages,
+				pendingCustom: this._pendingCustomMessages,
+				pendingBash: this._pendingBashMessages,
+				steeringMode: this.steeringMode,
+				followUpMode: this.followUpMode,
+				settings: this.settingsManager.getSettings(),
+				settingsLayers: {
+					global: this.settingsManager.getGlobalSettings(),
+					project: this.settingsManager.getProjectSettings(),
+				},
+				prompt: this._baseSystemPromptOptions,
+				runPrompt: this._runSystemPromptOptions,
+				flags: [...this._extensionRunner.getFlagValues()],
+				launch: {
+					agentDir: this.workingSessionLaunch.agentDir,
+					...this._resourceLoader.getWorkingSessionResources(),
+					trustProject: this.settingsManager.isProjectTrusted(),
+					offline: this._modelRuntime.offline,
+				},
+				mode: this._workingSessionHost
+					? { kind: this._workingSessionHost.kind, data: this._workingSessionHost.capture() }
+					: this._workingSessionMode,
+			});
 			if (boundary === "turn") blockers.unshift("Agent continuation remains active");
 			request.resolve({
 				state,
@@ -734,6 +737,12 @@ export class AgentSession {
 	/** SDK startup hydrates pending payloads directly, before session_start. No input replay. */
 	restoreWorkingSession(state: WorkingSession): void {
 		this.workingSessionGate.beforeMutation();
+		state = copyWorkingSession(state);
+		const launch = state.launch ?? this.workingSessionLaunch;
+		if (!this._resourceLoader.getWorkingSessionResources || !launch)
+			throw new Error(
+				"Native working-session restore requires a persistence-capable ResourceLoader and launch owner",
+			);
 		this._restoredWorkingSession = true;
 		this.agent.restoreQueuedMessages(state);
 		this.agent.steeringMode = state.steeringMode;
@@ -751,7 +760,7 @@ export class AgentSession {
 		this._baseSystemPromptOptions = state.prompt;
 		this._runSystemPromptOptions = state.runPrompt;
 		for (const [name, value] of state.flags) this._resourceLoader.getExtensions().runtime.flagValues.set(name, value);
-		this.workingSessionLaunch = state.launch;
+		this.workingSessionLaunch = launch;
 		this._workingSessionMode = state.mode;
 	}
 

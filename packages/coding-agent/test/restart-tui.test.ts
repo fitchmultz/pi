@@ -1,7 +1,19 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { requestRestart } from "../src/cli/restart-protocol.ts";
@@ -24,10 +36,11 @@ interface Receipt {
 	endpoint: string;
 	text?: string;
 	calls?: number;
+	environment?: Record<string, string>;
 }
 
-function fixture() {
-	const root = mkdtempSync(join(tmpdir(), "pi-restart-tui-"));
+function fixture(rootDir = tmpdir()) {
+	const root = realpathSync(mkdtempSync(join(rootDir, "pi-restart-tui-")));
 	const socket = `restart-${root.split("-").at(-1)}`;
 	resources.push({ root, socket });
 	const home = join(root, "home");
@@ -46,23 +59,31 @@ function fixture() {
 		status,
 		extension(
 			version: string,
-			options: { restartCommand?: string; holdWork?: boolean; settledFollowup?: boolean } = {},
+			options: {
+				restartCommand?: string;
+				holdWork?: boolean;
+				settledFollowup?: boolean;
+				nested?: { probe: string; command: string; exitPath: string };
+			} = {},
 		) {
-			const { restartCommand, holdWork, settledFollowup } = options;
+			const { restartCommand, holdWork, settledFollowup, nested } = options;
 			const path = join(root, `${version}.ts`);
 			writeFileSync(
 				path,
 				`
 import { appendFileSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 export default function(pi) {
+ ${nested ? `appendFileSync(${JSON.stringify(log)}, JSON.stringify({event:'factory-child', pid:process.pid, version:${JSON.stringify(version)}, environment:JSON.parse(execFileSync(process.execPath,[${JSON.stringify(nested.probe)}],{encoding:'utf8'}))}) + '\\n');` : ""}
  const faux = fauxProvider();
  let queueSettledFollowup = false;
  pi.registerProvider('faux', { api: faux.api, baseUrl: faux.getModel().baseUrl, apiKey: 'faux-key', models: faux.models, streamSimple: faux.provider.streamSimple });
  const record = (event, ctx, extra = {}) => appendFileSync(${JSON.stringify(log)}, JSON.stringify({event, pid:process.pid, version:${JSON.stringify(version)}, sessionId:ctx.sessionManager.getSessionId(), sessionFile:ctx.sessionManager.getSessionFile(), endpoint:process.env.PI_RESTART_SOCKET, ...extra}) + '\\n');
  pi.registerTool({ name:'completed_work', label:'Completed work', description:'Records one completed side effect', parameters:Type.Object({}), async execute(_id,_args,signal,_update,ctx) { record('work',ctx); ${holdWork ? `while (!existsSync(${JSON.stringify(join(root, "release-work"))}) && !signal?.aborted) await new Promise(r=>setTimeout(r,10));` : ""} return {content:[{type:'text',text:'Completed'}],details:{}}; } });
- pi.on('session_start', (_event,ctx) => { record('start',ctx); });
+ pi.on('session_start', (_event,ctx) => { ${nested ? `writeFileSync(${JSON.stringify(nested.exitPath)},'primary-owned-sentinel',{mode:0o600});` : ""} record('start',ctx); });
  pi.on('before_agent_start', async (event,ctx) => {
   if (${settledFollowup === true} && event.prompt === 'Deferred settled followup') {
    record('deferred-start',ctx);
@@ -72,7 +93,7 @@ export default function(pi) {
   const resumed = event.prompt.startsWith('[Restart continuation]');
   record('prompt',ctx,{text:event.prompt});
   faux.setResponses(resumed ? [fauxAssistantMessage('Continuation handled')] : [
-   fauxAssistantMessage([fauxToolCall('completed_work',{}), ${restartCommand ? `fauxToolCall('bash',{command:${JSON.stringify(restartCommand)}})` : "fauxToolCall('completed_work',{})"}],{stopReason:'toolUse'}),
+   fauxAssistantMessage([fauxToolCall('completed_work',{}), ${restartCommand || nested ? `fauxToolCall('bash',{command:${JSON.stringify(restartCommand ?? nested?.command)}})` : "fauxToolCall('completed_work',{})"}],{stopReason:'toolUse'}),
    fauxAssistantMessage('Seed completed')
   ]);
  });
@@ -92,19 +113,19 @@ export default function(pi) {
 			);
 			return path;
 		},
-		start(extension: string, options: { env?: Record<string, string>; legacyHandoff?: unknown } = {}) {
+		start(extension: string, options: { env?: Record<string, string>; invalidHandoff?: unknown } = {}) {
 			if (!existsSync(cli)) throw new Error(`Build the coding-agent package first: missing ${cli}`);
 			const script = join(root, "launch.sh");
 			let entry = cli;
-			if (options.legacyHandoff !== undefined) {
-				entry = join(root, "legacy-parent.mjs");
+			if (options.invalidHandoff !== undefined) {
+				entry = join(root, "invalid-parent.mjs");
 				writeFileSync(
 					entry,
 					`
 import {spawn} from 'node:child_process';
 const child = spawn(process.execPath, [${JSON.stringify(join(dirname(cli), "cli-worker.js"))}, ...process.argv.slice(2)], {
  stdio:['inherit','inherit','inherit','ipc'],
- env:{...process.env, PI_MANAGED_CLI:'1', PI_RESTART_HANDOFF:${JSON.stringify(JSON.stringify(options.legacyHandoff))}}
+ env:{...process.env, PI_MANAGED_CLI:'1', PI_RESTART_HANDOFF:${JSON.stringify(JSON.stringify(options.invalidHandoff))}}
 });
 child.on('exit', code => {process.exitCode = code ?? 1;});
 `,
@@ -218,6 +239,127 @@ afterEach(async () => {
 
 // Real terminal, private tmux socket, isolated HOME and faux provider: no network or paid requests.
 describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_CLI)", () => {
+	it("keeps primary working-session ownership out of factory and headless bash children across restart", async () => {
+		const f = fixture("/tmp");
+		const socketPath = join(f.root, "working.sock");
+		const exitPath = join(f.root, "completed.json");
+		const probe = join(f.root, "child-env.mjs");
+		writeFileSync(
+			probe,
+			`const keys = ['PI_WORKING_SESSION_SOCKET','PI_WORKING_SESSION_EXIT_PATH','PI_WORKING_SESSION_LAUNCH','PI_WORKING_SESSION_WORKER']; console.log(JSON.stringify(Object.fromEntries(keys.filter(key => process.env[key] !== undefined).map(key => [key,process.env[key]]))));`,
+		);
+		const childExtension = join(f.root, "headless.ts");
+		writeFileSync(
+			childExtension,
+			`import {fauxProvider,fauxAssistantMessage} from '@earendil-works/pi-ai';
+export default function(pi) {
+ const faux = fauxProvider();
+ faux.setResponses([fauxAssistantMessage('Nested headless completed')]);
+ pi.registerProvider('faux',{api:faux.api,baseUrl:faux.getModel().baseUrl,apiKey:'faux-key',models:faux.models,streamSimple:faux.provider.streamSimple});
+}`,
+		);
+		const childArgs = [
+			process.execPath,
+			cli,
+			"--offline",
+			"-ne",
+			"-ns",
+			"-np",
+			"-nc",
+			"--no-themes",
+			"--no-approve",
+			"--provider",
+			"faux",
+			"--model",
+			"faux-1",
+			"-e",
+			childExtension,
+		]
+			.map(quote)
+			.join(" ");
+		const command = `${childArgs} -p 'nested text' && ${childArgs} --mode json 'nested json'`;
+		f.start(f.extension("v1", { nested: { probe, command, exitPath } }), {
+			env: { PI_WORKING_SESSION_SOCKET: socketPath, PI_WORKING_SESSION_EXIT_PATH: exitPath },
+		});
+		await f.wait((rows) => rows.some((row) => row.event === "settled"));
+		const first = f.read().find((row) => row.event === "start")!;
+		const journal = readFileSync(first.sessionFile, "utf8");
+		expect({
+			factoryEnvironment: f.read().find((row) => row.event === "factory-child")?.environment,
+			textChild: journal.includes("Nested headless completed"),
+			jsonChild: journal.includes('\\"type\\":\\"agent_end\\"'),
+			conflict: journal.includes("Native working-session socket already exists"),
+			receipt: existsSync(exitPath) ? readFileSync(exitPath, "utf8") : undefined,
+		}).toEqual({
+			factoryEnvironment: {},
+			textChild: true,
+			jsonChild: true,
+			conflict: false,
+			receipt: "primary-owned-sentinel",
+		});
+		const acquire = async () => {
+			const socket = createConnection(socketPath);
+			const reader = createInterface({ input: socket });
+			const replies = reader[Symbol.asyncIterator]();
+			try {
+				socket.write(
+					`${JSON.stringify({ action: "acquire", path: join(f.root, "held.json"), boundary: "settled" })}\n`,
+				);
+				const grant = JSON.parse((await replies.next()).value!);
+				expect(grant).toMatchObject({ ok: true, sleepReady: true, guardPath: `${socketPath}.guard` });
+				expect(JSON.parse(readFileSync(grant.guardPath, "utf8"))).toMatchObject({
+					token: grant.token,
+					worker: grant.worker,
+					launch: grant.launch,
+					pid: grant.pid,
+					valid: true,
+				});
+				socket.write(`${JSON.stringify({ action: "release", token: grant.token })}\n`);
+				expect(JSON.parse((await replies.next()).value!)).toEqual({ ok: true });
+				return grant;
+			} finally {
+				socket.destroy();
+				reader.close();
+			}
+		};
+		const before = await acquire();
+		expect(before.pid).toBe(first.pid);
+		expect(
+			await requestRestart(f.read().find((row) => row.event === "prompt")!.endpoint, {
+				message: "Continue after nested workers",
+			}),
+		).toContain("Restart queued");
+		await f.wait((rows) => rows.filter((row) => row.event === "settled").length === 2);
+		const second = f.read().filter((row) => row.event === "start")[1]!;
+		expect(second.sessionId).toBe(first.sessionId);
+		expect(
+			f
+				.read()
+				.filter((row) => row.event === "factory-child")
+				.map((row) => row.environment),
+		).toEqual([{}, {}]);
+		const after = await acquire();
+		expect(after.pid).toBe(second.pid);
+		expect(after.worker).not.toBe(before.worker);
+		expect(after.launch).toBe(before.launch);
+		f.keys("/quit", "Enter");
+		await f.wait(() => existsSync(f.status));
+		expect(readFileSync(f.status, "utf8").trim()).toBe("0");
+		const completed = JSON.parse(readFileSync(exitPath, "utf8"));
+		expect(completed).toMatchObject({
+			version: 1,
+			sessionId: first.sessionId,
+			pid: second.pid,
+			worker: after.worker,
+			launch: after.launch,
+			launcher: after.launch,
+		});
+		expect(completed.digest).toBe(createHash("sha256").update(readFileSync(completed.path)).digest("hex"));
+		expect(JSON.parse(readFileSync(completed.path, "utf8")).header.id).toBe(first.sessionId);
+		expect(existsSync(socketPath)).toBe(false);
+		expect(existsSync(`${socketPath}.guard`)).toBe(false);
+	}, 60_000);
+
 	it.each([false, true])(
 		"starts a replacement on the same session, continuation once, completed work never replayed; rollback=%s",
 		async (rollback) => {
@@ -360,18 +502,18 @@ describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_
 	}, 60_000);
 
 	it.each([
-		{ checkpoint: { session: { sessionId: "legacy-session", sessionFile: "/legacy/session" } } },
-		{ sessionId: "legacy-session", sessionFile: 7 },
-		{ sessionId: 7, sessionFile: "/legacy/session" },
+		{ sessionId: "saved-session", sessionFile: "/saved/session" },
+		{ sessionId: "saved-session", sessionFile: 7, workingSession: "/private/state.json" },
+		{ sessionId: 7, sessionFile: "/saved/session", workingSession: "/private/state.json" },
+		{ sessionId: "saved-session", sessionFile: "/saved/session", workingSession: "relative.json" },
 	])(
-		"rejects legacy handoff before session_start: %j",
-		async (legacyHandoff) => {
+		"rejects incomplete or malformed handoff before session_start: %j",
+		async (invalidHandoff) => {
 			const f = fixture();
-			f.start(f.extension("v1"), { legacyHandoff });
+			f.start(f.extension("v1"), { invalidHandoff });
 			await f.wait(() => existsSync(f.status));
 			expect(readFileSync(f.status, "utf8").trim()).toBe("1");
-			expect(f.screen()).toContain("older Pi launcher");
-			expect(f.screen()).toContain("quit and run pi -c");
+			expect(f.screen()).toContain("Invalid restart handoff");
 			expect(f.read()).toHaveLength(0);
 		},
 		60_000,

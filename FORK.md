@@ -6,39 +6,74 @@ below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
 
-| Feature | Implementation | Docs |
+Owners below are source paths under `packages/coding-agent/src/`, and tests are under
+`packages/coding-agent/test/`, unless another package or repository path is given.
+The tests identify each delta's behavioral owner; they are not claims of live provider or
+all-platform qualification.
+
+| Feature and reason retained | Owner | Primary tests | Docs |
+| --- | --- | --- | --- |
+| Managed restart: same-session replacement without replay, with readiness rollback | `cli/{launcher,restart-protocol}.ts`, `extensions/restart/`, `cli-launcher.ts` | `restart-launcher.test.ts`, `restart-tui.test.ts`, `restart-guidance.test.ts` | [Restart](packages/coding-agent/docs/restart.md) |
+| Detached `background_command`: durable jobs/logs and completion delivery | `extensions/background-command/`, worker asset in `config.ts` | `background-command-process.test.ts`, `suite/background-command-{session,guards}.test.ts`, `scripts/smoke-test-background-command-bundle.mjs` | [Background commands](packages/coding-agent/docs/background-command.md) |
+| `discover_tools`: full prior-turn instructions and stable positional declarations | `extensions/instruction-groups/`, narrow `refreshTools()` seam in `core/{agent-session,extensions/loader,extensions/types}.ts` | `suite/instruction-groups.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Instruction groups](packages/coding-agent/docs/instruction-groups.md) |
+| JSON `read`: selection before paging/truncation, inherited by native factory consumers | `core/tools/{read,read-json}.ts` | `read-json.test.ts` | [SDK](packages/coding-agent/docs/sdk.md#json-selection-with-read) |
+| Compact activity: regroup native cards without replacing the whole TUI | `modes/interactive/{interactive-mode,components/activity}.ts`, card renderers, `core/settings-manager.ts` | `compact-view.test.ts`, `suite/regressions/compact-view.test.ts` | [Settings](packages/coding-agent/docs/settings.md) |
+| Immutable fork update: exact source/catalog, frozen install and guarded selection | `utils/{fork-update,fork-release-store}.ts`, `scripts/install-fork.mjs` | `fork-update.test.ts`, `scripts/install-fork.test.mjs` | [Install and activate](#install-and-activate) |
+| Termux: compiler/environment handling and short control-socket paths | `scripts/install-fork.mjs`, `test.sh`, `cli/restart-protocol.ts`, `experimental/server.ts` | `scripts/install-fork.test.mjs`, `restart-control.test.ts`; device activation is separate | [Termux](packages/coding-agent/docs/termux.md) |
+| Complete working state: native admission, all branches/queues/mode buffers and completed-exit attestation | `core/{working-session,agent-session,sdk,agent-session-services}.ts`, `cli/working-session-control.ts`, native mode/builtin bindings | `suite/working-session.test.ts`, `suite/working-session-cli.test.ts` | [Working sessions](packages/coding-agent/docs/working-session.md) |
+| Credential isolation: routing providers must not read unrelated stored credentials | `core/model-runtime.ts`, provider registration types/adapter | `provider-credential-isolation.test.ts` | [Custom providers](packages/coding-agent/docs/custom-provider.md) |
+| Auth fallback: ephemeral credentials without replacing native provider/catalog/transport | `core/{model-runtime,provider-composer}.ts`, `core/extensions/provider-registrations.ts` | `model-runtime-auth-options.test.ts` | [Auth fallback](packages/coding-agent/docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider) |
+| Opt-in slow diagnostics: native synchronous handlers and footer frames need dispatch attribution | `core/extensions/{runner,wrapper}.ts`; `PI_EXTENSION_PERFORMANCE=1` | `extensions-performance.test.ts` | [Extensions](packages/coding-agent/docs/extensions.md#opt-in-performance-warnings) |
+| Temporary passive tracing: public hooks do not yet cover final serialization/consumed attempts | `packages/ai/src/utils/cache-trace.ts`, native adapter hooks, `core/cache-trace-context.ts`, `scripts/cache-trace-report.mjs` | `packages/ai/test/cache-trace.test.ts`, `sdk-stream-options.test.ts`, `scripts/cache-trace-report.test.mjs` | [Fidelity and retirement](packages/coding-agent/docs/cache-tracing.md) |
+| Cloudflare Claude IDs: canonicalize provider/remote input before passthrough and merge | `packages/ai/src/api/cloudflare.ts`, generator/provider and `core/remote-catalog-provider.ts` | `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts` | [Providers](packages/coding-agent/docs/providers.md) |
+
+### Retained correctness deltas
+
+These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
+See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased)
+and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
+
+| Reason retained | Owner | Primary tests |
 | --- | --- | --- |
-| Managed restart (`pi restart`, `/restart`) | Launcher/worker split (`src/cli-launcher.ts`, `src/cli/launcher.ts`, `src/cli/restart-protocol.ts`) and the `restart` builtin extension, with small CLI/TUI lifecycle seams | [restart.md](packages/coding-agent/docs/restart.md) |
-| `background_command` | `background-command` builtin extension and its worker | [background-command.md](packages/coding-agent/docs/background-command.md) |
-| `discover_tools` instruction groups | `instruction-groups` builtin extension (public 1.0 APIs only); enabling a group adds tools positionally so Responses/Codex prompt-cache prefixes stay stable | [instruction-groups.md](packages/coding-agent/docs/instruction-groups.md) |
-| `read` JSON selection (`json: { path, fields }`) | Core `read` tool patch (`src/core/tools/read.ts`, `read-json.ts`) | [sdk.md](packages/coding-agent/docs/sdk.md#json-selection-with-read) |
-| Compact activity view (`compactView: false \| true \| "hybrid"`) | Small interactive-mode renderer patch | [settings.md](packages/coding-agent/docs/settings.md) |
-| `pi update --fork` | Updater that builds pinned `fitchmultz/pi` main and activates it through `scripts/install-fork.mjs` (`src/utils/fork-update.ts`, `package-manager-cli.ts`) | [Install and activate](#install-and-activate) |
-| Termux (Android) support | Installer compiler/environment handling, `test.sh`, and short Unix-socket paths for restart and the experimental server | [Install and activate](#install-and-activate) |
-| File and credential safety | Atomic auth/settings/journal rewrites, canonical credential locks, UTF-8 and boundary-safe edits, HTML journal guard, and private shell spill logs | [Changelog](packages/coding-agent/CHANGELOG.md#unreleased) |
-| Provider correctness fixes | Provider-local auth availability and saved/scoped selection, OAuth cleanup, detached Codex continuation, Responses terminal usage, Anthropic strict budgets, schema validation, proxy exclusions, retry delays, and signature token estimates | [AI changelog](packages/ai/CHANGELOG.md), [coding-agent changelog](packages/coding-agent/CHANGELOG.md) |
-| Opt-in provider credential isolation (`ignoreStoredCredentials`) | Credential-read adapter in `src/core/model-runtime.ts` plus registration types; used by account-routing extensions | [custom-provider.md](packages/coding-agent/docs/custom-provider.md) |
-| Complete native working-session save/resume | One native admission/hold and complete-state codec, mode/builtin readiness bindings, conditional private Unix socket and final-worker launcher attestation | [working-session.md](packages/coding-agent/docs/working-session.md) |
-| Provider-scoped auth fallback | Ephemeral fallback composed with the effective `ModelRuntime` provider; native auth precedence, catalogs and transport retained | [custom-provider.md](packages/coding-agent/docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider) |
-| GPT-6 Astra Ultrafast and Codex Fast cost estimates | Service-tier pricing in `packages/ai/src/api/openai-responses.ts` and `openai-codex-responses.ts` | [models.md](packages/coding-agent/docs/models.md) |
-| Slow-extension diagnostics (handler over 100 ms, footer render over 16 ms) | Timing at handler dispatch and extension footers in `src/core/extensions/runner.ts` | [extensions.md](packages/coding-agent/docs/extensions.md) |
-| Temporary passive cache investigation | Opt-in private HMAC recorder at native send/usage boundaries, SDK provenance, and read-only `scripts/cache-trace-report.mjs`; no provider probes or cache-policy changes | [cache-tracing.md](packages/coding-agent/docs/cache-tracing.md) |
-| Cloudflare AI Gateway Claude IDs | `normalizeCloudflareModelId()` in `packages/ai/src/api/cloudflare.ts`, used by the generator, the provider and remote catalogs | [providers.md](packages/coding-agent/docs/providers.md) |
-| Small confirmed fixes | TUI input, keys and links; resized-image coordinate notes; branch-summary budgets; prompt-template and piped-input handling | [Changelog](packages/coding-agent/CHANGELOG.md#unreleased) |
+| Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
+| HTML export must not replace the journal through any alias | `core/export-html/index.ts` | `file-safety.test.ts` |
+| Edits must preserve UTF-8 and untouched original text/boundaries | `core/tools/{edit,edit-diff}.ts`, `utils/text.ts` | `edit-byte-safety.test.ts` |
+| Shell spill output must remain private | `core/{bash-executor,tools/output-accumulator}.ts` | `private-spill.test.ts` |
+| One auth-check failure must not hide healthy providers or replace saved/scoped selections | `packages/ai/src/models.ts`, `core/{model-runtime,model-resolver,sdk}.ts` | `packages/ai/test/models-runtime.test.ts`, `model-runtime-auth-options.test.ts`, `model-resolver.test.ts`, `agent-session-dynamic-provider.test.ts` |
+| OAuth state, cancellation and UI failures must retain listener/prompt cleanup | `packages/ai/src/auth/oauth/{callback-server,openai-chatgpt}.ts` | `packages/ai/test/{oauth-callback-server,openai-chatgpt-oauth}.test.ts` |
+| Retained payload objects must not mutate Codex continuation baselines | `packages/ai/src/api/openai-codex-responses.ts` | `packages/ai/test/openai-codex-stream.test.ts` |
+| Failed terminal responses must preserve consumed numeric usage and error details | `packages/ai/src/api/{openai-responses-shared,openai-codex-responses}.ts` | `packages/ai/test/{openai-responses-terminal-event,openai-codex-stream}.test.ts` |
+| Astra Ultrafast and legacy Codex Fast estimates need correct tier/confirmation rules | `packages/ai/src/api/{openai-responses,openai-codex-responses}.ts` | `packages/ai/test/openai-ultrafast-pricing.test.ts` |
+| Anthropic strict limits apply across initial and inline definitions, including required schemas | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/anthropic-strict-tool-schema.test.ts` |
+| Optional nulls inside schema unions must not be coerced into fabricated values | `packages/ai/src/utils/validation.ts` | `packages/ai/test/validation.test.ts` |
+| DNS root dots must not bypass `NO_PROXY` | `packages/ai/src/utils/node-http-proxy.ts` | `packages/ai/test/node-http-proxy.test.ts` |
+| Fractional/overflowed zero retry delays must not become a minute | `packages/ai/src/utils/retry.ts` | `packages/ai/test/retry.test.ts` |
+| Replayed signatures count toward context estimates | `packages/ai/src/utils/estimate.ts` | `packages/ai/test/context-estimate.test.ts` |
+| Dialog input needs xterm printable decoding, grapheme-safe replacement and correct mouse columns | `packages/tui/src/components/input.ts` | `packages/tui/test/{input,mouse-components}.test.ts` |
+| Plus-sign key IDs must parse, and hyperlink control payloads must stay byte-identical | `packages/tui/src/{keys,utils}.ts` | `packages/tui/test/{keys,truncate-to-width}.test.ts` |
+| Terminal cell-size replies must reach native housekeeping before extension input listeners | `packages/tui/src/tui.ts` | `packages/tui/test/tui-cell-size-input.test.ts` |
+| Image coordinate notes need independent unrounded axis ratios | `utils/image-resize.ts` | `image-dimension-note.test.ts` |
+| Branch budgets must exclude system declarations not serialized as conversation | `core/compaction/branch-summarization.ts` | `branch-summarization.test.ts` |
+| Empty quoted arguments must not shift template positions | `core/prompt-templates.ts` | `prompt-templates.test.ts` |
+| Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
+| Reload must preserve deselected default-active tools while adopting newly configured defaults | `core/agent-session.ts` | `default-tools-setting.test.ts` |
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
 `background_command`, and no upstream publishing, binary or issue-analysis workflows. Nix builds
 follow upstream; its automatic catalog-pin commits and stable-branch promotion are upstream-only.
 The fork uses upstream's install lock, not the removed npm shrinkwrap, and keeps its immutable
-installer. It uses upstream's pre-commit hook and `npm run check`.
+installer. It uses upstream's pre-commit hook and `npm run check`. Delivery evidence comes from
+`./test.sh`, installer/consumer tests, bundle smoke, and Linux/macOS CI; it does not establish live
+Windows, Termux-device or hosted Axiom acceptance.
 
 Anthropic native tool changes follow upstream's inline definitions and fixed initial tool list,
 including same-name redefinitions. The fork retains request-wide strict-schema budgets and passive
 cache tracing. ChatGPT OAuth follows upstream's mandatory callback listener and port-conflict
 failure while keeping the fork's cancellation, state validation and cleanup safeguards. Cloudflare
-Claude-ID normalization remains necessary for older bundled and remote catalogs; the generator
-shares that helper rather than duplicating upstream's replacement.
+Claude-ID generation already produces canonical IDs upstream. The shared helper also canonicalizes
+provider inputs and remote overlays before passthrough/merge; current bundled defaults are not
+claimed to be broken.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`
 owner, not the user-only run hook. Forced text stays run-scoped and unpersisted. Child
@@ -123,9 +158,15 @@ The installer builds the exact commit from a Git archive plus the checkout's hyd
 installs frozen dependencies from `packages/coding-agent/install-lock`, smoke-tests the SDK and CLI,
 runs a bundled `background_command` smoke and the real-tmux restart test against the installed CLI.
 The release identity is `<commit>-<catalog sha256 prefix>-node<version>-<platform>-<arch>`, so the
-catalog is frozen at staging time. Before activating, compare its model IDs with the selected
-release so an upgrade does not silently downgrade model data. Settings, credentials, sessions and
-extensions are never edited. `node scripts/install-fork.mjs --help` lists every option.
+catalog is frozen at staging time. Normal install/activation compares frozen installed
+provider/model IDs with the selected release under the shared mutation lock, before changing
+either selector link. First installs and equal/growing catalogs pass; losses are listed and refuse
+activation. Review intentional removals, then use `--activate <identity> --accept-model-removals`;
+the removed IDs are still printed. No model generation or remote refresh occurs during comparison.
+Missing, invalid or unsupported-schema selected catalogs fail closed. Explicit `--rollback`
+skips the catalog downgrade check for recovery, not receipt/identity or store/lock safeguards.
+Settings, credentials, sessions and extensions are never edited.
+`node scripts/install-fork.mjs --help` lists every option.
 
 All release mutations share `<selector>.lock`. A release store belongs to one selector, recorded
 in its `.owner-selector`; other selectors must use their own `--releases` directory. `--prune` only
@@ -144,21 +185,10 @@ release selectable at `<selector>.previous`. Its selector is
 `$(npm root -g)/@earendil-works/pi-coding-agent`; on Termux it is
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` with `~/.local/bin/pi`.
 
-### Cutover from the 0.99 fork
-
-Do the first 1.0 install from a fork checkout (`npm ci --ignore-scripts`,
-`npm run hydrate:model-data`, then
-`node scripts/install-fork.mjs --selector "$(npm root -g)/@earendil-works/pi-coding-agent"`, so it
-activates the selector that `pi` and `pi update --fork` use; on Termux omit `--selector`). A 0.99
-`pi update --fork` holds `<selector>.lock` while it runs the 1.0 installer, which needs the same
-lock, so it fails with `Lock file is already being held` and changes nothing. Later updates can use
-`pi update --fork`.
-
-Sessions started by the 0.99 fork must quit and relaunch to run on 1.0. `/restart` from such a
-session is refused by the new worker and stays on 0.99. Relaunch with `pi --session <path|id>`:
-`pi -c` opens the directory's most recently modified session, which can be another live session
-when several share the directory. Keep the 0.99 release on disk until the new release is verified;
-to roll back, `--rollback` (or flip the selector to `<selector>.previous`) and fully relaunch.
+After activation, immediately restart running workers and verify their actual runtime, not only
+the selector. Launcher changes require a full CLI relaunch; worker restart leaves the launcher
+loaded. Preserve the previous immutable release until the new runtime is verified. Restart accepts
+only complete current native state, with no journal-only or pre-v1 handoff fallback.
 
 ## Testing
 

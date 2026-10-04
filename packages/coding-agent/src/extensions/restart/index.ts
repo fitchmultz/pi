@@ -15,6 +15,7 @@ import {
 	RESTART_SOCKET_ENV,
 	type RestartHandoff,
 	type RestartRequest,
+	type RestartSession,
 	type RestartWorkerMessage,
 } from "../../cli/restart-protocol.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
@@ -88,7 +89,8 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	let started = false;
 	let closing = false;
 	let pending: RestartRequest | undefined;
-	let committed: Extract<RestartWorkerMessage, { type: "pi:restart" }> | undefined;
+	let committed: { request: RestartRequest; session: Omit<RestartSession, "workingSession"> } | undefined;
+	let workingSession: string | undefined;
 	let timer: NodeJS.Timeout | undefined;
 	let server: Server | undefined;
 	let directory: string | undefined;
@@ -101,6 +103,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		const requested = pending !== undefined || committed !== undefined;
 		pending = undefined;
 		committed = undefined;
+		workingSession = undefined;
 		clearTimeout(timer);
 		if (artifactDirectory) rmSync(artifactDirectory, { recursive: true, force: true });
 		artifactDirectory = undefined;
@@ -134,7 +137,6 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			return;
 		}
 		committed = {
-			type: "pi:restart",
 			request: pending,
 			session: { sessionFile, sessionId: ctx.sessionManager.getSessionId() },
 		};
@@ -310,7 +312,12 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		async completeShutdown() {
 			if (!committed) return;
 			try {
-				await send(committed);
+				if (!workingSession) throw new Error("Managed restart has no complete native working-session state");
+				await send({
+					type: "pi:restart",
+					request: committed.request,
+					session: { ...committed.session, workingSession },
+				});
 				artifactDirectory = undefined;
 			} catch (error) {
 				cancel();
@@ -328,7 +335,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 				const path = join(artifactDirectory, "working-session.json");
 				writeWorkingSession(path, hold.state);
 				hold.assertHeld();
-				committed.session.workingSession = path;
+				workingSession = path;
 				return true;
 			} catch (error) {
 				cancel();

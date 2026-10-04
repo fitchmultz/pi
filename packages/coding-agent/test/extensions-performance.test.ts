@@ -1,6 +1,6 @@
 import { performance } from "node:perf_hooks";
 import type { Component } from "@earendil-works/pi-tui";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
@@ -26,9 +26,45 @@ async function createRunner(...factories: ExtensionFactory[]) {
 	);
 }
 
-afterEach(() => vi.restoreAllMocks());
+beforeEach(() => vi.stubEnv("PI_EXTENSION_PERFORMANCE", "1"));
+afterEach(() => {
+	vi.unstubAllEnvs();
+	vi.restoreAllMocks();
+});
 
 describe("non-fatal extension performance warnings", () => {
+	it("leaves handlers and footers uninstrumented by default", async () => {
+		vi.stubEnv("PI_EXTENSION_PERFORMANCE", undefined);
+		const component: Component = { render: () => ["footer"], invalidate: () => {} };
+		const runner = await createRunner((pi) => {
+			pi.on("input", (event) => ({ action: "transform", text: `${event.text}!` }));
+			pi.on("session_start", (_event, ctx) => ctx.ui.setFooter(() => component));
+		});
+		let footer: Component | undefined;
+		runner.setUIContext(
+			{
+				...runner.getUIContext(),
+				setFooter: (factory) => {
+					footer = factory?.(undefined as never, theme, undefined as never);
+				},
+			},
+			"tui",
+		);
+		const clock = vi.spyOn(performance, "now");
+		const warnings: ExtensionError[] = [];
+		runner.onError((error) => warnings.push(error));
+		expect(await runner.emitInput("hi", undefined, "interactive")).toEqual({
+			action: "transform",
+			text: "hi!",
+			images: undefined,
+		});
+		await runner.emit({ type: "session_start", reason: "startup" });
+		expect(footer).toBe(component);
+		expect(footer?.render(80)).toEqual(["footer"]);
+		expect(clock).not.toHaveBeenCalled();
+		expect(warnings).toEqual([]);
+	});
+
 	it("warns once per extension and event kind without changing results", async () => {
 		let now = 0;
 		vi.spyOn(performance, "now").mockImplementation(() => now);

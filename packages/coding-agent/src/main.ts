@@ -34,7 +34,7 @@ import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { parseRestartHandoff, RESTART_HANDOFF_ENV } from "./cli/restart-protocol.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
-import { startWorkingSessionControl } from "./cli/working-session-control.ts";
+import { consumeWorkingSessionEnvironment, startWorkingSessionControl } from "./cli/working-session-control.ts";
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
 import {
@@ -63,7 +63,7 @@ import { collectSettingsDiagnostics, deduplicateDiagnostics } from "./core/setti
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
-import { openWorkingSession, readWorkingSession } from "./core/working-session.ts";
+import { openWorkingSession, resolveWorkingSession } from "./core/working-session.ts";
 import { builtInExtensions } from "./extensions/index.ts";
 import { loadMcpCommand } from "./extensions/mcp/cli.lazy.ts";
 import restartExtension, { createManagedRestart } from "./extensions/restart/index.ts";
@@ -575,10 +575,15 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	const workingSessionTransport = consumeWorkingSessionEnvironment();
 	resetTimings();
 	// Validate the cut and journal before migrations, setup, resources or model selection.
 	const parsed = parseArgs(args);
-	const saved = parsed.workingSession ? readWorkingSession(resolvePath(parsed.workingSession)) : undefined;
+	const saved = resolveWorkingSession(parsed.workingSession ? resolvePath(parsed.workingSession) : undefined);
+	if (saved && !saved.launch)
+		throw new Error(
+			"CLI native restore requires a launch descriptor; use the SDK for an explicit host-bound restore",
+		);
 	if (saved?.mode && !["tui", "rpc", "print", "json"].includes(saved.mode.kind))
 		throw new Error(`Unsupported native working-session mode: ${saved.mode.kind}`);
 	if (
@@ -1010,6 +1015,7 @@ export async function main(args: string[], options?: MainOptions) {
 	await startWorkingSessionControl(
 		runtime,
 		managedRestart ? (session) => managedRestart.captureFinal(session) : undefined,
+		workingSessionTransport,
 	);
 
 	// RPC refreshes catalogs here in the background; interactive mode starts its refresh after TUI initialization.

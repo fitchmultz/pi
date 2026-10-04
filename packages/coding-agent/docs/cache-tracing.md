@@ -48,4 +48,10 @@ Report classes distinguish incomplete capture/reporting, expected model/policy/a
 
 Offline owner tests cover real native serialization, terminal presence, first-terminal behavior, silent retry/fallback, delta/full envelopes, late hook mutation, privacy/storage failure and SDK provenance. Required repository checks do not make real provider calls. See [Restart](restart.md#validation) for the persistent guidance regression and [SDK](sdk.md) for lifecycle ownership.
 
-No natural request measurements are created by installing this source change. Representative GLM wake/tool/user, Sol discovery/reload and Codex short-gap pairs must come from later ordinary authorized work. Historical unrecorded bodies and server-internal cache identity cannot be reconstructed by this recorder. Remove the temporary plumbing when those questions are answered.
+No natural request measurements are created by installing this source change. Representative GLM wake/tool/user, Sol discovery/reload and Codex short-gap pairs must come from later ordinary authorized work. Historical unrecorded bodies and server-internal cache identity cannot be reconstructed by this recorder.
+
+## Retirement condition
+
+The native recorder remains because public payload hooks run before final serialization, and public stream events alone do not identify every transport attempt or the raw usage record actually consumed. Moving those observations into an extension today would lose evidence, not remove equivalent plumbing.
+
+Retire the recorder, SDK provenance and report tooling when the investigation ends, or when a replacement proves equivalent coverage of post-hook serialized bodies, HTTP/WebSocket attempts and consumed raw usage presence/provenance while retaining these privacy limits. Do not present entry-file digests as loaded-module identity or passive correlations as server causation.

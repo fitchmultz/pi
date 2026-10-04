@@ -10,12 +10,15 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import lockfile from "proper-lockfile";
+import { createModelDataManifest } from "../packages/ai/scripts/model-data.ts";
 import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 import {
 	activateRelease, installFrozenConsumer, installRelease, isolatedEnvironment, main, prepareTermuxCompiler, pruneReleases, releaseIdentity, resolveBuildTools,
 } from "./install-fork.mjs";
 
 const name = "@earendil-works/pi-coding-agent";
+const aiName = "@earendil-works/pi-ai";
+const defaultCatalog = [["fixture-provider", "fixture-model", "chat", "fixture-api"]];
 const tools = resolveBuildTools();
 
 test("runs the installer CLI through a symlinked path", (t) => {
@@ -44,6 +47,8 @@ function fixture(t) {
 	const oldPackage = join(root, "old-release");
 	mkdirSync(oldPackage);
 	writeFileSync(join(oldPackage, "untouched"), "previous runtime");
+	writeFileSync(join(oldPackage, "package.json"), JSON.stringify({ name }));
+	writeCatalogFixture(join(oldPackage, "node_modules", aiName));
 	mkdirSync(dirname(selector), { recursive: true });
 	symlinkSync(oldPackage, selector);
 	for (const filename of ["settings.json", "auth.json", "sessions/real.jsonl"]) {
@@ -54,21 +59,50 @@ function fixture(t) {
 	return { root, env, selector, oldPackage, releases: join(root, "releases") };
 }
 
-function receipt(commit = "a", catalog = "b") {
+function catalogFiles(entries = defaultCatalog) {
+	const providers = {};
+	const structure = {};
+	for (const [provider, id, type, api] of entries) {
+		providers[provider] ??= {};
+		providers[provider][api] ??= {};
+		structure[provider] ??= {};
+		structure[provider][`${type}:${id}`] = api;
+		providers[provider][api][`${type}:${id}`] = {
+			provider, id, type, api, name: id, baseUrl: "", input: ["text"],
+			...(type === "image" ? { output: ["image"] } : { contextWindow: 100, maxTokens: 10, reasoning: false }),
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+	}
+	const files = Object.fromEntries(Object.entries(providers).map(([provider, groups]) => [`${provider}.json`, JSON.stringify(groups)]));
+	files[".manifest.json"] = JSON.stringify(createModelDataManifest(structure, files, "2026-10-03T00:00:00Z"));
+	return files;
+}
+
+function writeCatalogFixture(directory, entries = defaultCatalog) {
+	mkdirSync(join(directory, "dist/providers/data"), { recursive: true });
+	writeFileSync(join(directory, "package.json"), JSON.stringify({
+		name: aiName, version: "1.0.0", type: "module", exports: { "./models": { import: "./dist/models.js" } },
+	}));
+	writeFileSync(join(directory, "dist/models.js"), 'throw new Error("Catalog comparison must not execute provider code");');
+	for (const [file, content] of Object.entries(catalogFiles(entries))) writeFileSync(join(directory, "dist/providers/data", file), content);
+}
+
+function receipt(commit = "a", catalog = defaultCatalog) {
 	return {
-		commit: commit.repeat(40), catalogSha256: catalog.repeat(64), archiveSha256: "c".repeat(64),
+		commit: commit.repeat(40), catalogSha256: createHash("sha256").update(catalogFiles(catalog)[".manifest.json"]).digest("hex"), archiveSha256: "c".repeat(64),
 		node: process.versions.node, npm: tools.npmVersion, platform: process.platform, arch: process.arch,
 	};
 }
 
 function packages(f, { brokenCli = false } = {}) {
-	const packages = [name, "@earendil-works/chord"].map((name) => ({ name, directory: join(f.root, "packages", name) }));
+	const packages = [name, "@earendil-works/chord", aiName].map((name) => ({ name, directory: join(f.root, "packages", name) }));
 	for (const pkg of packages) {
+		if (pkg.name === aiName) { writeCatalogFixture(pkg.directory); continue; }
 		const coding = pkg.name === name;
 		const files = {
 			"package.json": JSON.stringify({
 				name: pkg.name, version: "1.0.0", type: "module", exports: "./dist/index.js",
-				...(coding ? { dependencies: { "@earendil-works/chord": "1.0.0" }, bin: { pi: "dist/bundle/cli.js" } } : {}),
+				...(coding ? { dependencies: { "@earendil-works/chord": "1.0.0", [aiName]: "1.0.0" }, bin: { pi: "dist/bundle/cli.js" } } : {}),
 			}),
 			"dist/index.js": coding ? `
 import { identity } from "@earendil-works/chord";
@@ -145,6 +179,121 @@ test("stages real npm artifacts, selects atomically, reuses without rebuilding, 
 	assert.equal(readlinkSync(f.selector), first.packageDir);
 	assert.deepEqual(readFileSync(join(first.directory, "fork-release.json")), before);
 	assert.ok(existsSync(second.packageDir));
+});
+
+test("CLI selection permits first install, equal IDs despite API changes, and image/classifier growth", async (t) => {
+	const f = fixture(t);
+	rmSync(f.selector);
+	const catalogs = [
+		defaultCatalog,
+		[["fixture-provider", "fixture-model", "chat", "different-api"]],
+		[["fixture-provider", "fixture-model", "chat", "different-api"],
+			["new-provider", "image/model", "image", "image-api"],
+			["new-provider", "classifier/model", "classifier", "classifier-api"]],
+	];
+	for (const [index, catalog] of catalogs.entries()) {
+		const candidate = await installRelease({ ...f, receipt: receipt(String(index + 1), catalog), stage: true },
+			(directory) => writePackageFixture(directory, catalog));
+		const selected = spawnSync(tools.node, [fileURLToPath(new URL("./install-fork.mjs", import.meta.url)),
+			"--activate", basename(candidate.directory), "--releases", f.releases, "--selector", f.selector], { env: f.env, encoding: "utf8" });
+		assert.equal(selected.status, 0, selected.stderr);
+		assert.equal(readlinkSync(f.selector), candidate.packageDir);
+		if (index === 0) assert.equal(existsSync(`${f.selector}.previous`), false);
+	}
+});
+
+test("CLI refuses lost provider/model IDs without changing either link; removal acceptance and older rollback are explicit", async (t) => {
+	const f = fixture(t);
+	const richCatalog = [
+		...defaultCatalog,
+		["fixture-provider", "same-id", "chat", "fixture-api"],
+		["fixture-provider", "removed-chat", "chat", "fixture-api"],
+		["removed-provider", "same-id", "image", "image-api"],
+		["removed-provider", "classify/model", "classifier", "classifier-api"],
+	];
+	const rich = await installRelease({ ...f, receipt: receipt("1", richCatalog) },
+		(directory) => writePackageFixture(directory, richCatalog));
+	const smallerCatalog = [...defaultCatalog, ["fixture-provider", "same-id", "chat", "fixture-api"]];
+	const smallReceipt = receipt("2", smallerCatalog);
+	const smaller = await installRelease({ ...f, receipt: smallReceipt, stage: true },
+		(directory) => writePackageFixture(directory, smallerCatalog));
+	const links = [f.selector, `${f.selector}.previous`].map((path) => ({ path, target: readlinkSync(path), inode: lstatSync(path).ino }));
+	const receiptBefore = readFileSync(join(smaller.directory, "fork-release.json"));
+	const cli = (operation, identity, extra = []) => spawnSync(tools.node,
+		[fileURLToPath(new URL("./install-fork.mjs", import.meta.url)), operation, identity,
+			"--releases", f.releases, "--selector", f.selector, ...extra], { env: f.env, encoding: "utf8" });
+	const refused = cli("--activate", basename(smaller.directory));
+	assert.equal(refused.status, 1);
+	assert.match(refused.stderr, /fixture-provider\/removed-chat/);
+	assert.match(refused.stderr, /removed-provider\/same-id/);
+	assert.match(refused.stderr, /removed-provider\/classify\/model/);
+	assert.match(refused.stderr, /--accept-model-removals/);
+	assert.ok(refused.stderr.includes(`validated release remains staged: ${basename(smaller.directory)}`));
+	const recovery = refused.stderr.match(/then run from a fork checkout:\n  (.+)\n/)?.[1];
+	assert.ok(recovery, refused.stderr);
+	await assert.rejects(installRelease({ ...f, receipt: smallReceipt }, () => assert.fail("must reuse frozen release")), /Refusing activation/);
+	for (const { path, target, inode } of links) {
+		assert.equal(readlinkSync(path), target);
+		assert.equal(lstatSync(path).ino, inode);
+	}
+	assert.deepEqual(readFileSync(join(smaller.directory, "fork-release.json")), receiptBefore);
+	assert.equal(existsSync(`${f.selector}.lock`), false);
+
+	const accepted = spawnSync("bash", ["-c", recovery], {
+		cwd: resolve(dirname(fileURLToPath(import.meta.url)), ".."), env: f.env, encoding: "utf8",
+	});
+	assert.equal(accepted.status, 0, accepted.stderr);
+	assert.match(accepted.stderr, /Accepted intentional model removals/);
+	assert.match(accepted.stderr, /removed-provider\/same-id/);
+	assert.equal(readlinkSync(f.selector), smaller.packageDir);
+	assert.equal(readlinkSync(`${f.selector}.previous`), rich.packageDir);
+
+	assert.equal(cli("--activate", basename(rich.directory)).status, 0);
+	const rollback = cli("--rollback", basename(smaller.directory));
+	assert.equal(rollback.status, 0, rollback.stderr);
+	assert.match(rollback.stderr, /Explicit rollback: catalog downgrade check skipped/);
+	assert.equal(readlinkSync(f.selector), smaller.packageDir);
+	assert.equal(readlinkSync(`${f.selector}.previous`), rich.packageDir);
+	assert.deepEqual(readFileSync(join(smaller.directory, "fork-release.json")), receiptBefore);
+	assert.equal(cli("--activate", basename(rich.directory)).status, 0);
+	await installRelease({ ...f, receipt: smallReceipt, acceptModelRemovals: true }, () => assert.fail("must reuse frozen release"));
+	assert.equal(readlinkSync(f.selector), smaller.packageDir);
+});
+
+test("removal acceptance never bypasses malformed or receipt-mismatched frozen catalogs", async (t) => {
+	const f = fixture(t);
+	const candidate = await installRelease({ ...f, receipt: receipt(), stage: true }, writePackageFixture);
+	const data = join(candidate.directory, "node_modules", aiName, "dist/providers/data");
+	const shard = join(data, "fixture-provider.json");
+	const originalShard = readFileSync(shard);
+	const manifest = join(data, ".manifest.json");
+	const originalManifest = readFileSync(manifest);
+	const paths = ["--activate", basename(candidate.directory), "--releases", f.releases, "--selector", f.selector, "--accept-model-removals"];
+	writeFileSync(shard, "{}");
+	await assert.rejects(main(paths), /Invalid generated model data/);
+	assertPreserved(f);
+	writeFileSync(shard, originalShard);
+	writeFileSync(manifest, "{}");
+	await assert.rejects(main(paths), /Installed catalog does not match its release receipt/);
+	assertPreserved(f);
+	writeFileSync(manifest, originalManifest);
+	rmSync(join(f.oldPackage, "node_modules", aiName, "dist/providers/data"), { recursive: true });
+	await assert.rejects(main(paths), /ENOENT/);
+	assertPreserved(f);
+	assert.equal(existsSync(`${f.selector}.previous`), false);
+	// Explicit recovery does not require reading an older release's catalog.
+	await main(["--rollback", basename(candidate.directory), "--releases", f.releases, "--selector", f.selector]);
+	assert.equal(readlinkSync(f.selector), candidate.packageDir);
+	assert.equal(readlinkSync(`${f.selector}.previous`), f.oldPackage);
+});
+
+test("intentional-removal acceptance cannot be attached to operations without a normal selection", async (t) => {
+	const f = fixture(t);
+	for (const operation of [["--stage"], ["--prune", "--keep", "0"], ["--rollback", "older"]]) {
+		await assert.rejects(main([...operation, "--accept-model-removals", "--releases", f.releases, "--selector", f.selector]), /cannot combine/);
+	}
+	assertPreserved(f);
+	assert.equal(existsSync(f.releases), false);
 });
 
 test("rejects a CI archive for another commit before building or changing the selector", async (t) => {
@@ -242,11 +391,12 @@ test("native selection replaces the link inode and leaves no temporary selectors
 	assert.deepEqual(readdirSync(dirname(f.selector)).sort(), ["pi-coding-agent", "pi-coding-agent.previous"]);
 });
 
-function writePackageFixture(directory) {
+function writePackageFixture(directory, catalog = defaultCatalog) {
 	const pkg = join(directory, "node_modules", name);
 	mkdirSync(join(pkg, "dist/bundle"), { recursive: true });
 	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name }));
 	writeFileSync(join(pkg, "dist/bundle/cli-worker.js"), "");
+	writeCatalogFixture(join(directory, "node_modules", aiName), catalog);
 }
 
 function validatedRelease(f, commit, validatedAt) {
@@ -444,7 +594,7 @@ test("isolates ambient Pi/npm config and resolves native Node/npm before HOME ch
 	}
 	assert.equal(execFileSync(tools.node, [tools.npm, "--version"], { env: f.env, encoding: "utf8" }).trim(), tools.npmVersion);
 	assert.equal(execFileSync("node", ["-p", "process.execPath"], { env: f.env, encoding: "utf8" }).trim(), tools.node);
-	assert.notEqual(releaseIdentity(receipt()), releaseIdentity(receipt("a", "e")));
+	assert.notEqual(releaseIdentity(receipt()), releaseIdentity(receipt("a", [["fixture-provider", "different-model", "chat", "fixture-api"]])));
 });
 
 test("isolated npm cannot read registry credentials or settings from the native prefix", (t) => {

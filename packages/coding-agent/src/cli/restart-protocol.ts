@@ -10,7 +10,7 @@ export const WORKING_SESSION_WORKER_ENV = "PI_WORKING_SESSION_WORKER";
 
 /** Headless modes become ready only after their native owner and extensions bind. */
 export async function notifyCliReady(): Promise<void> {
-	if (!process.env[WORKING_SESSION_LAUNCH_ENV] || !process.send || !process.connected) return;
+	if (process.env[MANAGED_CLI_ENV] !== "1" || !process.send || !process.connected) return;
 	await new Promise<void>((resolve, reject) =>
 		process.send!({ type: "pi:ready" }, (error) => (error ? reject(error) : resolve())),
 	);
@@ -35,7 +35,7 @@ export interface RestartRequest {
 export interface RestartSession {
 	sessionFile: string;
 	sessionId: string;
-	workingSession?: string;
+	workingSession: string;
 }
 
 export interface RestartHandoff extends RestartSession {
@@ -57,12 +57,16 @@ export function parseRestartHandoff(encoded: string): RestartHandoff {
 		!("sessionFile" in value) ||
 		typeof value.sessionFile !== "string" ||
 		!("sessionId" in value) ||
-		typeof value.sessionId !== "string"
+		typeof value.sessionId !== "string" ||
+		!value.sessionId ||
+		!("workingSession" in value) ||
+		typeof value.workingSession !== "string" ||
+		!isAbsolute(value.workingSession)
 	) {
-		throw new Error("This Pi was started by an older Pi launcher; quit and run pi -c to resume on the new runtime.");
+		throw new Error("Invalid restart handoff: complete native working-session state is required");
 	}
 	const fields = value as Record<string, unknown>;
-	for (const key of ["message", "failure", "workingSession"] as const) {
+	for (const key of ["message", "failure"] as const) {
 		if (fields[key] !== undefined && typeof fields[key] !== "string")
 			throw new Error(`Invalid restart handoff ${key}`);
 	}
