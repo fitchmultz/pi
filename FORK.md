@@ -135,11 +135,13 @@ npm run check
 ./test.sh
 ```
 
-Open the PR with `gh pr create --repo fitchmultz/pi`, wait for green CI, review, and merge.
+Open the PR with `gh pr create --repo fitchmultz/pi`, follow CI to completion, fix failures and actionable review findings (or record evidence-backed rebuttals), and merge through repository rules. Refresh the canonical local checkout without overwriting unrelated work, install and verify changed resources, then remove only the task's clean worktree and obsolete branch.
 CI is the upstream workflow plus tmux, so the real-terminal restart test runs, and a macOS job
 runs the restart and `background_command` tests.
 
 ## Install and activate
+
+This runtime workflow applies when runtime code or bundled runtime resources change. For guidance-only changes, refresh the canonical checkout and any actual installed copies of the changed guidance, verify they match the merged revision, and clean up the task worktree. Do not build, activate or restart unchanged core code merely for Markdown edits.
 
 Installations are immutable releases under `~/.local/share/pi-fork/releases/`. The `pi` binary
 links through a selector symlink, by default

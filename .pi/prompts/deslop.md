@@ -24,32 +24,15 @@ Review the completed workpackage and simplify its implementation without changin
 - Prefer direct, readable code over cleverness, premature abstraction, and framework-like infrastructure.
 - Delete comments that merely restate the code, but preserve comments that explain constraints, intent, or non-obvious decisions.
 
-## Approval gate for significant removals
+## Preserve the authorized outcome
 
-Before making any significant or potentially intentional removal, stop and ask the user for approval. First explain:
+The simplification request authorizes behavior-preserving refactors and deletion of redundant mechanisms, including deliberate abstractions when an equivalent simpler design covers their consumers. Trace callers, contracts and tests to establish equivalence; uncertain intent is a reason to investigate, not automatically to ask.
 
-1. what you propose to remove or change;
-2. why it appears unnecessary or overly defensive;
-3. what behavior, compatibility, extensibility, validation, or failure handling could be affected;
-4. the simpler replacement, if any; and
-5. your recommendation.
-
-Wait for explicit approval before applying that change. Do not bundle approval for multiple independent decisions; present them separately when the tradeoffs differ.
-
-Treat a decision as significant when it removes or materially changes any of the following:
-
-- user-visible behavior or supported workflows;
-- public APIs, persisted formats, protocol behavior, or backward compatibility;
-- validation, authorization, security checks, recovery, retries, fallbacks, or error handling;
-- an abstraction or extension point that appears deliberate or has multiple consumers;
-- functionality covered by tests or documentation;
-- code whose purpose or invariant is uncertain.
-
-Routine, behavior-preserving cleanup does not require approval, such as inlining a single-use trivial helper, removing an unreachable branch proven impossible by the type model, or deleting newly added duplication. If uncertain whether a removal is significant, ask.
+Preserve supported workflows, public contracts, persisted formats, security checks, validation and recovery guarantees. Existing task or standing authorization for a replacement counts; do not ask for it again. Ask only when completing the simplification requires an unapproved material behavior change or risks irreversible data loss. State the concrete consequence and continue independent authorized cleanup.
 
 ## Constraints
 
-- Preserve intended behavior unless the user explicitly approves a change.
+- Preserve intended behavior unless the current task or standing authorization already includes the change.
 - Do not remove code merely because it is unused until you have checked whether it is a public API, extension point, generated entry point, or intentionally retained compatibility surface.
 - Do not replace clear code with a new abstraction solely to reduce line count.
 - Do not weaken tests to permit simplification. Update tests only when an approved behavior change or a cleaner equivalent structure requires it.
@@ -61,7 +44,7 @@ After editing, review the final diff for avoidable complexity, duplication, indi
 
 - what was simplified;
 - which invariants the implementation now relies on;
-- any significant removals you did not make because approval was not granted; and
+- any unresolved material behavior decision and its concrete consequence; and
 - the validation performed and its results.
 
 Passing tests and type checks is necessary but not sufficient. Leave the affected code easier to understand and change.
