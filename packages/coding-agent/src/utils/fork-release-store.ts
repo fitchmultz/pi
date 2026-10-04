@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
 /** Called under the selector lock, before any release-store mutation. */
@@ -9,18 +8,13 @@ export function claimForkReleaseStore(releases: string, selector: string): strin
 	const store = resolve(releases);
 	mkdirSync(store, { recursive: true });
 	const ownerFile = join(store, ".owner-selector");
-	const temporary = join(store, `.owner-selector.${randomUUID()}.tmp`);
 	try {
-		writeFileSync(temporary, `${canonicalSelector}\n`, { flag: "wx" });
-		try {
-			// Publish complete contents without overwriting another selector's first claim.
-			linkSync(temporary, ownerFile);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		}
-	} finally {
-		rmSync(temporary, { force: true });
+		// Exclusive creation works on Termux, where Android denies hard links.
+		writeFileSync(ownerFile, `${canonicalSelector}\n`, { flag: "wx" });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 	}
+	// ponytail: an interrupted first write leaves an invalid claim; verify its owner before repairing it.
 	const owner = readFileSync(ownerFile, "utf8");
 	if (owner !== `${canonicalSelector}\n`) {
 		throw new Error(

@@ -100,7 +100,7 @@ test("consumer smoke children retain the Termux environment without leaking prov
 	const prefix = join(directory, "termux-prefix");
 	const guard = `import assert from "node:assert/strict";
 assert.equal(process.env.PREFIX, ${JSON.stringify(prefix)});
-assert.equal(process.env.LD_PRELOAD, "");
+assert.equal(process.env.LD_PRELOAD ?? "", "");
 assert.equal(process.env.ANTHROPIC_API_KEY, undefined);
 `;
 	for (const entry of ["dist/index.js", "dist/cli.js", "dist/bundle/cli.js"]) {

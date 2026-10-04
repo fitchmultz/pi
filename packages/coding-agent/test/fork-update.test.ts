@@ -181,7 +181,7 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 		expect(observed.env.HOME).not.toBe(process.env.HOME);
 		expect(observed.env.TMPDIR).toBe(join(observed.env.HOME!, "tmp"));
 		expect(observed.env.PREFIX).toBe(platform === "android" ? process.env.PREFIX : undefined);
-		expect(observed.env.LD_PRELOAD).toBe(platform === "android" ? process.env.LD_PRELOAD : undefined);
+		expect(observed.env.LD_PRELOAD ?? "").toBe(platform === "android" ? process.env.LD_PRELOAD : "");
 		expect(observed.env.npm_config_script_shell).toBe(
 			platform === "android" ? join(dirname(process.execPath), "bash") : undefined,
 		);
