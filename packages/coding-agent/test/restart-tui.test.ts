@@ -256,7 +256,7 @@ afterEach(async () => {
 // Real terminal, private tmux socket, isolated HOME and faux provider: no network or paid requests.
 describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_CLI)", () => {
 	it("preserves fullscreen and primary working-session ownership across restart and completed exit", async () => {
-		const f = fixture("/tmp");
+		const f = fixture(process.platform === "android" ? resolve(dirname(process.execPath), "../tmp") : "/tmp");
 		const socketPath = join(f.root, "working.sock");
 		const exitPath = join(f.root, "completed.json");
 		const probe = join(f.root, "child-env.mjs");
