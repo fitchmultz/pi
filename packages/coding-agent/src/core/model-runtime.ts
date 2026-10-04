@@ -193,6 +193,8 @@ export class ModelRuntime implements Models {
 		storedProviders: new Set(),
 		auth: new Map(),
 	};
+	private fullRefreshSeq = 0;
+	private fullRefresh: Promise<ModelsRefreshResult> = Promise.resolve({ aborted: false, errors: new Map() });
 	private availabilityRefreshSeq = 0;
 	private availabilityErrorSeq = 0;
 	private readonly providerAvailabilitySeq = new Map<string, number>();
@@ -871,8 +873,43 @@ export class ModelRuntime implements Models {
 		return !this.modelNetworkEnabled;
 	}
 
-	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
-		this.config = await ModelConfig.load(this.modelsPath);
+	refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
+		if (options.providers) return this.runRefresh(options);
+		const seq = ++this.fullRefreshSeq;
+		const pending = (async () => {
+			const errors = new Map<string, Error>();
+			try {
+				const result = await this.runRefresh(options, seq);
+				for (const [id, error] of result.errors) errors.set(id, error);
+				// Older work cannot publish after a newer full refresh, but its caller still needs readiness.
+				while (seq !== this.fullRefreshSeq && !options.signal?.aborted) {
+					const latest = this.fullRefresh;
+					const next = await raceWithAbortSignal(latest, options.signal);
+					for (const [id, error] of next.errors) errors.set(id, error);
+					if (latest !== this.fullRefresh) continue;
+					if (!next.aborted) return { aborted: options.signal?.aborted ?? false, errors };
+					// A cancelled caller cannot discard an uncancelled registration or disposal.
+					const resumed = await this.refresh(options);
+					for (const [id, error] of resumed.errors) errors.set(id, error);
+					return { aborted: resumed.aborted || (options.signal?.aborted ?? false), errors };
+				}
+				return { aborted: result.aborted || (options.signal?.aborted ?? false), errors };
+			} catch (error) {
+				if (!options.signal?.aborted) throw error;
+				return { aborted: true, errors };
+			}
+		})();
+		this.fullRefresh = pending;
+		return pending;
+	}
+
+	private async runRefresh(options: ModelsRefreshOptions, seq?: number): Promise<ModelsRefreshResult> {
+		const loading = ModelConfig.load(this.modelsPath);
+		const config = await (seq === undefined ? loading : raceWithAbortSignal(loading, options.signal));
+		if (seq !== undefined && (options.signal?.aborted || seq !== this.fullRefreshSeq)) {
+			return { aborted: options.signal?.aborted ?? false, errors: new Map() };
+		}
+		this.config = config;
 		this.configureRadiusProviders();
 		if (options.providers) {
 			for (const providerId of new Set(options.providers)) this.recomposeProvider(providerId);
@@ -891,6 +928,9 @@ export class ModelRuntime implements Models {
 			errors: new Map(),
 		};
 		const errors = new Map(result.errors);
+		if (seq !== undefined && seq !== this.fullRefreshSeq) {
+			return { aborted: result.aborted || (options.signal?.aborted ?? false), errors };
+		}
 		this.updateModelSnapshot();
 		if (options.providers) {
 			await Promise.all(

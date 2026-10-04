@@ -9,7 +9,7 @@ import {
 	type Model,
 	type Provider,
 } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
@@ -369,6 +369,27 @@ describe("extension provider model lifecycle", () => {
 		await runtime.refresh({ allowNetwork: false });
 		expect(runtime.getModel("extension-oauth", "base")).toBeDefined();
 		expect(runtime.getModel("extension-oauth", "credential-model")).toBeDefined();
+
+		// Live fallback registration recomposes the provider; offline refresh must restore its OAuth projection.
+		const refresh = vi.spyOn(runtime, "refresh");
+		try {
+			const dispose = runtime.registerProviderAuthFallback("extension-oauth", {
+				check: async () => {
+					throw new Error("stored OAuth must take precedence");
+				},
+				resolve: async () => {
+					throw new Error("stored OAuth must take precedence");
+				},
+			});
+			await Promise.all(refresh.mock.results.map((result) => result.value));
+			expect(runtime.getModel("extension-oauth", "credential-model")).toBeDefined();
+			refresh.mockClear();
+			dispose();
+			await Promise.all(refresh.mock.results.map((result) => result.value));
+			expect(runtime.getModel("extension-oauth", "credential-model")).toBeDefined();
+		} finally {
+			refresh.mockRestore();
+		}
 
 		await runtime.logout("extension-oauth");
 		expect(runtime.getModel("extension-oauth", "credential-model")).toBeUndefined();

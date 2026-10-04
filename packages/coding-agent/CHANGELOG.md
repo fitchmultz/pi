@@ -21,6 +21,8 @@
 
 ### Fixed
 
+- Fixed overlapping full model refreshes publishing out of order or returning before models and auth are ready, including SDK and CLI startup. Cancelling a later refresh no longer drops pending provider registration or disposal.
+- Fixed nested headless Pi sessions inheriting the primary working-session socket and exit receipt through extension factories and shell tools.
 - Fixed native working-session service creation loading resources before rejecting a mismatched journal; SDK, CLI and services now share read-only admission before factories.
 - Fixed `/reload` re-enabling previously deselected default-active extension tools; new defaults and tools newly added to `defaultTools` still activate.
 - Fixed resized-image coordinate notes to use separate, unrounded x and y scales.
