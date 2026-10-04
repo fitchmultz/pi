@@ -12,7 +12,7 @@ First things first: **pi's core is minimal**.
 
 If your feature does not belong in the core, it should be an extension. PRs that bloat the core will likely be rejected.
 
-Pi's core exists to be minimal and to be extensible so that it can be influenced and manipulated by extensions.  Even hook points for extensions however should be well considered and discussed to avoid adding unmaintainable bloat and complex interactions.
+Pi's core exists to be minimal and to be extensible so that it can be influenced and manipulated by extensions.  Hook points for extensions should also be well considered to avoid unmaintainable bloat and complex interactions. Upstream contributors should discuss material core/API proposals with upstream maintainers; owner-authorized fork work follows the settled architecture in [FORK.md](FORK.md) without reopening routine implementation decisions.
 
 ## The One Rule
 
@@ -61,14 +61,14 @@ If you send a large volume of issues through automation, your GitHub account wil
 
 Unless you have `admin`, `maintain`, or `write` access to the target repository, do not open a PR until a maintainer of that repository has approved you using `lgtm` in the command position described above.
 
-Before submitting a PR to either upstream or the fork:
+Before submitting a code-changing PR to either upstream or the fork:
 
 ```bash
 npm run check
 ./test.sh
 ```
 
-Both must pass.
+Both must pass. For guidance-only or other docs-only changes, inspect the complete diff and validate affected links, commands and policy consistency; do not rebuild unchanged runtime code or add source-string tests. Required hooks, CI checks and repository review rules still apply.
 
 Contributors must not edit `CHANGELOG.md`. Authorized maintainers follow the [changelog procedures in AGENTS.md](AGENTS.md#changelog).
 

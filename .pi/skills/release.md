@@ -7,9 +7,11 @@ description: Prepare, publish, verify, and recover pi releases. Use for release 
 
 Run repository commands from the repo root (two directories above this skill), unless instructed otherwise.
 
+This is the upstream/public package release procedure, not ordinary fork delivery. In `fitchmultz/pi`, use [FORK.md](../../FORK.md#install-and-activate) for local runtime installation; public publishing needs authorization beyond standing fork delivery. A request to publish includes its normal release prerequisites, so do not reconfirm them. Guidance-only changes need no runtime build or activation.
+
 **Lockstep versioning**: all packages share one version; every release updates all together. `patch` = fixes + additions, `minor` = breaking changes. No major releases.
 
-1. **Update CHANGELOGs**: ask the user whether they ran the `/cl` prompt on the latest commit on `main`. If not, they must run `/cl` first to audit and update each package's `[Unreleased]` section before releasing.
+1. **Update CHANGELOGs**: audit all commits since the last release using the [changelog prompt](../prompts/cl.md) and repair missing entries in each affected package's `[Unreleased]` section. Reuse a completed audit only if it covers the current release source; perform missing work yourself rather than requiring the user to run `/cl`.
 
 2. **Local smoke test**: build an unpublished release and smoke test from outside the repo (so it can't resolve workspace files):
    ```bash
