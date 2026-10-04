@@ -17,6 +17,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { requestRestart } from "../src/cli/restart-protocol.ts";
+import type { TuiMode } from "../src/core/settings-manager.ts";
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = process.env.PI_TEST_CLI ?? join(packageDir, "dist", "bundle", "cli.js");
@@ -49,7 +50,12 @@ function fixture(rootDir = tmpdir()) {
 	for (const path of [home, agentDir, cwd]) mkdirSync(path, { recursive: true });
 	writeFileSync(
 		join(agentDir, "settings.json"),
-		JSON.stringify({ quietStartup: true, enableInstallTelemetry: false, experimental: { firstTimeSetup: false } }),
+		JSON.stringify({
+			tuiMode: "regular",
+			quietStartup: true,
+			enableInstallTelemetry: false,
+			experimental: { firstTimeSetup: false },
+		}),
 	);
 	const log = join(root, "receipts.jsonl");
 	const status = join(root, "exit-code");
@@ -113,7 +119,10 @@ export default function(pi) {
 			);
 			return path;
 		},
-		start(extension: string, options: { env?: Record<string, string>; invalidHandoff?: unknown } = {}) {
+		start(
+			extension: string,
+			options: { env?: Record<string, string>; invalidHandoff?: unknown; tuiMode?: TuiMode } = {},
+		) {
 			if (!existsSync(cli)) throw new Error(`Build the coding-agent package first: missing ${cli}`);
 			const script = join(root, "launch.sh");
 			let entry = cli;
@@ -152,7 +161,7 @@ child.on('exit', code => {process.exitCode = code ?? 1;});
 				"--no-themes",
 				"--no-approve",
 				"--tui-mode",
-				"regular",
+				options.tuiMode ?? "regular",
 				"--provider",
 				"faux",
 				"--model",
@@ -194,6 +203,13 @@ child.on('exit', code => {process.exitCode = code ?? 1;});
 			return execFileSync("tmux", ["-L", socket, "capture-pane", "-p", "-S", "-200", "-t", "test"], {
 				encoding: "utf8",
 			});
+		},
+		isFullscreen() {
+			return (
+				execFileSync("tmux", ["-L", socket, "display-message", "-p", "-t", "test", "#{alternate_on}"], {
+					encoding: "utf8",
+				}).trim() === "1"
+			);
 		},
 		keys(...keys: string[]) {
 			execFileSync("tmux", ["-L", socket, "send-keys", "-t", "test", ...keys]);
@@ -239,7 +255,7 @@ afterEach(async () => {
 
 // Real terminal, private tmux socket, isolated HOME and faux provider: no network or paid requests.
 describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_CLI)", () => {
-	it("keeps primary working-session ownership out of factory and headless bash children across restart", async () => {
+	it("preserves fullscreen and primary working-session ownership across restart and completed exit", async () => {
 		const f = fixture("/tmp");
 		const socketPath = join(f.root, "working.sock");
 		const exitPath = join(f.root, "completed.json");
@@ -280,6 +296,7 @@ export default function(pi) {
 		const command = `${childArgs} -p 'nested text' && ${childArgs} --mode json 'nested json'`;
 		f.start(f.extension("v1", { nested: { probe, command, exitPath } }), {
 			env: { PI_WORKING_SESSION_SOCKET: socketPath, PI_WORKING_SESSION_EXIT_PATH: exitPath },
+			tuiMode: "fullscreen",
 		});
 		await f.wait((rows) => rows.some((row) => row.event === "settled"));
 		const first = f.read().find((row) => row.event === "start")!;
@@ -307,6 +324,10 @@ export default function(pi) {
 				);
 				const grant = JSON.parse((await replies.next()).value!);
 				expect(grant).toMatchObject({ ok: true, sleepReady: true, guardPath: `${socketPath}.guard` });
+				expect(JSON.parse(readFileSync(grant.path, "utf8"))).toMatchObject({
+					mode: { kind: "tui", data: { tuiMode: "fullscreen" } },
+					settings: { tuiMode: "regular" },
+				});
 				expect(JSON.parse(readFileSync(grant.guardPath, "utf8"))).toMatchObject({
 					token: grant.token,
 					worker: grant.worker,
@@ -342,6 +363,7 @@ export default function(pi) {
 		expect(after.pid).toBe(second.pid);
 		expect(after.worker).not.toBe(before.worker);
 		expect(after.launch).toBe(before.launch);
+		expect(f.isFullscreen()).toBe(true);
 		f.keys("/quit", "Enter");
 		await f.wait(() => existsSync(f.status));
 		expect(readFileSync(f.status, "utf8").trim()).toBe("0");
@@ -355,7 +377,13 @@ export default function(pi) {
 			launcher: after.launch,
 		});
 		expect(completed.digest).toBe(createHash("sha256").update(readFileSync(completed.path)).digest("hex"));
-		expect(JSON.parse(readFileSync(completed.path, "utf8")).header.id).toBe(first.sessionId);
+		expect(JSON.parse(readFileSync(completed.path, "utf8"))).toMatchObject({
+			header: { id: first.sessionId },
+			mode: { kind: "tui", data: { tuiMode: "fullscreen" } },
+			settings: { tuiMode: "regular" },
+		});
+		expect(f.screen()).toContain("Continuation handled");
+		expect(f.isFullscreen()).toBe(false);
 		expect(existsSync(socketPath)).toBe(false);
 		expect(existsSync(`${socketPath}.guard`)).toBe(false);
 	}, 60_000);
@@ -375,8 +403,9 @@ export default function(pi) {
 			} else symlinkSync(resolve(dirname(cli), "../.."), candidate, "dir");
 			const command = `test -z "$PI_MANAGED_CLI" && ${quote(process.execPath)} ${quote(cli)} restart --runtime ${quote(candidate)} -e ${quote(v2)} --message 'Continue the task once'`;
 			const v1 = f.extension("v1", { restartCommand: command });
-			f.start(v1);
+			f.start(v1, { tuiMode: "fullscreen" });
 			await f.wait((r) => r.filter((x) => x.event === "settled").length === 2);
+			expect(f.isFullscreen()).toBe(true);
 			const receipts = f.read();
 			const starts = receipts.filter((r) => r.event === "start");
 			expect(starts).toHaveLength(2);
