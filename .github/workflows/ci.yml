@@ -82,11 +82,17 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Build
-        run: npm run build
+        run: |
+          root="$PWD"
+          cd "$(dirname "$root")/$(basename "$root" | tr '[:lower:]' '[:upper:]')"
+          npm run build
 
       - name: Restart and background_command tests
         working-directory: packages/coding-agent
         run: node ../../node_modules/vitest/dist/cli.js --run restart background-command
+
+      - name: Case-insensitive workspace build
+        run: node --test scripts/workspace-build.test.mjs
 
   mcp-conformance:
     runs-on: ubuntu-latest
