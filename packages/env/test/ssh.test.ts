@@ -1,0 +1,162 @@
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer, Socket } from "node:net";
+import { tmpdir, userInfo } from "node:os";
+import { join, resolve } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { getOrThrow } from "@earendil-works/pi-durable/env";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { RemoteExecutionEnv } from "../src/remote-env.ts";
+import {
+	acceptHostKey,
+	connectSsh,
+	HostKeyChangedError,
+	HostKeyUnknownError,
+	type SshTarget,
+	scanHostKey,
+} from "../src/ssh.ts";
+
+const daemon = resolve(import.meta.dirname, "../daemon/target/debug/pi-env");
+const version = (
+	JSON.parse(readFileSync(resolve(import.meta.dirname, "../package.json"), "utf8")) as { version: string }
+).version;
+const context = BACKGROUND_CONTEXT;
+
+function which(program: string): string | undefined {
+	try {
+		return execFileSync("sh", ["-c", `command -v ${program}`], { encoding: "utf8" }).trim() || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+const sshd =
+	process.platform === "win32"
+		? undefined
+		: (which("sshd") ?? (existsSync("/usr/sbin/sshd") ? "/usr/sbin/sshd" : undefined));
+
+async function freePort(): Promise<number> {
+	return new Promise((resolve) => {
+		const server = createServer().listen(0, "127.0.0.1", () => {
+			const { port } = server.address() as { port: number };
+			server.close(() => resolve(port));
+		});
+	});
+}
+
+async function waitForPort(port: number): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		const open = await new Promise<boolean>((resolve) => {
+			const socket = new Socket();
+			socket.once("connect", () => resolve(true)).once("error", () => resolve(false));
+			socket.connect(port, "127.0.0.1");
+		}).finally(() => undefined);
+		if (open) return;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	throw new Error("sshd did not start");
+}
+
+// A disposable sshd on localhost with its own host key, client key and home directory.
+describe.skipIf(sshd === undefined)("SSH bootstrap", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-env-ssh-"));
+	const home = join(root, "home");
+	let server: ChildProcess | undefined;
+	let target: SshTarget;
+
+	beforeAll(async () => {
+		execFileSync("mkdir", ["-p", home]);
+		execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", join(root, "host_key")]);
+		execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", join(root, "client_key")]);
+		writeFileSync(join(root, "authorized_keys"), readFileSync(join(root, "client_key.pub")));
+		const port = await freePort();
+		writeFileSync(
+			join(root, "sshd_config"),
+			[
+				`Port ${port}`,
+				"ListenAddress 127.0.0.1",
+				`HostKey ${join(root, "host_key")}`,
+				`AuthorizedKeysFile ${join(root, "authorized_keys")}`,
+				`PidFile ${join(root, "sshd.pid")}`,
+				"PasswordAuthentication no",
+				"KbdInteractiveAuthentication no",
+				"StrictModes no",
+				`SetEnv HOME=${home}`,
+				"",
+			].join("\n"),
+		);
+		writeFileSync(join(root, "ssh_config"), "");
+		server = spawn(sshd!, ["-D", "-e", "-f", join(root, "sshd_config")], { stdio: "ignore" });
+		await waitForPort(port);
+		target = {
+			host: "127.0.0.1",
+			port,
+			user: userInfo().username,
+			identityFile: join(root, "client_key"),
+			knownHostsFile: join(root, "known_hosts"),
+			hostKeyAlias: "pi-env-test",
+			configFile: join(root, "ssh_config"),
+		};
+	});
+
+	afterAll(() => {
+		server?.kill();
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("refuses an untrusted host, then deploys and runs the daemon once its key is accepted", async () => {
+		await expect(connectSsh({ ...target, binary: daemon })).rejects.toBeInstanceOf(HostKeyUnknownError);
+
+		const scanned = await scanHostKey(target);
+		const expected = execFileSync("ssh-keygen", ["-lf", join(root, "host_key.pub")], { encoding: "utf8" }).split(
+			" ",
+		)[1];
+		expect(scanned.fingerprints.join("\n")).toContain(expected);
+		await acceptHostKey(target, scanned.lines);
+
+		const { connection, remote } = await connectSsh({ ...target, binary: daemon });
+		try {
+			expect(remote.home).toBe(home);
+			const deployed = readFileSync(join(home, ".pi/mobile/tools", `pi-env-${version}`));
+			expect(deployed.equals(readFileSync(daemon))).toBe(true);
+			const env = new RemoteExecutionEnv({ connection, id: "pi-env:test", cwd: home });
+			getOrThrow(await env.writeFile("over-ssh.txt", "hello", context));
+			expect(getOrThrow(await env.readTextFile("over-ssh.txt", context))).toBe("hello");
+			const output: string[] = [];
+			const result = getOrThrow(
+				await env.exec(["sh", "-c", 'printf "%s" "$HOME"'], { onOutput: (text) => output.push(text) }, context),
+			);
+			expect(result.exitCode).toBe(0);
+			expect(output.join("")).toBe(home);
+		} finally {
+			connection.close();
+		}
+	}, 60_000);
+
+	it("reuses a verified daemon and replaces a tampered one", async () => {
+		const file = join(home, ".pi/mobile/tools", `pi-env-${version}`);
+		const before = statSync(file).mtimeMs;
+		(await connectSsh({ ...target, binary: daemon })).connection.close();
+		expect(statSync(file).mtimeMs).toBe(before);
+
+		writeFileSync(file, "tampered");
+		const { connection } = await connectSsh({ ...target, binary: daemon });
+		try {
+			expect(readFileSync(file).equals(readFileSync(daemon))).toBe(true);
+			expect((await connection.info()).home).toBe(home);
+		} finally {
+			connection.close();
+		}
+	}, 60_000);
+
+	it("refuses a changed host key", async () => {
+		const other = join(root, "other_key");
+		execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", other]);
+		const key = readFileSync(`${other}.pub`, "utf8").split(" ").slice(0, 2).join(" ");
+		const knownHosts = join(root, "changed_known_hosts");
+		writeFileSync(knownHosts, `pi-env-test ${key}\n`);
+		await expect(connectSsh({ ...target, knownHostsFile: knownHosts, binary: daemon })).rejects.toBeInstanceOf(
+			HostKeyChangedError,
+		);
+	}, 60_000);
+});

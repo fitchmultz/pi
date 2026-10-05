@@ -440,7 +440,7 @@ describe("resolveCliModel", () => {
 			...mockModels[1],
 			id: "gpt-5.6-sol",
 			name: "GPT 5.6 Sol",
-			provider: "azure-openai-responses",
+			provider: "azure",
 		};
 		const codexModel: Model<"anthropic-messages"> = {
 			...mockModels[1],
@@ -468,7 +468,7 @@ describe("resolveCliModel", () => {
 			...mockModels[1],
 			id: "gpt-5.6-sol",
 			name: "GPT 5.6 Sol",
-			provider: "azure-openai-responses",
+			provider: "azure",
 		};
 		const codexModel: Model<"anthropic-messages"> = {
 			...mockModels[1],
@@ -488,7 +488,7 @@ describe("resolveCliModel", () => {
 
 		expect(result.model).toBeUndefined();
 		expect(result.error).toContain('Model "gpt-5.6-sol" is ambiguous across providers');
-		expect(result.error).toContain("azure-openai-responses/gpt-5.6-sol");
+		expect(result.error).toContain("azure/gpt-5.6-sol");
 		expect(result.error).toContain("openai-codex/gpt-5.6-sol");
 		expect(result.error).toContain("Use --provider or provider/model");
 	});
