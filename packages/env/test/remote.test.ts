@@ -36,12 +36,16 @@ describe("RemoteExecutionEnv", () => {
 		});
 		const watched = join(env.cwd, "watched");
 		const staged = join(env.cwd, "staged");
-		const directory = "d".repeat(180);
+		const windows = process.platform === "win32";
+		const directory = "d".repeat(windows ? 10 : 180);
 		const leaf = join(staged, directory, directory);
 		mkdirSync(watched);
 		mkdirSync(leaf, { recursive: true });
 		// On POSIX, escaping makes the JSON exceed the budget even though the raw paths fit.
-		const suffix = `${(process.platform === "win32" ? "x" : "\x01").repeat(220)}é`;
+		// On Windows, multibyte names exceed the frame budget without crossing legacy path-length limits.
+		const suffix = windows
+			? "漢".repeat(Math.min(180, 240 - join(watched, directory, directory, "000000").length))
+			: `${"\x01".repeat(220)}é`;
 		const sample = join(watched, directory, directory, `000000${suffix}`);
 		const frameLimit = 16 * 1024 * 1024;
 		const count = Math.ceil(frameLimit / (Buffer.byteLength(JSON.stringify(sample)) + 1)) + 100;
@@ -52,7 +56,7 @@ describe("RemoteExecutionEnv", () => {
 			paths.push(join(watched, directory, directory, name));
 		}
 		expect(Buffer.byteLength(JSON.stringify({ kind: "change", paths }))).toBeGreaterThan(frameLimit);
-		if (process.platform !== "win32") {
+		if (!windows) {
 			expect(paths.reduce((bytes, path) => bytes + Buffer.byteLength(path), 0)).toBeLessThan(frameLimit);
 		}
 		const changes: WatchChange[] = [];
@@ -62,6 +66,7 @@ describe("RemoteExecutionEnv", () => {
 		const { pid } = await connection.info();
 		try {
 			renameSync(join(staged, directory), join(watched, directory));
+			getOrThrow(await env.fileInfo(sample, withAbortSignal(AbortSignal.timeout(5000), context)));
 			await expect
 				.poll(() => changes.some((change) => "overflow" in change && change.overflow), { timeout: 15_000 })
 				.toBe(true);
