@@ -263,28 +263,44 @@ describe("AgentSession MCP integration", () => {
 		expect(harness.session.getActiveToolNames()).toEqual([]);
 	});
 
-	it("does not declare unnamed MCP tools restored from the transcript", async () => {
-		const first = await setup("direct");
-		first.harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
-		await first.harness.session.prompt("first");
-		await first.harness.session.prompt("second");
-		expect(declaredToolNames(first.harness)).toContain("mcp__docs__search");
+	// Regression: fitchmultz/pi#189.
+	it.each(["direct", "codemode"] as const)(
+		"keeps restored sessions usable without declaring unnamed %s MCP tools from the transcript",
+		async (exposure) => {
+			const first = await setup("direct");
+			first.harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+			await first.harness.session.prompt("first");
+			await first.harness.session.prompt("second");
+			expect(declaredToolNames(first.harness)).toContain("mcp__docs__search");
 
-		// Like `pi --tools read,codemode -c` followed by /tree.
-		const second = await setup("direct", undefined, {
-			allowedToolNames: ["read", "codemode"],
-			sessionManager: first.harness.sessionManager,
-		});
-		const firstAssistant = second.harness.sessionManager
-			.getBranch()
-			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
-		if (!firstAssistant) throw new Error("No assistant entry");
-		await second.harness.session.navigateTree(firstAssistant.id);
+			// Like `pi --tools read,codemode -c` followed by /tree.
+			const second = await setup(exposure, undefined, {
+				allowedToolNames: ["read", "codemode"],
+				sessionManager: first.harness.sessionManager,
+			});
+			const hold = await second.harness.session.acquireWorkingSession();
+			await hold.release();
+			second.harness.session.restoreWorkingSession(hold.state);
+			const firstAssistant = second.harness.sessionManager
+				.getBranch()
+				.find((entry) => entry.type === "message" && entry.message.role === "assistant");
+			if (!firstAssistant) throw new Error("No assistant entry");
+			await second.harness.session.navigateTree(firstAssistant.id);
 
-		// The transcript's loadout is restored without the MCP tools it declared.
-		expect(second.harness.session.getActiveToolNames()).toEqual([]);
-		expect(second.harness.session.getAllTools().map((tool) => tool.name)).toContain("mcp__docs__search");
-	});
+			// The transcript's loadout is restored without the MCP tools it declared.
+			expect(second.harness.session.getActiveToolNames()).toEqual([]);
+			expect(second.harness.session.getAllTools().map((tool) => tool.name)).toContain("mcp__docs__search");
+			second.harness.setResponses([fauxAssistantMessage("resumed")]);
+			await second.harness.session.prompt("continue after navigation");
+			expect(getAssistantTexts(second.harness).at(-1)).toBe("resumed");
+			const saved = await second.harness.session.acquireWorkingSession();
+			try {
+				expect(saved.state.pendingTools).toEqual([]);
+			} finally {
+				await saved.release();
+			}
+		},
+	);
 
 	it("lets tool_search declare unnamed MCP tools when --tools names it", async () => {
 		const { harness } = await setup("deferred", undefined, { allowedToolNames: ["tool_search"] });

@@ -1800,7 +1800,10 @@ export class AgentSession {
 
 	private _setActiveTools(toolNames: string[]): void {
 		const tools = this._applyToolLoadout(toolNames);
-		for (const tool of tools) this._pendingToolNames.delete(tool.name);
+		// Registered tools are no longer pending even when policy keeps them out of declarations.
+		for (const name of this._pendingToolNames) {
+			if (this._toolRegistry.has(name)) this._pendingToolNames.delete(name);
+		}
 		this._rebuildSystemPrompt(tools.map((tool) => tool.name));
 	}
 
