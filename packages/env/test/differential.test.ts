@@ -1,6 +1,7 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ToolExecutionApi } from "@earendil-works/pi-durable";
@@ -10,11 +11,8 @@ import { createBashTool, createReadTool } from "@earendil-works/pi-durable/tools
 import { afterAll, describe, expect, it } from "vitest";
 import { Connection } from "../src/connection.ts";
 import { RemoteExecutionEnv } from "../src/remote-env.ts";
+import { daemon } from "./daemon.ts";
 
-const daemon = resolve(
-	import.meta.dirname,
-	`../daemon/target/debug/pi-env${process.platform === "win32" ? ".exe" : ""}`,
-);
 const connection = new Connection({ command: [daemon] });
 const context: Context = BACKGROUND_CONTEXT;
 const dirs: string[] = [];
@@ -69,6 +67,8 @@ const CONTENTS: (string | Uint8Array)[] = [
 	"\ufeffbom\r\nline",
 	Uint8Array.from([0xe2, 0x82, 0x0a, 0xff, 0xef, 0xbb, 0xbf]),
 	"x".repeat(70_000),
+	// Crosses write chunks, read chunks and multi-byte characters split between them.
+	"é".repeat(300_001),
 ];
 
 type Operation = (env: ExecutionEnv) => Promise<unknown>;
@@ -237,6 +237,74 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 			}
 		}
 	}, 120_000);
+
+	it.skipIf(process.platform === "win32")(
+		"reads devices, FIFOs and directories like Node",
+		async () => {
+			const { local, remote, roots } = pair();
+			const results = async (env: ExecutionEnv, root: string) => {
+				const fifo = join(root, "fifo");
+				const made = await env.exec(["mkfifo", fifo], undefined, context);
+				if (!made.ok || made.value.exitCode !== 0) throw new Error("mkfifo failed");
+				await env.createDir("dir", undefined, context);
+				// A writer for each blocking open of the FIFO.
+				const write = (text: string) => spawn("sh", ["-c", `printf '%s' "$1" > "$2"`, "sh", text, fifo]);
+				write("fifo text\n");
+				const fifoText = await env.readTextFile("fifo", context);
+				write("fifo bytes");
+				const fifoBytes = await env.readBinaryFile("fifo", context);
+				write("x");
+				const fifoLines = await env.readTextLines("fifo", undefined, context);
+				const dirReader = await env.openTextLineReader("dir", context);
+				const dirLine = dirReader.ok ? await dirReader.value.readLine(context) : undefined;
+				if (dirReader.ok) await dirReader.value.close(context);
+				return normalize(
+					{
+						nullText: await env.readTextFile("/dev/null", context),
+						nullBytes: await env.readBinaryFile("/dev/null", context),
+						nullLines: await env.readTextLines("/dev/null", undefined, context),
+						fifoText,
+						fifoBytes,
+						fifoLines,
+						dirReaderOpened: dirReader.ok,
+						dirLine,
+						dirText: await env.readTextFile("dir", context),
+						dirBytes: await env.readBinaryFile("dir", context),
+					},
+					root,
+				);
+			};
+			expect(await results(remote, roots[1])).toEqual(await results(local, roots[0]));
+		},
+		30_000,
+	);
+
+	// macOS file systems refuse names that are not UTF-8.
+	it.skipIf(process.platform !== "linux" && process.platform !== "android")(
+		"lists names that are not UTF-8 like Node",
+		async () => {
+			const { local, remote, roots } = pair();
+			for (const root of roots) {
+				for (const name of [[0x62], [0x61, 0xff], [0xc3, 0xa9], [0x61, 0xfe, 0x7a], [0x7a]]) {
+					writeFileSync(Buffer.concat([Buffer.from(`${root}/`), Buffer.from(name)]), "x");
+				}
+			}
+			const results = async (env: ExecutionEnv, root: string) => {
+				const reader = await env.openDirReader(".", context);
+				const pages: unknown[] = [];
+				if (reader.ok) {
+					for (let done = false; !done; ) {
+						const page = await reader.value.next(2, context);
+						pages.push(page);
+						done = !page.ok || page.value.done;
+					}
+					await reader.value.close(context);
+				}
+				return normalize({ list: await env.listDir(".", context), pages }, root);
+			};
+			expect(await results(remote, roots[1])).toEqual(await results(local, roots[0]));
+		},
+	);
 
 	it("gives the same read and bash tool results", async () => {
 		const { local, remote, roots } = pair();

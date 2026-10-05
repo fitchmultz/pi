@@ -13,6 +13,8 @@ const MAX_FRAME = 16 * 1024 * 1024;
 const PING_INTERVAL_MS = 5000;
 /** The daemon pings every five seconds; this much silence means the connection is gone. */
 const SILENCE_LIMIT_MS = 30_000;
+/** How long starting the daemon and its `hello` may take. */
+const START_TIMEOUT_MS = 60_000;
 
 export type Json = Record<string, unknown>;
 
@@ -41,6 +43,10 @@ export interface RemoteInfo {
 	tmpdir: string;
 	/** Path separator: `/`, or `\\` on Windows. */
 	separator: string;
+	/** The daemon's working directory, where Node's `path.resolve` would fall back to `process.cwd()`. */
+	cwd: string;
+	/** Windows: per-drive working directories (`C:` → `C:\\work`) of the `=C:` variables. */
+	driveCwds: Record<string, string>;
 	pid: number;
 }
 
@@ -49,10 +55,19 @@ export interface ConnectionOptions {
 	command: readonly string[];
 	/** Receives the daemon's and the transport's diagnostic output. */
 	onLog?: (text: string) => void;
+	/** Runs before each start of the daemon, e.g. to verify or deploy it; a failure fails that start. */
+	beforeStart?: () => Promise<void>;
+}
+
+export interface Reply {
+	json: Json;
+	payload: Uint8Array;
+	/** The daemon session that answered; handles from it are only valid while it lives. */
+	session: number;
 }
 
 type Pending = {
-	resolve: (value: { json: Json; payload: Uint8Array }) => void;
+	resolve: (value: Reply) => void;
 	reject: (error: Error) => void;
 	onEvent?: (json: Json, payload: Uint8Array) => void;
 };
@@ -63,12 +78,22 @@ export interface RequestOptions {
 	signal?: AbortSignal;
 	/** Progress events of the request, such as `exec` output. */
 	onEvent?: (json: Json, payload: Uint8Array) => void;
-	/** The request's id, for `kill`. */
-	onStart?: (id: number) => void;
+	/** The request's id and session, for `kill`. */
+	onStart?: (id: number, session: number) => void;
+	/**
+	 * Only run in this daemon session, for requests on handles it opened. After the connection was lost and started
+	 * again, such requests fail instead of reaching a daemon that never opened the handle.
+	 */
+	session?: number;
+}
+
+/** Lone surrogates become U+FFFD, as Node encodes strings for system calls. */
+function wellFormed(_key: string, value: unknown): unknown {
+	return typeof value === "string" ? value.toWellFormed() : value;
 }
 
 function frame(type: number, id: number, json: Json, payload: Uint8Array = new Uint8Array(0)): Buffer {
-	const body = Buffer.from(JSON.stringify(json), "utf8");
+	const body = Buffer.from(JSON.stringify(json, wellFormed), "utf8");
 	const header = Buffer.alloc(13);
 	header.writeUInt32BE(9 + body.length + payload.length, 0);
 	header.writeUInt8(type, 4);
@@ -77,21 +102,73 @@ function frame(type: number, id: number, json: Json, payload: Uint8Array = new U
 	return Buffer.concat([header, body, payload]);
 }
 
+/** The connection failed or ended; a request may succeed once it is started again. */
+function lost(message: string): RemoteError {
+	return new RemoteError({ code: "unknown", message, lost: true });
+}
+
+/** Whether an error means the connection was lost, not that the daemon refused the request. */
+export function isConnectionLost(error: unknown): boolean {
+	return error instanceof RemoteError && error.fields.lost === true;
+}
+
+function closed(): RemoteError {
+	return new RemoteError({ code: "unknown", message: "Connection closed" });
+}
+
+/** One running daemon. */
+class Session {
+	readonly id: number;
+	readonly child: ChildProcessWithoutNullStreams;
+	readonly token: string;
+	readonly pending = new Map<number, Pending>();
+	/** Received bytes not yet parsed, without concatenating on every chunk. */
+	chunks: Buffer[] = [];
+	buffered = 0;
+	synced = false;
+	lastSeen = Date.now();
+	timer: ReturnType<typeof setInterval> | undefined;
+	live = true;
+
+	constructor(id: number, child: ChildProcessWithoutNullStreams, token: string) {
+		this.id = id;
+		this.child = child;
+		this.token = token;
+	}
+
+	/** The first `length` buffered bytes as one buffer, without consuming them. */
+	peek(length: number): Buffer {
+		if (this.chunks[0]!.length < length) {
+			this.chunks = [Buffer.concat(this.chunks)];
+		}
+		return this.chunks[0]!.subarray(0, length);
+	}
+
+	consume(length: number): void {
+		this.buffered -= length;
+		while (length > 0) {
+			const first = this.chunks[0]!;
+			if (first.length <= length) {
+				this.chunks.shift();
+				length -= first.length;
+			} else {
+				this.chunks[0] = first.subarray(length);
+				length = 0;
+			}
+		}
+	}
+}
+
 /**
  * One connection to a pi-env daemon: started lazily on the first request and started again after it is lost. Requests
  * in flight when it is lost fail with code `unknown`; for mutations their outcome is then unknown.
  */
 export class Connection {
 	readonly #options: ConnectionOptions;
-	#child: ChildProcessWithoutNullStreams | undefined;
-	#ready: Promise<RemoteInfo> | undefined;
-	#pending = new Map<number, Pending>();
+	#session: Session | undefined;
+	#ready: Promise<{ info: RemoteInfo; session: Session }> | undefined;
+	#sessions = 0;
 	#nextId = 1;
-	#buffer: Buffer = Buffer.alloc(0);
-	#synced = false;
-	#token = "";
-	#lastSeen = 0;
-	#timer: ReturnType<typeof setInterval> | undefined;
 	#closed = false;
 
 	constructor(options: ConnectionOptions) {
@@ -99,34 +176,59 @@ export class Connection {
 	}
 
 	/** Connect if needed and return what the daemon reported about its machine. */
-	info(): Promise<RemoteInfo> {
-		if (this.#closed) return Promise.reject(new RemoteError({ code: "unknown", message: "Connection closed" }));
-		this.#ready ??= this.#start();
-		return this.#ready;
+	async info(): Promise<RemoteInfo> {
+		return (await this.#connect()).info;
 	}
 
-	async request(op: string, json: Json, options: RequestOptions = {}): Promise<{ json: Json; payload: Uint8Array }> {
-		await this.info();
-		return this.#send(op, json, options);
+	/** Connect if needed and return the live session's id. */
+	async session(): Promise<number> {
+		return (await this.#connect()).session.id;
+	}
+
+	async request(op: string, json: Json, options: RequestOptions = {}): Promise<Reply> {
+		if (options.session !== undefined) {
+			const current = this.#session;
+			if (current === undefined || current.id !== options.session || !current.live) {
+				throw lost("pi-env connection lost");
+			}
+			return this.#send(current, op, json, options);
+		}
+		const { session } = await this.#connect();
+		return this.#send(session, op, json, options);
 	}
 
 	/** Stop the daemon; it kills everything it started. */
 	close(): void {
 		this.#closed = true;
-		this.#teardown(new RemoteError({ code: "unknown", message: "Connection closed" }));
+		if (this.#session) this.#teardown(this.#session, closed());
 	}
 
 	/** Kill one `exec` without aborting it. */
-	kill(id: number): void {
-		this.#write(frame(CANCEL, id, { mode: "kill" }));
+	kill(id: number, session: number): void {
+		const current = this.#session;
+		if (current?.id === session && current.live) this.#write(current, frame(CANCEL, id, { mode: "kill" }));
 	}
 
-	#send(op: string, json: Json, options: RequestOptions): Promise<{ json: Json; payload: Uint8Array }> {
+	#connect(): Promise<{ info: RemoteInfo; session: Session }> {
+		if (this.#closed) return Promise.reject(closed());
+		if (this.#ready === undefined) {
+			const ready = this.#start();
+			this.#ready = ready;
+			// A failed start is not remembered: the next request tries again.
+			ready.catch(() => {
+				if (this.#ready === ready) this.#ready = undefined;
+			});
+		}
+		return this.#ready;
+	}
+
+	#send(session: Session, op: string, json: Json, options: RequestOptions): Promise<Reply> {
+		if (!session.live) return Promise.reject(lost("pi-env connection lost"));
 		const id = this.#nextId++;
 		return new Promise((resolve, reject) => {
-			const onAbort = () => this.#write(frame(CANCEL, id, {}));
+			const onAbort = () => this.#write(session, frame(CANCEL, id, {}));
 			const done = () => options.signal?.removeEventListener("abort", onAbort);
-			this.#pending.set(id, {
+			session.pending.set(id, {
 				resolve: (value) => {
 					done();
 					resolve(value);
@@ -138,112 +240,141 @@ export class Connection {
 				...(options.onEvent ? { onEvent: options.onEvent } : {}),
 			});
 			options.signal?.addEventListener("abort", onAbort, { once: true });
-			options.onStart?.(id);
-			this.#write(frame(REQUEST, id, { ...json, op }, options.payload));
+			options.onStart?.(id, session.id);
+			this.#write(session, frame(REQUEST, id, { ...json, op }, options.payload));
 			if (options.signal?.aborted) onAbort();
 		});
 	}
 
-	#write(data: Buffer): void {
-		this.#child?.stdin.write(data);
+	#write(session: Session, data: Buffer): void {
+		if (session.live) session.child.stdin.write(data);
 	}
 
-	async #start(): Promise<RemoteInfo> {
-		this.#token = randomBytes(16).toString("hex");
-		this.#synced = false;
-		this.#buffer = Buffer.alloc(0);
+	async #start(): Promise<{ info: RemoteInfo; session: Session }> {
 		const [program, ...args] = this.#options.command;
 		if (program === undefined) throw new RemoteError({ code: "spawn_error", message: "No daemon command" });
-		const child = spawn(program, [...args, "serve", "--token", this.#token], { stdio: ["pipe", "pipe", "pipe"] });
-		this.#child = child;
+		try {
+			await this.#options.beforeStart?.();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new RemoteError({ code: "spawn_error", message, lost: true });
+		}
+		if (this.#closed) throw closed();
+		const token = randomBytes(16).toString("hex");
+		const child = spawn(program, [...args, "serve", "--token", token], { stdio: ["pipe", "pipe", "pipe"] });
+		const session = new Session(++this.#sessions, child, token);
+		this.#session = session;
+		let startTimer: ReturnType<typeof setTimeout> | undefined;
 		const failed = new Promise<never>((_resolve, reject) => {
-			child.once("error", (error) => reject(new RemoteError({ code: "spawn_error", message: error.message })));
-			child.once("exit", (code) =>
-				reject(
-					new RemoteError({ code: "unknown", message: `pi-env exited with code ${code} before it was ready` }),
-				),
+			startTimer = setTimeout(
+				() => reject(lost(`pi-env did not answer within ${START_TIMEOUT_MS / 1000} s`)),
+				START_TIMEOUT_MS,
 			);
+			child.once("error", (error) =>
+				reject(new RemoteError({ code: "spawn_error", message: error.message, lost: true })),
+			);
+			child.once("exit", (code) => reject(lost(`pi-env exited with code ${code} before it was ready`)));
 		});
 		failed.catch(() => {});
-		child.stdout.on("data", (chunk: Buffer) => this.#onData(chunk));
+		child.stdout.on("data", (chunk: Buffer) => this.#onData(session, chunk));
 		child.stderr.on("data", (chunk: Buffer) => this.#options.onLog?.(chunk.toString("utf8")));
-		child.on("exit", () => {
-			if (this.#child === child)
-				this.#teardown(new RemoteError({ code: "unknown", message: "pi-env connection lost" }));
-		});
+		child.on("error", () => this.#teardown(session, lost("pi-env connection lost")));
+		child.on("exit", () => this.#teardown(session, lost("pi-env connection lost")));
 		child.stdin.on("error", () => {});
-		this.#lastSeen = Date.now();
-		this.#timer = setInterval(() => {
-			this.#write(frame(PING, 0, {}));
-			if (Date.now() - this.#lastSeen > SILENCE_LIMIT_MS) {
-				this.#teardown(new RemoteError({ code: "unknown", message: "pi-env connection timed out" }));
+		session.timer = setInterval(() => {
+			this.#write(session, frame(PING, 0, {}));
+			if (Date.now() - session.lastSeen > SILENCE_LIMIT_MS) {
+				this.#teardown(session, lost("pi-env connection timed out"));
 			}
 		}, PING_INTERVAL_MS);
-		this.#timer.unref();
-		const hello = this.#send("hello", { protocol: 1 }, {});
-		const { json } = await Promise.race([hello, failed]);
-		if (json.protocol !== 1)
-			throw new RemoteError({ code: "unknown", message: `Unsupported protocol ${json.protocol}` });
-		return json as unknown as RemoteInfo;
+		session.timer.unref();
+		try {
+			const { json } = await Promise.race([this.#send(session, "hello", { protocol: 1 }, {}), failed]);
+			if (json.protocol !== 1) throw lost(`Unsupported protocol ${json.protocol}`);
+			return { info: json as unknown as RemoteInfo, session };
+		} catch (error) {
+			this.#teardown(session, error instanceof Error ? error : lost(String(error)));
+			throw error;
+		} finally {
+			clearTimeout(startTimer);
+		}
 	}
 
-	#teardown(error: Error): void {
-		clearInterval(this.#timer);
-		this.#timer = undefined;
-		const child = this.#child;
-		this.#child = undefined;
-		this.#ready = undefined;
-		child?.stdin.end();
-		child?.kill();
-		const pending = [...this.#pending.values()];
-		this.#pending.clear();
+	#teardown(session: Session, error: Error): void {
+		if (!session.live) return;
+		session.live = false;
+		clearInterval(session.timer);
+		if (this.#session === session) {
+			this.#session = undefined;
+			this.#ready = undefined;
+		}
+		session.child.stdin.end();
+		session.child.kill();
+		const pending = [...session.pending.values()];
+		session.pending.clear();
 		for (const request of pending) request.reject(error);
 	}
 
-	#onData(chunk: Buffer): void {
-		this.#lastSeen = Date.now();
-		this.#buffer = this.#buffer.length === 0 ? chunk : Buffer.concat([this.#buffer, chunk]);
-		if (!this.#synced) {
+	#onData(session: Session, chunk: Buffer): void {
+		if (!session.live) return;
+		session.lastSeen = Date.now();
+		session.chunks.push(chunk);
+		session.buffered += chunk.length;
+		if (!session.synced) {
 			// Shell startup files may print before the daemon runs; skip everything before its sync line.
-			const marker = Buffer.from(`PI-ENV ${this.#token}\n`, "utf8");
-			const index = this.#buffer.indexOf(marker);
+			const marker = Buffer.from(`PI-ENV ${session.token}\n`, "utf8");
+			const all = session.peek(session.buffered);
+			const index = all.indexOf(marker);
 			if (index === -1) {
-				if (this.#buffer.length > 1024 * 1024) this.#buffer = this.#buffer.subarray(-marker.length);
+				if (session.buffered > 1024 * 1024) {
+					session.consume(session.buffered - marker.length);
+				}
 				return;
 			}
-			const noise = this.#buffer.subarray(0, index).toString("utf8").trim();
+			const noise = all.subarray(0, index).toString("utf8").trim();
 			if (noise !== "") this.#options.onLog?.(noise);
-			this.#buffer = this.#buffer.subarray(index + marker.length);
-			this.#synced = true;
+			session.consume(index + marker.length);
+			session.synced = true;
 		}
-		while (this.#buffer.length >= 4) {
-			const length = this.#buffer.readUInt32BE(0);
+		while (session.live && session.buffered >= 4) {
+			const length = session.peek(4).readUInt32BE(0);
 			if (length < 9 || length > MAX_FRAME) {
-				this.#teardown(new RemoteError({ code: "unknown", message: "Corrupt frame from pi-env" }));
+				this.#teardown(session, lost("Corrupt frame from pi-env"));
 				return;
 			}
-			if (this.#buffer.length < 4 + length) return;
-			const type = this.#buffer.readUInt8(4);
-			const id = this.#buffer.readUInt32BE(5);
-			const jsonLength = this.#buffer.readUInt32BE(9);
-			const json = JSON.parse(this.#buffer.subarray(13, 13 + jsonLength).toString("utf8")) as Json;
+			if (session.buffered < 4 + length) return;
+			const body = session.peek(4 + length).subarray(4);
+			const type = body.readUInt8(0);
+			const id = body.readUInt32BE(1);
+			const jsonLength = body.readUInt32BE(5);
+			let json: Json;
+			try {
+				if (9 + jsonLength > length) throw new Error("JSON length out of range");
+				const parsed: unknown = JSON.parse(body.subarray(9, 9 + jsonLength).toString("utf8"));
+				if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+					throw new Error("not an object");
+				json = parsed as Json;
+			} catch {
+				this.#teardown(session, lost("Corrupt frame from pi-env"));
+				return;
+			}
 			// A plain Uint8Array copy, like `NodeExecutionEnv`'s reader results, not a view of the receive buffer.
-			const payload = new Uint8Array(this.#buffer.subarray(13 + jsonLength, 4 + length));
-			this.#buffer = this.#buffer.subarray(4 + length);
-			this.#dispatch(type, id, json, payload);
+			const payload = new Uint8Array(body.subarray(9 + jsonLength));
+			session.consume(4 + length);
+			this.#dispatch(session, type, id, json, payload);
 		}
 	}
 
-	#dispatch(type: number, id: number, json: Json, payload: Uint8Array): void {
-		const pending = this.#pending.get(id);
+	#dispatch(session: Session, type: number, id: number, json: Json, payload: Uint8Array): void {
+		const pending = session.pending.get(id);
 		if (type === EVENT) {
 			pending?.onEvent?.(json, payload);
 			return;
 		}
 		if (type !== RESULT && type !== ERROR) return;
 		if (pending === undefined) return;
-		this.#pending.delete(id);
-		if (type === RESULT) pending.resolve({ json, payload });
+		session.pending.delete(id);
+		if (type === RESULT) pending.resolve({ json, payload, session: session.id });
 		else pending.reject(new RemoteError(json));
 	}
 }

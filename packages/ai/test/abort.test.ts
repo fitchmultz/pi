@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { complete, getModel, stream } from "../src/compat.ts";
+import { complete, getModel, registerFauxProvider, stream } from "../src/compat.ts";
+import { fauxAssistantMessage } from "../src/providers/faux.ts";
 import type { Api, Context, Model, StreamOptions } from "../src/types.ts";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
@@ -28,7 +29,7 @@ async function testAbortSignal<TApi extends Api>(llm: Model<TApi>, options: Stre
 	const controller = new AbortController();
 	const response = await stream(llm, context, { ...options, signal: controller.signal });
 	for await (const event of response) {
-		if (abortFired) return;
+		if (abortFired) continue;
 		if (event.type === "text_delta" || event.type === "thinking_delta") {
 			text += event.delta;
 		}
@@ -98,6 +99,20 @@ async function testAbortThenNewMessage<TApi extends Api>(llm: Model<TApi>, optio
 }
 
 describe("AI Providers Abort Tests", () => {
+	// https://github.com/earendil-works/pi/issues/10508
+	it("checks the aborted result and follow-up offline", async () => {
+		const faux = registerFauxProvider({ tokenSize: { min: 1, max: 1 }, tokensPerSecond: 1000 });
+		faux.setResponses([fauxAssistantMessage("a".repeat(104)), fauxAssistantMessage("Five names.")]);
+		try {
+			await testAbortSignal(faux.getModel());
+			expect(faux.state.callCount).toBe(2);
+			expect(faux.getPendingResponseCount()).toBe(0);
+			expect.assertions(6);
+		} finally {
+			faux.unregister();
+		}
+	});
+
 	describe.skipIf(!process.env.GEMINI_API_KEY)("Google Provider Abort", () => {
 		const llm = getModel("google", "gemini-2.5-flash");
 

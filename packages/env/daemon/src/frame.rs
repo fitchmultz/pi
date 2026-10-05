@@ -12,6 +12,8 @@ pub const PING: u8 = 6;
 
 /// Largest frame either side accepts.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
+/// Type, request id and JSON length, excluding the outer length prefix.
+pub const HEADER_SIZE: usize = 9;
 /// Largest payload a response carries, leaving room for its JSON.
 pub const MAX_PAYLOAD: usize = MAX_FRAME - 64 * 1024;
 
@@ -55,7 +57,7 @@ pub fn read_frame(input: &mut impl Read) -> io::Result<Option<Frame>> {
         Err(error) => return Err(error),
     }
     let length = u32::from_be_bytes(length) as usize;
-    if !(9..=MAX_FRAME).contains(&length) {
+    if !(HEADER_SIZE..=MAX_FRAME).contains(&length) {
         return Err(invalid("frame length out of range"));
     }
     let mut body = vec![0u8; length];
@@ -63,15 +65,16 @@ pub fn read_frame(input: &mut impl Read) -> io::Result<Option<Frame>> {
     let kind = body[0];
     let id = u32::from_be_bytes([body[1], body[2], body[3], body[4]]);
     let json_length = u32::from_be_bytes([body[5], body[6], body[7], body[8]]) as usize;
-    if 9 + json_length > length {
+    if HEADER_SIZE + json_length > length {
         return Err(invalid("JSON length out of range"));
     }
+    // Unparseable JSON leaves the framing intact: the frame arrives with `Value::Null` and gets an error reply.
     let json = if json_length == 0 {
         Value::Object(Default::default())
     } else {
-        serde_json::from_slice(&body[9..9 + json_length]).map_err(|_| invalid("invalid JSON"))?
+        serde_json::from_slice(&body[HEADER_SIZE..HEADER_SIZE + json_length]).unwrap_or(Value::Null)
     };
-    let payload = body[9 + json_length..].to_vec();
+    let payload = body[HEADER_SIZE + json_length..].to_vec();
     Ok(Some(Frame {
         kind,
         id,
@@ -82,8 +85,11 @@ pub fn read_frame(input: &mut impl Read) -> io::Result<Option<Frame>> {
 
 pub fn write_frame(output: &mut impl Write, frame: &Frame) -> io::Result<()> {
     let json = serde_json::to_vec(&frame.json).map_err(|_| invalid("unserializable JSON"))?;
-    let length = 9 + json.len() + frame.payload.len();
-    let mut header = Vec::with_capacity(13);
+    let length = HEADER_SIZE + json.len() + frame.payload.len();
+    if length > MAX_FRAME {
+        return Err(invalid("frame too large"));
+    }
+    let mut header = Vec::with_capacity(4 + HEADER_SIZE);
     header.extend_from_slice(&(length as u32).to_be_bytes());
     header.push(frame.kind);
     header.extend_from_slice(&frame.id.to_be_bytes());

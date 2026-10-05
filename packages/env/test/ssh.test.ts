@@ -1,8 +1,18 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, Socket } from "node:net";
 import { tmpdir, userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { getOrThrow } from "@earendil-works/pi-durable/env";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -10,16 +20,16 @@ import { RemoteExecutionEnv } from "../src/remote-env.ts";
 import {
 	acceptHostKey,
 	connectSsh,
+	forgetHostKey,
 	HostKeyChangedError,
 	HostKeyUnknownError,
 	type SshTarget,
 	scanHostKey,
 } from "../src/ssh.ts";
+import { daemon } from "./daemon.ts";
 
-const daemon = resolve(import.meta.dirname, "../daemon/target/debug/pi-env");
-const version = (
-	JSON.parse(readFileSync(resolve(import.meta.dirname, "../package.json"), "utf8")) as { version: string }
-).version;
+/** The deployed daemon is named by its content. */
+const deployedName = `pi-env-${createHash("sha256").update(readFileSync(daemon)).digest("hex").slice(0, 32)}`;
 const context = BACKGROUND_CONTEXT;
 
 function which(program: string): string | undefined {
@@ -56,6 +66,54 @@ async function waitForPort(port: number): Promise<void> {
 	}
 	throw new Error("sshd did not start");
 }
+
+describe("SSH known-hosts storage", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-env-known-hosts-"));
+	const knownHosts = join(root, "known_hosts");
+	const target: SshTarget = { host: "unused.invalid", hostKeyAlias: "pi-env-test", knownHostsFile: knownHosts };
+	// Synthetic keys exercise storage validation without an sshd or real credentials.
+	const first = "ssh-ed25519 AAAA";
+	const second = "ssh-ed25519 BBBB";
+
+	afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+	it("accepts only host keys for the alias and never replaces a trusted key silently", async () => {
+		await expect(acceptHostKey(target, [`other-alias ${first}`])).rejects.toThrow();
+		await expect(acceptHostKey(target, [`@cert-authority pi-env-test ${first}`])).rejects.toThrow();
+		await Promise.all([
+			acceptHostKey(target, [`pi-env-test ${first}`]),
+			acceptHostKey(target, [`pi-env-test ${first}`]),
+		]);
+		expect(readFileSync(knownHosts, "utf8")).toBe(`pi-env-test ${first}\n`);
+		await expect(acceptHostKey(target, [`pi-env-test ${second}`])).rejects.toBeInstanceOf(HostKeyChangedError);
+		await forgetHostKey(target);
+		await acceptHostKey(target, [`pi-env-test ${second}`]);
+		expect(readFileSync(knownHosts, "utf8")).toBe(`pi-env-test ${second}\n`);
+	});
+
+	// https://github.com/earendil-works/pi/issues/10517
+	it("serializes concurrent acceptance and revocation through equivalent file paths", async () => {
+		const file = join(root, "concurrent_known_hosts");
+		const revoked = { ...target, knownHostsFile: file, hostKeyAlias: "alias-a" };
+		const accepted = { ...target, hostKeyAlias: "alias-b" };
+		for (let trial = 0; trial < 20; trial++) {
+			writeFileSync(file, `alias-a ${first}\n`, { mode: 0o600 });
+			await Promise.all([
+				forgetHostKey(revoked),
+				acceptHostKey(
+					{
+						...accepted,
+						knownHostsFile: trial % 2 === 0 ? `${root}/./concurrent_known_hosts` : relative(process.cwd(), file),
+					},
+					[`alias-b ${second}`],
+				),
+			]);
+			expect(readFileSync(file, "utf8")).toBe(`alias-b ${second}\n`);
+			if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
+		}
+		expect(readdirSync(root).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+	});
+});
 
 // A disposable sshd on localhost with its own host key, client key and home directory.
 describe.skipIf(sshd === undefined)("SSH bootstrap", () => {
@@ -114,11 +172,17 @@ describe.skipIf(sshd === undefined)("SSH bootstrap", () => {
 		expect(scanned.fingerprints.join("\n")).toContain(expected);
 		await acceptHostKey(target, scanned.lines);
 
+		mkdirSync(join(home, ".pi/mobile/tools"), { recursive: true });
+		writeFileSync(join(home, ".pi/mobile/tools/pi-env-0123456789abcdef0123456789abcdef"), "old");
 		const { connection, remote } = await connectSsh({ ...target, binary: daemon });
 		try {
 			expect(remote.home).toBe(home);
-			const deployed = readFileSync(join(home, ".pi/mobile/tools", `pi-env-${version}`));
+			const deployed = readFileSync(join(home, ".pi/mobile/tools", deployedName));
 			expect(deployed.equals(readFileSync(daemon))).toBe(true);
+			// Daemons of other contents are removed.
+			expect(readdirSync(join(home, ".pi/mobile/tools")).filter((name) => name.startsWith("pi-env-"))).toEqual([
+				deployedName,
+			]);
 			const env = new RemoteExecutionEnv({ connection, id: "pi-env:test", cwd: home });
 			getOrThrow(await env.writeFile("over-ssh.txt", "hello", context));
 			expect(getOrThrow(await env.readTextFile("over-ssh.txt", context))).toBe("hello");
@@ -134,7 +198,7 @@ describe.skipIf(sshd === undefined)("SSH bootstrap", () => {
 	}, 60_000);
 
 	it("reuses a verified daemon and replaces a tampered one", async () => {
-		const file = join(home, ".pi/mobile/tools", `pi-env-${version}`);
+		const file = join(home, ".pi/mobile/tools", deployedName);
 		const before = statSync(file).mtimeMs;
 		(await connectSsh({ ...target, binary: daemon })).connection.close();
 		expect(statSync(file).mtimeMs).toBe(before);
@@ -147,6 +211,50 @@ describe.skipIf(sshd === undefined)("SSH bootstrap", () => {
 		} finally {
 			connection.close();
 		}
+	}, 60_000);
+
+	it("verifies the daemon again before starting it after a lost connection", async () => {
+		const { connection } = await connectSsh({ ...target, binary: daemon });
+		const file = join(home, ".pi/mobile/tools", deployedName);
+		try {
+			const { pid } = await connection.info();
+			process.kill(pid, "SIGKILL");
+			await new Promise((done) => setTimeout(done, 300));
+			// Linux refuses to write a running program's file.
+			writeFileSync(file, "tampered");
+			// The next start redeploys the verified binary instead of running whatever is there.
+			expect((await connection.info()).pid).not.toBe(pid);
+			expect(readFileSync(file).equals(readFileSync(daemon))).toBe(true);
+		} finally {
+			connection.close();
+		}
+	}, 60_000);
+
+	it("starts the daemon through the login shell only when asked", async () => {
+		// sshd uses the account's shell: sh, bash and zsh have different login startup files
+		// (https://github.com/earendil-works/pi/issues/10518).
+		for (const name of [".profile", ".bash_profile", ".zprofile"]) {
+			writeFileSync(join(home, name), "export PI_ENV_LOGIN=yes\n");
+		}
+		const login = async (loginShell: boolean) => {
+			const { connection } = await connectSsh({ ...target, binary: daemon, loginShell });
+			try {
+				const env = new RemoteExecutionEnv({ connection, id: "pi-env:test", cwd: home });
+				const output: string[] = [];
+				getOrThrow(
+					await env.exec(
+						["sh", "-c", 'printf "%s" "$PI_ENV_LOGIN"'],
+						{ onOutput: (text) => output.push(text) },
+						context,
+					),
+				);
+				return output.join("");
+			} finally {
+				connection.close();
+			}
+		};
+		expect(await login(false)).toBe("");
+		expect(await login(true)).toBe("yes");
 	}, 60_000);
 
 	it("refuses a changed host key", async () => {

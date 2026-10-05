@@ -3,8 +3,9 @@
 use crate::errors::Failure;
 use crate::sys;
 use serde_json::{Value, json};
+use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 pub type Outcome<T> = Result<T, Failure>;
@@ -76,7 +77,7 @@ pub fn mkdir_recursive(path: &Path) -> io::Result<()> {
             };
             match mkdir_recursive(parent) {
                 Err(parent_error) if parent_error.kind() == io::ErrorKind::AlreadyExists => {
-                    return Err(sys::not_a_directory());
+                    return Err(sys::synthetic("ENOTDIR"));
                 }
                 other => other?,
             }
@@ -102,10 +103,12 @@ pub fn mkdir(path: &str, recursive: bool) -> Outcome<Value> {
         .map_err(|error| Failure::io(&error, "mkdir", path))
 }
 
-/// `writeFile`/`appendFile`: create missing parents like Node's recursive `mkdir`, then write.
-pub fn write(path: &str, append: bool, content: &[u8]) -> Outcome<Value> {
+/// `writeFile`/`appendFile`: create missing parents like Node's recursive `mkdir`, then write. Returns the open file
+/// for further chunks.
+pub fn write(path: &str, append: bool, parents: bool, content: &[u8]) -> Outcome<File> {
     if let Some(parent) = Path::new(path)
         .parent()
+        .filter(|_| parents)
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         mkdir_recursive(parent)
@@ -119,7 +122,7 @@ pub fn write(path: &str, append: bool, content: &[u8]) -> Outcome<Value> {
     let mut file = sys::open(path, mode).map_err(|error| Failure::io(&error, "open", path))?;
     file.write_all(content)
         .map_err(|error| Failure::io(&error, "write", path))?;
-    Ok(json!({}))
+    Ok(file)
 }
 
 fn open_existing_for_write(path: &str) -> Outcome<File> {
@@ -218,4 +221,38 @@ pub fn pread(file: &File, path: &str, offset: u64, length: usize) -> Outcome<Vec
     }
     buffer.truncate(filled);
     Ok(buffer)
+}
+
+/// Up to `length` bytes from the current position: one `read` call, as Node's `readFile` makes for files of unknown
+/// size (FIFOs, devices).
+pub fn read(mut file: &File, path: &str, length: usize) -> Outcome<Vec<u8>> {
+    let mut buffer = vec![0u8; length];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(read) => {
+                buffer.truncate(read);
+                return Ok(buffer);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(Failure::io(&error, "read", path)),
+        }
+    }
+}
+
+/// One directory entry as Node lists it: the name decoded as UTF-8 (invalid bytes replaced), and lstat of the
+/// directory joined with that decoded name, so a name that is not valid UTF-8 reports `ENOENT` as in Node. `raw`
+/// carries the original bytes of such a name, which libuv sorts by.
+pub fn dir_entry(dir: &str, file_name: &OsStr) -> Value {
+    let name = file_name.to_string_lossy().into_owned();
+    let entry_path = Path::new(dir).join(&name).to_string_lossy().into_owned();
+    let mut entry = match fs::symlink_metadata(&entry_path) {
+        Ok(metadata) => json!({ "name": name, "info": info(&entry_path, &metadata) }),
+        Err(error) => {
+            json!({ "name": name, "error": Failure::io(&error, "lstat", &entry_path).to_json() })
+        }
+    };
+    if let Some(raw) = sys::raw_name(file_name).filter(|raw| *raw != name.as_bytes()) {
+        entry["raw"] = json!(raw);
+    }
+    entry
 }

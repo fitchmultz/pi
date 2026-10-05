@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "../src/providers/faux.ts";
 import { isRetryableAssistantError, type RetryPolicy, retryAssistantCall, retryDelayMs } from "../src/utils/retry.ts";
@@ -201,19 +202,22 @@ describe("retryAssistantCall", () => {
 		expect(onRetryScheduled.mock.calls.map((call) => call[2])).toEqual([10, 15, 15, 15]);
 	});
 
+	// https://github.com/earendil-works/pi/issues/10506
 	it("stops retrying once a call succeeds", async () => {
+		const controller = new AbortController();
 		let n = 0;
 		const produce = vi.fn(async () => {
 			n++;
-			return n < 3
+			return n < 4
 				? fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })
 				: fauxAssistantMessage("recovered");
 		});
 		const onRetryFinished = vi.fn();
-		const res = await retryAssistantCall(produce, enabled, undefined, { onRetryFinished });
+		const res = await retryAssistantCall(produce, enabled, controller.signal, { onRetryFinished });
 		expect(res.content).toEqual([{ type: "text", text: "recovered" }]);
-		expect(produce).toHaveBeenCalledTimes(3);
-		expect(onRetryFinished).toHaveBeenCalledWith(true, 2);
+		expect(produce).toHaveBeenCalledTimes(4);
+		expect(onRetryFinished).toHaveBeenCalledWith(true, 3);
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
 	});
 
 	it("reports an aborted retried call as unsuccessful", async () => {
@@ -273,6 +277,7 @@ describe("retryAssistantCall", () => {
 		]);
 	});
 
+	// https://github.com/earendil-works/pi/issues/10506
 	it("aborts backoff sleep via signal, returns an aborted message, and emits onRetryFinished(false)", async () => {
 		const controller = new AbortController();
 		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));
@@ -280,12 +285,13 @@ describe("retryAssistantCall", () => {
 		const onRetryFinished = vi.fn();
 		const p = retryAssistantCall(produce, policy, controller.signal, { onRetryFinished });
 		// Let one error call resolve and the first backoff sleep start, then abort.
-		await vi.waitFor(() => expect(produce).toHaveBeenCalled());
+		await vi.waitFor(() => expect(getEventListeners(controller.signal, "abort")).toHaveLength(1));
 		controller.abort();
 		const res = await p;
 		expect(res.stopReason).toBe("aborted");
 		expect(res.errorMessage).toBeUndefined();
 		expect(produce).toHaveBeenCalledTimes(1);
 		expect(onRetryFinished).toHaveBeenCalledWith(false, 1, "terminated");
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
 	});
 });
