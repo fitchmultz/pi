@@ -81,6 +81,47 @@ async function proxy(label: string) {
 }
 
 describe("CLI working-session bootstrap", () => {
+	it.each([true, false])("restores builtin MCP selection instead of new CLI flags; disabled=%s", async (disabled) => {
+		const h = await createHarness();
+		try {
+			const hold = await h.session.acquireWorkingSession();
+			const state = hold.state;
+			await hold.release();
+			const model = h.session.modelRuntime.getModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Native capture model missing");
+			state.model = { provider: model.provider, id: model.id };
+			const observation = join(h.tempDir, "commands.json");
+			const extension = join(h.tempDir, "observe.ts");
+			writeFileSync(
+				extension,
+				`import {existsSync, readFileSync, writeFileSync} from "node:fs";
+export default function(pi) {
+	const path = ${JSON.stringify(observation)};
+	pi.on("session_start", () => {
+		const observed = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : [];
+		observed.push(pi.getCommands().some(command => command.name === "mcp"));
+		writeFileSync(path, JSON.stringify(observed));
+	});
+	pi.registerCommand("replace", {handler: async (_args, ctx) => {await ctx.newSession();}});
+}`,
+			);
+			state.launch!.extensions = ["builtin:mcp", extension];
+			if (disabled) state.launch!.disabledBuiltinExtensions = ["mcp"];
+			const statePath = join(h.tempDir, "working-session.json");
+			writeFileSync(statePath, JSON.stringify(state));
+			const result = await runCli(
+				["--working-session", statePath, "--print", ...(disabled ? [] : ["--no-mcp"]), "/replace"],
+				h.tempDir,
+				{ ...process.env, [ENV_AGENT_DIR]: h.tempDir, PI_OFFLINE: "1" },
+			);
+			expect(result.signal).toBeNull();
+			expect(result.code, result.stderr).toBe(0);
+			expect(JSON.parse(readFileSync(observation, "utf8"))).toEqual([!disabled, !disabled]);
+		} finally {
+			h.cleanup();
+		}
+	});
+
 	it("refuses launch-less artifacts before materializing their missing journal", async () => {
 		const h = await createHarness();
 		try {

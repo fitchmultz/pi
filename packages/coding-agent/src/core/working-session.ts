@@ -57,6 +57,7 @@ export interface WorkingSessionLaunch {
 	prompts: string[];
 	themes: string[];
 	noExtensions?: boolean;
+	disabledBuiltinExtensions?: string[];
 	noSkills?: boolean;
 	noPromptTemplates?: boolean;
 	noThemes?: boolean;
@@ -199,6 +200,7 @@ function prompt(value: unknown): boolean {
 		(value.forceSystemPrompt === undefined || typeof value.forceSystemPrompt === "string") &&
 		typeof value.appendSystemPrompt === "string" &&
 		strings(value.selectedTools) &&
+		(value.hiddenTools === undefined || strings(value.hiddenTools)) &&
 		strings(value.promptGuidelines) &&
 		record(value.toolSnippets) &&
 		Object.values(value.toolSnippets).every((item) => typeof item === "string") &&
@@ -410,6 +412,8 @@ function validateWorkingSession(value: unknown): WorkingSession {
 		])
 			if (value.launch[name] !== undefined && typeof value.launch[name] !== "boolean") fail();
 		if (value.launch.systemPrompt !== undefined && typeof value.launch.systemPrompt !== "string") fail();
+		if (value.launch.disabledBuiltinExtensions !== undefined && !strings(value.launch.disabledBuiltinExtensions))
+			fail();
 		if (
 			value.launch.appendSystemPrompt !== undefined &&
 			(!Array.isArray(value.launch.appendSystemPrompt) ||

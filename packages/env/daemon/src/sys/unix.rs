@@ -1,6 +1,6 @@
 //! Linux, macOS and Android.
 
-use super::{OpenMode, ShellConfig};
+use super::{OpenMode, ShellConfig, path_exists};
 use crate::errors::Failure;
 use serde_json::{Map, Value};
 use std::ffi::{CString, OsStr};
@@ -9,11 +9,11 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// libuv's name for an OS error.
-pub fn error_name(error: &io::Error) -> &'static str {
+pub fn os_error_name(error: &io::Error) -> &'static str {
     let Some(errno) = error.raw_os_error() else {
         return "UNKNOWN";
     };
@@ -129,6 +129,7 @@ pub fn open_reader(path: &str, no_follow: bool) -> Result<File, Failure> {
 pub fn open(path: &str, mode: OpenMode) -> io::Result<File> {
     let mut options = OpenOptions::new();
     match mode {
+        OpenMode::Read => options.read(true),
         OpenMode::Write => options.write(true).create(true).truncate(true),
         OpenMode::Append => options.append(true).create(true),
         OpenMode::ReadWrite => options.read(true).write(true),
@@ -148,13 +149,62 @@ pub fn remove_file(path: &str) -> io::Result<()> {
     std::fs::remove_file(path)
 }
 
-/// The error a recursive `mkdir` reports when a file is in the way of a parent.
-pub fn not_a_directory() -> io::Error {
-    io::Error::from_raw_os_error(libc::ENOTDIR)
+/// A pipe a reader thread can poll, so that it stops when the command settles.
+pub trait Pipe: io::Read + std::os::fd::AsRawFd {}
+impl<T: io::Read + std::os::fd::AsRawFd> Pipe for T {}
+
+/// Read `pipe` until it ends, `on_data` returns false, or `stop` is set; the pipe closes when this returns.
+pub fn read_pipe(mut pipe: impl Pipe, stop: &AtomicBool, mut on_data: impl FnMut(&[u8]) -> bool) {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: fcntl on a descriptor this thread owns.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+    let mut buffer = vec![0u8; 64 * 1024];
+    while !stop.load(Ordering::SeqCst) {
+        let mut poll = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        let ready = unsafe { libc::poll(&mut poll, 1, 100) };
+        if ready == 0
+            || (ready < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted)
+        {
+            continue;
+        }
+        if ready < 0 {
+            return;
+        }
+        match pipe.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => {
+                if !on_data(&buffer[..read]) {
+                    return;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) => {}
+            Err(_) => return,
+        }
+    }
 }
 
-fn path_exists(path: &str) -> bool {
-    Path::new(path).symlink_metadata().is_ok()
+/// Readers poll `stop` every 100 ms.
+pub fn interrupt_reader(_reader: &std::thread::JoinHandle<()>) {}
+
+/// The program an argv command runs; `Command` searches `PATH` like `execvp`, as libuv does.
+pub fn resolve_program(
+    program: &str,
+    _cwd: &str,
+    _env: &Map<String, Value>,
+) -> Result<String, Failure> {
+    Ok(program.to_string())
 }
 
 fn which_bash() -> Option<String> {
@@ -251,4 +301,23 @@ pub fn exit_code(status: ExitStatus) -> i64 {
             .code()
             .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
     )
+}
+
+/// The bytes of a file name, which libuv sorts directory listings by.
+pub fn raw_name(name: &OsStr) -> Option<Vec<u8>> {
+    Some(name.as_bytes().to_vec())
+}
+
+/// Windows only: the per-drive working directories of the `=C:` variables.
+pub fn drive_cwds() -> Map<String, Value> {
+    Map::new()
+}
+
+pub fn read_dir(path: &str) -> io::Result<std::fs::ReadDir> {
+    std::fs::read_dir(path)
+}
+
+/// Device and inode of `path`; the metadata already has them.
+pub fn path_identity(_path: &str, metadata: &Metadata, _follow: bool) -> (u64, u64) {
+    identity(metadata)
 }

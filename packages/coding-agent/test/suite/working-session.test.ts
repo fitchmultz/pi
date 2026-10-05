@@ -37,6 +37,225 @@ describe("Native working sessions", () => {
 		while (harnesses.length) harnesses.pop()!.cleanup();
 	});
 
+	it.each([
+		{ allowedTools: undefined, expected: ["read", "bash", "mcp__server__keep"] },
+		{ allowedTools: [], expected: [] },
+		{ allowedTools: ["r*"], expected: ["read", "mcp__server__keep"] },
+		{ allowedTools: ["r*", "mcp__server__*"], expected: ["read", "mcp__server__keep"] },
+	])(
+		"restores native tool patterns and MCP registration policy: $allowedTools",
+		async ({ allowedTools, expected }) => {
+			const h = await createHarness({
+				allowedToolNames: allowedTools,
+				excludedToolNames: ["mcp__*__drop"],
+				extensionFactories: [
+					(pi) => {
+						for (const suffix of ["keep", "drop"])
+							pi.registerTool({
+								name: `mcp__server__${suffix}`,
+								label: suffix,
+								description: suffix,
+								exposure: "deferred",
+								parameters: Type.Object({}),
+								execute: async () => ({ content: [], details: {} }),
+							});
+					},
+				],
+			});
+			harnesses.push(h);
+			const hold = await h.session.acquireWorkingSession();
+			await hold.release();
+			expect(hold.state.allowedTools).toEqual(allowedTools);
+			expect(hold.state.excludedTools).toEqual(["mcp__*__drop"]);
+			// Change both matchers before restoring into the existing native session.
+			h.session.restoreWorkingSession({
+				...hold.state,
+				allowedTools: [],
+				excludedTools: undefined,
+				activeTools: [],
+			});
+			h.session.restoreWorkingSession(hold.state);
+			const names = h.session.getAllTools().map(({ name }) => name);
+			for (const name of ["read", "bash", "mcp__server__keep", "mcp__server__drop"])
+				expect(names.includes(name), name).toBe(expected.includes(name));
+			expect(h.session.getActiveToolNames()).toEqual(hold.state.activeTools);
+			h.session.setActiveToolsByName(["mcp__server__keep"]);
+			expect(h.session.getActiveToolNames()).toEqual(
+				allowedTools === undefined || allowedTools.some((pattern) => pattern.startsWith("mcp__"))
+					? ["mcp__server__keep"]
+					: [],
+			);
+		},
+	);
+
+	it("activates saved pending tools already registered at restore without reactivating deselected matches", async () => {
+		const h = await createHarness({
+			allowedToolNames: ["r*", "b*"],
+			extensionFactories: [
+				(pi) =>
+					pi.registerTool({
+						name: "reconnected",
+						label: "Reconnected",
+						description: "Reconnected",
+						defaultActive: false,
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [], details: {} }),
+					}),
+			],
+		});
+		harnesses.push(h);
+		h.session.setActiveToolsByName(["read"]);
+		const hold = await h.session.acquireWorkingSession();
+		await hold.release();
+		h.session.restoreWorkingSession({ ...hold.state, pendingTools: ["reconnected"] });
+		expect(h.session.getActiveToolNames()).toEqual(["read", "reconnected"]);
+		const restored = await h.session.acquireWorkingSession();
+		try {
+			expect(restored.state.pendingTools).toEqual([]);
+		} finally {
+			await restored.release();
+		}
+	});
+
+	it.each([true, false])(
+		"captures disabled builtins and restores before factories; saved policy=%s",
+		async (disabled) => {
+			const h = await createHarness();
+			harnesses.push(h);
+			let mcpFactories = 0;
+			const factories = [
+				{
+					name: "mcp",
+					builtin: true as const,
+					hidden: true,
+					factory: () => {
+						mcpFactories++;
+					},
+				},
+			];
+			const settings = SettingsManager.inMemory({ extensions: ["builtin:mcp"] });
+			const loader = new DefaultResourceLoader({
+				cwd: h.tempDir,
+				agentDir: h.tempDir,
+				settingsManager: settings,
+				disabledBuiltinExtensions: ["mcp"],
+				extensionFactories: factories,
+			});
+			await loader.reload();
+			const initial = await createAgentSession({
+				cwd: h.tempDir,
+				agentDir: h.tempDir,
+				model: h.getModel(),
+				modelRuntime: h.session.modelRuntime,
+				settingsManager: settings,
+				resourceLoader: loader,
+				sessionManager: SessionManager.inMemory(h.tempDir),
+			});
+			const hold = await initial.session.acquireWorkingSession();
+			await hold.release();
+			initial.session.dispose();
+			expect(hold.state.launch?.disabledBuiltinExtensions).toEqual(["mcp"]);
+			const saved = parseWorkingSession(JSON.stringify(hold.state));
+			// Older v1 artifacts omit this field and must reset the loader's supplied policy.
+			if (!disabled) delete saved.launch!.disabledBuiltinExtensions;
+			const services = await createAgentSessionServices({
+				cwd: h.tempDir,
+				workingSession: saved,
+				modelRuntime: h.session.modelRuntime,
+				resourceLoaderOptions: {
+					extensionFactories: factories,
+					disabledBuiltinExtensions: disabled ? [] : ["mcp"],
+				},
+			});
+			expect(mcpFactories).toBe(disabled ? 0 : 1);
+			expect(services.resourceLoader.getExtensions().extensions.map(({ path }) => path)).toEqual(
+				disabled ? [] : ["builtin:mcp"],
+			);
+			await services.resourceLoader.reload();
+			expect(mcpFactories).toBe(disabled ? 0 : 2);
+		},
+	);
+
+	it.each([
+		{ field: "prompt", value: 7 },
+		{ field: "prompt", value: ["read", 7] },
+		{ field: "runPrompt", value: 7 },
+		{ field: "runPrompt", value: ["read", 7] },
+		{ field: "disabledBuiltinExtensions", value: 7 },
+		{ field: "disabledBuiltinExtensions", value: ["mcp", 7] },
+	])("rejects malformed saved $field before factories: $value", async ({ field, value }) => {
+		const h = await createHarness();
+		harnesses.push(h);
+		const hold = await h.session.acquireWorkingSession();
+		await hold.release();
+		const saved = {
+			...hold.state,
+			...(field === "disabledBuiltinExtensions"
+				? { launch: { ...hold.state.launch, disabledBuiltinExtensions: value } }
+				: { [field]: { ...hold.state.prompt, hiddenTools: value } }),
+		};
+		let factories = 0;
+		const loader = new DefaultResourceLoader({
+			cwd: h.tempDir,
+			agentDir: h.tempDir,
+			extensionFactories: [
+				() => {
+					factories++;
+				},
+			],
+		});
+		const path = join(h.tempDir, "invalid-state.json");
+		writeFileSync(path, JSON.stringify(saved));
+		await expect(
+			createAgentSession({
+				workingSession: path,
+				resourceLoader: loader,
+				modelRuntime: h.session.modelRuntime,
+			}).then(({ session }) => {
+				session.dispose();
+				throw new Error("Malformed state admitted");
+			}),
+		).rejects.toThrow("Invalid native working session");
+		await expect(
+			createAgentSessionServices({
+				cwd: h.tempDir,
+				workingSession: path,
+				modelRuntime: h.session.modelRuntime,
+				resourceLoaderOptions: {
+					extensionFactories: [
+						() => {
+							factories++;
+						},
+					],
+				},
+			}).then(() => {
+				throw new Error("Malformed state admitted");
+			}),
+		).rejects.toThrow("Invalid native working session");
+		expect(factories).toBe(0);
+	});
+
+	it("restores older v1 prompts without hiddenTools", async () => {
+		const h = await createHarness();
+		harnesses.push(h);
+		const hold = await h.session.acquireWorkingSession();
+		await hold.release();
+		const { hiddenTools: _hiddenTools, ...prompt } = hold.state.prompt;
+		const path = join(h.tempDir, "old-state.json");
+		writeFileSync(path, JSON.stringify({ ...hold.state, prompt, runPrompt: prompt }));
+		const { session } = await createAgentSession({
+			workingSession: path,
+			resourceLoader: h.session.resourceLoader,
+			modelRuntime: h.session.modelRuntime,
+		});
+		try {
+			expect(session.systemPrompt).toContain("- read:");
+			expect(h.faux.state.callCount).toBe(0);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("joins detached nested execution and its sequential queue before granting sleep", async () => {
 		const execution = deferred();
 		let ctx!: ExtensionToolContext;

@@ -3,20 +3,24 @@
 use crate::decode::StreamDecoder;
 use crate::errors::Failure;
 use crate::frame::{EVENT, Frame};
+use crate::output::Output;
 use crate::sys;
+use crate::window::{Pending, Window};
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
-const READ_CHUNK: usize = 64 * 1024;
+/// How often a delivery waiting for the link to drain looks again.
+const UNSENT_POLL: Duration = Duration::from_millis(20);
 
 /// Commands this daemon started and has not reaped; killed when the connection ends.
 pub type Groups = Arc<Mutex<HashSet<u32>>>;
@@ -32,6 +36,32 @@ pub enum Message {
     Kill,
 }
 
+/// Cancellation of one request, registered before the request runs so a cancel that arrives first is not lost.
+#[derive(Default)]
+pub struct Control {
+    pub aborted: AtomicBool,
+    pub killed: AtomicBool,
+    sender: Mutex<Option<Sender<Message>>>,
+}
+
+impl Control {
+    pub fn cancel(&self, kill: bool) {
+        let sender = self.sender.lock().unwrap();
+        if kill {
+            self.killed.store(true, Ordering::SeqCst);
+        } else {
+            self.aborted.store(true, Ordering::SeqCst);
+        }
+        if let Some(sender) = sender.as_ref() {
+            let _ = sender.send(if kill { Message::Kill } else { Message::Cancel });
+        }
+    }
+
+    fn attach(&self, sender: Sender<Message>) {
+        *self.sender.lock().unwrap() = Some(sender);
+    }
+}
+
 pub struct ExecRequest {
     pub command: Option<String>,
     pub argv: Option<Vec<String>>,
@@ -41,6 +71,7 @@ pub struct ExecRequest {
     pub shell_path: Option<String>,
     pub timeout: Option<Duration>,
     pub spill: Option<(u64, u64)>,
+    pub window: Option<Window>,
 }
 
 impl ExecRequest {
@@ -71,6 +102,7 @@ impl ExecRequest {
                     spill.get("afterLines")?.as_u64()?,
                 ))
             }),
+            window: Window::from_json(&json["window"]),
         })
     }
 }
@@ -80,10 +112,7 @@ pub fn kill_group(pid: u32) {
 }
 
 fn random_uuid() -> String {
-    let mut bytes = [0u8; 16];
-    if let Ok(mut random) = File::open("/dev/urandom") {
-        let _ = random.read_exact(&mut bytes);
-    }
+    let mut bytes = sys::random_bytes();
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -136,10 +165,15 @@ impl Spill {
 
     /// `createTempFile({ prefix: "pi-output-", suffix: ".log" })`: a fresh `tmp-` directory holding the file.
     fn start(&mut self, tmpdir: &str) -> Result<(), String> {
-        let directory =
-            crate::fs::mkdtemp(&format!("{tmpdir}/tmp-")).map_err(|failure| failure.message)?;
-        let directory = directory["path"].as_str().unwrap_or_default().to_string();
-        let path = format!("{directory}/pi-output-{}.log", random_uuid());
+        let prefix = Path::new(tmpdir)
+            .join("tmp-")
+            .to_string_lossy()
+            .into_owned();
+        let directory = sys::mkdtemp(&prefix).map_err(|error| error.to_string())?;
+        let path = Path::new(&directory)
+            .join(format!("pi-output-{}.log", random_uuid()))
+            .to_string_lossy()
+            .into_owned();
         let mut file = OpenOptions::new()
             .append(true)
             .create(true)
@@ -152,26 +186,6 @@ impl Spill {
         self.path = Some(path);
         Ok(())
     }
-}
-
-fn spawn_reader(stream: usize, mut pipe: impl Read + Send + 'static, sender: Sender<Message>) {
-    thread::spawn(move || {
-        let mut buffer = vec![0u8; READ_CHUNK];
-        loop {
-            match pipe.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                Ok(read) => {
-                    if sender
-                        .send(Message::Data(stream, buffer[..read].to_vec()))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-        }
-        let _ = sender.send(Message::Eof(stream));
-    });
 }
 
 fn spawn(
@@ -196,15 +210,48 @@ fn spawn(
     Ok(child)
 }
 
+/// Read one pipe on its own thread. Without an output window, reading waits while too much output is unsent.
+fn spawn_reader(
+    stream: usize,
+    pipe: impl sys::Pipe + Send + 'static,
+    sender: Sender<Message>,
+    stop: Arc<AtomicBool>,
+    output: Option<Arc<Output>>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        sys::read_pipe(pipe, &stop, |bytes| {
+            let delivered = sender.send(Message::Data(stream, bytes.to_vec())).is_ok();
+            if let Some(output) = &output {
+                output.wait_for_room(&stop);
+            }
+            delivered
+        });
+        let _ = sender.send(Message::Eof(stream));
+    })
+}
+
+fn output_frame(id: u32, stream: &str, text: String, skipped: Option<Value>) -> Frame {
+    let mut json = json!({ "kind": "output", "stream": stream });
+    if let Some(skipped) = skipped {
+        json["skipped"] = skipped;
+    }
+    Frame::with_payload(EVENT, id, json, text.into_bytes())
+}
+
 /// Run one command, sending output events for request `id`, until it settles.
 pub fn run(
     id: u32,
     request: ExecRequest,
     tmpdir: &str,
-    out: &Sender<Frame>,
-    messages: (Sender<Message>, Receiver<Message>),
+    output: &Arc<Output>,
+    control: &Control,
     groups: &Groups,
 ) -> Result<Value, Failure> {
+    let (sender, receiver) = mpsc::channel();
+    control.attach(sender.clone());
+    if control.aborted.load(Ordering::SeqCst) {
+        return Err(Failure::new("aborted", "aborted"));
+    }
     // A string runs through the shell (as its last argument, or on stdin for legacy WSL bash); argv runs directly.
     let (program, args, stdin_command) = match (&request.command, &request.argv) {
         (Some(command), _) => {
@@ -218,7 +265,11 @@ pub fn run(
             }
         }
         (None, Some(argv)) => match argv.split_first() {
-            Some((first, rest)) => (first.clone(), rest.to_vec(), None),
+            Some((first, rest)) => (
+                sys::resolve_program(first, &request.cwd, &request.env)?,
+                rest.to_vec(),
+                None,
+            ),
             None => return Err(Failure::new("spawn_error", "Empty argv: no program to run")),
         },
         (None, None) => return Err(Failure::new("EINVAL", "exec needs command or argv")),
@@ -232,7 +283,6 @@ pub fn run(
             ),
         ));
     }
-    let (sender, receiver) = messages;
     let mut child = spawn(&request, &program, &args, stdin_command.is_some())
         .map_err(|error| Failure::new("spawn_error", error.to_string()))?;
     if let (Some(command), Some(mut stdin)) = (stdin_command, child.stdin.take()) {
@@ -241,8 +291,29 @@ pub fn run(
     let pid = child.id();
     groups.lock().unwrap().insert(pid);
     let deadline = request.timeout.map(|timeout| Instant::now() + timeout);
-    spawn_reader(0, child.stdout.take().unwrap(), sender.clone());
-    spawn_reader(1, child.stderr.take().unwrap(), sender.clone());
+    let stop = Arc::new(AtomicBool::new(false));
+    // Without a window, output is not coalesced; reading then waits for the link.
+    let gate = if request.window.is_none() {
+        Some(output.clone())
+    } else {
+        None
+    };
+    let readers = [
+        spawn_reader(
+            0,
+            child.stdout.take().unwrap(),
+            sender.clone(),
+            stop.clone(),
+            gate.clone(),
+        ),
+        spawn_reader(
+            1,
+            child.stderr.take().unwrap(),
+            sender.clone(),
+            stop.clone(),
+            gate,
+        ),
+    ];
     let waiter = sender.clone();
     thread::spawn(move || {
         let _ = waiter.send(match child.wait() {
@@ -263,15 +334,24 @@ pub fn run(
         path: None,
         failed: None,
     });
-    let emit = |stream: usize, text: String| {
-        if !text.is_empty() {
-            let name = if stream == 0 { "stdout" } else { "stderr" };
-            let _ = out.send(Frame::with_payload(
-                EVENT,
-                id,
-                json!({ "kind": "output", "stream": name }),
-                text.into_bytes(),
-            ));
+    let mut pending = request.window.map(Pending::new);
+    let unsent = Arc::new(AtomicUsize::new(0));
+    let names = ["stdout", "stderr"];
+    let emit = |pending: &mut Option<Pending>, stream: usize, text: String| {
+        if text.is_empty() {
+            return;
+        }
+        match pending {
+            Some(pending) => pending.push(names[stream], text),
+            None => output.bulk(output_frame(id, names[stream], text, None), None),
+        }
+    };
+    let deliver = |pending: &mut Pending| {
+        for event in pending.take() {
+            output.bulk(
+                output_frame(id, event.stream, event.text, event.skipped),
+                Some(unsent.clone()),
+            );
         }
     };
     let mut ended = [false, false];
@@ -286,11 +366,30 @@ pub fn run(
             kill_group(pid);
         }
     };
+    if control.killed.load(Ordering::SeqCst) {
+        kill(&mut killed);
+    }
     loop {
+        let now = Instant::now();
+        // Node's timer stays armed until the command settles, including the grace period after exit.
+        if !timed_out && deadline.is_some_and(|deadline| now >= deadline) {
+            timed_out = true;
+            kill(&mut killed);
+        }
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        let now = Instant::now();
+        if idle_until.is_some_and(|idle| now >= idle) {
+            // A descendant may hold the pipes open after the process exited; stop waiting for it.
+            break;
+        }
+        if let Some(pending) = &mut pending
+            && !pending.is_empty()
+            && now >= pending.next_send()
+            && unsent.load(Ordering::SeqCst) == 0
+        {
+            deliver(pending);
+        }
         let mut wait = Duration::from_secs(3600);
         if let Some(deadline) = deadline.filter(|_| !timed_out) {
             wait = wait.min(deadline.saturating_duration_since(now));
@@ -298,9 +397,16 @@ pub fn run(
         if let Some(idle) = idle_until {
             wait = wait.min(idle.saturating_duration_since(now));
         }
+        if let Some(pending) = pending.as_ref().filter(|pending| !pending.is_empty()) {
+            wait = wait.min(if unsent.load(Ordering::SeqCst) > 0 {
+                UNSENT_POLL
+            } else {
+                pending.next_send().saturating_duration_since(now)
+            });
+        }
         match receiver.recv_timeout(wait) {
             Ok(Message::Data(stream, bytes)) => {
-                emit(stream, decoders[stream].decode(&bytes, false));
+                emit(&mut pending, stream, decoders[stream].decode(&bytes, false));
                 if let Some(spill) = &mut spill {
                     spill.push(&bytes, tmpdir);
                     if spill.failed.is_some() {
@@ -325,24 +431,23 @@ pub fn run(
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
-            Err(RecvTimeoutError::Timeout) => {
-                if deadline.is_some_and(|deadline| Instant::now() >= deadline)
-                    && !timed_out
-                    && status.is_none()
-                {
-                    timed_out = true;
-                    kill(&mut killed);
-                } else if idle_until.is_some_and(|idle| Instant::now() >= idle) {
-                    // A descendant may hold the pipes open after the process exited; stop waiting for it.
-                    break;
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
+    // Like Node destroying its streams: stop reading, so the pipes close even if a descendant still holds them.
+    stop.store(true, Ordering::SeqCst);
+    for reader in &readers {
+        sys::interrupt_reader(reader);
+    }
     groups.lock().unwrap().remove(&pid);
-    emit(0, decoders[0].decode(&[], true));
-    emit(1, decoders[1].decode(&[], true));
+    emit(&mut pending, 0, decoders[0].decode(&[], true));
+    emit(&mut pending, 1, decoders[1].decode(&[], true));
+    if let Some(pending) = &mut pending
+        && !pending.is_empty()
+    {
+        deliver(pending);
+    }
     let spill_path = spill.as_ref().and_then(|spill| spill.path.clone());
     let with_spill = |failure: Failure| match &spill_path {
         Some(path) => failure.extra(json!({ "spillPath": path })),

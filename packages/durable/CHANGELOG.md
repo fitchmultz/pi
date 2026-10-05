@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `createPowerShellTool()` in `@earendil-works/pi-durable/tools`: a `powershell` tool that runs `pwsh`, else Windows PowerShell, directly through argv `exec` (no other shell parses the command), with UTF-8 output and the `bash` tool's output window, spill and errors.
+
+### Fixed
+
+- The `read` tool reads a file that grows while it is read (an active log) instead of failing with "changed while it was read"; it reads again only when the file shrank or was rewritten in place.
+- `NodeExecutionEnv.watch()`: a directory replaced at the same path gets a new native watcher; a target that is a symbolic link to a file reports changes to that file; a non-recursive target no longer stops an overlapping recursive target from covering subdirectories; closing during a rescan no longer leaks watchers; a target that cannot be read for lack of permission fails with `permission_denied` instead of being watched as missing.
+- Bounded tool output keeps a U+FEFF at the start of the retained tail, and drops a byte-order mark only at the very start of byte output.
+- `settings.progress` fields given as `undefined` keep their defaults.
+
 ## [1.0.3] - 2026-10-05
 
 ### Breaking Changes

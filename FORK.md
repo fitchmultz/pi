@@ -1,7 +1,7 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream v1.0.3 `5b6c792b4` (2026-10-05). It is upstream plus the features
+v1.0.0 and synchronized through upstream v1.0.3 `98d2e1947` (2026-10-05). It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -31,8 +31,9 @@ all-platform qualification.
 
 These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
 Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in this sync); the fork keeps `private-spill.test.ts` as a regression guard.
-See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased)
-and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
+Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard.
+See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
+[Codemode](packages/codemode/CHANGELOG.md#unreleased) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
@@ -48,7 +49,13 @@ and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing detai
 | Anthropic strict limits apply across initial and inline definitions, including required schemas | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/anthropic-strict-tool-schema.test.ts` |
 | Optional nulls inside schema unions must not be coerced into fabricated values | `packages/ai/src/utils/validation.ts` | `packages/ai/test/validation.test.ts` |
 | DNS root dots must not bypass `NO_PROXY` | `packages/ai/src/utils/node-http-proxy.ts` | `packages/ai/test/node-http-proxy.test.ts` |
-| Fractional/overflowed zero retry delays must not become a minute | `packages/ai/src/utils/retry.ts` | `packages/ai/test/retry.test.ts` |
+| Fractional/overflowed zero retry delays must not become a minute; completed backoffs must release abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)) | `packages/ai/src/utils/retry.ts` | `packages/ai/test/retry.test.ts` |
+| Radius gateway pricing must have finite rates and tiers before cost estimation ([#10507](https://github.com/earendil-works/pi/issues/10507)) | `packages/ai/src/providers/radius-config.ts` | `packages/ai/test/radius-provider.test.ts` |
+| Abort tests must check the terminal result and follow-up rather than pass early ([#10508](https://github.com/earendil-works/pi/issues/10508)); this is test-only, not a provider cancellation fix | `packages/ai/test/abort.test.ts` | Offline faux-provider case in the same file |
+| Chord in-process service hydration must reject non-plain arrays ([#10509](https://github.com/earendil-works/pi/issues/10509)) | `packages/chord/src/delta/revision-validator.ts` | `packages/chord/test/services.test.ts` |
+| Codemode string store keys must round-trip as own data properties, including `__proto__` ([#10510](https://github.com/earendil-works/pi/issues/10510)) | `packages/codemode/src/runtime/host.ts` | `packages/codemode/test/sandbox.test.ts` |
+| An oversized Env watch change must report `overflow` instead of stopping the daemon's output writer ([#10516](https://github.com/earendil-works/pi/issues/10516)) | `packages/env/daemon/src/watch.rs` | `packages/env/test/remote.test.ts` |
+| Equivalent known-hosts path spellings must serialize accept/forget rewrites ([#10517](https://github.com/earendil-works/pi/issues/10517)); the zsh login-shell test fixture writes sh/bash/zsh startup files ([#10518](https://github.com/earendil-works/pi/issues/10518)) | `packages/env/src/ssh.ts`, `packages/env/test/ssh.test.ts` | `packages/env/test/ssh.test.ts` |
 | Replayed signatures count toward context estimates | `packages/ai/src/utils/estimate.ts` | `packages/ai/test/context-estimate.test.ts` |
 | Dialog input needs xterm printable decoding, grapheme-safe replacement and correct mouse columns | `packages/tui/src/components/input.ts` | `packages/tui/test/{input,mouse-components}.test.ts` |
 | Plus-sign key IDs must parse, and hyperlink control payloads must stay byte-identical | `packages/tui/src/{keys,utils}.ts` | `packages/tui/test/{keys,truncate-to-width}.test.ts` |

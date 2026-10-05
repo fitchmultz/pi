@@ -1,11 +1,19 @@
-export { Connection, type ConnectionOptions, RemoteError, type RemoteInfo, type RequestOptions } from "./connection.ts";
-export { PollingWatcher } from "./polling-watch.ts";
+export {
+	Connection,
+	type ConnectionOptions,
+	isConnectionLost,
+	RemoteError,
+	type RemoteInfo,
+	type Reply,
+	type RequestOptions,
+} from "./connection.ts";
 export { RemoteExecutionEnv, type RemoteExecutionEnvOptions } from "./remote-env.ts";
 export {
 	acceptHostKey,
 	connectSsh,
 	deployDaemon,
 	detectPlatform,
+	forgetHostKey,
 	HostKeyChangedError,
 	HostKeyUnknownError,
 	packagedDaemon,
@@ -16,3 +24,4 @@ export {
 	scanHostKey,
 	sshArguments,
 } from "./ssh.ts";
+export { RemoteWatcher, type RemoteWatchOptions } from "./watch.ts";

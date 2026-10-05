@@ -572,6 +572,54 @@ describe("remote services", () => {
 		await namespace.dispose(BACKGROUND_CONTEXT);
 	});
 
+	class ArraySubclass extends Array<number> {}
+	const alteredPrototype = [1, 2];
+	Object.setPrototypeOf(alteredPrototype, Object.create(Array.prototype));
+
+	// https://github.com/earendil-works/pi/issues/10509
+	test.each<[string, JsonValue, boolean]>([
+		["primitive", 42, true],
+		["plain array", { rows: [null, true, 1, "value"] }, true],
+		["array subclass", { rows: new ArraySubclass(1, 2) }, false],
+		["altered array prototype", { rows: alteredPrototype }, false],
+	])("validates %s state during service hydration", async (_kind, payload, valid) => {
+		const service = defineService<{ readonly state: ReplicatedState<JsonValue> }>("test.json-hydration");
+		const errors: Error[] = [];
+		const namespace = createRemoteServiceBinding({
+			services: [service],
+			transport: {
+				invoke: () => Promise.reject(new Error("unexpected invocation")),
+				async subscribe() {
+					return {
+						snapshot: {
+							serviceId: service.id,
+							mode: "singleton",
+							instances: [{ members: [{ name: "state", kind: "state", sequence: 0, ops: [["r", payload]] }] }],
+						},
+						activate() {},
+						close() {},
+					};
+				},
+			},
+			onError: (error) => errors.push(error),
+		});
+		const remote = namespace.use(service);
+		try {
+			if (valid) {
+				await expect(namespace.ready(BACKGROUND_CONTEXT)).resolves.toBeUndefined();
+				expect(remote.state.value).toBe(payload);
+				expect(errors).toEqual([]);
+			} else {
+				await expect(namespace.ready(BACKGROUND_CONTEXT)).rejects.toBeInstanceOf(TypeError);
+				expect(remote.state.value).toBeUndefined();
+				expect(errors).toHaveLength(1);
+				expect(errors[0]).toBeInstanceOf(TypeError);
+			}
+		} finally {
+			await namespace.dispose(BACKGROUND_CONTEXT);
+		}
+	});
+
 	test("buffers state updates that race subscription hydration", async () => {
 		const provider = new RemoteServiceProvider([Models]);
 		const state = replicatedState<ModelsState>({ selected: null, revision: 0 });

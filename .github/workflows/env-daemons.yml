@@ -1,8 +1,8 @@
 name: pi-env daemons
 
 # Builds the pi-env daemon for every remote system @earendil-works/pi-env supports, on native runners, as artifacts
-# named pi-env-<platform>-<arch>. Build Binaries calls this before publishing npm packages; branches named
-# durable-env-* run it to test the builds without a release.
+# named pi-env-<platform>-<arch>. Build Binaries calls this before publishing npm packages; the Environments workflow
+# calls it to test the release builds on every change.
 on:
   workflow_call:
     inputs:
@@ -11,9 +11,6 @@ on:
         required: false
         type: string
   workflow_dispatch:
-  push:
-    branches: ["durable-env-*"]
-    paths: ["packages/env/daemon/**", ".github/workflows/env-daemons.yml"]
 
 permissions:
   contents: read
@@ -49,8 +46,16 @@ jobs:
 
       - name: Configure the Android NDK linker
         if: matrix.android
+        # A fixed NDK, installed when the runner image does not have it.
+        env:
+          NDK_VERSION: 27.2.12479018
         run: |
-          linker="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.android }}-clang"
+          ndk="$ANDROID_HOME/ndk/$NDK_VERSION"
+          if [ ! -d "$ndk" ]; then
+            # `yes` ends with SIGPIPE once the licenses are accepted.
+            { yes || true; } | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          fi
+          linker="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.android }}-clang"
           test -x "$linker"
           variable="CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER"
           echo "$variable=$linker" >> "$GITHUB_ENV"

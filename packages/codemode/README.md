@@ -58,7 +58,9 @@ await sandbox.close();
 const result = await sandbox.execute(`store("runs", (load("runs") ?? 0) + 1)`, { store: saved });
 if (result.ok) {
 	for (const key of result.storeWrites.delete) delete saved[key];
-	Object.assign(saved, result.storeWrites.set);
+	for (const [key, value] of Object.entries(result.storeWrites.set)) {
+		Object.defineProperty(saved, key, { value, writable: true, enumerable: true, configurable: true });
+	}
 }
 ```
 

@@ -1,5 +1,5 @@
 import type { OAuthCredential } from "../auth/types.ts";
-import type { Model, ThinkingLevelMap } from "../types.ts";
+import type { Model, ModelCostRates, ThinkingLevelMap } from "../types.ts";
 
 export const DEFAULT_RADIUS_GATEWAY = "https://radius.pi.dev";
 
@@ -23,6 +23,15 @@ export type RadiusOAuthCredential = OAuthCredential & {
 	gatewayConfig?: RadiusGatewayConfig;
 };
 
+function hasCostRates(value: unknown): value is ModelCostRates {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const rates = value as Record<string, unknown>;
+	return ["input", "output", "cacheRead", "cacheWrite"].every((key) => {
+		const rate = rates[key];
+		return typeof rate === "number" && Number.isFinite(rate);
+	});
+}
+
 function isRadiusGatewayModel(value: unknown): value is RadiusGatewayModel {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const model = value as Partial<RadiusGatewayModel>;
@@ -31,9 +40,10 @@ function isRadiusGatewayModel(value: unknown): value is RadiusGatewayModel {
 		typeof model.name === "string" &&
 		typeof model.reasoning === "boolean" &&
 		Array.isArray(model.input) &&
-		typeof model.cost === "object" &&
-		model.cost !== null &&
-		!Array.isArray(model.cost) &&
+		hasCostRates(model.cost) &&
+		(model.cost.tiers === undefined ||
+			(Array.isArray(model.cost.tiers) &&
+				model.cost.tiers.every((tier) => hasCostRates(tier) && Number.isFinite(tier.inputTokensAbove)))) &&
 		typeof model.contextWindow === "number" &&
 		typeof model.maxTokens === "number"
 	);

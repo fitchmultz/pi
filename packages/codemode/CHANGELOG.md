@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Built-ins are frozen and built-in globals are read-only before the script runs, so patches such as `Array.prototype.toJSON = ...` have no effect. Instances can still override `constructor`, `name`, `message`, `toString`, `toLocaleString`, `valueOf`, `toJSON`, and `Object.prototype` members ([#10444](https://github.com/earendil-works/pi/issues/10444))
+
+### Fixed
+
+- Fixed `__proto__` store keys being lost on input and changing the result writes-map prototype instead of reporting an own entry ([#10510](https://github.com/earendil-works/pi/issues/10510)).
+- Fixed a script that patched built-ins crashing the host process and leaving `execute()` unsettled. Malformed payloads from the worker now fail the execution with a `sandbox` error ([#10444](https://github.com/earendil-works/pi/issues/10444))
+
 ## [1.0.3] - 2026-10-05
 
 ## [1.0.2] - 2026-10-04
