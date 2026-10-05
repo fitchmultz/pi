@@ -174,6 +174,7 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 			selector,
 			"--releases",
 			join(root, "real-home/.local/share/pi-fork/releases"),
+			"--accept-model-removals",
 		]);
 		expect(observed.env.ANTHROPIC_API_KEY).toBeUndefined();
 		expect(observed.env.PI_RESTART_SOCKET).toBeUndefined();

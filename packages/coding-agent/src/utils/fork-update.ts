@@ -153,6 +153,11 @@ export async function runForkUpdate(): Promise<void> {
 			selector,
 			"--releases",
 			releases,
+			// Upstream catalog changes (provider renames, model pruning) are routine.
+			// Never block the update on them; the installer prints every removed ID.
+			// ponytail: no updater-level consent gate by owner decision. Malformed or
+			// empty catalogs still fail closed in the installer.
+			"--accept-model-removals",
 		]);
 		console.log(`Fork commit ${commit} is active. Rollback selector (when available): ${selector}.previous`);
 		console.log(
