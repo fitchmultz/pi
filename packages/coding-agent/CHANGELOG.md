@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Fixed standalone Bun binaries failing to resolve extension dependency entrypoints: manifests now supply `main`, `exports` and Bun conditions, including transitive imports. Unexported dependency subpaths are now rejected as under Node; use public entrypoints. Project bunfig preloads remain disabled.
 - Fixed `pi update --fork` failing on Termux when Android denies hard-link publication of the release-store ownership claim; exclusive creation still prevents competing selectors from sharing a store.
 - Fixed overlapping full model refreshes publishing out of order or returning before models and auth are ready, including SDK and CLI startup. Cancelling a later refresh no longer drops pending provider registration or disposal.
 - Fixed nested headless Pi sessions inheriting the primary working-session socket and exit receipt through extension factories and shell tools.

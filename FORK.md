@@ -35,6 +35,7 @@ and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing detai
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
+| Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
 | HTML export must not replace the journal through any alias | `core/export-html/index.ts` | `file-safety.test.ts` |
 | Edits must preserve UTF-8 and untouched original text/boundaries | `core/tools/{edit,edit-diff}.ts`, `utils/text.ts` | `edit-byte-safety.test.ts` |
@@ -136,8 +137,9 @@ npm run check
 ```
 
 Open the PR with `gh pr create --repo fitchmultz/pi`, follow CI to completion, fix failures and actionable review findings (or record evidence-backed rebuttals), and merge through repository rules. Refresh the canonical local checkout without overwriting unrelated work, install and verify changed resources, then remove only the task's clean worktree and obsolete branch.
-CI is the upstream workflow plus tmux, so the real-terminal restart test runs, and a macOS job
-runs the restart and `background_command` tests.
+CI adds tmux for the real-terminal restart test, a macOS job for restart and
+`background_command`, and one Linux standalone build with the compiled extension regression.
+The standalone step uses pinned Bun 1.3.14 and the existing package build.
 
 ## Install and activate
 
@@ -199,3 +201,18 @@ only complete current native state, with no journal-only or pre-v1 handoff fallb
   focused command the same way. Node and npm resolve before HOME isolation so version-manager
   shims keep working.
 - Restart terminal tests need tmux and a built CLI; set `PI_TEST_CLI` to test an installed release.
+- Standalone builds enable `--compile-autoload-package-json`: dependency `main` and `exports`
+  resolve at runtime, including Bun export conditions. Unexported subpaths are rejected as under
+  Node; use public entrypoints. `--no-compile-autoload-bunfig` keeps project preloads disabled.
+  Bun 1.3.14's runtime tsconfig autoload default remains disabled; the package-manifest flag is
+  independent. Pi's project-resource trust gate and embedded host peers are unchanged.
+- `compiled-extension-packages.test.ts` requires an explicit `PI_TEST_COMPILED_CLI` standalone
+  target; unset skips, invalid targets fail. It checks deferred conditional/transitive imports,
+  main-only roots, private-subpath rejection, project-extension denial and disabled bunfig
+  preloads without model calls. `PI_TEST_CLI` remains the separate Node restart-test input.
+
+  ```sh
+  PI_TEST_COMPILED_CLI=/path/to/pi ./test.sh -- \
+    node node_modules/vitest/dist/cli.js --run --root packages/coding-agent \
+    test/compiled-extension-packages.test.ts
+  ```
