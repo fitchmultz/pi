@@ -69,6 +69,11 @@ under `~/.local/share/pi-fork/releases`. It does not edit settings, credentials,
 extensions, or sessions. Running sessions keep their runtime until a full relaunch
 or a [managed restart](restart.md).
 
+`pi update --fork` accepts upstream catalog removals and prints every removed model
+ID. Older fork installations may still refuse them: use the printed
+`--activate <identity> --accept-model-removals` command from a current fork checkout,
+then relaunch Pi to load the updated updater.
+
 The installer also supports `--stage`, `--activate <identity>`, and
 `--rollback <identity>`; pass the same `--selector` and `--releases` for each operation.
 The prior package target is preserved as `<selector>.previous`.
