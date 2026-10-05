@@ -17,7 +17,7 @@
 - Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle complete native-state resume, staged runtime and extension activation, and one-shot startup rollback. Journal-only handoffs are refused. See [Managed restarts](docs/restart.md).
 - Added optional `compactView` (off by default), `/compact-view`, and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Hybrid opens groups by default while keeping cards compact.
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
-- Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Activation checks frozen provider/model IDs before changing either selector link; intentional removals require explicit acceptance, while explicit rollback remains available. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
+- Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Activation accepts upstream catalog removals and prints every removed model ID instead of blocking the update; direct installer runs still require explicit `--accept-model-removals`, while explicit rollback remains available. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
 
 ### Fixed
 
