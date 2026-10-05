@@ -103,6 +103,9 @@ for name in CI GITHUB_ACTIONS PI_TEST_CLI; do
 	value="${!name-}"
 	[[ -z "$value" ]] || test_env+=("$name=$value")
 done
+if [[ ${PI_TEST_COMPILED_CLI+x} ]]; then
+	test_env+=("PI_TEST_COMPILED_CLI=$PI_TEST_COMPILED_CLI")
+fi
 
 echo "Running tests without API keys in isolated home: $test_root/home"
 env -i "${test_env[@]}" "${command[@]}"
