@@ -1,6 +1,8 @@
+import { setImmediate } from "node:timers/promises";
 import type { ApiKeyCredential, Credential, CredentialStore, Model, Provider } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { ModelConfig } from "../src/core/model-config.ts";
 import { CredentialSynchronizationError, ModelRuntime } from "../src/core/model-runtime.ts";
 
 function model(provider: string): Model<"openai-completions"> {
@@ -60,6 +62,84 @@ async function runtimeWithProvider(
 }
 
 describe("ModelRuntime credential synchronization", () => {
+	it.each(["login", "logout", "setRuntimeApiKey", "removeRuntimeApiKey"] as const)(
+		"does not let earlier config I/O overtake %s catalog synchronization",
+		async (operation) => {
+			const id = "admission";
+			const credentials = AuthStorage.inMemory({ [id]: { type: "api_key", key: "stored-key" } });
+			const cacheEntered = Promise.withResolvers<void>();
+			const cacheGate = Promise.withResolvers<void>();
+			const obsoleteGate = Promise.withResolvers<void>();
+			let active = false;
+			let reads = 0;
+			let models: readonly Model<"openai-completions">[] = [{ ...model(id), id: "fallback" }];
+			const registered = provider(id, {
+				refreshModels: async ({ credential, publish }) => {
+					if (!active) return;
+					if (++reads === 1) {
+						cacheEntered.resolve();
+						await cacheGate.promise;
+					} else {
+						await obsoleteGate.promise;
+					}
+					await publish({
+						update: () => {
+							models = [
+								{ ...model(id), id: credential?.type === "api_key" ? credential.key! : "no-credential" },
+							];
+						},
+					});
+				},
+			});
+			registered.getModels = () => models;
+			const runtime = await runtimeWithProvider(registered, credentials);
+			if (operation === "removeRuntimeApiKey") await runtime.setRuntimeApiKey(id, "previous-runtime-key");
+			const configEntered = Promise.withResolvers<void>();
+			const configGate = Promise.withResolvers<void>();
+			const load = ModelConfig.load;
+			const loadSpy = vi.spyOn(ModelConfig, "load").mockImplementationOnce(async (path) => {
+				const config = await load(path);
+				configEntered.resolve();
+				await configGate.promise;
+				return config;
+			});
+			active = true;
+			const older = runtime.refresh({ allowNetwork: false });
+			let synchronized: Promise<unknown> | undefined;
+			try {
+				await configEntered.promise;
+				if (operation === "login") {
+					synchronized = runtime.login(id, "api_key", { prompt: async () => "unused", notify() {} });
+				} else if (operation === "logout") {
+					synchronized = runtime.logout(id);
+				} else if (operation === "setRuntimeApiKey") {
+					synchronized = runtime.setRuntimeApiKey(id, "runtime-key");
+				} else {
+					synchronized = runtime.removeRuntimeApiKey(id);
+				}
+				await cacheEntered.promise;
+				configGate.resolve();
+				await setImmediate();
+				cacheGate.resolve();
+				await synchronized;
+				const expected = {
+					login: `${id}-key`,
+					logout: "no-credential",
+					setRuntimeApiKey: "runtime-key",
+					removeRuntimeApiKey: "stored-key",
+				}[operation];
+				expect(runtime.getModels(id).map((entry) => entry.id)).toEqual([expected]);
+				expect(runtime.hasConfiguredAuth(id)).toBe(operation !== "logout");
+			} finally {
+				configGate.resolve();
+				cacheGate.resolve();
+				obsoleteGate.resolve();
+				await Promise.allSettled([older, synchronized]);
+				loadSpy.mockRestore();
+			}
+		},
+	);
+
 	it("publishes locally consistent availability before login and logout resolve", async () => {
 		const credentials = AuthStorage.inMemory();
 		const runtime = await runtimeWithProvider(provider("dynamic"), credentials);
@@ -170,6 +250,285 @@ describe("ModelRuntime credential synchronization", () => {
 			aborted: false,
 		});
 	});
+
+	it.each(["login", "logout", "setRuntimeApiKey", "removeRuntimeApiKey"] as const)(
+		"finishes %s local synchronization before an overlapping full successor's unrelated catalog",
+		async (operation) => {
+			const id = "local-target";
+			const credentials = AuthStorage.inMemory({ [id]: { type: "api_key", key: "stored-key" } });
+			const firstEntered = Promise.withResolvers<void>();
+			const firstGate = Promise.withResolvers<void>();
+			const firstPublished = Promise.withResolvers<void>();
+			const targetPublished = Promise.withResolvers<void>();
+			const unrelatedEntered = Promise.withResolvers<void>();
+			const unrelatedGate = Promise.withResolvers<void>();
+			let active = false;
+			let targetCalls = 0;
+			let models: readonly Model<"openai-completions">[] = [model(id)];
+			const target = provider(id, {
+				refreshModels: async ({ credential, publish }) => {
+					if (!active) return;
+					const first = ++targetCalls === 1;
+					if (first) {
+						firstEntered.resolve();
+						await firstGate.promise;
+					}
+					try {
+						await publish({
+							update: () => {
+								models = [{ ...model(id), id: credential?.type === "api_key" ? credential.key! : "no-key" }];
+							},
+						});
+						if (!first) targetPublished.resolve();
+					} finally {
+						if (first) firstPublished.resolve();
+					}
+				},
+			});
+			target.getModels = () => models;
+
+			const runtime = await runtimeWithProvider(target, credentials);
+			runtime.registerNativeProvider(
+				provider("local-unrelated", {
+					refreshModels: async () => {
+						if (!active) return;
+						unrelatedEntered.resolve();
+						await unrelatedGate.promise;
+					},
+				}),
+			);
+			await runtime.refresh({ allowNetwork: false });
+			if (operation === "removeRuntimeApiKey") await runtime.setRuntimeApiKey(id, "previous-key");
+			active = true;
+			const completionOrder: string[] = [];
+			const local = (
+				operation === "login"
+					? runtime.login(id, "api_key", { prompt: async () => "unused", notify() {} })
+					: operation === "logout"
+						? runtime.logout(id)
+						: operation === "setRuntimeApiKey"
+							? runtime.setRuntimeApiKey(id, "runtime-key")
+							: runtime.removeRuntimeApiKey(id)
+			).then(() => {
+				completionOrder.push("local");
+			});
+			await firstEntered.promise;
+			const full = runtime.refresh({ allowNetwork: false }).then((result) => {
+				completionOrder.push("full");
+				return result;
+			});
+			try {
+				await Promise.all([unrelatedEntered.promise, targetPublished.promise]);
+				firstGate.resolve();
+				await firstPublished.promise;
+				unrelatedGate.resolve();
+				await Promise.all([local, full]);
+				expect(completionOrder).toEqual(["local", "full"]);
+				const expected = {
+					login: `${id}-key`,
+					logout: "no-key",
+					setRuntimeApiKey: "runtime-key",
+					removeRuntimeApiKey: "stored-key",
+				}[operation];
+				expect(runtime.getModels(id).map((entry) => entry.id)).toEqual([expected]);
+				expect(runtime.hasConfiguredAuth(id)).toBe(operation !== "logout");
+			} finally {
+				firstGate.resolve();
+				unrelatedGate.resolve();
+				await Promise.allSettled([local, full]);
+			}
+		},
+	);
+
+	it.each(["login", "logout", "setRuntimeApiKey", "removeRuntimeApiKey"] as const)(
+		"publishes %s auth and credential-filtered models despite a later held global availability read",
+		async (operation) => {
+			const id = "global-overlap-target";
+			const stored = operation === "logout" || operation === "removeRuntimeApiKey";
+			const base = AuthStorage.inMemory(stored ? { [id]: { type: "api_key", key: "stored-key" } } : {});
+			const listEntered = Promise.withResolvers<void>();
+			const listGate = Promise.withResolvers<void>();
+			const unrelatedEntered = Promise.withResolvers<void>();
+			const unrelatedGate = Promise.withResolvers<void>();
+			const targetEntered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			const targetGates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			let active = false;
+			let checks = 0;
+			const credentials: CredentialStore = {
+				read: (providerId, options) => base.read(providerId, options),
+				modify: (providerId, update, options) => base.modify(providerId, update, options),
+				delete: (providerId, options) => base.delete(providerId, options),
+				list: async (options) => {
+					if (active) {
+						listEntered.resolve();
+						await listGate.promise;
+					}
+					return base.list(options);
+				},
+			};
+			const runtime = await ModelRuntime.create({ credentials, modelsPath: null });
+			const target = provider(id);
+			target.getModels = () =>
+				["stored-key", `${id}-key`, "runtime-key", "previous-key"].map((key) => ({ ...model(id), id: key }));
+			target.filterModels = (models, credential) =>
+				models.filter((entry) => credential?.type === "api_key" && entry.id === credential.key);
+			target.auth.apiKey!.check = async ({ credential }) => {
+				if (active) {
+					const index = checks++;
+					targetEntered[index]!.resolve();
+					await targetGates[index]!.promise;
+				}
+				return credential ? { type: "api_key", source: "fixture" } : undefined;
+			};
+			const unrelated = provider("global-overlap-unrelated");
+			unrelated.auth.apiKey!.check = async () => {
+				if (active) {
+					unrelatedEntered.resolve();
+					await unrelatedGate.promise;
+				}
+				return undefined;
+			};
+			runtime.registerNativeProvider(target);
+			runtime.registerNativeProvider(unrelated);
+			await runtime.refresh({ allowNetwork: false });
+			if (operation === "removeRuntimeApiKey") await runtime.setRuntimeApiKey(id, "previous-key");
+			active = true;
+			let globalSettled = false;
+			const local =
+				operation === "login"
+					? runtime.login(id, "api_key", { prompt: async () => "unused", notify() {} })
+					: operation === "logout"
+						? runtime.logout(id)
+						: operation === "setRuntimeApiKey"
+							? runtime.setRuntimeApiKey(id, "runtime-key")
+							: runtime.removeRuntimeApiKey(id);
+			let global: ReturnType<ModelRuntime["getAvailable"]> | undefined;
+			try {
+				await targetEntered[0]!.promise;
+				global = runtime.getAvailable().then((models) => {
+					globalSettled = true;
+					return models;
+				});
+				await Promise.all([targetEntered[1]!.promise, unrelatedEntered.promise, listEntered.promise]);
+				targetGates[0]!.resolve();
+				await local;
+				expect(globalSettled).toBe(false);
+				expect(runtime.hasConfiguredAuth(id)).toBe(operation !== "logout");
+				const expected = {
+					login: [`${id}-key`],
+					logout: [],
+					setRuntimeApiKey: ["runtime-key"],
+					removeRuntimeApiKey: ["stored-key"],
+				}[operation];
+				expect(
+					runtime
+						.getAvailableSnapshot()
+						.filter((entry) => entry.provider === id)
+						.map((entry) => entry.id),
+				).toEqual(expected);
+				expect(runtime.getError()).toBeUndefined();
+				targetGates[1]!.resolve();
+				unrelatedGate.resolve();
+				listGate.resolve();
+				expect((await global).filter((entry) => entry.provider === id).map((entry) => entry.id)).toEqual(expected);
+			} finally {
+				for (const gate of targetGates) gate.resolve();
+				unrelatedGate.resolve();
+				listGate.resolve();
+				await Promise.allSettled([local, global]);
+			}
+		},
+	);
+
+	it.each(["abort", "store failure"] as const)(
+		"does not discard credential synchronization when a later global availability read ends in %s",
+		async (failure) => {
+			const id = "failed-global-target";
+			const base = AuthStorage.inMemory();
+			const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			let active = false;
+			let checks = 0;
+			const credentials: CredentialStore = {
+				read: (providerId, options) => base.read(providerId, options),
+				modify: (providerId, update, options) => base.modify(providerId, update, options),
+				delete: (providerId, options) => base.delete(providerId, options),
+				list: async (options) => {
+					if (active && failure === "store failure") throw new Error("global list failed");
+					return base.list(options);
+				},
+			};
+			const runtime = await ModelRuntime.create({ credentials, modelsPath: null });
+			const target = provider(id);
+			target.auth.apiKey!.check = async ({ credential }) => {
+				if (active) {
+					const index = checks++;
+					entered[index]!.resolve();
+					await gates[index]!.promise;
+				}
+				return credential ? { type: "api_key", source: "fixture" } : undefined;
+			};
+			runtime.registerNativeProvider(target);
+			await runtime.refresh({ allowNetwork: false });
+			active = true;
+			const local = runtime.setRuntimeApiKey(id, "runtime-key");
+			const controller = new AbortController();
+			const reason = new Error("global read cancelled");
+			let outcome: Promise<unknown> | undefined;
+			try {
+				await entered[0]!.promise;
+				outcome = runtime.getAvailable(undefined, { signal: controller.signal }).catch((error: unknown) => error);
+				await entered[1]!.promise;
+				if (failure === "abort") controller.abort(reason);
+				if (failure === "abort") expect(await outcome).toBe(reason);
+				else expect(await outcome).toMatchObject({ message: "global list failed" });
+				gates[0]!.resolve();
+				await local;
+				expect(runtime.hasConfiguredAuth(id)).toBe(true);
+				expect(runtime.getAvailableSnapshot().some((entry) => entry.provider === id)).toBe(true);
+			} finally {
+				for (const gate of gates) gate.resolve();
+				await Promise.allSettled([local, outcome]);
+			}
+		},
+	);
+
+	it.each(["credential synchronization", "global availability read"] as const)(
+		"retains the newer snapshot after %s overtakes an older global availability read",
+		async (successor) => {
+			const id = "older-global-target";
+			const credentials = AuthStorage.inMemory();
+			const entered = Promise.withResolvers<void>();
+			const gate = Promise.withResolvers<void>();
+			let active = false;
+			const target = provider(id);
+			target.auth.apiKey!.check = async ({ credential }) => {
+				if (active && !credential) {
+					entered.resolve();
+					await gate.promise;
+				}
+				return credential ? { type: "api_key", source: "fixture" } : undefined;
+			};
+			const runtime = await runtimeWithProvider(target, credentials);
+			active = true;
+			const global = runtime.getAvailable();
+			try {
+				await entered.promise;
+				if (successor === "credential synchronization") await runtime.setRuntimeApiKey(id, "runtime-key");
+				else {
+					await credentials.modify(id, async () => ({ type: "api_key", key: "stored-key" }));
+					await runtime.getAvailable();
+				}
+				gate.resolve();
+				expect((await global).some((entry) => entry.provider === id)).toBe(true);
+				expect(runtime.hasConfiguredAuth(id)).toBe(true);
+				expect(runtime.getError()).toBeUndefined();
+			} finally {
+				gate.resolve();
+				await global;
+			}
+		},
+	);
 
 	it("reports cancellation that occurs during provider-scoped availability", async () => {
 		let blockAvailability = false;
