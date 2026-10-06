@@ -1,7 +1,16 @@
 import type { Message } from "@earendil-works/pi-ai";
-import { type EntryDraft, type EntryId, type EntryRecord, MemoryStorage } from "@earendil-works/pi-durable";
+import {
+	type ContextView,
+	createRegistry,
+	defineTask,
+	type EntryDraft,
+	type EntryId,
+	type EntryRecord,
+	MemoryStorage,
+	type Storage,
+} from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { assistant, describeMessage, openHarness, system, toolResult, user } from "./harness-support.ts";
+import { addTask, assistant, describeMessage, openHarness, system, toolResult, user } from "./harness-support.ts";
 import { context } from "./session-support.ts";
 
 async function setup() {
@@ -131,5 +140,94 @@ describe("conversation context", () => {
 		const parentView = await root.context(context);
 		expect(parentView.messages.map(describeMessage)).toEqual([]);
 		expect(parentView.entries.map((entry) => entry.kind)).toEqual(["reset", "message"]);
+	});
+
+	it("extends a task invocation's context read with only newer entries", async () => {
+		let scanned = 0;
+		const memory = new MemoryStorage();
+		const storage = new Proxy<Storage>(memory, {
+			get(target, key) {
+				const value: unknown = Reflect.get(target, key, target);
+				if (key === "scanEntries") {
+					return async (...args: Parameters<Storage["scanEntries"]>) => {
+						const page = await target.scanEntries(...args);
+						scanned += page.items.length;
+						return page;
+					};
+				}
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const registry = createRegistry();
+		const { harness } = await openHarness(storage, [], { registry });
+		const root = await harness.root(context);
+		const append = (draft: EntryDraft): Promise<EntryRecord> =>
+			root.commit((tx) => tx.appendEntry(root.id, draft), context);
+		const first = await append({ kind: "message", model: [user("first")] });
+		for (let index = 0; index < 20; index++) await append({ kind: "message", model: [assistant(`old ${index}`)] });
+		const Reads = defineTask<Record<string, never>, { phase: "run" }, null>({
+			name: "test.context-reads",
+			version: 1,
+			initial: () => ({ phase: "run" }),
+			phases: {
+				run: async (_task, runtime, taskContext) => {
+					const write = (draft: EntryDraft) =>
+						runtime.commit(async (tx) => {
+							await tx.appendEntry(root.id, draft);
+							return undefined;
+						}, taskContext);
+					const read = async (at?: EntryId): Promise<{ view: ContextView; rows: number }> => {
+						const before = scanned;
+						const view = await runtime.context(root.id, taskContext, at);
+						return { view, rows: scanned - before };
+					};
+					const initial = await read();
+					expect(initial.view).toEqual(await root.context(taskContext));
+
+					// Three new entries: the bounds probe reads one row, the extension the three new ones.
+					await write({ kind: "message", model: [user("new")] });
+					await write({ kind: "note", data: { text: "display only" } });
+					await write({ kind: "message", model: [assistant("answer")] });
+					const extended = await read();
+					expect(extended.rows).toBe(4);
+					expect(extended.view).toEqual(await root.context(taskContext));
+
+					// A newer edit of an older entry applies to the extended range.
+					await write({ kind: "edit", edits: [{ target: first.id, action: "omit" }] });
+					const edited = await read();
+					expect(edited.rows).toBe(2);
+					expect(edited.view).toEqual(await root.context(taskContext));
+					expect(edited.view.messages.map(describeMessage)).not.toContain("user:first");
+
+					// An earlier cutoff reuses the range.
+					const cutoff = await read(extended.view.entries.at(-1)!.id);
+					expect(cutoff.rows).toBe(0);
+					expect(cutoff.view).toEqual(extended.view);
+
+					// A new head marker changes the range: read it whole.
+					await write({ kind: "reset", head: "self", model: [user("fresh")] });
+					const reset = await read();
+					expect(reset.view).toEqual(await root.context(taskContext));
+					expect(reset.view.messages.map(describeMessage)).toEqual(["user:fresh"]);
+
+					await runtime.commit(
+						() => ({ status: "terminal", outcome: { status: "completed", result: null } }),
+						taskContext,
+					);
+				},
+			},
+			abort: async (_task, runtime, taskContext) => {
+				await runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), taskContext);
+			},
+		});
+		addTask(registry, Reads);
+		const id = await harness.commit(
+			(tx) => tx.createTask(Reads, {}, { ownership: { kind: "conversation" }, conversationId: root.id }),
+			context,
+		);
+		harness.resume();
+		const settled = await harness.waitForTask(id, context);
+		expect(settled.state.outcome).toEqual({ status: "completed", result: null });
+		await harness.close(context);
 	});
 });

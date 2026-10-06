@@ -174,16 +174,20 @@ describe("retryAssistantCall", () => {
 		expect(onRetryFinished).not.toHaveBeenCalled();
 	});
 
-	it("retries a transient error up to maxRetries then returns the final error", async () => {
-		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));
-		const onRetryScheduled = vi.fn();
-		const onRetryFinished = vi.fn();
-		const res = await retryAssistantCall(produce, enabled, undefined, { onRetryScheduled, onRetryFinished });
-		expect(res.stopReason).toBe("error");
-		expect(produce).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
-		expect(onRetryScheduled).toHaveBeenCalledTimes(3);
-		expect(onRetryFinished).toHaveBeenCalledWith(false, 3, "terminated");
-	});
+	// #10543: server-busy wording uses the same bounded retry policy as other transient failures.
+	it.each(["terminated", "server_busy", "servers are currently busy"])(
+		"retries %s up to maxRetries then returns the final error",
+		async (errorMessage) => {
+			const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage }));
+			const onRetryScheduled = vi.fn();
+			const onRetryFinished = vi.fn();
+			const res = await retryAssistantCall(produce, enabled, undefined, { onRetryScheduled, onRetryFinished });
+			expect(res.stopReason).toBe("error");
+			expect(produce).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
+			expect(onRetryScheduled).toHaveBeenCalledTimes(3);
+			expect(onRetryFinished).toHaveBeenCalledWith(false, 3, errorMessage);
+		},
+	);
 
 	it("reports capped retry delays", async () => {
 		// Regression for #8826.

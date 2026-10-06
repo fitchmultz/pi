@@ -18,12 +18,11 @@
 - Added optional `compactView` (off by default), `/compact-view`, and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Hybrid opens groups by default while keeping cards compact.
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 - Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Activation accepts upstream catalog removals and prints every removed model ID instead of blocking the update; direct installer runs still require explicit `--accept-model-removals`, while explicit rollback remains available. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
-
-- Added `*` patterns to `--tools` and `--exclude-tools`, for example `--tools read,codemode,'mcp__radius__*'`
-- Added `--no-mcp` to disable the built-in MCP support for one run
+- Added `+name` and `-name` entries to `--tools`, which change the default tool selection instead of replacing it, for example `pi -t +codemode`
 
 ### Fixed
 
+- Fixed native working-session restore losing `--tools +name/-name` modifiers on reload; malformed saved modifier lists are rejected before factories.
 - Fixed native working-session restore losing wildcard tool restrictions, disabled builtin selection such as `--no-mcp`, and pending tools already registered on reconnect; malformed saved hidden-tool lists are rejected before factories.
 - Fixed source builds failing with TypeScript casing errors on macOS checkouts reached through differently cased paths; builds use canonical working directories and resolve workspace declarations through package exports.
 - Fixed standalone Bun binaries failing to resolve extension dependency entrypoints: manifests now supply `main`, `exports` and Bun conditions, including transitive imports. Unexported dependency subpaths are now rejected as under Node; use public entrypoints. Project bunfig preloads remain disabled.
@@ -50,12 +49,31 @@
 - Fixed shell spill logs being created with permissions that expose output to other users.
 - Fixed failed session migration and whole-file rewrites truncating the existing journal.
 - Fixed a provider's auth-check failure hiding healthy models or silently replacing saved and scoped provider selections.
+- Fixed managed installs keeping every old release; `pi update` now keeps only the new release and the one it updated from ([#10392](https://github.com/earendil-works/pi/issues/10392))
+- Fixed standalone binaries loading `.env`, `.env.local`, and `.env.development` from the launch directory into Pi's environment ([#10473](https://github.com/earendil-works/pi/issues/10473))
+
+## [1.0.4] - 2026-10-05
+
+### New Features
+
+- **Tool patterns and `--no-mcp`**: `--tools` and `--exclude-tools` accept `*` patterns, for example `--tools read,codemode,'mcp__radius__*'` keeps only one MCP server's tools. `--tools` now keeps MCP tools unless an entry starts with `mcp__`, and `--no-mcp` turns off MCP for one run. See [Tools](docs/cli.md#tools) and [MCP tools](docs/cli.md#mcp-tools).
+- **Codemode persists images**: `tools.read()` on an image file now gives back an image block that `image()` can show. See [Call tools](docs/codemode.md#call-tools).
+
+### Added
+
+- Added `*` patterns to `--tools` and `--exclude-tools`, for example `--tools read,codemode,'mcp__radius__*'`
+- Added `--no-mcp` to disable the built-in MCP support for one run
+
+### Fixed
+
 - Fixed syntax highlighting losing colors after the first line of multiline strings and comments in fenced code blocks ([#10143](https://github.com/earendil-works/pi/issues/10143))
 - Fixed codemode scripts not receiving images from `read`: `tools.read()` now resolves to an image block for image files, which `image()` shows ([#10251](https://github.com/earendil-works/pi/issues/10251))
 - Fixed MCP OAuth sign-in failing with `invalid_redirect_uri` on servers with OpenID Connect client registration, such as `mcp.modem.dev`: pi now registers as a native client ([#10493](https://github.com/earendil-works/pi/issues/10493))
 - Fixed `--tools` removing MCP tools, which left `pi --tools codemode` without any MCP servers. `--tools` now keeps MCP tools unless an entry starts with `mcp__`
 - Fixed MCP session shutdown returning while a server was still connecting, leaving its transport open until the server answered or timed out ([#10249](https://github.com/earendil-works/pi/issues/10249))
 - Fixed system prompt rules and the skills hint naming tools hidden by `prepareLoadout`. Hidden tools are left out of the rules, the skills hint names no tool when the file reader is hidden, and `codemode` shows each tool's prompt guidelines with its declaration; `ToolLoadout` gains `getPromptGuidelines()` ([#10343](https://github.com/earendil-works/pi/issues/10343))
+- Fixed Bedrock requests that fail with `The pending stream has been canceled` after a stalled HTTP/2 connection not being retried automatically ([#10379](https://github.com/earendil-works/pi/issues/10379))
+- Fixed codemode scripts that patch built-ins (for example `Array.prototype.toJSON = ...`) crashing pi and leaving the tool call unsettled. Built-ins are now frozen before the script runs, so such patches have no effect ([#10444](https://github.com/earendil-works/pi/issues/10444))
 
 ## [1.0.3] - 2026-10-05
 

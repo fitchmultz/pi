@@ -11,7 +11,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import lockfile from "proper-lockfile";
 import { createModelDataManifest } from "../packages/ai/scripts/model-data.ts";
-import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
+import { smokeTestCodingAgent } from "./coding-agent-smoke.mjs";
+import { produceArtifactSet } from "./package-artifacts.mjs";
 import {
 	activateRelease, installFrozenConsumer, installRelease, isolatedEnvironment, main, prepareTermuxCompiler, pruneReleases, releaseIdentity, resolveBuildTools,
 } from "./install-fork.mjs";
@@ -95,14 +96,17 @@ function receipt(commit = "a", catalog = defaultCatalog) {
 }
 
 function packages(f, { brokenCli = false } = {}) {
-	const packages = [name, "@earendil-works/chord", aiName].map((name) => ({ name, directory: join(f.root, "packages", name) }));
+	const packages = [name, "@earendil-works/chord", aiName].map((name) => ({ name, directory: join(f.root, "source/packages", name) }));
 	for (const pkg of packages) {
 		if (pkg.name === aiName) { writeCatalogFixture(pkg.directory); continue; }
 		const coding = pkg.name === name;
 		const files = {
 			"package.json": JSON.stringify({
 				name: pkg.name, version: "1.0.0", type: "module", exports: "./dist/index.js",
-				...(coding ? { dependencies: { "@earendil-works/chord": "1.0.0", [aiName]: "1.0.0" }, bin: { pi: "dist/bundle/cli.js" } } : {}),
+				...(coding ? {
+					dependencies: { "@earendil-works/chord": "1.0.0", [aiName]: "1.0.0" },
+					bin: { pi: "dist/bundle/cli.js" }, scripts: { postinstall: "node -e 'process.exit(27)'" },
+				} : {}),
 			}),
 			"dist/index.js": coding ? `
 import { identity } from "@earendil-works/chord";
@@ -138,10 +142,18 @@ function installFixture(f, options = {}) {
 		mkdirSync(lockDirectory, { recursive: true });
 		writeFileSync(join(lockDirectory, "package.json"), JSON.stringify(manifest));
 		writeFileSync(join(lockDirectory, "package-lock.json"), JSON.stringify(lock));
-		const tarballs = packReleasePackages(pkgs, join(directory, "tarballs"), { ...tools, env: f.env });
-		if (options.brokenTarball) writeFileSync(tarballs.get(name), "not an npm tarball");
-		installFrozenConsumer(directory, tarballs, lockDirectory, tools, f.env);
-		smokeTestCodingAgentConsumer(directory, tools.node);
+		const artifactSet = produceArtifactSet({
+			repoRoot: join(f.root, "source"), outDir: join(directory, "artifacts"), build: false, source: null,
+			npmOptions: { node: tools.node, npm: tools.npm, env: f.env },
+		});
+		if (options.brokenTarball) {
+			const artifact = artifactSet.getPackage(name);
+			writeFileSync(artifact.tarballPath, "not an npm tarball");
+			// A matching digest forces npm to read the unusable archive instead of its valid pack cache.
+			artifact.integrity = `sha512-${createHash("sha512").update(readFileSync(artifact.tarballPath)).digest("base64")}`;
+		}
+		installFrozenConsumer(directory, artifactSet, lockDirectory, { ...tools, npm: options.npm ?? tools.npm }, f.env);
+		smokeTestCodingAgent(directory, tools.node);
 	};
 }
 
@@ -155,7 +167,13 @@ function assertPreserved(f) {
 
 test("stages real npm artifacts, selects atomically, reuses without rebuilding, and rolls back", async (t) => {
 	const f = fixture(t);
-	const first = await installRelease({ ...f, receipt: receipt(), stage: true }, installFixture(f));
+	const frozenLock = join(f.root, "frozen-lock.json");
+	const npm = join(f.root, "npm-ci-observer.cjs");
+	writeFileSync(npm, `require("node:fs").copyFileSync("package-lock.json", ${JSON.stringify(frozenLock)});
+require(${JSON.stringify(tools.npm)});
+`);
+	const first = await installRelease({ ...f, receipt: receipt(), stage: true }, installFixture(f, { npm }));
+	assert.deepEqual(readFileSync(join(first.directory, "package-lock.json")), readFileSync(frozenLock));
 	assertPreserved(f);
 	assert.equal(first.changed, false);
 	assert.equal(first.reused, false);
@@ -635,39 +653,6 @@ test("isolated npm cannot read registry credentials or settings from the native 
 	assert.equal(registry(), "https://credential-fixture.invalid/");
 });
 
-test("packing uses the resolved native Node/npm and isolated environment", (t) => {
-	const f = fixture(t);
-	const observed = join(f.root, "packing-env.json");
-	const npm = join(f.root, "npm-observer.cjs");
-	writeFileSync(npm, `const fs = require("node:fs");
-fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ node: process.execPath, env: process.env }));
-require(${JSON.stringify(tools.npm)});
-`);
-	const inherited = { HOME: process.env.HOME, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, NODE_OPTIONS: process.env.NODE_OPTIONS };
-	const preload = join(f.root, "ambient-preload.cjs");
-	const leaked = join(f.root, "preload-ran");
-	writeFileSync(preload, `require("node:fs").writeFileSync(${JSON.stringify(leaked)}, "leaked");`);
-	try {
-		process.env.HOME = join(f.root, "ambient-home");
-		process.env.ANTHROPIC_API_KEY = "synthetic-secret";
-		process.env.NODE_OPTIONS = `--require ${preload}`;
-		const tarballs = packReleasePackages(packages(f), join(f.root, "tarballs"), { node: tools.node, npm, env: f.env });
-		assert.ok(existsSync(tarballs.get(name)));
-		const result = JSON.parse(readFileSync(observed, "utf8"));
-		assert.equal(result.node, tools.node);
-		assert.equal(result.env.HOME, f.env.HOME);
-		assert.equal(result.env.ANTHROPIC_API_KEY, undefined);
-		assert.equal(result.env.NODE_OPTIONS, undefined);
-		assert.equal(result.env.npm_config_globalconfig, f.env.npm_config_globalconfig);
-		assert.equal(existsSync(leaked), false);
-	} finally {
-		for (const [name, value] of Object.entries(inherited)) {
-			if (value === undefined) delete process.env[name];
-			else process.env[name] = value;
-		}
-	}
-});
-
 test("keeps only Termux's exec wrapper, prefix and native shell in the isolated environment", (t) => {
 	const f = fixture(t);
 	const platform = process.platform;
@@ -713,7 +698,7 @@ for (const blocked of [false, true]) {
 	}, (t) => {
 		const f = fixture(t);
 		const name = `@typescript/typescript-linux-${process.arch}`;
-		const directory = join(f.root, "compiler");
+		const directory = join(f.root, "source/packages/compiler");
 		let gitHead = "a".repeat(40);
 		let originalWatcher;
 		let watcher;
@@ -754,7 +739,11 @@ func main() { fmt.Println("Version 1.2.3") }
 		writeFileSync(join(directory, "lib/tsc"), blocked
 			? '#!/usr/bin/env node\nconsole.error("SIGSYS: bad system call\\ninternal/fswatch.fanotifyAvailable()"); process.exit(2);\n'
 			: '#!/usr/bin/env node\nconsole.log("Version 1.2.3");\n', { mode: 0o755 });
-		const tarball = packReleasePackages([{ name, directory }], join(f.root, "tarballs")).get(name);
+		const artifactSet = produceArtifactSet({
+			repoRoot: join(f.root, "source"), outDir: join(f.root, "artifacts"), build: false, source: null,
+			npmOptions: { node: tools.node, npm: tools.npm, env: f.env },
+		});
+		const tarball = artifactSet.getPackage(name).tarballPath;
 		const lock = JSON.stringify({
 			lockfileVersion: 3,
 			packages: {

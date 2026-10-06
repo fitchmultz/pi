@@ -1,7 +1,8 @@
 import type { Context } from "@earendil-works/chord";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
+import { idFromNumber } from "../ids.ts";
 import type { SessionImpl } from "../session/session.ts";
-import type { ContextEdit, ConversationId, Cursor, EntryId, EntryRecord, Storage } from "../types.ts";
+import type { ContextEdit, ConversationId, Cursor, EntryId, EntryQuery, EntryRecord, Storage } from "../types.ts";
 import type { ContextView } from "./types.ts";
 
 const SCAN_PAGE_SIZE = 256;
@@ -38,6 +39,47 @@ export async function captureContextBounds(
 	return { head: await storage.findLatestHeadMarker(conversationId, tail, context), tail };
 }
 
+/**
+ * Visible entries one context read scanned: from the head marker's head, or transcript start, through `bounds.tail`,
+ * oldest first. Entries at or below the tail never change, so a later read with the same head marker extends it.
+ */
+export type ContextRange = {
+	readonly conversationId: ConversationId;
+	readonly bounds: ContextBounds;
+	readonly entries: readonly EntryRecord[];
+};
+
+/**
+ * `readContext()` that reuses `previous`: with the same conversation and head marker, only entries after its tail are
+ * scanned. Returns the view and the range to pass to the next read.
+ */
+export async function readContextFrom(
+	session: SessionImpl,
+	storage: Storage,
+	conversationId: ConversationId,
+	context: Context,
+	at: EntryId | undefined,
+	previous: ContextRange | undefined,
+): Promise<{ readonly view: ContextView; readonly range: ContextRange | undefined }> {
+	const bounds = await session.readOnLine(() => captureContextBounds(storage, conversationId, context, at));
+	if (bounds === undefined) return { view: emptyView(), range: undefined };
+	let entries: readonly EntryRecord[];
+	if (
+		previous === undefined ||
+		previous.conversationId !== conversationId ||
+		previous.bounds.head?.id !== bounds.head?.id
+	) {
+		entries = await scanRange(storage, conversationId, rangeQuery(bounds), context);
+	} else if (bounds.tail <= previous.bounds.tail) {
+		entries = previous.entries.filter((entry) => entry.id <= bounds.tail);
+	} else {
+		const minEntryId = idFromNumber<EntryId>(previous.bounds.tail + 1);
+		const added = await scanRange(storage, conversationId, { minEntryId, maxEntryId: bounds.tail }, context);
+		entries = [...previous.entries, ...added];
+	}
+	return { view: deriveView(bounds.head, entries), range: { conversationId, bounds, entries } };
+}
+
 /** Committed context of one conversation: bounds captured on the Session line, entries derived off it. */
 export async function readContext(
 	session: SessionImpl,
@@ -62,9 +104,16 @@ export async function deriveContext(
 	bounds: ContextBounds | undefined,
 	context: Context,
 ): Promise<ContextView> {
-	if (bounds === undefined) return { head: undefined, entries: [], contributions: [], messages: [] };
-	const head = bounds.head;
-	const range = await scanRange(storage, conversationId, bounds, context);
+	if (bounds === undefined) return emptyView();
+	return deriveView(bounds.head, await scanRange(storage, conversationId, rangeQuery(bounds), context));
+}
+
+function emptyView(): ContextView {
+	return { head: undefined, entries: [], contributions: [], messages: [] };
+}
+
+/** Derive the context view from the scanned range of `head`. */
+function deriveView(head: ContextBounds["head"], range: readonly EntryRecord[]): ContextView {
 	const edits = new Map<EntryId, ContextEdit>();
 	// Edits of every entry in the range count, including older head markers that `selectActive()` drops.
 	for (const entry of range) for (const edit of entry.edits ?? []) edits.set(edit.target, edit);
@@ -87,38 +136,36 @@ export async function activeEntries(
 	conversationId: ConversationId,
 	bounds: ContextBounds | undefined,
 	context: Context,
-): Promise<EntryRecord[]> {
+): Promise<readonly EntryRecord[]> {
 	if (bounds === undefined) return [];
-	return selectActive(bounds.head, await scanRange(storage, conversationId, bounds, context));
+	return selectActive(bounds.head, await scanRange(storage, conversationId, rangeQuery(bounds), context));
 }
 
-/** Visible entries from the head marker's head, or transcript start, through the tail, oldest first. */
+/** The visible range of `bounds`: from the head marker's head, or transcript start, through the tail. */
+function rangeQuery(bounds: ContextBounds): Omit<EntryQuery, "conversationId"> {
+	const head = bounds.head;
+	return head === undefined ? { maxEntryId: bounds.tail } : { minEntryId: head.head, maxEntryId: bounds.tail };
+}
+
+/** Visible entries within `range`, oldest first. */
 async function scanRange(
 	storage: Storage,
 	conversationId: ConversationId,
-	bounds: ContextBounds,
+	range: Omit<EntryQuery, "conversationId">,
 	context: Context,
 ): Promise<EntryRecord[]> {
-	const head = bounds.head;
-	const range: EntryRecord[] = [];
+	const entries: EntryRecord[] = [];
 	let cursor: Cursor | undefined;
 	do {
-		const page = await storage.scanEntries(
-			head === undefined
-				? { conversationId, maxEntryId: bounds.tail }
-				: { conversationId, minEntryId: head.head, maxEntryId: bounds.tail },
-			SCAN_PAGE_SIZE,
-			cursor,
-			context,
-		);
-		range.push(...page.items);
+		const page = await storage.scanEntries({ conversationId, ...range }, SCAN_PAGE_SIZE, cursor, context);
+		entries.push(...page.items);
 		cursor = page.next;
 	} while (cursor !== undefined);
-	return range.reverse();
+	return entries.reverse();
 }
 
 /** The head marker followed by the range's non-head entries, or the whole range without a marker. */
-function selectActive(head: ContextBounds["head"], range: EntryRecord[]): EntryRecord[] {
+function selectActive(head: ContextBounds["head"], range: readonly EntryRecord[]): readonly EntryRecord[] {
 	return head === undefined ? range : [head, ...range.filter((entry) => entry.head === undefined)];
 }
 

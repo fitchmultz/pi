@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openaiChatGPTOAuth } from "../src/auth/oauth/openai-chatgpt.ts";
+import { openaiCodexOAuth } from "../src/auth/oauth/openai-codex.ts";
 import type { OAuthCredential, ProviderAuthInteraction } from "../src/auth/types.ts";
 
 const TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token";
@@ -181,6 +182,23 @@ describe("OpenAI ChatGPT OAuth", () => {
 		);
 	});
 
+	it("uses the app's agent name as the name hint", async () => {
+		let authorizeUrl: URL | undefined;
+		stubTokenEndpoint(tokenResponse());
+
+		await openaiChatGPTOAuth.login(
+			loginInteraction({
+				callbackClientId: "oaiapp_issued",
+				onAuthorize: (url) => {
+					authorizeUrl = url;
+				},
+			}),
+			{ getDeviceId: () => DEVICE_ID, agentName: "my-app" },
+		);
+
+		expect(authorizeUrl?.searchParams.get("agent_name_hint")).toBe("my-app");
+	});
+
 	it("rejects registration without an issued client ID", async () => {
 		const fetchMock = stubTokenEndpoint(tokenResponse());
 
@@ -248,5 +266,85 @@ describe("OpenAI ChatGPT OAuth", () => {
 			clientId: "oaiapp_existing",
 			scopes: REQUIRED_SCOPE.split(" "),
 		});
+	});
+});
+
+// Both browser flows bind port 1455; keep their tests in one sequential file.
+describe("OpenAI Codex browser OAuth", () => {
+	const accessToken = `e30.${Buffer.from(
+		JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct" } }),
+	).toString("base64")}.signature`;
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it("uses the app's agent name as the browser login originator", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => jsonResponse({ access_token: accessToken, refresh_token: "refresh", expires_in: 3600 })),
+		);
+
+		let authUrl = "";
+		await openaiCodexOAuth.login(
+			{
+				signal: neverAbortedSignal,
+				notify: (event) => {
+					if (event.type === "auth_url") authUrl = event.url;
+				},
+				prompt: async (prompt) => {
+					if (prompt.type === "select") return "browser";
+					if (prompt.type !== "manual_code") throw new Error(`Unexpected prompt: ${prompt.type}`);
+					const state = new URL(authUrl).searchParams.get("state");
+					return `http://localhost:1455/auth/callback?code=pasted-code&state=${state}`;
+				},
+			},
+			{ agentName: "my-app" },
+		);
+
+		expect(new URL(authUrl).searchParams.get("originator")).toBe("my-app");
+	});
+
+	it("falls back to the pasted redirect URL when the fixed callback port is taken", async () => {
+		const blocker = createServer();
+		try {
+			await new Promise<void>((resolve, reject) => {
+				blocker.once("error", reject);
+				blocker.listen(1455, "127.0.0.1", resolve);
+			});
+			let exchangeBody: URLSearchParams | undefined;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+					expect(input instanceof Request ? input.url : String(input)).toBe("https://auth.openai.com/oauth/token");
+					exchangeBody = new URLSearchParams(String(init?.body));
+					return jsonResponse({
+						access_token: accessToken,
+						refresh_token: "refresh",
+						expires_in: 3600,
+					});
+				}),
+			);
+
+			let authUrl = "";
+			const credential = await openaiCodexOAuth.login({
+				signal: neverAbortedSignal,
+				notify: (event) => {
+					if (event.type === "auth_url") authUrl = event.url;
+				},
+				prompt: async (prompt) => {
+					if (prompt.type === "select") return "browser";
+					if (prompt.type !== "manual_code") throw new Error(`Unexpected prompt: ${prompt.type}`);
+					const state = new URL(authUrl).searchParams.get("state");
+					return `http://localhost:1455/auth/callback?code=pasted-code&state=${state}`;
+				},
+			});
+
+			expect(credential.accountId).toBe("acct");
+			expect(exchangeBody?.get("code")).toBe("pasted-code");
+			expect(exchangeBody?.get("redirect_uri")).toBe("http://localhost:1455/auth/callback");
+		} finally {
+			blocker.close();
+		}
 	});
 });

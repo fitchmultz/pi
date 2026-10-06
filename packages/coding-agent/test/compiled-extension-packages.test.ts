@@ -55,6 +55,14 @@ export const result = 'bun:' + value;`,
 			writeFileSync(join(mainOnly, "entry.cjs"), "module.exports = { value: 'main-only' };");
 			writeFileSync(join(cwd, "preload.mjs"), "throw new Error('Project preload executed');");
 			writeFileSync(join(cwd, "bunfig.toml"), 'preload = ["./preload.mjs"]\n');
+			// #10473: standalone startup must not import launch-directory dotenv values.
+			for (const [file, key] of [
+				[".env", "PI_COMPILED_ENV_BASE"],
+				[".env.local", "PI_COMPILED_ENV_LOCAL"],
+				[".env.development", "PI_COMPILED_ENV_DEVELOPMENT"],
+			]) {
+				writeFileSync(join(cwd, file), `${key}=injected\n`);
+			}
 			writeFileSync(join(cwd, ".pi", "extensions", "denied.js"), `${record}\nrecord({ phase: 'untrusted' });`);
 			writeFileSync(
 				extension,
@@ -72,7 +80,8 @@ export default function(pi) {
    const { value: main } = require('@compiled/main');
    let privateDenied = false;
    try { require('@compiled/exports/private.mjs'); } catch { privateDenied = true; }
-   record({ phase: 'request', result, main, privateDenied, bun: !!process.versions.bun, calls: faux.state.callCount });
+   record({ phase: 'request', result, main, privateDenied, bun: !!process.versions.bun, calls: faux.state.callCount,
+    dotenv: ['PI_COMPILED_ENV_BASE', 'PI_COMPILED_ENV_LOCAL', 'PI_COMPILED_ENV_DEVELOPMENT'].map(key => process.env[key] ?? null) });
   }
  });
  record({ phase: 'factory' });
@@ -122,7 +131,15 @@ export default function(pi) {
 				{ phase: "factory" },
 				{ phase: "transitive" },
 				{ phase: "package" },
-				{ phase: "request", result: "bun:transitive", main: "main-only", privateDenied: true, bun: true, calls: 0 },
+				{
+					phase: "request",
+					result: "bun:transitive",
+					main: "main-only",
+					privateDenied: true,
+					bun: true,
+					calls: 0,
+					dotenv: [null, null, null],
+				},
 			]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });

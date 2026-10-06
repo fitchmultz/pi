@@ -23,7 +23,7 @@ import type {
 	TaskState,
 } from "../types.ts";
 import { agentHooks } from "./agent.ts";
-import { readContext } from "./context.ts";
+import { type ContextRange, readContextFrom } from "./context.ts";
 import type {
 	Agent,
 	AnyTask,
@@ -75,6 +75,11 @@ type Invocation = {
 	readonly context: Context;
 	/** Watches acquired through the runtime; stopped at invocation end. */
 	readonly watches: Set<DocumentWatch<JsonObject>>;
+	/**
+	 * Range of the invocation's last context read, so the next read, such as a generation's request after its prepare,
+	 * scans only newer entries. Derived and never persisted; dropped at invocation end and before sleeping.
+	 */
+	contextRange: ContextRange | undefined;
 	ended: boolean;
 	readonly done: Promise<void>;
 	readonly finish: () => void;
@@ -825,6 +830,7 @@ export class TaskScheduler {
 			controller,
 			context: withAbortSignal(controller.signal, this.#context),
 			watches: new Set(),
+			contextRange: undefined,
 			ended: false,
 			done,
 			finish: () => finish(),
@@ -1028,6 +1034,7 @@ export class TaskScheduler {
 	#end(invocation: Invocation): void {
 		if (invocation.ended) return;
 		invocation.ended = true;
+		invocation.contextRange = undefined;
 		if (this.#invocations.get(invocation.taskId) === invocation) this.#invocations.delete(invocation.taskId);
 		for (const watch of invocation.watches) void watch.stop();
 		// Pending waits bound to the invocation, such as a tool's waitForTask(), reject with it.
@@ -1168,7 +1175,18 @@ export class TaskScheduler {
 				});
 			}) as ErasedRuntime["entry"],
 			context: (conversationId, context, at) =>
-				this.#read(invocation, () => readContext(this.#session, this.#storage, conversationId, context, at)),
+				this.#read(invocation, async () => {
+					const { view, range } = await readContextFrom(
+						this.#session,
+						this.#storage,
+						conversationId,
+						context,
+						at,
+						invocation.contextRange,
+					);
+					if (!invocation.ended) invocation.contextRange = range;
+					return view;
+				}),
 			now: () => {
 				if (invocation.ended) throw endedError(invocation);
 				return this.#now();
@@ -1214,6 +1232,8 @@ export class TaskScheduler {
 	/** Wait until the Harness clock reaches `until`, rechecking it after every timer. */
 	async #sleep(invocation: Invocation, until: number, context: Context): Promise<void> {
 		if (invocation.ended) throw endedError(invocation);
+		// A sleeping task holds no context range; a retry or poll can wait for a long time.
+		invocation.contextRange = undefined;
 		const signals = [invocation.controller.signal];
 		if (context.abortSignal !== undefined) signals.push(context.abortSignal);
 		const signal = AbortSignal.any(signals);

@@ -8,15 +8,15 @@ import {
 } from "node:fs";
 import { findPackageJSON } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
 import { validateModelDataDirectory } from "../packages/ai/scripts/model-data.ts";
 import { claimForkReleaseStore } from "../packages/coding-agent/src/utils/fork-release-store.ts";
-import { packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
-import { findPackageDirectories } from "./package-workspaces.mjs";
+import { codingAgentName, smokeTestCodingAgent } from "./coding-agent-smoke.mjs";
+import { wireConsumer } from "./local-package-install.mjs";
+import { produceArtifactSet } from "./package-artifacts.mjs";
 
-const codingAgentName = "@earendil-works/pi-coding-agent";
 const receiptFile = "fork-release.json";
 const restartWorker = "dist/bundle/cli-worker.js";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -136,22 +136,20 @@ function packageNameFromLockPath(lockPath) {
 }
 
 // Install the upstream runtime lock, replacing only the locally built packages.
-export function installFrozenConsumer(directory, tarballs, lockDirectory, tools, env) {
+export function installFrozenConsumer(directory, artifactSet, lockDirectory, tools, env) {
 	mkdirSync(directory, { recursive: true });
-	const local = Object.fromEntries([...tarballs].map(([name, path]) => [name, `file:./${relative(directory, path)}`]));
-	if (!local[codingAgentName]) throw new Error("Missing coding-agent tarball");
-	const manifest = JSON.parse(readFileSync(join(lockDirectory, "package.json"), "utf8"));
-	manifest.dependencies = { [codingAgentName]: local[codingAgentName] };
-	manifest.overrides = { ...manifest.overrides, ...local };
+	copyFileSync(join(lockDirectory, "package.json"), join(directory, "package.json"));
+	const manifest = wireConsumer({ artifactSet, consumerDirectory: directory, packageNames: [codingAgentName] });
+	const artifacts = new Map(artifactSet.packages.map((pkg) => [pkg.name, pkg]));
 	const lock = JSON.parse(readFileSync(join(lockDirectory, "package-lock.json"), "utf8"));
 	lock.packages[""].dependencies = manifest.dependencies;
 	for (const [path, entry] of Object.entries(lock.packages)) {
 		const name = packageNameFromLockPath(path);
-		if (!tarballs.has(name)) continue;
-		entry.resolved = local[name];
-		entry.integrity = `sha512-${createHash("sha512").update(readFileSync(tarballs.get(name))).digest("base64")}`;
+		const artifact = artifacts.get(name);
+		if (!artifact) continue;
+		entry.resolved = manifest.overrides[name];
+		entry.integrity = artifact.integrity;
 	}
-	writeFileSync(join(directory, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 	writeFileSync(join(directory, "package-lock.json"), `${JSON.stringify(lock, null, "\t")}\n`);
 	run(tools.node, [tools.npm, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: directory, env });
 }
@@ -503,12 +501,12 @@ export async function main(args = process.argv.slice(2)) {
 			run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: source, env });
 			if (process.platform === "android") prepareTermuxCompiler(source, tools, env);
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
-			const packages = findPackageDirectories(join(source, "packages"))
-				.map((directory) => ({ directory, ...JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) }))
-				.filter((pkg) => pkg.private !== true);
-			const tarballs = packReleasePackages(packages, join(directory, "tarballs"), { ...tools, env });
-			installFrozenConsumer(directory, tarballs, join(source, "packages/coding-agent/install-lock"), tools, env);
-			smokeTestCodingAgentConsumer(directory, tools.node);
+			const artifactSet = produceArtifactSet({
+				repoRoot: source, outDir: join(directory, "artifacts"), build: false,
+				source: { commit, dirty: false }, npmOptions: { node: tools.node, npm: tools.npm, env },
+			});
+			installFrozenConsumer(directory, artifactSet, join(source, "packages/coding-agent/install-lock"), tools, env);
+			smokeTestCodingAgent(directory, tools.node);
 			const cli = join(packagePath(directory), "dist/bundle/cli.js");
 			run(tools.node, [cli, "--help"], { cwd: env.HOME, env });
 			run(tools.node, [join(source, "scripts/smoke-test-background-command-bundle.mjs"), cli], { cwd: env.HOME, env });

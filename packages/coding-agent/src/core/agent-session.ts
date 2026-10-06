@@ -130,7 +130,12 @@ import {
 	SessionManager,
 	type SessionProjection,
 } from "./session-manager.ts";
-import { type CacheWarmingMode, DEFAULT_TOOL_NAMES, type SettingsManager } from "./settings-manager.ts";
+import {
+	applyToolModifiers,
+	type CacheWarmingMode,
+	DEFAULT_TOOL_NAMES,
+	type SettingsManager,
+} from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { BUILTIN_PATH_PREFIX, createSyntheticSourceInfo, isSyntheticPath, type SourceInfo } from "./source-info.ts";
 import {
@@ -276,6 +281,11 @@ export interface AgentSessionConfig {
 	 * tools newly added to the setting. Tools removed from it stay active.
 	 */
 	usesDefaultTools?: boolean;
+	/**
+	 * `+name`/`-name` entries applied on top of the `defaultTools` setting, from `--tools`. Reload
+	 * applies them to the reloaded setting too, so a removed tool stays removed.
+	 */
+	defaultToolModifiers?: string[];
 	/**
 	 * Optional allowlist of tool names or patterns (`*` matches any characters). When provided, only
 	 * matching tools are exposed. A non-empty list without `mcp__` entries also keeps MCP tools
@@ -461,6 +471,7 @@ export class AgentSession {
 	 */
 	private _pendingToolNames = new Set<string>();
 	private _usesDefaultTools: boolean;
+	private _defaultToolModifiers: string[];
 	/** Original patterns retained for native working-session persistence. */
 	private _allowedToolNames?: string[];
 	private _excludedToolNames?: string[];
@@ -515,6 +526,7 @@ export class AgentSession {
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._usesDefaultTools = config.usesDefaultTools ?? false;
+		this._defaultToolModifiers = config.defaultToolModifiers ?? [];
 		this._setToolFilters(config.allowedToolNames, config.excludedToolNames);
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
@@ -700,6 +712,7 @@ export class AgentSession {
 				allowedTools: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
 				excludedTools: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
 				usesDefaultTools: this._usesDefaultTools,
+				defaultToolModifiers: this._defaultToolModifiers,
 				steering: queues.steering,
 				followUp: queues.followUp,
 				steeringText: this._steeringMessages,
@@ -767,6 +780,7 @@ export class AgentSession {
 		this._pendingCustomMessages = state.pendingCustom as CustomMessage[];
 		this._pendingBashMessages = state.pendingBash as BashExecutionMessage[];
 		this._usesDefaultTools = state.usesDefaultTools;
+		this._defaultToolModifiers = state.defaultToolModifiers ?? [];
 		this._setToolFilters(state.allowedTools, state.excludedTools);
 		this._pendingToolNames = new Set([...state.activeTools, ...state.pendingTools]);
 		this._refreshToolRegistry({ activeToolNames: state.activeTools });
@@ -4014,20 +4028,21 @@ export class AgentSession {
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
 		oldRunner.invalidate();
-		const previousDefaultTools = new Set(
-			this._usesDefaultTools ? (this.settingsManager.getDefaultTools() ?? DEFAULT_TOOL_NAMES) : [],
-		);
+		const getDefaultTools = () =>
+			this._usesDefaultTools
+				? applyToolModifiers(
+						this.settingsManager.getDefaultTools() ?? DEFAULT_TOOL_NAMES,
+						this._defaultToolModifiers,
+					)
+				: [];
+		const previousDefaultTools = new Set(getDefaultTools());
 		await this.settingsManager.reload();
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
 		await this._resourceLoader.reload();
 		// Activate tools newly added to defaultTools. Removed ones stay active, and tools disabled
 		// during the session stay disabled unless the setting newly adds them.
-		const addedDefaultTools = this._usesDefaultTools
-			? (this.settingsManager.getDefaultTools() ?? DEFAULT_TOOL_NAMES).filter(
-					(name) => !previousDefaultTools.has(name),
-				)
-			: [];
+		const addedDefaultTools = getDefaultTools().filter((name) => !previousDefaultTools.has(name));
 		// Tools the new extensions register later, such as MCP tools, are pending until then.
 		for (const name of this.getActiveToolNames()) this._pendingToolNames.add(name);
 		this._buildRuntime({
