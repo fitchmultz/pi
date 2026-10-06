@@ -56,11 +56,14 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Public package consumer installs
+        run: ./test.sh -- npm run check:package-install
+
       - name: Build the pi-env daemon
         run: npm run build:daemon --workspace packages/env
 
       - name: Test
-        run: npm test
+        run: ./test.sh
 
   # Fork: restart and background_command depend on macOS process groups, signals and Unix sockets.
   macos-restart-background:

@@ -34,6 +34,18 @@ OUTPUT_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help)
+            printf '%s\n' \
+                'Usage: ./scripts/build-binaries.sh [options]' \
+                '--skip-install       Skip npm ci' \
+                '--skip-build         Skip the package build' \
+                '--offline-model-data Use bundled model data' \
+                '--platform <name>    Build one darwin/linux/windows arm64/x64 platform' \
+                '--out <dir>          Output directory (its contents are replaced)' \
+                'Example: ./scripts/build-binaries.sh --platform darwin-arm64 --offline-model-data' \
+                'Exit codes: 0 success, 1 invalid options, otherwise the failed command status.'
+            exit 0
+            ;;
         --skip-install)
             SKIP_INSTALL=true
             shift
@@ -128,11 +140,12 @@ for platform in "${PLATFORMS[@]}"; do
     #
     # Load runtime package manifests for extension dependencies and conditional exports.
     # Disable cwd bunfig.toml autoload so project preload scripts cannot crash the
-    # standalone binary before pi starts (see #7684).
+    # standalone binary before pi starts (see #7684). Disable cwd .env autoload so
+    # project env files do not leak into pi's environment (see #10473).
     if [[ "$platform" == windows-* ]]; then
-        bun build --compile --compile-autoload-package-json --no-compile-autoload-bunfig --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$OUTPUT_DIR/$platform/pi.exe"
+        bun build --compile --compile-autoload-package-json --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$OUTPUT_DIR/$platform/pi.exe"
     else
-        bun build --compile --compile-autoload-package-json --no-compile-autoload-bunfig --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$OUTPUT_DIR/$platform/pi"
+        bun build --compile --compile-autoload-package-json --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$OUTPUT_DIR/$platform/pi"
     fi
 done
 

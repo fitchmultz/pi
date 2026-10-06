@@ -1,7 +1,7 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream v1.0.3 `98d2e1947` (2026-10-05). It is upstream plus the features
+v1.0.0 and synchronized through upstream v1.0.4 plus main `68ccef176` (2026-10-06). It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -31,7 +31,7 @@ all-platform qualification.
 
 These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
 Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in this sync); the fork keeps `private-spill.test.ts` as a regression guard.
-Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard.
+Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
 [Codemode](packages/codemode/CHANGELOG.md#unreleased) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
 
@@ -56,7 +56,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Chord in-process service hydration must reject non-plain arrays ([#10509](https://github.com/earendil-works/pi/issues/10509)) | `packages/chord/src/delta/revision-validator.ts` | `packages/chord/test/services.test.ts` |
 | Codemode string store keys must round-trip as own data properties, including `__proto__` ([#10510](https://github.com/earendil-works/pi/issues/10510)) | `packages/codemode/src/runtime/host.ts` | `packages/codemode/test/sandbox.test.ts` |
 | An oversized Env watch change must report `overflow` instead of stopping the daemon's output writer ([#10516](https://github.com/earendil-works/pi/issues/10516)) | `packages/env/daemon/src/watch.rs` | `packages/env/test/remote.test.ts` |
-| Equivalent known-hosts path spellings must serialize accept/forget rewrites ([#10517](https://github.com/earendil-works/pi/issues/10517)); the zsh login-shell test fixture writes sh/bash/zsh startup files ([#10518](https://github.com/earendil-works/pi/issues/10518)) | `packages/env/src/ssh.ts`, `packages/env/test/ssh.test.ts` | `packages/env/test/ssh.test.ts` |
+| Equivalent known-hosts path spellings must serialize accept/forget rewrites ([#10517](https://github.com/earendil-works/pi/issues/10517)) | `packages/env/src/ssh.ts`, `packages/env/test/ssh.test.ts` | `packages/env/test/ssh.test.ts` |
 | Replayed signatures count toward context estimates | `packages/ai/src/utils/estimate.ts` | `packages/ai/test/context-estimate.test.ts` |
 | Dialog input needs xterm printable decoding, grapheme-safe replacement and correct mouse columns | `packages/tui/src/components/input.ts` | `packages/tui/test/{input,mouse-components}.test.ts` |
 | Plus-sign key IDs must parse, and hyperlink control payloads must stay byte-identical | `packages/tui/src/{keys,utils}.ts` | `packages/tui/test/{keys,truncate-to-width}.test.ts` |
@@ -65,7 +65,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Branch budgets must exclude system declarations not serialized as conversation | `core/compaction/branch-summarization.ts` | `branch-summarization.test.ts` |
 | Empty quoted arguments must not shift template positions | `core/prompt-templates.ts` | `prompt-templates.test.ts` |
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
-| Reload must preserve deselected default-active tools while adopting newly configured defaults | `core/agent-session.ts` | `default-tools-setting.test.ts` |
+| Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
@@ -211,13 +211,13 @@ only complete current native state, with no journal-only or pre-v1 handoff fallb
 - Restart terminal tests need tmux and a built CLI; set `PI_TEST_CLI` to test an installed release.
 - Standalone builds enable `--compile-autoload-package-json`: dependency `main` and `exports`
   resolve at runtime, including Bun export conditions. Unexported subpaths are rejected as under
-  Node; use public entrypoints. `--no-compile-autoload-bunfig` keeps project preloads disabled.
+  Node; use public entrypoints. `--no-compile-autoload-bunfig` keeps project preloads disabled, and `--no-compile-autoload-dotenv` prevents launch-directory `.env` files from changing Pi's environment.
   Bun 1.3.14's runtime tsconfig autoload default remains disabled; the package-manifest flag is
   independent. Pi's project-resource trust gate and embedded host peers are unchanged.
 - `compiled-extension-packages.test.ts` requires an explicit `PI_TEST_COMPILED_CLI` standalone
   target; unset skips, invalid targets fail. It checks deferred conditional/transitive imports,
-  main-only roots, private-subpath rejection, project-extension denial and disabled bunfig
-  preloads without model calls. `PI_TEST_CLI` remains the separate Node restart-test input.
+  main-only roots, private-subpath rejection, project-extension denial, disabled bunfig
+  preloads and dotenv isolation without model calls. `PI_TEST_CLI` remains the separate Node restart-test input.
 
   ```sh
   PI_TEST_COMPILED_CLI=/path/to/pi ./test.sh -- \

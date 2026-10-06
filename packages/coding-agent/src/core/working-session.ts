@@ -7,7 +7,7 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { assertValidSessionId, type SessionEntry, type SessionHeader, SessionManager } from "./session-manager.ts";
-import type { Settings } from "./settings-manager.ts";
+import { getToolListError, isToolModifier, type Settings } from "./settings-manager.ts";
 import type { NormalizedBuildSystemPromptOptions } from "./system-prompt.ts";
 
 export type WorkingSessionBoundary = "turn" | "settled";
@@ -31,6 +31,7 @@ export interface WorkingSession {
 	allowedTools?: string[];
 	excludedTools?: string[];
 	usesDefaultTools: boolean;
+	defaultToolModifiers?: string[];
 	steering: AgentMessage[];
 	followUp: AgentMessage[];
 	steeringText: string[];
@@ -359,6 +360,13 @@ function validateWorkingSession(value: unknown): WorkingSession {
 					: undefined;
 		if (role && !list.every((item: unknown) => record(item) && item.role === role)) fail();
 	}
+	if (
+		value.defaultToolModifiers !== undefined &&
+		(!strings(value.defaultToolModifiers) ||
+			!value.defaultToolModifiers.every(isToolModifier) ||
+			getToolListError(value.defaultToolModifiers))
+	)
+		fail();
 	for (const name of ["steeringMode", "followUpMode"])
 		if (!["all", "one-at-a-time"].includes(String(value[name]))) fail();
 	const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];

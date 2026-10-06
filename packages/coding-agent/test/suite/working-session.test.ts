@@ -183,6 +183,10 @@ describe("Native working sessions", () => {
 		{ field: "runPrompt", value: ["read", 7] },
 		{ field: "disabledBuiltinExtensions", value: 7 },
 		{ field: "disabledBuiltinExtensions", value: ["mcp", 7] },
+		{ field: "defaultToolModifiers", value: 7 },
+		{ field: "defaultToolModifiers", value: ["+read", 7] },
+		{ field: "defaultToolModifiers", value: ["read"] },
+		{ field: "defaultToolModifiers", value: ["-r*"] },
 	])("rejects malformed saved $field before factories: $value", async ({ field, value }) => {
 		const h = await createHarness();
 		harnesses.push(h);
@@ -192,7 +196,9 @@ describe("Native working sessions", () => {
 			...hold.state,
 			...(field === "disabledBuiltinExtensions"
 				? { launch: { ...hold.state.launch, disabledBuiltinExtensions: value } }
-				: { [field]: { ...hold.state.prompt, hiddenTools: value } }),
+				: field === "defaultToolModifiers"
+					? { defaultToolModifiers: value }
+					: { [field]: { ...hold.state.prompt, hiddenTools: value } }),
 		};
 		let factories = 0;
 		const loader = new DefaultResourceLoader({
@@ -255,6 +261,75 @@ describe("Native working sessions", () => {
 			session.dispose();
 		}
 	});
+
+	it.each([false, true])(
+		"retains saved tool modifier policy across restore and reload; older v1=%s",
+		async (older) => {
+			const h = await createHarness();
+			harnesses.push(h);
+			const settingsPath = join(h.tempDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ defaultTools: ["read"], cacheWarming: "off" }));
+			const settingsManager = SettingsManager.create(h.tempDir, h.tempDir);
+			const loader = new DefaultResourceLoader({
+				cwd: h.tempDir,
+				agentDir: h.tempDir,
+				settingsManager,
+				extensionFactories: [
+					(pi) => {
+						for (const name of ["inactive_tool", "default_tool"])
+							pi.registerTool({
+								name,
+								label: name,
+								description: name,
+								defaultActive: name === "default_tool",
+								parameters: Type.Object({}),
+								execute: async () => ({ content: [], details: {} }),
+							});
+					},
+				],
+			});
+			await loader.reload();
+			const initial = await createAgentSession({
+				cwd: h.tempDir,
+				agentDir: h.tempDir,
+				model: h.getModel(),
+				modelRuntime: h.session.modelRuntime,
+				settingsManager,
+				resourceLoader: loader,
+				sessionManager: SessionManager.inMemory(h.tempDir),
+				tools: ["-bash", "+grep"],
+			});
+			initial.session.setActiveToolsByName(["read", "grep"]);
+			const hold = await initial.session.acquireWorkingSession();
+			await hold.release();
+			initial.session.dispose();
+			const saved = parseWorkingSession(JSON.stringify(hold.state));
+			if (older) delete saved.defaultToolModifiers;
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({ defaultTools: ["read", "bash", "inactive_tool"], cacheWarming: "off" }),
+			);
+			const { session } = await createAgentSession({
+				workingSession: saved,
+				modelRuntime: h.session.modelRuntime,
+				settingsManager,
+				resourceLoader: loader,
+				tools: ["-bash", "+ls"],
+				excludeTools: ["grep"],
+				noTools: "all",
+			});
+			try {
+				expect(session.getActiveToolNames()).toEqual(["read", "grep"]);
+				await session.reload();
+				expect(session.getActiveToolNames().sort()).toEqual(
+					older ? ["bash", "grep", "inactive_tool", "read"] : ["grep", "inactive_tool", "read"],
+				);
+				expect(h.faux.state.callCount).toBe(0);
+			} finally {
+				session.dispose();
+			}
+		},
+	);
 
 	it("joins detached nested execution and its sequential queue before granting sleep", async () => {
 		const execution = deferred();

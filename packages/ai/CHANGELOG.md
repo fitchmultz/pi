@@ -19,6 +19,12 @@
 - Fixed context estimates omitting thinking and tool-call signatures.
 - Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
 - Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
+- Fixed `server_busy` and `servers are currently busy` provider errors ending the turn instead of being retried ([#10543](https://github.com/earendil-works/pi/issues/10543))
+
+## [1.0.4] - 2026-10-05
+
+### Fixed
+
 - Fixed Bedrock requests that fail with `The pending stream has been canceled` after a stalled HTTP/2 connection not being retried automatically ([#10379](https://github.com/earendil-works/pi/issues/10379))
 
 ## [1.0.3] - 2026-10-05
