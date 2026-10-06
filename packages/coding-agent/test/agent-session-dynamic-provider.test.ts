@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
-import type { Provider } from "@earendil-works/pi-ai";
+import { type Api, createProvider, InMemoryModelsStore, type Model, type Provider } from "@earendil-works/pi-ai";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
@@ -136,6 +136,142 @@ describe("AgentSession dynamic provider registration", () => {
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/native-top-level");
 
 		session.dispose();
+	});
+
+	it.each([
+		["scoped", "startup-first"],
+		["scoped", "registration-first"],
+		["full", "startup-first"],
+		["full", "registration-first"],
+	] as const)("restores native cached models before %s startup returns with %s config I/O", async (scope, order) => {
+		const id = "startup-cache";
+		const cached = { ...getModel("anthropic", "claude-sonnet-4-5")!, provider: id, id: "cached" };
+		const store = new InMemoryModelsStore();
+		await store.write(id, { models: [cached], checkedAt: 1 });
+		const credentials = AuthStorage.inMemory({ [id]: { type: "api_key", key: "fixture" } });
+		const modelRuntime = await ModelRuntime.create({ credentials, modelsPath: null, modelsStore: store });
+		const provider = createProvider({
+			id,
+			auth: {
+				apiKey: {
+					name: "fixture",
+					check: async ({ credential }) => (credential ? { type: "api_key", source: "fixture" } : undefined),
+					resolve: async () => undefined,
+				},
+			},
+			models: [{ ...cached, id: "fallback" }],
+			fetchModels: async () => {
+				throw new Error("Offline startup must not fetch");
+			},
+			api: {
+				stream: () => {
+					throw new Error("unused");
+				},
+				streamSimple: () => {
+					throw new Error("unused");
+				},
+			},
+		});
+		let startupModels: readonly Model<Api>[] = [];
+		const settingsManager = SettingsManager.inMemory();
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", async (_event, ctx) => {
+						pi.registerProvider(provider);
+						await ctx.modelRegistry.refresh({
+							allowNetwork: false,
+							...(scope === "scoped" ? { providers: [id] } : {}),
+						});
+						startupModels = ctx.modelRegistry.getAll().filter((model) => model.provider === id);
+					});
+				},
+			],
+		});
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			modelRuntime,
+			resourceLoader,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(tempDir),
+		});
+		const configEntered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const configGates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const storeEntered = Promise.withResolvers<void>();
+		const storeGate = Promise.withResolvers<void>();
+		const obsoleteStoreGate = Promise.withResolvers<void>();
+		const load = ModelConfig.load;
+		const loadSpy = vi.spyOn(ModelConfig, "load");
+		for (let i = 0; i < 2; i++) {
+			loadSpy.mockImplementationOnce(async (path) => {
+				const config = await load(path);
+				configEntered[i]!.resolve();
+				await configGates[i]!.promise;
+				return config;
+			});
+		}
+		const read = store.read.bind(store);
+		let reads = 0;
+		const readSpy = vi.spyOn(store, "read").mockImplementation(async (providerId, options) => {
+			if (providerId === id) {
+				if (++reads === 1) {
+					storeEntered.resolve();
+					await storeGate.promise;
+				} else if (order === "startup-first") {
+					await obsoleteStoreGate.promise;
+				}
+			}
+			return read(providerId, options);
+		});
+		const refresh = modelRuntime.refresh.bind(modelRuntime);
+		const pending: ReturnType<ModelRuntime["refresh"]>[] = [];
+		const refreshSpy = vi.spyOn(modelRuntime, "refresh").mockImplementation((options) => {
+			const operation = refresh(options);
+			pending.push(operation);
+			return operation;
+		});
+		const binding = session.bindExtensions({});
+		try {
+			await Promise.all(configEntered.map((entry) => entry.promise));
+			const first = order === "startup-first" ? 1 : 0;
+			configGates[first]!.resolve();
+			if (order === "startup-first") await storeEntered.promise;
+			else await setImmediate();
+			configGates[1 - first]!.resolve();
+			await storeEntered.promise;
+			await setImmediate();
+			storeGate.resolve();
+			await binding;
+			expect(startupModels.map((model) => model.id)).toContain("cached");
+			expect(
+				modelRuntime
+					.getAvailableSnapshot()
+					.filter((model) => model.provider === id)
+					.map((model) => model.id),
+			).toContain("cached");
+			expect(modelRuntime.hasConfiguredAuth(id)).toBe(true);
+			expect(modelRuntime.getError()).toBeUndefined();
+		} finally {
+			for (const gate of configGates) gate.resolve();
+			storeGate.resolve();
+			obsoleteStoreGate.resolve();
+			await binding;
+			await Promise.allSettled(pending);
+			refreshSpy.mockRestore();
+			readSpy.mockRestore();
+			loadSpy.mockRestore();
+			session.dispose();
+		}
 	});
 
 	it("applies command-time registerProvider overrides without reload", async () => {
