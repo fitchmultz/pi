@@ -28,6 +28,7 @@ export interface ToolExecutionOptions {
 	compactView?: boolean;
 	showImages?: boolean;
 	imageWidthCells?: number;
+	outputPad?: number;
 }
 
 export class ToolExecutionComponent extends Container {
@@ -53,6 +54,7 @@ export class ToolExecutionComponent extends Container {
 	private compactPreview?: { width: number; source: string[]; resultStart: number; lines: string[] };
 	private showImages: boolean;
 	private imageWidthCells: number;
+	private outputPad: number;
 	private isPartial = true;
 	private toolDefinition?: ToolRenderers;
 	private ui: TUI;
@@ -63,6 +65,7 @@ export class ToolExecutionComponent extends Container {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		isError: boolean;
 		details?: any;
+		durationMs?: number;
 	};
 	private hideComponent = false;
 
@@ -83,6 +86,7 @@ export class ToolExecutionComponent extends Container {
 		this.compactView = options.compactView ?? false;
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
+		this.outputPad = options.outputPad ?? 1;
 		this.ui = ui;
 		this.cwd = cwd;
 
@@ -138,6 +142,8 @@ export class ToolExecutionComponent extends Container {
 			expanded: this.expanded,
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
+			durationMs: this.isPartial ? undefined : this.result?.durationMs,
+			outputPad: this.outputPad,
 		};
 	}
 
@@ -191,6 +197,8 @@ export class ToolExecutionComponent extends Container {
 			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 			details?: any;
 			isError: boolean;
+			/** Execution time of a final result. */
+			durationMs?: number;
 		},
 		isPartial = false,
 	): void {
@@ -211,6 +219,11 @@ export class ToolExecutionComponent extends Container {
 	setCompactView(compactView: boolean): void {
 		if (this.compactView === compactView) return;
 		this.compactView = compactView;
+		this.updateDisplay();
+	}
+
+	setOutputPad(outputPad: number): void {
+		this.outputPad = outputPad;
 		this.updateDisplay();
 	}
 
@@ -238,11 +251,11 @@ export class ToolExecutionComponent extends Container {
 			// Keep native child layouts live for inner card clicks and asynchronous renderers.
 			const source = super.render(width);
 			const self = this.getRenderShell() === "self";
-			const padding = self ? 0 : 1;
+			const paddingX = self ? 0 : this.outputPad;
 			const container = self ? this.selfRenderContainer : this.contentBox;
 			const resultStart =
 				this.hasRendererDefinition() && this.result
-					? 1 + padding + (container.children[0]?.render(Math.max(1, width - padding * 2)).length ?? 0)
+					? 1 + (self ? 0 : 1) + (container.children[0]?.render(Math.max(1, width - paddingX * 2)).length ?? 0)
 					: 0;
 			const cached = this.compactPreview;
 			if (
@@ -327,6 +340,7 @@ export class ToolExecutionComponent extends Container {
 			const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
 			if (renderContainer instanceof Box) {
 				renderContainer.setBgFn(bgFn);
+				renderContainer.setPaddingX(this.outputPad);
 			}
 			renderContainer.clear();
 
@@ -378,6 +392,7 @@ export class ToolExecutionComponent extends Container {
 			}
 		} else {
 			this.contentText.setCustomBgFn(bgFn);
+			this.contentText.setPaddingX(this.outputPad);
 			this.contentText.setText(this.formatToolExecution());
 			hasContent = true;
 		}

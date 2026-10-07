@@ -1,7 +1,7 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream v1.0.4 plus main `68ccef176` (2026-10-06). It is upstream plus the features
+v1.0.0 and synchronized through upstream v1.0.4 plus main `f10993bc7` (2026-10-07). It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -75,6 +75,10 @@ The fork uses upstream's install lock, not the removed npm shrinkwrap, and keeps
 installer. It uses upstream's pre-commit hook and `npm run check`. Delivery evidence comes from
 `./test.sh`, installer/consumer tests, bundle smoke, and Linux/macOS CI; it does not establish live
 Windows, Termux-device or hosted Axiom acceptance.
+
+Package production uses upstream's `scripts/package-artifacts.mjs` and local consumer helpers.
+The narrow `scripts/coding-agent-consumer.mjs` packing export remains for pinned fleet automation
+until that external caller migrates to the artifact API.
 
 Anthropic native tool changes follow upstream's inline definitions and fixed initial tool list,
 including same-name redefinitions. The fork retains request-wide strict-schema budgets and passive

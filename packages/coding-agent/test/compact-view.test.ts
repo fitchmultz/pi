@@ -368,7 +368,7 @@ describe("compact Activity and messages", () => {
 			[],
 			true,
 		);
-		const shell = new BashExecutionComponent("echo shell", ui, false, true);
+		const shell = new BashExecutionComponent("echo shell", ui, false, 1, true);
 		try {
 			chat.children = [tool, assistant, shell];
 			expect(chat.render(80).map((line) => stripAnsi(line).trimEnd())).toEqual(["▸ Activity · 2 calls · 2 running"]);
@@ -401,7 +401,7 @@ describe("compact Activity and messages", () => {
 			[2, false, "(exit 2)"],
 			[undefined, true, "(cancelled)"],
 		] as const) {
-			const shell = new BashExecutionComponent(args.command, ui, excluded, true);
+			const shell = new BashExecutionComponent(args.command, ui, excluded, 1, true);
 			try {
 				shell.appendOutput(output);
 				expect(stripAnsi(compactRows(shell, 80)[1])).toContain("Running...");

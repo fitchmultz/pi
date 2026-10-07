@@ -1628,6 +1628,7 @@ export class AgentSession {
 				toolName: event.toolName,
 				result: event.result,
 				isError: event.isError,
+				...(event.durationMs === undefined ? {} : { durationMs: event.durationMs }),
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		}

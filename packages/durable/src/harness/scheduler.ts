@@ -75,11 +75,6 @@ type Invocation = {
 	readonly context: Context;
 	/** Watches acquired through the runtime; stopped at invocation end. */
 	readonly watches: Set<DocumentWatch<JsonObject>>;
-	/**
-	 * Range of the invocation's last context read, so the next read, such as a generation's request after its prepare,
-	 * scans only newer entries. Derived and never persisted; dropped at invocation end and before sleeping.
-	 */
-	contextRange: ContextRange | undefined;
 	ended: boolean;
 	readonly done: Promise<void>;
 	readonly finish: () => void;
@@ -191,6 +186,14 @@ export class TaskScheduler {
 	readonly #conversation: TaskSchedulerOptions["conversation"];
 	readonly #context: Context;
 	readonly #live = new Map<TaskId, AnyTaskRecord>();
+	/**
+	 * Context range last read through a task runtime, per conversation: a later read, by any of its tasks, scans only
+	 * newer entries. `idleSince` is the Harness time it was first seen idle. Derived and never persisted; dropped at the
+	 * first idle check after `settings.contextRetentionMs` of idleness, and at close.
+	 */
+	readonly #contexts = new Map<ConversationId, { range: ContextRange; idleSince: number | undefined }>();
+	/** Timer for the earliest expiry of an idle context, only where timers can be unreferenced (see `#scheduleExpiry`). */
+	#expiry: { readonly at: number; readonly timer: ReturnType<typeof setTimeout> } | undefined;
 	readonly #invocations = new Map<TaskId, Invocation>();
 	readonly #taskWaiters = new Waiters<TaskId, SettledTask<JsonValue>>();
 	/** Idle waiters by conversation; `undefined` waits for the whole Harness. */
@@ -419,14 +422,75 @@ export class TaskScheduler {
 		// Also retries, with the next commit of any kind, a cascade whose commit failed.
 		if (this.#cascadePending) this.#scheduleReconcile();
 		if (!changed) return;
-		this.#resolveIdleWaiters();
+		this.#settleIdle();
 		this.#kick();
 	}
 
-	#resolveIdleWaiters(): void {
+	/**
+	 * `settings.contextRetentionMs`, or 0 when the host's settings throw. Kept contexts are only a cache, so dropping them
+	 * is safe, while a throw here would escape commit listeners, reconciliation, and the expiry timer.
+	 */
+	#contextRetentionMs(): number {
+		try {
+			return this.#settings().contextRetentionMs;
+		} catch (error) {
+			this.#report(error);
+			return 0;
+		}
+	}
+
+	/** Resolve idle waiters, and drop each kept context whose conversation has been idle for the retention period. */
+	#settleIdle(): void {
 		for (const conversationId of this.#idleWaiters.keys()) {
 			if (this.#idle(conversationId)) this.#idleWaiters.resolve(conversationId);
 		}
+		const now = this.#now();
+		const retention = this.#contextRetentionMs();
+		for (const [conversationId, kept] of this.#contexts) {
+			if (kept.idleSince !== undefined && now - kept.idleSince >= retention) {
+				this.#contexts.delete(conversationId);
+			} else if (!this.#idle(conversationId)) {
+				kept.idleSince = undefined;
+			} else if (retention > 0) {
+				kept.idleSince ??= now;
+			} else {
+				this.#contexts.delete(conversationId);
+			}
+		}
+		this.#scheduleExpiry();
+	}
+
+	/**
+	 * Run `#settleIdle()` when the earliest idle context expires. The timer is unreferenced, so it never keeps the process
+	 * alive. Where timers cannot be unreferenced, as in Cloudflare Workers, none is kept: a pending timer could keep a
+	 * Durable Object from being evicted, and eviction frees the contexts. There, task changes alone check expiry.
+	 */
+	#scheduleExpiry(): void {
+		const retention = this.#contextRetentionMs();
+		let at: number | undefined;
+		for (const kept of this.#contexts.values()) {
+			if (kept.idleSince !== undefined && (at === undefined || kept.idleSince + retention < at)) {
+				at = kept.idleSince + retention;
+			}
+		}
+		if (this.#expiry !== undefined && this.#expiry.at === at) return;
+		if (this.#expiry !== undefined) clearTimeout(this.#expiry.timer);
+		this.#expiry = undefined;
+		if (at === undefined || this.#closing) return;
+		const timer = setTimeout(
+			() => {
+				this.#expiry = undefined;
+				this.#settleIdle();
+			},
+			Math.min(Math.max(0, at - this.#now()), MAX_TIMER_DELAY),
+		);
+		const unref = (timer as { unref?: unknown }).unref;
+		if (typeof unref !== "function") {
+			clearTimeout(timer);
+			return;
+		}
+		unref.call(timer);
+		this.#expiry = { at, timer };
 	}
 
 	// ─── Ownership ───────────────────────────────────────────────────────────
@@ -481,7 +545,7 @@ export class TaskScheduler {
 			for (const id of checks) this.#failFastChecks.add(id);
 			if (!this.#closing) this.#report(error);
 		}
-		this.#resolveIdleWaiters();
+		this.#settleIdle();
 	}
 
 	/** Whether any of `ids` holds or ended with an outcome other than `completed`. */
@@ -674,6 +738,9 @@ export class TaskScheduler {
 		const error = closedError();
 		this.#taskWaiters.rejectAll(error);
 		this.#idleWaiters.rejectAll(error);
+		this.#contexts.clear();
+		if (this.#expiry !== undefined) clearTimeout(this.#expiry.timer);
+		this.#expiry = undefined;
 		for (const invocation of this.#invocations.values()) invocation.controller.abort();
 	}
 
@@ -830,7 +897,6 @@ export class TaskScheduler {
 			controller,
 			context: withAbortSignal(controller.signal, this.#context),
 			watches: new Set(),
-			contextRange: undefined,
 			ended: false,
 			done,
 			finish: () => finish(),
@@ -1034,7 +1100,6 @@ export class TaskScheduler {
 	#end(invocation: Invocation): void {
 		if (invocation.ended) return;
 		invocation.ended = true;
-		invocation.contextRange = undefined;
 		if (this.#invocations.get(invocation.taskId) === invocation) this.#invocations.delete(invocation.taskId);
 		for (const watch of invocation.watches) void watch.stop();
 		// Pending waits bound to the invocation, such as a tool's waitForTask(), reject with it.
@@ -1174,17 +1239,32 @@ export class TaskScheduler {
 					return token === undefined || entry?.kind === token.kind ? entry : undefined;
 				});
 			}) as ErasedRuntime["entry"],
-			context: (conversationId, context, at) =>
+			context: (conversationId, context, options) =>
 				this.#read(invocation, async () => {
 					const { view, range } = await readContextFrom(
 						this.#session,
 						this.#storage,
 						conversationId,
 						context,
-						at,
-						invocation.contextRange,
+						options?.at,
+						this.#contexts.get(conversationId)?.range,
 					);
-					if (!invocation.ended) invocation.contextRange = range;
+					// Keep it unless the invocation ended or a concurrent read already kept a newer range.
+					const kept = this.#contexts.get(conversationId);
+					if (
+						range !== undefined &&
+						!this.#closing &&
+						!invocation.ended &&
+						(kept === undefined || kept.range.bounds.tail <= range.bounds.tail)
+					) {
+						// A read of another, idle conversation starts or continues its retention period.
+						if (!this.#idle(conversationId)) {
+							this.#contexts.set(conversationId, { range, idleSince: undefined });
+						} else if (this.#contextRetentionMs() > 0) {
+							this.#contexts.set(conversationId, { range, idleSince: kept?.idleSince ?? this.#now() });
+							this.#scheduleExpiry();
+						}
+					}
 					return view;
 				}),
 			now: () => {
@@ -1232,8 +1312,6 @@ export class TaskScheduler {
 	/** Wait until the Harness clock reaches `until`, rechecking it after every timer. */
 	async #sleep(invocation: Invocation, until: number, context: Context): Promise<void> {
 		if (invocation.ended) throw endedError(invocation);
-		// A sleeping task holds no context range; a retry or poll can wait for a long time.
-		invocation.contextRange = undefined;
 		const signals = [invocation.controller.signal];
 		if (context.abortSignal !== undefined) signals.push(context.abortSignal);
 		const signal = AbortSignal.any(signals);

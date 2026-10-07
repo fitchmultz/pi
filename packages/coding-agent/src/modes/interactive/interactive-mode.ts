@@ -3655,6 +3655,7 @@ export class InteractiveMode {
 										showImages: this.settingsManager.getShowImages(),
 										imageWidthCells: this.settingsManager.getImageWidthCells(),
 										compactView: !!this.compactView,
+										outputPad: this.outputPad,
 									},
 									this.getRegisteredToolDefinition(content.name),
 									this.ui,
@@ -3734,6 +3735,7 @@ export class InteractiveMode {
 							showImages: this.settingsManager.getShowImages(),
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
 							compactView: !!this.compactView,
+							outputPad: this.outputPad,
 						},
 						this.getRegisteredToolDefinition(event.toolName),
 						this.ui,
@@ -3761,7 +3763,7 @@ export class InteractiveMode {
 				if (event.isError) this.maybeShowInstallChangeWarning();
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
-					component.updateResult({ ...event.result, isError: event.isError });
+					component.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
 					this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
@@ -3969,7 +3971,7 @@ export class InteractiveMode {
 		if (!renderer) {
 			return;
 		}
-		const component = new CustomEntryComponent(entry, renderer, !!this.compactView);
+		const component = new CustomEntryComponent(entry, renderer, this.outputPad, !!this.compactView);
 		component.setExpanded(this.toolOutputExpanded);
 		if (!component.hasContent()) {
 			return;
@@ -3993,6 +3995,7 @@ export class InteractiveMode {
 					message.command,
 					this.ui,
 					message.excludeFromContext,
+					this.outputPad,
 					!!this.compactView,
 				);
 				component.setExpanded(this.toolOutputExpanded);
@@ -4025,14 +4028,22 @@ export class InteractiveMode {
 			}
 			case "compactionSummary": {
 				this.chatContainer.addChild(new Spacer(1));
-				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
+				const component = new CompactionSummaryMessageComponent(
+					message,
+					this.getMarkdownThemeWithSettings(),
+					this.outputPad,
+				);
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
 				break;
 			}
 			case "branchSummary": {
 				this.chatContainer.addChild(new Spacer(1));
-				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
+				const component = new BranchSummaryMessageComponent(
+					message,
+					this.getMarkdownThemeWithSettings(),
+					this.outputPad,
+				);
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
 				break;
@@ -4051,6 +4062,7 @@ export class InteractiveMode {
 						const component = new SkillInvocationMessageComponent(
 							skillBlock,
 							this.getMarkdownThemeWithSettings(),
+							this.outputPad,
 						);
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
@@ -4149,6 +4161,7 @@ export class InteractiveMode {
 								showImages: this.settingsManager.getShowImages(),
 								imageWidthCells: this.settingsManager.getImageWidthCells(),
 								compactView: !!this.compactView,
+								outputPad: this.outputPad,
 							},
 							this.getRegisteredToolDefinition(content.name),
 							this.ui,
@@ -5233,23 +5246,14 @@ export class InteractiveMode {
 					onOutputPadChange: (padding) => {
 						this.settingsManager.setOutputPad(padding);
 						this.outputPad = padding;
-						if (this.streamingComponent || this.session.isStreaming) {
-							for (const child of this.chatContainer.children) {
-								if (
-									child instanceof AssistantMessageComponent ||
-									child instanceof CustomMessageComponent ||
-									child instanceof UserMessageComponent
-								) {
+						for (const container of [this.chatContainer, this.pendingMessagesContainer]) {
+							for (const child of container.children) {
+								if ("setOutputPad" in child && typeof child.setOutputPad === "function") {
 									child.setOutputPad(padding);
 								}
 							}
-							if (this.streamingComponent) {
-								this.streamingComponent.setOutputPad(padding);
-							}
-							this.ui.requestRender();
-							return;
 						}
-						this.rebuildChatFromMessages();
+						this.ui.requestRender();
 					},
 					onAutocompleteMaxVisibleChange: (maxVisible) => {
 						this.settingsManager.setAutocompleteMaxVisible(maxVisible);
@@ -7175,7 +7179,13 @@ export class InteractiveMode {
 			const result = eventResult.result;
 
 			// Create UI component for display
-			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext, !!this.compactView);
+			this.bashComponent = new BashExecutionComponent(
+				command,
+				this.ui,
+				excludeFromContext,
+				this.outputPad,
+				!!this.compactView,
+			);
 			this.bashComponent.setExpanded(this.toolOutputExpanded);
 			if (this.session.isStreaming) {
 				this.pendingMessagesContainer.addChild(this.bashComponent);
@@ -7204,7 +7214,13 @@ export class InteractiveMode {
 
 		// Normal execution path (possibly with custom operations)
 		const isDeferred = this.session.isStreaming;
-		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext, !!this.compactView);
+		this.bashComponent = new BashExecutionComponent(
+			command,
+			this.ui,
+			excludeFromContext,
+			this.outputPad,
+			!!this.compactView,
+		);
 		this.bashComponent.setExpanded(this.toolOutputExpanded);
 
 		if (isDeferred) {
