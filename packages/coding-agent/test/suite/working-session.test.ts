@@ -10,11 +10,16 @@ import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
 import type { ExtensionContext, ExtensionToolContext } from "../../src/core/extensions/types.ts";
-import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
-import { createAgentSession } from "../../src/core/sdk.ts";
+import { DefaultResourceLoader, type ResourceLoader } from "../../src/core/resource-loader.ts";
+import { type CreateAgentSessionOptions, createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager, type SettingsStorage } from "../../src/core/settings-manager.ts";
-import { openWorkingSession, parseWorkingSession, writeWorkingSession } from "../../src/core/working-session.ts";
+import {
+	copyWorkingSession,
+	openWorkingSession,
+	parseWorkingSession,
+	writeWorkingSession,
+} from "../../src/core/working-session.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
@@ -611,9 +616,13 @@ describe("Native working sessions", () => {
 		},
 	);
 
-	it.each(["matching", "conversation", "settings", "resources"] as const)(
-		"restores scoped settings before factories and reuses only matching preparation: %s",
-		async (change) => {
+	it.each(
+		(["matching", "conversation", "settings", "resources"] as const).flatMap((change) =>
+			[false, true].map((policyOnly) => ({ change, policyOnly })),
+		),
+	)(
+		"restores scoped settings before factories and reuses only matching preparation: $change, policyOnly=$policyOnly",
+		async ({ change, policyOnly }) => {
 			const h = await createHarness();
 			harnesses.push(h);
 			const agentDir = join(h.tempDir, "agent");
@@ -640,9 +649,28 @@ describe("Native working sessions", () => {
 			writeFileSync(join(h.tempDir, ".pi", "settings.json"), "{}");
 			const observed: Array<string | undefined> = [];
 			const manager = SettingsManager.create(h.tempDir, agentDir);
+			if (policyOnly) {
+				delete hold.state.launch!.trustProject;
+				manager.restoreWorkingSession(hold.state.settings, hold.state.settingsLayers);
+			}
 			const services = await createAgentSessionServices({
 				cwd: h.tempDir,
-				workingSession: hold.state,
+				agentDir,
+				workingSession: policyOnly ? undefined : hold.state,
+				resourceLoaderReloadOptions: policyOnly
+					? {
+							resolveProjectTrust: async () => {
+								throw new Error("Saved policy must not invoke project trust discovery");
+							},
+							workingSessionPolicy: {
+								cwd: hold.state.cwd,
+								launch: hold.state.launch,
+								settings: hold.state.settings,
+								settingsLayers: hold.state.settingsLayers,
+								flags: hold.state.flags,
+							},
+						}
+					: undefined,
 				settingsManager: manager,
 				modelRuntime: h.session.modelRuntime,
 				resourceLoaderOptions: {
@@ -653,10 +681,14 @@ describe("Native working sessions", () => {
 					],
 				},
 			});
+			const conversation = change === "conversation" ? openWorkingSession(hold.state) : undefined;
+			conversation?.appendCustomEntry("accepted history update", { kept: true });
 			const saved = {
 				...hold.state,
 				...(change === "conversation"
 					? {
+							entries: conversation!.getEntries(),
+							leafId: conversation!.getLeafId(),
 							steering: [{ role: "user" as const, content: "new accepted queue", timestamp: 1 }],
 							steeringText: ["new accepted queue"],
 						}
@@ -690,7 +722,10 @@ describe("Native working sessions", () => {
 				expect(session.extensionRunner.getRegisteredCommands().map((command) => command.name)).toContain(
 					"relative-owner",
 				);
-				if (change === "conversation") expect(session.agent.getQueuedMessages().steering).toEqual(saved.steering);
+				if (change === "conversation") {
+					expect(session.agent.getQueuedMessages().steering).toEqual(saved.steering);
+					expect(session.sessionManager.getEntries()).toEqual(saved.entries);
+				}
 				if (change === "resources")
 					expect(session.resourceLoader.getWorkingSessionResources?.().noContextFiles).toBe(true);
 				expect(h.faux.state.callCount).toBe(0);
@@ -1063,6 +1098,232 @@ describe("Native working sessions", () => {
 		}
 	});
 
+	it.each([
+		{ boundary: "resourceLoader option getter", error: "differs" },
+		{ boundary: "agentDir option getter", error: "differs" },
+		{ boundary: "capability method getter", error: "differs" },
+		{ boundary: "reload method getter", error: "differs" },
+		{ boundary: "launch-less capability callback", error: "differs" },
+		{ boundary: "unsupported loader", error: "ResourceLoader persistence support" },
+		{ boundary: "missing launch owner", error: "explicit persistence-capable" },
+		{ boundary: "invalid launch callback", error: "Invalid native working session" },
+	])("rejects at the SDK $boundary before factories or journal materialization", async ({ boundary, error }) => {
+		const h = await createHarness();
+		harnesses.push(h);
+		h.sessionManager.appendCustomEntry("retained", { nested: ["history"] });
+		const hold = await h.session.acquireWorkingSession();
+		await hold.release();
+		const saved = { ...hold.state, sessionFile: join(h.tempDir, "journal.jsonl"), sessionDir: h.tempDir };
+		const missing = !error.includes("differs");
+		const journal = missing ? undefined : openWorkingSession(saved);
+		let expectedJournal = journal ? readFileSync(saved.sessionFile) : undefined;
+		const changeJournal = () => {
+			journal!.appendCustomEntry("new owner input", { retained: true });
+			expectedJournal = readFileSync(saved.sessionFile);
+		};
+		let factories = 0;
+		const loader: ResourceLoader = new DefaultResourceLoader({
+			cwd: h.tempDir,
+			agentDir: h.tempDir,
+			extensionFactories: [
+				() => {
+					factories++;
+				},
+			],
+		});
+		const options: CreateAgentSessionOptions = {
+			workingSession: saved,
+			resourceLoader: loader,
+			agentDir: h.tempDir,
+			modelRuntime: h.session.modelRuntime,
+		};
+		if (boundary === "resourceLoader option getter" || boundary === "agentDir option getter") {
+			Object.defineProperty(options, boundary.startsWith("resourceLoader") ? "resourceLoader" : "agentDir", {
+				get() {
+					changeJournal();
+					return boundary.startsWith("resourceLoader") ? loader : h.tempDir;
+				},
+			});
+		} else if (boundary === "capability method getter" || boundary === "reload method getter") {
+			const method = boundary.startsWith("capability") ? "getWorkingSessionResources" : "reload";
+			const reference = loader[method];
+			Object.defineProperty(loader, method, {
+				get() {
+					changeJournal();
+					return reference;
+				},
+			});
+		} else if (boundary === "unsupported loader") {
+			loader.getWorkingSessionResources = undefined;
+		} else {
+			delete saved.launch;
+			if (boundary === "missing launch owner") delete options.agentDir;
+			else {
+				const getResources = loader.getWorkingSessionResources!;
+				loader.getWorkingSessionResources = function () {
+					expect(this).toBe(loader);
+					if (boundary === "launch-less capability callback") changeJournal();
+					return boundary === "invalid launch callback"
+						? { ...getResources.call(this), extensions: [7] as unknown as string[] }
+						: getResources.call(this);
+				};
+			}
+		}
+		await expect(
+			createAgentSession(options).then(({ session }) => {
+				session.dispose();
+				throw new Error("Invalid state admitted");
+			}),
+		).rejects.toThrow(error);
+		expect(factories).toBe(0);
+		if (missing) expect(existsSync(saved.sessionFile)).toBe(false);
+		else expect(readFileSync(saved.sessionFile)).toEqual(expectedJournal);
+		expect(h.faux.state.callCount).toBe(0);
+	});
+
+	it.each(["custom", "launch-less custom", "instance override", "subclass", "prototype override"] as const)(
+		"isolates manager history from full reload input for a %s loader",
+		async (kind) => {
+			const h = await createHarness();
+			harnesses.push(h);
+			const leaf = h.sessionManager.appendCustomEntry("retained", { nested: ["original"] });
+			const hold = await h.session.acquireWorkingSession();
+			await hold.release();
+			const saved = { ...hold.state, launch: kind === "launch-less custom" ? undefined : hold.state.launch };
+			const nativeReload = DefaultResourceLoader.prototype.reload;
+			let reloads = 0;
+			const reload: ResourceLoader["reload"] = async (options) => {
+				reloads++;
+				expect(options?.workingSession?.header).toEqual(hold.state.header);
+				expect(options?.workingSession?.entries).toEqual(hold.state.entries);
+				const entry = options!.workingSession!.entries[0];
+				if (entry.type !== "custom") throw new Error("Missing complete history");
+				(entry.data as { nested: string[] }).nested[0] = "mutated reload input";
+			};
+			class HostLoader extends DefaultResourceLoader {}
+			const loader =
+				kind === "custom" || kind === "launch-less custom"
+					? createTestResourceLoader()
+					: new (kind === "subclass" ? HostLoader : DefaultResourceLoader)({
+							cwd: h.tempDir,
+							agentDir: h.tempDir,
+						});
+			if (kind === "prototype override") DefaultResourceLoader.prototype.reload = reload;
+			else loader.reload = reload;
+			try {
+				const { session } = await createAgentSession({
+					workingSession: saved,
+					agentDir: h.tempDir,
+					resourceLoader: loader,
+					modelRuntime: h.session.modelRuntime,
+				});
+				try {
+					expect(reloads).toBe(1);
+					expect(session.sessionManager.getEntry(leaf)).toMatchObject({ data: { nested: ["original"] } });
+					expect(hold.state.entries[0]).toMatchObject({ data: { nested: ["original"] } });
+					const recaptured = await session.acquireWorkingSession();
+					expect(recaptured.state.entries).toEqual(hold.state.entries);
+					await recaptured.release();
+					expect(h.faux.state.callCount).toBe(0);
+				} finally {
+					session.dispose();
+				}
+			} finally {
+				DefaultResourceLoader.prototype.reload = nativeReload;
+			}
+		},
+	);
+
+	it.each(["plain payloads", "root version Proxy", "flag tuple Proxy", "history parent Proxy"] as const)(
+		"validates ignored history and extra payloads before public restore mutates memory: %s",
+		async (kind) => {
+			const h = await createHarness();
+			harnesses.push(h);
+			h.sessionManager.appendCustomEntry("retained", { valid: true });
+			await h.session.steer("existing queue");
+			const hold = await h.session.acquireWorkingSession();
+			await hold.release();
+			const queues = h.session.agent.getQueuedMessages();
+			const tools = h.session.getActiveToolNames();
+			const flags = new Map(h.session.resourceLoader.getExtensions().runtime.flagValues);
+			const getter = vi.fn(() => {
+				throw new Error("Getter must not execute");
+			});
+			const incoming = {
+				...hold.state,
+				steering: [{ role: "user" as const, content: "replacement", timestamp: 1 }],
+				activeTools: [],
+				flags: [["replacement", true]],
+			};
+			const invalidPayloads = [
+				{ entries: [{ ...hold.state.entries[0], data: { callback: () => {} } }] },
+				{
+					entries: [
+						{
+							...hold.state.entries[0],
+							data: Object.defineProperty({}, "value", { enumerable: true, get: getter }),
+						},
+					],
+				},
+				{ entries: [{ ...hold.state.entries[0], parentId: "missing" }] },
+				{ header: { ...hold.state.header, version: 2 } },
+				{ leafId: "missing" },
+				{ extra: { nested: [Infinity] } },
+				{ mode: { kind: "host", data: undefined } },
+				{ steering: [undefined] },
+				{ prompt: { ...hold.state.prompt, toolGuidelines: { invalid: [undefined] } } },
+				{ steeringMode: undefined },
+			].map((invalid) => ({ ...incoming, ...invalid }));
+			const inputs: unknown[] =
+				kind === "plain payloads"
+					? invalidPayloads
+					: kind === "root version Proxy"
+						? [
+								new Proxy(
+									{ ...incoming, version: 2 },
+									{
+										get: (target, key, receiver) =>
+											key === "version" ? 1 : Reflect.get(target, key, receiver),
+									},
+								),
+							]
+						: kind === "flag tuple Proxy"
+							? [
+									{
+										...incoming,
+										flags: [
+											new Proxy(["saved-flag", 42], {
+												get: (target, key, receiver) =>
+													key === "1" ? "kept" : Reflect.get(target, key, receiver),
+											}),
+										],
+									},
+								]
+							: [
+									{
+										...incoming,
+										entries: [
+											new Proxy(
+												{ ...hold.state.entries[0], parentId: "missing" },
+												{
+													get: (target, key, receiver) =>
+														key === "parentId" ? null : Reflect.get(target, key, receiver),
+												},
+											),
+										],
+									},
+								];
+			for (const input of inputs) {
+				expect(() => copyWorkingSession(input)).toThrow();
+				expect(() => h.session.restoreWorkingSession(input as typeof hold.state)).toThrow();
+				expect(h.session.agent.getQueuedMessages()).toEqual(queues);
+				expect(h.session.getActiveToolNames()).toEqual(tools);
+				expect(h.session.resourceLoader.getExtensions().runtime.flagValues).toEqual(flags);
+			}
+			expect(getter).not.toHaveBeenCalled();
+		},
+	);
+
 	it("rejects lossy host data, releases preparation and leaves prior artifacts intact", async () => {
 		const h = await createHarness();
 		harnesses.push(h);
@@ -1133,9 +1394,9 @@ describe("Native working sessions", () => {
 		expect(failure).toMatchObject({ message: expect.stringContaining(`${kind}.ts`) });
 	});
 
-	it.each([false, true])(
-		"restores all branches, context edits, full queues and loadout without replay; null leaf=%s",
-		async (nullLeaf) => {
+	it.each([false, true].flatMap((nullLeaf) => [false, true].map((native) => ({ nullLeaf, native }))))(
+		"restores all branches, context edits, full queues and loadout without replay; null leaf=$nullLeaf, native=$native",
+		async ({ nullLeaf, native }) => {
 			const h = await createHarness({ allowedToolNames: ["read", "bash"], excludedToolNames: ["bash"] });
 			harnesses.push(h);
 			const selected = h.sessionManager.appendMessage({ role: "user", content: "selected branch", timestamp: 10 });
@@ -1191,7 +1452,7 @@ describe("Native working sessions", () => {
 			const { session } = await createAgentSession({
 				workingSession: state,
 				modelRuntime: h.session.modelRuntime,
-				resourceLoader: h.session.resourceLoader,
+				resourceLoader: native ? undefined : h.session.resourceLoader,
 			});
 			try {
 				expect(session.sessionId).toBe(h.session.sessionId);
@@ -1213,7 +1474,99 @@ describe("Native working sessions", () => {
 				expect(session.settingsManager.getShellCommandPrefix()).toBe("native unsent setting");
 				expect(session.scopedModels).toMatchObject([{ model: { id: h.getModel().id }, thinkingLevel: "high" }]);
 				expect(session.hasPendingNextTurnMessages).toBe(true);
+				// Public restore validates the whole input but owns only its retained memory.
+				const source = structuredClone(state);
+				source.defaultToolModifiers = ["-bash"];
+				source.steeringText = ["saved steering text"];
+				source.followUpText = ["saved follow-up text"];
+				source.pendingTools = ["not-yet-registered"];
+				source.pendingCustom = [
+					{
+						role: "custom",
+						customType: "pending",
+						content: "saved custom",
+						display: false,
+						details: { nested: ["kept"] },
+						timestamp: 24,
+					},
+				];
+				source.pendingBash = [
+					{
+						role: "bashExecution",
+						command: "saved bash",
+						output: "kept",
+						exitCode: undefined,
+						cancelled: false,
+						truncated: false,
+						timestamp: 25,
+					},
+				];
+				source.flags = [["saved-flag", "kept"]];
+				source.prompt.toolSnippets = { read: "saved snippet" };
+				source.prompt.toolGuidelines = { read: ["saved guideline"] };
+				source.prompt.contextFiles = [{ path: "owned.md", content: "saved context" }];
+				source.runPrompt = { ...structuredClone(source.prompt), sections: { owner: "saved run section" } };
+				source.mode = { kind: "host", data: { nested: ["saved mode"] } };
+				Object.assign(source.prompt.toolSnippets, { omitted: undefined });
+				Object.assign(source.prompt.toolGuidelines, { omitted: undefined });
+				Object.assign(source.prompt.sections, { omitted: undefined });
+				Object.assign(source, { unused: undefined });
+				if (native) {
+					source.flags[0] = new Proxy(source.flags[0], {
+						get: (target, key, receiver) => (key === "1" ? 42 : Reflect.get(target, key, receiver)),
+					});
+				}
+				const input =
+					native && nullLeaf
+						? new Proxy(source, {
+								get: (target, key, receiver) => (key === "version" ? 2 : Reflect.get(target, key, receiver)),
+							})
+						: source;
+				if (native) {
+					const owned = copyWorkingSession(input);
+					expect(owned.version).toBe(1);
+					expect(owned.flags).toEqual([["saved-flag", "kept"]]);
+				}
+				session.restoreWorkingSession(input);
+				(source.steering[0] as { content: Array<{ text?: string }> }).content[0].text = "changed";
+				(source.followUp[0] as { details: { owned: string } }).details.owned = "changed";
+				(source.nextTurn[0] as { details: { nested: boolean } }).details.nested = false;
+				(source.pendingCustom[0] as { details: { nested: string[] } }).details.nested[0] = "changed";
+				(source.pendingBash[0] as { output: string }).output = "changed";
+				source.steeringText[0] = source.followUpText[0] = "changed";
+				source.allowedTools!.push("ls");
+				source.excludedTools!.length = 0;
+				source.defaultToolModifiers.push("+ls");
+				source.activeTools.push("bash");
+				source.pendingTools.length = 0;
+				source.prompt.toolSnippets.read = "changed";
+				source.prompt.toolGuidelines.read[0] = "changed";
+				source.prompt.contextFiles[0].content = "changed";
+				source.runPrompt.sections.owner = "changed";
+				source.flags[0][1] = "changed";
+				source.launch!.extensions.push("changed");
+				(source.mode.data as { nested: string[] }).nested[0] = "changed";
+				expect(session.workingSessionLaunch?.extensions).toEqual(state.launch!.extensions);
+				expect(session.getActiveToolNames()).toEqual(["read"]);
+				expect(session.agent.getQueuedMessages()).toEqual({ steering, followUp });
 				const restored = await session.acquireWorkingSession();
+				expect(restored.state.header).toEqual(state.header);
+				expect(restored.state.entries).toEqual(state.entries);
+				expect(restored.state.leafId).toBe(state.leafId);
+				expect(restored.state.steeringText).toEqual(["saved steering text"]);
+				expect(restored.state.followUpText).toEqual(["saved follow-up text"]);
+				expect(restored.state.pendingTools).toEqual(["not-yet-registered"]);
+				expect(restored.state.defaultToolModifiers).toEqual(["-bash"]);
+				expect(restored.state.pendingCustom).toMatchObject([{ details: { nested: ["kept"] } }]);
+				expect(restored.state.pendingBash).toMatchObject([{ command: "saved bash", output: "kept" }]);
+				expect(Object.hasOwn(restored.state.pendingBash[0], "exitCode")).toBe(false);
+				expect(restored.state.prompt.toolSnippets).toEqual({ read: "saved snippet" });
+				expect(restored.state.prompt.toolGuidelines).toEqual({ read: ["saved guideline"] });
+				expect(Object.hasOwn(restored.state.prompt.sections, "omitted")).toBe(false);
+				expect(restored.state.prompt.contextFiles).toEqual([{ path: "owned.md", content: "saved context" }]);
+				expect(restored.state.runPrompt?.sections).toEqual({ owner: "saved run section" });
+				expect(restored.state.flags).toEqual([["saved-flag", "kept"]]);
+				expect(restored.state.mode).toEqual({ kind: "host", data: { nested: ["saved mode"] } });
 				expect(restored.state.nextTurn).toEqual([
 					expect.objectContaining({
 						role: "custom",

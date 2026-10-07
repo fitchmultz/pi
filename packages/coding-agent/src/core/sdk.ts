@@ -53,6 +53,9 @@ import {
 // provider-agnostic and does not import pi-ai/compat itself.
 setDefaultStreamFn(streamSimple);
 
+const nativeResourceLoaderReload = DefaultResourceLoader.prototype.reload;
+const nativeWorkingSessionResources = DefaultResourceLoader.prototype.getWorkingSessionResources;
+
 export interface CreateAgentSessionOptions {
 	/** Native complete-state resume, validated before services or resource construction. */
 	workingSession?: WorkingSession | string;
@@ -201,20 +204,43 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	const saved = resolveWorkingSession(options.workingSession);
 	let resourceLoader = options.resourceLoader;
-	if (saved && resourceLoader && !resourceLoader.getWorkingSessionResources)
+	const explicitAgentDir = options.agentDir;
+	let getWorkingSessionResources = resourceLoader?.getWorkingSessionResources;
+	const reload = resourceLoader?.reload;
+	const nativeResourceLoader =
+		!resourceLoader ||
+		(Object.getPrototypeOf(resourceLoader) === DefaultResourceLoader.prototype &&
+			reload === nativeResourceLoaderReload &&
+			getWorkingSessionResources === nativeWorkingSessionResources);
+	const saved = resolveWorkingSession(options.workingSession);
+	const nativeRestore = nativeResourceLoader && saved?.launch !== undefined;
+	if (saved && resourceLoader && !getWorkingSessionResources)
 		throw new Error("Native working-session restore requires ResourceLoader persistence support");
 	if (saved && !saved.launch) {
-		if (!resourceLoader?.getWorkingSessionResources || !options.agentDir)
+		if (!resourceLoader || !getWorkingSessionResources || !explicitAgentDir)
 			throw new Error(
 				"Launch-less native restore requires an explicit persistence-capable ResourceLoader and agentDir",
 			);
-		saved.launch = { agentDir: resolvePath(options.agentDir), ...resourceLoader.getWorkingSessionResources() };
+		saved.launch = {
+			agentDir: resolvePath(explicitAgentDir),
+			...getWorkingSessionResources.call(resourceLoader),
+		};
 	}
-	const savedManager = saved ? openWorkingSession(saved) : undefined;
+	// Only the native launch-bearing path has no caller callback between admission and ownership.
+	const savedManager = saved
+		? nativeRestore
+			? SessionManager.fromWorkingSession(
+					saved.cwd,
+					saved.sessionDir,
+					saved.sessionFile,
+					[saved.header, ...saved.entries],
+					saved.leafId,
+				)
+			: openWorkingSession(saved)
+		: undefined;
 	const cwd = resolvePath(saved?.cwd ?? options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
-	const agentDir = resolvePath(saved?.launch?.agentDir ?? options.agentDir ?? getDefaultAgentDir());
+	const agentDir = resolvePath(saved?.launch?.agentDir ?? explicitAgentDir ?? getDefaultAgentDir());
 	if (saved && options.sessionManager && options.sessionManager.getSessionId() !== saved.header.id)
 		throw new Error("Working session and supplied SessionManager identity disagree");
 
@@ -237,16 +263,30 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionManager =
 		savedManager ?? options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
+	const reloadOptions = saved
+		? nativeResourceLoader
+			? {
+					workingSessionPolicy: {
+						cwd: saved.cwd,
+						launch: saved.launch,
+						settings: saved.settings,
+						settingsLayers: saved.settingsLayers,
+						flags: saved.flags,
+					},
+				}
+			: { workingSession: saved }
+		: undefined;
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({
 			cwd,
 			agentDir,
 			settingsManager,
 		});
-		await resourceLoader.reload(saved ? { workingSession: saved } : undefined);
+		getWorkingSessionResources = nativeWorkingSessionResources;
+		await nativeResourceLoaderReload.call(resourceLoader, reloadOptions);
 		time("resourceLoader.reload");
 	} else if (saved && !workingSessionResourcesMatch(saved, options.workingSessionResourcesPrepared)) {
-		await resourceLoader.reload({ workingSession: saved });
+		await reload!.call(resourceLoader, reloadOptions);
 	}
 
 	// Direct SDK hosts need factory registrations before native model selection too.
@@ -570,8 +610,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 	});
 
-	if (resourceLoader.getWorkingSessionResources)
-		session.workingSessionLaunch = { agentDir, ...resourceLoader.getWorkingSessionResources() };
+	if (getWorkingSessionResources)
+		session.workingSessionLaunch = { agentDir, ...getWorkingSessionResources.call(resourceLoader) };
 	if (saved) session.restoreWorkingSession(saved);
 	const extensionsResult = resourceLoader.getExtensions();
 

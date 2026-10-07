@@ -69,6 +69,8 @@ Ordinary custom loaders need no persistence method. Complete capture/restore req
 
 `workingSessionResourcesPrepared` is a trusted-host optimization for resources already loaded under the exact saved cwd, launch, effective/layered settings and flags. It is not journal admission or proof of arbitrary host state. Changed queues or conversation entries do not force another resource reload, but every restore still validates the snapshot and matching journal.
 
+`DefaultResourceLoader.reload({ workingSessionPolicy })` accepts those same five resource-policy fields without history. Native owners use it after snapshot admission; custom loaders continue to receive the complete isolated `workingSession` reload input.
+
 <a id="background-commands"></a>
 
 ### Background commands

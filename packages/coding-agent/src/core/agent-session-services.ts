@@ -182,7 +182,7 @@ export async function createAgentSessionServices(
 	);
 	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
 
-	const prepared = reloadOptions?.workingSession;
+	const prepared = reloadOptions?.workingSession ?? reloadOptions?.workingSessionPolicy;
 	return {
 		cwd,
 		agentDir,

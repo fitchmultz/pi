@@ -99,14 +99,24 @@ export default function(pi) {
 	const path = ${JSON.stringify(observation)};
 	pi.on("session_start", () => {
 		const observed = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : [];
-		observed.push(pi.getCommands().some(command => command.name === "mcp"));
+		observed.push({
+			mcp: pi.getCommands().some(command => command.name === "mcp"),
+			flag: pi.getFlag("saved-choice"), offline: process.env.PI_OFFLINE
+		});
 		writeFileSync(path, JSON.stringify(observed));
 	});
+	pi.registerFlag("saved-choice", {type: "string", default: "new default"});
 	pi.registerCommand("replace", {handler: async (_args, ctx) => {await ctx.newSession();}});
 }`,
 			);
 			state.launch!.extensions = ["builtin:mcp", extension];
+			state.launch!.offline = true;
+			state.flags = [["saved-choice", "saved selection"]];
 			if (disabled) state.launch!.disabledBuiltinExtensions = ["mcp"];
+			// Empty native history must not acquire synthetic model/thinking metadata on startup.
+			state.entries = [];
+			state.leafId = null;
+			state.sessionFile = join(h.tempDir, "empty-native.jsonl");
 			const statePath = join(h.tempDir, "working-session.json");
 			writeFileSync(statePath, JSON.stringify(state));
 			const result = await runCli(
@@ -116,7 +126,11 @@ export default function(pi) {
 			);
 			expect(result.signal).toBeNull();
 			expect(result.code, result.stderr).toBe(0);
-			expect(JSON.parse(readFileSync(observation, "utf8"))).toEqual([!disabled, !disabled]);
+			expect(JSON.parse(readFileSync(observation, "utf8"))).toEqual([
+				{ mcp: !disabled, flag: "saved selection", offline: "1" },
+				{ mcp: !disabled, flag: "saved selection", offline: "1" },
+			]);
+			expect(readFileSync(state.sessionFile, "utf8")).toBe(`${JSON.stringify(state.header)}\n`);
 		} finally {
 			h.cleanup();
 		}
@@ -191,7 +205,16 @@ export default function(pi) {
 				mkdirSync(agentDir);
 				writeFileSync(
 					join(agentDir, "settings.json"),
-					JSON.stringify({ httpProxy: diskProxy.url, httpIdleTimeoutMs: 5000 }),
+					JSON.stringify({ httpProxy: diskProxy.url, httpIdleTimeoutMs: 5000, extensions: [] }),
+				);
+				mkdirSync(join(h.tempDir, ".pi"));
+				writeFileSync(join(h.tempDir, ".pi", "settings.json"), JSON.stringify({ extensions: [] }));
+				const layerObservation = join(h.tempDir, "saved-layer-loaded");
+				writeFileSync(
+					join(h.tempDir, "layer.ts"),
+					`import {writeFileSync} from "node:fs"; export default function() {
+	writeFileSync(${JSON.stringify(layerObservation)}, "saved project origin");
+}`,
 				);
 				const model = h.session.modelRuntime.getModel("anthropic", "claude-sonnet-4-5");
 				if (!model) throw new Error("Native capture model missing");
@@ -207,7 +230,8 @@ export default async function() {
 	try { await fetch("http://native-bootstrap.invalid/timeout"); }
 	catch (error) { timeoutCode = error.cause?.code; }
 	writeFileSync(${JSON.stringify(observation)}, JSON.stringify({
-		http: process.env.HTTP_PROXY, https: process.env.HTTPS_PROXY, route, timeoutCode
+		http: process.env.HTTP_PROXY, https: process.env.HTTPS_PROXY, route, timeoutCode,
+		offline: process.env.PI_OFFLINE
 	}));
 }`,
 				);
@@ -241,6 +265,9 @@ export default async function() {
 					expect(hold.state.settings.httpIdleTimeoutMs).toBe(10);
 					expect(hold.state.settingsLayers.global.httpIdleTimeoutMs).toBe(5000);
 					expect(hold.state.settingsLayers.global.httpProxy).toBe(savedProxy.url);
+					hold.state.launch!.trustProject = true;
+					hold.state.settingsLayers.project.extensions = ["../layer.ts"];
+					hold.state.settings.extensions = ["../layer.ts"];
 					writeFileSync(statePath, JSON.stringify(hold.state));
 					await hold.release();
 				} finally {
@@ -275,7 +302,9 @@ export default async function() {
 					https: explicit ? callerProxy.url : savedProxy.url,
 					route: explicit ? "caller C" : "saved A",
 					timeoutCode: "UND_ERR_HEADERS_TIMEOUT",
+					offline: "1",
 				});
+				expect(readFileSync(layerObservation, "utf8")).toBe("saved project origin");
 			} finally {
 				h.cleanup();
 				await Promise.all([savedProxy.close(), diskProxy.close(), callerProxy.close()]);

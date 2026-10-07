@@ -827,37 +827,53 @@ export async function main(args: string[], options?: MainOptions) {
 				parsed.projectTrustOverride ??
 				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		const workingSessionPolicy =
+			isInitialRuntime && saved
+				? {
+						cwd: saved.cwd,
+						launch: saved.launch,
+						settings: saved.settings,
+						settingsLayers: saved.settingsLayers,
+						flags: saved.flags,
+					}
+				: undefined;
+		if (workingSessionPolicy)
+			runtimeSettingsManager.restoreWorkingSession(
+				workingSessionPolicy.settings,
+				workingSessionPolicy.settingsLayers,
+			);
 		const services = await createAgentSessionServices({
 			cwd,
-			workingSession: isInitialRuntime ? saved : undefined,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
 			modelRuntimeSignal: AbortSignal.timeout(15_000),
 			extensionFlagValues: parsed.unknownFlags,
-			resourceLoaderReloadOptions: shouldResolveProjectTrust
-				? {
-						resolveProjectTrust: async ({ extensionsResult }) => {
-							const trusted = await resolveProjectTrusted({
-								cwd,
-								trustStore,
-								trustOverride: parsed.projectTrustOverride,
-								defaultProjectTrust: startupSettingsManager.getDefaultProjectTrust(),
-								extensionsResult,
-								projectTrustContext:
-									projectTrustContext ??
-									createProjectTrustContext({
-										cwd,
-										mode: isInitialRuntime ? trustPromptMode : appMode,
-										settingsManager: startupSettingsManager,
-										hasUI: isInitialRuntime && trustPromptMode === "interactive",
-									}),
-								onExtensionError: (message) => projectTrustDiagnostics.push({ type: "warning", message }),
-							});
-							projectTrustByCwd.set(cwd, trusted);
-							return trusted;
-						},
-					}
-				: undefined,
+			resourceLoaderReloadOptions: workingSessionPolicy
+				? { workingSessionPolicy }
+				: shouldResolveProjectTrust
+					? {
+							resolveProjectTrust: async ({ extensionsResult }) => {
+								const trusted = await resolveProjectTrusted({
+									cwd,
+									trustStore,
+									trustOverride: parsed.projectTrustOverride,
+									defaultProjectTrust: startupSettingsManager.getDefaultProjectTrust(),
+									extensionsResult,
+									projectTrustContext:
+										projectTrustContext ??
+										createProjectTrustContext({
+											cwd,
+											mode: isInitialRuntime ? trustPromptMode : appMode,
+											settingsManager: startupSettingsManager,
+											hasUI: isInitialRuntime && trustPromptMode === "interactive",
+										}),
+									onExtensionError: (message) => projectTrustDiagnostics.push({ type: "warning", message }),
+								});
+								projectTrustByCwd.set(cwd, trusted);
+								return trusted;
+							},
+						}
+					: undefined,
 			resourceLoaderOptions: {
 				additionalExtensionPaths: resolvedExtensionPaths,
 				additionalSkillPaths: resolvedSkillPaths,

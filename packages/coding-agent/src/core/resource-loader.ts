@@ -51,6 +51,8 @@ export interface ResourceLoaderReloadOptions {
 	resolveProjectTrust?: (input: { extensionsResult: LoadExtensionsResult }) => Promise<boolean>;
 	/** Restore native selection before discovery; settings follow file reload but precede factories. */
 	workingSession?: WorkingSession;
+	/** Native owners can prepare resources without passing conversation history. */
+	workingSessionPolicy?: Pick<WorkingSession, "cwd" | "launch" | "settings" | "settingsLayers" | "flags">;
 }
 
 const HOST_PROVIDED_EXTENSION_PACKAGES = new Set([
@@ -538,7 +540,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
 		resetTimings("extensions");
 
-		const saved = options?.workingSession;
+		const saved = options?.workingSession ?? options?.workingSessionPolicy;
 		if (saved) {
 			if (
 				resolvePath(saved.cwd) !== this.cwd ||

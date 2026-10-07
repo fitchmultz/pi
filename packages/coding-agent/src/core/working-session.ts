@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { isDeepStrictEqual } from "node:util";
+import { isDeepStrictEqual, types } from "node:util";
 import { copyJson, isJsonValue } from "@earendil-works/chord";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
@@ -205,11 +205,11 @@ function prompt(value: unknown): boolean {
 		(value.hiddenTools === undefined || strings(value.hiddenTools)) &&
 		strings(value.promptGuidelines) &&
 		record(value.toolSnippets) &&
-		Object.values(value.toolSnippets).every((item) => typeof item === "string") &&
+		Object.values(value.toolSnippets).every((item) => item === undefined || typeof item === "string") &&
 		record(value.sections) &&
-		Object.values(value.sections).every((item) => typeof item === "string") &&
+		Object.values(value.sections).every((item) => item === undefined || typeof item === "string") &&
 		record(value.toolGuidelines) &&
-		Object.values(value.toolGuidelines).every(strings) &&
+		Object.values(value.toolGuidelines).every((item) => item === undefined || strings(item)) &&
 		Array.isArray(value.contextFiles) &&
 		value.contextFiles.every(
 			(file: unknown) => record(file) && typeof file.path === "string" && typeof file.content === "string",
@@ -400,7 +400,7 @@ function validateWorkingSession(value: unknown): WorkingSession {
 		fail();
 	if (
 		value.mode !== undefined &&
-		(!record(value.mode) || typeof value.mode.kind !== "string" || !("data" in value.mode))
+		(!record(value.mode) || typeof value.mode.kind !== "string" || value.mode.data === undefined)
 	)
 		fail();
 	if (value.launch !== undefined) {
@@ -436,6 +436,40 @@ function validateWorkingSession(value: unknown): WorkingSession {
 /** An owned JSON snapshot; executable or lossy values cannot become persistence evidence. */
 export function copyWorkingSession(value: unknown): WorkingSession {
 	return validateWorkingSession(copyJson(value, { omitUndefinedProperties: true }));
+}
+
+/** Validate the complete snapshot, then detach only the memory retained by AgentSession. */
+export function copyWorkingSessionMemory(value: unknown) {
+	// Proxies need the existing descriptor copy before schema reads.
+	const state = isJsonValue(value, {
+		omitUndefinedProperties: true,
+		validateContainer: (container) => !types.isProxy(container),
+	})
+		? validateWorkingSession(value)
+		: copyWorkingSession(value);
+	const memory = {
+		steering: state.steering,
+		followUp: state.followUp,
+		steeringMode: state.steeringMode,
+		followUpMode: state.followUpMode,
+		steeringText: state.steeringText,
+		followUpText: state.followUpText,
+		nextTurn: state.nextTurn,
+		pendingCustom: state.pendingCustom,
+		pendingBash: state.pendingBash,
+		usesDefaultTools: state.usesDefaultTools,
+		defaultToolModifiers: state.defaultToolModifiers,
+		allowedTools: state.allowedTools,
+		excludedTools: state.excludedTools,
+		activeTools: state.activeTools,
+		pendingTools: state.pendingTools,
+		prompt: state.prompt,
+		runPrompt: state.runPrompt,
+		flags: state.flags,
+		launch: state.launch,
+		mode: state.mode,
+	};
+	return copyJson(memory, { omitUndefinedProperties: true }) as unknown as typeof memory;
 }
 
 /** Parsed trees are already private; reject non-finite JSON numbers without cloning them again. */

@@ -159,6 +159,7 @@ import {
 } from "./virtual-models.ts";
 import {
 	copyWorkingSession,
+	copyWorkingSessionMemory,
 	type WorkingSession,
 	type WorkingSessionBoundary,
 	WorkingSessionGate,
@@ -768,32 +769,33 @@ export class AgentSession {
 	/** SDK startup hydrates pending payloads directly, before session_start. No input replay. */
 	restoreWorkingSession(state: WorkingSession): void {
 		this.workingSessionGate.beforeMutation();
-		state = copyWorkingSession(state);
-		const launch = state.launch ?? this.workingSessionLaunch;
+		const memory = copyWorkingSessionMemory(state);
+		const launch = memory.launch ?? this.workingSessionLaunch;
 		if (!this._resourceLoader.getWorkingSessionResources || !launch)
 			throw new Error(
 				"Native working-session restore requires a persistence-capable ResourceLoader and launch owner",
 			);
 		this._restoredWorkingSession = true;
-		this.agent.restoreQueuedMessages(state);
-		this.agent.steeringMode = state.steeringMode;
-		this.agent.followUpMode = state.followUpMode;
-		this._steeringMessages = state.steeringText;
-		this._followUpMessages = state.followUpText;
-		this._pendingNextTurnMessages = state.nextTurn as CustomMessage[];
-		this._pendingCustomMessages = state.pendingCustom as CustomMessage[];
-		this._pendingBashMessages = state.pendingBash as BashExecutionMessage[];
-		this._usesDefaultTools = state.usesDefaultTools;
-		this._defaultToolModifiers = state.defaultToolModifiers ?? [];
-		this._setToolFilters(state.allowedTools, state.excludedTools);
-		this._pendingToolNames = new Set([...state.activeTools, ...state.pendingTools]);
-		this._refreshToolRegistry({ activeToolNames: state.activeTools });
-		this._setActiveTools([...state.activeTools, ...state.pendingTools]);
-		this._baseSystemPromptOptions = state.prompt;
-		this._runSystemPromptOptions = state.runPrompt;
-		for (const [name, value] of state.flags) this._resourceLoader.getExtensions().runtime.flagValues.set(name, value);
+		this.agent.restoreQueuedMessages(memory);
+		this.agent.steeringMode = memory.steeringMode;
+		this.agent.followUpMode = memory.followUpMode;
+		this._steeringMessages = memory.steeringText;
+		this._followUpMessages = memory.followUpText;
+		this._pendingNextTurnMessages = memory.nextTurn as CustomMessage[];
+		this._pendingCustomMessages = memory.pendingCustom as CustomMessage[];
+		this._pendingBashMessages = memory.pendingBash as BashExecutionMessage[];
+		this._usesDefaultTools = memory.usesDefaultTools;
+		this._defaultToolModifiers = memory.defaultToolModifiers ?? [];
+		this._setToolFilters(memory.allowedTools, memory.excludedTools);
+		this._pendingToolNames = new Set([...memory.activeTools, ...memory.pendingTools]);
+		this._refreshToolRegistry({ activeToolNames: memory.activeTools });
+		this._setActiveTools([...memory.activeTools, ...memory.pendingTools]);
+		this._baseSystemPromptOptions = memory.prompt;
+		this._runSystemPromptOptions = memory.runPrompt;
+		for (const [name, value] of memory.flags)
+			this._resourceLoader.getExtensions().runtime.flagValues.set(name, value);
 		this.workingSessionLaunch = launch;
-		this._workingSessionMode = state.mode;
+		this._workingSessionMode = memory.mode;
 	}
 
 	get modelRuntime(): ModelRuntime {
