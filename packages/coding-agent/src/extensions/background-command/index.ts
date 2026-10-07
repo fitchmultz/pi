@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
+import { createInterface } from "node:readline";
 import lockfile from "proper-lockfile";
 import type {
 	BoundaryState,
@@ -24,6 +25,8 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 		let timer: NodeJS.Timeout | undefined;
 		let context: ExtensionContext | undefined;
 		let release: (() => void) | undefined;
+		let recovery: Promise<void> | undefined;
+		let recoveryController: AbortController | undefined;
 		let root: string | undefined;
 		let ownerKey: string | undefined;
 		let wakeSuppressed = false;
@@ -61,8 +64,25 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 			stopped = true;
 			if (timer) clearInterval(timer);
 			timer = undefined;
+			recoveryController?.abort();
+			recoveryController = undefined;
+			recovery = undefined;
 			release?.();
 			release = undefined;
+		}
+		async function recoverReceipts(journal: string, signal: AbortSignal): Promise<void> {
+			const input = createReadStream(journal, { encoding: "utf8", signal });
+			const lines = createInterface({ input, crlfDelay: Infinity });
+			try {
+				// ponytail: One JSONL entry must fit in a string; larger entries need a streaming JSON parser.
+				for await (const line of lines) {
+					signal.throwIfAborted();
+					receipts(parseSessionEntries(line));
+				}
+			} finally {
+				lines.close();
+				input.destroy();
+			}
 		}
 		function start(ctx: ExtensionContext): string {
 			const owner = ctx.sessionManager;
@@ -79,8 +99,8 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 			if (!timer) timer = setInterval(() => inspect(), 1000).unref();
 			return root;
 		}
-		function completion(ctx: ExtensionContext): CustomMessageEntryDraft | undefined {
-			if (stopped || !root || !existsSync(root) || ctx.hasPendingMessages()) return;
+		async function completion(ctx: ExtensionContext): Promise<CustomMessageEntryDraft | undefined> {
+			if (stopped || saving || !root || !existsSync(root) || ctx.hasPendingMessages()) return;
 			if (!release) {
 				try {
 					// One live session process owns delivery. After a crash the lease expires;
@@ -97,8 +117,19 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 					throw error;
 				}
 				const journal = ctx.sessionManager.getSessionFile();
-				if (journal && existsSync(journal)) receipts(parseSessionEntries(readFileSync(journal, "utf8")));
+				recoveryController = new AbortController();
+				recovery =
+					journal && existsSync(journal) ? recoverReceipts(journal, recoveryController.signal) : Promise.resolve();
 			}
+			const controller = recoveryController;
+			try {
+				await recovery;
+			} catch (error) {
+				if (controller?.signal.aborted) return;
+				stop();
+				throw error;
+			}
+			if (stopped || saving || controller?.signal.aborted || ctx.hasPendingMessages()) return;
 			receipts(ctx.sessionManager.getEntries());
 			const jobs = listBackgroundCommands(root);
 			const running = jobs.filter((job) => !backgroundCommandFinished(job)).length;
@@ -124,17 +155,18 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 					.join("\n\n")}`,
 			};
 		}
-		function inspect(): void {
+		async function inspect(): Promise<void> {
 			if (!context || saving) return;
+			const ctx = context;
 			try {
-				if (!context.isIdle()) return;
-				const notice = completion(context);
-				if (notice) pi.sendMessage(notice, { deliverAs: "steer", triggerTurn: !wakeSuppressed && !!context.model });
+				if (!ctx.isIdle()) return;
+				const notice = await completion(ctx);
+				if (notice) pi.sendMessage(notice, { deliverAs: "steer", triggerTurn: !wakeSuppressed && !!ctx.model });
 			} catch (error) {
 				stop();
 				// Disposed extension contexts also reach here; cleanup must not keep a session alive.
 				try {
-					context.ui.notify(
+					ctx.ui.notify(
 						`Background command monitoring stopped: ${String(error)}. Job files remain in ${root}.`,
 						"error",
 					);
@@ -143,14 +175,19 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 				}
 			}
 		}
-		function boundary(event: BoundaryState, ctx: ExtensionContext) {
-			if (event.outcome === "aborted") {
-				if (!wakeSuppressed) pi.appendEntry(RUN_STATE, true);
-				wakeSuppressed = true;
+		function suppressWake(): void {
+			if (!wakeSuppressed) pi.appendEntry(RUN_STATE, true);
+			wakeSuppressed = true;
+		}
+		async function boundary(event: BoundaryState, ctx: ExtensionContext) {
+			const signal = ctx.signal;
+			if (event.outcome === "aborted" || signal?.aborted) {
+				suppressWake();
 				return;
 			}
 			start(ctx);
-			const notice = completion(ctx);
+			const notice = await completion(ctx);
+			if (signal?.aborted) suppressWake();
 			if (notice)
 				return {
 					entries: [...event.entries, notice],

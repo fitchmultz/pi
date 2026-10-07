@@ -1,11 +1,19 @@
-import fs, { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
+import {
+	appendFileSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext, ExtensionFactory } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import backgroundCommand, { BACKGROUND_COMMAND_NOTICE } from "../../src/extensions/background-command/index.ts";
@@ -76,36 +84,39 @@ describe("background command extension delivery", () => {
 			h.cleanup();
 		}
 		for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-		vi.restoreAllMocks();
-		syncBuiltinESMExports();
 		expect(failures).toEqual([]);
 	});
 
-	it("reads the journal once per delivery lease, not on later turns or idle writes", async () => {
+	it("delivers without errors or duplicates when the journal exceeds Node's string limit", async () => {
 		const h = await harness();
-		h.sessionManager.appendCustomEntry("large-history", "history ".repeat(16_384));
-		const read = vi.spyOn(fs, "readFileSync");
-		syncBuiltinESMExports();
-		const reads = () => read.mock.calls.filter(([file]) => file === h.sessionManager.getSessionFile()).length;
+		h.setResponses([fauxAssistantMessage("Ready")]);
+		await h.session.prompt("Initialize the saved journal");
+		const journal = h.sessionManager.getSessionFile()!;
+		// Blank physical lines are valid padding and do not inflate the in-memory session.
+		const padding = Buffer.alloc(1024 * 1024, " ");
+		padding[padding.length - 1] = 10;
+		for (let i = 0; i < 513; i++) appendFileSync(journal, padding);
+		expect(statSync(journal).size).toBeGreaterThan(536_870_888);
+		const errors: string[] = [];
+		h.session.extensionRunner.onError((error) => errors.push(error.error));
 		const { command, release } = held(h);
 		h.setResponses([
 			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
 				stopReason: "toolUse",
 			}),
 			fauxAssistantMessage("Launched"),
+			fauxAssistantMessage("Completion consumed"),
 		]);
 		await h.session.prompt("Start");
-		expect(reads()).toBe(1);
-		h.sessionManager.appendCustomEntry("unrelated", { value: true });
-		await delay(1100);
-		h.setResponses([fauxAssistantMessage("Another turn")]);
-		await h.session.prompt("Continue");
-		expect(reads()).toBe(1);
-		h.setResponses([fauxAssistantMessage("Completion consumed")]);
+		expect(errors).toEqual([]);
 		await finish(h, release);
 		await until(() => notices(h).length === 1 && h.session.isIdle);
-		expect(reads()).toBe(1);
-	});
+		await h.session.reload();
+		await delay(1100);
+		expect(notices(h)).toHaveLength(1);
+		expect(h.faux.state.callCount).toBe(4);
+		expect(errors).toEqual([]);
+	}, 30_000);
 	it("delivers after the whole foreground batch, once across reload", async () => {
 		const h = await harness();
 		const { command, release } = held(h);
@@ -271,6 +282,47 @@ describe("background command extension delivery", () => {
 		await h.session.prompt("Continue");
 		expect(notices(h)).toHaveLength(1);
 	});
+	it("retains completions without waking when cancellation arrives during journal recovery", async () => {
+		const h = await harness();
+		h.setResponses([fauxAssistantMessage("Ready")]);
+		await h.session.prompt("Initialize the saved journal");
+		const padding = Buffer.alloc(1024 * 1024, " ");
+		padding[padding.length - 1] = 10;
+		for (let i = 0; i < 128; i++) appendFileSync(h.sessionManager.getSessionFile()!, padding);
+		const { command, release } = held(h);
+		const root = backgroundCommandDirectory(h.sessionManager);
+		const job = await startBackgroundCommand(root, command, { command, cwd: h.tempDir, env: getShellEnv() });
+		let aborted: Promise<void> | undefined;
+		h.setResponses([
+			() => {
+				setImmediate(() => {
+					aborted = h.session.abort();
+				});
+				return fauxAssistantMessage("Final response");
+			},
+			fauxAssistantMessage("Unexpected wake"),
+		]);
+		await h.session.prompt("Finish foreground work");
+		expect(aborted).toBeDefined();
+		await aborted;
+		expect(h.sessionManager.getEntries()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					type: "message",
+					message: expect.objectContaining({
+						role: "assistant",
+						stopReason: "stop",
+						content: expect.arrayContaining([{ type: "text", text: "Final response" }]),
+					}),
+				}),
+				expect.objectContaining({ type: "custom", customType: "background-command-run-state", data: true }),
+			]),
+		);
+		writeFileSync(release, "go");
+		await until(() => backgroundCommandFinished(readBackgroundCommand(root, job.id)));
+		await until(() => notices(h).length === 1 && h.session.isIdle);
+		expect(h.faux.state.callCount).toBe(2);
+	}, 15_000);
 	it.skipIf(process.platform === "win32")(
 		"uses effective shell settings, relative cwd, and session metadata",
 		async () => {
