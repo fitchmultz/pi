@@ -36,7 +36,7 @@ Native terminal input and mutating RPC commands received during a hold invalidat
 
 SDK hosts with extra memory-owned state bind one `WorkingSessionHost` using `session.bindWorkingSessionHost({ kind, readiness, capture, restore })`. Its readiness callback returns `{ blockers }` when live memory cannot be restored. `capture` must return plain JSON data; `restore` receives it before mode startup. A mode-kind mismatch fails rather than losing buffers.
 
-Capture, restore and `writeWorkingSession` use the same strict v1 codec. Undefined object properties are omitted, but non-finite numbers, functions, symbols, getters, class instances, sparse arrays and cycles are rejected rather than silently dropped or coerced. Failed capture releases admission; an invalid write leaves the existing artifact unchanged.
+Capture, restore and `writeWorkingSession` use the same strict v1 codec. File reads, writes, journal comparison and completion digests process bounded chunks, so aggregate history can exceed Node's string limit without changing the format or dropping entries. The synchronous APIs still retain the complete state as objects in memory. Undefined object properties are omitted, but non-finite numbers, functions, symbols, getters, class instances, sparse arrays and cycles are rejected rather than silently dropped or coerced. Failed capture releases admission; an invalid write leaves the existing artifact unchanged.
 
 ## Extension persistence and readiness
 

@@ -1,11 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { copyJson } from "@earendil-works/chord";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { jsonChunks, readFileChunksSync, readJsonFileSync } from "../utils/streaming-file.ts";
 import { assertValidSessionId, type SessionEntry, type SessionHeader, SessionManager } from "./session-manager.ts";
 import { getToolListError, isToolModifier, type Settings } from "./settings-manager.ts";
 import type { NormalizedBuildSystemPromptOptions } from "./system-prompt.ts";
@@ -442,7 +443,7 @@ export function parseWorkingSession(text: string): WorkingSession {
 }
 
 export function readWorkingSession(path: string): WorkingSession {
-	return parseWorkingSession(new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path)));
+	return copyWorkingSession(readJsonFileSync(path));
 }
 
 /** Read-only admission must precede services, discovery and extension factories. */
@@ -472,19 +473,45 @@ export function workingSessionResourcesMatch(state: WorkingSession, prepared: Wo
 
 export function writeWorkingSession(path: string, state: WorkingSession): void {
 	assertPrivateFilePath(path);
-	atomicWriteFileSync(path, `${JSON.stringify(copyWorkingSession(state))}\n`);
+	const saved = copyWorkingSession(state);
+	atomicWriteFileSync(path, (fd) => {
+		for (const chunk of jsonChunks(saved)) writeFileSync(fd, chunk);
+		writeFileSync(fd, "\n");
+	});
 }
 
 function assertWorkingSessionJournal(state: WorkingSession): void {
-	const entries = [state.header, ...state.entries];
 	if (state.sessionFile && existsSync(state.sessionFile)) {
-		const text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(state.sessionFile));
-		const actual: unknown[] = text
-			.split("\n")
-			.filter((line) => line.trim())
-			.map((line) => JSON.parse(line));
-		if (JSON.stringify(actual) !== JSON.stringify(entries))
+		const fail = (): never => {
 			throw new Error("Native working session journal differs from saved state; refusing to overwrite it");
+		};
+		let index = 0;
+		const compare = (line: string) => {
+			if (!line.trim()) return;
+			if (index > state.entries.length) fail();
+			const actual = jsonChunks(JSON.parse(line));
+			const expected = jsonChunks(index === 0 ? state.header : state.entries[index - 1]);
+			index++;
+			for (const chunk of expected) {
+				if (actual.next().value !== chunk) fail();
+			}
+			if (!actual.next().done) fail();
+		};
+		const decoder = new TextDecoder("utf-8", { fatal: true });
+		let pending = "";
+		for (const chunk of readFileChunksSync(state.sessionFile)) {
+			pending += decoder.decode(chunk, { stream: true });
+			let start = 0;
+			let end = pending.indexOf("\n", start);
+			while (end !== -1) {
+				compare(pending.slice(start, end));
+				start = end + 1;
+				end = pending.indexOf("\n", start);
+			}
+			pending = pending.slice(start);
+		}
+		compare(pending + decoder.decode());
+		if (index !== state.entries.length + 1) fail();
 	}
 }
 

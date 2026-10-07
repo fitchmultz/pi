@@ -1,9 +1,10 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
+import { readJsonFileSync } from "../utils/streaming-file.ts";
 import { parseArgs } from "./args.ts";
 import {
 	type CompletedWorkingSession,
@@ -260,11 +261,11 @@ export async function superviseCli(
 			if (ready && completed && result.code === 0 && !result.signal && exitPath) {
 				assertPrivateFilePath(completed.path);
 				assertPrivateFilePath(exitPath);
-				const bytes = readFileSync(completed.path);
 				// Native finalization owns the full codec; the launcher checks its exact identity and bytes.
-				const artifact: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+				const hash = createHash("sha256");
+				const artifact = readJsonFileSync(completed.path, hash);
 				if (
-					createHash("sha256").update(bytes).digest("hex") !== completed.digest ||
+					hash.digest("hex") !== completed.digest ||
 					!artifact ||
 					typeof artifact !== "object" ||
 					!("version" in artifact) ||
