@@ -1,5 +1,6 @@
 import { createHash, type Hash } from "node:crypto";
 import { closeSync, openSync, readSync } from "node:fs";
+import { isJsonValue } from "@earendil-works/chord";
 import { getManyValues, type Many, none } from "stream-chain/core";
 import { Assembler } from "stream-json/core/assembler.js";
 import type { ParserOptions, Token } from "stream-json/core/parser.js";
@@ -38,10 +39,12 @@ export function readJsonFileSync(path: string, hash?: Hash): unknown {
 	const parse = jsonParser({ streamValues: false });
 	const assembler = new Assembler();
 	const decoder = new TextDecoder("utf-8", { fatal: true });
+	let nonFiniteNumber = false;
 	const consume = (input: string | typeof none) => {
 		const tokens = parse(input);
 		if (tokens === none) return;
 		for (const token of getManyValues(tokens)) {
+			if (token.name === "numberValue" && !Number.isFinite(Number(token.value))) nonFiniteNumber = true;
 			// Detach parser ropes/slices from input buffers; UTF-16 preserves lone surrogates as well.
 			if (token.name === "stringValue" || token.name === "keyValue")
 				token.value = Buffer.from(token.value, "utf16le").toString("utf16le");
@@ -54,6 +57,9 @@ export function readJsonFileSync(path: string, hash?: Hash): unknown {
 	}
 	consume(decoder.decode());
 	consume(none);
+	// An overflowing value may have been discarded by a later duplicate key.
+	if (nonFiniteNumber && !isJsonValue(assembler.current))
+		throw new TypeError("Value contains a non-finite number and is not strict JSON");
 	return assembler.current;
 }
 

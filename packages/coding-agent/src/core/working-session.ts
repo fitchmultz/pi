@@ -449,7 +449,8 @@ export function parseWorkingSession(text: string): WorkingSession {
 }
 
 export function readWorkingSession(path: string): WorkingSession {
-	return validateParsedWorkingSession(readJsonFileSync(path));
+	// The parser constructs private JSON containers and rejects surviving non-finite numbers.
+	return validateWorkingSession(readJsonFileSync(path));
 }
 
 /** Read-only admission must precede services, discovery and extension factories. */

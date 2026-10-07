@@ -48,7 +48,7 @@ describe("Native working-session files", () => {
 			const expected = `${JSON.stringify(hold.state)}\n`;
 			expect(readFileSync(path, "utf8")).toBe(expected);
 			const duplicateKeys = expected
-				.replace('"duplicate":2', '"duplicate":1,"duplicate":2')
+				.replace('"duplicate":2', '"duplicate":{"nested":[1e999]},"duplicate":-1e999,"duplicate":2')
 				.replace("before\uFEFFafter", "before\\uFEFFafter");
 			writeFileSync(path, `\uFEFF${duplicateKeys}`);
 			const restored = readWorkingSession(path);
