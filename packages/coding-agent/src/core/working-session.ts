@@ -487,6 +487,55 @@ export function writeWorkingSession(path: string, state: WorkingSession): void {
 	});
 }
 
+/** Compare parsed journal JSON in serialization order without re-encoding its strings. */
+function sameJournalJson(actual: unknown, expected: unknown): boolean {
+	const stack: Array<{
+		actual: Record<string, unknown>;
+		expected: Record<string, unknown>;
+		keys: Iterator<string | number>;
+	}> = [];
+	while (true) {
+		// JSON.stringify normalizes overflowing parsed numbers and signed zero.
+		if (typeof actual === "number" && !Number.isFinite(actual)) actual = null;
+		if (actual !== expected) {
+			if (actual === null || expected === null || typeof actual !== "object" || typeof expected !== "object")
+				return false;
+			if (Array.isArray(actual) !== Array.isArray(expected)) return false;
+			let keys: Iterator<string | number>;
+			if (Array.isArray(actual)) {
+				if (actual.length !== (expected as unknown[]).length) return false;
+				keys = actual.keys();
+			} else {
+				const actualKeys = Object.keys(actual);
+				const expectedKeys = Object.keys(expected);
+				if (
+					actualKeys.length !== expectedKeys.length ||
+					actualKeys.some((key, index) => key !== expectedKeys[index])
+				)
+					return false;
+				keys = actualKeys.values();
+			}
+			stack.push({
+				actual: actual as Record<string, unknown>,
+				expected: expected as Record<string, unknown>,
+				keys,
+			});
+		}
+		while (true) {
+			const frame = stack.at(-1);
+			if (!frame) return true;
+			const key = frame.keys.next();
+			if (key.done) {
+				stack.pop();
+				continue;
+			}
+			actual = frame.actual[key.value];
+			expected = frame.expected[key.value];
+			break;
+		}
+	}
+}
+
 function assertWorkingSessionJournal(state: WorkingSession): void {
 	if (state.sessionFile && existsSync(state.sessionFile)) {
 		const fail = (): never => {
@@ -496,28 +545,27 @@ function assertWorkingSessionJournal(state: WorkingSession): void {
 		const compare = (line: string) => {
 			if (!line.trim()) return;
 			if (index > state.entries.length) fail();
-			const actual = jsonChunks(JSON.parse(line));
-			const expected = jsonChunks(index === 0 ? state.header : state.entries[index - 1]);
+			if (!sameJournalJson(JSON.parse(line), index === 0 ? state.header : state.entries[index - 1])) fail();
 			index++;
-			for (const chunk of expected) {
-				if (actual.next().value !== chunk) fail();
-			}
-			if (!actual.next().done) fail();
 		};
 		const decoder = new TextDecoder("utf-8", { fatal: true });
-		let pending = "";
-		for (const chunk of readFileChunksSync(state.sessionFile)) {
-			pending += decoder.decode(chunk, { stream: true });
+		const lineChunks: string[] = [];
+		for (const bytes of readFileChunksSync(state.sessionFile)) {
+			const chunk = decoder.decode(bytes, { stream: true });
 			let start = 0;
-			let end = pending.indexOf("\n", start);
+			let end = chunk.indexOf("\n", start);
 			while (end !== -1) {
-				compare(pending.slice(start, end));
+				lineChunks.push(chunk.slice(start, end));
+				const line = lineChunks.join("");
+				lineChunks.length = 0;
+				compare(line);
 				start = end + 1;
-				end = pending.indexOf("\n", start);
+				end = chunk.indexOf("\n", start);
 			}
-			pending = pending.slice(start);
+			lineChunks.push(chunk.slice(start));
 		}
-		compare(pending + decoder.decode());
+		lineChunks.push(decoder.decode());
+		compare(lineChunks.join(""));
 		if (index !== state.entries.length + 1) fail();
 	}
 }

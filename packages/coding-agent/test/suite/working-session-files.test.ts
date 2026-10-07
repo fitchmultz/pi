@@ -141,7 +141,13 @@ for (const [index, entry] of state.entries.entries()) {
 	it("preserves strict journal comparison, including order, invalid lines and unterminated final lines", async () => {
 		const h = await createHarness();
 		try {
-			h.sessionManager.appendCustomEntry("opaque", { first: 1, second: 2 });
+			h.sessionManager.appendCustomEntry("opaque", {
+				first: 1,
+				second: 2,
+				zero: -0,
+				overflow: null,
+				nested: [false, null, { text: `${"x".repeat(65535)}界\uFEFF\ud800\n` }],
+			});
 			const hold = await h.session.acquireWorkingSession();
 			await hold.release();
 			const saved = { ...hold.state, sessionFile: join(realpathSync(h.tempDir), "journal.jsonl") };
@@ -151,8 +157,13 @@ for (const [index, entry] of state.entries.entries()) {
 			writeFileSync(saved.sessionFile, valid);
 			expect(resolveWorkingSession(saved)?.leafId).toBe(saved.leafId);
 			expect(readFileSync(saved.sessionFile, "utf8")).toBe(valid);
+			const equivalent = `${header}\n${entry.replace('"zero":0', '"zero":-0').replace('"overflow":null', '"overflow":1e999')}`;
+			writeFileSync(saved.sessionFile, equivalent);
+			expect(resolveWorkingSession(saved)?.leafId).toBe(saved.leafId);
+			expect(readFileSync(saved.sessionFile, "utf8")).toBe(equivalent);
 			for (const input of [
 				`${header}\n${entry.replace('"first":1,"second":2', '"second":2,"first":1')}\n`,
+				`${header}\n${entry.replace('"nested":[false,null,', '"nested":[null,false,')}\n`,
 				`${header}\nnot JSON\n${entry}\n`,
 				`${header}\n`,
 				`${valid}\n${entry}\n`,
