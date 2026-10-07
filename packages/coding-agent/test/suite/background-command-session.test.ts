@@ -296,7 +296,7 @@ describe("background command extension delivery", () => {
 			for (let i = 0; i < 128; i++) appendFileSync(h.sessionManager.getSessionFile()!, padding);
 			const { command, release } = held(h);
 			const root = backgroundCommandDirectory(h.sessionManager);
-			const job = await startBackgroundCommand(root, command, { command, cwd: h.tempDir, env: getShellEnv() });
+			const starting = startBackgroundCommand(root, command, { command, cwd: h.tempDir, env: getShellEnv() });
 			let releaseLease: (() => void) | undefined = lockfile.lockSync(root, { realpath: false });
 			let aborted: Promise<void> | undefined;
 			let signalAtAbort: AbortSignal | undefined;
@@ -339,7 +339,9 @@ describe("background command extension delivery", () => {
 				},
 				fauxAssistantMessage("Unexpected wake"),
 			]);
+			let job: BackgroundCommandJob;
 			try {
+				job = await starting;
 				await h.session.prompt("Finish foreground work");
 			} finally {
 				releaseLease?.();
