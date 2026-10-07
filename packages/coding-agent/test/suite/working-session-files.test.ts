@@ -1,4 +1,5 @@
 import { constants } from "node:buffer";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	appendFileSync,
@@ -9,7 +10,8 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { superviseCli } from "../../src/cli/launcher.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
@@ -90,6 +92,51 @@ describe("Native working-session files", () => {
 			h.cleanup();
 		}
 	});
+
+	it("reads escaped structured history within a constrained heap", async () => {
+		const h = await createHarness();
+		try {
+			const line = 'alpha\\path "quoted"\t界\uFEFF\ud800\n';
+			const payload = line.repeat(64);
+			for (let index = 0; index < 4096; index++)
+				h.sessionManager.appendCustomEntry("escaped-history", { index, payload });
+			const hold = await h.session.acquireWorkingSession();
+			await hold.release();
+			const artifact = join(h.tempDir, "escaped-history.json");
+			writeFileSync(artifact, JSON.stringify(hold.state));
+			const reader = join(h.tempDir, "reader.mjs");
+			const ownerUrl = pathToFileURL(resolve(import.meta.dirname, "../../src/core/working-session.ts")).href;
+			writeFileSync(
+				reader,
+				`
+import assert from "node:assert/strict";
+import { readWorkingSession } from ${JSON.stringify(ownerUrl)};
+const state = readWorkingSession(process.argv[2]);
+assert.equal(state.entries.length, 4096);
+const expected = ${JSON.stringify(line)}.repeat(64);
+for (const [index, entry] of state.entries.entries()) {
+	assert.equal(entry.type, "custom");
+	assert.equal(entry.customType, "escaped-history");
+	assert.equal(entry.data.index, index);
+	assert.equal(entry.data.payload, expected);
+}
+`,
+			);
+			const resolverUrl = pathToFileURL(
+				resolve(import.meta.dirname, "../../src/experimental/source-resolver.ts"),
+			).href;
+			const result = spawnSync(
+				process.execPath,
+				["--max-old-space-size=64", "--import", resolverUrl, reader, artifact],
+				{ encoding: "utf8", timeout: 30000 },
+			);
+			expect(result.error).toBeUndefined();
+			expect(result.status, result.stderr).toBe(0);
+			expect(result.signal).toBeNull();
+		} finally {
+			h.cleanup();
+		}
+	}, 60000);
 
 	it("preserves strict journal comparison, including order, invalid lines and unterminated final lines", async () => {
 		const h = await createHarness();

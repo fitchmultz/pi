@@ -40,7 +40,13 @@ export function readJsonFileSync(path: string, hash?: Hash): unknown {
 	const decoder = new TextDecoder("utf-8", { fatal: true });
 	const consume = (input: string | typeof none) => {
 		const tokens = parse(input);
-		if (tokens !== none) for (const token of getManyValues(tokens)) assembler.consume(token);
+		if (tokens === none) return;
+		for (const token of getManyValues(tokens)) {
+			// Detach parser ropes/slices from input buffers; UTF-16 preserves lone surrogates as well.
+			if (token.name === "stringValue" || token.name === "keyValue")
+				token.value = Buffer.from(token.value, "utf16le").toString("utf16le");
+			assembler.consume(token);
+		}
 	};
 	for (const chunk of readFileChunksSync(path)) {
 		hash?.update(chunk);
