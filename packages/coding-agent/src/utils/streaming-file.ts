@@ -1,6 +1,14 @@
 import { createHash, type Hash } from "node:crypto";
 import { closeSync, openSync, readSync } from "node:fs";
-import { Tokenizer, TokenParser } from "@streamparser/json";
+import { getManyValues, type Many, none } from "stream-chain/core";
+import { Assembler } from "stream-json/core/assembler.js";
+import type { ParserOptions, Token } from "stream-json/core/parser.js";
+import * as streamJson from "stream-json/core/parser.js";
+
+// ponytail: 3.7 omits its public synchronous factory's types; drop this narrowing when upstream includes them.
+const { jsonParser } = streamJson as typeof streamJson & {
+	jsonParser(options?: ParserOptions): (input: string | typeof none) => Many<Token> | typeof none;
+};
 
 const CHUNK_SIZE = 64 * 1024;
 
@@ -27,28 +35,20 @@ export function hashFileSync(path: string): string {
 
 /** Parse a full JSON value without constructing a string for the whole document. */
 export function readJsonFileSync(path: string, hash?: Hash): unknown {
-	const tokenizer = new Tokenizer();
-	// Its initial BOM handling accepts BOMs even after whitespace/opening braces.
-	// Prime that state before connecting the parser; only TextDecoder may strip a leading BOM.
-	tokenizer.onToken = () => {};
-	tokenizer.write('""');
-	const parser = new TokenParser({ paths: ["$"] });
-	tokenizer.onToken = parser.write.bind(parser);
-	tokenizer.onEnd = () => {
-		if (!parser.isEnded) parser.end();
-	};
+	const parse = jsonParser({ streamValues: false });
+	const assembler = new Assembler();
 	const decoder = new TextDecoder("utf-8", { fatal: true });
-	let result: unknown;
-	parser.onValue = ({ value }) => {
-		result = value;
+	const consume = (input: string | typeof none) => {
+		const tokens = parse(input);
+		if (tokens !== none) for (const token of getManyValues(tokens)) assembler.consume(token);
 	};
 	for (const chunk of readFileChunksSync(path)) {
 		hash?.update(chunk);
-		tokenizer.write(decoder.decode(chunk, { stream: true }));
+		consume(decoder.decode(chunk, { stream: true }));
 	}
-	tokenizer.write(decoder.decode());
-	tokenizer.end();
-	return result;
+	consume(decoder.decode());
+	consume(none);
+	return assembler.current;
 }
 
 function* jsonStringChunks(value: string): Generator<string> {

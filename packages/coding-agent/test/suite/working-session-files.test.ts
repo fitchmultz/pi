@@ -29,7 +29,8 @@ describe("Native working-session files", () => {
 			const data: Record<string, unknown> = JSON.parse(
 				'{"__proto__":{"kept":true},"constructor":[false,null,1.25e100],"duplicate":2}',
 			);
-			data.text = `${"x".repeat(65535)}\u{10000}${"界\u{10000}".repeat(14000)}\ud800\\"\n\t\udfff`;
+			data["\uFEFF"] = ["\uFEFF", "before\uFEFFafter", "\uFEFFprefix", "suffix\uFEFF"];
+			data.text = `${"x".repeat(65535)}\uFEFF\u{10000}${"界\uFEFF\u{10000}".repeat(14000)}\ud800\\"\n\t\udfff`;
 			h.sessionManager.appendCustomEntry("opaque", data);
 			h.session.bindWorkingSessionHost({
 				kind: "host",
@@ -43,8 +44,10 @@ describe("Native working-session files", () => {
 			writeWorkingSession(path, hold.state);
 			const expected = `${JSON.stringify(hold.state)}\n`;
 			expect(readFileSync(path, "utf8")).toBe(expected);
-			const duplicateKeys = expected.replace('"duplicate":2', '"duplicate":1,"duplicate":2');
-			writeFileSync(path, duplicateKeys);
+			const duplicateKeys = expected
+				.replace('"duplicate":2', '"duplicate":1,"duplicate":2')
+				.replace("before\uFEFFafter", "before\\uFEFFafter");
+			writeFileSync(path, `\uFEFF${duplicateKeys}`);
 			const restored = readWorkingSession(path);
 			expect(restored).toEqual(JSON.parse(duplicateKeys));
 			const opaque = restored.entries[0];
@@ -68,6 +71,7 @@ describe("Native working-session files", () => {
 			expect(readWorkingSession(path)).toEqual(JSON.parse(valid));
 			for (const input of [
 				Buffer.from(""),
+				Buffer.from("\uFEFF"),
 				Buffer.from(`\uFEFF\uFEFF${valid}`),
 				Buffer.from(` \uFEFF${valid}`),
 				Buffer.from(`{\uFEFF${valid.slice(1)}`),
@@ -75,6 +79,7 @@ describe("Native working-session files", () => {
 				Buffer.from(`${valid} {}`),
 				Buffer.from(valid.replace('"entries":[]', '"entries":[null]')),
 				Buffer.from(valid.replace('"settings":{}', '"settings":{"value":1e999}')),
+				Buffer.from(valid.replace('"settings":{}', '"settings":{"value":"\\\uFEFF"}')),
 				Buffer.concat([Buffer.from(valid.slice(0, -1)), Buffer.from([0xff]), Buffer.from("}")]),
 			]) {
 				writeFileSync(path, input);
