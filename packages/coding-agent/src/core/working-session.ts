@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { copyJson } from "@earendil-works/chord";
+import { copyJson, isJsonValue } from "@earendil-works/chord";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -438,12 +438,18 @@ export function copyWorkingSession(value: unknown): WorkingSession {
 	return validateWorkingSession(copyJson(value, { omitUndefinedProperties: true }));
 }
 
+/** Parsed trees are already private; reject non-finite JSON numbers without cloning them again. */
+function validateParsedWorkingSession(value: unknown): WorkingSession {
+	if (!isJsonValue(value)) throw new TypeError("Value contains a non-finite number and is not strict JSON");
+	return validateWorkingSession(value);
+}
+
 export function parseWorkingSession(text: string): WorkingSession {
-	return copyWorkingSession(JSON.parse(text));
+	return validateParsedWorkingSession(JSON.parse(text));
 }
 
 export function readWorkingSession(path: string): WorkingSession {
-	return copyWorkingSession(readJsonFileSync(path));
+	return validateParsedWorkingSession(readJsonFileSync(path));
 }
 
 /** Read-only admission must precede services, discovery and extension factories. */
@@ -459,9 +465,18 @@ export function resolveWorkingSession(input: WorkingSession | string | undefined
 }
 
 /** Trusted preparation hint, not journal admission or a proof of arbitrary host memory. */
-export function workingSessionResourcesMatch(state: WorkingSession, prepared: WorkingSession | undefined): boolean {
+export function workingSessionResourcesMatch(
+	state: WorkingSession,
+	prepared: Pick<WorkingSession, "cwd" | "launch" | "settings" | "settingsLayers" | "flags"> | undefined,
+): boolean {
 	if (!prepared) return false;
-	const policy = ({ cwd, launch, settings, settingsLayers, flags }: WorkingSession) => ({
+	const policy = ({
+		cwd,
+		launch,
+		settings,
+		settingsLayers,
+		flags,
+	}: Pick<WorkingSession, "cwd" | "launch" | "settings" | "settingsLayers" | "flags">) => ({
 		cwd: resolvePath(cwd),
 		launch,
 		settings,

@@ -15,7 +15,7 @@ import {
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
-import { resolveWorkingSession, type WorkingSession } from "./working-session.ts";
+import { resolveWorkingSession } from "./working-session.ts";
 
 /**
  * Non-fatal issues collected while creating services or sessions.
@@ -81,7 +81,7 @@ export interface AgentSessionServices {
 	settingsManager: SettingsManager;
 	resourceLoader: ResourceLoader;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
-	workingSessionResourcesPrepared?: WorkingSession;
+	workingSessionResourcesPrepared?: CreateAgentSessionOptions["workingSessionResourcesPrepared"];
 }
 
 function applyExtensionFlagValues(
@@ -182,6 +182,7 @@ export async function createAgentSessionServices(
 	);
 	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
 
+	const prepared = reloadOptions?.workingSession;
 	return {
 		cwd,
 		agentDir,
@@ -189,7 +190,15 @@ export async function createAgentSessionServices(
 		settingsManager,
 		resourceLoader,
 		diagnostics,
-		workingSessionResourcesPrepared: reloadOptions?.workingSession,
+		workingSessionResourcesPrepared: prepared
+			? {
+					cwd: prepared.cwd,
+					launch: prepared.launch,
+					settings: prepared.settings,
+					settingsLayers: prepared.settingsLayers,
+					flags: prepared.flags,
+				}
+			: undefined,
 	};
 }
 

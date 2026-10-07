@@ -18,6 +18,7 @@ import { createAgentSession } from "../../src/core/sdk.ts";
 import { type SessionEntry, SessionManager } from "../../src/core/session-manager.ts";
 import {
 	openWorkingSession,
+	parseWorkingSession,
 	readWorkingSession,
 	resolveWorkingSession,
 	writeWorkingSession,
@@ -80,12 +81,13 @@ describe("Native working-session files", () => {
 				Buffer.from(valid.slice(0, -1)),
 				Buffer.from(`${valid} {}`),
 				Buffer.from(valid.replace('"entries":[]', '"entries":[null]')),
-				Buffer.from(valid.replace('"settings":{}', '"settings":{"value":1e999}')),
+				Buffer.from(valid.replace('"settings":{}', '"settings":{"value":{"nested":[1e999]}}')),
 				Buffer.from(valid.replace('"settings":{}', '"settings":{"value":"\\\uFEFF"}')),
 				Buffer.concat([Buffer.from(valid.slice(0, -1)), Buffer.from([0xff]), Buffer.from("}")]),
 			]) {
 				writeFileSync(path, input);
 				expect(() => readWorkingSession(path)).toThrow();
+				expect(() => parseWorkingSession(input.toString("utf8"))).toThrow();
 				expect(readFileSync(path)).toEqual(input);
 			}
 		} finally {

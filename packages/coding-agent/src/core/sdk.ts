@@ -106,7 +106,7 @@ export interface CreateAgentSessionOptions {
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
 	/** Services hosts that already restored settings before discovery may reuse those resources. */
-	workingSessionResourcesPrepared?: WorkingSession;
+	workingSessionResourcesPrepared?: Pick<WorkingSession, "cwd" | "launch" | "settings" | "settingsLayers" | "flags">;
 
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
