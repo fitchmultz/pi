@@ -1,11 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { isDeepStrictEqual } from "node:util";
-import { copyJson } from "@earendil-works/chord";
+import { isDeepStrictEqual, types } from "node:util";
+import { copyJson, isJsonValue } from "@earendil-works/chord";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { jsonChunks, readFileChunksSync, readJsonFileSync } from "../utils/streaming-file.ts";
 import { assertValidSessionId, type SessionEntry, type SessionHeader, SessionManager } from "./session-manager.ts";
 import { getToolListError, isToolModifier, type Settings } from "./settings-manager.ts";
 import type { NormalizedBuildSystemPromptOptions } from "./system-prompt.ts";
@@ -204,11 +205,11 @@ function prompt(value: unknown): boolean {
 		(value.hiddenTools === undefined || strings(value.hiddenTools)) &&
 		strings(value.promptGuidelines) &&
 		record(value.toolSnippets) &&
-		Object.values(value.toolSnippets).every((item) => typeof item === "string") &&
+		Object.values(value.toolSnippets).every((item) => item === undefined || typeof item === "string") &&
 		record(value.sections) &&
-		Object.values(value.sections).every((item) => typeof item === "string") &&
+		Object.values(value.sections).every((item) => item === undefined || typeof item === "string") &&
 		record(value.toolGuidelines) &&
-		Object.values(value.toolGuidelines).every(strings) &&
+		Object.values(value.toolGuidelines).every((item) => item === undefined || strings(item)) &&
 		Array.isArray(value.contextFiles) &&
 		value.contextFiles.every(
 			(file: unknown) => record(file) && typeof file.path === "string" && typeof file.content === "string",
@@ -399,7 +400,7 @@ function validateWorkingSession(value: unknown): WorkingSession {
 		fail();
 	if (
 		value.mode !== undefined &&
-		(!record(value.mode) || typeof value.mode.kind !== "string" || !("data" in value.mode))
+		(!record(value.mode) || typeof value.mode.kind !== "string" || value.mode.data === undefined)
 	)
 		fail();
 	if (value.launch !== undefined) {
@@ -437,12 +438,53 @@ export function copyWorkingSession(value: unknown): WorkingSession {
 	return validateWorkingSession(copyJson(value, { omitUndefinedProperties: true }));
 }
 
+/** Validate the complete snapshot, then detach only the memory retained by AgentSession. */
+export function copyWorkingSessionMemory(value: unknown) {
+	// Proxies need the existing descriptor copy before schema reads.
+	const state = isJsonValue(value, {
+		omitUndefinedProperties: true,
+		validateContainer: (container) => !types.isProxy(container),
+	})
+		? validateWorkingSession(value)
+		: copyWorkingSession(value);
+	const memory = {
+		steering: state.steering,
+		followUp: state.followUp,
+		steeringMode: state.steeringMode,
+		followUpMode: state.followUpMode,
+		steeringText: state.steeringText,
+		followUpText: state.followUpText,
+		nextTurn: state.nextTurn,
+		pendingCustom: state.pendingCustom,
+		pendingBash: state.pendingBash,
+		usesDefaultTools: state.usesDefaultTools,
+		defaultToolModifiers: state.defaultToolModifiers,
+		allowedTools: state.allowedTools,
+		excludedTools: state.excludedTools,
+		activeTools: state.activeTools,
+		pendingTools: state.pendingTools,
+		prompt: state.prompt,
+		runPrompt: state.runPrompt,
+		flags: state.flags,
+		launch: state.launch,
+		mode: state.mode,
+	};
+	return copyJson(memory, { omitUndefinedProperties: true }) as unknown as typeof memory;
+}
+
+/** Parsed trees are already private; reject non-finite JSON numbers without cloning them again. */
+function validateParsedWorkingSession(value: unknown): WorkingSession {
+	if (!isJsonValue(value)) throw new TypeError("Value contains a non-finite number and is not strict JSON");
+	return validateWorkingSession(value);
+}
+
 export function parseWorkingSession(text: string): WorkingSession {
-	return copyWorkingSession(JSON.parse(text));
+	return validateParsedWorkingSession(JSON.parse(text));
 }
 
 export function readWorkingSession(path: string): WorkingSession {
-	return parseWorkingSession(new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path)));
+	// The parser constructs private JSON containers and rejects surviving non-finite numbers.
+	return validateWorkingSession(readJsonFileSync(path));
 }
 
 /** Read-only admission must precede services, discovery and extension factories. */
@@ -458,9 +500,18 @@ export function resolveWorkingSession(input: WorkingSession | string | undefined
 }
 
 /** Trusted preparation hint, not journal admission or a proof of arbitrary host memory. */
-export function workingSessionResourcesMatch(state: WorkingSession, prepared: WorkingSession | undefined): boolean {
+export function workingSessionResourcesMatch(
+	state: WorkingSession,
+	prepared: Pick<WorkingSession, "cwd" | "launch" | "settings" | "settingsLayers" | "flags"> | undefined,
+): boolean {
 	if (!prepared) return false;
-	const policy = ({ cwd, launch, settings, settingsLayers, flags }: WorkingSession) => ({
+	const policy = ({
+		cwd,
+		launch,
+		settings,
+		settingsLayers,
+		flags,
+	}: Pick<WorkingSession, "cwd" | "launch" | "settings" | "settingsLayers" | "flags">) => ({
 		cwd: resolvePath(cwd),
 		launch,
 		settings,
@@ -472,19 +523,100 @@ export function workingSessionResourcesMatch(state: WorkingSession, prepared: Wo
 
 export function writeWorkingSession(path: string, state: WorkingSession): void {
 	assertPrivateFilePath(path);
-	atomicWriteFileSync(path, `${JSON.stringify(copyWorkingSession(state))}\n`);
+	const saved = copyWorkingSession(state);
+	atomicWriteFileSync(path, (fd) => {
+		let pending = "";
+		for (const chunk of jsonChunks(saved)) {
+			pending += chunk;
+			if (pending.length >= 64 * 1024) {
+				writeFileSync(fd, pending);
+				pending = "";
+			}
+		}
+		writeFileSync(fd, `${pending}\n`);
+	});
+}
+
+/** Compare parsed journal JSON in serialization order without re-encoding its strings. */
+function sameJournalJson(actual: unknown, expected: unknown): boolean {
+	const stack: Array<{
+		actual: Record<string, unknown>;
+		expected: Record<string, unknown>;
+		keys: Iterator<string | number>;
+	}> = [];
+	while (true) {
+		// JSON.stringify normalizes overflowing parsed numbers and signed zero.
+		if (typeof actual === "number" && !Number.isFinite(actual)) actual = null;
+		if (actual !== expected) {
+			if (actual === null || expected === null || typeof actual !== "object" || typeof expected !== "object")
+				return false;
+			if (Array.isArray(actual) !== Array.isArray(expected)) return false;
+			let keys: Iterator<string | number>;
+			if (Array.isArray(actual)) {
+				if (actual.length !== (expected as unknown[]).length) return false;
+				keys = actual.keys();
+			} else {
+				const actualKeys = Object.keys(actual);
+				const expectedKeys = Object.keys(expected);
+				if (
+					actualKeys.length !== expectedKeys.length ||
+					actualKeys.some((key, index) => key !== expectedKeys[index])
+				)
+					return false;
+				keys = actualKeys.values();
+			}
+			stack.push({
+				actual: actual as Record<string, unknown>,
+				expected: expected as Record<string, unknown>,
+				keys,
+			});
+		}
+		while (true) {
+			const frame = stack.at(-1);
+			if (!frame) return true;
+			const key = frame.keys.next();
+			if (key.done) {
+				stack.pop();
+				continue;
+			}
+			actual = frame.actual[key.value];
+			expected = frame.expected[key.value];
+			break;
+		}
+	}
 }
 
 function assertWorkingSessionJournal(state: WorkingSession): void {
-	const entries = [state.header, ...state.entries];
 	if (state.sessionFile && existsSync(state.sessionFile)) {
-		const text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(state.sessionFile));
-		const actual: unknown[] = text
-			.split("\n")
-			.filter((line) => line.trim())
-			.map((line) => JSON.parse(line));
-		if (JSON.stringify(actual) !== JSON.stringify(entries))
+		const fail = (): never => {
 			throw new Error("Native working session journal differs from saved state; refusing to overwrite it");
+		};
+		let index = 0;
+		const compare = (line: string) => {
+			if (!line.trim()) return;
+			if (index > state.entries.length) fail();
+			if (!sameJournalJson(JSON.parse(line), index === 0 ? state.header : state.entries[index - 1])) fail();
+			index++;
+		};
+		const decoder = new TextDecoder("utf-8", { fatal: true });
+		const lineChunks: string[] = [];
+		for (const bytes of readFileChunksSync(state.sessionFile)) {
+			const chunk = decoder.decode(bytes, { stream: true });
+			let start = 0;
+			let end = chunk.indexOf("\n", start);
+			while (end !== -1) {
+				lineChunks.push(chunk.slice(start, end));
+				const line = lineChunks.join("");
+				lineChunks.length = 0;
+				compare(line);
+				start = end + 1;
+				end = chunk.indexOf("\n", start);
+			}
+			lineChunks.push(chunk.slice(start));
+		}
+		lineChunks.push(decoder.decode());
+		compare(lineChunks.join(""));
+		if (index !== state.entries.length + 1) fail();
 	}
 }
 

@@ -1,10 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, readFileSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, lstatSync, rmSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import type { AgentSession } from "../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { type WorkingSessionHold, writeWorkingSession } from "../core/working-session.ts";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
+import { hashFileSync } from "../utils/streaming-file.ts";
 import {
 	type CompletedWorkingSession,
 	WORKING_SESSION_LAUNCH_ENV,
@@ -84,7 +85,7 @@ export async function startWorkingSessionControl(
 						throw new Error("Native finalization requires the current CLI launcher");
 					const completed: CompletedWorkingSession = {
 						path: statePath,
-						digest: createHash("sha256").update(readFileSync(statePath)).digest("hex"),
+						digest: hashFileSync(statePath),
 						sessionId: session.sessionId,
 						pid: process.pid,
 						worker,

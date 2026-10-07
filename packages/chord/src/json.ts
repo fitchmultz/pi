@@ -12,6 +12,11 @@ export type CopyJsonOptions = {
 	readonly omitUndefinedProperties?: boolean;
 };
 
+export type CheckJsonOptions = CopyJsonOptions & {
+	/** Additional container validation, applied before inspecting its prototype or properties. */
+	readonly validateContainer?: (value: object) => boolean;
+};
+
 /** Copy a value into an alias-free strict-JSON tree owned by the caller. */
 export function copyJson(value: unknown, options?: CopyJsonOptions): JsonValue {
 	return copy(value, undefined, options?.omitUndefinedProperties === true);
@@ -71,13 +76,22 @@ function defineData(target: object, key: PropertyKey, value: JsonValue): void {
 }
 
 /** Return whether a value is finite strict JSON with plain objects and no cycles. */
-export function isJsonValue(value: unknown): value is JsonValue {
-	return check(value, new Set<object>());
+export function isJsonValue(value: unknown): value is JsonValue;
+export function isJsonValue(value: unknown, options: CheckJsonOptions): boolean;
+export function isJsonValue(value: unknown, options?: CheckJsonOptions): boolean {
+	return check(value, new Set<object>(), options?.omitUndefinedProperties === true, options?.validateContainer);
 }
 
-function check(value: unknown, ancestors: Set<object>): boolean {
+function check(
+	value: unknown,
+	ancestors: Set<object>,
+	omitUndefinedProperties: boolean,
+	validateContainer?: (value: object) => boolean,
+): boolean {
 	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
 	if (typeof value === "number") return Number.isFinite(value);
+	if (typeof value !== "object") return false;
+	if (validateContainer && !validateContainer(value)) return false;
 	if (Array.isArray(value)) {
 		if (Object.getPrototypeOf(value) !== Array.prototype) return false;
 		const keys = Reflect.ownKeys(value);
@@ -91,7 +105,7 @@ function check(value: unknown, ancestors: Set<object>): boolean {
 					descriptor === undefined ||
 					!descriptor.enumerable ||
 					!("value" in descriptor) ||
-					!check(descriptor.value, ancestors)
+					!check(descriptor.value, ancestors, omitUndefinedProperties, validateContainer)
 				) {
 					return false;
 				}
@@ -101,7 +115,6 @@ function check(value: unknown, ancestors: Set<object>): boolean {
 			ancestors.delete(value);
 		}
 	}
-	if (typeof value !== "object" || value === null) return false;
 	const prototype = Object.getPrototypeOf(value);
 	if (prototype !== Object.prototype && prototype !== null) return false;
 	if (Reflect.ownKeys(value).some((key) => typeof key !== "string")) return false;
@@ -109,9 +122,9 @@ function check(value: unknown, ancestors: Set<object>): boolean {
 	ancestors.add(value);
 	try {
 		for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
-			if (!descriptor.enumerable || !("value" in descriptor) || !check(descriptor.value, ancestors)) {
-				return false;
-			}
+			if (!descriptor.enumerable || !("value" in descriptor)) return false;
+			if (descriptor.value === undefined && omitUndefinedProperties) continue;
+			if (!check(descriptor.value, ancestors, omitUndefinedProperties, validateContainer)) return false;
 		}
 		return true;
 	} finally {
