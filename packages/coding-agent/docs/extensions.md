@@ -122,7 +122,7 @@ Handlers are awaited in stream order, so slow handlers delay stream consumption.
 
 Tool calls from one assistant message can run in parallel.
 Do not assume a sibling call or result exists when another tool event runs.
-Use `ctx.signal` for nested work owned by an active turn; commands and idle session events often have no operation signal.
+Use `ctx.signal` for work owned by an active agent activity. It uses the current low-level loop's signal while that loop runs, then the activity's signal during post-run recovery and `agent_before_settle`. Capture it before awaiting work to observe cancellation throughout that boundary. It is undefined when idle, including `agent_settled`.
 
 A `user_bash` handler that returns `undefined` passes the command to the next handler and then to local execution if no handler handles it. Returning `operations` or `result` stops propagation. A handler failure blocks the command rather than falling through to local execution.
 

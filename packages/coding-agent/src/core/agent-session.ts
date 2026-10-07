@@ -409,8 +409,14 @@ export class AgentSession {
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
-	private _isAgentRunActive = false;
-	private _agentRunAbortRequested = false;
+	/** Covers the whole activity, including recovery and pre-settlement hooks after Agent.signal ends. */
+	private _agentRunAbortController: AbortController | undefined;
+	private get _isAgentRunActive(): boolean {
+		return this._agentRunAbortController !== undefined;
+	}
+	private get _agentRunAbortRequested(): boolean {
+		return this._agentRunAbortController?.signal.aborted ?? false;
+	}
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -452,8 +458,6 @@ export class AgentSession {
 	private _lastAssistantMessage: AssistantMessage | undefined;
 	private _lastAssistantToolResults: AgentMessage[] = [];
 	private _lastActivityOutcome: AgentActivityOutcome = "completed";
-	private _isBeforeSettle = false;
-	private _abortDuringBeforeSettle = false;
 	private _isEmittingAgentSettled = false;
 	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
 	private _settledActionCount = 0;
@@ -1349,7 +1353,7 @@ export class AgentSession {
 
 	private async _emitAgentSettled(): Promise<void> {
 		this._cacheWarmer?.onAgentSettled();
-		this._isAgentRunActive = false;
+		this._agentRunAbortController = undefined;
 		this._isEmittingAgentSettled = true;
 		try {
 			await this._extensionRunner.emit({ type: "agent_settled" });
@@ -2131,14 +2135,13 @@ export class AgentSession {
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		this._assertRestoredToolsAvailable();
 		const restoreForeground = this.workingSessionGate.foreground();
-		this._agentRunAbortRequested = false;
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
 		this._failedResponse = undefined;
 		this._recordSelection();
 		// The run records the loadout in the transcript; restored tools that did not register by now
 		// are dropped, so a tool that never registers does not stay pending.
 		this._pendingToolNames.clear();
-		this._isAgentRunActive = true;
+		this._agentRunAbortController = new AbortController();
 		try {
 			await this.agent.prompt(messages);
 			while (!this._agentRunAbortRequested) {
@@ -2204,26 +2207,20 @@ export class AgentSession {
 
 	private async _runBeforeSettleBoundary(): Promise<boolean> {
 		if (!this._extensionRunner.hasHandlers("agent_before_settle")) return this.agent.hasQueuedMessages();
-		this._isBeforeSettle = true;
-		this._abortDuringBeforeSettle = false;
-		try {
-			const result = await this._extensionRunner.emitBoundary(
-				{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
-				(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
-			);
-			this._commitBoundaryDrafts(result.entries);
-			this._flushPendingCustomMessages();
-			const finalContext = this._buildBoundaryContext([], "agent_before_settle");
-			if (this._abortDuringBeforeSettle) return false;
-			const shouldContinue = result.continue || this.agent.hasQueuedMessages();
-			if (shouldContinue && !finalContext.canContinue) {
-				if (result.continue) this._reportInvalidBoundaryContinuation("agent_before_settle");
-				return false;
-			}
-			return shouldContinue;
-		} finally {
-			this._isBeforeSettle = false;
+		const result = await this._extensionRunner.emitBoundary(
+			{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
+			(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
+		);
+		this._commitBoundaryDrafts(result.entries);
+		this._flushPendingCustomMessages();
+		const finalContext = this._buildBoundaryContext([], "agent_before_settle");
+		if (this._agentRunAbortRequested) return false;
+		const shouldContinue = result.continue || this.agent.hasQueuedMessages();
+		if (shouldContinue && !finalContext.canContinue) {
+			if (result.continue) this._reportInvalidBoundaryContinuation("agent_before_settle");
+			return false;
 		}
+		return shouldContinue;
 	}
 
 	private async _runInputHandlers(
@@ -2767,13 +2764,10 @@ export class AgentSession {
 	 */
 	async abort(): Promise<void> {
 		this.workingSessionGate.beforeMutation();
-		if (this._isAgentRunActive) {
-			this._agentRunAbortRequested = true;
-		}
+		this._agentRunAbortController?.abort();
 		this.abortRetry();
 		this.abortCompaction();
 		this.abortBranchSummary();
-		if (this._isBeforeSettle) this._abortDuringBeforeSettle = true;
 		this.agent.abort();
 		await this.waitForIdle();
 	}
@@ -3797,7 +3791,7 @@ export class AgentSession {
 				getScopedModels: () => this._scopedModels,
 				isIdle: () => this.isIdle,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
-				getSignal: () => this.agent.signal,
+				getSignal: () => this.agent.signal ?? this._agentRunAbortController?.signal,
 				abort: () => {
 					if (this._extensionAbortHandler) {
 						this._extensionAbortHandler();

@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import lockfile from "proper-lockfile";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext, ExtensionFactory } from "../../src/core/extensions/types.ts";
@@ -282,47 +283,123 @@ describe("background command extension delivery", () => {
 		await h.session.prompt("Continue");
 		expect(notices(h)).toHaveLength(1);
 	});
-	it("retains completions without waking when cancellation arrives during journal recovery", async () => {
-		const h = await harness();
-		h.setResponses([fauxAssistantMessage("Ready")]);
-		await h.session.prompt("Initialize the saved journal");
-		const padding = Buffer.alloc(1024 * 1024, " ");
-		padding[padding.length - 1] = 10;
-		for (let i = 0; i < 128; i++) appendFileSync(h.sessionManager.getSessionFile()!, padding);
-		const { command, release } = held(h);
-		const root = backgroundCommandDirectory(h.sessionManager);
-		const job = await startBackgroundCommand(root, command, { command, cwd: h.tempDir, env: getShellEnv() });
-		let aborted: Promise<void> | undefined;
-		h.setResponses([
-			() => {
+	it.each(["turn_end", "agent_before_settle"] as const)(
+		"retains completions without waking when cancellation arrives during %s journal recovery",
+		async (boundary) => {
+			const h = await harness();
+			const ctx = h.session.extensionRunner.createContext();
+			expect(ctx.signal).toBeUndefined();
+			h.setResponses([fauxAssistantMessage("Ready")]);
+			await h.session.prompt("Initialize the saved journal");
+			const padding = Buffer.alloc(1024 * 1024, " ");
+			padding[padding.length - 1] = 10;
+			for (let i = 0; i < 128; i++) appendFileSync(h.sessionManager.getSessionFile()!, padding);
+			const { command, release } = held(h);
+			const root = backgroundCommandDirectory(h.sessionManager);
+			const job = await startBackgroundCommand(root, command, { command, cwd: h.tempDir, env: getShellEnv() });
+			let releaseLease: (() => void) | undefined = lockfile.lockSync(root, { realpath: false });
+			let aborted: Promise<void> | undefined;
+			let signalAtAbort: AbortSignal | undefined;
+			let lowLevelSignalAtAbort: AbortSignal | undefined;
+			let boundaryAtAbort: unknown;
+			const cancelDuringRecovery = () => {
 				setImmediate(() => {
+					// The acquired lease and unfinished native boundary prove receipt recovery is in flight.
+					boundaryAtAbort = {
+						leaseHeld: lockfile.checkSync(root, { realpath: false }),
+						active: h.session.isStreaming,
+						lowLevelActive: h.session.agent.signal !== undefined,
+						agentEnds: h.eventsOfType("agent_end").length,
+						turnEnds: h.eventsOfType("turn_end").length,
+						settled: h.eventsOfType("agent_settled").length,
+					};
+					signalAtAbort = ctx.signal;
+					lowLevelSignalAtAbort = h.session.agent.signal;
 					aborted = h.session.abort();
 				});
-				return fauxAssistantMessage("Final response");
-			},
-			fauxAssistantMessage("Unexpected wake"),
-		]);
-		await h.session.prompt("Finish foreground work");
-		expect(aborted).toBeDefined();
-		await aborted;
-		expect(h.sessionManager.getEntries()).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					type: "message",
-					message: expect.objectContaining({
-						role: "assistant",
-						stopReason: "stop",
-						content: expect.arrayContaining([{ type: "text", text: "Final response" }]),
+			};
+			const initialAgentEnds = h.eventsOfType("agent_end").length;
+			const initialTurnEnds = h.eventsOfType("turn_end").length;
+			const initialSettled = h.eventsOfType("agent_settled").length;
+			const unsubscribe = h.session.subscribe((event) => {
+				if (boundary !== "agent_before_settle" || event.type !== "agent_end" || !releaseLease) return;
+				// A prior delivery owner exits only after turn_end; this session takes over before settlement.
+				releaseLease();
+				releaseLease = undefined;
+				cancelDuringRecovery();
+			});
+			h.setResponses([
+				() => {
+					if (boundary === "turn_end") {
+						releaseLease!();
+						releaseLease = undefined;
+						cancelDuringRecovery();
+					}
+					return fauxAssistantMessage("Final response");
+				},
+				fauxAssistantMessage("Unexpected wake"),
+			]);
+			try {
+				await h.session.prompt("Finish foreground work");
+			} finally {
+				releaseLease?.();
+				unsubscribe();
+			}
+			expect(aborted).toBeDefined();
+			await aborted;
+			expect(boundaryAtAbort).toEqual({
+				leaseHeld: true,
+				active: true,
+				lowLevelActive: boundary === "turn_end",
+				agentEnds: initialAgentEnds + (boundary === "agent_before_settle" ? 1 : 0),
+				turnEnds: initialTurnEnds + (boundary === "agent_before_settle" ? 1 : 0),
+				settled: initialSettled,
+			});
+			expect(h.sessionManager.getEntries()).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						type: "message",
+						message: expect.objectContaining({
+							role: "assistant",
+							stopReason: "stop",
+							content: expect.arrayContaining([{ type: "text", text: "Final response" }]),
+						}),
 					}),
-				}),
-				expect.objectContaining({ type: "custom", customType: "background-command-run-state", data: true }),
-			]),
-		);
-		writeFileSync(release, "go");
-		await until(() => backgroundCommandFinished(readBackgroundCommand(root, job.id)));
-		await until(() => notices(h).length === 1 && h.session.isIdle);
-		expect(h.faux.state.callCount).toBe(2);
-	}, 15_000);
+					expect.objectContaining({ type: "custom", customType: "background-command-run-state", data: true }),
+				]),
+			);
+			expect(signalAtAbort?.aborted).toBe(true);
+			if (boundary === "turn_end") expect(signalAtAbort).toBe(lowLevelSignalAtAbort);
+			expect(ctx.signal).toBeUndefined();
+			expect(
+				SessionManager.open(h.sessionManager.getSessionFile()!)
+					.getEntries()
+					.filter((entry) => entry.type === "custom" && entry.customType === "background-command-run-state"),
+			).toContainEqual(expect.objectContaining({ data: true }));
+			writeFileSync(release, "go");
+			await until(() => backgroundCommandFinished(readBackgroundCommand(root, job.id)));
+			await until(() => notices(h).length === 1 && h.session.isIdle);
+			expect(h.faux.state.callCount).toBe(2);
+			h.setResponses([fauxAssistantMessage("Continued")]);
+			await h.session.prompt("Continue");
+			expect(h.sessionManager.getEntries()).toContainEqual(
+				expect.objectContaining({ type: "custom", customType: "background-command-run-state", data: false }),
+			);
+			const next = held(h, "next");
+			const nextJob = await startBackgroundCommand(root, next.command, {
+				command: next.command,
+				cwd: h.tempDir,
+				env: getShellEnv(),
+			});
+			h.setResponses([fauxAssistantMessage("Normal completion wake")]);
+			writeFileSync(next.release, "go");
+			await until(() => backgroundCommandFinished(readBackgroundCommand(root, nextJob.id)));
+			await until(() => notices(h).length === 2 && h.session.isIdle);
+			expect(h.faux.state.callCount).toBe(4);
+			expect(ctx.signal).toBeUndefined();
+		},
+		15_000,
+	);
 	it.skipIf(process.platform === "win32")(
 		"uses effective shell settings, relative cwd, and session metadata",
 		async () => {
