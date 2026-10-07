@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed successful retry backoffs retaining abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)).
+- Fixed Kimi K3 fallback and Kimi Coding implied estimates omitting the default five-minute cache-write price.
 - Fixed Radius gateway catalogs accepting incomplete pricing that produces `NaN` cost estimates ([#10507](https://github.com/earendil-works/pi/issues/10507)).
 - Fixed the abort-test helper returning before checking the aborted result and follow-up; added an offline regression ([#10508](https://github.com/earendil-works/pi/issues/10508)).
 - Fixed Cloudflare AI Gateway Claude models failing with a 404 by using dashed model IDs during generation, provider construction, and remote-catalog loading.

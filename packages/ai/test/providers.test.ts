@@ -261,13 +261,14 @@ describe("builtin providers", () => {
 	});
 
 	it("uses official Kimi K3 pricing for Moonshot providers", () => {
+		// https://platform.kimi.ai/docs/pricing/chat: default five-minute cache-write rate.
 		const models = builtinModels();
 		for (const provider of ["moonshotai", "moonshotai-cn"]) {
 			expect(models.getModel(provider, "kimi-k3")?.cost).toEqual({
 				input: 3,
 				output: 15,
 				cacheRead: 0.3,
-				cacheWrite: 0,
+				cacheWrite: 3,
 			});
 		}
 	});
@@ -275,7 +276,7 @@ describe("builtin providers", () => {
 	it("uses API-equivalent implied pricing for Kimi Coding subscription models", () => {
 		const models = builtinModels();
 		const expectedCosts = {
-			k3: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+			k3: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 },
 			"kimi-for-coding-highspeed": { input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 },
 		};
 

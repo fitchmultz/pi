@@ -32,6 +32,7 @@
 ### Fixed
 
 - Fixed native working-session restore losing `--tools +name/-name` modifiers on reload; malformed saved modifier lists are rejected before factories.
+- Fixed background-command completion recovery failing on session journals larger than Node's string limit; recovery streams entries once per delivery lease and cancels cleanly on shutdown.
 - Fixed native working-session restore losing wildcard tool restrictions, disabled builtin selection such as `--no-mcp`, and pending tools already registered on reconnect; malformed saved hidden-tool lists are rejected before factories.
 - Fixed source builds failing with TypeScript casing errors on macOS checkouts reached through differently cased paths; builds use canonical working directories and resolve workspace declarations through package exports.
 - Fixed standalone Bun binaries failing to resolve extension dependency entrypoints: manifests now supply `main`, `exports` and Bun conditions, including transitive imports. Unexported dependency subpaths are now rejected as under Node; use public entrypoints. Project bunfig preloads remain disabled.
