@@ -51,46 +51,59 @@ export function readJsonFileSync(path: string, hash?: Hash): unknown {
 	return result;
 }
 
+function* jsonStringChunks(value: string): Generator<string> {
+	yield '"';
+	for (let start = 0; start < value.length; ) {
+		let end = Math.min(start + CHUNK_SIZE, value.length);
+		// Do not turn a surrogate pair across the chunk boundary into two escaped code units.
+		if (
+			end < value.length &&
+			value.charCodeAt(end - 1) >= 0xd800 &&
+			value.charCodeAt(end - 1) <= 0xdbff &&
+			value.charCodeAt(end) >= 0xdc00 &&
+			value.charCodeAt(end) <= 0xdfff
+		)
+			end--;
+		yield JSON.stringify(value.slice(start, end)).slice(1, -1);
+		start = end;
+	}
+	yield '"';
+}
+
 /** Serialize an already validated JSON tree with JSON.stringify's ordering and escaping, in bounded chunks. */
 export function* jsonChunks(value: unknown): Generator<string> {
-	if (typeof value === "string") {
-		yield '"';
-		for (let start = 0; start < value.length; ) {
-			let end = Math.min(start + CHUNK_SIZE, value.length);
-			// Do not turn a surrogate pair across the chunk boundary into two escaped code units.
-			if (
-				end < value.length &&
-				value.charCodeAt(end - 1) >= 0xd800 &&
-				value.charCodeAt(end - 1) <= 0xdbff &&
-				value.charCodeAt(end) >= 0xdc00 &&
-				value.charCodeAt(end) <= 0xdfff
-			)
-				end--;
-			yield JSON.stringify(value.slice(start, end)).slice(1, -1);
-			start = end;
+	const stack: Array<{ items: Iterator<[string | number, unknown]>; array: boolean; first: boolean }> = [];
+	let current = value;
+	while (true) {
+		if (typeof current === "string") yield* jsonStringChunks(current);
+		else if (Array.isArray(current)) {
+			yield "[";
+			stack.push({ items: current.entries(), array: true, first: true });
+		} else if (current !== null && typeof current === "object") {
+			yield "{";
+			stack.push({ items: Object.entries(current)[Symbol.iterator](), array: false, first: true });
+		} else {
+			const text = JSON.stringify(current);
+			if (text === undefined) throw new TypeError("Expected a JSON value");
+			yield text;
 		}
-		yield '"';
-	} else if (Array.isArray(value)) {
-		yield "[";
-		for (let index = 0; index < value.length; index++) {
-			if (index) yield ",";
-			yield* jsonChunks(value[index]);
+		while (true) {
+			const frame = stack.at(-1);
+			if (!frame) return;
+			const item = frame.items.next();
+			if (item.done) {
+				yield frame.array ? "]" : "}";
+				stack.pop();
+				continue;
+			}
+			if (!frame.first) yield ",";
+			frame.first = false;
+			if (!frame.array) {
+				yield* jsonStringChunks(String(item.value[0]));
+				yield ":";
+			}
+			current = item.value[1];
+			break;
 		}
-		yield "]";
-	} else if (value !== null && typeof value === "object") {
-		yield "{";
-		let first = true;
-		for (const [key, item] of Object.entries(value)) {
-			if (!first) yield ",";
-			first = false;
-			yield* jsonChunks(key);
-			yield ":";
-			yield* jsonChunks(item);
-		}
-		yield "}";
-	} else {
-		const text = JSON.stringify(value);
-		if (text === undefined) throw new TypeError("Expected a JSON value");
-		yield text;
 	}
 }
