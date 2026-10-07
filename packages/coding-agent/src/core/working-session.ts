@@ -475,8 +475,15 @@ export function writeWorkingSession(path: string, state: WorkingSession): void {
 	assertPrivateFilePath(path);
 	const saved = copyWorkingSession(state);
 	atomicWriteFileSync(path, (fd) => {
-		for (const chunk of jsonChunks(saved)) writeFileSync(fd, chunk);
-		writeFileSync(fd, "\n");
+		let pending = "";
+		for (const chunk of jsonChunks(saved)) {
+			pending += chunk;
+			if (pending.length >= 64 * 1024) {
+				writeFileSync(fd, pending);
+				pending = "";
+			}
+		}
+		writeFileSync(fd, `${pending}\n`);
 	});
 }
 
