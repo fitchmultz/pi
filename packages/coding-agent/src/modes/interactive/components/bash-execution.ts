@@ -28,19 +28,19 @@ export class BashExecutionComponent extends Container {
 	private fullOutputPath?: string;
 	private expanded = false;
 	private compactView: boolean;
-	private excludeFromContext: boolean;
 	private compactPreview?: { width: number; lines: string[] };
 	private contentContainer: Container;
+	/** `dim` marks `!!` commands, whose output is excluded from the model context. */
+	private readonly colorKey: "dim" | "bashMode";
+	private outputPad: number;
 
-	constructor(command: string, ui: TUI, excludeFromContext = false, compactView = false) {
+	constructor(command: string, ui: TUI, excludeFromContext = false, outputPad = 1, compactView = false) {
 		super();
 		this.command = command;
 		this.compactView = compactView;
-		this.excludeFromContext = excludeFromContext;
-
-		// Use dim border for excluded-from-context commands (!! prefix)
-		const colorKey = excludeFromContext ? "dim" : "bashMode";
-		const borderColor = (str: string) => theme.fg(colorKey, str);
+		this.colorKey = excludeFromContext ? "dim" : "bashMode";
+		this.outputPad = outputPad;
+		const borderColor = (str: string) => theme.fg(this.colorKey, str);
 
 		// Add spacer
 		this.addChild(new Spacer(1));
@@ -52,21 +52,17 @@ export class BashExecutionComponent extends Container {
 		this.contentContainer = new Container();
 		this.addChild(this.contentContainer);
 
-		// Command header
-		const header = new Text(theme.fg(colorKey, theme.bold(`$ ${command}`)), 1, 0);
-		this.contentContainer.addChild(header);
-
-		// Loader
 		this.loader = new Loader(
 			ui,
-			(spinner) => theme.fg(colorKey, spinner),
+			(spinner) => theme.fg(this.colorKey, spinner),
 			(text) => theme.fg("muted", text),
 			`Running... (${keyText("tui.select.cancel")} to cancel)`, // Plain text for loader
 		);
-		this.contentContainer.addChild(this.loader);
 
 		// Bottom border
 		this.addChild(new DynamicBorder(borderColor));
+
+		this.updateDisplay();
 	}
 
 	/**
@@ -104,10 +100,7 @@ export class BashExecutionComponent extends Container {
 	override render(width: number): string[] {
 		if (!this.compactView || this.expanded) return super.render(width);
 		if (this.compactPreview?.width === width) return this.compactPreview.lines;
-		const command = theme.fg(
-			this.excludeFromContext ? "dim" : "bashMode",
-			theme.bold(`$ ${this.command.replace(/\s+/g, " ")}`),
-		);
+		const command = theme.fg(this.colorKey, theme.bold(`$ ${this.command.replace(/\s+/g, " ")}`));
 		const status =
 			this.status === "running"
 				? theme.fg("muted", "Running...")
@@ -118,9 +111,16 @@ export class BashExecutionComponent extends Container {
 						: "";
 		const output = this.outputLines.findLast((line) => line.trim()) ?? "";
 		const detail = [status, output ? theme.fg("muted", output) : ""].filter(Boolean).join(" ");
-		const lines = (detail ? [command, detail] : [command]).map((line) => truncateToWidth(line, width));
+		const lines = (detail ? [command, detail] : [command]).flatMap((line) =>
+			new Text(truncateToWidth(line, Math.max(1, width - this.outputPad * 2)), this.outputPad, 0).render(width),
+		);
 		this.compactPreview = { width, lines };
 		return lines;
+	}
+
+	setOutputPad(outputPad: number): void {
+		this.outputPad = outputPad;
+		this.updateDisplay();
 	}
 
 	override invalidate(): void {
@@ -187,7 +187,7 @@ export class BashExecutionComponent extends Container {
 		this.contentContainer.clear();
 
 		// Command header
-		const header = new Text(theme.fg("bashMode", theme.bold(`$ ${this.command}`)), 1, 0);
+		const header = new Text(theme.fg(this.colorKey, theme.bold(`$ ${this.command}`)), this.outputPad, 0);
 		this.contentContainer.addChild(header);
 
 		// Output
@@ -195,7 +195,7 @@ export class BashExecutionComponent extends Container {
 			if (this.expanded) {
 				// Show all lines
 				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
-				this.contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
+				this.contentContainer.addChild(new Text(`\n${displayText}`, this.outputPad, 0));
 			} else {
 				// Use shared visual truncation utility with width-aware caching
 				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
@@ -205,7 +205,7 @@ export class BashExecutionComponent extends Container {
 				this.contentContainer.addChild({
 					render: (width: number) => {
 						if (cachedLines === undefined || cachedWidth !== width) {
-							const result = truncateToVisualLines(styledInput, PREVIEW_LINES, width, 1);
+							const result = truncateToVisualLines(styledInput, PREVIEW_LINES, width, this.outputPad);
 							cachedLines = result.visualLines;
 							cachedWidth = width;
 						}
@@ -251,7 +251,7 @@ export class BashExecutionComponent extends Container {
 			}
 
 			if (statusParts.length > 0) {
-				this.contentContainer.addChild(new Text(`\n${statusParts.join("\n")}`, 1, 0));
+				this.contentContainer.addChild(new Text(`\n${statusParts.join("\n")}`, this.outputPad, 0));
 			}
 		}
 	}

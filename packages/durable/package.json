@@ -54,6 +54,12 @@
 			"import": "./dist/storage/sqlite/index.js",
 			"default": "./dist/storage/sqlite/index.js"
 		},
+		"./storage/sqlite/cloudflare": {
+			"source": "./src/storage/sqlite/cloudflare.ts",
+			"types": "./dist/storage/sqlite/cloudflare.d.ts",
+			"import": "./dist/storage/sqlite/cloudflare.js",
+			"default": "./dist/storage/sqlite/cloudflare.js"
+		},
 		"./storage/sqlite/node": {
 			"source": "./src/storage/sqlite/node.ts",
 			"types": "./dist/storage/sqlite/node.d.ts",

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Box.setPaddingX(...)` and `Text.setPaddingX(...)` ([#10557](https://github.com/earendil-works/pi/pull/10557) by [@rwachtler](https://github.com/rwachtler))
+
+### Fixed
+
+- Fixed Markdown links not being clickable in Herdr: `TERM_PROGRAM=herdr` is now detected as supporting OSC 8 hyperlinks ([#10573](https://github.com/earendil-works/pi/issues/10573))
+
 ## [1.0.4] - 2026-10-05
 
 ## [1.0.3] - 2026-10-05
