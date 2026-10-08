@@ -6,6 +6,7 @@ type RebindContext = {
 	updatePendingMessagesDisplay: () => void;
 	unsubscribe?: () => void;
 	applyRuntimeSettings: () => void;
+	programStatus: { reset(): void };
 	renderCurrentSessionState: () => void;
 	bindCurrentSessionExtensions: () => Promise<void>;
 	subscribeToAgent: () => void;
@@ -42,6 +43,7 @@ describe("overlapping startup and replacement session rebinds", () => {
 			session: startupSession,
 			updatePendingMessagesDisplay: () => {},
 			applyRuntimeSettings: () => {},
+			programStatus: { reset: () => {} },
 			renderCurrentSessionState: () => {},
 			bindCurrentSessionExtensions: () => {
 				bindCount += 1;

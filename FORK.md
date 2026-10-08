@@ -1,7 +1,7 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream v1.0.4 plus main `f10993bc7` (2026-10-07). It is upstream plus the features
+v1.0.0 and synchronized through upstream v1.1.0 `abe508e1b` (2026-10-07). It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -66,7 +66,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Empty quoted arguments must not shift template positions | `core/prompt-templates.ts` | `prompt-templates.test.ts` |
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
 | Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
-| Extension cancellation must remain observable through post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
+| Extension cancellation must remain observable through post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
@@ -88,6 +88,11 @@ failure while keeping the fork's cancellation, state validation and cleanup safe
 Claude-ID generation already produces canonical IDs upstream. The shared helper also canonicalizes
 provider inputs and remote overlays before passthrough/merge; current bundled defaults are not
 claimed to be broken.
+
+Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3 keeps
+the published $3/M five-minute cache-write rate, including Kimi Coding's implied
+estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)); Sonnet 5.5's fallback
+keeps the current $0.10/M cache-read rate.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`
 owner, not the user-only run hook. Forced text stays run-scoped and unpersisted. Child

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-07
+
 ### Added
 
 - Added a `signal` option to `authorizeMcp()`, `registerClient()`, the token request functions, and the discovery functions, which aborts their requests. An aborted refresh no longer falls back to a new authorization ([#10565](https://github.com/earendil-works/pi/issues/10565))
