@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-07
+
 ### Added
 
 - Added `console: true` to text output items produced by `console.*`, so hosts can tell them apart from `text()` output

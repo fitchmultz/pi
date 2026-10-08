@@ -43,6 +43,7 @@ type RebindContext = {
 	updatePendingMessagesDisplay: () => void;
 	unsubscribe?: () => void;
 	applyRuntimeSettings: () => void;
+	programStatus: { reset(): void };
 	renderCurrentSessionState: () => void;
 	bindCurrentSessionExtensions: () => Promise<void>;
 	subscribeToAgent: () => void;
@@ -256,6 +257,7 @@ describe("regression #5943: session_start transient UI", () => {
 				session: harness.session,
 				updatePendingMessagesDisplay: () => {},
 				applyRuntimeSettings: () => events.push("apply"),
+				programStatus: { reset: () => {} },
 				renderCurrentSessionState: () => events.push("render"),
 				bindCurrentSessionExtensions: async () => {
 					events.push("bind");
@@ -299,6 +301,7 @@ describe("regression #5943: session_start transient UI", () => {
 				session: harness.session,
 				updatePendingMessagesDisplay: () => {},
 				applyRuntimeSettings: () => {},
+				programStatus: { reset: () => {} },
 				renderCurrentSessionState: () => events.push("render"),
 				bindCurrentSessionExtensions: async () => {
 					events.push("bind");
@@ -353,6 +356,7 @@ describe("regression #5943: session_start transient UI", () => {
 				session: harness.session,
 				updatePendingMessagesDisplay: () => {},
 				applyRuntimeSettings: () => {},
+				programStatus: { reset: () => {} },
 				renderCurrentSessionState: () => events.push("render"),
 				bindCurrentSessionExtensions: async () => {
 					events.push("bind");

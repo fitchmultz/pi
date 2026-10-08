@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-07
+
 ### Added
 
 - Added `durationMs` to tool result messages, `AgentToolCallOutcome`, and `tool_execution_end` events: how long `execute()` took, measured with a monotonic clock and excluding hooks. Calls that did not run have none ([#10549](https://github.com/earendil-works/pi/issues/10549))
