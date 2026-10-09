@@ -15,6 +15,7 @@ function writePackage(directory, manifest, files) {
 	}
 }
 
+// #10633: Exercise both npm pack JSON formats independently of the npm version on PATH.
 test("artifact packing uses resolved Node/npm, isolated environment and array or keyed-object npm JSON", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "pi-artifact-packing-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));

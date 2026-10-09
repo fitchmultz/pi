@@ -141,6 +141,16 @@ describe("matchesKey", () => {
 			setKittyProtocolActive(false);
 		});
 
+		it("should match shifted symbols by their produced character", () => {
+			setKittyProtocolActive(true);
+			assert.strictEqual(matchesKey("\x1b[61:43;2u", "+"), true);
+			assert.strictEqual(matchesKey("\x1b[61:43;2u", "shift+="), true);
+			assert.strictEqual(parseKey("\x1b[61:43;2u"), "+");
+			assert.strictEqual(matchesKey("\x1b[61:43;6u", "ctrl++"), true);
+			assert.strictEqual(parseKey("\x1b[61:43;6u"), "ctrl++");
+			setKittyProtocolActive(false);
+		});
+
 		it("should handle shifted key in format", () => {
 			setKittyProtocolActive(true);
 			// Format with shifted key: CSI codepoint:shifted:base;modifier u
@@ -272,6 +282,8 @@ describe("matchesKey", () => {
 			setKittyProtocolActive(false);
 			assert.strictEqual(matchesKey("\x1b[27;5;47~", "ctrl+/"), true);
 			assert.strictEqual(parseKey("\x1b[27;5;47~"), "ctrl+/");
+			assert.strictEqual(matchesKey("\x1b[27;6;43~", "ctrl++"), true);
+			assert.strictEqual(parseKey("\x1b[27;6;43~"), "ctrl++");
 		});
 
 		it("should match xterm modifyOtherKeys digit combos", () => {
@@ -607,6 +619,8 @@ describe("parseKey", () => {
 			assert.strictEqual(parseKey(" "), "space");
 			assert.strictEqual(parseKey("1"), "1");
 			assert.strictEqual(matchesKey("1", "1"), true);
+			assert.strictEqual(parseKey("+"), "+");
+			assert.strictEqual(matchesKey("+", "+"), true);
 		});
 
 		it("should parse arrow keys", () => {

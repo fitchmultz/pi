@@ -1,7 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream v1.1.0 `abe508e1b` (2026-10-07). It is upstream plus the features
+v1.0.0 and synchronized through upstream `f1b2e77f5b13b2a199b1052cb79c235451afe7d7`
+(2026-10-09), an unreleased snapshot after v1.1.0 `abe508e1b`. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -30,8 +31,10 @@ all-platform qualification.
 ### Retained correctness deltas
 
 These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
-Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in this sync); the fork keeps `private-spill.test.ts` as a regression guard.
+Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in the v1.1.0 sync); the fork keeps `private-spill.test.ts` as a regression guard.
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
+Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
+Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
 [Codemode](packages/codemode/CHANGELOG.md#unreleased) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
 
@@ -59,7 +62,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Equivalent known-hosts path spellings must serialize accept/forget rewrites ([#10517](https://github.com/earendil-works/pi/issues/10517)) | `packages/env/src/ssh.ts`, `packages/env/test/ssh.test.ts` | `packages/env/test/ssh.test.ts` |
 | Replayed signatures count toward context estimates | `packages/ai/src/utils/estimate.ts` | `packages/ai/test/context-estimate.test.ts` |
 | Dialog input needs xterm printable decoding, grapheme-safe replacement and correct mouse columns | `packages/tui/src/components/input.ts` | `packages/tui/test/{input,mouse-components}.test.ts` |
-| Plus-sign key IDs must parse, and hyperlink control payloads must stay byte-identical | `packages/tui/src/{keys,utils}.ts` | `packages/tui/test/{keys,truncate-to-width}.test.ts` |
+| Hyperlink control payloads must stay byte-identical | `packages/tui/src/utils.ts` | `packages/tui/test/truncate-to-width.test.ts` |
 | Terminal cell-size replies must reach native housekeeping before extension input listeners | `packages/tui/src/tui.ts` | `packages/tui/test/tui-cell-size-input.test.ts` |
 | Image coordinate notes need independent unrounded axis ratios | `utils/image-resize.ts` | `image-dimension-note.test.ts` |
 | Branch budgets must exclude system declarations not serialized as conversation | `core/compaction/branch-summarization.ts` | `branch-summarization.test.ts` |
@@ -72,12 +75,21 @@ The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the is
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
 `background_command`, and no upstream publishing, binary or issue-analysis workflows. Nix builds
 follow upstream; its automatic catalog-pin commits and stable-branch promotion are upstream-only.
+Contributor approvals remain fork-local; upstream approval-list additions and maintainer-specific
+label assignment/reopening rules are not imported.
 The fork uses upstream's install lock, not the removed npm shrinkwrap, and keeps its immutable
 installer. It uses upstream's pre-commit hook and `npm run check`. Delivery evidence comes from
 `./test.sh`, installer/consumer tests, bundle smoke, and Linux/macOS CI; it does not establish live
 Windows, Termux-device or hosted Axiom acceptance.
 
-Package production uses upstream's `scripts/package-artifacts.mjs` and local consumer helpers.
+Configuration schemas, shared settings defaults, strict theme validation, and native fake-cursor
+markers follow upstream. `SettingsSchema` also describes the fork's `compactView` boolean or
+`"hybrid"` preference; settings keep upstream's allowance for extension-owned keys. Hardware
+cursor mode draws only the focused terminal cursor, while unfocused fake cursors remain visible.
+The published schemas are under `packages/coding-agent/schemas/`.
+
+Package production uses upstream's `scripts/package-artifacts.mjs` and local consumer helpers,
+including npm 12's expected-package-keyed pack metadata.
 The narrow `scripts/coding-agent-consumer.mjs` packing export remains for pinned fleet automation
 until that external caller migrates to the artifact API.
 
@@ -91,8 +103,8 @@ claimed to be broken.
 
 Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3 keeps
 the published $3/M five-minute cache-write rate, including Kimi Coding's implied
-estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)); Sonnet 5.5's fallback
-keeps the current $0.10/M cache-read rate.
+estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)). Claude 5.5 pricing now follows
+models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`
 owner, not the user-only run hook. Forced text stays run-scoped and unpersisted. Child

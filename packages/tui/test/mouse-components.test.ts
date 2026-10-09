@@ -112,7 +112,7 @@ describe("mouse-aware components", () => {
 				const input = new Input();
 				const value = "你好吗世界再见";
 				input.handleInput(value);
-				assert.deepStrictEqual(input.render(width), [`> ${visible}\x1b[7m \x1b[27m${padding}`]);
+				assert.deepStrictEqual(input.render(width).map(stripTerminalSequences), [`> ${visible} ${padding}`]);
 				input.handleMouse(mouse("press", atEnd ? endX : 2, 0, width, 1));
 				input.handleInput("X");
 				assert.strictEqual(input.getValue(), atEnd ? `${value}X` : `${hidden}X${visible}`);
