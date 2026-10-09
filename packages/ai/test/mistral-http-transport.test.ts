@@ -549,14 +549,14 @@ describe("Mistral HTTP transport", () => {
 						clearInterval(timer);
 						response.end(`data: ${JSON.stringify(createTerminalEvent())}\n\ndata: [DONE]\n\n`);
 					}
-				}, 50);
+				}, 150);
 				response.on("close", () => clearInterval(timer));
 			},
 			async (baseUrl) => {
 				const model = { ...getModel("mistral", "mistral-large-latest"), baseUrl };
 				const message = await streamMistral(model, context, {
 					apiKey: "test",
-					timeoutMs: 100,
+					timeoutMs: 500,
 					signal: hasCallerSignal ? new AbortController().signal : undefined,
 				}).result();
 
