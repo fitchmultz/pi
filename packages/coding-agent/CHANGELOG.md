@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- Fixed repeated context-usage reads rescanning archived session history; reuse preserves native compaction, edit, branch, model-limit and reload/restore behavior.
 - Fixed native working-session restore losing `--tools +name/-name` modifiers on reload; malformed saved modifier lists are rejected before factories.
 - Fixed background-command completion recovery failing on session journals larger than Node's string limit; recovery streams entries once per delivery lease and cancels cleanly on shutdown.
 - Fixed native working-session restore losing wildcard tool restrictions, disabled builtin selection such as `--no-mcp`, and pending tools already registered on reconnect; malformed saved hidden-tool lists are rejected before factories.
