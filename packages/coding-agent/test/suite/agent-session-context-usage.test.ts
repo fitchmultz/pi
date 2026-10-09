@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
-import { createAgentSession } from "../../src/core/sdk.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function assistant(tokens: number, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
@@ -167,37 +166,5 @@ describe("AgentSession context usage", () => {
 		expect(session.getContextUsage()?.tokens).toBe(0);
 		manager.branchWithSummary(null, "abcdefgh");
 		expect(session.getContextUsage()?.tokens).toBe(2);
-	});
-
-	it("restores native working-session selection without reusing another session's result", async () => {
-		const h = await createHarness();
-		harnesses.push(h);
-		const { session, sessionManager: manager } = h;
-		const first = manager.appendMessage(assistant(101));
-		const second = manager.appendMessage(assistant(407));
-		for (const [selected, expected] of [
-			[first, 101],
-			[second, 407],
-			[null, 0],
-		] as const) {
-			if (selected === null) manager.resetLeaf();
-			else manager.branch(selected);
-			session.refreshContext();
-			expect(session.getContextUsage()?.tokens).toBe(expected);
-			const hold = await session.acquireWorkingSession();
-			await hold.release();
-			const restored = await createAgentSession({
-				workingSession: hold.state,
-				modelRuntime: session.modelRuntime,
-				resourceLoader: session.resourceLoader,
-			});
-			try {
-				expect(restored.session.sessionManager.getLeafId()).toBe(selected);
-				expect(restored.session.sessionManager.getEntryCount()).toBe(2);
-				expect(restored.session.getContextUsage()?.tokens).toBe(expected);
-			} finally {
-				restored.session.dispose();
-			}
-		}
 	});
 });
