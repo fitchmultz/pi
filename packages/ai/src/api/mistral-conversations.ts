@@ -13,7 +13,6 @@ import type {
 	ToolCall,
 	TranscriptContext,
 } from "../types.ts";
-import { combineAbortSignals } from "../utils/abort-signals.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
@@ -308,23 +307,30 @@ async function requestMistralStream(
 	// The timeout covers only the wait for response headers. Long streams (e.g. extended thinking)
 	// must not be cut off by a fixed deadline; body stalls are left to the HTTP client idle timeout.
 	const timeoutMs = options?.timeoutMs ?? 60_000;
-	const headerTimeoutSignal = AbortSignal.timeout(timeoutMs);
-	const combinedSignal = combineAbortSignals([options?.signal, headerTimeoutSignal]);
+	if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 0xffffffff) {
+		throw new RangeError("Mistral timeoutMs must be an integer between 0 and 4294967295");
+	}
+	const headerTimeoutController = new AbortController();
+	const signal = options?.signal
+		? AbortSignal.any([options.signal, headerTimeoutController.signal])
+		: headerTimeoutController.signal;
+	const headerTimeout = setTimeout(() => headerTimeoutController.abort(), timeoutMs);
+	headerTimeout.unref?.();
 	let response: Response;
 	try {
 		response = await (options?.fetch ?? globalThis.fetch)(url, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(toMistralWirePayload(payload)),
-			signal: combinedSignal.signal,
+			signal,
 		});
 	} catch (error) {
-		if (headerTimeoutSignal.aborted && !options?.signal?.aborted) {
+		if (headerTimeoutController.signal.aborted && !options?.signal?.aborted) {
 			throw new Error(`Mistral response headers timed out after ${timeoutMs}ms`);
 		}
 		throw error;
 	} finally {
-		combinedSignal.cleanup();
+		clearTimeout(headerTimeout);
 	}
 
 	await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);

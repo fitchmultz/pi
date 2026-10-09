@@ -1,3 +1,4 @@
+import { createServer, type RequestListener } from "node:http";
 import { arch, platform, release } from "node:os";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
@@ -34,6 +35,29 @@ function createTerminalEvent(finishReason = "stop") {
 		choices: [{ index: 0, finish_reason: finishReason, delta: {} }],
 		usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
 	};
+}
+
+async function withHttpServer(handler: RequestListener, run: (baseUrl: string) => Promise<void>): Promise<void> {
+	const server = createServer(handler);
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	let deadline: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("Expected a TCP server address");
+		await Promise.race([
+			run(`http://127.0.0.1:${address.port}`),
+			new Promise<never>((_resolve, reject) => {
+				deadline = setTimeout(() => reject(new Error("Mistral transport did not settle within 2s")), 2000);
+			}),
+		]);
+	} finally {
+		clearTimeout(deadline);
+		server.closeAllConnections();
+		await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+	}
 }
 
 describe("Mistral HTTP transport", () => {
@@ -444,30 +468,45 @@ describe("Mistral HTTP transport", () => {
 		expect(requestHeaders?.get("user-agent")).toBe("custom-agent");
 	});
 
-	it("aborts while waiting for an SSE chunk", async () => {
-		const model = getModel("mistral", "mistral-large-latest");
-		const context = normalizeContext({
-			messages: [{ role: "user", content: "hello", timestamp: 1 }],
-		});
-		const controller = new AbortController();
-		const fetch: FetchFunction = async () =>
-			new Response(
-				new ReadableStream({
-					start() {},
-				}),
-				{ headers: { "content-type": "text/event-stream" } },
+	it.each(["headers", "stalled SSE", "active SSE", "HTTP error body"])(
+		"honors caller abort during %s",
+		async (phase) => {
+			const context = normalizeContext({
+				messages: [{ role: "user", content: "hello", timestamp: 1 }],
+			});
+			const controller = new AbortController();
+			await withHttpServer(
+				(_request, response) => {
+					if (phase === "headers") {
+						controller.abort();
+						return;
+					}
+					response.writeHead(phase === "HTTP error body" ? 403 : 200, { "content-type": "text/event-stream" });
+					response.flushHeaders();
+					if (phase === "active SSE") {
+						response.write('data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n');
+					}
+				},
+				async (baseUrl) => {
+					const model = { ...getModel("mistral", "mistral-large-latest"), baseUrl };
+					const message = await streamMistral(model, context, {
+						apiKey: "test",
+						timeoutMs: 1000,
+						signal: controller.signal,
+						onResponse: () => {
+							if (phase === "stalled SSE" || phase === "HTTP error body") controller.abort();
+						},
+						onProviderStreamEvent: () => {
+							if (phase === "active SSE") controller.abort();
+						},
+					}).result();
+
+					expect(message.stopReason).toBe("aborted");
+					if (phase === "active SSE") expect(message.content).toEqual([{ type: "text", text: "hello" }]);
+				},
 			);
-
-		const result = streamMistral(model, context, {
-			apiKey: "test",
-			fetch,
-			signal: controller.signal,
-		}).result();
-		controller.abort();
-		const message = await result;
-
-		expect(message.stopReason).toBe("aborted");
-	});
+		},
+	);
 
 	it("applies the request timeout while waiting for response headers", async () => {
 		const model = getModel("mistral", "mistral-large-latest");
@@ -490,40 +529,39 @@ describe("Mistral HTTP transport", () => {
 	});
 
 	// Regression test for #10609: an active stream must not be cut off after timeoutMs.
-	it("does not abort an active stream that lasts longer than the request timeout", async () => {
-		const model = getModel("mistral", "mistral-large-latest");
+	it.each([false, true])("streams past the header timeout with caller signal=%s", async (hasCallerSignal) => {
 		const context = normalizeContext({
 			messages: [{ role: "user", content: "hello", timestamp: 1 }],
 		});
-		const encoder = new TextEncoder();
 		const thinkingEvent = {
 			choices: [{ index: 0, delta: { content: [{ type: "thinking", thinking: [{ type: "text", text: "x" }] }] } }],
 		};
-		const fetch: FetchFunction = async () =>
-			new Response(
-				new ReadableStream({
-					async start(controller) {
-						for (let i = 0; i < 5; i++) {
-							controller.enqueue(encoder.encode(`data: ${JSON.stringify(thinkingEvent)}\n\n`));
-							await new Promise((resolve) => setTimeout(resolve, 10));
-						}
-						controller.enqueue(
-							encoder.encode(`data: ${JSON.stringify(createTerminalEvent())}\n\ndata: [DONE]\n\n`),
-						);
-						controller.close();
-					},
-				}),
-				{ headers: { "content-type": "text/event-stream" } },
-			);
+		await withHttpServer(
+			(_request, response) => {
+				response.writeHead(200, { "content-type": "text/event-stream" });
+				response.write(`data: ${JSON.stringify(thinkingEvent)}\n\n`);
+				let chunks = 1;
+				const timer = setInterval(() => {
+					if (chunks++ < 5) response.write(`data: ${JSON.stringify(thinkingEvent)}\n\n`);
+					else {
+						clearInterval(timer);
+						response.end(`data: ${JSON.stringify(createTerminalEvent())}\n\ndata: [DONE]\n\n`);
+					}
+				}, 50);
+				response.on("close", () => clearInterval(timer));
+			},
+			async (baseUrl) => {
+				const model = { ...getModel("mistral", "mistral-large-latest"), baseUrl };
+				const message = await streamMistral(model, context, {
+					apiKey: "test",
+					timeoutMs: 100,
+					signal: hasCallerSignal ? new AbortController().signal : undefined,
+				}).result();
 
-		const message = await streamMistral(model, context, {
-			apiKey: "test",
-			fetch,
-			timeoutMs: 20,
-		}).result();
-
-		expect(message.stopReason).toBe("stop");
-		expect(message.content).toEqual([{ type: "thinking", thinking: "xxxxx" }]);
+				expect(message.stopReason).toBe("stop");
+				expect(message.content).toEqual([{ type: "thinking", thinking: "xxxxx" }]);
+			},
+		);
 	});
 
 	it("preserves HTTP status and response bodies in errors", async () => {
