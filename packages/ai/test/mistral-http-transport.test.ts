@@ -483,7 +483,9 @@ describe("Mistral HTTP transport", () => {
 					}
 					response.writeHead(phase === "HTTP error body" ? 403 : 200, { "content-type": "text/event-stream" });
 					response.flushHeaders();
-					if (phase === "active SSE") {
+					if (phase === "HTTP error body") {
+						response.write('{"message":"blocked');
+					} else if (phase === "active SSE") {
 						response.write('data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n');
 					}
 				},
