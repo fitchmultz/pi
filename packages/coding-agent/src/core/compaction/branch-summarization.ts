@@ -16,7 +16,7 @@ import {
 	createCustomMessage,
 } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
-import { completeSummarization, estimateTokens, getSummarizationFailure } from "./compaction.ts";
+import { completeSummarization, getSummarizationFailure } from "./compaction.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -224,7 +224,8 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		// Extract file ops from assistant messages (tool calls)
 		extractFileOpsFromMessage(message, fileOps);
 
-		const tokens = estimateTokens(message);
+		// Budget the text sent to the summarizer, not replay-only signatures or images.
+		const tokens = Math.ceil(serializeConversation(convertToLlm([message])).length / 4);
 
 		// Check budget before adding
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {

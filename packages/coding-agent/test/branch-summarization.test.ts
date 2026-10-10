@@ -1,12 +1,14 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
+	contentText,
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { generateBugReportSummary } from "../src/core/bug-report.ts";
 import { generateBranchSummary, prepareBranchEntries } from "../src/core/compaction/index.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 
@@ -23,7 +25,7 @@ const model: Model<"anthropic-messages"> = {
 	maxTokens: 8192,
 };
 
-const entries: SessionEntry[] = [
+const entries = [
 	{
 		type: "message",
 		id: "branch-user",
@@ -31,7 +33,7 @@ const entries: SessionEntry[] = [
 		timestamp: new Date(1).toISOString(),
 		message: { role: "user", content: "Abandoned request", timestamp: 1 },
 	},
-];
+] satisfies SessionEntry[];
 
 function response(content: AssistantMessage["content"]): AssistantMessage {
 	return {
@@ -44,6 +46,42 @@ function response(content: AssistantMessage["content"]): AssistantMessage {
 }
 
 describe("branch summarization", () => {
+	// Upstream #9409: signatures count in replay context, but are not sent to text summarizers.
+	it.each(["branch", "bug-report"] as const)("keeps history with large signatures in %s summaries", async (kind) => {
+		const signed = response([
+			{ type: "thinking", thinking: "reasoning", thinkingSignature: "s".repeat(1_000_000) },
+			{ type: "text", text: "answer" },
+		]);
+		const history: SessionEntry[] = [
+			...entries,
+			{
+				type: "message",
+				id: "signed",
+				parentId: "branch-user",
+				timestamp: new Date(2).toISOString(),
+				message: signed,
+			},
+		];
+		let prompt = "";
+		const streamFn: StreamFn = (_model, context) => {
+			prompt = context.messages
+				.filter((message) => message.role === "user")
+				.map((message) => contentText(message.content))
+				.join("\n");
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() =>
+				stream.push({ type: "done", reason: "stop", message: response([{ type: "text", text: "summary" }]) }),
+			);
+			return stream;
+		};
+		const options = { model, signal: new AbortController().signal, streamFn };
+		if (kind === "branch") await generateBranchSummary(history, options);
+		else await generateBugReportSummary({ ...options, messages: [entries[0].message, signed] });
+		expect(prompt).toContain("Abandoned request");
+		expect(prompt).toContain("reasoning");
+		expect(prompt).not.toContain("s".repeat(100));
+	});
+
 	it("budgets conversation without system declarations", () => {
 		const system: SessionEntry = {
 			type: "message",
