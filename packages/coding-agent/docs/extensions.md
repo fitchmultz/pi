@@ -116,6 +116,8 @@ Handlers are awaited in stream order, so slow handlers delay stream consumption.
 
 `turn_end` and `agent_before_settle` are actionable boundaries. Their handlers can chain proposed `custom`, `custom_message`, `context_edit`, or `compaction` entries and return `continue: true` for one next model request. Guard continuation conditions because an unconditional continuation can loop. Use the exported event declarations for the complete validation and ordering contract.
 
+Boundary `event.context` is readonly. Empty-proposal previews are computed from the live session on first read and cached for that handler; read context during the handler rather than retaining an unread event.
+
 <a id="cache_warming_decision"></a>
 
 `cache_warming_decision` can override an idle prompt-cache refresh with `{ action: "warm" }` or `{ action: "stop" }`. The last handler that returns an action wins.

@@ -913,6 +913,48 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("boundary chaining", () => {
+		it("materializes empty previews only on read, once per handler or result", async () => {
+			const runtime = createExtensionRuntime();
+			let readContext = false;
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("agent_before_settle", (event) => {
+						if (!readContext) return;
+						expect(event.context.canContinue).toBe(false);
+						expect(event.context.pendingMessages).toEqual([]);
+					});
+					pi.on("agent_before_settle", (event) => ({ entries: event.entries }));
+					pi.on("agent_before_settle", () => ({ continue: true }));
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const buildContext = vi.fn(() => ({
+				contextEntries: [],
+				contextMessages: [],
+				llmMessages: [],
+				pendingMessages: [],
+				canContinue: false,
+			}));
+
+			const result = await runner.emitBoundary({ type: "agent_before_settle", outcome: "completed" }, buildContext);
+
+			expect(buildContext).not.toHaveBeenCalled();
+			expect(result.entries).toEqual([]);
+			expect(result.continue).toBe(true);
+			expect(result.valid).toBe(true);
+			expect(result.context.canContinue).toBe(false);
+			expect(result.context.pendingMessages).toEqual([]);
+			expect(buildContext).toHaveBeenCalledTimes(1);
+
+			readContext = true;
+			buildContext.mockClear();
+			await runner.emitBoundary({ type: "agent_before_settle", outcome: "completed" }, buildContext);
+			expect(buildContext).toHaveBeenCalledTimes(1);
+		});
+
 		it("chains shared draft proposals and preserves omitted result fields", async () => {
 			const runtime = createExtensionRuntime();
 			const eventBus = createEventBus();
@@ -977,7 +1019,7 @@ describe("ExtensionRunner", () => {
 			expect(result.continue).toBe(true);
 		});
 
-		it("reports invalid boundary previews and lets later handlers repair the proposal", async () => {
+		it.each([true, false])("reports invalid boundary previews (repaired: %s)", async (repair) => {
 			const runtime = createExtensionRuntime();
 			let secondRan = false;
 			const first = await loadExtensionFromFactory(
@@ -996,7 +1038,7 @@ describe("ExtensionRunner", () => {
 					pi.on("agent_before_settle", (event) => {
 						secondRan = true;
 						expect(event.entries).toHaveLength(1);
-						return { entries: [] };
+						return repair ? { entries: [] } : undefined;
 					});
 				},
 				tempDir,
@@ -1022,7 +1064,11 @@ describe("ExtensionRunner", () => {
 			expect(secondRan).toBe(true);
 			expect(errors).toContain("Invalid boundary entries: Entry missing not found");
 			expect(result.entries).toEqual([]);
-			expect(result.valid).toBe(true);
+			expect(result.valid).toBe(repair);
+			if (!repair) {
+				expect(result.continue).toBe(false);
+				expect(result.context.canContinue).toBe(false);
+			}
 		});
 
 		it("keeps shared mutations made before a handler throws", async () => {
