@@ -4,6 +4,8 @@
 
 ### Breaking Changes
 
+- The undocumented `ExtensionRunner.emitBoundary()` preview-builder callback must return synchronously; boundary events still expose a synchronous `context` preview.
+- Boundary `event.context` is now readonly. Empty-proposal previews are computed from the live session on first read; read them during the handler rather than retaining an unread event.
 - Complete native working-session capture and restore require a persistence-capable `ResourceLoader`; `getWorkingSessionResources()` is optional for ordinary SDK sessions. Directly constructed sessions must supply an explicit launch owner. Snapshot values must be plain finite JSON; lossy values are rejected.
 - Moved the published theme JSON Schema to `schemas/theme.schema.json` and made theme loading reject unknown top-level properties and unknown properties under `colors` or `export`. Update existing theme `$schema` references to the new path, define reusable custom colors under `vars`, and remove unsupported metadata.
 
@@ -28,6 +30,7 @@
 ### Fixed
 
 - Fixed repeated context-usage reads rescanning archived session history; reuse preserves native compaction, edit, branch, model-limit and reload/restore behavior.
+- Fixed no-op `turn_end` and `agent_before_settle` handlers copying archived session history for unread context previews; changed and mutable nonempty drafts retain eager validation.
 - Fixed native working-session restore losing `--tools +name/-name` modifiers on reload; malformed saved modifier lists are rejected before factories.
 - Fixed background-command completion recovery failing on session journals larger than Node's string limit; recovery streams entries once per delivery lease and cancels cleanly on shutdown.
 - Fixed native working-session restore losing wildcard tool restrictions, disabled builtin selection such as `--no-mcp`, and pending tools already registered on reconnect; malformed saved hidden-tool lists are rejected before factories.

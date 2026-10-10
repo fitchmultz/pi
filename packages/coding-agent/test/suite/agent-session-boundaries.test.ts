@@ -2,6 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -17,6 +18,35 @@ describe("AgentSession actionable boundaries", () => {
 
 	afterEach(() => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	});
+
+	it("settles no-op boundary handlers without copying history into preview managers", async () => {
+		const boundaries: string[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", (event) => {
+						boundaries.push(event.type);
+						return { entries: event.entries };
+					});
+					pi.on("agent_before_settle", (event) => {
+						boundaries.push(event.type);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		const previewManagers = vi.spyOn(SessionManager, "inMemory");
+		try {
+			await harness.session.prompt("start");
+			expect(boundaries).toEqual(["turn_end", "agent_before_settle"]);
+			expect(previewManagers).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
+		} finally {
+			previewManagers.mockRestore();
+		}
 	});
 
 	it("commits a retain-none turn_end compaction and explicitly continues once", async () => {
