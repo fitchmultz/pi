@@ -223,7 +223,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	};
 }
 
-/** Estimate projected context without trusting usage captured before a later edit or compaction. */
+/** Estimate projected context using usage only while its measured prefix is still valid. */
 export function estimateProjectedContextTokens(
 	projection: SessionProjection,
 	branchEntries: SessionEntry[],
@@ -241,16 +241,22 @@ export function estimateProjectedContextTokens(
 			projectedMessageIndex = nextMessageIndex;
 		}
 
-		const usageEntryIndex = usageEntryId ? branchEntries.findIndex((entry) => entry.id === usageEntryId) : -1;
-		let latestInvalidatingEntryIndex = -1;
-		for (let i = branchEntries.length - 1; i >= 0; i--) {
+		const entryIndices = new Map(branchEntries.map((entry, index) => [entry.id, index]));
+		const usageEntryIndex = usageEntryId ? (entryIndices.get(usageEntryId) ?? -1) : -1;
+		let usageIsValid = usageEntryIndex >= 0;
+		for (let i = usageEntryIndex + 1; usageIsValid && i < branchEntries.length; i++) {
 			const entry = branchEntries[i];
-			if (entry.type === "context_edit" || entry.type === "compaction") {
-				latestInvalidatingEntryIndex = i;
-				break;
+			if (
+				entry.type === "compaction" ||
+				(entry.type === "context_edit" &&
+					(entry.replacement !== null || (entryIndices.get(entry.targetId) ?? -1) <= usageEntryIndex))
+			) {
+				usageIsValid = false;
 			}
 		}
-		if (usageEntryIndex > latestInvalidatingEntryIndex) return estimate;
+		// Omitting a later retry attempt leaves the measured prefix unchanged;
+		// estimateContextTokens has already counted only the remaining suffix.
+		if (usageIsValid) return estimate;
 	}
 
 	const currentSystem = getCurrentSystemMessage(projection.messages);
@@ -322,9 +328,10 @@ export function estimateTokens(message: AgentMessage): number {
 				if (block.type === "text") {
 					chars += block.text.length;
 				} else if (block.type === "thinking") {
-					chars += block.thinking.length;
+					chars += block.thinking.length + (block.thinkingSignature?.length ?? 0);
 				} else if (block.type === "toolCall") {
-					chars += block.name.length + JSON.stringify(block.arguments).length;
+					chars +=
+						block.name.length + JSON.stringify(block.arguments).length + (block.thoughtSignature?.length ?? 0);
 				}
 			}
 			return Math.ceil(chars / 4);

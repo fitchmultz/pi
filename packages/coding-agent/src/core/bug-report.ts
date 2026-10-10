@@ -5,7 +5,7 @@ import type { Api, Model, Provider, SimpleStreamOptions } from "@earendil-works/
 import { VERSION } from "../config.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { writeZipArchive } from "../utils/zip.ts";
-import { completeSummarization, estimateTokens, getSummarizationFailure } from "./compaction/compaction.ts";
+import { completeSummarization, getSummarizationFailure } from "./compaction/compaction.ts";
 import { serializeConversation } from "./compaction/utils.ts";
 import type { CrashRecord } from "./crash-log.ts";
 import type { Extension } from "./extensions/types.ts";
@@ -304,7 +304,7 @@ function selectMessages(messages: readonly AgentMessage[], tokenBudget: number):
 	let tokens = 0;
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
-		const next = estimateTokens(message);
+		const next = Math.ceil(serializeConversation(convertToLlm([message])).length / 4);
 		if (selected.length > 0 && tokens + next > tokenBudget) break;
 		selected.push(message);
 		tokens += next;

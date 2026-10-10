@@ -227,6 +227,68 @@ describe("session context edits", () => {
 		expect(estimate.tokens).toBe(4_101);
 	});
 
+	// Regression for upstream #10287: recovery omissions must not replace valid usage with a raw estimate.
+	it.each([
+		{ chars: 320_000, usage: 50_000 },
+		{ chars: 400_000, usage: 50_000 },
+		{ chars: 20_000, usage: 78_000 },
+	])("preserves usage across repeated retry omissions ($chars chars, $usage tokens)", ({ chars, usage }) => {
+		const session = SessionManager.inMemory();
+		session.appendMessage({ role: "user", content: "a".repeat(chars), timestamp: Date.now() });
+		const response = assistant("anchor");
+		response.usage = { ...response.usage, input: usage, totalTokens: usage + 1 };
+		session.appendMessage(response);
+		session.appendMessage({ role: "user", content: "next", timestamp: Date.now() });
+
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const failedId = session.appendMessage({ ...assistant("partial"), stopReason: "error" });
+			const resultId = session.appendMessage({
+				role: "toolResult",
+				toolCallId: `call-${attempt}`,
+				toolName: "read",
+				content: [{ type: "text", text: "unused tool output" }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+			session.appendContextEdit(failedId, null);
+			session.appendContextEdit(resultId, null);
+			const estimate = estimateProjectedContextTokens(session.buildSessionProjection(), session.getBranch());
+			expect(estimate).toMatchObject({ tokens: usage + 2, usageTokens: usage + 1, trailingTokens: 1 });
+		}
+	});
+
+	it.each(["prefix", "anchor", "suffix"] as const)("invalidates usage for a %s replacement", (target) => {
+		const session = SessionManager.inMemory();
+		const prefix = session.appendMessage({ role: "user", content: "old", timestamp: Date.now() });
+		const anchor = session.appendMessage(assistant("answer"));
+		const suffix = session.appendMessage({ role: "user", content: "next", timestamp: Date.now() });
+		session.appendContextEdit({ prefix, anchor, suffix }[target], { content: "replacement" });
+		const estimate = estimateProjectedContextTokens(session.buildSessionProjection(), session.getBranch());
+		expect(estimate.usageTokens).toBe(0);
+		expect(estimate.tokens).toBe(target === "anchor" ? 5 : 6);
+	});
+
+	// Regression for upstream #9409: replayed reasoning must consume the retention budget.
+	it.each(["thinking", "toolCall"] as const)("counts %s signatures in estimates and compaction cuts", (type) => {
+		const session = SessionManager.inMemory();
+		session.appendMessage({ role: "user", content: "old", timestamp: Date.now() });
+		const response = assistant("");
+		response.usage = { ...response.usage, input: 0, output: 0, totalTokens: 0 };
+		const signature = "s".repeat(400_000);
+		response.content =
+			type === "thinking"
+				? [{ type, thinking: "", thinkingSignature: signature }]
+				: [{ type, id: "call-1", name: "read", arguments: {}, thoughtSignature: signature }];
+		const signedId = session.appendMessage(response);
+		session.appendMessage({ role: "user", content: "next", timestamp: Date.now() });
+
+		const estimate = estimateProjectedContextTokens(session.buildSessionProjection(), session.getBranch());
+		expect(estimate.tokens).toBe(type === "thinking" ? 100_002 : 100_004);
+		const preparation = prepareCompaction(session.getBranch(), DEFAULT_COMPACTION_SETTINGS);
+		expect(preparation?.firstKeptEntryId).toBe(signedId);
+		expect(preparation?.tokensBefore).toBe(estimate.tokens);
+	});
+
 	it("does not reuse post-edit assistant usage after a later compaction", () => {
 		const session = SessionManager.inMemory();
 		const userId = session.appendMessage({ role: "user", content: "small input", timestamp: Date.now() });

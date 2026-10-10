@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- Fixed retry omissions discarding valid context-usage anchors when their measured prefix is unchanged ([#10287](https://github.com/earendil-works/pi/issues/10287)); compaction estimates now include replayed thinking and tool-call signatures (estimate portion of [#9409](https://github.com/earendil-works/pi/issues/9409)), without charging text-only branch summaries and bug reports for unsent signatures.
 - Fixed repeated context-usage reads rescanning archived session history; reuse preserves native compaction, edit, branch, model-limit and reload/restore behavior.
 - Fixed native working-session restore losing `--tools +name/-name` modifiers on reload; malformed saved modifier lists are rejected before factories.
 - Fixed background-command completion recovery failing on session journals larger than Node's string limit; recovery streams entries once per delivery lease and cancels cleanly on shutdown.
