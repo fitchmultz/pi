@@ -1221,21 +1221,33 @@ export class ExtensionRunner {
 
 	async emitBoundary(
 		baseEvent: BoundaryBaseEvent,
-		buildContext: (entries: SessionBoundaryDraft[]) => BoundaryContextPreview | Promise<BoundaryContextPreview>,
+		buildContext: (entries: SessionBoundaryDraft[]) => BoundaryContextPreview,
 	): Promise<BoundaryDispatchResult> {
 		const ctx = this.createContext();
 		let entries: SessionBoundaryDraft[] = [];
 		let shouldContinue = false;
-		let context = await buildContext(entries);
+		const lazyEmptyContext = () => {
+			let context: BoundaryContextPreview | undefined;
+			return () => {
+				context ??= buildContext([]);
+				return context;
+			};
+		};
+		let getContext = lazyEmptyContext();
 		let valid = true;
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, baseEvent.type)) {
 			for (const handler of handlers) {
+				const previousEntries = entries;
+				const previousLength = entries.length;
+				const preview = getContext;
 				const event = {
 					...baseEvent,
 					entries,
 					continue: shouldContinue,
-					context,
+					get context() {
+						return preview();
+					},
 				} as TurnEndEvent | AgentBeforeSettleEvent;
 				try {
 					const handlerResult = (await this.callHandler(ext, handler, event, ctx)) as BoundaryResult | undefined;
@@ -1250,8 +1262,15 @@ export class ExtensionRunner {
 					});
 				}
 
+				// ponytail: nonempty drafts remain eagerly validated because handlers can mutate
+				// nested values in place. Revisit only with an immutable draft API.
+				if (entries === previousEntries && previousLength === 0 && entries.length === 0) {
+					getContext = lazyEmptyContext();
+					continue;
+				}
 				try {
-					context = await buildContext(entries);
+					const context = buildContext(entries);
+					getContext = () => context;
 					valid = true;
 				} catch (err) {
 					valid = false;
@@ -1265,9 +1284,14 @@ export class ExtensionRunner {
 			}
 		}
 
-		return valid
-			? { entries, continue: shouldContinue, context, valid: true }
-			: { entries: [], continue: false, context, valid: false };
+		return {
+			entries: valid ? entries : [],
+			continue: valid && shouldContinue,
+			get context() {
+				return getContext();
+			},
+			valid,
+		};
 	}
 
 	private isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {

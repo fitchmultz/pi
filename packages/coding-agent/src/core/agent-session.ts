@@ -2217,10 +2217,9 @@ export class AgentSession {
 		);
 		this._commitBoundaryDrafts(result.entries);
 		this._flushPendingCustomMessages();
-		const finalContext = this._buildBoundaryContext([], "agent_before_settle");
 		if (this._agentRunAbortRequested) return false;
 		const shouldContinue = result.continue || this.agent.hasQueuedMessages();
-		if (shouldContinue && !finalContext.canContinue) {
+		if (shouldContinue && !this._buildBoundaryContext([], "agent_before_settle").canContinue) {
 			if (result.continue) this._reportInvalidBoundaryContinuation("agent_before_settle");
 			return false;
 		}
