@@ -989,7 +989,8 @@ export interface BoundaryContextPreview {
 export interface BoundaryState {
 	entries: SessionBoundaryDraft[];
 	continue: boolean;
-	context: BoundaryContextPreview;
+	/** Empty-proposal previews are computed from the live session on first read; read context during the handler. */
+	readonly context: BoundaryContextPreview;
 	outcome: AgentActivityOutcome;
 }
 
