@@ -304,14 +304,34 @@ async function requestMistralStream(
 	baseUrl.pathname = `${baseUrl.pathname.replace(/\/+$/u, "")}/`;
 	const url = new URL("v1/chat/completions", baseUrl);
 	const headers = buildMistralHeaders(model, apiKey, options);
-	const timeoutSignal = AbortSignal.timeout(options?.timeoutMs ?? 60_000);
-	const signal = options?.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
-	const response = await (options?.fetch ?? globalThis.fetch)(url, {
-		method: "POST",
-		headers,
-		body: JSON.stringify(toMistralWirePayload(payload)),
-		signal,
-	});
+	// The timeout covers only the wait for response headers. Long streams (e.g. extended thinking)
+	// must not be cut off by a fixed deadline; body stalls are left to the HTTP client idle timeout.
+	const timeoutMs = options?.timeoutMs ?? 60_000;
+	if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 0xffffffff) {
+		throw new RangeError("Mistral timeoutMs must be an integer between 0 and 4294967295");
+	}
+	const headerTimeoutController = new AbortController();
+	const signal = options?.signal
+		? AbortSignal.any([options.signal, headerTimeoutController.signal])
+		: headerTimeoutController.signal;
+	const headerTimeout = setTimeout(() => headerTimeoutController.abort(), timeoutMs);
+	headerTimeout.unref?.();
+	let response: Response;
+	try {
+		response = await (options?.fetch ?? globalThis.fetch)(url, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(toMistralWirePayload(payload)),
+			signal,
+		});
+	} catch (error) {
+		if (headerTimeoutController.signal.aborted && !options?.signal?.aborted) {
+			throw new Error(`Mistral response headers timed out after ${timeoutMs}ms`);
+		}
+		throw error;
+	} finally {
+		clearTimeout(headerTimeout);
+	}
 
 	await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 
@@ -323,7 +343,7 @@ async function requestMistralStream(
 		throw new Error("Mistral response has no body");
 	}
 
-	return readMistralEvents(response.body, signal);
+	return readMistralEvents(response.body, options?.signal);
 }
 
 class MistralHttpError extends Error {
@@ -444,7 +464,7 @@ const MISTRAL_STREAM_DONE = Symbol("mistral-stream-done");
 
 async function* readMistralEvents(
 	body: ReadableStream<Uint8Array>,
-	signal: AbortSignal,
+	signal: AbortSignal | undefined,
 ): AsyncGenerator<MistralCompletionEvent> {
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
@@ -452,13 +472,13 @@ async function* readMistralEvents(
 	const onAbort = () => {
 		void reader.cancel().catch(() => {});
 	};
-	signal.addEventListener("abort", onAbort, { once: true });
+	signal?.addEventListener("abort", onAbort, { once: true });
 
 	try {
 		while (true) {
-			if (signal.aborted) throw signal.reason;
+			if (signal?.aborted) throw signal.reason;
 			const { done, value } = await reader.read();
-			if (signal.aborted) throw signal.reason;
+			if (signal?.aborted) throw signal.reason;
 			buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
 
 			let boundary = findMistralEventBoundary(buffer);
@@ -478,7 +498,7 @@ async function* readMistralEvents(
 			if (event !== MISTRAL_STREAM_DONE && event) yield event;
 		}
 	} finally {
-		signal.removeEventListener("abort", onAbort);
+		signal?.removeEventListener("abort", onAbort);
 		try {
 			await reader.cancel();
 		} catch {}

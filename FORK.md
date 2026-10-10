@@ -1,7 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream v1.1.0 `abe508e1b` (2026-10-07). It is upstream plus the features
+v1.0.0 and synchronized through upstream `f1b2e77f5b13b2a199b1052cb79c235451afe7d7`
+(2026-10-09), an unreleased snapshot after v1.1.0 `abe508e1b`. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -30,8 +31,10 @@ all-platform qualification.
 ### Retained correctness deltas
 
 These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
-Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in this sync); the fork keeps `private-spill.test.ts` as a regression guard.
+Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in the v1.1.0 sync); the fork keeps `private-spill.test.ts` as a regression guard.
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
+Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
+Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
 [Codemode](packages/codemode/CHANGELOG.md#unreleased) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
 
@@ -45,6 +48,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Refresh admission must precede config I/O: awaited scopes follow current per-provider catalog/auth readiness, global availability reads cannot discard credential synchronization or make it join unrelated work, and full-pass auth failures retain provider-local diagnostics and sibling credential filters under scoped overlap | `core/model-runtime.ts` | `model-runtime-refresh-order.test.ts`, `agent-session-dynamic-provider.test.ts`, `model-runtime-credential-sync.test.ts` |
 | OAuth state, cancellation and UI failures must retain listener/prompt cleanup | `packages/ai/src/auth/oauth/{callback-server,openai-chatgpt}.ts` | `packages/ai/test/{oauth-callback-server,openai-chatgpt-oauth}.test.ts` |
 | Retained payload objects must not mutate Codex continuation baselines | `packages/ai/src/api/openai-codex-responses.ts` | `packages/ai/test/openai-codex-stream.test.ts` |
+| Mistral's header deadline must stop after headers with or without a caller signal; caller cancellation must still stop SSE and held-open HTTP-error bodies ([#10609](https://github.com/earendil-works/pi/issues/10609)) | `packages/ai/src/api/mistral-conversations.ts` | `packages/ai/test/mistral-http-transport.test.ts` |
 | Failed terminal responses must preserve consumed numeric usage and error details | `packages/ai/src/api/{openai-responses-shared,openai-codex-responses}.ts` | `packages/ai/test/{openai-responses-terminal-event,openai-codex-stream}.test.ts` |
 | Astra Ultrafast and legacy Codex Fast estimates need correct tier/confirmation rules | `packages/ai/src/api/{openai-responses,openai-codex-responses}.ts` | `packages/ai/test/openai-ultrafast-pricing.test.ts` |
 | Anthropic strict limits apply across initial and inline definitions, including required schemas | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/anthropic-strict-tool-schema.test.ts` |
@@ -59,7 +63,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Equivalent known-hosts path spellings must serialize accept/forget rewrites ([#10517](https://github.com/earendil-works/pi/issues/10517)) | `packages/env/src/ssh.ts`, `packages/env/test/ssh.test.ts` | `packages/env/test/ssh.test.ts` |
 | Replayed signatures count toward context estimates | `packages/ai/src/utils/estimate.ts` | `packages/ai/test/context-estimate.test.ts` |
 | Dialog input needs xterm printable decoding, grapheme-safe replacement and correct mouse columns | `packages/tui/src/components/input.ts` | `packages/tui/test/{input,mouse-components}.test.ts` |
-| Plus-sign key IDs must parse, and hyperlink control payloads must stay byte-identical | `packages/tui/src/{keys,utils}.ts` | `packages/tui/test/{keys,truncate-to-width}.test.ts` |
+| Hyperlink control payloads must stay byte-identical | `packages/tui/src/utils.ts` | `packages/tui/test/truncate-to-width.test.ts` |
 | Terminal cell-size replies must reach native housekeeping before extension input listeners | `packages/tui/src/tui.ts` | `packages/tui/test/tui-cell-size-input.test.ts` |
 | Image coordinate notes need independent unrounded axis ratios | `utils/image-resize.ts` | `image-dimension-note.test.ts` |
 | Branch budgets must exclude system declarations not serialized as conversation | `core/compaction/branch-summarization.ts` | `branch-summarization.test.ts` |
@@ -67,17 +71,27 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
 | Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
 | Extension cancellation must remain observable through post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
+| Repeated context-usage reads must reuse the last scalar without rescanning archived ancestry; native leaf identity and effective model limits preserve compaction, edits, branches and reload/restore behavior | `core/agent-session.ts` | `suite/agent-session-context-usage.test.ts` |
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
 `background_command`, and no upstream publishing, binary or issue-analysis workflows. Nix builds
 follow upstream; its automatic catalog-pin commits and stable-branch promotion are upstream-only.
+Contributor approvals remain fork-local; upstream approval-list additions and maintainer-specific
+label assignment/reopening rules are not imported.
 The fork uses upstream's install lock, not the removed npm shrinkwrap, and keeps its immutable
 installer. It uses upstream's pre-commit hook and `npm run check`. Delivery evidence comes from
 `./test.sh`, installer/consumer tests, bundle smoke, and Linux/macOS CI; it does not establish live
 Windows, Termux-device or hosted Axiom acceptance.
 
-Package production uses upstream's `scripts/package-artifacts.mjs` and local consumer helpers.
+Configuration schemas, shared settings defaults, strict theme validation, and native fake-cursor
+markers follow upstream. `SettingsSchema` also describes the fork's `compactView` boolean or
+`"hybrid"` preference; settings keep upstream's allowance for extension-owned keys. Hardware
+cursor mode draws only the focused terminal cursor, while unfocused fake cursors remain visible.
+The published schemas are under `packages/coding-agent/schemas/`.
+
+Package production uses upstream's `scripts/package-artifacts.mjs` and local consumer helpers,
+including npm 12's expected-package-keyed pack metadata.
 The narrow `scripts/coding-agent-consumer.mjs` packing export remains for pinned fleet automation
 until that external caller migrates to the artifact API.
 
@@ -91,8 +105,8 @@ claimed to be broken.
 
 Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3 keeps
 the published $3/M five-minute cache-write rate, including Kimi Coding's implied
-estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)); Sonnet 5.5's fallback
-keeps the current $0.10/M cache-read rate.
+estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)). Claude 5.5 pricing now follows
+models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`
 owner, not the user-only run hook. Forced text stays run-scoped and unpersisted. Child

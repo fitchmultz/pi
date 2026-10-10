@@ -32,12 +32,10 @@ function packPackages(packages, tarballDirectory, npmOptions) {
 			stdio: ["inherit", "pipe", "inherit"],
 		});
 		const parsed = JSON.parse(output);
-		// npm <11.6 returns an array; newer npm can key the result by package name.
-		const results = Array.isArray(parsed) ? parsed : Object.values(parsed ?? {});
-		if (results.length !== 1 || !results[0]?.filename) {
+		const packed = Array.isArray(parsed) ? (parsed.length === 1 ? parsed[0] : undefined) : parsed?.[pkg.name];
+		if (packed?.name !== pkg.name || typeof packed.filename !== "string") {
 			throw new Error(`npm pack returned an unexpected result for ${pkg.name}`);
 		}
-		const packed = results[0];
 
 		const originalPath = join(tarballDirectory, packed.filename);
 		const contents = readFileSync(originalPath);

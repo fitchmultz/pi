@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - Complete native working-session capture and restore require a persistence-capable `ResourceLoader`; `getWorkingSessionResources()` is optional for ordinary SDK sessions. Directly constructed sessions must supply an explicit launch owner. Snapshot values must be plain finite JSON; lossy values are rejected.
+- Moved the published theme JSON Schema to `schemas/theme.schema.json` and made theme loading reject unknown top-level properties and unknown properties under `colors` or `export`. Update existing theme `$schema` references to the new path, define reusable custom colors under `vars`, and remove unsupported metadata.
 
 ### Added
 
@@ -19,8 +20,14 @@
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 - Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Activation accepts upstream catalog removals and prints every removed model ID instead of blocking the update; direct installer runs still require explicit `--accept-model-removals`, while explicit rollback remains available. Restored Termux compiler preparation, isolated shell/exec environments, and shortened experimental server socket paths.
 
+### Changed
+
+- Changed the `showHardwareCursor` setting to use only the terminal cursor instead of also drawing Pi's reverse-video cursor
+- Published settings, models, keybindings, and theme schemas using upstream's shared runtime definitions; the fork settings schema retains boolean and `"hybrid"` compact activity preferences.
+
 ### Fixed
 
+- Fixed repeated context-usage reads rescanning archived session history; reuse preserves native compaction, edit, branch, model-limit and reload/restore behavior.
 - Fixed native working-session restore losing `--tools +name/-name` modifiers on reload; malformed saved modifier lists are rejected before factories.
 - Fixed background-command completion recovery failing on session journals larger than Node's string limit; recovery streams entries once per delivery lease and cancels cleanly on shutdown.
 - Fixed native working-session restore losing wildcard tool restrictions, disabled builtin selection such as `--no-mcp`, and pending tools already registered on reconnect; malformed saved hidden-tool lists are rejected before factories.
@@ -50,6 +57,8 @@
 - Fixed failed session migration and whole-file rewrites truncating the existing journal.
 - Fixed a provider's auth-check failure hiding healthy models or silently replacing saved and scoped provider selections.
 - Fixed cancellation during post-run recovery or pre-settlement being reported as a finished run; `agent_settled.aborted` now remains `true` ([#10607](https://github.com/earendil-works/pi/issues/10607)).
+- Fixed Mistral streams being aborted mid-generation (e.g. during long thinking) after the request timeout; the timeout now applies only to waiting for response headers ([#10609](https://github.com/earendil-works/pi/issues/10609))
+- Fixed a symlinked `AGENTS.md` in a git worktree nested inside its main repo causing no project context file to load ([#10681](https://github.com/earendil-works/pi/issues/10681))
 
 ## [1.1.0] - 2026-10-07
 

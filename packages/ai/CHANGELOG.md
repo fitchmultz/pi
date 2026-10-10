@@ -20,6 +20,7 @@
 - Fixed context estimates omitting thinking and tool-call signatures.
 - Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
 - Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
+- Fixed Mistral streams being aborted mid-generation (e.g. during long thinking) after the request timeout; the timeout now applies only to waiting for response headers ([#10609](https://github.com/earendil-works/pi/issues/10609))
 
 ## [1.1.0] - 2026-10-07
 
