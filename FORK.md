@@ -1,8 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `f1b2e77f5b13b2a199b1052cb79c235451afe7d7`
-(2026-10-09), an unreleased snapshot after v1.1.0 `abe508e1b`. It is upstream plus the features
+v1.0.0 and synchronized through upstream `8a9c051f80090895abbc64262bc90d95b42103c4`
+(2026-10-11), an unreleased snapshot after v1.1.0 `abe508e1b`. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -58,7 +58,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Radius gateway pricing must have finite rates and tiers before cost estimation ([#10507](https://github.com/earendil-works/pi/issues/10507)) | `packages/ai/src/providers/radius-config.ts` | `packages/ai/test/radius-provider.test.ts` |
 | Abort tests must check the terminal result and follow-up rather than pass early ([#10508](https://github.com/earendil-works/pi/issues/10508)); this is test-only, not a provider cancellation fix | `packages/ai/test/abort.test.ts` | Offline faux-provider case in the same file |
 | Chord in-process service hydration must reject non-plain arrays ([#10509](https://github.com/earendil-works/pi/issues/10509)) | `packages/chord/src/delta/revision-validator.ts` | `packages/chord/test/services.test.ts` |
-| Codemode string store keys must round-trip as own data properties, including `__proto__` ([#10510](https://github.com/earendil-works/pi/issues/10510)) | `packages/codemode/src/runtime/host.ts` | `packages/codemode/test/sandbox.test.ts` |
+| Codemode string store keys must round-trip as own data properties, including `__proto__`, on every sandbox backend ([#10510](https://github.com/earendil-works/pi/issues/10510)) | `packages/codemode/src/runtime/execution.ts` | `packages/codemode/test/sandbox.test.ts` |
 | An oversized Env watch change must report `overflow` instead of stopping the daemon's output writer ([#10516](https://github.com/earendil-works/pi/issues/10516)) | `packages/env/daemon/src/watch.rs` | `packages/env/test/remote.test.ts` |
 | Equivalent known-hosts path spellings must serialize accept/forget rewrites ([#10517](https://github.com/earendil-works/pi/issues/10517)) | `packages/env/src/ssh.ts`, `packages/env/test/ssh.test.ts` | `packages/env/test/ssh.test.ts` |
 | Replayed signatures count toward context estimates | `packages/ai/src/utils/estimate.ts` | `packages/ai/test/context-estimate.test.ts` |
@@ -77,7 +77,8 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
-`background_command`, and no upstream publishing, binary or issue-analysis workflows. Nix builds
+`background_command`, and no upstream publishing, binary (including Android APK) or
+issue-analysis workflows. Upstream's local `scripts/issues` triage tool is kept but unused. Nix builds
 follow upstream; its automatic catalog-pin commits and stable-branch promotion are upstream-only.
 Contributor approvals remain fork-local; upstream approval-list additions and maintainer-specific
 label assignment/reopening rules are not imported.
@@ -90,7 +91,9 @@ Configuration schemas, shared settings defaults, strict theme validation, and na
 markers follow upstream. `SettingsSchema` also describes the fork's `compactView` boolean or
 `"hybrid"` preference; settings keep upstream's allowance for extension-owned keys. Hardware
 cursor mode draws only the focused terminal cursor, while unfocused fake cursors remain visible.
-The published schemas are under `packages/coding-agent/schemas/`.
+The generated schemas are under `packages/coding-agent/schemas/` and use upstream's
+`https://pi.dev/schemas/*.schema.json` IDs. They match the hosted files except for the fork's
+`compactView` setting, which the hosted settings schema accepts as an extra key.
 
 Package production uses upstream's `scripts/package-artifacts.mjs` and local consumer helpers,
 including npm 12's expected-package-keyed pack metadata.
@@ -234,6 +237,9 @@ only complete current native state, with no journal-only or pre-v1 handoff fallb
 - `./test.sh` runs all non-e2e tests offline in an isolated home; `./test.sh -- <command>` runs a
   focused command the same way. Node and npm resolve before HOME isolation so version-manager
   shims keep working.
+- `./test.sh` keeps the caller's `PATH`. If GNU coreutils' `gnubin` comes before `/bin`, Env's
+  foreground-job test sees `gsleep` instead of `sleep`. Remove `gnubin` from `PATH` and unset
+  `BASH_ENV` when it re-adds it, for example `env -u BASH_ENV PATH=<PATH without gnubin> ./test.sh`.
 - Restart terminal tests need tmux and a built CLI; set `PI_TEST_CLI` to test an installed release.
 - Standalone builds enable `--compile-autoload-package-json`: dependency `main` and `exports`
   resolve at runtime, including Bun export conditions. Unexported subpaths are rejected as under
