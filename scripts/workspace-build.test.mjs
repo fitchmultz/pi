@@ -19,12 +19,16 @@ test("workspace root and subpath imports compile through a case-aliased checkout
 		t.skip("requires a case-insensitive filesystem");
 		return;
 	}
-	const config = JSON.parse(await readFile(join(repo, "packages/durable/tsconfig.build.json"), "utf8"));
-	// The fixture exercises workspace resolution, without unrelated ambient Node types.
-	config.compilerOptions.types = [];
 	const files = {
 		"tsconfig.base.json": await readFile(join(repo, "tsconfig.base.json"), "utf8"),
-		"packages/durable/tsconfig.build.json": JSON.stringify(config),
+		// Copied verbatim: tsconfig files may contain comments.
+		"packages/durable/tsconfig.build.json": await readFile(join(repo, "packages/durable/tsconfig.build.json"), "utf8"),
+		// The fixture exercises workspace resolution, without unrelated ambient Node types or declaration files.
+		"packages/durable/tsconfig.fixture.json": JSON.stringify({
+			extends: "./tsconfig.build.json",
+			files: [],
+			compilerOptions: { types: [] },
+		}),
 		"packages/durable/package.json": JSON.stringify({ type: "module" }),
 		"packages/durable/src/index.ts": `
 import type { Delta } from "@earendil-works/chord";
@@ -51,7 +55,7 @@ export const identity = (delta: Delta): SubpathDelta => delta;
 		join(repo, "node_modules/typescript/bin/tsc"),
 		"--noEmit",
 		"--project",
-		join(alias, "packages/durable/tsconfig.build.json"),
+		join(alias, "packages/durable/tsconfig.fixture.json"),
 	], { cwd: root, encoding: "utf8" });
 	assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });

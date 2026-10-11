@@ -78,7 +78,7 @@ describe("branch summarization", () => {
 		if (kind === "branch") await generateBranchSummary(history, options);
 		else await generateBugReportSummary({ ...options, messages: [entries[0].message, signed] });
 		expect(prompt).toContain("Abandoned request");
-		expect(prompt).toContain("reasoning");
+		expect(prompt).toContain("answer");
 		expect(prompt).not.toContain("s".repeat(100));
 	});
 
