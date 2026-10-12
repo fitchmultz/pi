@@ -111,7 +111,6 @@ interface ModelRefresh {
 type ModelAvailability = Awaited<ReturnType<MutableModels["getAvailability"]>>;
 
 interface ModelRuntimeSnapshot {
-	all: readonly Model<Api>[];
 	available: readonly Model<Api>[];
 	configuredProviders: ReadonlySet<string>;
 	storedProviders: ReadonlySet<string>;
@@ -201,12 +200,13 @@ export class ModelRuntime implements Models {
 	private modelNetworkEnabled: boolean;
 	private config: ModelConfig;
 	private snapshot: ModelRuntimeSnapshot = {
-		all: [],
 		available: [],
 		configuredProviders: new Set(),
 		storedProviders: new Set(),
 		auth: new Map(),
 	};
+	/** `snapshot.available` by provider, so scoped updates read only their own catalogs. */
+	private availableByProvider = new Map<string, readonly Model<Api>[]>();
 	private refreshSeq = 0;
 	private configRefreshSeq = 0;
 	private readonly providerRefreshes = new Map<string, ModelRefresh>();
@@ -366,19 +366,28 @@ export class ModelRuntime implements Models {
 
 	private updateModelSnapshot(providerIds?: readonly string[]): void {
 		const current = providerIds && new Set(providerIds);
-		const availableById = new Map(this.snapshot.available.map((model) => [`${model.provider}\0${model.id}`, model]));
-		const all = [...this.models.getModels()];
 		this.snapshot = {
 			...this.snapshot,
-			all,
 			// Changed catalogs are provisional until auth completes; retain siblings' credential filters.
-			available: all.flatMap((model) => {
-				if (!current || current.has(model.provider)) {
-					return this.snapshot.configuredProviders.has(model.provider) ? [model] : [];
-				}
-				return availableById.get(`${model.provider}\0${model.id}`) ?? [];
+			available: this.rebuildAvailable((id) => {
+				if (current && !current.has(id)) return undefined;
+				return this.snapshot.configuredProviders.has(id) ? [...this.models.getModels(id)] : [];
 			}),
 		};
+	}
+
+	/**
+	 * Lists available models in provider order. `providerModels` returns a provider's new entries,
+	 * or undefined to keep its previous ones. A full catalog read per provider made each refresh
+	 * quadratic in the number of providers.
+	 */
+	private rebuildAvailable(providerModels: (providerId: string) => readonly Model<Api>[] | undefined): Model<Api>[] {
+		const byProvider = new Map<string, readonly Model<Api>[]>();
+		for (const { id } of this.models.getProviders()) {
+			byProvider.set(id, providerModels(id) ?? this.availableByProvider.get(id) ?? []);
+		}
+		this.availableByProvider = byProvider;
+		return [...byProvider.values()].flat();
 	}
 
 	private publishAvailability(
@@ -402,15 +411,17 @@ export class ModelRuntime implements Models {
 			else authErrors.delete(id);
 		}
 		const availableById = new Map(
-			[
-				...(complete ? [] : this.snapshot.available.filter((model) => !current.has(model.provider))),
-				...available.filter((model) => current.has(model.provider)),
-			].map((model) => [`${model.provider}\0${model.id}`, model]),
+			available
+				.filter((model) => current.has(model.provider))
+				.map((model) => [`${model.provider}\0${model.id}`, model]),
 		);
-		const all = [...this.models.getModels()];
 		this.snapshot = {
-			all,
-			available: all.flatMap((model) => availableById.get(`${model.provider}\0${model.id}`) ?? []),
+			available: this.rebuildAvailable((id) => {
+				if (!current.has(id)) return complete ? [] : undefined;
+				return this.models
+					.getModels(id)
+					.flatMap((model) => availableById.get(`${model.provider}\0${model.id}`) ?? []);
+			}),
 			configuredProviders,
 			storedProviders,
 			auth: authByProvider,

@@ -559,3 +559,40 @@ describe("ModelRuntime refresh ownership", () => {
 		}
 	});
 });
+
+describe("ModelRuntime refresh cost", () => {
+	it("reads each provider's catalog a fixed number of times per refresh, however many providers exist", async () => {
+		const catalogReadsPerRefresh = async (providers: number) => {
+			const runtime = await ModelRuntime.create({ credentials: AuthStorage.inMemory(), modelsPath: null });
+			const base = runtime.getProvider("anthropic")!;
+			let reads = 0;
+			for (let i = 0; i < providers; i++) {
+				const models = [{ ...base.getModels()[0]!, provider: `cost-${i}` }];
+				runtime.registerNativeProvider({
+					...base,
+					id: `cost-${i}`,
+					getModels: () => {
+						if (i === 0) reads++;
+						return models;
+					},
+					getAllModels: () => models,
+					auth: {
+						apiKey: {
+							name: "fixture",
+							check: async () => ({ type: "api_key", source: "fixture" }),
+							resolve: async () => undefined,
+						},
+					},
+				});
+			}
+			// Settle the refreshes that registration queues, then measure one more.
+			await runtime.refresh({ allowNetwork: false });
+			await setImmediate();
+			reads = 0;
+			await runtime.refresh({ allowNetwork: false });
+			expect(runtime.hasConfiguredAuth("cost-0")).toBe(true);
+			return reads;
+		};
+		expect(await catalogReadsPerRefresh(30)).toBe(await catalogReadsPerRefresh(1));
+	});
+});
