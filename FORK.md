@@ -1,7 +1,7 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `8a9c051f80090895abbc64262bc90d95b42103c4`
+v1.0.0 and synchronized through upstream `4270522473e677ddba7b093caa0064a3df51d459`
 (2026-10-11), an unreleased snapshot after v1.1.0 `abe508e1b`. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 

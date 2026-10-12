@@ -2856,7 +2856,7 @@ interface ToolExecutionApi<TDetails extends JsonValue = JsonValue> extends Docum
 type NestedToolExecutionResult = {
   /** The nested call's tool task. */
   readonly taskId: TaskId;
-  /** A schema tool's validated `structuredOutput`; else, and for an error result without one, its bounded output, collapsed (below). */
+  /** The tool's own value: a schema tool's validated `structuredOutput` (absent on an error result without one, whose text is then a `tool_error` diagnostic); a schema-less tool's bounded output, collapsed (below). */
   readonly structuredOutput?: JsonValue;
   readonly isError: boolean;
   readonly details?: JsonValue;
@@ -2984,19 +2984,20 @@ on an error result, where it may omit it; the Harness validates it after the
 programs get its bounded output, the content the model sees without the
 rendered diagnostics, for a success and for an error alike: one text item as
 its string, one image as its `ImageContent`, no items as `""`, and anything
-else as the content list. A schema tool's error result without
-`structuredOutput` gives programs its bounded output the same way, so they get
-the text of a returned error, for example `"permission denied: /etc"`. A
-thrown error's message is in its `tool_error` diagnostic, not in the output,
-so programs read it there, as they do for any tool. So a
-hook that redacts a tool's output redacts what programs get of a schema-less
-tool and of an error result without structured output. An
+else as the content list. `structuredOutput` is always the tool's own value,
+never text the Harness makes: a schema tool's error result keeps the value it
+returned, and one without gives programs no `structuredOutput`; the text of its
+output becomes a `tool_error` diagnostic of the nested result instead, unless an
+error diagnostic already says what went wrong, so programs get it, for example
+`"permission denied: /etc"`. A thrown error's message is in its `tool_error`
+diagnostic too. So a hook that redacts a schema-less tool's output redacts
+what programs get. An
 error result the Harness writes itself (unavailable, invalid arguments,
 blocked, interrupted, aborted, abandoned, or a scheduler fault) has no
 `structuredOutput`; its diagnostics say what went wrong. A thrown error
 becomes a `tool_error` diagnostic with its message. A nested call whose result breaks this gets an error result
-with an `invalid_structured_output` diagnostic, without the broken value, and
-with its bounded output as `structuredOutput`;
+with an `invalid_structured_output` diagnostic, without the broken value: a
+schema tool's then has no `structuredOutput`, a schema-less tool's its output;
 a model-issued call, whose `structuredOutput` the model never sees, only loses
 it, and the break is reported through `HarnessOptions.onReport`. `structuredOutput` has no size bound;
 keeping it small is the tool's job, as `bash` keeps its retained tail and the
@@ -3550,6 +3551,124 @@ terminates the process and reopens the Session from durable state. Old and new
 Harness instances must never own the same Session concurrently: open the new one
 after the old one's `close()` resolved, when none of its invocation code runs
 any more (section 2.2).
+
+### 7.6 Code mode
+
+`@earendil-works/pi-durable/codemode` provides the `codemode` tool (`createCodemodeExtension({ sandbox })`):
+`callers: ["model"]`, `replay: "safe"`. Its argument is a script, run with
+pi-codemode's deterministic `sandbox.start()`. The script calls the agent's
+`callable` tools as `tools.<name>(args)`; each call is a nested call with key
+`c<id>`, the VM's own number for the call. As in the coding agent, a tool that
+declares `structuredOutputSchema` resolves with its `structuredOutput`, also on an
+error result that carries one (`bash` with a nonzero exit resolves with
+`{ output, exitCode, ... }`, which the script checks), and a schema-less tool
+resolves with its text output, images left out, as its declaration
+(`Promise<string>`) says. Every other error rejects, with the schema-less tool's
+text as message when it is not empty, else the error diagnostics' messages, and
+the value, if any, as `error.structuredOutput`. Which tools declare a schema is
+recorded in the start data, so a resumed script maps results as it began.
+
+The tool's description is fixed: the script environment and its globals. The
+extension's `codemode` prompt section lists the agent's `callable` tools as
+TypeScript declarations, grouped by `namespaces` (a tool belongs to the one with
+the longest matching name prefix), within an inline budget of 3000 estimated
+tokens: every namespace places its cheapest tool before any places a second,
+and what does not fit is said so and found with `searchTools()`. Scripts find
+tools with `ALL_TOOLS`, `searchTools(query, { limit?, namespace? })` (BM25),
+`describeTool(name)`, and `describeNamespace(name)`, answered from the start
+data and journaled like other globals. The result's content is a
+`Script completed`/`Script failed` header with the wall time since
+`startedAt`, the text items (`==> text N/M <==` when there are several), the
+`console` lines in one `<console_output>` block, the returned value, and on
+failure the error with the calls already made. Text past `max_output_tokens`
+(default 10000) keeps its start and end, the complete text written to a file
+(`details.fullOutputPath`); images are saved to files, their paths next to them.
+The Harness cuts a result past the tool's `outputLimits` (4 MiB, 100,000 lines)
+without such a file, so the text is also cut when it exceeds 1 Mi characters or
+the line limit, whatever `max_output_tokens` says. The files go to a temp
+directory of the environment that the run creates once and records in its run
+document (`outputDir`) before writing to it, under fixed names (`output.txt`,
+`image-<n>.<ext>`): a rerun after a crash overwrites them instead of adding new
+ones.
+
+With `models` (default on), scripts get the model catalog
+(`models.getModelsOfType`, `getAvailableOfType`, `getModelOfType`; journaled
+globals, configured `headers` removed) and `models.classify()` and
+`models.generateImages()`. Those two are paid effects, so each runs as an
+internal tool of the extension, `pi.codemode.models.classify` and
+`pi.codemode.models.generateImages` (`callers: ["tools"]`): the code mode tool
+turns the script's call of the global into a nested call of the tool, which then
+has its own task, live row, abort, usage accounting, and replay policy. Tools
+named `pi.codemode.*` are recorded in the start data as `hidden`: never in the
+section, `tools`, `ALL_TOOLS`, or tool search. They declare a schema, so like any
+such tool they resolve with the model's result whatever its `stopReason`, which
+the script checks; their rows show a failed one as an error. At most four such
+calls of one script run at once, and a call waiting for a slot when the script
+has ended is not started. A script that
+received generated images and showed none gets a note in its result. The tool's
+declaration carries the Lark grammar of the script source as
+`constrainedSampling`, which pi-ai applies for models that support it.
+
+The result's \`details\` list the script's tool calls in call order
+(\`CodemodeToolDetails\`: id, name, cut arguments, status \`ok\`/\`error\`/
+\`cancelled\`, duration, cut error), written once with the result; a call still
+running or not yet launched when the script ended is \`cancelled\`. While the
+script runs, UIs show its nested calls from \`pi.live.nestedTools\`.
+
+Three documents, two of them scoped to the code mode call's task:
+
+- `pi.codemode.run`: `start`, written once before the VM starts (module
+  version, `startedAt`, seed, the VM's fingerprint once reported, the deadline
+  from `timeout_ms`, the tools and globals the script sees, the store
+  snapshot), and `result`, the outcome, written once.
+- `pi.codemode.journal`: `entries`, one per result delivered to the VM, in
+  delivery order: the call's ID, the clock value, `issuedAfter` (the calls the VM
+  had issued after processing it, from its acknowledgment), and for a global its
+  name, arguments, and outcome; and `firstIssued`, the calls the VM had issued
+  after the script's first run.
+- `pi.codemode.store`: conversation-scoped, `history: "rewindable"`,
+  `fork: "asOf"`; a successful script's `store()` writes are applied per key in
+  the transaction that writes its `result`.
+
+Live, a finished call's result is appended to the journal and then delivered as
+result number `entry index + 1`, with the clock at the entry's time; one journal
+commit is in flight at a time and later results join the next. Acknowledged
+counts are recorded with the next journal commit, or at once when the VM has
+processed everything delivered. A call is launched only once the count of the
+drain that made it is committed, so every key an attempt admitted is at most its
+last recorded count.
+
+A run the sandbox ends as `aborted` without the call having asked for it (the
+host closed the sandbox, for example before closing the Harness) decides
+nothing: the call stores no outcome and ends with its invocation, so a later
+attempt replays the script.
+
+A rerun (`execute()` after recovery) returns a stored `result` without a VM.
+Otherwise it ends the call with a stored error result, admitting no new nested
+call, when the module version differs or the deadline passed; it starts the VM
+from `start` and does the same when the fingerprint the VM reports differs, before
+delivering or reattaching anything. It then delivers the journal in order, each
+entry once the VM has issued its call; a tool's result comes from its nested
+call by key, a global's from the journal after comparing name and arguments.
+Calls the journal does not have are held until the last journaled result is
+acknowledged. Divergence ends the call with a stored error result, then stops the
+VM with an error the script cannot catch: a count that differs from a recorded
+`issuedAfter`, a VM that waits without having issued the next entry's call, a
+key or global called with another name or arguments, or a script that ends while
+processing an entry whose `issuedAfter` was recorded (or during its first run
+with a non-empty journal), or before issuing a call that a later entry answers.
+A live call whose key an earlier attempt admitted with another tool or other
+arguments diverges the same way. Every recorded count, `firstIssued`
+included, must equal the replay's. On a rerun, live calls are held until the
+acknowledgment of the last journaled result, or of the first run when the
+journal is empty; by then the counts have matched, so the script has made every
+call an earlier attempt could have admitted. Every held call's key is checked
+against its stored nested call, whatever the call's target, and only when none
+differs are they launched; later calls are new. Nothing is admitted or delivered once the run
+has its outcome. A script that ends before using every entry
+is otherwise fine: the live run ended there too. A count the replay acknowledges
+but the journal lacks is recorded with the first live commit. Nested calls admitted before the restart may
+resume on their own whatever the rerun decides; the call's cleanup aborts them.
 
 ## 8. Built-in tasks
 
