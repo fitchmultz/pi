@@ -1,5 +1,8 @@
 import assert from "node:assert";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { pathToFileURL } from "node:url";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
 import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
@@ -1689,6 +1692,33 @@ bar`,
 				line.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, ""),
 			);
 			assert.ok(!rawPlain.join("").includes("(https://example.com)"), "URL should not appear twice");
+		});
+
+		it("should link every wrapped row of a long local path to its full file URL", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			const path = "/Users/me/Projects/jobs-new/careeros/briefs/career-trajectory-workos-vs-cursor-sa-2026-10.html";
+			const lines = new Markdown(`\`${path}\``, 0, 0, defaultMarkdownTheme).render(30);
+			const open = `\x1b]8;;file://${path}\x1b\\`;
+			const visible = lines.map((line) =>
+				line.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, ""),
+			);
+
+			assert.ok(lines.length > 2, `Expected the path to wrap: ${JSON.stringify(visible)}`);
+			for (const line of lines) {
+				assert.ok(line.includes(open), `Wrapped row lacks the full file URL: ${JSON.stringify(line)}`);
+			}
+			assert.strictEqual(visible.map((line) => line.trimEnd()).join(""), path);
+		});
+
+		it("should link local paths in plain text without their line suffix and leave slash commands plain", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			const joined = new Markdown("Run /model, then edit ~/notes/todo.md:12.", 0, 0, defaultMarkdownTheme)
+				.render(80)
+				.join("");
+
+			const url = pathToFileURL(join(homedir(), "notes/todo.md")).href;
+			assert.ok(joined.includes(`\x1b]8;;${url}\x1b\\~/notes/todo.md:12`), JSON.stringify(joined));
+			assert.strictEqual(joined.match(/\x1b\]8;;file:/g)?.length, 1, "Only the path should be linked");
 		});
 	});
 
