@@ -11,10 +11,11 @@ import { daemon } from "./daemon.ts";
 const context = BACKGROUND_CONTEXT;
 const connections: Connection[] = [];
 const dirs: string[] = [];
+// Deleting the large listing and watch-overflow trees takes longer than the default hook timeout on Windows.
 afterAll(() => {
 	for (const connection of connections) connection.close();
 	for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 });
-});
+}, 60_000);
 
 function environment(): { env: RemoteExecutionEnv; connection: Connection } {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-env-remote-"));
@@ -164,7 +165,7 @@ describe("RemoteExecutionEnv", () => {
 		expect([listed.entries.length, listed.truncated]).toEqual([10_100, false]);
 		const bounded = getOrThrow(await env.listFiles(".", { maxEntries: 5000 }, context));
 		expect([bounded.entries.length, bounded.truncated]).toEqual([5000, true]);
-	});
+	}, 30_000);
 
 	it("times out a command that produces no output", async () => {
 		const { env } = environment();

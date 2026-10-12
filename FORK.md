@@ -80,7 +80,12 @@ The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the is
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
 `background_command`, and no upstream publishing, binary (including Android APK) or
 issue-analysis workflows. Upstream's local `scripts/issues` triage tool is kept but unused. Nix builds
-follow upstream; its automatic catalog-pin commits and stable-branch promotion are upstream-only.
+follow upstream; its automatic catalog-pin commits and stable-branch promotion are upstream-only. The
+fork drops the Nix install check that loads esbuild, because upstream 7472cda0d removed esbuild from the
+install lock. Environments CI tests the darwin-x64 release daemon under x64 Node (Rosetta), the Node
+that loads it, because upstream's `nodePlatform` test compares the daemon's platform with Node's. Env
+remote tests allow Windows enough time to create and delete their large listing and watch trees. Drop
+each of these three deltas once upstream fixes the same failure.
 Contributor approvals remain fork-local; upstream approval-list additions and maintainer-specific
 label assignment/reopening rules are not imported.
 The fork uses upstream's install lock, not the removed npm shrinkwrap, and keeps its immutable
