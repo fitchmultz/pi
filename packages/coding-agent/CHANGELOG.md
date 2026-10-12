@@ -31,6 +31,7 @@
 
 ### Fixed
 
+- Fixed managed restarts crashing sessions whose journals contain legacy entry types, such as pre-1.0 fork `context_window` boundaries; capture now keeps them as opaque journal records. A restart whose final state capture still fails prints the error and the resume command instead of a stack trace.
 - Fixed retry omissions discarding valid context-usage anchors when their measured prefix is unchanged ([#10287](https://github.com/earendil-works/pi/issues/10287)); compaction estimates now include replayed thinking and tool-call signatures (estimate portion of [#9409](https://github.com/earendil-works/pi/issues/9409)), without charging text-only branch summaries and bug reports for unsent signatures.
 - Fixed repeated context-usage reads rescanning archived session history; reuse preserves native compaction, edit, branch, model-limit and reload/restore behavior.
 - Fixed no-op `turn_end` and `agent_before_settle` handlers copying archived session history for unread context previews; changed and mutable nonempty drafts retain eager validation.

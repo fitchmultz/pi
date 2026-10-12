@@ -261,22 +261,8 @@ function validateWorkingSession(value: unknown): WorkingSession {
 		)
 			fail();
 		if (entry.parentId !== null && (typeof entry.parentId !== "string" || !ids.has(entry.parentId))) fail();
-		if (
-			![
-				"message",
-				"thinking_level_change",
-				"model_change",
-				"usage",
-				"compaction",
-				"branch_summary",
-				"custom",
-				"label",
-				"session_info",
-				"custom_message",
-				"context_edit",
-			].includes(entry.type)
-		)
-			fail();
+		// Other types, such as pre-1.0 fork `context_window` boundaries, round-trip as opaque journal records
+		// because the session loader keeps them; the restored journal must still match the file byte for byte.
 		switch (entry.type) {
 			case "message":
 				if (!message(entry.message)) fail();

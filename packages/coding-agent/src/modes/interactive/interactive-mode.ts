@@ -4487,15 +4487,23 @@ export class InteractiveMode {
 		if (!restarting) await this.ui.terminal.drainInput(1000);
 
 		this.stop();
-		await this.runtimeHost.dispose();
-		await this.options?.managedRestart?.completeShutdown();
+		let restartFailure: string | undefined;
+		try {
+			await this.runtimeHost.dispose();
+			await this.options?.managedRestart?.completeShutdown();
+		} catch (error) {
+			if (!restarting) throw error;
+			// The TUI and extensions are already shut down; the saved journal is intact, so point at resume.
+			restartFailure = error instanceof Error ? error.message : String(error);
+			process.stderr.write(`${chalk.red(`Restart failed: ${restartFailure}`)}\n`);
+		}
 
 		const resumeCommand = formatResumeCommand(this.sessionManager);
-		if (resumeCommand && !restarting) {
+		if (resumeCommand && (!restarting || restartFailure)) {
 			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
 		}
 
-		process.exit(0);
+		process.exit(restartFailure ? 1 : 0);
 	}
 
 	private emergencyTerminalExit(): never {

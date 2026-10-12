@@ -953,6 +953,47 @@ describe("Native working sessions", () => {
 		}
 	});
 
+	it("round-trips legacy fork journal entry types through a restart handoff", async () => {
+		const dir = realpathSync(mkdtempSync(join(tmpdir(), "pi-working-legacy-")));
+		try {
+			const seed = SessionManager.create(dir, dir);
+			const first = seed.appendMessage({ role: "user", content: "before", timestamp: 1 });
+			// Long-lived journals keep pre-1.0 fork context-window boundaries; capture used to reject them.
+			const legacy = {
+				type: "context_window",
+				id: "legacy01",
+				parentId: first,
+				timestamp: "2026-09-28T13:46:28.898Z",
+				handoff: "Continue",
+			};
+			const last = { ...seed.getEntry(first)!, id: "after001", parentId: legacy.id };
+			const file = join(dir, "legacy.jsonl");
+			writeFileSync(
+				file,
+				`${[seed.getHeader(), seed.getEntry(first), legacy, last].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+			);
+			const h = await createHarness({ sessionManager: SessionManager.open(file, dir) });
+			harnesses.push(h);
+			const hold = await h.session.acquireWorkingSession();
+			await hold.release();
+			const statePath = join(dir, "working-session.json");
+			writeWorkingSession(statePath, hold.state);
+			const { session } = await createAgentSession({
+				workingSession: statePath,
+				modelRuntime: h.session.modelRuntime,
+				resourceLoader: h.session.resourceLoader,
+			});
+			try {
+				expect(session.sessionManager.getEntry(legacy.id)).toEqual(legacy);
+				expect(session.sessionManager.getLeafId()).toBe(last.id);
+			} finally {
+				session.dispose();
+			}
+		} finally {
+			rmSync(dir, { recursive: true });
+		}
+	});
+
 	it.each(["write", "load", "write then reload"])(
 		"keeps unresolved settings %s failure after diagnostics are drained",
 		async (kind) => {
