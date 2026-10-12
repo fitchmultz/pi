@@ -471,7 +471,8 @@ export class ModelRuntime implements Models {
 			if (provider) view.setProvider(provider);
 			const [availability, credential] = await Promise.all([
 				view.getAvailability({ signal }),
-				this.credentials.read(providerId, { signal }),
+				// Isolated providers must not resolve ignored stored keys, which may run a secret-manager command.
+				this.modelCredentials.read(providerId, { signal }),
 			]);
 			signal.throwIfAborted();
 			const error = availability.errors.get(providerId);
