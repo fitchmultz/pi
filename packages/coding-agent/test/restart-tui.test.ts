@@ -69,10 +69,11 @@ function fixture(rootDir = tmpdir()) {
 				restartCommand?: string;
 				holdWork?: boolean;
 				settledFollowup?: boolean;
+				failSave?: boolean;
 				nested?: { probe: string; command: string; exitPath: string };
 			} = {},
 		) {
-			const { restartCommand, holdWork, settledFollowup, nested } = options;
+			const { restartCommand, holdWork, settledFollowup, failSave, nested } = options;
 			const path = join(root, `${version}.ts`);
 			writeFileSync(
 				path,
@@ -114,6 +115,7 @@ export default function(pi) {
   record('settled',ctx,{calls:faux.state.callCount});
  });
  pi.on('session_shutdown', async (_event,ctx) => { await new Promise(r=>setTimeout(r,50)); record('shutdown',ctx); });
+ ${failSave ? "pi.on('working_session_save', () => { throw new Error('save hook failed'); });" : ""}
 }
 `,
 			);
@@ -467,6 +469,21 @@ export default function(pi) {
 				.at(-1)?.text,
 		).toBe("[Restart continuation]\nSlash continuation");
 		expect(f.read().filter((r) => r.event === "work")).toHaveLength(2);
+	}, 60_000);
+
+	it("reports a failed restart capture with a resume command instead of crashing", async () => {
+		const f = fixture();
+		f.start(f.extension("v1", { failSave: true }));
+		await f.wait((r) => r.some((x) => x.event === "settled"));
+		f.keys("/restart Must not run", "Enter");
+		await f.wait(() => existsSync(f.status));
+		expect(readFileSync(f.status, "utf8").trim()).toBe("1");
+		const screen = f.screen();
+		expect(screen).toContain("Restart failed:");
+		expect(screen).toContain("save hook failed");
+		expect(screen).toContain("To resume this session:");
+		expect(screen).not.toContain("    at ");
+		expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
 	}, 60_000);
 
 	it.each(["interrupt", "draft"])(
