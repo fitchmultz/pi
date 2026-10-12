@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AssistantMessage, OAuthCredential } from "@earendil-works/pi-ai";
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { describe, expect, it, vi } from "vitest";
@@ -116,6 +119,29 @@ describe("provider credential isolation (#146)", () => {
 			expect((await runtime.getAuth("openai-codex"))?.auth.apiKey).toBe("new");
 			await runtime.logout("openai-codex");
 			expect(await credentials.read("openai-codex")).toBeUndefined();
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"never runs an ignored command-backed stored key during refresh",
+		async () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-credential-isolation-"));
+			const marker = join(dir, "resolved");
+			try {
+				// Resolving this key would run the standalone account's secret-manager command.
+				const credentials = AuthStorage.inMemory({
+					"openai-codex": { type: "api_key", key: `!touch '${marker}' && echo standalone` },
+				});
+				const runtime = await ModelRuntime.create({ credentials, modelsPath: null, refreshOnCreate: false });
+				runtime.registerProvider("openai-codex", { ignoreStoredCredentials: true, apiKey: "routing-placeholder" });
+				expect((await runtime.refresh({ allowNetwork: false, providers: ["openai-codex"] })).errors.size).toBe(0);
+				await runtime.refresh({ allowNetwork: false });
+				expect(existsSync(marker)).toBe(false);
+				expect(runtime.getProviderAuthStatus("openai-codex")).toEqual({ configured: true, source: "fallback" });
+				expect((await runtime.getAvailable("openai-codex")).length).toBeGreaterThan(0);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
 		},
 	);
 });

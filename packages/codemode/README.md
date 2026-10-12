@@ -49,7 +49,7 @@ await sandbox.close();
 - `tools.<name>(args)` returns a promise. Arguments and results make a JSON round trip. A tool that throws rejects with an `Error` carrying the same message. Tool names are also exposed as identifiers: characters that are not valid in identifiers become `_` (`toCodemodeIdentifier`), so `my-tool` is `tools.my_tool` as well as `tools["my-tool"]`.
 - `ALL_TOOLS` lists `{ name, description }` for every tool, with `name` as the identifier.
 - `text(value)` appends a text item to `result.output`; values other than strings are JSON-stringified. `console.log/info/warn/error/debug` append text items with `console: true`.
-- `image(urlOrItem)` appends an image item. It accepts a base64 `data:` URL, `{ image_url }`, or an MCP `ImageContent` block (`{ type: "image", data, mimeType }`). Remote URLs are rejected.
+- `image(urlOrItem)` appends an image item. It accepts a base64 `data:` URL, `{ image_url }`, or an image block (`{ type: "image", data, mimeType }`, as MCP tools and `@earendil-works/pi-ai` produce). Remote URLs are rejected.
 - `exit()` ends the script successfully right away, keeping its output and store writes.
 - `globals` passed to the sandbox are called as top-level functions, for example a host helper `image(ref)`. They behave like tools but are not recorded in `result.calls`. A name like `models.classify` puts the function on a frozen `models` object. With `spread: true`, `execute` receives all call arguments as an array instead of the first one, and `signature` replaces the declaration generated from the schemas.
 - `store(key, value)` and `load(key)` read and write JSON values synchronously. See [Store](#store).
@@ -85,7 +85,7 @@ const source = await tools.read({ path: "package.json" });
 text(JSON.parse(source).name);
 ```
 
-Supported fields are `max_output_tokens`, a token budget for the output, and `timeout_ms`, a hard deadline. The sandbox does not act on them; the caller decides. The options line is replaced by an empty line, so line numbers in stack traces still match the input. Empty input, invalid JSON, unknown fields, or an options line without code throw `CodemodeSourceError`. `CODEMODE_SOURCE_GRAMMAR` is a Lark grammar for providers that support grammar-constrained tool input. Both are also available from the lightweight `@earendil-works/pi-codemode/source` entry.
+Supported fields are `max_output_tokens`, a token budget for the output, and `timeout_ms`, a hard deadline. The sandbox does not act on them; the caller decides. The options line is replaced by an empty line, so line numbers in stack traces still match the input. Empty input, invalid JSON, unknown fields, an options line without code, or an options line on any line but the first throw `CodemodeSourceError`. `CODEMODE_SOURCE_GRAMMAR` is a Lark grammar for providers that support grammar-constrained tool input. Both are also available from the lightweight `@earendil-works/pi-codemode/source` entry.
 
 ## Bundled Node and Bun hosts
 

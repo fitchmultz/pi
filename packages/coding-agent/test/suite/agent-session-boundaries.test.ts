@@ -765,6 +765,38 @@ describe("AgentSession actionable boundaries", () => {
 		// #10607: settlement reports the abort although the last response succeeded.
 		expect(harness.eventsOfType("agent_settled")).toEqual([{ type: "agent_settled", aborted: true }]);
 	});
+
+	it("exposes cancellation during run setup to before_agent_start handlers", async () => {
+		const started = deferred();
+		const release = deferred();
+		let setupSignal: AbortSignal | undefined;
+		let handlerContext: { readonly signal: AbortSignal | undefined } | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async (_event, ctx) => {
+						setupSignal = ctx.signal;
+						handlerContext = ctx;
+						started.resolve();
+						await release.promise;
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("aborted before streaming")]);
+
+		const prompt = harness.session.prompt("start");
+		await started.promise;
+		expect(setupSignal?.aborted).toBe(false);
+		const abort = harness.session.abort();
+		expect(setupSignal?.aborted).toBe(true);
+		release.resolve();
+		await Promise.all([prompt, abort]);
+
+		expect(harness.eventsOfType("agent_settled")).toEqual([{ type: "agent_settled", aborted: true }]);
+		expect(handlerContext?.signal).toBeUndefined();
+	});
 });
 
 describe("durable length recovery", () => {

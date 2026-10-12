@@ -22,7 +22,13 @@ if [[ $# -gt 0 ]]; then
 fi
 
 # Isolate user resources, credentials, temporary files, and tool configuration.
-temp_parent="${TMPDIR:-/tmp}"
+# macOS's per-user TMPDIR is long enough that Unix sockets under the isolated tmp
+# exceed the 104-byte path limit, so use /tmp there.
+if [[ "$(uname -s)" == Darwin ]]; then
+	temp_parent=/tmp
+else
+	temp_parent="${TMPDIR:-/tmp}"
+fi
 temp_parent="${temp_parent%/}"
 test_root="$(mktemp -d "$temp_parent/pi-test.XXXXXX")"
 git_askpass="$(type -P false)"

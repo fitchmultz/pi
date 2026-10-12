@@ -1,4 +1,4 @@
-import type { JsonValue } from "../types.ts";
+import type { JsonValue } from "../json.ts";
 
 type JsonContainer = JsonValue[] | Record<string, JsonValue>;
 
@@ -55,9 +55,6 @@ function assertPlainObject(value: object): void {
 }
 
 function assertDenseArray(value: readonly unknown[]): void {
-	if (Object.getPrototypeOf(value) !== Array.prototype) {
-		throw new TypeError("Replicated state containers must be plain objects or arrays");
-	}
 	const keys = Reflect.ownKeys(value);
 	if (keys.length !== value.length + 1 || keys.some((key) => typeof key !== "string")) {
 		throw new TypeError("Replicated state arrays must be dense and contain only indexed entries");
