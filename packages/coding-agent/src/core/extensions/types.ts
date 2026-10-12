@@ -350,7 +350,7 @@ export interface ExtensionContext {
 	isIdle(): boolean;
 	/** Whether project-local trust is active for this context. */
 	isProjectTrusted(): boolean;
-	/** The active loop's abort signal, or the activity signal during post-run recovery and pre-settlement. Undefined when idle. */
+	/** The active loop's abort signal, or the activity signal during run setup, post-run recovery and pre-settlement. Undefined when idle. */
 	signal: AbortSignal | undefined;
 	/** Abort the current agent operation */
 	abort(): void;
@@ -536,6 +536,11 @@ export interface ToolAnnotations {
 export interface ToolNamespace {
 	/** For example `mcp__docs`. */
 	name: string;
+	/**
+	 * Other names that refer to the namespace where tools look it up by name (codemode's
+	 * `describeNamespace()` and the `namespace` option of `searchTools()`), for example `docs`.
+	 */
+	aliases?: readonly string[];
 	/** Short summary shown once with the group in model-facing tool listings. */
 	description?: string;
 	/**
@@ -607,6 +612,15 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 
 	/** Group the tool belongs to, for example its MCP server. */
 	namespace?: ToolNamespace;
+
+	/**
+	 * For tools that reach other tools (such as `codemode`, which calls them, and `tool_search`, which
+	 * loads them): which tools a call with `input` may reach. `"all"`, or the words of the input that
+	 * may name them, where a word refers to a tool or namespace whose name it contains, so words may
+	 * over-match. Extensions that register tools late, such as MCP servers that are still connecting,
+	 * use it from their `tool_call` handler to finish registering those tools before the call runs.
+	 */
+	reachesTools?: (input: Record<string, unknown>) => "all" | readonly string[];
 
 	/** Hints about what the tool does, for example from an MCP server. */
 	annotations?: ToolAnnotations;
@@ -917,18 +931,32 @@ export interface ProviderStreamEvent {
 	data: unknown;
 }
 
-/** Fired after user submits prompt but before agent loop. */
-export interface BeforeAgentStartEvent {
+interface BeforeAgentStartEventBase {
 	type: "before_agent_start";
-	/** The raw user prompt text (after expansion). */
-	prompt: string;
-	/** Images attached to the user prompt, if any. */
-	images?: ImageContent[];
 	/** The current system prompt, rendered from systemPromptOptions and earlier handler changes. */
 	readonly systemPrompt: string;
 	/** Mutable prompt sections. Later handlers observe mutations made by earlier handlers. */
 	systemPromptOptions: NormalizedBuildSystemPromptOptions;
 }
+
+/** A run started by a submitted prompt, RPC prompt, or `pi.sendUserMessage()`. */
+export interface BeforeAgentStartUserEvent extends BeforeAgentStartEventBase {
+	messageType: "user";
+	/** The raw user prompt text (after expansion). */
+	prompt: string;
+	/** Images attached to the user prompt, if any. */
+	images?: ImageContent[];
+}
+
+/** A run started by `pi.sendMessage(..., { triggerTurn: true })` while idle. */
+export interface BeforeAgentStartCustomEvent extends BeforeAgentStartEventBase {
+	messageType: "custom";
+	/** The custom message that starts the run. */
+	message: CustomMessage;
+}
+
+/** Fired before a run starts from a user message or an idle custom message with `triggerTurn`. */
+export type BeforeAgentStartEvent = BeforeAgentStartUserEvent | BeforeAgentStartCustomEvent;
 
 /** Fired when an agent loop starts */
 export interface AgentStartEvent {
@@ -2112,7 +2140,10 @@ export type GetSessionNameHandler = () => string | undefined;
 export type GetActiveToolsHandler = () => string[];
 
 /** Tool info with name, description, parameter schema, prompt guidelines, and source metadata. */
-export type ToolInfo = Pick<ToolDefinition, "name" | "description" | "parameters" | "promptGuidelines"> & {
+export type ToolInfo = Pick<
+	ToolDefinition,
+	"name" | "description" | "parameters" | "promptGuidelines" | "reachesTools"
+> & {
 	exposure: ToolExposure;
 	namespace?: ToolNamespace;
 	annotations?: ToolAnnotations;

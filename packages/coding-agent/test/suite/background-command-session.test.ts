@@ -276,9 +276,16 @@ describe("background command extension delivery", () => {
 			},
 		]);
 		await h.session.prompt("Start");
+		// Another extension's notice starts a custom-message run; only user input clears wake suppression.
+		h.setResponses([fauxAssistantMessage("Noted")]);
+		await h.session.sendCustomMessage(
+			{ customType: "other-extension", content: "Unrelated notice", display: false },
+			{ triggerTurn: true },
+		);
+		expect(h.faux.state.callCount).toBe(3);
 		await finish(h, release);
 		await until(() => notices(h).length === 1);
-		expect(h.faux.state.callCount).toBe(2);
+		expect(h.faux.state.callCount).toBe(3);
 		h.setResponses([fauxAssistantMessage("Continued")]);
 		await h.session.prompt("Continue");
 		expect(notices(h)).toHaveLength(1);

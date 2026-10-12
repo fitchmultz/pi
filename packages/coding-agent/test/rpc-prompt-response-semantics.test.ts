@@ -336,7 +336,7 @@ describe("RPC prompt response semantics", () => {
 							});
 						} else {
 							pi.on("before_agent_start", (event) => {
-								if (event.prompt === "repair") pi.registerTool(savedTool);
+								if (event.messageType === "user" && event.prompt === "repair") pi.registerTool(savedTool);
 							});
 						}
 					},

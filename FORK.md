@@ -1,8 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `4270522473e677ddba7b093caa0064a3df51d459`
-(2026-10-11), an unreleased snapshot after v1.1.0 `abe508e1b`. It is upstream plus the features
+v1.0.0 and synchronized through upstream `b6d505cd1f00ce7f8eecf5134c4f048d0d3ae852`
+(2026-10-12), an unreleased snapshot after v1.1.0 `abe508e1b`. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -20,8 +20,8 @@ all-platform qualification.
 | JSON `read`: selection before paging/truncation, inherited by native factory consumers | `core/tools/{read,read-json}.ts` | `read-json.test.ts` | [SDK](packages/coding-agent/docs/sdk.md#json-selection-with-read) |
 | Compact activity: regroup native cards without replacing the whole TUI | `modes/interactive/{interactive-mode,components/activity}.ts`, card renderers, `core/settings-manager.ts` | `compact-view.test.ts`, `suite/regressions/compact-view.test.ts` | [Settings](packages/coding-agent/docs/settings.md) |
 | Immutable fork update: exact source/catalog, frozen install and guarded selection | `utils/{fork-update,fork-release-store}.ts`, `scripts/install-fork.mjs` | `fork-update.test.ts`, `scripts/install-fork.test.mjs` | [Install and activate](#install-and-activate) |
-| Termux: compiler/environment handling and short control-socket paths | `scripts/install-fork.mjs`, `test.sh`, `cli/restart-protocol.ts`, `experimental/server.ts` | `scripts/install-fork.test.mjs`, `restart-control.test.ts`; device activation is separate | [Termux](packages/coding-agent/docs/termux.md) |
-| Complete working state: native admission, all branches/queues/mode buffers and completed-exit attestation | `core/{working-session,agent-session,sdk,agent-session-services}.ts`, `cli/working-session-control.ts`, native mode/builtin bindings | `suite/working-session.test.ts`, `suite/working-session-cli.test.ts` | [Working sessions](packages/coding-agent/docs/working-session.md) |
+| Termux: compiler/environment handling and short control-socket paths | `scripts/install-fork.mjs`, `test.sh`, `cli/restart-protocol.ts` | `scripts/install-fork.test.mjs`, `restart-control.test.ts`; device activation is separate | [Termux](packages/coding-agent/docs/termux.md) |
+| Complete working state: native admission, all branches/queues/mode buffers and completed-exit attestation; strict plain-JSON snapshots use Chord's checker with a container hook, so coding-agent keeps its `@earendil-works/chord` dependency after upstream dropped it | `core/{working-session,agent-session,sdk,agent-session-services}.ts`, `cli/working-session-control.ts`, native mode/builtin bindings, `packages/chord/src/json.ts` (`CheckJsonOptions`) | `suite/working-session.test.ts`, `suite/working-session-cli.test.ts`, `packages/chord/test/json.test.ts` | [Working sessions](packages/coding-agent/docs/working-session.md) |
 | Credential isolation: routing providers must not read unrelated stored credentials | `core/model-runtime.ts`, provider registration types/adapter | `provider-credential-isolation.test.ts` | [Custom providers](packages/coding-agent/docs/custom-provider.md) |
 | Auth fallback: ephemeral credentials without replacing native provider/catalog/transport | `core/{model-runtime,provider-composer}.ts`, `core/extensions/provider-registrations.ts` | `model-runtime-auth-options.test.ts` | [Auth fallback](packages/coding-agent/docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider) |
 | Opt-in slow diagnostics: native synchronous handlers and footer frames need dispatch attribution | `core/extensions/{runner,wrapper}.ts`; `PI_EXTENSION_PERFORMANCE=1` | `extensions-performance.test.ts` | [Extensions](packages/coding-agent/docs/extensions.md#opt-in-performance-warnings) |
@@ -36,6 +36,7 @@ Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
 Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
+The Chord service-hydration array check ([#10509](https://github.com/earendil-works/pi/issues/10509)) was retired with upstream's Chord 2 runtime: the service runtime is gone, and every link, including the in-memory one, JSON-round-trips frames.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
 [Codemode](packages/codemode/CHANGELOG.md#unreleased) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
 
@@ -52,13 +53,12 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Mistral's header deadline must stop after headers with or without a caller signal; caller cancellation must still stop SSE and held-open HTTP-error bodies ([#10609](https://github.com/earendil-works/pi/issues/10609)) | `packages/ai/src/api/mistral-conversations.ts` | `packages/ai/test/mistral-http-transport.test.ts` |
 | Failed terminal responses must preserve consumed numeric usage and error details | `packages/ai/src/api/{openai-responses-shared,openai-codex-responses}.ts` | `packages/ai/test/{openai-responses-terminal-event,openai-codex-stream}.test.ts` |
 | Astra Ultrafast and legacy Codex Fast estimates need correct tier/confirmation rules | `packages/ai/src/api/{openai-responses,openai-codex-responses}.ts` | `packages/ai/test/openai-ultrafast-pricing.test.ts` |
-| Anthropic strict limits apply across initial and inline definitions, including required schemas | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/anthropic-strict-tool-schema.test.ts` |
+| Anthropic strict limits apply across initial and inline definitions, including required schemas. Upstream's one-time fallback after a rejected request stays for limits a count cannot predict, such as compiled grammar size; alone it would spend a rejected request on every over-limit turn and drop strict mode for all preferred tools | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/anthropic-strict-tool-{schema,fallback}.test.ts` |
 | Optional nulls inside schema unions must not be coerced into fabricated values | `packages/ai/src/utils/validation.ts` | `packages/ai/test/validation.test.ts` |
 | DNS root dots must not bypass `NO_PROXY` | `packages/ai/src/utils/node-http-proxy.ts` | `packages/ai/test/node-http-proxy.test.ts` |
 | Fractional/overflowed zero retry delays must not become a minute; completed backoffs must release abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)) | `packages/ai/src/utils/retry.ts` | `packages/ai/test/retry.test.ts` |
 | Radius gateway pricing must have finite rates and tiers before cost estimation ([#10507](https://github.com/earendil-works/pi/issues/10507)) | `packages/ai/src/providers/radius-config.ts` | `packages/ai/test/radius-provider.test.ts` |
 | Abort tests must check the terminal result and follow-up rather than pass early ([#10508](https://github.com/earendil-works/pi/issues/10508)); this is test-only, not a provider cancellation fix | `packages/ai/test/abort.test.ts` | Offline faux-provider case in the same file |
-| Chord in-process service hydration must reject non-plain arrays ([#10509](https://github.com/earendil-works/pi/issues/10509)) | `packages/chord/src/delta/revision-validator.ts` | `packages/chord/test/services.test.ts` |
 | Codemode string store keys must round-trip as own data properties, including `__proto__`, on every sandbox backend ([#10510](https://github.com/earendil-works/pi/issues/10510)) | `packages/codemode/src/runtime/execution.ts` | `packages/codemode/test/sandbox.test.ts` |
 | An oversized Env watch change must report `overflow` instead of stopping the daemon's output writer ([#10516](https://github.com/earendil-works/pi/issues/10516)) | `packages/env/daemon/src/watch.rs` | `packages/env/test/remote.test.ts` |
 | Equivalent known-hosts path spellings must serialize accept/forget rewrites ([#10517](https://github.com/earendil-works/pi/issues/10517)) | `packages/env/src/ssh.ts`, `packages/env/test/ssh.test.ts` | `packages/env/test/ssh.test.ts` |
@@ -72,7 +72,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Empty quoted arguments must not shift template positions | `core/prompt-templates.ts` | `prompt-templates.test.ts` |
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
 | Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
-| Extension cancellation must remain observable through post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
+| Extension cancellation must remain observable through run setup, post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
 | Repeated context-usage reads must reuse the last scalar without rescanning archived ancestry; native leaf identity and effective model limits preserve compaction, edits, branches and reload/restore behavior | `core/agent-session.ts` | `suite/agent-session-context-usage.test.ts` |
 | No-op boundary handlers must not copy archived history for unread previews; mutable nonempty drafts still need eager validation. The undocumented `emitBoundary` preview builder is synchronous so `event.context` can materialize on first read | `core/extensions/runner.ts`, `core/agent-session.ts` | `extensions-runner.test.ts`, `suite/agent-session-boundaries.test.ts` |
 
@@ -115,7 +115,7 @@ estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)). Claude 5.5 pri
 models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`
-owner, not the user-only run hook. Forced text stays run-scoped and unpersisted. Child
+owner, not the per-run `before_agent_start` hook. Forced text stays run-scoped and unpersisted. Child
 finalization recovery remains a conditional source risk: managed saved-session attempts create
 new contracts, and no reachable unchanged-contract reset was reproduced. Do not restore an old
 phase for a new contract or apply a speculative recovery patch. Passive tracing records unknown
@@ -237,7 +237,8 @@ only complete current native state, with no journal-only or pre-v1 handoff fallb
 - `npm run check` after code changes.
 - `./test.sh` runs all non-e2e tests offline in an isolated home; `./test.sh -- <command>` runs a
   focused command the same way. Node and npm resolve before HOME isolation so version-manager
-  shims keep working.
+  shims keep working. On macOS the isolated root lives under `/tmp`: the per-user `TMPDIR` pushes
+  Unix socket paths, such as Chord's host-manager locks, past the 104-byte limit.
 - `./test.sh` keeps the caller's `PATH`. If GNU coreutils' `gnubin` comes before `/bin`, Env's
   foreground-job test sees `gsleep` instead of `sleep`. Remove `gnubin` from `PATH` and unset
   `BASH_ENV` when it re-adds it, for example `env -u BASH_ENV PATH=<PATH without gnubin> ./test.sh`.

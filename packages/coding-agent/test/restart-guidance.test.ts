@@ -252,15 +252,15 @@ describe("actual managed restart guidance", () => {
 		},
 	);
 	it.each(["idle", "deferred"] as const)(
-		"keeps the serialized head across %s wake, tools, and next user without extra hooks",
+		"keeps the serialized head across %s wake, tools, and next user with one hook per run",
 		async (delivery) => {
-			let hooks = 0;
+			const hooks: string[] = [];
 			let queued = false;
 			const f = await managedFixture({
 				extensions: [
 					(pi) => {
-						pi.on("before_agent_start", () => {
-							hooks++;
+						pi.on("before_agent_start", (event) => {
+							hooks.push(event.messageType);
 						});
 						pi.on("agent_settled", () => {
 							if (delivery === "deferred" && !queued) {
@@ -278,10 +278,10 @@ describe("actual managed restart guidance", () => {
 			await f.h.session.prompt("Seed");
 			if (delivery === "idle") await f.wake();
 			await f.h.session.waitForIdle();
-			expect(hooks).toBe(1);
+			expect(hooks).toEqual(["user", "custom"]);
 			f.faux.setResponses([f.response()]);
 			await f.h.session.prompt("Next user");
-			expect(hooks).toBe(2);
+			expect(hooks).toEqual(["user", "custom", "user"]);
 			expect(f.requests).toHaveLength(4);
 			for (const request of f.requests) restartSection(request);
 			expect(f.h.session.messages.filter((m) => m.role === "custom" && m.customType === "wake")).toHaveLength(1);
@@ -297,53 +297,53 @@ describe("actual managed restart guidance", () => {
 		await f.wake();
 		const file = f.h.sessionManager.getSessionFile()!;
 		await f.close();
-		let hooks = 0;
+		const hooks: string[] = [];
 		const reopened = await managedFixture({
 			sessionFile: file,
 			extensions: [
 				(pi) => {
-					pi.on("before_agent_start", () => {
-						hooks++;
+					pi.on("before_agent_start", (event) => {
+						hooks.push(event.messageType);
 					});
 				},
 			],
 		});
 		await reopened.wake();
-		expect(hooks).toBe(0);
+		expect(hooks).toEqual(["custom"]);
 		expect(f.requests).toHaveLength(3);
 		expect(reopened.requests).toHaveLength(2);
 		for (const request of [...f.requests, ...reopened.requests]) restartSection(request);
 		await expectStableRequests([...f.requests, ...reopened.requests]);
 	});
 
-	it("supplies guidance on a fresh custom request without claiming full base initialization", async () => {
-		let hooks = 0;
+	it("supplies guidance and base sections from the first request of a fresh custom run", async () => {
+		const hooks: string[] = [];
 		const f = await managedFixture({
 			extensions: [
 				(pi) => {
-					pi.on("before_agent_start", () => {
-						hooks++;
+					pi.on("before_agent_start", (event) => {
+						hooks.push(event.messageType);
 					});
 				},
 			],
 		});
 		await f.wake();
-		expect(hooks).toBe(0);
+		expect(hooks).toEqual(["custom"]);
 		expect(f.requests).toHaveLength(2);
 		for (const request of f.requests) restartSection(request);
-		const captures = await payloads(f.requests, "openai-completions");
-		// Separate native ceiling: base sections still arrive only after the fresh custom tool batch.
-		expect(captures[1].messages?.[0]).not.toEqual(captures[0].messages?.[0]);
+		// Custom-message runs prepare the full prompt before their first request (#10739), so the head stays stable.
+		await expectStableRequests(f.requests);
 	});
 
 	it("appends actual guidance exactly once to post-hook forced text, never persists or revives it", async () => {
-		let hooks = 0;
+		const hooks: string[] = [];
 		const f = await managedFixture({
 			extensions: [
 				(pi) => {
 					pi.on("before_agent_start", (event) => {
-						hooks++;
-						if (event.prompt === "Force") event.systemPromptOptions.forceSystemPrompt = "Exact forced text.";
+						hooks.push(event.messageType);
+						if (event.messageType === "user" && event.prompt === "Force")
+							event.systemPromptOptions.forceSystemPrompt = "Exact forced text.";
 					});
 				},
 			],
@@ -358,7 +358,7 @@ describe("actual managed restart guidance", () => {
 		for (const request of f.requests.slice(1)) expect(getCurrentSystemPrompt(request.messages)).toBe(postHook);
 		expect(readFileSync(f.h.sessionManager.getSessionFile()!, "utf8")).not.toContain("Exact forced text.");
 		await f.wake();
-		expect(hooks).toBe(2);
+		expect(hooks).toEqual(["user", "user", "custom"]);
 		expect(f.requests).toHaveLength(5);
 		for (const request of f.requests.slice(3)) {
 			restartSection(request);

@@ -202,8 +202,10 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 				.findLast((entry) => entry.type === "custom" && entry.customType === RUN_STATE);
 			wakeSuppressed = state?.type === "custom" && state.data === true;
 		});
-		pi.on("before_agent_start", (_event, ctx) => {
+		pi.on("before_agent_start", (event, ctx) => {
 			start(ctx);
+			// Only user input clears wake suppression; extension messages also start runs.
+			if (event.messageType !== "user") return;
 			if (wakeSuppressed) pi.appendEntry(RUN_STATE, false);
 			wakeSuppressed = false;
 		});

@@ -26,7 +26,7 @@ if (args.some((arg) => arg !== "--offline")) {
 const root = realpathSync.native(fileURLToPath(new URL("../", import.meta.url)));
 for (const name of [
 	"chord", "tui", "telemetry", "codemode", "mcp", "ai", "durable",
-	"env", "agent", "protocol", "client", "server", "coding-agent",
+	"env", "agent", "coding-agent",
 ]) {
 	const cwd = join(root, "packages", name);
 	const script = name === "ai" && args.includes("--offline") ? "build:offline" : "build";

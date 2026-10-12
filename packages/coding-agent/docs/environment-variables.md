@@ -88,7 +88,7 @@ These variables are read by Pi itself:
 | `PI_CACHE_TRACE_DIR` | Opt in to temporary private, metadata-only native cache tracing; see [Passive cache investigation](cache-tracing.md) for limits, coverage and cleanup |
 | `PI_EXTENSION_PERFORMANCE` | Set to `1` to enable slow-handler and footer-render warnings; off by default. See [Extensions](extensions.md#opt-in-performance-warnings) |
 | `PI_SHARE_VIEWER_URL` | Override the base URL used by `/share` |
-| `PI_RADIUS_GATEWAY` | Override the Radius gateway origin used by `/bug` uploads and Radius relay connections |
+| `PI_RADIUS_GATEWAY` | Override the Radius gateway origin used by `/bug` uploads |
 | `PI_HARDWARE_CURSOR` | Set to `1` to show the hardware cursor; see [Terminal setup](terminal-setup.md) |
 | `PI_HYPERLINKS` | Override OSC 8 hyperlink detection with `1`, `0`, or `auto` |
 | `PI_PROGRAM_STATUS` | Override OSC 7501 program status detection: `1` always reports, `0` never reports; otherwise Pi reports only after the terminal confirms support. See [Terminal setup](terminal-setup.md#program-status) |
