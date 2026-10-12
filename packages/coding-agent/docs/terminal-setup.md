@@ -208,6 +208,8 @@ pi
 
 Pi automatically detects OSC 8 hyperlinks, inline image protocols, and truecolor support. A terminal proxy or multiplexer can make that detection inaccurate.
 
+With hyperlinks enabled, Markdown links, URLs in inline code, and absolute or `~/` file paths with at least two segments are OSC 8 links, so they stay clickable after wrapping. Paths open as `file://` URLs without any `:line` suffix.
+
 | Capability | Environment variable | Setting |
 |---|---|---|
 | Hyperlinks | `PI_HYPERLINKS=1\|0\|auto` | `terminal.hyperlinks: true\|false\|"auto"` |

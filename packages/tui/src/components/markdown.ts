@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
 import { renderLatex } from "../latex.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
@@ -5,6 +7,21 @@ import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
+
+// Terminals regex-match links within one row, so a wrapped path or URL is only clickable as an OSC 8 hyperlink.
+const LINKABLE_TEXT_REGEX = /(?<=^|[\s(["'<=])(?:https?:\/\/|~?\/)[^\s"'<>`]*[^\s"'<>`.,;:!?)\]}]/g;
+
+function linkTarget(text: string): string | undefined {
+	if (/^https?:\/\//.test(text)) {
+		return text;
+	}
+	// Require two segments so slash commands like /model stay plain; drop editor-style :line[:column] suffixes.
+	const path = text.replace(/(?::\d+){1,2}$/, "");
+	if (!/^(?:~|\/[^/]+)\/[^/]/.test(path)) {
+		return undefined;
+	}
+	return pathToFileURL(path.startsWith("~/") ? homedir() + path.slice(1) : path).href;
+}
 
 class StrictStrikethroughTokenizer extends Tokenizer {
 	override del(src: string): Tokens.Del | undefined {
@@ -241,6 +258,7 @@ export class Markdown implements Component {
 	private theme: MarkdownTheme;
 	private options: MarkdownOptions;
 	private defaultStylePrefix?: string;
+	private renderingLinkText = false;
 
 	// Cache for rendered output
 	private cachedText?: string;
@@ -461,6 +479,27 @@ export class Markdown implements Component {
 		};
 	}
 
+	/** Style text, wrapping local paths and URLs in OSC 8 hyperlinks so every wrapped row stays clickable. */
+	private renderLinkableText(text: string, style: (text: string) => string): string {
+		if (this.renderingLinkText || !getCapabilities().hyperlinks) {
+			return style(text);
+		}
+		let result = "";
+		let start = 0;
+		for (const match of text.matchAll(LINKABLE_TEXT_REGEX)) {
+			const target = linkTarget(match[0]);
+			if (!target) {
+				continue;
+			}
+			if (match.index > start) {
+				result += style(text.slice(start, match.index));
+			}
+			result += hyperlink(style(match[0]), target);
+			start = match.index + match[0].length;
+		}
+		return start < text.length ? result + style(text.slice(start)) : result;
+	}
+
 	private renderToken(
 		token: Token,
 		width: number,
@@ -671,7 +710,7 @@ export class Markdown implements Component {
 					if (token.tokens && token.tokens.length > 0) {
 						result += this.renderInlineTokens(token.tokens, resolvedStyleContext);
 					} else {
-						result += applyTextWithNewlines(token.text);
+						result += this.renderLinkableText(token.text, applyTextWithNewlines);
 					}
 					break;
 
@@ -693,11 +732,13 @@ export class Markdown implements Component {
 				}
 
 				case "codespan":
-					result += this.theme.code(token.text) + stylePrefix;
+					result += this.renderLinkableText(token.text, (text) => this.theme.code(text)) + stylePrefix;
 					break;
 
 				case "link": {
+					this.renderingLinkText = true;
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
+					this.renderingLinkText = false;
 					const styledLink = this.theme.link(this.theme.underline(linkText));
 					if (getCapabilities().hyperlinks) {
 						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,

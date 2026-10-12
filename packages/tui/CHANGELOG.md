@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added OSC 8 `file://` links for absolute and `~/` paths in Markdown text and inline code, plus OSC 8 links for URLs in inline code, so wrapped paths stay clickable
 - Added `renderFakeCursor()`. Components wrap their drawn cursor with it, and the TUI renders it in reverse video, or omits it after `CURSOR_MARKER` when `showHardwareCursor` is enabled
 
 ### Changed
