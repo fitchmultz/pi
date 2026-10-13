@@ -1,4 +1,11 @@
-import { collapseSystemMessages, fauxAssistantMessage, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
+import {
+	collapseSystemMessages,
+	fauxAssistantMessage,
+	fauxToolCall,
+	getCurrentSystemMessage,
+	getCurrentTools,
+	type TranscriptContext,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
@@ -74,6 +81,83 @@ describe("on-demand instruction groups", () => {
 		await harness.session.bindExtensions({});
 		return harness;
 	}
+
+	it.each(["direct", "codemode-only"] as const)(
+		"advertises sorted permitted capabilities before discovery in %s mode without activation or index churn",
+		async (mode) => {
+			const harness = await setup({
+				initialActiveToolNames: mode === "codemode-only" ? ["codemode"] : [],
+				extensionFactories: [
+					instructionGroupsExtension,
+					owner,
+					(pi) => {
+						pi.events.on("pi:instruction-groups", (data) => {
+							const collector = data as InstructionGroupCollector;
+							for (const group of [
+								{ name: "zeta", description: "Unrelated actions", tools: ["plain"] },
+								{ name: "denied", description: "Hidden capability", tools: ["hidden"] },
+								{ name: "alpha", description: "Nested actions", tools: ["nested"] },
+							])
+								collector.register({ ...group, instructions: () => later });
+						});
+					},
+					...(mode === "codemode-only" ? [createCodemodeExtension({ mode: "only" })] : []),
+				],
+			});
+			const requests: TranscriptContext[] = [];
+			harness.setResponses([
+				(context) => {
+					requests.push(structuredClone(context));
+					return fauxAssistantMessage([fauxToolCall("discover_tools", {})], { stopReason: "toolUse" });
+				},
+				(context) => {
+					requests.push(structuredClone(context));
+					return discover();
+				},
+				(context) => {
+					requests.push(structuredClone(context));
+					return done();
+				},
+			]);
+			await harness.session.prompt("Find available capabilities");
+			harness.setResponses([
+				(context) => {
+					requests.push(structuredClone(context));
+					return done();
+				},
+			]);
+			await harness.session.prompt("Continue after enabling");
+			expect(requests).toHaveLength(4);
+			const sections = getCurrentSystemMessage(requests[0].messages)?.sections;
+			const index = sections?.instruction_groups;
+			expect(index).toBeDefined();
+			expect(index?.split("\n").filter((line) => line.startsWith("- "))).toEqual([
+				"- alpha: Nested actions",
+				"- browser: Browser actions",
+				"- zeta: Unrelated actions",
+			]);
+			expect(sections?.tools).toMatch(/discover_tools: .+/);
+			const tools = getCurrentTools(requests[0].messages);
+			const declaration = JSON.stringify(tools.find((tool) => tool.name === "discover_tools"));
+			expect(tools.map((tool) => tool.name)).toContain("discover_tools");
+			expect(tools.map((tool) => tool.name)).not.toContain("browse");
+			if (mode === "codemode-only") expect(tools.map((tool) => tool.name)).not.toContain("plain");
+			for (const request of requests) {
+				expect(getCurrentSystemMessage(request.messages)?.sections?.instruction_groups).toBe(index);
+				expect(
+					JSON.stringify(getCurrentTools(request.messages).find((tool) => tool.name === "discover_tools")),
+				).toBe(declaration);
+				expect(JSON.stringify(request.messages)).not.toContain("Hidden capability");
+				expect(JSON.stringify(request.messages)).not.toContain(later);
+			}
+			for (const request of requests.slice(0, 2)) expect(JSON.stringify(request.messages)).not.toContain(full);
+			expect(JSON.stringify(requests[3].messages)).toContain(full);
+			expect(harness.session.getCallableToolNames()).not.toContain("discover_tools");
+			expect(harness.session.getActiveToolNames()).toContain("browse");
+			expect(harness.session.getActiveToolNames()).not.toContain("optional");
+			expect(harness.session.getCallableToolNames()).not.toContain("hidden");
+		},
+	);
 
 	it.each([
 		{ boundary: "session_start", discard: false, selection: ["late"], allowlist: undefined },
@@ -255,7 +339,10 @@ describe("on-demand instruction groups", () => {
 		]) {
 			const denied = await setup(options);
 			denied.setResponses([
-				fauxAssistantMessage([fauxToolCall("discover_tools", {})], { stopReason: "toolUse" }),
+				(context) => {
+					expect(JSON.stringify(context.messages)).not.toContain("Browser actions");
+					return fauxAssistantMessage([fauxToolCall("discover_tools", {})], { stopReason: "toolUse" });
+				},
 				done(),
 			]);
 			await denied.session.prompt("list");
@@ -267,6 +354,7 @@ describe("on-demand instruction groups", () => {
 		eager.setResponses([
 			(context) => {
 				expect(JSON.stringify(context.messages)).toContain(full);
+				expect(getCurrentSystemMessage(context.messages)?.sections).not.toHaveProperty("instruction_groups");
 				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toContain("browse");
 				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
 			},
