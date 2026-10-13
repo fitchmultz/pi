@@ -161,7 +161,6 @@ const TIMING_PHASES = new Set([
 	"adapter_enter",
 	"payload_pass",
 	"fetch_delegate_enter",
-	"fetch_headers",
 	"fetch_error",
 	"callback_enter",
 	"callback_exit",
@@ -980,7 +979,6 @@ export class CacheTrace {
 				}
 				const response = await pending;
 				const monoMs = performance.now();
-				this.observe(() => this.timing("fetch_headers", { status: response.status }, monoMs, attemptId));
 				this.response(response, monoMs, attemptId);
 				return response;
 			} catch (error) {

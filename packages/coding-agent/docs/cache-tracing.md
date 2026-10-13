@@ -43,11 +43,12 @@ Warming is tagged separately while retaining the original request's identity. Na
 
 The native Anthropic consumer records finite `monoMs` clocks (milliseconds on the process's
 monotonic clock), captured before recorder writes. Timing rows distinguish adapter entry,
-payload passes, actual delegate-fetch entry after fingerprinting, received headers/status,
+payload passes, actual delegate-fetch entry after fingerprinting,
 all three awaited option callback slots (also when unset), completed SSE frames before filtering, first native
 and content event types, `message_stop`, read waits, true decoder EOF, consumed-loop exit
 and adapter completion/error. HTTP request IDs prefer Anthropic's `request-id`, with a
 validated `x-request-id` fallback. Existing terminal and parsed-usage rows remain.
+The `http_response` row records header-arrival time, status, attempt identity and request ID.
 
 Frame types are fixed enums; unknown types become `unknown` and pings remain absent from
 public provider events. Callback exits use `finally`, including thrown callbacks. Completion
@@ -55,6 +56,16 @@ still waits for the body EOF: these observations do not change cancellation, ret
 strict-tool fallback or stream output. `payloadPass` distinguishes strict fallback payloads
 from retries within one pass; `attemptId` identifies each delegate fetch. The writer's
 existing limits bound repetitive rows, with an explicit gap when collection stops.
+
+Each delta emits several timing rows. An offline sample with 1,000 deltas and one SSE frame
+per read used about 1.6 MB; chunking and other observations change that volume. The shared
+16 MiB per-process budget can therefore fill after about ten similarly chunked responses.
+Once `file_limit` is recorded, all native, lifecycle and HTTP observations in that process
+stop. Use a fresh traced worker for the next one or two request captures, check file size
+and coverage gaps before accepting evidence, then stop collection. If the file fills, mark
+the capture incomplete and restart only the traced worker before collecting again. Preserve
+the existing 24-hour key lifetime and private retention rules; do not rotate files in place
+or raise the privacy limits to keep tracing indefinitely.
 
 The exported `/utils/cache-trace` investigation helper `recordCacheTraceObservation` accepts
 only allowlisted lifecycle/HTTP phases and scalar metadata through the same private sink.
