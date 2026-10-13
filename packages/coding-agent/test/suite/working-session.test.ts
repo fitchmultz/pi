@@ -1980,33 +1980,52 @@ describe("Native working sessions", () => {
 		}
 	});
 
-	it("invalidates before synchronous mutation and keeps the reservation until explicit release", async () => {
-		const lifetime: AbortSignal[] = [];
-		const h = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("working_session_save", (event) => {
-						lifetime.push(event.signal);
-						event.appendEntry("persisted", { version: 1 });
-					});
-				},
-			],
-		});
-		harnesses.push(h);
-		const hold = await h.session.acquireWorkingSession();
-		expect(hold.state.entries).toEqual(
-			expect.arrayContaining([expect.objectContaining({ customType: "persisted", data: { version: 1 } })]),
-		);
-		expect(() => h.settingsManager.setShellCommandPrefix("not accepted")).toThrow("reserved");
-		expect(h.settingsManager.getShellCommandPrefix()).toBeUndefined();
-		expect(hold.invalidated.aborted).toBe(true);
-		expect(lifetime[0]!.aborted).toBe(false);
-		expect(() => h.session.sessionManager.appendCustomEntry("timer", true)).toThrow("reserved");
-		expect(() => hold.assertHeld()).toThrow();
-		await hold.release();
-		expect(lifetime[0]!.aborted).toBe(true);
-		h.session.sessionManager.appendCustomEntry("timer", true);
-	});
+	it.each(["shell command prefix", "share destination"])(
+		"invalidates before synchronous mutation of %s and keeps the reservation until explicit release",
+		async (setting) => {
+			const lifetime: AbortSignal[] = [];
+			const h = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("working_session_save", (event) => {
+							lifetime.push(event.signal);
+							event.appendEntry("persisted", { version: 1 });
+						});
+					},
+				],
+			});
+			harnesses.push(h);
+			const read = () =>
+				setting === "shell command prefix"
+					? h.settingsManager.getShellCommandPrefix()
+					: h.settingsManager.getSessionShareDestination();
+			const mutate = () =>
+				setting === "shell command prefix"
+					? h.settingsManager.setShellCommandPrefix("updated")
+					: h.settingsManager.setSessionShareDestination("gist");
+			const initial = setting === "shell command prefix" ? undefined : "auto";
+			const hold = await h.session.acquireWorkingSession();
+			try {
+				expect(hold.state.entries).toEqual(
+					expect.arrayContaining([expect.objectContaining({ customType: "persisted", data: { version: 1 } })]),
+				);
+				expect(read()).toBe(initial);
+				expect(mutate).toThrow("reserved");
+				expect(read()).toBe(initial);
+				expect(hold.invalidated.aborted).toBe(true);
+				expect(lifetime[0]!.aborted).toBe(false);
+				expect(() => h.session.sessionManager.appendCustomEntry("timer", true)).toThrow("reserved");
+				expect(() => hold.assertHeld()).toThrow();
+			} finally {
+				await hold.release();
+			}
+			expect(lifetime[0]!.aborted).toBe(true);
+			mutate();
+			await h.settingsManager.flush();
+			expect(read()).toBe(setting === "shell command prefix" ? "updated" : "gist");
+			h.session.sessionManager.appendCustomEntry("timer", true);
+		},
+	);
 
 	it("propagates save-hook failures and refuses a newer journal without writes", async () => {
 		const broken = await createHarness({

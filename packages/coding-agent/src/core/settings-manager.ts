@@ -888,6 +888,7 @@ export class SettingsManager {
 	}
 
 	setSessionShareDestination(destination: SessionShareDestination): void {
+		this.beforeMutation?.();
 		this.globalSettings.sessionShareDestination = destination;
 		this.markModified("sessionShareDestination");
 		this.save();
