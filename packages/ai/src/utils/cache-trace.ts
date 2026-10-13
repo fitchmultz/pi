@@ -157,6 +157,129 @@ const SAFE_HEADERS = [
 ];
 
 type TraceModel = Pick<Model<Api>, "id" | "api" | "provider" | "baseUrl" | "compat">;
+const TIMING_PHASES = new Set([
+	"adapter_enter",
+	"payload_pass",
+	"fetch_delegate_enter",
+	"fetch_headers",
+	"fetch_error",
+	"callback_enter",
+	"callback_exit",
+	"read_enter",
+	"read_exit",
+	"decoder_eof",
+	"sse_frame",
+	"first_native_event",
+	"first_content_event",
+	"message_stop",
+	"consumed_loop_exit",
+	"adapter_done",
+	"adapter_error",
+	"session_start",
+	"session_shutdown",
+	"input",
+	"before_agent_start",
+	"agent_start",
+	"turn_start",
+	"context",
+	"context_with_system",
+	"before_provider_headers",
+	"before_provider_request",
+	"after_provider_response",
+	"message_start",
+	"message_update_first",
+	"message_end",
+	"tool_execution_start",
+	"tool_execution_end",
+	"turn_end",
+	"agent_end",
+	"agent_before_settle",
+	"agent_settled",
+	"http_create",
+	"http_send",
+	"http_body_sent",
+	"http_headers",
+	"http_first_chunk",
+	"http_complete",
+	"http_error",
+	"observer_limit",
+]);
+const TIMING_ENUMS: Record<string, ReadonlySet<string>> = {
+	callback: new Set(["onPayload", "onResponse", "onProviderStreamEvent"]),
+	eventType: new Set([
+		"message_start",
+		"message_delta",
+		"message_stop",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"ping",
+		"error",
+		"unknown",
+	]),
+	contentType: new Set([
+		"text",
+		"thinking",
+		"redacted_thinking",
+		"tool_use",
+		"text_delta",
+		"thinking_delta",
+		"input_json_delta",
+		"signature_delta",
+		"unknown",
+	]),
+	route: new Set(["native", "gateway"]),
+	role: new Set(["user", "assistant", "toolResult", "unknown"]),
+	outcome: new Set(["completed", "error", "aborted", "unknown"]),
+	delivery: new Set(["steer", "followUp", "idle"]),
+	requestIdSource: new Set(["request-id", "x-request-id"]),
+};
+const TIMING_NUMBERS = new Set([
+	"index",
+	"ordinal",
+	"status",
+	"count",
+	"bytes",
+	"firstChunkMs",
+	"lastChunkMs",
+	"acceptedAt",
+	"queueResidenceMs",
+	"durationMs",
+	"turnIndex",
+]);
+
+function sessionAllowed(sessionId?: string): boolean {
+	const filter = typeof process === "undefined" ? undefined : process.env?.PI_CACHE_TRACE_SESSION_ID;
+	return !filter || (/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(filter) && sessionId === filter);
+}
+
+function timingMetadata(phase: string, metadata: Metadata, monoMs: number): Metadata {
+	if (!TIMING_PHASES.has(phase) || !Number.isFinite(monoMs) || monoMs < 0) throw new Error("Unsafe timing");
+	const safe: Metadata = { phase, monoMs };
+	for (const [key, value] of Object.entries(metadata)) {
+		if (value === undefined) continue;
+		if (TIMING_NUMBERS.has(key) && typeof value === "number" && Number.isFinite(value) && value >= 0)
+			safe[key] = value;
+		else if (key === "done" && typeof value === "boolean") safe[key] = value;
+		else if (key === "requestId" && safeId(value)) safe[key] = value;
+		else if (typeof value === "string" && TIMING_ENUMS[key]?.has(value)) safe[key] = value;
+		else if (key === "eventType" || key === "contentType") safe[key] = "unknown";
+		else throw new Error("Unsafe timing metadata");
+	}
+	return safe;
+}
+
+/** Temporary exact-session lifecycle/Undici scalars, through the same bounded private sink. */
+export function recordCacheTraceObservation(sessionId: string, phase: string, metadata: Metadata = {}): void {
+	if (!sessionAllowed(sessionId) || typeof process === "undefined" || !process.env?.PI_CACHE_TRACE_DIR) return;
+	const monoMs = performance.now();
+	try {
+		const safe = timingMetadata(phase, metadata, monoMs);
+		const w = getWriter();
+		if (w) append(w, { kind: "observation", session: fingerprint(w, sessionId), ...safe });
+	} catch {}
+}
+
 type TraceOptions = Pick<ProviderRequestOptions, "cacheTraceContext" | "fetch">;
 type Metadata = Record<string, unknown>;
 type Fingerprint = { hmac: string; bytes: number };
@@ -429,11 +552,14 @@ export class CacheTrace {
 	private usageSourceAttemptId?: string;
 	private sdkLogicalBody?: Fingerprint;
 	private sequence = 0;
+	private payloadPassIndex = 0;
+	private readonly sessionId?: string;
 
 	constructor(w: Writer, model: TraceModel, options?: TraceOptions, accountId?: string, resolvedCompat?: unknown) {
 		this.writer = w;
 		this.logicalRequestId = w.crypto.randomUUID();
 		const context = options?.cacheTraceContext ?? {};
+		this.sessionId = context.sessionId;
 		const provenance: Metadata = {};
 		for (const key of PROVENANCE_FIELDS) {
 			const value = context[key];
@@ -486,11 +612,30 @@ export class CacheTrace {
 	}
 
 	private write(kind: string, metadata: Metadata): void {
-		append(this.writer, { logicalRequestId: this.logicalRequestId, attemptId: this.attemptId, kind, ...metadata });
+		if (
+			typeof process === "undefined" ||
+			process.env?.PI_CACHE_TRACE_DIR !== this.writer.directory ||
+			!sessionAllowed(this.sessionId)
+		)
+			return;
+		append(this.writer, {
+			monoMs: performance.now(),
+			logicalRequestId: this.logicalRequestId,
+			attemptId: this.attemptId,
+			payloadPass: this.payloadPassIndex || undefined,
+			kind,
+			...metadata,
+		});
 	}
 
 	private observe(action: () => void): void {
-		if (this.writer.stopped) return;
+		if (
+			this.writer.stopped ||
+			typeof process === "undefined" ||
+			process.env?.PI_CACHE_TRACE_DIR !== this.writer.directory ||
+			!sessionAllowed(this.sessionId)
+		)
+			return;
 		try {
 			validateWriter(this.writer);
 			if (Date.now() >= this.writer.expiresAt) {
@@ -501,6 +646,17 @@ export class CacheTrace {
 		} catch {
 			this.gap("observer_failure");
 		}
+	}
+
+	timing(phase: string, metadata: Metadata = {}, monoMs = performance.now(), attemptId = this.attemptId): void {
+		this.observe(() => this.write("timing", { ...timingMetadata(phase, metadata, monoMs), attemptId }));
+	}
+
+	payloadPass(): void {
+		this.observe(() => {
+			this.payloadPassIndex++;
+			this.timing("payload_pass");
+		});
 	}
 
 	gap(reason: string): void {
@@ -701,15 +857,20 @@ export class CacheTrace {
 		});
 	}
 
-	response(response: Response): void {
-		this.observe(() =>
+	response(response: Response, monoMs = performance.now(), attemptId = this.attemptId): void {
+		this.observe(() => {
+			const standardId = safeId(response.headers.get("request-id"));
+			const requestId = standardId ?? safeId(response.headers.get("x-request-id"));
 			this.write("http_response", {
+				monoMs,
+				attemptId,
 				status: response.status,
 				redirected: response.redirected,
 				endpoint: endpoint(response.url),
-				requestId: safeId(response.headers.get("x-request-id")),
-			}),
-		);
+				requestId,
+				requestIdSource: requestId ? (standardId ? "request-id" : "x-request-id") : undefined,
+			});
+		});
 	}
 
 	terminal(event: unknown): void {
@@ -796,7 +957,7 @@ export class CacheTrace {
 				providerRequest = /\/(responses|completions|messages)$/.test(new URL(String(input)).pathname);
 			} catch {}
 			if (!providerRequest) return (fetch ?? globalThis.fetch)(input, init);
-			this.attempt("sse");
+			const attemptId = this.attempt("sse");
 			this.observe(() => {
 				if (typeof init?.body === "string" || init?.body instanceof Uint8Array) {
 					const digest = fingerprint(this.writer, init.body);
@@ -809,11 +970,21 @@ export class CacheTrace {
 				} else this.gap("http_body_unobserved");
 				this.headers(init?.headers instanceof Headers ? init.headers : undefined);
 			});
+			const delegateEnterMs = performance.now();
 			try {
-				const response = await (fetch ?? globalThis.fetch)(input, init);
-				this.response(response);
+				let pending: Promise<Response>;
+				try {
+					pending = (fetch ?? globalThis.fetch)(input, init);
+				} finally {
+					this.timing("fetch_delegate_enter", {}, delegateEnterMs, attemptId);
+				}
+				const response = await pending;
+				const monoMs = performance.now();
+				this.observe(() => this.timing("fetch_headers", { status: response.status }, monoMs, attemptId));
+				this.response(response, monoMs, attemptId);
 				return response;
 			} catch (error) {
+				this.timing("fetch_error", {}, performance.now(), attemptId);
 				this.event("attempt_error");
 				throw error;
 			}
@@ -829,6 +1000,8 @@ export function createCacheTrace(
 ): CacheTrace | undefined {
 	let w: Writer | undefined;
 	try {
+		if (typeof process === "undefined" || !process.env?.PI_CACHE_TRACE_DIR) return undefined;
+		if (!sessionAllowed(options?.cacheTraceContext?.sessionId)) return undefined;
 		w = getWriter();
 		return w ? new CacheTrace(w, model, options, resolvedAccountId, resolvedCompat?.()) : undefined;
 	} catch {
