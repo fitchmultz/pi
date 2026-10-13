@@ -37,6 +37,7 @@ interface Receipt {
 	endpoint: string;
 	text?: string;
 	calls?: number;
+	idle?: boolean;
 	environment?: Record<string, string>;
 }
 
@@ -90,6 +91,12 @@ export default function(pi) {
  pi.registerProvider('faux', { api: faux.api, baseUrl: faux.getModel().baseUrl, apiKey: 'faux-key', models: faux.models, streamSimple: faux.provider.streamSimple });
  const record = (event, ctx, extra = {}) => appendFileSync(${JSON.stringify(log)}, JSON.stringify({event, pid:process.pid, version:${JSON.stringify(version)}, sessionId:ctx.sessionManager.getSessionId(), sessionFile:ctx.sessionManager.getSessionFile(), endpoint:process.env.PI_RESTART_SOCKET, ...extra}) + '\\n');
  pi.registerTool({ name:'completed_work', label:'Completed work', description:'Records one completed side effect', parameters:Type.Object({}), async execute(_id,_args,signal,_update,ctx) { record('work',ctx); ${holdWork ? `while (!existsSync(${JSON.stringify(join(root, "release-work"))}) && !signal?.aborted) await new Promise(r=>setTimeout(r,10));` : ""} return {content:[{type:'text',text:'Completed'}],details:{}}; } });
+ pi.registerCommand('admitted-work', { description:'Finish an asynchronous native command', handler:async (_args,ctx) => {
+  record('admitted',ctx,{idle:ctx.isIdle()});
+  while (!existsSync(${JSON.stringify(join(root, "release-command"))})) await new Promise(r=>setTimeout(r,10));
+  pi.appendEntry('admitted-work',{completed:true});
+  record('admitted-complete',ctx);
+ } });
  pi.on('session_start', (_event,ctx) => { ${nested ? `writeFileSync(${JSON.stringify(nested.exitPath)},'primary-owned-sentinel',{mode:0o600});` : ""} record('start',ctx); });
  pi.on('before_agent_start', async (event,ctx) => {
   if (${settledFollowup === true} && event.prompt === 'Deferred settled followup') {
@@ -172,7 +179,10 @@ child.on('exit', code => {process.exitCode = code ?? 1;});
 				extension,
 				"Seed prompt",
 			];
-			writeFileSync(script, `${command.map(quote).join(" ")}\nprintf '%s\\n' "$?" > ${quote(status)}\nsleep 60\n`);
+			writeFileSync(
+				script,
+				`${command.map(quote).join(" ")}\nprintf '%s\\n' "$?" > ${quote(`${status}.tmp`)}\nmv ${quote(`${status}.tmp`)} ${quote(status)}\nsleep 60\n`,
+			);
 			execFileSync("tmux", [
 				"-L",
 				socket,
@@ -484,6 +494,52 @@ export default function(pi) {
 		expect(screen).toContain("To resume this session:");
 		expect(screen).not.toContain("    at ");
 		expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
+	}, 60_000);
+
+	it("keeps the idle worker alive until an admitted native command completes, then restarts once", async () => {
+		const f = fixture();
+		f.start(f.extension("v1"));
+		await f.wait((r) => r.some((x) => x.event === "settled"));
+		const original = f.read().find((r) => r.event === "start")!;
+		f.keys("/admitted-work", "Enter");
+		await f.wait((r) => r.some((x) => x.event === "admitted"));
+		expect(f.read().find((r) => r.event === "admitted")?.idle).toBe(true);
+		const endpoint = f.read().find((r) => r.event === "prompt")!.endpoint;
+		expect(await requestRestart(endpoint, { message: "Continue after admitted work" })).toContain("Restart queued");
+		try {
+			await new Promise((r) => setTimeout(r, 300));
+			expect(
+				f.read().filter((r) => r.event === "shutdown"),
+				f.screen(),
+			).toHaveLength(0);
+			expect(existsSync(f.status)).toBe(false);
+			process.kill(original.pid, 0);
+		} finally {
+			writeFileSync(join(f.root, "release-command"), "");
+		}
+		await f.wait((r) => r.filter((x) => x.event === "settled").length === 2);
+		const receipts = f.read();
+		const starts = receipts.filter((r) => r.event === "start");
+		expect(starts).toHaveLength(2);
+		expect(starts[1]).toMatchObject({ sessionId: original.sessionId, sessionFile: original.sessionFile });
+		expect(starts[1].pid).not.toBe(original.pid);
+		expect(receipts.filter((r) => r.event === "shutdown")).toHaveLength(1);
+		expect(receipts.findIndex((r) => r.event === "admitted-complete")).toBeLessThan(
+			receipts.findIndex((r) => r.event === "shutdown"),
+		);
+		expect(receipts.filter((r) => r.event === "prompt").map((r) => r.text)).toEqual([
+			"Seed prompt",
+			"[Restart continuation]\nContinue after admitted work",
+		]);
+		expect(receipts.filter((r) => r.event === "work")).toHaveLength(2);
+		const entries = readFileSync(original.sessionFile, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { customType?: string; data?: unknown });
+		expect(entries.filter((entry) => entry.customType === "admitted-work")).toEqual([
+			expect.objectContaining({ data: { completed: true } }),
+		]);
+		expect(f.screen()).not.toContain("Restart failed:");
 	}, 60_000);
 
 	it.each(["interrupt", "draft"])(
