@@ -12,7 +12,7 @@ From a Pi shell tool:
 pi restart --message "Verify the updated tool, then continue the task"
 ```
 
-The response says **Restart queued**, not ready or successfully activated. Pi waits for final idle: no streaming, running tools, automatic retry/compaction, queued steering/follow-up messages, or unfinished `agent_settled` handlers and their deferred actions. It runs `session_shutdown` handlers, exits gracefully, then starts the replacement.
+The response says **Restart queued**, not ready or successfully activated. Pi waits for final idle: no streaming, running tools or extension commands/handlers, admitted UI/shortcut activity, automatic retry/compaction, queued steering/follow-up messages, or unfinished `agent_settled` handlers and their deferred actions. It runs `session_shutdown` handlers, exits gracefully, then starts the replacement.
 
 In the TUI, `/restart` does the same. `/restart <text>` supplies a continuation. Without text, the replacement waits for input. Supplied text is sent once, labelled `[Restart continuation]`.
 

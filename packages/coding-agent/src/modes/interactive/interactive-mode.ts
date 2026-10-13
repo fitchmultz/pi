@@ -709,6 +709,8 @@ export class InteractiveMode {
 		});
 		options.managedRestart?.bindInput(() => ({
 			busy:
+				!this.session.workingSessionReady ||
+				this.session.workingSessionGate.busy ||
 				this.session.isBashRunning ||
 				this.session.isSettling ||
 				process.stdin.isPaused() ||
