@@ -79,6 +79,8 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		label: "Discover instructions",
 		description:
 			"List available instruction groups, or enable groups to read their FULL instructions and restore their previously selected tools for the next request. Read the result before calling a group's tools in a later turn.",
+		promptSnippet:
+			"List available capabilities; enable instruction groups and read their full instructions before use",
 		exposure: "model-only",
 		parameters: Type.Object({ enable: Type.Optional(Type.Array(Type.String(), { uniqueItems: true })) }),
 		prepareLoadout(loadout) {
@@ -150,6 +152,13 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		// ponytail: prompt-start suppression only; use a loadout-selection hook if mid-batch suppression is needed.
 		if (!isManaged()) return;
 		replay(ctx);
+		const summaries = available().map((group) => `- ${group.name}: ${group.description}`);
+		if (summaries.length)
+			event.systemPromptOptions.sections.instruction_groups = [
+				"Available instruction groups (capability summaries, not loaded tools):",
+				"Before claiming a capability is unavailable, inspect or enable the relevant group with discover_tools. searchTools and MCP searches cover different catalogs. Read the full instructions before using the group's tools in a later turn.",
+				...summaries,
+			].join("\n");
 		const pending = new Set(
 			available()
 				.filter((group) => !enabled.has(group.name))

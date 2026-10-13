@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added a sorted, permission-filtered instruction-group capability index to initial prompts and a static `discover_tools` hint. Listing and enabling groups leave the index and discovery declaration unchanged.
 - Added the `sessionShareDestination` setting to choose automatic, GitHub gist, or Radius uploads for `/share`; the default `auto` behavior is unchanged ([#10870](https://github.com/earendil-works/pi/issues/10870)).
 - Added complete native working-session save and restore through the SDK and `--working-session`, with private local control and completed-exit receipts. See [Native working sessions](docs/working-session.md).
 - Added `registerProviderAuthFallback()` for ephemeral provider-scoped authentication with native credential precedence, catalogs and transport. See [Provider authentication fallback](docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider).

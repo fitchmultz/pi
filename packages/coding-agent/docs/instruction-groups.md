@@ -5,6 +5,18 @@ Calling it without arguments lists available instruction groups. Calling it with
 `{ "enable": ["browser"] }` returns the group's **full** owner-provided instructions.
 Listing alone does not enable a group. Only subsequent model turns can use its tools.
 
+Initial prompts include a sorted index of permitted available group names and capability
+summaries, plus a static `discover_tools` hint. Check the relevant instruction group before
+claiming a capability is unavailable: codemode's `searchTools` and MCP searches cover
+different catalogs. The index includes neither full instructions nor tool schemas and
+does not activate capabilities.
+
+Listing and enabling leave the index and `discover_tools` declaration unchanged. The
+index excludes enabled/readiness state; only genuine availability changes update it at
+prompt start. Providers with positional system support receive a later section patch,
+preserving the earlier serialized prefix. Other providers use their native full-prompt
+fallback; this does not guarantee live cache hits or model compliance.
+
 At prompt start, discovery deactivates selected tools in groups not yet enabled.
 Enabling restores only those previously selected tools for the next request; it does
 not activate optional tools, bypass `--tools` or exclusions, change exposure, or make

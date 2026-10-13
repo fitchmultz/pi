@@ -11,6 +11,7 @@ import {
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { streamSimple as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { streamSimple as completionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { getBuiltinModel, getBuiltinModelDataGeneratedAt } from "@earendil-works/pi-ai/providers/all";
 import { Container } from "@earendil-works/pi-tui";
@@ -22,7 +23,12 @@ import { ModelRuntime } from "../../src/core/model-runtime.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import { type ExtensionAPI, type InstructionGroupCollector, instructionGroupsExtension } from "../../src/index.ts";
+import {
+	createCodemodeExtension,
+	type ExtensionAPI,
+	type InstructionGroupCollector,
+	instructionGroupsExtension,
+} from "../../src/index.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../src/utils/ansi.ts";
@@ -30,28 +36,37 @@ import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness } from "./harness.ts";
 
 interface Payload {
-	input: unknown[];
+	input?: unknown[];
+	messages?: unknown[];
 	tools?: unknown[];
 	instructions?: string;
 }
 
-// Both serializers must stop before transport; this is prefix evidence, not a live cache-hit measurement.
-it.each(["openai-responses", "openai-codex-responses"] as const)(
-	"%s adds discovered declarations positionally without rewriting the request prefix",
-	async (api) => {
-		const model = {
-			id: "gpt-6.1-sol",
-			name: "Sol",
-			api,
-			provider: api === "openai-responses" ? "openai" : "openai-codex",
-			baseUrl: api === "openai-responses" ? "https://api.openai.com/v1" : "https://chatgpt.com/backend-api",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 128000,
-			maxTokens: 1000,
-			compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true },
-		} satisfies Model<"openai-responses" | "openai-codex-responses">;
+// Serializers stop before transport; this is prefix evidence, not a live cache-hit measurement.
+it.each([
+	{ model: getBuiltinModel("openai", "gpt-6.1-sol"), systemPatches: true, toolAdditions: true, scriptOnly: false },
+	{
+		model: getBuiltinModel("openai-codex", "gpt-6.1-sol"),
+		systemPatches: true,
+		toolAdditions: true,
+		scriptOnly: false,
+	},
+	{ model: getBuiltinModel("zai", "glm-5.3"), systemPatches: false, toolAdditions: false, scriptOnly: true },
+	{
+		model: getBuiltinModel("deepseek", "deepseek-flash"),
+		systemPatches: false,
+		toolAdditions: false,
+		scriptOnly: true,
+	},
+	{
+		model: getBuiltinModel("deepseek", "deepseek-v4-pro"),
+		systemPatches: true,
+		toolAdditions: false,
+		scriptOnly: false,
+	},
+] as const)(
+	"$model.provider/$model.id preserves supported discovery prefixes and uses native fallback when needed",
+	async ({ model, systemPatches, toolAdditions, scriptOnly }) => {
 		const captures: Payload[] = [];
 		const capture = async (context: TranscriptContext) => {
 			const options = {
@@ -61,38 +76,55 @@ it.each(["openai-responses", "openai-codex-responses"] as const)(
 					throw new Error("offline payload captured");
 				},
 			};
-			const result = await (api === "openai-responses"
-				? responsesStream({ ...model, api }, context, options)
-				: codexStream({ ...model, api }, context, options)
-			).result();
+			const stream = hasApi(model, "openai-responses")
+				? responsesStream(model, context, options)
+				: hasApi(model, "openai-codex-responses")
+					? codexStream(model, context, options)
+					: completionsStream(model, context, options);
+			const result = await stream.result();
 			expect(result.errorMessage).toContain("offline payload captured");
 		};
+		let owner!: ExtensionAPI;
 		const h = await createHarness({
-			initialActiveToolNames: [],
+			initialActiveToolNames: scriptOnly ? ["codemode"] : [],
 			extensionFactories: [
+				...(scriptOnly ? [createCodemodeExtension({ mode: "only" })] : []),
 				instructionGroupsExtension,
 				(pi) => {
+					owner = pi;
 					pi.registerTool({
 						name: "browse",
 						label: "Browse",
 						description: "Inspect a page",
+						exposure: scriptOnly ? "deferred" : "direct",
 						parameters: Type.Object({}),
 						execute: async () => ({ content: [{ type: "text", text: "page inspected" }], details: undefined }),
 					});
-					pi.events.on("pi:instruction-groups", (data) =>
-						(data as InstructionGroupCollector).register({
+					pi.events.on("pi:instruction-groups", (data) => {
+						const collector = data as InstructionGroupCollector;
+						collector.register({
 							name: "browser",
 							description: "Browser",
 							tools: ["browse"],
 							instructions: () => "Inspect before acting.",
-						}),
-					);
+						});
+						collector.register({
+							name: "later",
+							description: "Late connection",
+							tools: ["late"],
+							instructions: () => "Full late guidance.",
+						});
+					});
 				},
 			],
 		});
 		try {
 			await h.session.bindExtensions({});
 			h.setResponses([
+				async (context) => {
+					await capture(context);
+					return fauxAssistantMessage(fauxToolCall("discover_tools", {}), { stopReason: "toolUse" });
+				},
 				async (context) => {
 					await capture(context);
 					return fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), {
@@ -103,17 +135,70 @@ it.each(["openai-responses", "openai-codex-responses"] as const)(
 					await capture(context);
 					return fauxAssistantMessage("done");
 				},
+				async (context) => {
+					await capture(context);
+					return fauxAssistantMessage("continued");
+				},
+				async (context) => {
+					await capture(context);
+					return fauxAssistantMessage("reconnected");
+				},
 			]);
 			await h.session.prompt("Enable browser");
-			expect(captures).toHaveLength(2);
-			const [before, after] = captures;
-			expect(JSON.stringify(after.input.slice(0, before.input.length))).toBe(JSON.stringify(before.input));
-			expect(JSON.stringify(after.tools)).toBe(JSON.stringify(before.tools));
-			expect(after.instructions).toBe(before.instructions);
+			await h.session.prompt("Continue after enabling");
+			owner.registerTool({
+				name: "late",
+				label: "Late",
+				description: "Connected later",
+				exposure: "deferred",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [], details: undefined }),
+			});
+			await h.session.prompt("After reconnect");
+			expect(captures).toHaveLength(5);
+			const [before, listed, enabled, continued, reconnected] = captures;
+			const messages = (payload: Payload) => payload.input ?? payload.messages ?? [];
+			expect(JSON.stringify(messages(listed).slice(0, messages(before).length))).toBe(
+				JSON.stringify(messages(before)),
+			);
+			expect(JSON.stringify(listed.tools)).toBe(JSON.stringify(before.tools));
+			if (systemPatches) {
+				for (let index = 1; index < captures.length; index++) {
+					const previous = captures[index - 1];
+					const current = captures[index];
+					expect(JSON.stringify(messages(current).slice(0, messages(previous).length))).toBe(
+						JSON.stringify(messages(previous)),
+					);
+					expect(current.instructions).toBe(before.instructions);
+				}
+				expect(JSON.stringify(messages(reconnected).slice(messages(continued).length))).toContain(
+					"- later: Late connection",
+				);
+			} else {
+				expect(JSON.stringify(messages(reconnected)[0])).toContain("- later: Late connection");
+				expect(JSON.stringify(messages(reconnected)[0])).not.toBe(JSON.stringify(messages(continued)[0]));
+			}
+			if (toolAdditions || scriptOnly) {
+				for (const payload of captures) expect(JSON.stringify(payload.tools)).toBe(JSON.stringify(before.tools));
+				if (toolAdditions) {
+					expect(JSON.stringify(enabled.input)).toContain('"type":"additional_tools"');
+					expect(JSON.stringify(enabled.input)).toContain('"name":"browse"');
+				}
+			} else {
+				// System-only support still needs the current tools at the top level.
+				expect(JSON.stringify(enabled.tools)).toContain('"name":"browse"');
+				expect(JSON.stringify(enabled.tools)).not.toBe(JSON.stringify(before.tools));
+				for (const payload of captures.slice(2))
+					expect(JSON.stringify(payload.tools)).toBe(JSON.stringify(enabled.tools));
+			}
+			expect(JSON.stringify(before)).toContain("- browser: Browser");
+			expect(JSON.stringify(before)).toContain("discover_tools: ");
+			expect(JSON.stringify(before)).not.toContain("Inspect before acting.");
 			expect(JSON.stringify(before)).not.toContain('"name":"browse"');
-			expect(JSON.stringify(after.input)).toContain('"type":"additional_tools"');
-			expect(JSON.stringify(after.input)).toContain('"name":"browse"');
-			expect(h.session.getActiveToolNames()).toContain("browse");
+			expect(JSON.stringify(listed)).not.toContain('"name":"browse"');
+			expect(JSON.stringify(continued)).not.toContain("- later: Late connection");
+			expect(h.session.getActiveToolNames().includes("browse")).toBe(!scriptOnly);
+			expect(h.session.getActiveToolNames()).not.toContain("late");
 		} finally {
 			h.cleanup();
 		}
@@ -201,6 +286,7 @@ interface NativePayload {
 
 // Real SDK/provider serialization, with offline transport; this does not qualify signed replay or live cache hits.
 it.each([
+	{ source: "direct", native: true, shortTtlMs: 300_000, longTtlMs: 3_600_000 },
 	{ source: "public-generated", native: true, shortTtlMs: 300_000, longTtlMs: 3_600_000 },
 	{ source: "bundled", native: true, shortTtlMs: 300_000, longTtlMs: 3_600_000 },
 	{ source: "restored", native: true, shortTtlMs: 300_000, longTtlMs: 3_600_000 },
@@ -214,7 +300,7 @@ it.each([
 	{ source: "restored-short", native: true, shortTtlMs: 79_000, longTtlMs: undefined },
 	{ source: "user-empty", native: false, shortTtlMs: undefined, longTtlMs: undefined },
 ] as const)(
-	"$source Cloudflare catalog preserves native SDK prefixes, cache lifetimes and user opt-outs",
+	"$source Anthropic catalog preserves native SDK prefixes, cache lifetimes and user opt-outs",
 	async ({ source, native, shortTtlMs, longTtlMs }) => {
 		let owner!: ExtensionAPI;
 		const h = await createHarness({
@@ -232,14 +318,21 @@ it.each([
 						parameters: Type.Object({ url: Type.String() }),
 						execute: async () => ({ content: [{ type: "text", text: "inspected" }], details: undefined }),
 					});
-					pi.events.on("pi:instruction-groups", (data) =>
-						(data as InstructionGroupCollector).register({
+					pi.events.on("pi:instruction-groups", (data) => {
+						const collector = data as InstructionGroupCollector;
+						collector.register({
 							name: "browser",
 							description: "Browser",
 							tools: ["browse"],
 							instructions: () => "Inspect before acting.",
-						}),
-					);
+						});
+						collector.register({
+							name: "later",
+							description: "Late connection",
+							tools: ["late"],
+							instructions: () => "Full late guidance.",
+						});
+					});
 				},
 			],
 		});
@@ -249,7 +342,7 @@ it.each([
 			throw new Error("Unexpected network request");
 		});
 		try {
-			const provider = "cloudflare-ai-gateway";
+			const provider = source === "direct" ? "anthropic" : "cloudflare-ai-gateway";
 			const publicModel = getBuiltinModel(provider, "claude-opus-5-5");
 			const old: Model<"anthropic-messages"> = {
 				...publicModel,
@@ -341,7 +434,8 @@ it.each([
 				expect(catalogFetch).not.toHaveBeenCalled();
 			}
 			const id = source === "unrelated-model" ? "claude-opus-4-6" : "claude-opus-5-5";
-			const model = source === "public-generated" ? publicModel : runtime.getPhysicalModel(provider, id);
+			const model =
+				source === "public-generated" || source === "direct" ? publicModel : runtime.getPhysicalModel(provider, id);
 			if (!model || !hasApi(model, "anthropic-messages")) throw new Error("Missing native Cloudflare model");
 			const preparedProvider = runtime.getProvider(provider);
 			if (!preparedProvider) throw new Error("Missing Cloudflare provider");
@@ -412,7 +506,11 @@ it.each([
 			h.setResponses([
 				async (context) => {
 					await capture(context);
-					return fauxAssistantMessage("primed");
+					return fauxAssistantMessage(fauxToolCall("discover_tools", {}), { stopReason: "toolUse" });
+				},
+				async (context) => {
+					await capture(context);
+					return fauxAssistantMessage("listed");
 				},
 				async (context) => {
 					await capture(context);
@@ -437,6 +535,11 @@ it.each([
 					await capture(context, "low");
 					return fauxAssistantMessage("continued");
 				},
+				async (context) => {
+					continuationContext = context;
+					await capture(context, "low");
+					return fauxAssistantMessage("reconnected");
+				},
 			]);
 			await h.session.prompt("Prime");
 			await h.session.prompt("Discover browser");
@@ -451,17 +554,35 @@ it.each([
 			h.session.setActiveToolsByName(["discover_tools"]);
 			await h.session.prompt("Withdraw browser");
 			await h.session.prompt("Continue at low effort");
+			owner.registerTool({
+				name: "late",
+				label: "Late",
+				description: "Connected later",
+				exposure: "deferred",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [], details: undefined }),
+			});
+			await h.session.prompt("After reconnect");
 			expect(failures).toEqual([]);
-			expect(captures).toHaveLength(6);
+			expect(captures).toHaveLength(8);
 			for (const url of urls) {
 				expect(url).toBe(
-					source === "custom-endpoint"
-						? "https://proxy.invalid/anthropic/v1/messages?beta=true"
-						: "https://gateway.ai.cloudflare.com/v1/offline-account/offline-gateway/anthropic/v1/messages?beta=true",
+					source === "direct"
+						? "https://api.anthropic.com/v1/messages?beta=true"
+						: source === "custom-endpoint"
+							? "https://proxy.invalid/anthropic/v1/messages?beta=true"
+							: "https://gateway.ai.cloudflare.com/v1/offline-account/offline-gateway/anthropic/v1/messages?beta=true",
 				);
 			}
-			const [prime, append, discovered, redefined, removed, low] = captures;
+			const [prime, listed, append, discovered, redefined, removed, low, reconnected] = captures;
 			const blocks = (payload: NativePayload) => payload.messages.flatMap((message) => message.content);
+			expect(JSON.stringify(prime.system)).toContain("- browser: Browser");
+			expect(JSON.stringify(prime.system)).toContain("discover_tools: ");
+			expect(JSON.stringify(prime)).not.toContain("Inspect before acting.");
+			expect(JSON.stringify(listed)).not.toContain("Inspect before acting.");
+			expect(JSON.stringify(low)).not.toContain("- later: Late connection");
+			expect(JSON.stringify(reconnected)).toContain("- later: Late connection");
+			expect(h.session.getActiveToolNames()).not.toContain("late");
 			const betas = [
 				"inline-tools-2026-09-15",
 				"mid-conversation-output-config-2026-07-01",
@@ -469,9 +590,11 @@ it.each([
 			];
 			for (const [index, payload] of captures.entries()) {
 				expect(payload.model).toBe(id);
-				expect(headers[index].get("cf-aig-authorization")).toBe("Bearer offline-gateway-key");
+				expect(headers[index].get("cf-aig-authorization")).toBe(
+					source === "direct" ? null : "Bearer offline-gateway-key",
+				);
 				expect(headers[index].has("authorization")).toBe(false);
-				expect(headers[index].has("x-api-key")).toBe(false);
+				expect(headers[index].get("x-api-key")).toBe(source === "direct" ? "offline-gateway-key" : null);
 				if (restored || source === "fetched") expect(headers[index].get("x-catalog-source")).toBe(source);
 				if (source.startsWith("user-")) expect(headers[index].get("x-user-override")).toBe("kept");
 			}
@@ -546,7 +669,7 @@ it.each([
 					expect(payload.messages.at(-1)).toEqual({
 						role: "system",
 						content: [],
-						output_config: { effort: index === 5 ? "low" : "high" },
+						output_config: { effort: index >= 6 ? "low" : "high" },
 					});
 				}
 			} else {
@@ -587,7 +710,7 @@ it.each([
 				);
 			}
 			expect(failures).toEqual([]);
-			expect(captures).toHaveLength(8);
+			expect(captures).toHaveLength(10);
 		} finally {
 			preparation?.mockRestore();
 			sdk?.session.dispose();
