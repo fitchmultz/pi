@@ -72,6 +72,7 @@
 - Fixed cache warming using ambient rather than resolved credential retention and omitting one-hour writes and prompt-length pricing tiers. Native preparation drives scheduling; refreshes resolve current auth and headers and recheck context and dispatch deadlines.
 - Fixed cancelled or timed-out shell commands on macOS sometimes running later steps after the current step was killed; cancellation and timeouts now stop the whole command.
 - Pinned internal Pi dependencies to exact release versions to prevent fresh installs from mixing incompatible packages ([#10865](https://github.com/earendil-works/pi/issues/10865))
+- Fixed resumed sessions dropping tools activated during the session. Resume now restores the session's active tools, with `--tools +name`/`-name` entries applied to them, unless `--tools` with tool names, `--no-tools`, or `--no-builtin-tools` selects tools explicitly ([#10785](https://github.com/earendil-works/pi/issues/10785))
 
 ## [1.2.0] - 2026-10-12
 
