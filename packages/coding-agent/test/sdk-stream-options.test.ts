@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,12 +9,14 @@ import {
 	normalizeContext,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { stream as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { completeSummarization } from "../src/core/compaction/compaction.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import type { ProviderConfigInput } from "../src/core/provider-composer.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -41,7 +43,7 @@ describe("createAgentSession stream options", () => {
 		}
 	});
 
-	function createModel(api: Api): Model<Api> {
+	function createModel<T extends Api>(api: T): Model<T> {
 		return {
 			id: "capture-model",
 			name: "Capture Model",
@@ -90,6 +92,7 @@ describe("createAgentSession stream options", () => {
 		extensionFactory?: ExtensionFactory,
 		providerEvent?: unknown,
 		exercise?: (session: AgentSession, captured: () => SimpleStreamOptions | undefined) => Promise<void>,
+		providerStream?: ProviderConfigInput["streamSimple"],
 	): Promise<SimpleStreamOptions | undefined> {
 		const model = createModel(api);
 		const settingsManager = SettingsManager.inMemory(settings);
@@ -109,8 +112,9 @@ describe("createAgentSession stream options", () => {
 		modelRegistry.registerProvider(model.provider, {
 			api,
 			headers: { "x-provider": "provider" },
-			streamSimple: (requestModel, _context, providerOptions) => {
+			streamSimple: (requestModel, context, providerOptions) => {
 				capturedOptions = providerOptions;
+				if (providerStream) return providerStream(requestModel, context, providerOptions);
 				if (providerEvent === undefined) return createDoneStream(api);
 
 				const stream = createAssistantMessageEventStream();
@@ -309,6 +313,81 @@ describe("createAgentSession stream options", () => {
 		// Provenance must not serialize caller-owned schemas before the provider does.
 		expect(schemaToJSON).not.toHaveBeenCalled();
 	});
+
+	it.each(["different", "invalid", "matching"] as const)(
+		"admits SDK provenance before native tracing only for the owning session (%s)",
+		async (scope) => {
+			const directory = join(tempDir, "trace");
+			mkdirSync(directory, { mode: 0o700 });
+			const target = "11111111-1111-4111-8111-111111111111";
+			vi.stubEnv("PI_CACHE_TRACE_DIR", directory);
+			vi.stubEnv("PI_CACHE_TRACE_SESSION_ID", scope === "invalid" ? "invalid-session" : target);
+			vi.stubEnv("PI_SUBAGENT_CHILD", "1");
+			const events = [
+				{ type: "message_start", message: { id: "msg_scope", usage: { input_tokens: 1, output_tokens: 0 } } },
+				{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+				{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "synthetic-ok" } },
+				{ type: "content_block_stop", index: 0 },
+				{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+				{ type: "message_stop" },
+			];
+			const fetch = vi.fn(
+				async () =>
+					new Response(
+						events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+						{ headers: { "content-type": "text/event-stream" } },
+					),
+			);
+			const options = await captureStreamOptions(
+				"anthropic-messages",
+				{ cacheWarming: "off", compaction: { enabled: false } },
+				{},
+				undefined,
+				undefined,
+				async (session) => {
+					expect(session.sessionId).not.toBe(target);
+					if (scope === "matching") vi.stubEnv("PI_CACHE_TRACE_SESSION_ID", session.sessionId);
+					await session.prompt("synthetic scope probe");
+					const message = session.messages.findLast((item) => item.role === "assistant");
+					expect(message?.stopReason).toBe("stop");
+					expect(message?.content).toEqual([{ type: "text", text: "synthetic-ok" }]);
+				},
+				(_model, context, providerOptions) =>
+					streamAnthropic(createModel("anthropic-messages"), normalizeContext(context), {
+						...providerOptions,
+						fetch,
+					}),
+			);
+			expect(fetch).toHaveBeenCalledTimes(1);
+			if (scope !== "matching") {
+				expect(options?.cacheTraceContext).toBeUndefined();
+				expect(readdirSync(directory)).toEqual([]);
+			} else {
+				expect(options?.cacheTraceContext).toMatchObject({
+					sessionId: process.env.PI_CACHE_TRACE_SESSION_ID,
+					purpose: "child",
+					catalogDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+				});
+				const files = readdirSync(directory);
+				expect(files).toContain("investigation.key");
+				const rows = files
+					.filter((name) => name.endsWith(".jsonl"))
+					.flatMap((name) =>
+						readFileSync(join(directory, name), "utf8")
+							.trim()
+							.split("\n")
+							.map((line) => JSON.parse(line) as Record<string, unknown>),
+					);
+				expect(rows).toEqual(
+					expect.arrayContaining([
+						expect.objectContaining({ kind: "request" }),
+						expect.objectContaining({ phase: "decoder_eof" }),
+						expect.objectContaining({ phase: "adapter_done" }),
+					]),
+				);
+			}
+		},
+	);
 
 	it("lets request timeoutMs override httpIdleTimeoutMs for OpenAI Codex", async () => {
 		const options = await captureStreamOptions(

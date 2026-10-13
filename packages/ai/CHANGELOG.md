@@ -5,6 +5,7 @@
 ### Changed
 
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
+- Extended temporary opt-in Anthropic tracing with monotonic callback, SSE/read/EOF and attempt timing, validated standard request IDs, and exact-session filtering. Transport and completion behavior are unchanged.
 
 ### Fixed
 

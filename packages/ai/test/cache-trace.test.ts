@@ -18,15 +18,17 @@ import { stream as anthropic } from "../src/api/anthropic-messages.ts";
 import { stream as completions } from "../src/api/openai-completions.ts";
 import { stream as responses } from "../src/api/openai-responses.ts";
 import type { Model, StreamOptions } from "../src/types.ts";
-import { cacheTraceDigest, createCacheTrace } from "../src/utils/cache-trace.ts";
+import { cacheTraceDigest, createCacheTrace, recordCacheTraceObservation } from "../src/utils/cache-trace.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const originalDirectory = process.env.PI_CACHE_TRACE_DIR;
+const originalSessionFilter = process.env.PI_CACHE_TRACE_SESSION_ID;
 const directories: string[] = [];
 function directory(): string {
 	const path = mkdtempSync(join(tmpdir(), "pi-cache-trace-"));
 	directories.push(path);
 	process.env.PI_CACHE_TRACE_DIR = path;
+	delete process.env.PI_CACHE_TRACE_SESSION_ID;
 	return path;
 }
 function records(path: string): Record<string, unknown>[] {
@@ -57,6 +59,8 @@ function model<T extends "openai-responses" | "openai-completions" | "anthropic-
 afterEach(() => {
 	if (originalDirectory === undefined) delete process.env.PI_CACHE_TRACE_DIR;
 	else process.env.PI_CACHE_TRACE_DIR = originalDirectory;
+	if (originalSessionFilter === undefined) delete process.env.PI_CACHE_TRACE_SESSION_ID;
+	else process.env.PI_CACHE_TRACE_SESSION_ID = originalSessionFilter;
 	for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true });
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
@@ -200,7 +204,7 @@ describe("private opt-in cache recorder", () => {
 									{
 										headers: {
 											"content-type": "text/event-stream",
-											"x-request-id": "req_safe",
+											[api === "anthropic-messages" ? "request-id" : "x-request-id"]: "req_safe",
 											"set-cookie": "PRIVATE_RESPONSE_COOKIE",
 										},
 									},
@@ -237,9 +241,19 @@ describe("private opt-in cache recorder", () => {
 					expect(captured.filter((record) => record.kind === "attempt")).toHaveLength(
 						serializations === 1 ? 1 : 2,
 					);
+					const attempts = captured
+						.filter((record) => record.kind === "attempt")
+						.map((record) => record.attemptId);
+					expect(captured.filter((record) => record.kind === "wire").map((record) => record.attemptId)).toEqual(
+						attempts,
+					);
+					expect(
+						captured.filter((record) => record.kind === "http_response").map((record) => record.attemptId),
+					).toEqual(attempts);
 					expect(
 						captured.filter((record) => record.kind === "http_response").map((record) => record.status),
 					).toEqual(serializations === 1 ? [200] : [503, 200]);
+					expect(captured.filter((record) => record.kind === "http_response").at(-1)?.requestId).toBe("req_safe");
 					if (api === "openai-completions")
 						expect(captured.find((record) => record.kind === "terminal")?.responseId).toBe("chatcmpl_safe");
 					if (api !== "anthropic-messages") expect(logical?.requested).toMatchObject({ tier: "fast" });
@@ -298,7 +312,7 @@ describe("private opt-in cache recorder", () => {
 		const get = vi.spyOn(response.headers, "get").mockImplementation(() => {
 			throw new Error("PRIVATE_HEADER_ERROR");
 		});
-		const fetch = vi.fn(async () => response);
+		const fetch = vi.fn<typeof globalThis.fetch>(async () => response);
 		const init = { body: '{"input":"PRIVATE_BODY"}', method: "POST" };
 		expect(
 			await trace.wrapFetch(fetch)(
@@ -310,13 +324,136 @@ describe("private opt-in cache recorder", () => {
 			"https://user:PRIVATE_PASSWORD@provider.test/responses?token=PRIVATE_URL_TOKEN",
 			init,
 		);
+		expect(fetch.mock.calls[0]?.[1]).toBe(init);
 		trace.event("send", { reason: { secret: "PRIVATE_NESTED_SECRET" } });
 		trace.event("PRIVATE_EVENT", { PRIVATE_FIELD: "PRIVATE_VALUE" });
+		trace.timing("PRIVATE_PHASE", { PRIVATE_FIELD: "PRIVATE_VALUE" });
+		trace.timing("read_enter", { index: Number.NaN });
+		trace.timing("callback_enter", { callback: "PRIVATE_CALLBACK" });
+		trace.timing("sse_frame", { eventType: "PRIVATE_EVENT_TYPE" });
+		trace.timing("first_content_event", { contentType: { private: "PRIVATE_OBJECT" } });
 		get.mockRestore();
 		const captured = records(path);
 		expect(captured.filter((record) => record.kind === "coverage_gap").length).toBeGreaterThan(0);
 		expect(JSON.stringify(captured)).not.toMatch(/PRIVATE_/);
 		expect(captured.find((record) => record.kind === "send")?.endpoint).toBe("https://provider.test");
+		expect(captured.filter((record) => record.kind === "timing" && record.eventType === "unknown")).toHaveLength(1);
+	});
+
+	it.each([
+		{ standard: "req_standard", fallback: "req_fallback", expected: "req_standard", source: "request-id" },
+		{ standard: "PRIVATE_UNSAFE_ID", fallback: "req_fallback", expected: "req_fallback", source: "x-request-id" },
+		{ standard: "", fallback: "PRIVATE_UNSAFE_ID", expected: undefined, source: undefined },
+	])(
+		"validates request IDs and retains safe fallback: $standard",
+		async ({ standard, fallback, expected, source }) => {
+			const path = directory();
+			const trace = createCacheTrace(model("anthropic-messages"))!;
+			const response = new Response("PRIVATE_RESPONSE_BODY", {
+				headers: { "request-id": standard, "x-request-id": fallback },
+			});
+			const input = "https://provider.test/v1/messages";
+			const init = { method: "POST", body: '{"messages":[]}' };
+			const fetch = vi.fn<typeof globalThis.fetch>(async () => response);
+			expect(await trace.wrapFetch(fetch)(input, init)).toBe(response);
+			expect(response.bodyUsed).toBe(false);
+			expect(fetch.mock.calls[0]?.[0]).toBe(input);
+			expect(fetch.mock.calls[0]?.[1]).toBe(init);
+			const row = records(path).find((record) => record.kind === "http_response");
+			expect(row?.requestId).toBe(expected);
+			expect(row?.requestIdSource).toBe(source);
+			expect(JSON.stringify(records(path))).not.toContain("PRIVATE_");
+		},
+	);
+
+	it("scopes inherited tracing to the exact session and stops already-admitted observers when disabled", () => {
+		const path = directory();
+		const sessionId = "01a135b8-dfbf-7122-9500-43010f4d51fe";
+		process.env.PI_CACHE_TRACE_SESSION_ID = sessionId;
+		const compat = vi.fn();
+		expect(createCacheTrace(model("anthropic-messages"), undefined, undefined, compat)).toBeUndefined();
+		expect(
+			createCacheTrace(model("anthropic-messages"), { cacheTraceContext: { sessionId: "other" } }),
+		).toBeUndefined();
+		recordCacheTraceObservation("other", "agent_start");
+		expect(readdirSync(path)).toEqual([]);
+		expect(compat).not.toHaveBeenCalled();
+		const trace = createCacheTrace(model("anthropic-messages"), { cacheTraceContext: { sessionId } })!;
+		recordCacheTraceObservation(sessionId, "agent_start");
+		recordCacheTraceObservation(sessionId, "http_headers", { requestId: "PRIVATE_ID", status: 200 });
+		recordCacheTraceObservation(sessionId, "http_headers", { status: Number.POSITIVE_INFINITY });
+		const captured = records(path);
+		expect(captured.filter((row) => row.kind === "observation")).toHaveLength(1);
+		expect(JSON.stringify(captured)).not.toContain(sessionId);
+		delete process.env.PI_CACHE_TRACE_DIR;
+		trace.timing("adapter_done");
+		trace.terminal({ type: "message_stop" });
+		recordCacheTraceObservation(sessionId, "agent_end");
+		expect(records(path)).toEqual(captured);
+		process.env.PI_CACHE_TRACE_DIR = path;
+		process.env.PI_CACHE_TRACE_SESSION_ID = "*";
+		expect(createCacheTrace(model("anthropic-messages"), { cacheTraceContext: { sessionId } })).toBeUndefined();
+	});
+
+	it("distinguishes real retries from the existing strict fallback payload pass", async () => {
+		const path = directory();
+		let calls = 0;
+		const onPayload = vi.fn();
+		const result = await anthropic(
+			{ ...model("anthropic-messages"), compat: { supportsStrictTools: true } },
+			normalizeContext({
+				messages: [{ role: "user", content: "PRIVATE_PROMPT", timestamp: 1 }],
+				tools: [
+					{
+						name: "lookup",
+						description: "PRIVATE_TOOL",
+						parameters: Type.Object({ value: Type.String() }),
+						constrainedSampling: { type: "json_schema", strict: "prefer" },
+					},
+				],
+			}),
+			{
+				apiKey: "PRIVATE_KEY",
+				maxRetries: 1,
+				onPayload,
+				fetch: async () => {
+					if (++calls === 1)
+						return Response.json(
+							{ error: { message: "retry" } },
+							{ status: 503, headers: { "retry-after-ms": "0" } },
+						);
+					if (calls === 2)
+						return Response.json(
+							{
+								type: "error",
+								error: { type: "invalid_request_error", message: "The compiled grammar is too large" },
+							},
+							{ status: 400 },
+						);
+					return new Response(
+						[
+							{
+								type: "message_start",
+								message: { id: "msg_safe", model: "test-model", usage: { input_tokens: 1, output_tokens: 0 } },
+							},
+							{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+							{ type: "message_stop" },
+						]
+							.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+							.join(""),
+					);
+				},
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(calls).toBe(3);
+		expect(onPayload).toHaveBeenCalledTimes(2);
+		const captured = records(path);
+		expect(captured.filter((row) => row.kind === "attempt").map((row) => row.payloadPass)).toEqual([1, 1, 2]);
+		const attempts = captured.filter((row) => row.kind === "attempt").map((row) => row.attemptId);
+		expect(new Set(attempts).size).toBe(3);
+		expect(captured.findLast((row) => row.kind === "parsed_usage")?.usageSourceAttemptId).toBe(attempts[2]);
+		expect(JSON.stringify(captured)).not.toContain("PRIVATE_");
 	});
 
 	it.each(

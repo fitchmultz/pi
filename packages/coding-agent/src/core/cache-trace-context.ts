@@ -30,6 +30,10 @@ export function createCacheTraceContext(
 	return (selected, routingId, supplied) => {
 		if (!process.env.PI_CACHE_TRACE_DIR) return undefined;
 		try {
+			const sessionId = manager.getSessionId();
+			const filter = process.env.PI_CACHE_TRACE_SESSION_ID;
+			if (filter && (!/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(filter) || sessionId !== filter))
+				return undefined;
 			// Recorder admission is also the privacy/lifetime gate for provenance collection.
 			if (!cacheTraceDigest("sdk-provenance")) return undefined;
 			runtimeGeneration ??= randomUUID();
@@ -66,7 +70,6 @@ export function createCacheTraceContext(
 			}
 			const branch = manager.getBranch();
 			const reset = branch.findLast((entry) => entry.type === "compaction" || entry.type === "branch_summary");
-			const sessionId = manager.getSessionId();
 			return {
 				...supplied,
 				...manifest,
