@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added the `sessionShareDestination` setting to choose automatic, GitHub gist, or Radius uploads for `/share`; the default `auto` behavior is unchanged ([#10870](https://github.com/earendil-works/pi/issues/10870)).
 - Added complete native working-session save and restore through the SDK and `--working-session`, with private local control and completed-exit receipts. See [Native working sessions](docs/working-session.md).
 - Added `registerProviderAuthFallback()` for ephemeral provider-scoped authentication with native credential precedence, catalogs and transport. See [Provider authentication fallback](docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider).
 - Added opt-in `ignoreStoredCredentials` provider registration and `ModelRuntime.supportsIgnoreStoredCredentials` feature detection for routing providers; explicit keys and persistent login/logout remain unchanged.
@@ -17,7 +18,7 @@
 - Added JSON selection to the `read` tool. `json: { path?, fields? }` selects a JSON Pointer target and, optionally, immediate object keys before paging and output limits. See [JSON selection with read](docs/sdk.md#json-selection-with-read).
 - Added the replaceable `discover_tools` builtin for full on-demand extension instructions, with deferred activation, prior-turn read gating, and branch-aware persistence and compaction repair. SDK hosts can opt in with `instructionGroupsExtension`.
 - Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle complete native-state resume, staged runtime and extension activation, and one-shot startup rollback. Journal-only handoffs are refused. See [Managed restarts](docs/restart.md).
-- Added optional `compactView` (off by default), `/compact-view`, and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Hybrid opens groups by default while keeping cards compact.
+- Added optional `compactView` (off by default), `/compact-view` (alias `/cv`), and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Bare commands cycle off → on → hybrid → off. Hybrid opens groups by default while keeping cards compact.
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 - Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Activation accepts upstream catalog removals and prints every removed model ID instead of blocking the update; direct installer runs still require explicit `--accept-model-removals`, while explicit rollback remains available. Restored Termux compiler preparation and isolated shell/exec environments.
 - Added frozen performance results and offline reproduction fixtures covering native tools, rendering, sessions, transports, storage and packaging. See [performance results and reproduction](../../docs/performance.md).
@@ -70,6 +71,8 @@
 - Fixed cache overlap estimates crossing abandoned branches or presenting unknown read prices and expiry as measured facts. Recorded usage and cost totals remain complete.
 - Fixed cache warming using ambient rather than resolved credential retention and omitting one-hour writes and prompt-length pricing tiers. Native preparation drives scheduling; refreshes resolve current auth and headers and recheck context and dispatch deadlines.
 - Fixed cancelled or timed-out shell commands on macOS sometimes running later steps after the current step was killed; cancellation and timeouts now stop the whole command.
+- Pinned internal Pi dependencies to exact release versions to prevent fresh installs from mixing incompatible packages ([#10865](https://github.com/earendil-works/pi/issues/10865))
+- Fixed resumed sessions dropping tools activated during the session. Resume now restores the session's active tools, with `--tools +name`/`-name` entries applied to them, unless `--tools` with tool names, `--no-tools`, or `--no-builtin-tools` selects tools explicitly ([#10785](https://github.com/earendil-works/pi/issues/10785))
 
 ## [1.2.0] - 2026-10-12
 

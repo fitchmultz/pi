@@ -218,17 +218,13 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 	};
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (!ctx.hasUI) return;
+		if (!ctx.hasUI || event.messageType !== "user") return;
 		const match = extractPromptMatch(event.prompt);
 		if (!match) {
 			return;
 		}
 
 		updatePromptContext(ctx, match);
-	});
-
-	pi.on("session_switch", async (_event, ctx) => {
-		rebuildFromSession(ctx);
 	});
 
 	const getUserText = (content: string | { type: string; text?: string }[] | undefined): string => {

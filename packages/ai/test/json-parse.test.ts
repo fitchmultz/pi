@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, it, test } from "vitest";
 import { parseJsonWithRepair, parseStreamingJson, repairJson } from "../src/utils/json-parse.ts";
 
 describe("JSON string repair", () => {
@@ -11,8 +11,8 @@ describe("JSON string repair", () => {
 		['\n{"value":"line\n\ttab\u0000\u001f"}\r', '\n{"value":"line\\n\\ttab\\u0000\\u001f"}\r'],
 		[String.raw`{"path":"A\H","next":"B\Q"}`, String.raw`{"path":"A\\H","next":"B\\Q"}`],
 		['{"value":"end\\', '{"value":"end\\\\'],
-		[String.raw`{"value":"\u12`, String.raw`{"value":"\u12`],
-		[String.raw`{"value":"\u12QZ"}`, String.raw`{"value":"\u12QZ"}`],
+		[String.raw`{"value":"\u12`, String.raw`{"value":"\\u12`],
+		[String.raw`{"value":"\u12QZ"}`, String.raw`{"value":"\\u12QZ"}`],
 		[String.raw`{"value":"escaped quote \" then \H 🍎"}`, String.raw`{"value":"escaped quote \" then \\H 🍎"}`],
 	])("preserves untouched spans and repairs only malformed string characters (%s)", (input, expected) => {
 		expect(repairJson(input)).toBe(expected);
@@ -37,5 +37,25 @@ describe("JSON string repair", () => {
 		});
 		expect(parseStreamingJson(String.raw`{"path":"A\H`)).toEqual({ path: "A" });
 		expect(parseStreamingJson(String.raw`{"path":"\u12`)).toEqual({ path: "" });
+	});
+});
+
+describe("parseStreamingJson", () => {
+	// #10868
+	it("keeps invalid \\u escapes as literal text without dropping fields", () => {
+		expect(parseStreamingJson(String.raw`{"text":"\url{x}"}`)).toEqual({ text: "\\url{x}" });
+		expect(parseStreamingJson(String.raw`{"path":"a.tex","content":"\usepackage{x}","mode":"w"}`)).toEqual({
+			path: "a.tex",
+			content: "\\usepackage{x}",
+			mode: "w",
+		});
+	});
+
+	it("decodes valid \\u escapes", () => {
+		expect(parseStreamingJson(String.raw`{"text":"caf\u00e9 \url"}`)).toEqual({ text: "café \\url" });
+	});
+
+	it("omits a \\u escape that is cut off mid-stream", () => {
+		expect(parseStreamingJson(String.raw`{"text":"ab\u00`)).toEqual({ text: "ab" });
 	});
 });

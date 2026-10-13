@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { type Container, Text } from "@earendil-works/pi-tui";
+import { type AutocompleteProvider, type Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
@@ -19,6 +19,7 @@ import { createHarness, type Harness } from "../harness.ts";
 type View = {
 	isInitialized: boolean;
 	defaultEditor: CustomEditor;
+	autocompleteProvider: AutocompleteProvider | undefined;
 	chatContainer: Container;
 	pendingMessagesContainer: Container;
 	editorContainer: Container;
@@ -117,21 +118,50 @@ describe("compact view settings and native event lifecycle", () => {
 		const saved = structuredClone(harness.session.messages);
 		for (const [command, enabled] of [
 			["/compact-view", true],
+			["/compact-view", "hybrid"],
+			["/compact-view", false],
+			["/cv", true],
+			["/cv", "hybrid"],
+			["/cv", false],
+			["/compact-view on", true],
 			["/compact-view off", false],
 			["/compact-view toggle", true],
+			["/compact-view toggle", false],
 			["/compact-view hybrid", "hybrid"],
-			["/compact-view on", true],
-			["/compact-view invalid", true],
+			["/compact-view invalid", "hybrid"],
+			["/compact-view toggle", false],
+			["/cv on", true],
+			["/cv off", false],
+			["/cv toggle", true],
+			["/cv toggle", false],
+			["/cv hybrid", "hybrid"],
+			["/cv invalid", "hybrid"],
+			["/cv toggle", false],
+			["/cv on", true],
 		] as const) {
+			view.defaultEditor.setText(command);
 			await submit(command);
 			expect(harness.settingsManager.getCompactView()).toBe(enabled);
 			expect(text().includes("Activity")).toBe(!!enabled);
 			expect(view.chatContainer.children[0]).toBe(child);
+			expect(view.defaultEditor.getText()).toBe("");
 		}
-		expect(text()).toContain("Usage: /compact-view [on|off|hybrid|toggle]");
+		expect(text().match(/Usage: \/compact-view \[on\|off\|hybrid\|toggle\]/g)).toHaveLength(2);
+		const suggestions = await view.autocompleteProvider?.getSuggestions(["/cv"], 0, 3, {
+			signal: new AbortController().signal,
+		});
+		expect(suggestions?.items).toContainEqual(expect.objectContaining({ value: "cv" }));
 		harness.settingsManager.setCompactView(false);
 		await rebind();
 		expect(text()).toContain("Activity");
+		await submit("/cv");
+		expect(harness.settingsManager.getCompactView()).toBe("hybrid");
+		expect(text()).toContain("▾ Activity");
+		await submit("/compact-view");
+		expect(harness.settingsManager.getCompactView()).toBe(false);
+		expect(text()).not.toContain("Activity");
+		await submit("/cv");
+		expect(harness.settingsManager.getCompactView()).toBe(true);
 		view.showSettingsSelector();
 		const selector = view.editorContainer.children[0] as SettingsSelectorComponent;
 		selector.getSettingsList().selectItem("compact-view");

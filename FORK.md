@@ -1,8 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `d6370b72d0a478a31741a6c44ae7ecdcbd01d0fd`
-(2026-10-12), including v1.2.0 and its follow-up fixes. It is upstream plus the features
+v1.0.0 and synchronized through upstream `b9ab2a6238d2c91cf0c6ebf836dfd05883f9db51`
+(2026-10-13), including v1.2.0 and its follow-up fixes. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -35,6 +35,7 @@ These fixes remain until upstream supplies equivalent behavior, not merely close
 Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in the v1.1.0 sync); the fork keeps `private-spill.test.ts` as a regression guard.
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
+Transcript resume now uses upstream's recorded active-tool loadout and `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785)); explicit tool selection and exclusion keep their precedence. Native complete working-session restore retains its saved current loadout and modifier policy.
 Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
 The Chord service-hydration array check ([#10509](https://github.com/earendil-works/pi/issues/10509)) was retired with upstream's Chord 2 runtime: the service runtime is gone, and every link, including the in-memory one, JSON-round-trips frames.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
@@ -44,6 +45,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | --- | --- | --- |
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
+| WebSocket text frames must not decode object-transport packing markers and bypass untrusted-client compression restrictions | `packages/chord/src/link.ts` | `packages/chord/test/websocket.test.ts` |
 | Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `utils/shell.ts`, `packages/coding-agent/examples/extensions/sandbox/index.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
 | HTML export must not replace the journal through any alias | `core/export-html/index.ts` | `file-safety.test.ts` |
@@ -95,7 +97,7 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Stop image encoding at the first fitting candidate without changing candidate order | `utils/image-resize-core.ts` | `image-processing.test.ts` |
 | Bound native Bash spill queues and wait for complete private files; push-only custom producers retain their existing callback contract | `core/{bash-executor,tools/bash,tools/output-accumulator}.ts`, `utils/{output-files,child-process}.ts` | `bash-spill.test.ts`, `private-spill.test.ts`, `streaming-file.test.ts` |
 | Skip disk reads only for acknowledged, confirmed-terminal background jobs during monitoring; explicit tools remain fresh | `extensions/background-command/{index,jobs}.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
-| Compile the fixed Chord frame schema, drain publications by cursor, and accumulate MCP lines and error prefixes without repeated copying | `packages/chord/src/{wire,publish}.ts`, `packages/mcp/src/transports/{stdio,streamable-http}.ts` | `packages/chord/test/{links-review,state}.test.ts`, `packages/mcp/test/{stdio,streamable-http}.test.ts` |
+| Compile upstream's single Chord frame schema once, drain publications by cursor, and accumulate MCP lines and error prefixes without repeated copying | `packages/chord/src/{wire,publish}.ts`, `packages/mcp/src/transports/{stdio,streamable-http}.ts` | `packages/chord/test/{links-review,state}.test.ts`, `packages/mcp/test/{stdio,streamable-http}.test.ts` |
 | Limit retained-context scheduler work, binary-search historical revisions, avoid redundant SQLite writes, and join long lines at their boundary | `packages/durable/src/{harness/scheduler,storage/memory,storage/sqlite/storage,env/node}.ts` | `packages/durable/test/{harness-context,memory-storage,sqlite-storage,env-node}.test.ts` |
 | Count decoded lengths with scratch storage, reuse frame payload allocation without retaining large metadata, bound read-ahead, and precompute directory sort keys | `packages/env/daemon/src/{decode,scan,frame}.rs`, `packages/env/src/remote-env.ts` | Native daemon tests, `packages/env/test/{connection,remote,differential}.test.ts` |
 | Append native eval journals and validate reports once; avoid repeated retained-array copying in the opt-in telemetry adapter | `packages/evals/src/{cli,report}.ts`, `packages/telemetry/src/memory.ts` | `packages/evals/test/{cli,report}.test.ts`, `packages/telemetry/test/conformance.test.ts` |
@@ -115,7 +117,9 @@ to delete the large listing and watch trees.
 Contributor approvals remain fork-local; upstream approval-list additions and maintainer-specific
 label assignment/reopening rules are not imported.
 The fork uses upstream's install lock, not the removed npm shrinkwrap, and keeps its immutable
-installer. It uses upstream's pre-commit hook and `npm run check`. Delivery evidence comes from
+installer. Direct registry dependencies, including internal packages and the retained coding-agent
+Chord dependency, use upstream's exact-version policy. It uses upstream's pre-commit hook and
+`npm run check`. Delivery evidence comes from
 `./test.sh`, installer/consumer tests, bundle smoke, and Linux/macOS CI; it does not establish live
 Windows, Termux-device or hosted Axiom acceptance.
 
@@ -132,6 +136,19 @@ including npm 12's expected-package-keyed pack metadata. Selected workspaces pac
 Nix retains its eight raw named archives. Pinned fleet automation has migrated to the artifact API,
 and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
 Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
+
+Chord follows upstream's schema-derived frame types, stricter contract tokens and error codes,
+large-payload deflation, acknowledgement-based state flow control, and optional per-link call limits.
+`Link.send` reports encoded sizes when available; call results may overtake waiting state. The fork
+retains one compiled frame validator, the cursor-based publication drain, strict-JSON container hooks
+and public exports. Coding-agent uses Chord's JSON helpers, not its host/link transport; this sync
+establishes no current TUI or tool-performance improvement from those transport features.
+
+Streaming tool-call JSON now follows upstream's invalid `\u` repair without losing later fields,
+while retaining span-based repair and the original partial-parser fallback order. Anthropic error
+tool results replace images with text notes; successful result images and error text are preserved.
+These behaviors have offline parser/payload regression coverage, not a live provider qualification.
+`/share` supports an explicit gist or Radius destination; its default `auto` selection is unchanged.
 
 Anthropic native tool changes follow upstream's inline definitions and fixed initial tool list,
 including same-name redefinitions. The fork retains request-wide strict-schema budgets and passive
