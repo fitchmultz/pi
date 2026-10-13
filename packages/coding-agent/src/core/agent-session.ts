@@ -1142,24 +1142,20 @@ export class AgentSession {
 			const entryId = this._findPersistedMessageEntryId(result);
 			return entryId ? [entryId] : [];
 		});
-		const boundary = await this._extensionRunner.emitBoundary(
-			{
-				type: "turn_end",
-				turnIndex: this._turnIndex,
-				message,
-				toolResults,
-				messageEntryId,
-				toolResultEntryIds,
-				outcome: this._lastActivityOutcome,
-			},
-			(entries) => this._buildBoundaryContext(entries, "turn_end"),
-		);
-		this._commitBoundaryDrafts(boundary.entries);
-		if (boundary.continue && !this._buildBoundaryContext([], "turn_end").canContinue) {
+		const shouldContinue = await this._dispatchBoundary({
+			type: "turn_end",
+			turnIndex: this._turnIndex,
+			message,
+			toolResults,
+			messageEntryId,
+			toolResultEntryIds,
+			outcome: this._lastActivityOutcome,
+		});
+		if (shouldContinue && !this._buildBoundaryContext([], "turn_end").canContinue) {
 			this._reportInvalidBoundaryContinuation("turn_end");
 			return false;
 		}
-		return boundary.continue;
+		return shouldContinue;
 	}
 
 	private _installAgentBoundaryHooks(): void {
@@ -1300,10 +1296,14 @@ export class AgentSession {
 		};
 	}
 
-	private _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): void {
-		const appended = this._applyBoundaryDrafts(this.sessionManager, drafts);
+	private async _dispatchBoundary(event: Parameters<ExtensionRunner["emitBoundary"]>[0]): Promise<boolean> {
+		const result = await this._extensionRunner.emitBoundary(event, (entries) =>
+			this._buildBoundaryContext(entries, event.type),
+		);
+		const appended = this._applyBoundaryDrafts(this.sessionManager, result.entries);
 		this._refreshFinalizedContext();
 		for (const entry of appended) this._emit({ type: "entry_appended", entry });
+		return result.continue;
 	}
 
 	private _reportInvalidBoundaryContinuation(event: "turn_end" | "agent_before_settle"): void {
@@ -2297,16 +2297,15 @@ export class AgentSession {
 
 	private async _runBeforeSettleBoundary(): Promise<boolean> {
 		if (!this._extensionRunner.hasHandlers("agent_before_settle")) return this.agent.hasQueuedMessages();
-		const result = await this._extensionRunner.emitBoundary(
-			{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
-			(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
-		);
-		this._commitBoundaryDrafts(result.entries);
+		const requestedContinue = await this._dispatchBoundary({
+			type: "agent_before_settle",
+			outcome: this._lastActivityOutcome,
+		});
 		this._flushPendingCustomMessages();
 		if (this._agentRunAbortRequested) return false;
-		const shouldContinue = result.continue || this.agent.hasQueuedMessages();
+		const shouldContinue = requestedContinue || this.agent.hasQueuedMessages();
 		if (shouldContinue && !this._buildBoundaryContext([], "agent_before_settle").canContinue) {
-			if (result.continue) this._reportInvalidBoundaryContinuation("agent_before_settle");
+			if (requestedContinue) this._reportInvalidBoundaryContinuation("agent_before_settle");
 			return false;
 		}
 		return shouldContinue;

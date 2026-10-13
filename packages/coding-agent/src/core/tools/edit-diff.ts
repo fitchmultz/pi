@@ -100,21 +100,24 @@ function originalLineOffset(line: string, offset: number): number {
 	);
 }
 
-function originalFuzzyOffset(content: string, offset: number, side: "start" | "end"): number {
+function originalFuzzyOffset(content: string, fuzzyContent: string, offset: number, side: "start" | "end"): number {
 	let originalStart = 0;
 	let fuzzyStart = 0;
-	for (const line of content.split("\n")) {
-		const fuzzyLine = normalizeForFuzzyMatch(line);
+	// Fuzzy normalization preserves LF boundaries; reuse its line lengths while scanning original offsets.
+	while (originalStart <= content.length) {
+		const originalNewline = content.indexOf("\n", originalStart);
+		const fuzzyNewline = fuzzyContent.indexOf("\n", fuzzyStart);
+		const originalEnd = originalNewline === -1 ? content.length : originalNewline;
+		const fuzzyEnd = fuzzyNewline === -1 ? fuzzyContent.length : fuzzyNewline;
+		const fuzzyLineLength = fuzzyEnd - fuzzyStart;
 		const localOffset = offset - fuzzyStart;
-		if (localOffset <= fuzzyLine.length) {
+		if (localOffset <= fuzzyLineLength) {
 			// Starting at a newline skips its preceding spaces; ending there leaves those spaces intact.
-			return (
-				originalStart +
-				(side === "start" && localOffset === fuzzyLine.length ? line.length : originalLineOffset(line, localOffset))
-			);
+			if (side === "start" && localOffset === fuzzyLineLength) return originalEnd;
+			return originalStart + originalLineOffset(content.slice(originalStart, originalEnd), localOffset);
 		}
-		originalStart += line.length + 1;
-		fuzzyStart += fuzzyLine.length + 1;
+		originalStart = originalEnd + 1;
+		fuzzyStart = fuzzyEnd + 1;
 	}
 	throw new Error("Replacement range is outside the original content.");
 }
@@ -191,12 +194,6 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 	};
 }
 
-function countOccurrences(content: string, oldText: string): number {
-	const fuzzyContent = normalizeForFuzzyMatch(content);
-	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	return fuzzyContent.split(fuzzyOldText).length - 1;
-}
-
 function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
 	if (totalEdits === 1) {
 		return new Error(
@@ -262,24 +259,33 @@ export function applyEditsToNormalizedContent(
 	}
 
 	const matchedEdits: MatchedEdit[] = [];
+	const fuzzyContent = normalizeForFuzzyMatch(normalizedContent);
 	for (let i = 0; i < normalizedEdits.length; i++) {
 		const edit = normalizedEdits[i];
-		const matchResult = fuzzyFindText(normalizedContent, edit.oldText);
-		if (!matchResult.found) {
+		const fuzzyOldText = normalizeForFuzzyMatch(edit.oldText);
+		const exactIndex = normalizedContent.indexOf(edit.oldText);
+		const usedFuzzyMatch = exactIndex === -1;
+		const matchIndex = usedFuzzyMatch
+			? fuzzyOldText.length > 0
+				? fuzzyContent.indexOf(fuzzyOldText)
+				: -1
+			: exactIndex;
+		const matchLength = usedFuzzyMatch ? fuzzyOldText.length : edit.oldText.length;
+		if (matchIndex === -1) {
 			throw getNotFoundError(path, i, normalizedEdits.length);
 		}
 
-		const occurrences = countOccurrences(normalizedContent, edit.oldText);
+		const occurrences = fuzzyContent.split(fuzzyOldText).length - 1;
 		if (occurrences > 1) {
 			throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
 		}
 
-		const matchStart = matchResult.usedFuzzyMatch
-			? originalFuzzyOffset(normalizedContent, matchResult.index, "start")
-			: matchResult.index;
-		const matchEnd = matchResult.usedFuzzyMatch
-			? originalFuzzyOffset(normalizedContent, matchResult.index + matchResult.matchLength, "end")
-			: matchResult.index + matchResult.matchLength;
+		const matchStart = usedFuzzyMatch
+			? originalFuzzyOffset(normalizedContent, fuzzyContent, matchIndex, "start")
+			: matchIndex;
+		const matchEnd = usedFuzzyMatch
+			? originalFuzzyOffset(normalizedContent, fuzzyContent, matchIndex + matchLength, "end")
+			: matchIndex + matchLength;
 		matchedEdits.push({
 			editIndex: i,
 			matchIndex: matchStart,

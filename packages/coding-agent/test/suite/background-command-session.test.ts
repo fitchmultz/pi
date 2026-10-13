@@ -1,4 +1,4 @@
-import {
+import fs, {
 	appendFileSync,
 	mkdirSync,
 	mkdtempSync,
@@ -8,13 +8,14 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext, ExtensionFactory } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import backgroundCommand, { BACKGROUND_COMMAND_NOTICE } from "../../src/extensions/background-command/index.ts";
@@ -28,7 +29,14 @@ import {
 	startBackgroundCommand,
 } from "../../src/extensions/background-command/jobs.ts";
 import { getShellEnv } from "../../src/utils/shell.ts";
-import { createHarness, getMessageText, getToolResult, type Harness, type HarnessOptions } from "./harness.ts";
+import {
+	createHarness,
+	createTestUiContext,
+	getMessageText,
+	getToolResult,
+	type Harness,
+	type HarnessOptions,
+} from "./harness.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 async function until(condition: () => boolean) {
@@ -647,4 +655,101 @@ describe("background command extension delivery", () => {
 		expect(snapshots[2]).toMatchObject({ total: 1, nextOffset: null });
 		expect(snapshots[2].jobs.map((job) => job.commandPreview)).toEqual(["sleep 600"]);
 	});
+	it.each(["succeeded", "unknown"] as const)(
+		"skips only acknowledged final monitor records; initial status=%s",
+		async (status) => {
+			const h = await harness();
+			const root = backgroundCommandDirectory(h.sessionManager);
+			const id = "00000000-0000-4000-8000-000000000001";
+			const directory = join(root, id);
+			mkdirSync(directory, { recursive: true });
+			const record = join(directory, "job.json");
+			const state = join(directory, "state.json");
+			writeFileSync(
+				record,
+				JSON.stringify({
+					job: {
+						id,
+						command: "observed job",
+						cwd: h.tempDir,
+						createdAt: new Date(0).toISOString(),
+						logFile: join(directory, "output.log"),
+						status: "running",
+						pid: process.pid,
+					},
+				}),
+			);
+			writeFileSync(state, JSON.stringify({ status }));
+			writeFileSync(join(directory, "output.log"), "");
+			h.setResponses([
+				fauxAssistantMessage(fauxToolCall("background_command", { action: "status", id }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Acknowledged"),
+			]);
+			await h.session.prompt("Inspect the job");
+			expect(jobFrom(h).status).toBe(status);
+			expect(notices(h)).toHaveLength(0);
+
+			let runningStatus: string | undefined;
+			h.session.extensionRunner.setUIContext(
+				createTestUiContext({
+					setStatus(key, value) {
+						if (key === "background-command") runningStatus = value;
+					},
+				}),
+				"rpc",
+			);
+			// Unknown is provisional, including after acknowledgement; a later live worker must be rediscovered.
+			writeFileSync(state, JSON.stringify({ status: status === "unknown" ? "running" : "failed" }));
+			const reads = vi.spyOn(fs, "readFileSync");
+			syncBuiltinESMExports();
+			try {
+				h.setResponses([fauxAssistantMessage("Foreground finished")]);
+				await h.session.prompt("Finish foreground work");
+				const jobReads = reads.mock.calls.filter(([path]) => path === record || path === state);
+				if (status === "unknown") {
+					expect(jobReads.length).toBeGreaterThan(0);
+					expect(runningStatus).toBe("background: 1 running");
+				} else {
+					expect(jobReads).toEqual([]);
+					expect(runningStatus).toBeUndefined();
+				}
+
+				writeFileSync(state, JSON.stringify({ status: "failed", exitCode: 7 }));
+				const snapshots: unknown[] = [];
+				h.setResponses([
+					fauxAssistantMessage(fauxToolCall("background_command", { action: "status", id }), {
+						stopReason: "toolUse",
+					}),
+					() => {
+						snapshots.push(jobFrom(h));
+						return fauxAssistantMessage(fauxToolCall("background_command", { action: "status" }), {
+							stopReason: "toolUse",
+						});
+					},
+					() => {
+						snapshots.push(JSON.parse(getMessageText(getToolResult(h, "background_command"))));
+						return fauxAssistantMessage(fauxToolCall("background_command", { action: "cancel", id }), {
+							stopReason: "toolUse",
+						});
+					},
+					() => {
+						snapshots.push(jobFrom(h));
+						return fauxAssistantMessage("Inspected freshly");
+					},
+				]);
+				await h.session.prompt("Inspect and cancel the acknowledged job");
+				expect(snapshots).toMatchObject([
+					{ id, status: "failed", exitCode: 7 },
+					{ total: 1, jobs: [{ id, status: "failed", exitCode: 7 }] },
+					{ id, status: "failed", exitCode: 7 },
+				]);
+				expect(notices(h)).toHaveLength(0);
+			} finally {
+				reads.mockRestore();
+				syncBuiltinESMExports();
+			}
+		},
+	);
 });

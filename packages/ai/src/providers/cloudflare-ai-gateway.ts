@@ -1,5 +1,5 @@
 import { anthropicMessagesApi } from "../api/anthropic-messages.lazy.ts";
-import { normalizeCloudflareModelId } from "../api/cloudflare.ts";
+import { normalizeCloudflareModel } from "../api/cloudflare.ts";
 import { openAICompletionsApi } from "../api/openai-completions.lazy.ts";
 import { openAIResponsesApi } from "../api/openai-responses.lazy.ts";
 import { createProvider, type Provider } from "../models.ts";
@@ -18,10 +18,7 @@ export function cloudflareAIGatewayProvider(): Provider<CloudflareAIGatewayApi> 
 		id: "cloudflare-ai-gateway",
 		name: "Cloudflare AI Gateway",
 		auth: { apiKey: cloudflareAIGatewayAuth() },
-		models: Object.values(CLOUDFLARE_AI_GATEWAY_MODELS).map((model) => ({
-			...model,
-			id: normalizeCloudflareModelId(model.provider, model.api, model.id),
-		})),
+		models: Object.values(CLOUDFLARE_AI_GATEWAY_MODELS).map((model) => normalizeCloudflareModel(model)),
 		api: {
 			"anthropic-messages": cloudflareStreams(anthropicMessagesApi()),
 			"openai-completions": cloudflareStreams(openAICompletionsApi()),

@@ -7,7 +7,7 @@ import {
 	type Provider,
 	type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { normalizeCloudflareModelId } from "@earendil-works/pi-ai/api/cloudflare";
+import { normalizeCloudflareModel } from "@earendil-works/pi-ai/api/cloudflare";
 import { VERSION } from "../config.ts";
 import { fetchWithRetry } from "../utils/management-http.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
@@ -33,8 +33,8 @@ function isSupportedModelType(model: { type?: unknown }): boolean {
 function mergeModels<TModel extends AnyModel>(baseline: readonly TModel[], dynamic: readonly TModel[]): TModel[] {
 	const merged = new Map<string, TModel>();
 	for (const model of [...baseline, ...dynamic]) {
-		const id = normalizeCloudflareModelId(model.provider, model.api, model.id);
-		merged.set(`${getModelType(model)}\0${id}`, id === model.id ? model : { ...model, id });
+		const normalized = normalizeCloudflareModel(model);
+		merged.set(`${getModelType(normalized)}\0${normalized.id}`, normalized);
 	}
 	return [...merged.values()];
 }

@@ -1,3 +1,6 @@
+import type { AnyModel } from "../types.ts";
+import { isModelType } from "../utils/model-operations.ts";
+
 /** Workers AI direct endpoint. */
 export const CLOUDFLARE_WORKERS_AI_BASE_URL =
 	"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1";
@@ -23,4 +26,31 @@ export function normalizeCloudflareModelId(provider: string, api: string, id: st
 	return provider === "cloudflare-ai-gateway" && api === "anthropic-messages" && id.startsWith("claude-")
 		? id.replaceAll(".", "-")
 		: id;
+}
+
+export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel): TModel {
+	const id = normalizeCloudflareModelId(model.provider, model.api, model.id);
+	const normalized = id === model.id ? model : { ...model, id };
+	if (
+		!isModelType(normalized, "chat") ||
+		normalized.provider !== "cloudflare-ai-gateway" ||
+		normalized.api !== "anthropic-messages" ||
+		normalized.id !== "claude-opus-5-5" ||
+		normalized.baseUrl !== CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL
+	) {
+		return normalized;
+	}
+	const compat = {
+		supportsMidConvoSystemMessages: true,
+		supportsMidConvoToolChanges: true,
+		supportsMidConvoEffort: true,
+		forceAdaptiveThinking: true,
+		...normalized.compat,
+	};
+	return {
+		...normalized,
+		promptCache: normalized.promptCache ?? { short: 300, long: 3600 },
+		compat,
+		...(compat.supportsMidConvoEffort ? { thinkingLevelMap: { ...normalized.thinkingLevelMap, off: null } } : {}),
+	};
 }

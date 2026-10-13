@@ -62,9 +62,9 @@ function encodeCandidate(buffer: Uint8Array, mimeType: string): EncodedCandidate
  *
  * Strategy for staying under maxBytes:
  * 1. First resize to maxWidth/maxHeight
- * 2. Try both PNG and JPEG formats, pick the smaller one
- * 3. If still too large, try JPEG with decreasing quality
- * 4. If still too large, progressively reduce dimensions until 1x1
+ * 2. Try PNG, then JPEG at the requested quality followed by 85, 70, 55, 40 (deduplicated)
+ * 3. Return the first encoding below maxBytes
+ * 4. If none fit, progressively reduce dimensions until 1x1
  */
 export async function resizeImageInProcess(
 	inputBytes: Uint8Array,
@@ -115,15 +115,17 @@ export async function resizeImageInProcess(
 			targetHeight = opts.maxHeight;
 		}
 
-		function tryEncodings(width: number, height: number, jpegQualities: number[]): EncodedCandidate[] {
+		function tryEncodings(width: number, height: number, jpegQualities: number[]): EncodedCandidate | null {
 			const resized = photon!.resize(image!, width, height, photon!.SamplingFilter.Lanczos3);
 
 			try {
-				const candidates: EncodedCandidate[] = [encodeCandidate(resized.get_bytes(), "image/png")];
+				const png = encodeCandidate(resized.get_bytes(), "image/png");
+				if (png.encodedSize < opts.maxBytes) return png;
 				for (const quality of jpegQualities) {
-					candidates.push(encodeCandidate(resized.get_bytes_jpeg(quality), "image/jpeg"));
+					const jpeg = encodeCandidate(resized.get_bytes_jpeg(quality), "image/jpeg");
+					if (jpeg.encodedSize < opts.maxBytes) return jpeg;
 				}
-				return candidates;
+				return null;
 			} finally {
 				resized.free();
 			}
@@ -134,19 +136,17 @@ export async function resizeImageInProcess(
 		let currentHeight = targetHeight;
 
 		while (true) {
-			const candidates = tryEncodings(currentWidth, currentHeight, qualitySteps);
-			for (const candidate of candidates) {
-				if (candidate.encodedSize < opts.maxBytes) {
-					return {
-						data: candidate.data,
-						mimeType: candidate.mimeType,
-						originalWidth,
-						originalHeight,
-						width: currentWidth,
-						height: currentHeight,
-						wasResized: true,
-					};
-				}
+			const candidate = tryEncodings(currentWidth, currentHeight, qualitySteps);
+			if (candidate) {
+				return {
+					data: candidate.data,
+					mimeType: candidate.mimeType,
+					originalWidth,
+					originalHeight,
+					width: currentWidth,
+					height: currentHeight,
+					wasResized: true,
+				};
 			}
 
 			if (currentWidth === 1 && currentHeight === 1) {

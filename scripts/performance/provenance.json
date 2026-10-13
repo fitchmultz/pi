@@ -1,0 +1,174 @@
+{
+	"baseline": "c329e624e73ba2086bd3ce15e091d667879dca9c",
+	"origin": "Offline research/implementation fixtures captured for the fork-wide performance investigation on 2026-10-12. Original source files are identified by content hashes; reproduction uses the retained scripts only.",
+	"fixtures": [
+		{
+			"retained": "fixtures/ai.mjs",
+			"original": "pi-performance-ai/bench.mjs",
+			"originalSha256": "b3d4afcdb574632b649f844908e4cd39ab0c7dd9d9523d82f80e4f2897f02e32",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/catalog.mjs",
+			"original": "pi-performance-ai/catalog.mjs",
+			"originalSha256": "c62cdedce5933beb54b1c22b88f5edfb561e2c658b94e14107937f7259b88ba5",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/codex.mjs",
+			"original": "pi-performance-ai/codex.mjs",
+			"originalSha256": "037af362a8d5defe0dc9c29d5c64bd222ae16fff21bffb42d04982c40cd5c60f",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/tools.mjs",
+			"original": "pi-performance-startup-tools/tools.mjs",
+			"originalSha256": "97b54b277ce45a8371a447e035d1485e9f7cf75496783cd507df12cf3b1bbe87",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/cpu.mjs",
+			"original": "pi-performance-startup-tools/cpu.mjs",
+			"originalSha256": "a79aebaa6ecc986fc7e4299d2cb1dd62edaa9f16dcb4225899d620684c9a6376",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/tui.ts",
+			"original": "pi-performance-tui/bench.ts",
+			"originalSha256": "f0efe36a8efd2a026509c8256a2c3adb7326d28ad71d82836bd8c74db1103798",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/bridges.mjs",
+			"original": "pi-performance-bridges/bench.mjs",
+			"originalSha256": "b76108e69eba5460d2ef944bbed27f84756fc938db5d26530c5aa2f24417dddd",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/sessions.mts",
+			"original": "pi-performance-sessions/bench.mts",
+			"originalSha256": "d90455c067e4928e573fb5745879335061a6217a807c81fb41baa49eb4fafc2c",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/durable-context.ts",
+			"original": "pi-performance-durable/context-retention-probe.ts",
+			"originalSha256": "89fa1fd1d727b1c7bc43cf030efccaa167ff88d41af35ce549e28b74c98804bd",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/durable-history.ts",
+			"original": "pi-performance-durable/history-probe.ts",
+			"originalSha256": "1ecd2c4d861d68ca444566429b4d316f953b8acd635d5b013433657821d3b197",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/durable-lines.ts",
+			"original": "pi-performance-durable/line-reader-probe.ts",
+			"originalSha256": "89553f6b2cff2e323b5869ff487a05c8c1ac2adf93f84a6632773d40d3c2952e",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/durable-storage.ts",
+			"original": "pi-performance-durable/storage-probe.ts",
+			"originalSha256": "4e3b67024682cb96ab557fa08aea16f4d3d01131480977b5ab4c1f186fd4eef8",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/env-client.mjs",
+			"original": "pi-performance-env/client-bench.mjs",
+			"originalSha256": "ff16585be1186da9e294218e286d0744e3aacb140287200456423dfbe6a5cbf9",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/env-daemon.mjs",
+			"original": "pi-performance-env/daemon-bench.mjs",
+			"originalSha256": "e720a5f98e9ccf59b52a3cd6ffd20fdc93e1e045f42dec1acda908e8bb9d9f11",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/eval-report.mjs",
+			"original": "pi-performance-tooling/eval-report-bench.mjs",
+			"originalSha256": "6481f159e1b9a90f7ebf57d7db03b964ddcacb65ec4a3c8b2a0bf344634c42fe",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/telemetry.mjs",
+			"original": "pi-performance-tooling/telemetry-bench.mjs",
+			"originalSha256": "077ac63623a4b4d9d8c1143d0da2ba04325d9a36136b12ad0197915e630753b8",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/eval-persistence.mjs",
+			"original": "pi-performance-eval-telemetry/persistence-bench.mjs",
+			"originalSha256": "b5d1b475020d298f85553e0bca542f96fdbe909a576a93142f39642f802dbc00",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/eval-hook.mjs",
+			"original": "pi-performance-eval-telemetry/persistence-hook.mjs",
+			"originalSha256": "32dd528067668424ae7169f5e15f8dac76f38ce595bcfeb348fc991d20ace181",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/background.mjs",
+			"original": "performance/background-monitor.mjs",
+			"originalSha256": "503bc34a7640daf7e26ead77b8703a0d3e79863479680c9e8645dedda90acecc",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/startup.mjs",
+			"original": "pi-performance-startup-tools/startup.mjs",
+			"originalSha256": "03e3009d29ede85675a94fdcc03e6da4ab54443a008464e2231a1df799b1ae66",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/env-scan.rs",
+			"original": "pi-performance-env/scan-bench.rs",
+			"originalSha256": "9d9452bb4e8a3b4a3e6f4287f80d72b6dcc3eb95ca4508bf5dcc1c5527749626",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/force-android.cjs",
+			"original": "pi-performance-tooling/force-android.cjs",
+			"originalSha256": "e937cf9afbb54506e339f38cca28b047bd70f8f43b109224341b11b047c7e450",
+			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
+		},
+		{
+			"retained": "fixtures/artifacts.mjs",
+			"original": "pi-performance-build-pack/build-bench.mjs",
+			"originalSha256": "5dcb77f3c3524f8055121c39d1baceb97ffbb9312ea59ecf6348d1a036a7b8f0",
+			"adaptation": "Actual selected production offline build/artifact APIs; same-input payload and dist/tarball hashes instead of copied baseline sources."
+		},
+		{
+			"retained": "fixtures/artifacts.mjs",
+			"original": "pi-performance-build-pack/pack-bench.mjs",
+			"originalSha256": "1a95f47279f315a7b2d3eb5861e630df6503b456ccb4cbf9fc9006b394b5bfa6",
+			"adaptation": "Pack comparison uses arbitrary selected roots and one fixed payload; no copied package-artifacts implementation."
+		},
+		{
+			"retained": "fixtures/biome.mjs",
+			"original": "pi-performance-tooling/biome-baseline.mjs",
+			"originalSha256": "8f1db034782eda7b157b24b389f450f7d1fb56a9033cd7de98fa6b0c6d7565b0",
+			"adaptation": "Actual selected native/fallback wrapper over one fixed Git scan payload; untimed inventory/config/Grit content hashes and cross-run payload witnesses."
+		},
+		{
+			"retained": "fixtures/tui.ts",
+			"original": "pi-performance-tui-validation/bench.ts",
+			"originalSha256": "43bf41eda438d1ddb48e2fbe660e5bdc0d56a0bfdaa858d4e9a428f1d3e151e8",
+			"adaptation": "Retains paired probe's short/long unchanged/cursor/ASCII/Unicode typing controls in single-side source-root form; no baseline source copies."
+		},
+		{
+			"retained": "fixtures/nix-pack.mjs",
+			"original": "pi-performance-build-pack/nix-pack-bench.mjs",
+			"originalSha256": "c6911f9a416e35e07082a01e2ff0bd819d60fcc45a68dc21c49930babd3c989f",
+			"adaptation": "Exact eight-package legacy Nix npm recipe or actual selected final driver, with fixed after-root payload and SHA-512 output equality."
+		},
+		{
+			"retained": "fixtures/bash.mjs",
+			"original": "pi-bash-native-probe.mjs",
+			"originalSha256": "5240895bfbeff7c0654eac8c7aad83e71fa6d5eb939b65057371c37369173e71",
+			"adaptation": "Actual native tool/executor, deterministic drain-respecting producer, fs-only delayed sink and semantic/queue/memory witnesses."
+		}
+	]
+}

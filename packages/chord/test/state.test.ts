@@ -280,4 +280,53 @@ describe("state cells", () => {
 		assert.equal(handle.d.value, 4);
 		assert.deepEqual(doubled, [0, 2, 4]);
 	});
+
+	it("retains queued revisions in global FIFO order after a reentrant observer and error reporter throw", async () => {
+		const failure = new Error("observer failed");
+		const host = createHost({
+			onError: (error) => {
+				throw error;
+			},
+		});
+		const Counter = local("t.throwing-publication", {
+			version: 1,
+			input: Type.Object({}),
+			members: { n: Type.Number(), d: Type.Number(), set: method(Type.Number(), Type.Null()) },
+		});
+		host.serve(Counter, (_input, _principal, self) => {
+			const state = self.state({ n: cell(Type.Number(), 0) });
+			const derived = self.derive({ d: derivation([state.n], (n) => n * 2) });
+			return {
+				n: state.n,
+				d: derived.d,
+				set: (value: number, ctx: Ctx) => {
+					state.n.replace(ctx, value);
+					return null;
+				},
+			};
+		});
+		const handle = host.get(Counter, {});
+		let reentered: Promise<unknown> | undefined;
+		try {
+			await handle.ready;
+			const events: string[] = [];
+			handle.n.subscribe((value) => {
+				events.push(`n:${value}`);
+				if (value === 1) {
+					reentered = handle.set(2);
+					throw failure;
+				}
+			});
+			handle.d.subscribe((value) => events.push(`d:${value}`));
+			await assert.rejects(handle.set(1), (error) => error === failure);
+			await reentered;
+			assert.deepEqual(events, ["n:0", "d:0", "n:1"]);
+			await handle.set(3);
+			assert.deepEqual(events, ["n:0", "d:0", "n:1", "d:2", "n:2", "d:4", "n:3", "d:6"]);
+			assert.equal(handle.n.value, 3);
+			assert.equal(handle.d.value, 6);
+		} finally {
+			await host.close();
+		}
+	});
 });

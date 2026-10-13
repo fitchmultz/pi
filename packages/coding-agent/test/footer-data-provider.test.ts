@@ -1,8 +1,28 @@
 import { execFile, spawnSync } from "child_process";
+import type * as fs from "fs";
 import { existsSync, type FSWatcher, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Fake timers do not control native watcher delivery. Keep emit-capable watchers,
+// but detach their native event sources for the synthetic-event tests only.
+vi.mock("fs", async (importOriginal) => {
+	const original = await importOriginal<typeof fs>();
+	return {
+		...original,
+		watch: (path: fs.PathLike, listener: fs.WatchListener<string>) => {
+			const watcher = original.watch(path, listener);
+			if (vi.isFakeTimers()) watcher.close();
+			return watcher;
+		},
+		watchFile: (path: fs.PathLike, options: fs.WatchFileOptions & { bigint?: false }, listener: fs.StatsListener) => {
+			const watcher = original.watchFile(path, options, listener);
+			if (vi.isFakeTimers()) original.unwatchFile(path, listener);
+			return watcher;
+		},
+	};
+});
 
 let resolvedBranch = "main";
 
@@ -237,7 +257,16 @@ describe("FooterDataProvider reftable branch detection", () => {
 
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
 			// Real fs watcher events can arrive late under full-suite load.
-			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1, 10_000);
+			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1, 10_000).catch((cause: unknown) => {
+				throw new Error(
+					`Native reftable refresh timed out: ${JSON.stringify({
+						queries: vi.mocked(execFile).mock.calls.length,
+						branch: provider.getGitBranch(),
+						notifications: onBranchChange.mock.calls.length,
+					})}`,
+					{ cause },
+				);
+			});
 			await waitFor(() => provider.getGitBranch() === "foo", 10_000);
 
 			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);

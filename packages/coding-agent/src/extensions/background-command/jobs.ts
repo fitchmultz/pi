@@ -84,10 +84,10 @@ export function readBackgroundCommand(root: string, id: string): BackgroundComma
 	}
 	return job;
 }
-export function listBackgroundCommands(root: string): BackgroundCommandJob[] {
+export function listBackgroundCommands(root: string, excludeIds?: ReadonlySet<string>): BackgroundCommandJob[] {
 	if (!existsSync(root)) return [];
 	return readdirSync(root, { withFileTypes: true })
-		.filter((entry) => entry.isDirectory() && /^[a-f0-9-]{36}$/.test(entry.name))
+		.filter((entry) => entry.isDirectory() && /^[a-f0-9-]{36}$/.test(entry.name) && !excludeIds?.has(entry.name))
 		.map((entry): BackgroundCommandJob => {
 			try {
 				return readBackgroundCommand(root, entry.name);

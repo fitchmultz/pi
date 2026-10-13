@@ -87,7 +87,7 @@ describe.skipIf(process.platform === "win32")("openTerminal", () => {
 		await output.waitFor("READY");
 		expect(await terminal.foreground()).toBeUndefined();
 		terminal.write("sleep 100\n");
-		// The shell puts the job in front before it execs the program, so the job is named after the shell until then.
+		// The shell forks before it execs: wait until the foreground job is the command itself, not the forked shell.
 		const named = process.platform === "darwin" || process.platform === "linux";
 		let foreground = await terminal.foreground();
 		for (let tries = 0; (!foreground || (named && foreground.name !== "sleep")) && tries < 100; tries++) {

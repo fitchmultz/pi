@@ -100,6 +100,49 @@ describe("branch summarization", () => {
 		expect(prepared.totalTokens).toBeLessThan(100);
 	});
 
+	it.each([
+		{ budget: 0, expected: ["old", "important summary", "middle", "last"] },
+		{ budget: 6, expected: ["last"] },
+		{ budget: 7, expected: ["middle", "last"] },
+		{ budget: 10, expected: ["important summary", "middle", "last"] },
+	])("keeps newest admitted history chronological with budget $budget", ({ budget, expected }) => {
+		const history: SessionEntry[] = [
+			{ ...entries[0], message: { role: "user", content: "old", timestamp: 1 } },
+			{
+				type: "branch_summary",
+				id: "summary",
+				parentId: "branch-user",
+				timestamp: new Date(2).toISOString(),
+				fromId: "abandoned",
+				summary: "important summary",
+				details: { readFiles: ["earlier.ts"], modifiedFiles: [] },
+			},
+			{
+				...entries[0],
+				id: "middle",
+				parentId: "summary",
+				message: { role: "user", content: "middle", timestamp: 3 },
+			},
+			{
+				...entries[0],
+				id: "last",
+				parentId: "middle",
+				message: { role: "user", content: "last", timestamp: 4 },
+			},
+		];
+		const prepared = prepareBranchEntries(history, budget);
+		expect(
+			prepared.messages.map((message) =>
+				message.role === "branchSummary"
+					? message.summary
+					: "content" in message
+						? contentText(message.content)
+						: "",
+			),
+		).toEqual(expected);
+		expect([...prepared.fileOps.read]).toEqual(["earlier.ts"]);
+	});
+
 	it("does not override tool choice for branch summaries", async () => {
 		let requestOptions: SimpleStreamOptions | undefined;
 		const streamFn: StreamFn = (_model, _context, options) => {

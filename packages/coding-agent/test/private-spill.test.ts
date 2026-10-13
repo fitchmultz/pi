@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, statSync } from "fs";
+import { readFileSync, rmSync, statSync } from "fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import { OutputAccumulator } from "../src/core/tools/output-accumulator.ts";
@@ -30,10 +30,6 @@ describe("private shell spill logs", () => {
 						},
 					})
 				).fullOutputPath!;
-				// The existing bash executor does not await stream completion.
-				for (let i = 0; i < 100 && (!existsSync(path) || statSync(path).size < Buffer.byteLength(data)); i++) {
-					await new Promise((resolve) => setTimeout(resolve, 5));
-				}
 			}
 			paths.push(path);
 			expect(statSync(path).mode & 0o777).toBe(0o600);

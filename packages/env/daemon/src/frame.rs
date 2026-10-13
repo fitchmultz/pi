@@ -74,7 +74,14 @@ pub fn read_frame(input: &mut impl Read) -> io::Result<Option<Frame>> {
     } else {
         serde_json::from_slice(&body[HEADER_SIZE..HEADER_SIZE + json_length]).unwrap_or(Value::Null)
     };
-    let payload = body[HEADER_SIZE + json_length..].to_vec();
+    // Shift the payload within its owned buffer rather than allocating a second copy.
+    drop(body.drain(..HEADER_SIZE + json_length));
+    // Queued payloads must not retain arbitrary JSON metadata after the request is acknowledged.
+    let payload = if body.capacity() > body.len() * 2 {
+        body.into_boxed_slice().into_vec()
+    } else {
+        body
+    };
     Ok(Some(Frame {
         kind,
         id,
@@ -113,10 +120,88 @@ mod tests {
             &Frame::with_payload(RESULT, 7, json!({ "a": 1 }), vec![0, 255, 10]),
         )
         .unwrap();
-        let frame = read_frame(&mut buffer.as_slice()).unwrap().unwrap();
+        write_frame(&mut buffer, &Frame::new(REQUEST, 8, json!({ "b": 2 }))).unwrap();
+        let mut input = buffer.as_slice();
+        let frame = read_frame(&mut input).unwrap().unwrap();
+        let next = read_frame(&mut input).unwrap().unwrap();
         assert_eq!((frame.kind, frame.id), (RESULT, 7));
         assert_eq!(frame.json, json!({ "a": 1 }));
         assert_eq!(frame.payload, vec![0, 255, 10]);
-        assert!(read_frame(&mut &[][..]).unwrap().is_none());
+        assert_eq!((next.kind, next.id), (REQUEST, 8));
+        assert_eq!(next.json, json!({ "b": 2 }));
+        assert!(next.payload.is_empty());
+        assert!(read_frame(&mut input).unwrap().is_none());
+    }
+
+    #[test]
+    fn bounds_retained_payload_storage_when_metadata_is_large() {
+        // PTY input queues retain the payload after acknowledging and discarding its JSON metadata.
+        for payload in [vec![], vec![255], vec![0, 255, 10]] {
+            let expected = Frame::with_payload(
+                REQUEST,
+                7,
+                json!({ "op": "ptyWrite", "target": 1, "padding": "x".repeat(1024 * 1024) }),
+                payload,
+            );
+            let mut wire = Vec::new();
+            write_frame(&mut wire, &expected).unwrap();
+            let frame = read_frame(&mut wire.as_slice()).unwrap().unwrap();
+            assert_eq!(frame.json, expected.json);
+            assert_eq!(frame.payload, expected.payload);
+            assert!(
+                frame.payload.capacity() <= frame.payload.len() * 2,
+                "payload of {} bytes retains {} bytes",
+                frame.payload.len(),
+                frame.payload.capacity()
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_empty_and_malformed_json_frames_aligned() {
+        for json_bytes in [b"".as_slice(), b"{".as_slice(), &[0xff]] {
+            let payload = [0, 255, 10];
+            let length = HEADER_SIZE + json_bytes.len() + payload.len();
+            let mut wire = (length as u32).to_be_bytes().to_vec();
+            wire.push(REQUEST);
+            wire.extend_from_slice(&7u32.to_be_bytes());
+            wire.extend_from_slice(&(json_bytes.len() as u32).to_be_bytes());
+            wire.extend_from_slice(json_bytes);
+            wire.extend_from_slice(&payload);
+            write_frame(&mut wire, &Frame::new(REQUEST, 8, json!({ "op": "hello" }))).unwrap();
+            let mut input = wire.as_slice();
+            let frame = read_frame(&mut input).unwrap().unwrap();
+            let next = read_frame(&mut input).unwrap().unwrap();
+            assert_eq!((frame.kind, frame.id), (REQUEST, 7));
+            assert_eq!(
+                frame.json,
+                if json_bytes.is_empty() {
+                    json!({})
+                } else {
+                    Value::Null
+                }
+            );
+            assert_eq!(frame.payload, payload);
+            assert_eq!(next.json, json!({ "op": "hello" }));
+            assert!(read_frame(&mut input).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_lengths_and_truncated_bodies() {
+        for length in [HEADER_SIZE - 1, MAX_FRAME + 1] {
+            let prefix = (length as u32).to_be_bytes();
+            let error = read_frame(&mut prefix.as_slice()).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        let mut wire = (HEADER_SIZE as u32).to_be_bytes().to_vec();
+        wire.push(REQUEST);
+        wire.extend_from_slice(&1u32.to_be_bytes());
+        wire.extend_from_slice(&1u32.to_be_bytes());
+        let error = read_frame(&mut wire.as_slice()).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        wire.pop();
+        let error = read_frame(&mut wire.as_slice()).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 }

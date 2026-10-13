@@ -50,7 +50,7 @@ function segmentWithMarkers(
 	text: string,
 	baseSegmenter: Intl.Segmenter,
 	validIds: Set<number>,
-): Iterable<Intl.SegmentData> {
+): Intl.Segments | Intl.SegmentData[] {
 	// Fast path: no paste markers in the text or no valid IDs.
 	if (validIds.size === 0 || !text.includes("[paste #")) {
 		return baseSegmenter.segment(text);
@@ -312,6 +312,12 @@ export class Editor implements Component, Focusable {
 	private lastWidth: number = 80;
 	private renderedVisibleLineCount = 1;
 	private renderedAutocompleteHeight = 0;
+	private wrappedLinesCache?: {
+		width: number;
+		lines: string[];
+		pasteIds: number[];
+		chunks: TextChunk[][];
+	};
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -387,8 +393,15 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Segment text with paste-marker awareness, only merging markers with valid IDs. */
-	private segment(text: string, mode: "word" | "grapheme"): Iterable<Intl.SegmentData> {
+	private segment(text: string, mode: "word" | "grapheme"): Intl.Segments | Intl.SegmentData[] {
 		return segmentWithMarkers(text, mode === "word" ? wordSegmenter : graphemeSegmenter, this.validPasteIds());
+	}
+
+	private endpointGrapheme(text: string, end: "start" | "end"): Intl.SegmentData | undefined {
+		const segments = this.segment(text, "grapheme");
+		return Array.isArray(segments)
+			? segments[end === "start" ? 0 : segments.length - 1]
+			: segments.containing(end === "start" ? 0 : text.length - 1);
 	}
 
 	getPaddingX(): number {
@@ -505,7 +518,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.wrappedLinesCache = undefined;
 	}
 
 	protected renderTopBorder(width: number, hiddenLineCount: number): string {
@@ -585,8 +598,7 @@ export class Editor implements Component, Focusable {
 				if (after.length > 0) {
 					// Cursor is on a character (grapheme) - replace it with highlighted version
 					// Get the first grapheme from 'after'
-					const afterGraphemes = [...this.segment(after, "grapheme")];
-					const firstGrapheme = afterGraphemes[0]?.segment || "";
+					const firstGrapheme = this.endpointGrapheme(after, "start")?.segment || "";
 					const restAfter = after.slice(firstGrapheme.length);
 					const cursor = renderFakeCursor(firstGrapheme);
 					displayText = before + marker + cursor + restAfter;
@@ -995,11 +1007,39 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	private getWrappedLines(width: number): TextChunk[][] {
+		const cache = this.wrappedLinesCache;
+		if (
+			cache &&
+			cache.width === width &&
+			cache.lines.length === this.state.lines.length &&
+			cache.lines.every((line, i) => line === (this.state.lines[i] || "")) &&
+			cache.pasteIds.length === this.pastes.size &&
+			cache.pasteIds.every((id) => this.pastes.has(id))
+		) {
+			return cache.chunks;
+		}
+
+		// Callbacks can mutate lines in place; compare values and exact marker membership,
+		// retaining only the current draft/width rather than relying on edit-site invalidation.
+		const lines = Array.from(this.state.lines, (line) => line || "");
+		const pasteIds = this.validPasteIds();
+		const chunks = lines.map((line) =>
+			visibleWidth(line) <= width
+				? [{ text: line, startIndex: 0, endIndex: line.length }]
+				: wordWrapLine(line, width, [...segmentWithMarkers(line, graphemeSegmenter, pasteIds)]),
+		);
+		this.wrappedLinesCache = { width, lines, pasteIds: [...pasteIds], chunks };
+		return chunks;
+	}
+
 	private layoutText(contentWidth: number): LayoutLine[] {
 		const layoutLines: LayoutLine[] = [];
+		let wrappedLines: TextChunk[][] | undefined;
 
 		if (this.state.lines.length === 0 || (this.state.lines.length === 1 && this.state.lines[0] === "")) {
 			// Empty editor
+			this.wrappedLinesCache = undefined;
 			layoutLines.push({
 				text: "",
 				hasCursor: true,
@@ -1030,7 +1070,8 @@ export class Editor implements Component, Focusable {
 				}
 			} else {
 				// Line needs wrapping - use word-aware wrapping
-				const chunks = wordWrapLine(line, contentWidth, [...this.segment(line, "grapheme")]);
+				wrappedLines ??= this.getWrappedLines(contentWidth);
+				const chunks = wrappedLines[i]!;
 
 				for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
 					const chunk = chunks[chunkIndex];
@@ -1080,6 +1121,7 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
+		if (!wrappedLines) this.wrappedLinesCache = undefined;
 		return layoutLines;
 	}
 
@@ -1389,10 +1431,9 @@ export class Editor implements Component, Focusable {
 			const beforeCursor = line.slice(0, this.state.cursorCol);
 
 			// Find the last grapheme in the text before cursor
-			const graphemes = [...this.segment(beforeCursor, "grapheme")];
-			const lastGrapheme = graphemes[graphemes.length - 1];
+			const lastGrapheme = this.endpointGrapheme(beforeCursor, "end");
 			const graphemeLength = lastGrapheme ? lastGrapheme.segment.length : 1;
-			const isPastedSegmented = PASTE_MARKER_SINGLE.exec(lastGrapheme.segment);
+			const isPastedSegmented = lastGrapheme && PASTE_MARKER_SINGLE.exec(lastGrapheme.segment);
 
 			if (isPastedSegmented) {
 				// This contains the id part e.g 4 from [paste #4 +123 lines]
@@ -1518,8 +1559,7 @@ export class Editor implements Component, Focusable {
 		// Snap cursor to atomic segment boundary (e.g. paste markers)
 		// so the cursor never lands in the middle of a multi-grapheme unit.
 		// Single-grapheme segments don't need snapping.
-		const segments = [...this.segment(logicalLine, "grapheme")];
-		for (const seg of segments) {
+		for (const seg of this.segment(logicalLine, "grapheme")) {
 			if (seg.index > this.state.cursorCol) break;
 			if (seg.segment.length <= 1) continue;
 			if (this.state.cursorCol < seg.index + seg.segment.length) {
@@ -1789,8 +1829,7 @@ export class Editor implements Component, Focusable {
 			const afterCursor = currentLine.slice(this.state.cursorCol);
 
 			// Find the first grapheme at cursor
-			const graphemes = [...this.segment(afterCursor, "grapheme")];
-			const firstGrapheme = graphemes[0];
+			const firstGrapheme = this.endpointGrapheme(afterCursor, "start");
 			const graphemeLength = firstGrapheme ? firstGrapheme.segment.length : 1;
 
 			const before = currentLine.slice(0, this.state.cursorCol);
@@ -1835,6 +1874,7 @@ export class Editor implements Component, Focusable {
 	 */
 	private buildVisualLineMap(width: number): Array<{ logicalLine: number; startCol: number; length: number }> {
 		const visualLines: Array<{ logicalLine: number; startCol: number; length: number }> = [];
+		let wrappedLines: TextChunk[][] | undefined;
 
 		for (let i = 0; i < this.state.lines.length; i++) {
 			const line = this.state.lines[i] || "";
@@ -1846,7 +1886,8 @@ export class Editor implements Component, Focusable {
 				visualLines.push({ logicalLine: i, startCol: 0, length: line.length });
 			} else {
 				// Line needs wrapping - use word-aware wrapping
-				const chunks = wordWrapLine(line, width, [...this.segment(line, "grapheme")]);
+				wrappedLines ??= this.getWrappedLines(width);
+				const chunks = wrappedLines[i]!;
 				for (const chunk of chunks) {
 					visualLines.push({
 						logicalLine: i,
@@ -1857,6 +1898,7 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
+		if (!wrappedLines) this.wrappedLinesCache = undefined;
 		return visualLines;
 	}
 
@@ -1911,8 +1953,7 @@ export class Editor implements Component, Focusable {
 				// Moving right - move by one grapheme (handles emojis, combining characters, etc.)
 				if (this.state.cursorCol < currentLine.length) {
 					const afterCursor = currentLine.slice(this.state.cursorCol);
-					const graphemes = [...this.segment(afterCursor, "grapheme")];
-					const firstGrapheme = graphemes[0];
+					const firstGrapheme = this.endpointGrapheme(afterCursor, "start");
 					this.setCursorCol(this.state.cursorCol + (firstGrapheme ? firstGrapheme.segment.length : 1));
 				} else if (this.state.cursorLine < this.state.lines.length - 1) {
 					// Wrap to start of next logical line
@@ -1929,8 +1970,7 @@ export class Editor implements Component, Focusable {
 				// Moving left - move by one grapheme (handles emojis, combining characters, etc.)
 				if (this.state.cursorCol > 0) {
 					const beforeCursor = currentLine.slice(0, this.state.cursorCol);
-					const graphemes = [...this.segment(beforeCursor, "grapheme")];
-					const lastGrapheme = graphemes[graphemes.length - 1];
+					const lastGrapheme = this.endpointGrapheme(beforeCursor, "end");
 					this.setCursorCol(this.state.cursorCol - (lastGrapheme ? lastGrapheme.segment.length : 1));
 				} else if (this.state.cursorLine > 0) {
 					// Wrap to end of previous logical line

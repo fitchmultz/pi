@@ -8,6 +8,7 @@ import {
 	openSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 	writeSync,
 } from "fs";
@@ -328,8 +329,20 @@ describe("SessionManager custom flat session directory", () => {
 		await new Promise((r) => setTimeout(r, 10));
 		const sessionB = createPersistedSession(projectB, "from B");
 
-		const currentA = await SessionManager.list(projectA, tempDir);
+		const progress: [number, number][] = [];
+		const partialPaths: string[][] = [];
+		const currentA = await SessionManager.list(projectA, tempDir, (loaded, total, partialSessions) => {
+			progress.push([loaded, total]);
+			if (partialSessions) partialPaths.push(partialSessions.map((session) => session.path));
+		});
 		expect(currentA.map((session) => session.path)).toEqual([sessionA]);
+		expect(currentA[0]).toMatchObject({
+			firstMessage: "from A",
+			allMessagesText: "from A reply to from A",
+			messageCount: 2,
+		});
+		expect(progress.at(-1)).toEqual([2, 2]);
+		expect(partialPaths.flat().every((path) => path === sessionA)).toBe(true);
 
 		const all = await SessionManager.listAll(tempDir);
 		expect(new Set(all.map((session) => session.path))).toEqual(new Set([sessionA, sessionB]));
@@ -338,17 +351,22 @@ describe("SessionManager custom flat session directory", () => {
 		expect(continuedA.getSessionFile()).toBe(sessionA);
 	});
 
-	it("rejects a cancelled session listing", async () => {
+	it.each(["current", "excluded", "all"] as const)("rejects a cancelled %s session listing", async (scope) => {
 		createPersistedSession(projectA, "from A");
 		createPersistedSession(projectB, "from B");
 		const controller = new AbortController();
-		const listing = SessionManager.listAll(
-			tempDir,
-			(_loaded, _total, partialSessions) => {
-				if (partialSessions) controller.abort();
-			},
-			controller.signal,
-		);
+		const progress = (_loaded: number, _total: number, partialSessions?: readonly unknown[]) => {
+			if (partialSessions) controller.abort();
+		};
+		const listing =
+			scope === "all"
+				? SessionManager.listAll(tempDir, progress, controller.signal)
+				: SessionManager.list(
+						scope === "current" ? projectA : join(tempDir, "other-project"),
+						tempDir,
+						progress,
+						controller.signal,
+					);
 
 		await expect(listing).rejects.toMatchObject({ name: "AbortError" });
 		await expect(SessionManager.listAll(undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
@@ -442,6 +460,80 @@ describe("SessionManager session file creation", () => {
 
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("keeps the latest name global across navigation, clears, reload and new sessions", () => {
+		const session = SessionManager.create(tempDir, tempDir);
+		const root = session.appendMessage(userMsg("first question"));
+		session.appendSessionInfo(" original name ");
+		session.branch(root);
+		const latestName = session.appendSessionInfo("latest name");
+		session.resetLeaf();
+		expect(session.getSessionName()).toBe("latest name");
+
+		const info = session.getEntry(latestName);
+		if (info?.type !== "session_info") throw new Error("missing name");
+		info.name = " updated name ";
+		expect(session.getSessionName()).toBe("updated name");
+
+		const file = session.getSessionFile()!;
+		expect(SessionManager.open(file).getSessionName()).toBe("latest name");
+		session.appendSessionInfo(" ");
+		expect(session.getSessionName()).toBeUndefined();
+		expect(SessionManager.open(file).getSessionName()).toBeUndefined();
+		session.newSession();
+		expect(session.getSessionName()).toBeUndefined();
+		session.setSessionFile(file);
+		session.branch(root);
+		session.createBranchedSession(root);
+		expect(session.getSessionName()).toBeUndefined();
+	});
+
+	it("forks all branches into a private cross-workspace journal without changing their records", () => {
+		const source = SessionManager.create(tempDir, tempDir);
+		source.appendModelChange("anthropic", "source-model");
+		source.appendThinkingLevelChange("high");
+		const root = source.appendMessage(userMsg("shared question"));
+		const firstBranch = source.appendMessage(userMsg("first branch"));
+		source.branch(root);
+		const secondBranch = source.appendMessage(userMsg("second branch"));
+		source.appendCustomEntry("chunk-a", "λ".repeat(600_000));
+		source.appendCustomEntry("chunk-b", "β".repeat(600_000));
+		source.appendCustomEntry("oversized-record", "x".repeat(1_100_000));
+		source.appendSessionInfo("fork name");
+		const path = source.getSessionFile()!;
+		const original = readFileSync(path, "utf8");
+		const target = join(tempDir, "target");
+
+		const fork = SessionManager.forkFrom(path, target, target, { id: "forked-session" });
+		const forkPath = fork.getSessionFile()!;
+		expect(fork.getHeader()).toMatchObject({
+			type: "session",
+			version: 3,
+			id: "forked-session",
+			cwd: target,
+			parentSession: path,
+		});
+		expect(fork.getSessionName()).toBe("fork name");
+		expect(readFileSync(forkPath, "utf8").split("\n").slice(1)).toEqual(original.split("\n").slice(1));
+		expect(readFileSync(path, "utf8")).toBe(original);
+		if (process.platform !== "win32") expect(statSync(forkPath).mode & 0o777).toBe(0o600);
+		for (const manager of [fork, SessionManager.open(forkPath)]) {
+			for (const [leaf, branchText] of [
+				[firstBranch, "first branch"],
+				[secondBranch, "second branch"],
+			]) {
+				manager.branch(leaf);
+				expect(manager.buildSessionContext()).toMatchObject({
+					thinkingLevel: "high",
+					model: { provider: "anthropic", modelId: "source-model" },
+					messages: [
+						{ role: "user", content: "shared question" },
+						{ role: "user", content: branchText },
+					],
+				});
+			}
+		}
 	});
 
 	it("does not create a file for a session with only setup entries", () => {

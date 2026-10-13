@@ -3,7 +3,7 @@ import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -94,14 +94,17 @@ describe("AssistantMessageComponent", () => {
 
 	test("collapses individual thinking runs when clicked", () => {
 		initTheme("dark");
-		const component = new AssistantMessageComponent(
-			createAssistantMessage([
-				{ type: "thinking", thinking: "first reasoning" },
-				{ type: "text", text: "answer" },
-				{ type: "thinking", thinking: "second reasoning" },
-			]),
-		);
+		const answer = { type: "text" as const, text: "answer" };
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking: "first reasoning" },
+			answer,
+			{ type: "thinking", thinking: "second reasoning" },
+		]);
+		const component = new AssistantMessageComponent(message);
 		const width = 80;
+		component.render(width);
+		answer.text += "\n\nlater paragraph";
+		component.updateContent(message);
 		const lines = component.render(width);
 		const firstThinkingRow = lines.findIndex((line) => stripAnsi(line).includes("first reasoning"));
 		expect(firstThinkingRow).toBeGreaterThanOrEqual(0);
@@ -125,6 +128,17 @@ describe("AssistantMessageComponent", () => {
 		expect(collapsed).not.toContain("first reasoning");
 		expect(collapsed).toContain("Thinking...");
 		expect(collapsed).toContain("second reasoning");
+
+		component.setHiddenThinkingLabel("Reasoning hidden");
+		component.setCompactView(true);
+		const compact = stripAnsi(component.render(width).join("\n"));
+		expect(compact).not.toContain("Reasoning hidden");
+		expect(compact).toContain("second reasoning");
+		expect(compact).toContain("later paragraph");
+		component.setCompactView(false);
+		expect(stripAnsi(component.render(width).join("\n"))).toContain("Reasoning hidden");
+		component.setHideThinkingBlock(false);
+		expect(stripAnsi(component.render(width).join("\n"))).toContain("first reasoning");
 	});
 
 	test("uses configured output padding for text and thinking", () => {
@@ -188,6 +202,86 @@ describe("AssistantMessageComponent", () => {
 		component.updateContent(message, false);
 		expect(stripAnsi(component.render(80).join("\n"))).toContain("partial transformed");
 		expect(streamingStates).toEqual([true, false]);
+	});
+
+	test("retains unchanged run highlighting while later content grows and observes in-place edits", () => {
+		initTheme("dark");
+		const highlighted: string[] = [];
+		const thinking = { type: "thinking" as const, thinking: "```ts\nretained thought\n```" };
+		const introduction = { type: "text" as const, text: "```ts\nretained introduction\n```" };
+		const answer = { type: "text" as const, text: "partial answer" };
+		const message = createAssistantMessage([thinking, introduction, answer]);
+		const component = new AssistantMessageComponent(undefined, false, {
+			...getMarkdownTheme(),
+			highlightCode: (code) => {
+				highlighted.push(code);
+				return code.split("\n");
+			},
+		});
+
+		component.updateContent(message, true);
+		component.render(80);
+		answer.text += " 漢字 👨‍👩‍👧‍👦 é";
+		component.updateContent(message, true);
+		const grown = stripAnsi(component.render(80).join("\n"));
+		expect(grown).toContain("partial answer 漢字 👨‍👩‍👧‍👦 é");
+		expect(grown).toContain("retained thought");
+		expect(grown).toContain("retained introduction");
+		expect(highlighted).toEqual(["retained thought", "retained introduction"]);
+
+		thinking.thinking = "```ts\nedited thought\n```";
+		component.updateContent(message, true);
+		const edited = stripAnsi(component.render(80).join("\n"));
+		expect(edited).toContain("edited thought");
+		expect(edited).not.toContain("retained thought");
+		expect(highlighted).toEqual(["retained thought", "retained introduction", "edited thought"]);
+	});
+
+	test("refreshes retained runs on finalization and invalidation, and removes replaced content", () => {
+		initTheme("dark");
+		const states: string[] = [];
+		let suffix = "final";
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking: "reasoning" },
+			{ type: "text", text: "answer" },
+		]);
+		const component = new AssistantMessageComponent(undefined, false, undefined, "Thinking...", 1, [
+			(markdown, context) => {
+				states.push(`${context.messageType}:${context.isStreaming}`);
+				return context.isStreaming ? markdown : `${markdown} ${suffix}`;
+			},
+		]);
+
+		component.updateContent(message, true);
+		component.render(80);
+		component.updateContent(message, true);
+		component.render(80);
+		component.updateContent(message, false);
+		const finalized = stripAnsi(component.render(80).join("\n"));
+		expect(finalized).toContain("reasoning final");
+		expect(finalized).toContain("answer final");
+		expect(states).toEqual([
+			"assistant-thinking:true",
+			"assistant:true",
+			"assistant-thinking:false",
+			"assistant:false",
+		]);
+
+		suffix = "refreshed";
+		component.invalidate();
+		const refreshed = stripAnsi(component.render(80).join("\n"));
+		expect(refreshed).toContain("reasoning refreshed");
+		expect(refreshed).toContain("answer refreshed");
+
+		message.content.splice(0, 2, { type: "text", text: "replacement" });
+		message.stopReason = "error";
+		message.errorMessage = "failure";
+		component.updateContent(message);
+		const replaced = stripAnsi(component.render(80).join("\n"));
+		expect(replaced).toContain("replacement refreshed");
+		expect(replaced).toContain("Error: failure");
+		expect(replaced).not.toContain("reasoning");
+		expect(replaced).not.toContain("answer");
 	});
 
 	test("reapplies Markdown transformers when available width changes", () => {

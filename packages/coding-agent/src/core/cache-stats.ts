@@ -1,32 +1,34 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "./session-manager.ts";
 
-/**
- * Prompt-cache TTL: idle gaps longer than this are worth mentioning as the
- * likely cause of a miss. Anthropic's default cache TTL is 5 minutes.
- */
-export const CACHE_TTL_MS = 5 * 60 * 1000;
-
-/** Per-turn misses at or below this are cache breakpoint granularity noise. */
+/** Per-turn overlap estimates at or below this are cache breakpoint granularity noise. */
 const NOISE_FLOOR_TOKENS = 1024;
 
-/** A counted cache miss on a single assistant message. */
+type ReadPriceSource = "usage" | "ancestor" | "catalog" | "unknown";
+
+// ponytail: token counts do not establish prefix identity; use native cache traces to diagnose causes.
+/** A token-count overlap estimate, not proof of a changed cache key or avoidable billing. */
 export interface CacheMiss {
-	/** Prompt tokens that were in the previous turn's prompt but not read from cache. */
+	/** min(previous prompt, current prompt) - current cache reads; prefixes are not compared. */
 	missedTokens: number;
-	/** Extra dollars paid vs. a full cache hit; 0 when pricing is unknown. */
+	/** Estimated cost above a full cache hit; 0 when the read price is unknown. */
 	missedCost: number;
-	/** Milliseconds since the previous request (which last refreshed the cache). */
+	readPriceSource: ReadPriceSource;
+	/** Request-start to request-start gap in milliseconds, not observed idle time. */
 	idleMs: number;
-	/** True when the model changed relative to the previous request. */
+	/** Expected transition to a different provider/model on the same ancestry. */
 	modelChanged: boolean;
 }
 
 export interface CacheWasteTotals {
 	missedTokens: number;
+	/** Sum of priced estimates only; never part of real session usage/cost accounting. */
 	missedCost: number;
-	/** Number of counted misses (turns above the noise floor). */
 	missCount: number;
+	modelSwitchCount: number;
+	ancestorPriceCount: number;
+	catalogPriceCount: number;
+	unpricedMissCount: number;
 }
 
 /** Minimal pricing lookup, satisfied by ModelRuntime. Cost is $/million tokens. */
@@ -34,25 +36,16 @@ export interface ModelPriceSource {
 	getModel(provider: string, modelId: string): { cost: { cacheRead: number } } | undefined;
 }
 
-/** The last request seen by the scan; everything in its prompt should be cached. */
 interface PreviousRequest {
 	promptTokens: number;
 	modelKey: string;
 	timestamp: number;
-	/**
-	 * Sticky: some earlier request in this scan segment reported cache activity.
-	 * Distinguishes a total miss on a cache-read-only provider (OpenAI-style,
-	 * writes unreported) from a provider that never reports caching at all.
-	 */
+	/** Last observed read rate on this uninterrupted provider/model ancestry. */
+	readPerToken?: number;
+	/** Some earlier request on this ancestry reported cache activity. */
 	reportedCache: boolean;
 }
 
-/**
- * Compute the cache miss for one assistant message relative to the previous
- * request. Returns undefined when nothing is counted: first turn, after a
- * reset, no cache activity ever reported (provider without cache support), or
- * miss below the noise floor.
- */
 function detectMiss(
 	prev: PreviousRequest | undefined,
 	message: AssistantMessage,
@@ -60,9 +53,8 @@ function detectMiss(
 ): CacheMiss | undefined {
 	const usage = message.usage;
 	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-	// A zero-cache turn only counts when cache activity was reported before:
-	// on cache-read-only providers that is a total miss, while on providers
-	// that never report caching it means nothing.
+	// Cache-read-only providers do not report writes. A normalized zero alone
+	// cannot distinguish a total miss from a provider that never reports caching.
 	if (!prev || promptTokens <= 0 || (usage.cacheRead + usage.cacheWrite === 0 && !prev.reportedCache)) {
 		return undefined;
 	}
@@ -70,34 +62,52 @@ function detectMiss(
 	const missedTokens = Math.min(prev.promptTokens, promptTokens) - usage.cacheRead;
 	if (missedTokens <= NOISE_FLOOR_TOKENS) return undefined;
 
-	// Extra cost = missed tokens billed at the actual paid rate (input/cacheWrite,
-	// incl. write premium) instead of the cache-read rate. Missed tokens can only
-	// land in the input or cacheWrite buckets, so the paid rate comes straight
-	// from this message's own cost breakdown.
+	const modelChanged = `${message.provider}/${message.responseModel ?? message.model}` !== prev.modelKey;
 	const paidTokens = usage.input + usage.cacheWrite;
 	const paidPerToken = paidTokens > 0 ? (usage.cost.input + usage.cost.cacheWrite) / paidTokens : 0;
-	const readPerToken =
-		usage.cacheRead > 0
-			? usage.cost.cacheRead / usage.cacheRead
-			: (models.getModel(message.provider, message.model)?.cost.cacheRead ?? 0) / 1_000_000;
+	let readPerToken = usage.cacheRead > 0 ? usage.cost.cacheRead / usage.cacheRead : undefined;
+	let readPriceSource: ReadPriceSource = "usage";
+	if (readPerToken === undefined && !modelChanged && prev.readPerToken !== undefined) {
+		readPerToken = prev.readPerToken;
+		readPriceSource = "ancestor";
+	}
+	if (readPerToken === undefined) {
+		// Today's catalog is not a historical tariff. Keep the fallback explicitly
+		// identifiable, and never substitute a zero read price for missing metadata.
+		const catalogRate = models.getModel(message.provider, message.responseModel ?? message.model)?.cost.cacheRead;
+		if (catalogRate !== undefined && Number.isFinite(catalogRate) && catalogRate >= 0) {
+			readPerToken = catalogRate / 1_000_000;
+			readPriceSource = "catalog";
+		} else {
+			readPriceSource = "unknown";
+		}
+	}
 
 	return {
 		missedTokens,
-		missedCost: missedTokens * Math.max(0, paidPerToken - readPerToken),
+		missedCost: readPerToken === undefined ? 0 : missedTokens * Math.max(0, paidPerToken - readPerToken),
+		readPriceSource,
 		idleMs: Math.max(0, message.timestamp - prev.timestamp),
-		modelChanged: `${message.provider}/${message.model}` !== prev.modelKey,
+		modelChanged,
 	};
 }
 
-function asPreviousRequest(message: AssistantMessage, reportedCache: boolean): PreviousRequest | undefined {
+function asPreviousRequest(message: AssistantMessage, prev: PreviousRequest | undefined): PreviousRequest | undefined {
 	const usage = message.usage;
 	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 	if (promptTokens <= 0) return undefined;
+	const modelKey = `${message.provider}/${message.responseModel ?? message.model}`;
 	return {
 		promptTokens,
-		modelKey: `${message.provider}/${message.model}`,
+		modelKey,
 		timestamp: message.timestamp,
-		reportedCache: reportedCache || usage.cacheRead + usage.cacheWrite > 0,
+		readPerToken:
+			usage.cacheRead > 0
+				? usage.cost.cacheRead / usage.cacheRead
+				: modelKey === prev?.modelKey
+					? prev.readPerToken
+					: undefined,
+		reportedCache: (prev?.reportedCache ?? false) || usage.cacheRead + usage.cacheWrite > 0,
 	};
 }
 
@@ -106,24 +116,38 @@ function scan(
 	models: ModelPriceSource,
 ): { prev: PreviousRequest | undefined; totals: CacheWasteTotals; misses: Map<AssistantMessage, CacheMiss> } {
 	let prev: PreviousRequest | undefined;
-	const totals: CacheWasteTotals = { missedTokens: 0, missedCost: 0, missCount: 0 };
+	const requestsByEntry = new Map<string, PreviousRequest | undefined>();
+	const totals: CacheWasteTotals = {
+		missedTokens: 0,
+		missedCost: 0,
+		missCount: 0,
+		modelSwitchCount: 0,
+		ancestorPriceCount: 0,
+		catalogPriceCount: 0,
+		unpricedMissCount: 0,
+	};
 	const misses = new Map<AssistantMessage, CacheMiss>();
 
+	// Native entries are append-only (parents precede children). Inherit the
+	// request from each entry's own parent, never from an abandoned sibling.
 	for (const entry of entries) {
+		prev = entry.parentId === null ? undefined : requestsByEntry.get(entry.parentId);
 		if (entry.type === "compaction" || entry.type === "branch_summary") {
-			// The context legitimately changed; the next turn's prompt is new content,
-			// not re-billed content. Model switches are NOT exempt: they re-bill the
-			// full prompt and should be counted.
 			prev = undefined;
-			continue;
-		}
-		if (entry.type === "usage" && entry.kind === "cache_warm") {
+		} else if (entry.type === "usage" && entry.kind === "cache_warm") {
 			const promptTokens = entry.usage.input + entry.usage.cacheRead + entry.usage.cacheWrite;
 			if (promptTokens > 0) {
+				const modelKey = `${entry.provider}/${entry.model}`;
 				prev = {
 					promptTokens,
-					modelKey: `${entry.provider}/${entry.model}`,
+					modelKey,
 					timestamp: Date.parse(entry.timestamp),
+					readPerToken:
+						entry.usage.cacheRead > 0
+							? entry.usage.cost.cacheRead / entry.usage.cacheRead
+							: modelKey === prev?.modelKey
+								? prev.readPerToken
+								: undefined,
 					reportedCache: true,
 				};
 			}
@@ -133,27 +157,29 @@ function scan(
 				totals.missedTokens += miss.missedTokens;
 				totals.missedCost += miss.missedCost;
 				totals.missCount += 1;
+				if (miss.modelChanged) totals.modelSwitchCount += 1;
+				if (miss.readPriceSource === "ancestor") totals.ancestorPriceCount += 1;
+				if (miss.readPriceSource === "catalog") totals.catalogPriceCount += 1;
+				if (miss.readPriceSource === "unknown") totals.unpricedMissCount += 1;
 				misses.set(entry.message, miss);
 			}
-			prev = asPreviousRequest(entry.message, prev?.reportedCache ?? false) ?? prev;
+			prev = asPreviousRequest(entry.message, prev) ?? prev;
 		}
+		requestsByEntry.set(entry.id, prev);
 	}
 	return { prev, totals, misses };
 }
 
 /**
- * Cumulative cache waste across a session: prompt tokens that should have been
- * cache reads (they were in the previous turn's prompt) but were re-billed.
+ * Sum overlap/cost estimates across the supplied native entries, comparing each
+ * request only with its own ancestry. All branches may be supplied for session
+ * history; this never changes persisted usage or the real session cost total.
  */
 export function computeCacheWaste(entries: SessionEntry[], models: ModelPriceSource): CacheWasteTotals {
 	return scan(entries, models).totals;
 }
 
-/**
- * All counted cache misses across a session, keyed by the assistant message
- * (by reference) that paid for them. Used to re-derive transcript notices when
- * rebuilding the chat from entries (resume, post-compaction rebuild).
- */
+/** Re-derive historical notices by assistant reference using native parent ancestry. */
 export function collectCacheMisses(
 	entries: SessionEntry[],
 	models: ModelPriceSource,
@@ -162,8 +188,9 @@ export function collectCacheMisses(
 }
 
 /**
- * Detect a cache miss on a just-completed assistant message.
- * `entries` must not yet contain `message` (message_end fires before persistence).
+ * Estimate overlap for a just-completed assistant message. Supply getBranch(),
+ * not global chronology: message_end fires before the message is persisted, and
+ * only the session's current leaf identifies its ancestry.
  */
 export function detectCacheMiss(
 	entries: SessionEntry[],

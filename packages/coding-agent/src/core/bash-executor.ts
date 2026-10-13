@@ -8,7 +8,7 @@
 
 import type { WriteStream } from "node:fs";
 import { splitIncompleteAnsiSuffix, stripAnsi } from "../utils/ansi.ts";
-import { createOutputFileStream } from "../utils/output-files.ts";
+import { createOutputFileStream, writeOutputFileChunk } from "../utils/output-files.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
@@ -57,13 +57,15 @@ export async function executeBashWithOperations(
 
 	let tempFilePath: string | undefined;
 	let tempFileStream: WriteStream | undefined;
+	let tempFileDone: Promise<void> | undefined;
+	let acceptingOutput = true;
 	let totalBytes = 0;
 
 	const ensureTempFile = () => {
 		if (tempFilePath) {
 			return;
 		}
-		({ path: tempFilePath, stream: tempFileStream } = createOutputFileStream("pi-bash", ".log"));
+		({ path: tempFilePath, stream: tempFileStream, done: tempFileDone } = createOutputFileStream("pi-bash", ".log"));
 		for (const chunk of outputChunks) {
 			tempFileStream.write(chunk);
 		}
@@ -85,9 +87,7 @@ export async function executeBashWithOperations(
 			ensureTempFile();
 		}
 
-		if (tempFileStream) {
-			tempFileStream.write(text);
-		}
+		const written = tempFileStream ? writeOutputFileChunk(tempFileStream, text) : undefined;
 
 		// Keep rolling buffer
 		outputChunks.push(text);
@@ -101,13 +101,15 @@ export async function executeBashWithOperations(
 		if (options?.onChunk) {
 			options.onChunk(text);
 		}
+		return written;
 	};
 
 	const onData = (data: Buffer) => {
+		if (!acceptingOutput) return;
 		totalBytes += data.length;
 		const { complete, pending } = splitIncompleteAnsiSuffix(pendingAnsi + decoder.decode(data, { stream: true }));
 		pendingAnsi = pending;
-		appendText(complete);
+		return appendText(complete);
 	};
 
 	const flushOutput = () => {
@@ -118,29 +120,32 @@ export async function executeBashWithOperations(
 
 	let exitCode: number | null = null;
 	try {
-		({ exitCode } = await operations.exec(command, cwd, { onData, signal: options?.signal }));
-	} catch (err) {
-		// An aborted command still returns the output it produced so far
-		if (!options?.signal?.aborted) {
-			tempFileStream?.end();
-			throw err;
+		try {
+			({ exitCode } = await operations.exec(command, cwd, { onData, signal: options?.signal }));
+		} catch (err) {
+			// An aborted command still returns the output it produced so far.
+			if (!options?.signal?.aborted) throw err;
+		} finally {
+			acceptingOutput = false;
 		}
-	}
 
-	flushOutput();
-	const fullOutput = outputChunks.join("");
-	const truncationResult = truncateTail(fullOutput);
-	if (truncationResult.truncated) {
-		ensureTempFile();
-	}
-	tempFileStream?.end();
-	const cancelled = options?.signal?.aborted ?? false;
+		flushOutput();
+		const fullOutput = outputChunks.join("");
+		const truncationResult = truncateTail(fullOutput);
+		if (truncationResult.truncated) {
+			ensureTempFile();
+		}
+		const cancelled = options?.signal?.aborted ?? false;
 
-	return {
-		output: truncationResult.truncated ? truncationResult.content : fullOutput,
-		exitCode: cancelled ? undefined : (exitCode ?? undefined),
-		cancelled,
-		truncated: truncationResult.truncated,
-		fullOutputPath: tempFilePath,
-	};
+		return {
+			output: truncationResult.truncated ? truncationResult.content : fullOutput,
+			exitCode: cancelled ? undefined : (exitCode ?? undefined),
+			cancelled,
+			truncated: truncationResult.truncated,
+			fullOutputPath: tempFilePath,
+		};
+	} finally {
+		tempFileStream?.end();
+		await tempFileDone;
+	}
 }

@@ -2,7 +2,7 @@
 //! in pieces (Durable `env/decode.ts`): invalid sequences become U+FFFD by the maximal-subpart rule, and only a
 //! byte-order mark at the very start is dropped.
 
-use encoding_rs::{Decoder, UTF_8};
+use encoding_rs::{CoderResult, Decoder, UTF_8};
 
 /// Decodes one stream chunk by chunk, dropping a leading byte-order mark.
 pub struct StreamDecoder {
@@ -36,6 +36,24 @@ pub fn decode_into(decoder: &mut Decoder, bytes: &[u8], last: bool) -> String {
     let (_result, read, _replaced) = decoder.decode_to_string(bytes, &mut text, last);
     debug_assert_eq!(read, bytes.len());
     text
+}
+
+/// UTF-8 length without retaining decoded text; the same decoder preserves replacement and partial-character state.
+pub fn decode_len(
+    decoder: &mut Decoder,
+    mut bytes: &[u8],
+    last: bool,
+    scratch: &mut [u8; 4096],
+) -> u64 {
+    let mut length = 0;
+    loop {
+        let (result, read, written, _replaced) = decoder.decode_to_utf8(bytes, scratch, last);
+        length += written as u64;
+        bytes = &bytes[read..];
+        if result == CoderResult::InputEmpty {
+            return length;
+        }
+    }
 }
 
 /// Whether decoding the whole input drops its first three bytes as a byte-order mark.

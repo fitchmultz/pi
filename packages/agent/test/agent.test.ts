@@ -3,6 +3,7 @@ import {
 	createAssistantMessageEventStream,
 	getCurrentSystemMessage,
 	getModel,
+	type Tool,
 	toToolDeclaration,
 	type UserMessage,
 } from "@earendil-works/pi-ai/compat";
@@ -206,6 +207,45 @@ describe("Agent", () => {
 		const initial = agent.state.messages[0];
 		if (initial?.role !== "system") throw new Error("expected initial system message");
 		expect(initial.toolsAdded?.[0]).not.toHaveProperty("execute");
+	});
+
+	it("observes nested in-place schema changes without mutating earlier transcript declarations", async () => {
+		const path = Object.assign(Type.String(), { description: "original" });
+		const parameters = Type.Object({ options: Type.Object({ path }) });
+		const tool = { ...createTool("mutable"), parameters };
+		const requests: Tool[][] = [];
+		const agent = new Agent({
+			initialState: { tools: [tool] },
+			streamFn: (_model, context) => {
+				requests.push(getCurrentSystemMessage(context.messages)?.toolsAdded ?? []);
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("one");
+		path.description = "changed";
+		await agent.prompt("two");
+		path.description = "latest";
+		await agent.prompt("three");
+		await agent.prompt("four");
+
+		expect(requests).toHaveLength(4);
+		for (const [index, description] of ["original", "changed", "latest", "latest"].entries()) {
+			expect(requests[index][0].parameters).toHaveProperty(
+				"properties.options.properties.path.description",
+				description,
+			);
+		}
+		const updates = agent.state.messages.filter((message) => message.role === "system");
+		expect(updates.map((message) => message.toolsRemoved ?? [])).toEqual([
+			[],
+			[{ name: "mutable" }],
+			[{ name: "mutable" }],
+		]);
 	});
 
 	it("merges tool changes into a pending system message", async () => {

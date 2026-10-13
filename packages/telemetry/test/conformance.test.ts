@@ -22,10 +22,18 @@ describe("InMemoryTelemetryContext conformance", () => {
 
 	it("returns detached snapshots without exposing mutable recording state", async () => {
 		const context = new InMemoryTelemetryContext();
+		const tags = ["initial"];
+		const updates = ["updated"];
+		const eventTags = ["event"];
 		let openSettled: boolean | undefined;
 		let openEndSequence: number | undefined;
-		await context.startSpan({ name: "snapshot", attributes: { tags: ["initial"] } }, (span) => {
-			span.addEvent("event", { value: 1 });
+		await context.startSpan({ name: "snapshot", attributes: { tags } }, (span) => {
+			span.setAttributes({ updates });
+			span.addEvent("event", { value: 1, tags: eventTags });
+			tags[0] = "mutated input";
+			updates[0] = "mutated update";
+			eventTags[0] = "mutated event";
+			span.setAttributes({ value: 2 });
 			const [open] = context.getSpans();
 			openSettled = open?.settled;
 			openEndSequence = open?.endSequence;
@@ -36,11 +44,13 @@ describe("InMemoryTelemetryContext conformance", () => {
 		const [first] = context.getSpans();
 		expect(first?.settled).toBe(true);
 		expect(first?.endSequence).toBe(1);
-		(first?.attributes as SpanAttributes).tags = ["mutated"];
+		(first?.attributes.tags as string[])[0] = "mutated snapshot";
+		(first?.attributes as SpanAttributes).updates = ["mutated"];
+		(first?.events[0]?.attributes.tags as string[])[0] = "mutated snapshot";
 		(first?.events[0]?.attributes as SpanAttributes).value = 2;
 
 		const [second] = context.getSpans();
-		expect(second?.attributes).toEqual({ tags: ["initial"] });
-		expect(second?.events).toEqual([{ name: "event", attributes: { value: 1 } }]);
+		expect(second?.attributes).toEqual({ tags: ["initial"], updates: ["updated"], value: 2 });
+		expect(second?.events).toEqual([{ name: "event", attributes: { value: 1, tags: ["event"] } }]);
 	});
 });

@@ -380,29 +380,29 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
-function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntry>): Map<string, SessionEntry> {
+function buildEntryIndex(entries: FileEntry[], byId?: Map<string, SessionEntry>): Map<string, SessionEntry> {
 	if (byId) return byId;
 	const index = new Map<string, SessionEntry>();
 	for (const entry of entries) {
-		index.set(entry.id, entry);
+		if (entry.type !== "session") index.set(entry.id, entry);
 	}
 	return index;
 }
 
 function buildSessionPath(
-	entries: SessionEntry[],
+	entries: FileEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
-	const index = buildEntryIndex(entries, byId);
-	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
 		return [];
 	}
+	const index = buildEntryIndex(entries, byId);
+	let leaf: SessionEntry | undefined;
 	if (leafId) {
 		leaf = index.get(leafId);
 	}
-	leaf ??= entries[entries.length - 1];
+	leaf ??= entries.findLast((entry): entry is SessionEntry => entry.type !== "session");
 	if (!leaf) {
 		return [];
 	}
@@ -480,7 +480,10 @@ export function buildContextEntries(
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
-	const path = buildSessionPath(entries, leafId, byId);
+	return buildContextEntriesFromPath(buildSessionPath(entries, leafId, byId));
+}
+
+function buildContextEntriesFromPath(path: SessionEntry[]): SessionEntry[] {
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -547,9 +550,12 @@ export function buildSessionProjection(
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionProjection {
-	const path = buildSessionPath(entries, leafId, byId);
+	return buildSessionProjectionFromPath(buildSessionPath(entries, leafId, byId));
+}
+
+function buildSessionProjectionFromPath(path: SessionEntry[]): SessionProjection {
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const contextEntries = buildContextEntries(entries, leafId, byId);
+	const contextEntries = buildContextEntriesFromPath(path);
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
@@ -604,6 +610,7 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 }
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
+const SESSION_WRITE_CHUNK_CHARS = 1024 * 1024;
 const SESSION_HEADER_READ_BUFFER_SIZE = 4096;
 /** Bound synchronous header discovery while allowing large cwd and custom metadata fields. */
 const MAX_SESSION_HEADER_SCAN_BYTES = 1024 * 1024;
@@ -802,6 +809,7 @@ async function buildSessionInfo(
 	filePath: string,
 	signal?: AbortSignal,
 	fileStats?: Stats,
+	resolvedCwd?: string,
 ): Promise<SessionInfo | null> {
 	try {
 		const stats = fileStats ?? (await stat(filePath));
@@ -812,45 +820,54 @@ async function buildSessionInfo(
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
 
+		const input = createReadStream(filePath, { encoding: "utf8", signal });
 		const rl = createInterface({
-			input: createReadStream(filePath, { encoding: "utf8", signal }),
+			input,
 			crlfDelay: Infinity,
 		});
 
-		for await (const line of rl) {
-			const entry = parseSessionEntryLine(line);
-			if (!entry) continue;
+		try {
+			for await (const line of rl) {
+				const entry = parseSessionEntryLine(line);
+				if (!entry) continue;
 
-			if (!header) {
-				if (entry.type !== "session") return null;
-				header = entry;
-				continue;
+				if (!header) {
+					if (entry.type !== "session") return null;
+					header = entry;
+					if (resolvedCwd !== undefined && !sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd)) {
+						return null;
+					}
+					continue;
+				}
+
+				// Extract session name (use latest, including explicit clears)
+				if (entry.type === "session_info") {
+					name = entry.name?.trim() || undefined;
+				}
+
+				if (entry.type !== "message") continue;
+				messageCount++;
+
+				const activityTime = getMessageActivityTime(entry);
+				if (typeof activityTime === "number") {
+					lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
+				}
+
+				const message = entry.message;
+				if (!isMessageWithContent(message)) continue;
+				if (message.role !== "user" && message.role !== "assistant") continue;
+
+				const textContent = extractTextContent(message);
+				if (!textContent) continue;
+
+				allMessages.push(textContent);
+				if (!firstMessage && message.role === "user") {
+					firstMessage = textContent;
+				}
 			}
-
-			// Extract session name (use latest, including explicit clears)
-			if (entry.type === "session_info") {
-				name = entry.name?.trim() || undefined;
-			}
-
-			if (entry.type !== "message") continue;
-			messageCount++;
-
-			const activityTime = getMessageActivityTime(entry);
-			if (typeof activityTime === "number") {
-				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
-			}
-
-			const message = entry.message;
-			if (!isMessageWithContent(message)) continue;
-			if (message.role !== "user" && message.role !== "assistant") continue;
-
-			const textContent = extractTextContent(message);
-			if (!textContent) continue;
-
-			allMessages.push(textContent);
-			if (!firstMessage && message.role === "user") {
-				firstMessage = textContent;
-			}
+		} finally {
+			rl.close();
+			input.destroy();
 		}
 
 		if (!header) return null;
@@ -927,12 +944,13 @@ function buildSessionInfosWithConcurrency(
 	files: SessionFileCandidate[],
 	onLoaded: (info: SessionInfo | null, index: number) => void,
 	signal?: AbortSignal,
+	resolvedCwd?: string,
 ): Promise<(SessionInfo | null)[]> {
 	return mapWithConcurrency(
 		files,
 		MAX_CONCURRENT_SESSION_INFO_LOADS,
 		async (file, index) => {
-			const info = await buildSessionInfo(file.path, signal, file.stats);
+			const info = await buildSessionInfo(file.path, signal, file.stats, resolvedCwd);
 			onLoaded(info, index);
 			return info;
 		},
@@ -944,6 +962,7 @@ async function listSessionsFromDir(
 	dir: string,
 	onProgress?: SessionListProgress,
 	signal?: AbortSignal,
+	resolvedCwd?: string,
 ): Promise<SessionInfo[]> {
 	signal?.throwIfAborted();
 	if (!existsSync(dir)) return [];
@@ -967,7 +986,9 @@ async function listSessionsFromDir(
 				onProgress?.(loaded, total, publishPartial ? sortSessionInfos([...partialSessions]) : undefined);
 			},
 			signal,
+			resolvedCwd,
 		);
+		signal?.throwIfAborted();
 		return results.filter((info): info is SessionInfo => info !== null);
 	} catch {
 		signal?.throwIfAborted();
@@ -999,6 +1020,7 @@ export class SessionManager {
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
+	private latestSessionInfo: SessionInfoEntry | undefined;
 	private leafId: string | null = null;
 
 	private constructor(
@@ -1078,6 +1100,7 @@ export class SessionManager {
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
+		this.latestSessionInfo = undefined;
 		this.leafId = null;
 		this.flushed = false;
 
@@ -1110,11 +1133,13 @@ export class SessionManager {
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
+		this.latestSessionInfo = undefined;
 		this.leafId = null;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
+			if (entry.type === "session_info") this.latestSessionInfo = entry;
 			if (entry.type === "label") {
 				if (entry.label) {
 					this.labelsById.set(entry.targetId, entry.label);
@@ -1196,6 +1221,7 @@ export class SessionManager {
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
+		if (entry.type === "session_info") this.latestSessionInfo = entry;
 		try {
 			this._persist(entry);
 		} catch (error) {
@@ -1325,16 +1351,7 @@ export class SessionManager {
 
 	/** Get the current session name from the latest session_info entry, if any. */
 	getSessionName(): string | undefined {
-		// Walk entries in reverse to find the latest session_info entry.
-		// Empty names explicitly clear the session title. Reads fileEntries directly: the footer
-		// calls this on every frame, and getEntries() copies the whole session.
-		for (let i = this.fileEntries.length - 1; i >= 0; i--) {
-			const entry = this.fileEntries[i];
-			if (entry.type === "session_info") {
-				return entry.name?.trim() || undefined;
-			}
-		}
-		return undefined;
+		return this.latestSessionInfo?.name?.trim() || undefined;
 	}
 
 	/**
@@ -1492,7 +1509,7 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildContextEntries(): SessionEntry[] {
-		return buildContextEntries(this.getEntries(), this.leafId, this.byId);
+		return buildContextEntriesFromPath(buildSessionPath(this.fileEntries, this.leafId, this.byId));
 	}
 
 	/**
@@ -1500,7 +1517,7 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionProjection(): SessionProjection {
-		return buildSessionProjection(this.getEntries(), this.leafId, this.byId);
+		return buildSessionProjectionFromPath(buildSessionPath(this.fileEntries, this.leafId, this.byId));
 	}
 
 	buildSessionContext(): SessionContext {
@@ -1899,16 +1916,30 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
-
-		// Copy all non-header entries from source
-		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+		const forkEntries: FileEntry[] = [newHeader, ...sourceEntries.filter((entry) => entry.type !== "session")];
+		const fd = openSync(newSessionFile, "wx", 0o600);
+		try {
+			let chunk = "";
+			for (const [index, entry] of forkEntries.entries()) {
+				const serialized = JSON.stringify(entry);
+				forkEntries[index] = JSON.parse(serialized) as FileEntry;
+				const line = `${serialized}\n`;
+				if (chunk.length + line.length > SESSION_WRITE_CHUNK_CHARS) {
+					if (chunk) writeFileSync(fd, chunk);
+					chunk = "";
+				}
+				if (line.length >= SESSION_WRITE_CHUNK_CHARS) {
+					writeFileSync(fd, line);
+				} else {
+					chunk += line;
+				}
 			}
+			if (chunk) writeFileSync(fd, chunk);
+		} finally {
+			closeSync(fd);
 		}
 
-		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
+		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true, undefined, forkEntries);
 	}
 
 	/**
@@ -1951,12 +1982,7 @@ export class SessionManager {
 	): Promise<SessionInfo[]> {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
-		const resolvedCwd = resolvePath(cwd);
-		const includeSession = (session: SessionInfo) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd);
-		const progress: SessionListProgress | undefined = onProgress
-			? (loaded, total, partialSessions) => onProgress(loaded, total, partialSessions?.filter(includeSession))
-			: undefined;
-		const sessions = (await listSessionsFromDir(dir, progress, signal)).filter(includeSession);
+		const sessions = await listSessionsFromDir(dir, onProgress, signal, filterCwd ? resolvePath(cwd) : undefined);
 		return sortSessionInfos(sessions);
 	}
 

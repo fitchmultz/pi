@@ -4,6 +4,20 @@
 
 ### Breaking Changes
 
+- The env conformance suite now checks that aborting POSIX shell commands stops all process-group descendants without letting waiting shells run later steps. Custom environments may need changes to pass.
+
+### Changed
+
+- Reduced retained-context scheduling and historical-read work, skipped redundant SQLite writes and avoided repeated copying of partial lines.
+
+### Fixed
+
+- An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer runs its later steps after the current step is killed.
+
+## [1.2.0] - 2026-10-12
+
+### Breaking Changes
+
 - `ToolTaskInput` and `ToolTaskResult` are tagged unions: a model-issued call is `{ kind: "model", ... }` with its previous fields, a nested call `{ kind: "nested", ... }`. `pi.tool` is version 2 and migrates live version 1 tasks.
 - `ToolExecutionResult.content` is now `output`, next to the new `structuredOutput`.
 - `bash` and `powershell` answer a nonzero exit with an error result carrying an `exit_code` diagnostic, instead of throwing (`tool_error`).

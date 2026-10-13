@@ -153,6 +153,7 @@ function createSandboxedBashOps(): BashOperations {
 						timedOut = true;
 						if (child.pid) {
 							try {
+								process.kill(-child.pid, "SIGSTOP");
 								process.kill(-child.pid, "SIGKILL");
 							} catch {
 								child.kill("SIGKILL");
@@ -172,6 +173,7 @@ function createSandboxedBashOps(): BashOperations {
 				const onAbort = () => {
 					if (child.pid) {
 						try {
+							process.kill(-child.pid, "SIGSTOP");
 							process.kill(-child.pid, "SIGKILL");
 						} catch {
 							child.kill("SIGKILL");

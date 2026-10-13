@@ -6,7 +6,6 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { matchesGlob, posix } from "node:path";
-import { MemoryFileSystem, main, Workspace } from "@biomejs/wasm-nodejs";
 
 const write = process.argv.includes("--write");
 
@@ -20,6 +19,8 @@ if (hasNativeBinary) {
 	if (result.error) throw result.error;
 	process.exit(result.status ?? 1);
 }
+
+const { MemoryFileSystem, main, Workspace } = createRequire(import.meta.url)("@biomejs/wasm-nodejs");
 
 // The WASM API has no CLI file scanner. Git supplies tracked and untracked
 // files while respecting .gitignore; biome.json supplies the include patterns.

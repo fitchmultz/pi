@@ -1,8 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `7bd01fb92485c06f92ecfff7ccf3197148bc16af`
-(2026-10-12), an unreleased snapshot after v1.1.0 `abe508e1b`. It is upstream plus the features
+v1.0.0 and synchronized through upstream `d6370b72d0a478a31741a6c44ae7ecdcbd01d0fd`
+(2026-10-12), including v1.2.0 and its follow-up fixes. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -26,7 +26,7 @@ all-platform qualification.
 | Auth fallback: ephemeral credentials without replacing native provider/catalog/transport | `core/{model-runtime,provider-composer}.ts`, `core/extensions/provider-registrations.ts` | `model-runtime-auth-options.test.ts` | [Auth fallback](packages/coding-agent/docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider) |
 | Opt-in slow diagnostics: native synchronous handlers and footer frames need dispatch attribution | `core/extensions/{runner,wrapper}.ts`; `PI_EXTENSION_PERFORMANCE=1` | `extensions-performance.test.ts` | [Extensions](packages/coding-agent/docs/extensions.md#opt-in-performance-warnings) |
 | Temporary passive tracing: public hooks do not yet cover final serialization/consumed attempts | `packages/ai/src/utils/cache-trace.ts`, native adapter hooks, `core/cache-trace-context.ts`, `scripts/cache-trace-report.mjs` | `packages/ai/test/cache-trace.test.ts`, `sdk-stream-options.test.ts`, `scripts/cache-trace-report.test.mjs` | [Fidelity and retirement](packages/coding-agent/docs/cache-tracing.md) |
-| Cloudflare Claude IDs: canonicalize provider/remote input before passthrough and merge | `packages/ai/src/api/cloudflare.ts`, generator/provider and `core/remote-catalog-provider.ts` | `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts` | [Providers](packages/coding-agent/docs/providers.md) |
+| Cloudflare Claude catalogs: canonical IDs and qualified Opus 5.5 positional controls/cache lifetimes | `packages/ai/src/api/cloudflare.ts`, generator/provider, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
 | Path hyperlinks: Markdown paths stay clickable after wrapping; terminals only regex-match one row and the source-transform seam cannot see codespans or code blocks | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
 
 ### Retained correctness deltas
@@ -42,7 +42,9 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
+| Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
+| Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `utils/shell.ts`, `packages/coding-agent/examples/extensions/sandbox/index.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
 | HTML export must not replace the journal through any alias | `core/export-html/index.ts` | `file-safety.test.ts` |
 | Edits must preserve UTF-8 and untouched original text/boundaries | `core/tools/{edit,edit-diff}.ts`, `utils/text.ts` | `edit-byte-safety.test.ts` |
@@ -69,23 +71,47 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Terminal cell-size replies must reach native housekeeping before extension input listeners | `packages/tui/src/tui.ts` | `packages/tui/test/tui-cell-size-input.test.ts` |
 | Image coordinate notes need independent unrounded axis ratios | `utils/image-resize.ts` | `image-dimension-note.test.ts` |
 | Branch budgets must exclude system declarations not serialized as conversation | `core/compaction/branch-summarization.ts` | `branch-summarization.test.ts` |
+| Cache overlap estimates must follow native ancestry, identify expected model/provider transitions and distinguish current, prior observed, catalog and unknown read prices without changing real usage totals | `core/cache-stats.ts`, `modes/interactive/interactive-mode.ts` | `cache-stats.test.ts`, `interactive-mode-assistant-diagnostics.test.ts`, `suite/prompt-cache-prefix.test.ts` |
 | Empty quoted arguments must not shift template positions | `core/prompt-templates.ts` | `prompt-templates.test.ts` |
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
 | Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
 | Extension cancellation must remain observable through run setup, post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
 | Repeated context-usage reads must reuse the last scalar without rescanning archived ancestry; native leaf identity and effective model limits preserve compaction, edits, branches and reload/restore behavior | `core/agent-session.ts` | `suite/agent-session-context-usage.test.ts` |
-| No-op boundary handlers must not copy archived history for unread previews; mutable nonempty drafts still need eager validation. The undocumented `emitBoundary` preview builder is synchronous so `event.context` can materialize on first read | `core/extensions/runner.ts`, `core/agent-session.ts` | `extensions-runner.test.ts`, `suite/agent-session-boundaries.test.ts` |
+| Session hot paths reuse indexed active ancestry and the latest name entry; branch-summary admission stays linear, file forks reuse a private exclusive descriptor, and custom-flat listings reject unrelated cwd headers before reading bodies | `core/session-manager.ts`, `core/compaction/branch-summarization.ts` | `session-manager/*.test.ts`, `session-context-edit.test.ts`, `branch-summarization.test.ts`, `file-safety.test.ts` |
+| No-op boundary handlers must not copy archived history for unread previews. Canonical context still refreshes after every boundary because public Agent state allows in-place mutation; committed drafts refresh before entry notifications. Mutable nonempty drafts still need eager validation. The undocumented `emitBoundary` preview builder is synchronous so `event.context` can materialize on first read | `core/extensions/runner.ts`, `core/agent-session.ts` | `extensions-runner.test.ts`, `suite/agent-session-boundaries.test.ts` |
+
+### Performance deltas
+
+These paths remove repeated work or bound allocation while preserving their existing contracts.
+Keep them visible during upstream syncs; retire each change when upstream covers the same behavior.
+Workloads, measurements and limits are in [Performance reproduction](docs/performance.md).
+
+| Retained work reduction | Owner | Primary tests |
+| --- | --- | --- |
+| Normalize tool declarations once per comparison, index model overlays per read, repair JSON by spans, and drain Codex events without repeated array shifts | `packages/agent/src/agent-loop.ts`, `packages/ai/src/{utils/transcript,utils/json-parse,models,api/openai-codex-responses}.ts` | `packages/agent/test/agent.test.ts`, `packages/ai/test/{system-message-replay,json-parse,model-types,openai-codex-websocket-queue}.test.ts` |
+| Stream long-token wrapping, use native grapheme endpoints, and reuse only the current editor layout after comparing text, width and paste membership | `packages/tui/src/{utils,components/editor,components/input}.ts` | `packages/tui/test/{wrap-ansi,editor,input}.test.ts` |
+| Reuse unchanged assistant runs, reject plain prose before Mermaid lexing, and compute visible tree ancestry in one pass | `modes/interactive/components/{assistant-message,mermaid,tree-selector}.ts` | `{assistant-message,mermaid,tree-selector}.test.ts` |
+| Normalize edit text once and scan only requested read, grep and head-truncation ranges | `core/tools/{edit-diff,read,grep,truncate}.ts` | `edit-byte-safety.test.ts`, `tools.test.ts` |
+| Stop image encoding at the first fitting candidate without changing candidate order | `utils/image-resize-core.ts` | `image-processing.test.ts` |
+| Bound native Bash spill queues and wait for complete private files; push-only custom producers retain their existing callback contract | `core/{bash-executor,tools/bash,tools/output-accumulator}.ts`, `utils/{output-files,child-process}.ts` | `bash-spill.test.ts`, `private-spill.test.ts`, `streaming-file.test.ts` |
+| Skip disk reads only for acknowledged, confirmed-terminal background jobs during monitoring; explicit tools remain fresh | `extensions/background-command/{index,jobs}.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
+| Compile the fixed Chord frame schema, drain publications by cursor, and accumulate MCP lines and error prefixes without repeated copying | `packages/chord/src/{wire,publish}.ts`, `packages/mcp/src/transports/{stdio,streamable-http}.ts` | `packages/chord/test/{links-review,state}.test.ts`, `packages/mcp/test/{stdio,streamable-http}.test.ts` |
+| Limit retained-context scheduler work, binary-search historical revisions, avoid redundant SQLite writes, and join long lines at their boundary | `packages/durable/src/{harness/scheduler,storage/memory,storage/sqlite/storage,env/node}.ts` | `packages/durable/test/{harness-context,memory-storage,sqlite-storage,env-node}.test.ts` |
+| Count decoded lengths with scratch storage, reuse frame payload allocation without retaining large metadata, bound read-ahead, and precompute directory sort keys | `packages/env/daemon/src/{decode,scan,frame}.rs`, `packages/env/src/remote-env.ts` | Native daemon tests, `packages/env/test/{connection,remote,differential}.test.ts` |
+| Append native eval journals and validate reports once; avoid repeated retained-array copying in the opt-in telemetry adapter | `packages/evals/src/{cli,report}.ts`, `packages/telemetry/src/memory.ts` | `packages/evals/test/{cli,report}.test.ts`, `packages/telemetry/test/conformance.test.ts` |
+| Build ready workspaces two at a time, batch selected npm packs, avoid unused native-path Biome WASM loading, and retain every startup worker profile | `scripts/{build,package-artifacts,pack-nix-packages,biome-check,profile-coding-agent-node}.mjs`, `nix/package.nix` | `scripts/{workspace-build,package-artifacts,package-artifact-cli,profile-coding-agent-node}.test.mjs` |
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
 `background_command`, and no upstream publishing, binary (including Android APK) or
 issue-analysis workflows. Upstream's local `scripts/issues` triage tool is kept but unused. Nix builds
-follow upstream; its automatic catalog-pin commits and stable-branch promotion are upstream-only. The
-fork drops the Nix install check that loads esbuild, because upstream 7472cda0d removed esbuild from the
-install lock. Environments CI tests the darwin-x64 release daemon under x64 Node (Rosetta), the Node
-that loads it, because upstream's `nodePlatform` test compares the daemon's platform with Node's. Env
-remote tests allow Windows enough time to create and delete their large listing and watch trees. Drop
-each of these three deltas once upstream fixes the same failure.
+retain upstream's derivation and locks with the batched install-phase packing above; automatic
+catalog-pin commits and stable-branch promotion are upstream-only. The
+Nix install check now follows upstream's removal of esbuild from the installer dependencies. Env's upstream platform check accepts the
+darwin-x64 daemon under native arm64 Node with Rosetta, so CI no longer forces x64 Node. Upstream
+also supplies foreground-job polling, the large-listing timeout, and Chord's private short-path lock
+fallback for deep temporary directories. The fork retains Windows teardown retries and enough time
+to delete the large listing and watch trees.
 Contributor approvals remain fork-local; upstream approval-list additions and maintainer-specific
 label assignment/reopening rules are not imported.
 The fork uses upstream's install lock, not the removed npm shrinkwrap, and keeps its immutable
@@ -101,18 +127,21 @@ The generated schemas are under `packages/coding-agent/schemas/` and use upstrea
 `https://pi.dev/schemas/*.schema.json` IDs. They match the hosted files except for the fork's
 `compactView` setting, which the hosted settings schema accepts as an extra key.
 
-Package production uses upstream's `scripts/package-artifacts.mjs` and local consumer helpers,
-including npm 12's expected-package-keyed pack metadata.
-The narrow `scripts/coding-agent-consumer.mjs` packing export remains for pinned fleet automation
-until that external caller migrates to the artifact API.
+Package production uses the maintained `scripts/package-artifacts.mjs` and local consumer helpers,
+including npm 12's expected-package-keyed pack metadata. Selected workspaces pack in one npm process;
+Nix retains its eight raw named archives. Pinned fleet automation has migrated to the artifact API,
+and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
+Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
 
 Anthropic native tool changes follow upstream's inline definitions and fixed initial tool list,
 including same-name redefinitions. The fork retains request-wide strict-schema budgets and passive
 cache tracing. ChatGPT OAuth follows upstream's mandatory callback listener and port-conflict
 failure while keeping the fork's cancellation, state validation and cleanup safeguards. Cloudflare
 Claude-ID generation already produces canonical IDs upstream. The shared helper also canonicalizes
-provider inputs and remote overlays before passthrough/merge; current bundled defaults are not
-claimed to be broken.
+provider inputs, remote overlays and pinned catalog hydration. For canonical Cloudflare Opus 5.5 it
+restores positional system/tool/effort controls and defaults absent cache metadata to five-minute
+and one-hour lifetimes. Explicit compatibility flags and whole cache metadata objects are preserved;
+catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
 Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3 keeps
 the published $3/M five-minute cache-write rate, including Kimi Coding's implied
@@ -242,8 +271,8 @@ only complete current native state, with no journal-only or pre-v1 handoff fallb
 - `npm run check` after code changes.
 - `./test.sh` runs all non-e2e tests offline in an isolated home; `./test.sh -- <command>` runs a
   focused command the same way. Node and npm resolve before HOME isolation so version-manager
-  shims keep working. On macOS the isolated root lives under `/tmp`: the per-user `TMPDIR` pushes
-  Unix socket paths, such as Chord's host-manager locks, past the 104-byte limit.
+  shims keep working. The isolated root follows the caller's `TMPDIR`; Chord's upstream lock
+  fallback handles Unix socket paths that exceed the native limit.
 - `./test.sh` keeps the caller's `PATH`. If GNU coreutils' `gnubin` comes before `/bin`, Env's
   foreground-job test sees `gsleep` instead of `sleep`. Remove `gnubin` from `PATH` and unset
   `BASH_ENV` when it re-adds it, for example `env -u BASH_ENV PATH=<PATH without gnubin> ./test.sh`.

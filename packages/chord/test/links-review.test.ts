@@ -237,14 +237,37 @@ describe("links review: identity and stamping", () => {
 
 	it("#10 malformed frames and duplicate ids close the link", async () => {
 		const c = cluster();
-		const first = c.raw({ guest: "g" });
-		first.raw.send({ t: "call", hold: 1 } as never);
-		await until(() => first.raw.closed);
+		for (const frame of [
+			{ t: "call", hold: 1 },
+			{ t: "ping", n: "1" },
+			{ t: "release", id: 0 },
+			{ t: "call", id: 1, hold: 1, member: "add", args: 1, root: { rootId: "r", epoch: 0 } },
+			{ t: "result", id: 1, error: { code: "invalid", message: 1 } },
+			{ t: "state", id: 1, ops: [1] },
+		]) {
+			const first = c.raw({ guest: "g" });
+			first.raw.send(frame as never);
+			await until(() => first.raw.closed);
+		}
 		const second = c.raw({ guest: "g" });
 		const token = Counter.description;
 		second.raw.send({ t: "hold", id: 1, at: "session:S1", token, input: { name: "a" } });
 		second.raw.send({ t: "hold", id: 1, at: "session:S1", token, input: { name: "b" } });
 		await until(() => second.raw.closed);
+	});
+
+	it("accepts unknown extra frame fields without relaxing required field types", async () => {
+		const c = cluster();
+		const { raw, frames } = c.raw({ guest: "g" });
+		raw.send({ t: "ping", n: 7, future: { enabled: true } } as never);
+		await until(() => frames.some((frame) => frame.t === "pong"));
+		assert.deepEqual(
+			frames.find((frame) => frame.t === "pong"),
+			{ t: "pong", n: 7 },
+		);
+		assert.equal(raw.closed, false);
+		raw.close();
+		await c.server.close();
 	});
 });
 

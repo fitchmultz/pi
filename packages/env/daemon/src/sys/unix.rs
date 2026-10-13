@@ -288,6 +288,8 @@ pub fn kill_tree(pid: u32) {
     let pid = pid as i32;
     // SAFETY: plain signal delivery.
     unsafe {
+        // Stop waiting shells before killing their children so they cannot resume and run side effects.
+        libc::kill(-pid, libc::SIGSTOP);
         if libc::kill(-pid, libc::SIGKILL) != 0 {
             libc::kill(pid, libc::SIGKILL);
         }

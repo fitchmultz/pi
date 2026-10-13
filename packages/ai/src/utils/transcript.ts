@@ -148,21 +148,35 @@ export interface ToolStateChanges {
 
 /** Compare two complete tool states. A changed definition is a removal followed by an addition. */
 export function getToolStateChanges(previous: readonly Tool[], current: readonly Tool[]): ToolStateChanges {
-	const previousTools = new Map(previous.map((tool) => [tool.name, tool]));
-	const currentTools = new Map(current.map((tool) => [tool.name, tool]));
+	const previousNames = new Set(previous.map((tool) => tool.name));
+	const currentNames = new Set(current.map((tool) => tool.name));
+	const previousDeclarations = previous.map((tool) => ({
+		name: tool.name,
+		serialized: currentNames.has(tool.name) ? JSON.stringify(toToolDeclaration(tool)) : undefined,
+	}));
+	const currentDeclarations = current.map((tool) => {
+		const declaration = toToolDeclaration(tool);
+		return {
+			declaration,
+			serialized: previousNames.has(tool.name) ? JSON.stringify(declaration) : undefined,
+		};
+	});
+	// Maps select the last definition, while filtering retains original order and duplicates.
+	const previousTools = new Map(previousDeclarations.map((entry) => [entry.name, entry]));
+	const currentTools = new Map(currentDeclarations.map((entry) => [entry.declaration.name, entry]));
 	return {
-		toolsAdded: current
-			.filter((tool) => {
-				const previousTool = previousTools.get(tool.name);
-				return previousTool === undefined || !declarationsEqual(previousTool, tool);
+		toolsAdded: currentDeclarations
+			.filter((entry) => {
+				const previousTool = previousTools.get(entry.declaration.name);
+				return previousTool === undefined || previousTool.serialized !== entry.serialized;
 			})
-			.map(toToolDeclaration),
-		toolsRemoved: previous
-			.filter((tool) => {
-				const currentTool = currentTools.get(tool.name);
-				return currentTool === undefined || !declarationsEqual(tool, currentTool);
+			.map((entry) => entry.declaration),
+		toolsRemoved: previousDeclarations
+			.filter((entry) => {
+				const currentTool = currentTools.get(entry.name);
+				return currentTool === undefined || entry.serialized !== currentTool.serialized;
 			})
-			.map((tool) => ({ name: tool.name })),
+			.map((entry) => ({ name: entry.name })),
 	};
 }
 

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { globSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildImages, createDockerContext, discoverCases, requireEvalAuthFile, runTask } from "./docker.ts";
@@ -177,10 +177,7 @@ for (const [index, task] of tasks.entries()) {
 		? await readTaskObservation(task, reportPath, artifactDirectory)
 		: erroredObservation(task);
 	observations.push(observation);
-	await writeFile(
-		resolve(artifactDirectory, "observations.jsonl"),
-		`${observations.map((item) => JSON.stringify(item)).join("\n")}\n`,
-	);
+	await appendFile(resolve(artifactDirectory, "observations.jsonl"), `${JSON.stringify(observation)}\n`);
 }
 
 const report = summarizeEvalObservations(protocolDigest, tasks, observations);

@@ -20,7 +20,7 @@ afterEach(() => {
 	for (const root of temporaryRoots.splice(0)) rmSync(root, { force: true, recursive: true });
 });
 
-function createFixture(): {
+function createFixture(providerId = "test-provider"): {
 	dataDir: string;
 	packageRoot: string;
 	structure: ModelDataStructure;
@@ -31,17 +31,18 @@ function createFixture(): {
 	const providersDir = join(packageRoot, "src", "providers");
 	const dataDir = join(providersDir, "data");
 	mkdirSync(dataDir, { recursive: true });
+	const symbol = providerId.replaceAll("-", "_").toUpperCase();
 	writeFileSync(
 		join(packageRoot, "src", "models.generated.ts"),
-		'import { TEST_PROVIDER_CLASSIFIER_MODELS, TEST_PROVIDER_IMAGE_MODELS, TEST_PROVIDER_MODELS } from "./providers/test-provider.models.ts";\n',
+		`import { ${symbol}_CLASSIFIER_MODELS, ${symbol}_IMAGE_MODELS, ${symbol}_MODELS } from "./providers/${providerId}.models.ts";\n`,
 	);
 	writeFileSync(
-		join(providersDir, "test-provider.models.ts"),
-		'import values from "./data/test-provider.json" with { type: "json" };\n',
+		join(providersDir, `${providerId}.models.ts`),
+		`import values from "./data/${providerId}.json" with { type: "json" };\n`,
 	);
 
 	const structure: ModelDataStructure = {
-		"test-provider": {
+		[providerId]: {
 			"chat:model-a": "openai-completions",
 		},
 	};
@@ -51,7 +52,7 @@ function createFixture(): {
 			id: "model-a",
 			name: "Model A",
 			api: "openai-completions",
-			provider: "test-provider",
+			provider: providerId,
 			baseUrl: "https://example.test/v1",
 			reasoning: false,
 			input: ["text"],
@@ -71,7 +72,7 @@ function writeFixtureData(
 	manifestSchemaVersion = MODEL_DATA_SCHEMA_VERSION,
 	apiGroup = "openai-completions",
 ): void {
-	const filename = "test-provider.json";
+	const filename = `${Object.keys(structure)[0]}.json`;
 	const content = `${JSON.stringify({ [apiGroup]: values })}\n`;
 	writeFileSync(join(dataDir, filename), content);
 	const manifest = createModelDataManifest(structure, { [filename]: content }, GENERATED_AT);
@@ -102,6 +103,47 @@ describe("published model catalog hydration", () => {
 		hydrateModelCatalog(packageRoot, catalogPath);
 		expect(readFileSync(join(dataDir, MODEL_DATA_MANIFEST_FILE), "utf8")).toBe(manifest);
 		expect(readFileSync(join(dataDir, "test-provider.json"), "utf8")).toBe(provider);
+	});
+
+	it("hydrates published Cloudflare defaults for raw model consumers while preserving explicit metadata", () => {
+		const { dataDir, packageRoot, values } = createFixture("cloudflare-ai-gateway");
+		const catalogPath = join(packageRoot, "catalog.json");
+		const model = {
+			...chatModel(values),
+			id: "claude-opus-5-5",
+			api: "anthropic-messages",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic",
+		};
+		writeFileSync(catalogPath, JSON.stringify({ "cloudflare-ai-gateway": [model] }));
+		hydrateModelCatalog(packageRoot, catalogPath);
+		const providerPath = join(dataDir, "cloudflare-ai-gateway.json");
+		const groups: Record<string, Record<string, unknown>> = JSON.parse(readFileSync(providerPath, "utf8"));
+		expect(groups["anthropic-messages"]["chat:claude-opus-5-5"]).toMatchObject({
+			promptCache: { short: 300, long: 3600 },
+			compat: {
+				supportsMidConvoSystemMessages: true,
+				supportsMidConvoToolChanges: true,
+				supportsMidConvoEffort: true,
+				forceAdaptiveThinking: true,
+			},
+			thinkingLevelMap: { off: null },
+		});
+		expect(() => validateModelDataDirectory(readModelDataStructure(packageRoot), dataDir)).not.toThrow();
+
+		writeFileSync(
+			catalogPath,
+			JSON.stringify({
+				"cloudflare-ai-gateway": [{ ...model, promptCache: {}, compat: { supportsMidConvoToolChanges: false } }],
+			}),
+		);
+		hydrateModelCatalog(packageRoot, catalogPath);
+		const restored: Record<string, Record<string, Record<string, unknown>>> = JSON.parse(
+			readFileSync(providerPath, "utf8"),
+		);
+		expect(restored["anthropic-messages"]["chat:claude-opus-5-5"].promptCache).toEqual({});
+		expect(restored["anthropic-messages"]["chat:claude-opus-5-5"].compat).toMatchObject({
+			supportsMidConvoToolChanges: false,
+		});
 	});
 
 	it("groups models by API and keys them by type and id", () => {

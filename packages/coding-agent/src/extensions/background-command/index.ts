@@ -34,6 +34,7 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 		let saving = false;
 		const seen = new Set<string>();
 		const pending = new Set<string>();
+		const acknowledged = new Set<string>();
 
 		function receipts(entries: readonly FileEntry[]): void {
 			for (const entry of entries) {
@@ -93,6 +94,7 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 				root = backgroundCommandDirectory(owner);
 				seen.clear();
 				pending.clear();
+				acknowledged.clear();
 			}
 			stopped = false;
 			context = ctx;
@@ -131,7 +133,12 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 			}
 			if (stopped || saving || controller?.signal.aborted || ctx.hasPendingMessages()) return;
 			receipts(ctx.sessionManager.getEntries());
-			const jobs = listBackgroundCommands(root);
+			const jobs = listBackgroundCommands(root, acknowledged);
+			for (const job of jobs) {
+				// Unknown outcomes can resolve later; only acknowledged final records are immutable.
+				if (seen.has(job.id) && backgroundCommandFinished(job) && job.status !== "unknown")
+					acknowledged.add(job.id);
+			}
 			const running = jobs.filter((job) => !backgroundCommandFinished(job)).length;
 			ctx.ui.setStatus("background-command", running ? `background: ${running} running` : undefined);
 			const completed = jobs

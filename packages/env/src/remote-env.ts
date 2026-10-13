@@ -297,6 +297,8 @@ class RemoteTextLineReader implements TextLineReader {
 	readonly #decoder = new StreamDecoder();
 	#offset = 0;
 	#buffered = "";
+	#bufferedOffset = 0;
+	readonly #fragments: string[] = [];
 	#ended = false;
 	#closed = false;
 
@@ -311,16 +313,22 @@ class RemoteTextLineReader implements TextLineReader {
 		if (this.#closed) return err(new FileError("invalid", "Text line reader is closed", path));
 		try {
 			while (true) {
-				const newline = this.#buffered.indexOf("\n");
+				const newline = this.#buffered.indexOf("\n", this.#bufferedOffset);
 				if (newline !== -1) {
-					const text = this.#buffered.slice(0, newline);
-					this.#buffered = this.#buffered.slice(newline + 1);
+					const tail = this.#buffered.slice(this.#bufferedOffset, newline);
+					const text = this.#fragments.length === 0 ? tail : this.#fragments.join("") + tail;
+					this.#fragments.length = 0;
+					this.#bufferedOffset = newline + 1;
 					return ok({ text, terminated: true });
 				}
+				const tail = this.#buffered.slice(this.#bufferedOffset);
+				if (tail !== "") this.#fragments.push(tail);
+				this.#buffered = "";
+				this.#bufferedOffset = 0;
 				if (this.#ended) {
-					if (this.#buffered.length === 0) return ok(undefined);
-					const text = this.#buffered;
-					this.#buffered = "";
+					if (this.#fragments.length === 0) return ok(undefined);
+					const text = this.#fragments.join("");
+					this.#fragments.length = 0;
 					return ok({ text, terminated: false });
 				}
 				const bytes = await this.#handle.pread(this.#offset, LINE_CHUNK);
@@ -328,10 +336,10 @@ class RemoteTextLineReader implements TextLineReader {
 				if (afterReadAbort) return afterReadAbort;
 				this.#offset += bytes.length;
 				if (bytes.length === 0) {
-					this.#buffered += this.#decoder.decode();
+					this.#buffered = this.#decoder.decode();
 					this.#ended = true;
 				} else {
-					this.#buffered += this.#decoder.decode(bytes);
+					this.#buffered = this.#decoder.decode(bytes);
 				}
 			}
 		} catch (error) {
@@ -343,6 +351,7 @@ class RemoteTextLineReader implements TextLineReader {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#buffered = "";
+		this.#fragments.length = 0;
 		await this.#handle.close();
 	}
 }
@@ -474,8 +483,8 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 						const bytes = await handle.pread(undefined, READ_FILE_UNKNOWN_CHUNK);
 						if (bytes.length === 0) break;
 						total += bytes.length;
-						chunks.push(bytes);
 						if (encoding) text += decoder.write(bytes);
+						else chunks.push(bytes);
 					}
 					if (!encoding) return Buffer.concat(chunks, total);
 					return total === 0 ? "" : text + decoder.end();
@@ -502,7 +511,8 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 				const inFlight: Promise<Uint8Array>[] = [];
 				let next = 0;
 				while (true) {
-					while (inFlight.length < READ_DEPTH) {
+					// Only read beyond the known size if a consumed full chunk shows that the file grew.
+					while (inFlight.length < READ_DEPTH && (next < size || inFlight.length === 0)) {
 						const bytes = handle.pread(next, length);
 						bytes.catch(() => {});
 						inFlight.push(bytes);
@@ -704,12 +714,18 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 			// Node's `readdir` fails on any entry it cannot lstat. libuv sorts names by their bytes on POSIX; on Windows it
 			// keeps the file system's order, which the daemon reports.
 			const paths = await remotePath(this.connection);
-			if (paths === posix) {
-				const key = (entry: RemoteDirEntry) => Buffer.from(entry.raw ?? Buffer.from(entry.name, "utf8"));
-				entries.sort((a, b) => Buffer.compare(key(a), key(b)));
-			}
+			const ordered =
+				paths === posix
+					? entries
+							.map((entry) => ({
+								entry,
+								key: entry.raw === undefined ? Buffer.from(entry.name, "utf8") : Buffer.from(entry.raw),
+							}))
+							.sort((a, b) => Buffer.compare(a.key, b.key))
+							.map(({ entry }) => entry)
+					: entries;
 			const infos: FileInfo[] = [];
-			for (const entry of entries) {
+			for (const entry of ordered) {
 				if (context.abortSignal?.aborted) throw new FileError("aborted", "aborted", resolved);
 				const entryPath = paths.resolve(resolved, entry.name);
 				if (entry.error !== undefined) throw toFileError(new RemoteError(entry.error), entryPath);

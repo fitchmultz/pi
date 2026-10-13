@@ -232,7 +232,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 			// If this is a summary entry, try to fit it anyway as it's important context
 			if (entry.type === "compaction" || entry.type === "branch_summary") {
 				if (totalTokens < tokenBudget * 0.9) {
-					messages.unshift(message);
+					messages.push(message);
 					totalTokens += tokens;
 				}
 			}
@@ -240,11 +240,11 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 			break;
 		}
 
-		messages.unshift(message);
+		messages.push(message);
 		totalTokens += tokens;
 	}
 
-	return { messages, fileOps, totalTokens };
+	return { messages: messages.reverse(), fileOps, totalTokens };
 }
 
 // ============================================================================

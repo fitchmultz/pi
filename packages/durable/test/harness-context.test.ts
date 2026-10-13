@@ -2,6 +2,7 @@ import type { Context } from "@earendil-works/chord";
 import { createModels, type Message } from "@earendil-works/pi-ai";
 import {
 	type ContextView,
+	type ConversationId,
 	createRegistry,
 	defineTask,
 	type EntryDraft,
@@ -60,7 +61,7 @@ async function countingSetup(options: { readonly settings?: HarnessSettings; rea
 			context,
 		);
 	}
-	return { harness, registry, root, first, scanned, hold };
+	return { harness, registry, root, first, scanned, hold, storage };
 }
 
 function ids(entries: readonly EntryRecord[]): EntryId[] {
@@ -393,6 +394,81 @@ describe("conversation context", () => {
 		await harness.close(context);
 	});
 
+	it("keeps an ancestor's range while work in a forgotten owned conversation runs", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const settings = { contextRetentionMs: 1_000 };
+		const { harness, registry, root, scanned } = await countingSetup({ settings });
+		const rows: Record<string, number> = {};
+		const Probe = probeTask(async (name, load) => {
+			const before = scanned.rows;
+			await load();
+			rows[name] = scanned.rows - before;
+		});
+		let child: ConversationId | undefined;
+		const Owner = defineTask<Record<string, never>, { phase: "run" }, null>({
+			name: "test.context-owner",
+			version: 1,
+			initial: () => ({ phase: "run" }),
+			phases: {
+				run: async (_task, runtime, taskContext) => {
+					await runtime.commit(async (tx) => {
+						child = (await tx.createConversation({ ownership: { kind: "task", taskId: runtime.taskId } })).id;
+					}, taskContext);
+					await runtime.commit(() => DONE, taskContext);
+				},
+			},
+			abort: async (_task, runtime, taskContext) => {
+				await runtime.commit(() => ABORTED, taskContext);
+			},
+		});
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const Hold = defineTask<Record<string, never>, { phase: "run" }, null>({
+			name: "test.context-hold",
+			version: 1,
+			initial: () => ({ phase: "run" }),
+			phases: {
+				run: async (_task, runtime, taskContext) => {
+					started.resolve();
+					await release.promise;
+					await runtime.commit(() => DONE, taskContext);
+				},
+			},
+			abort: async (_task, runtime, taskContext) => {
+				await runtime.commit(() => ABORTED, taskContext);
+			},
+		});
+		for (const task of [Probe, Owner, Hold]) addTask(registry, task);
+		harness.resume();
+		const options = { ownership: { kind: "conversation" }, conversationId: root.id } as const;
+		const probe = async (name: string) => {
+			const id = await harness.commit((tx) => tx.createTask(Probe, { name }, options), context);
+			expect((await harness.waitForTask(id, context)).state.outcome).toEqual(DONE.outcome);
+			await root.waitForIdle(context);
+		};
+		await probe("first");
+		const owner = await harness.commit((tx) => tx.createTask(Owner, {}, options), context);
+		expect((await harness.waitForTask(owner, context)).state.outcome).toEqual(DONE.outcome);
+		// The ended owner's empty chain has been swept. New work must load it and make the retained ancestor busy.
+		vi.advanceTimersByTime(500);
+		const conversation = (await harness.conversation(child!, context))!;
+		const held = await conversation.commit(
+			(tx) => tx.createTask(Hold, {}, { ownership: { kind: "conversation" } }),
+			context,
+		);
+		await started.promise;
+		settings.contextRetentionMs = 100;
+		vi.advanceTimersByTime(1_000);
+		release.resolve();
+		expect((await harness.waitForTask(held, context)).state.outcome).toEqual(DONE.outcome);
+		await root.waitForIdle(context);
+		await probe("retained");
+		vi.advanceTimersByTime(100);
+		await probe("expired");
+		expect(rows).toEqual({ first: 22, retained: 1, expired: 22 });
+		await harness.close(context);
+	});
+
 	it("derives the same view from extended reads as from whole reads", async () => {
 		const { harness, registry, root } = await countingSetup();
 		// Deterministic pseudo-random transcript (32-bit LCG, high bits): calls and results in any order, missing and
@@ -665,6 +741,57 @@ describe("conversation context", () => {
 		expect(vi.getTimerCount()).toBe(idle);
 		await probe("second");
 		expect(rows).toEqual({ first: 22, second: 22 });
+		await harness.close(context);
+	});
+
+	it("restarts unrelated idle retention when an unloaded ownership chain becomes known", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const { harness, registry, root, scanned, storage } = await countingSetup({
+			settings: { contextRetentionMs: 1_000 },
+		});
+		const other = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+		const rows: Record<string, number> = {};
+		const Probe = probeTask(async (name, load) => {
+			const before = scanned.rows;
+			await load();
+			rows[name] = scanned.rows - before;
+		});
+		addTask(registry, Probe);
+		harness.resume();
+		const options = { ownership: { kind: "conversation" }, conversationId: root.id } as const;
+		const probe = async (name: string) => {
+			const id = await harness.commit((tx) => tx.createTask(Probe, { name }, options), context);
+			expect((await harness.waitForTask(id, context)).state.outcome).toEqual(DONE.outcome);
+			await root.waitForIdle(context);
+		};
+		await probe("first");
+		vi.advanceTimersByTime(500);
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const read = storage.conversation.bind(storage);
+		let reads = 0;
+		storage.conversation = async (id, readContext) => {
+			// Creation validates the conversation first; hold the scheduler's subsequent ownership load.
+			if (id === other.id && ++reads === 2) {
+				reached.resolve();
+				await release.promise;
+			}
+			return read(id, readContext);
+		};
+		const unrelated = await other.commit(
+			(tx) => tx.createTask(Probe, { name: "unrelated" }, { ownership: { kind: "conversation" } }),
+			context,
+		);
+		await reached.promise;
+		vi.advanceTimersByTime(1_000);
+		release.resolve();
+		expect((await harness.waitForTask(unrelated, context)).state.outcome).toEqual(DONE.outcome);
+		// Root was conservatively busy while the chain was unknown. Its idle period starts at certainty, not creation.
+		vi.advanceTimersByTime(999);
+		await probe("within");
+		vi.advanceTimersByTime(1_000);
+		await probe("expired");
+		expect(rows).toEqual({ first: 22, unrelated: 0, within: 1, expired: 22 });
 		await harness.close(context);
 	});
 

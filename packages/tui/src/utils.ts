@@ -1018,60 +1018,40 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 	let currentLine = tracker.getActiveCodes();
 	let currentWidth = 0;
 
-	// First, separate ANSI codes from visible content
-	// We need to handle ANSI codes specially since they're not graphemes
 	let i = 0;
-	const segments: Array<{ type: "ansi" | "grapheme"; value: string }> = [];
-
 	while (i < word.length) {
 		const ansiResult = extractAnsiCode(word, i);
 		if (ansiResult) {
-			segments.push({ type: "ansi", value: ansiResult.code });
+			currentLine += ansiResult.code;
+			tracker.process(ansiResult.code);
 			i += ansiResult.length;
-		} else {
-			// Find the next ANSI code or end of string
-			let end = i;
-			while (end < word.length) {
-				const nextAnsi = extractAnsiCode(word, end);
-				if (nextAnsi) break;
-				end++;
-			}
-			// Segment this non-ANSI portion into graphemes
-			const textPortion = word.slice(i, end);
-			for (const seg of graphemeSegmenter.segment(textPortion)) {
-				segments.push({ type: "grapheme", value: seg.segment });
-			}
-			i = end;
-		}
-	}
-
-	// Now process segments
-	for (const seg of segments) {
-		if (seg.type === "ansi") {
-			currentLine += seg.value;
-			tracker.process(seg.value);
 			continue;
 		}
 
-		const grapheme = seg.value;
-		// Skip empty graphemes to avoid issues with string-width calculation
-		if (!grapheme) continue;
-
-		const graphemeWidth = visibleWidth(grapheme);
-
-		if (currentWidth + graphemeWidth > width) {
-			// Add specific reset for underline only (preserves background)
-			const lineEndReset = tracker.getLineEndReset();
-			if (lineEndReset) {
-				currentLine += lineEndReset;
-			}
-			lines.push(currentLine);
-			currentLine = tracker.getActiveCodes();
-			currentWidth = 0;
+		// Keep ANSI payloads outside segmentation, including escapes in hyperlinks.
+		let end = word.indexOf("\x1b", i + 1);
+		while (end !== -1 && ansiCodeLength(word, end) === 0) {
+			end = word.indexOf("\x1b", end + 1);
 		}
+		if (end === -1) end = word.length;
+		const text = word.slice(i, end);
+		const ascii = isPrintableAscii(text);
 
-		currentLine += grapheme;
-		currentWidth += graphemeWidth;
+		for (const grapheme of ascii ? text : graphemeSegments(text)) {
+			const graphemeWidth = ascii ? 1 : visibleWidth(grapheme);
+
+			if (currentWidth + graphemeWidth > width) {
+				// Reset underline only, preserving background and hyperlink continuation.
+				currentLine += tracker.getLineEndReset();
+				lines.push(currentLine);
+				currentLine = tracker.getActiveCodes();
+				currentWidth = 0;
+			}
+
+			currentLine += grapheme;
+			currentWidth += graphemeWidth;
+		}
+		i = end;
 	}
 
 	if (currentLine) {

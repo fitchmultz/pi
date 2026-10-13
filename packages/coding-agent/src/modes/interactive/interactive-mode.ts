@@ -68,13 +68,7 @@ import {
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
-import {
-	CACHE_TTL_MS,
-	type CacheMiss,
-	collectCacheMisses,
-	computeCacheWaste,
-	detectCacheMiss,
-} from "../../core/cache-stats.ts";
+import { type CacheMiss, collectCacheMisses, computeCacheWaste, detectCacheMiss } from "../../core/cache-stats.ts";
 import { formatCacheWarmingStatus, formatCacheWarmingUsage } from "../../core/cache-warmer.ts";
 import { findExtensionStackMatches, recordCrash, takeUnnotifiedCrash } from "../../core/crash-log.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "../../core/defaults.ts";
@@ -4155,7 +4149,7 @@ export class InteractiveMode {
 		this.pendingTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache misses are not persisted, unlike successful cache-warming usage.
-		// Re-derive them and inject them after the assistant messages that paid for them.
+		// Re-derive estimates from each message's ancestry, including retained pre-compaction messages.
 		const cacheMisses = this.settingsManager.getShowCacheMissNotices()
 			? collectCacheMisses(this.sessionManager.getEntries(), this.session.modelRuntime)
 			: new Map<AssistantMessage, CacheMiss>();
@@ -4340,32 +4334,34 @@ export class InteractiveMode {
 		);
 	}
 
-	/**
-	 * Show a transcript notice when a completed assistant message paid for a
-	 * significant cache miss. Only states observable facts: the miss itself,
-	 * a model switch, or an idle gap past the cache TTL.
-	 */
+	/** Show significant token-count overlap estimates, not a cache-cause diagnosis. */
 	private maybeShowCacheMissNotice(message: AssistantMessage): void {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
 
 		// Entries don't contain `message` yet: message_end fires before persistence.
-		const miss = detectCacheMiss(this.sessionManager.getEntries(), message, this.session.modelRuntime);
+		const miss = detectCacheMiss(this.sessionManager.getBranch(), message, this.session.modelRuntime);
 		if (miss) this.addCacheMissNotice(miss);
 	}
 
 	private addCacheMissNotice(miss: CacheMiss): void {
 		if (miss.missedTokens < 20_000 && miss.missedCost < 0.1) return;
 
-		const cost = miss.missedCost >= 0.01 ? ` (~$${miss.missedCost.toFixed(2)})` : "";
-		const reBilled = `${formatTokens(miss.missedTokens)} tokens re-billed${cost}`;
-		let label = "Cache miss";
-		if (miss.modelChanged) {
-			label = "Cache miss after model switch";
-		} else if (miss.idleMs >= CACHE_TTL_MS) {
-			label = `Cache miss after ${Math.round(miss.idleMs / 60_000)}m idle`;
-		}
+		const readPriceNote =
+			miss.readPriceSource === "catalog"
+				? ", catalog read price"
+				: miss.readPriceSource === "ancestor"
+					? ", prior observed read price"
+					: "";
+		const cost =
+			miss.readPriceSource === "unknown"
+				? " (extra cost unknown)"
+				: miss.missedCost >= 0.01
+					? ` (~$${miss.missedCost.toFixed(2)} extra${readPriceNote})`
+					: "";
+		const label = miss.modelChanged ? "Expected model/provider cache transition" : "Cache miss estimate";
+		const detail = `${formatTokens(miss.missedTokens)} estimated uncached overlap tokens${cost}`;
 		this.chatContainer.addChild(new Spacer(1));
-		addChatActivity(this.chatContainer, new ThemedText(() => theme.fg("warning", `${label}: ${reBilled}`), 1, 0));
+		addChatActivity(this.chatContainer, new ThemedText(() => theme.fg("warning", `${label}: ${detail}`), 1, 0));
 	}
 
 	renderInitialMessages(): void {
@@ -6961,8 +6957,8 @@ export class InteractiveMode {
 			info += `${theme.fg("dim", "Status:")} ${cacheWarmingStatus ? formatCacheWarmingStatus(cacheWarmingStatus) : "Inactive (cache warming unavailable)"}\n`;
 			const decision = cacheWarmingStatus?.decision;
 			if (decision?.economicsAvailable) {
-				info += `${theme.fg("dim", "Cache miss penalty:")} $${decision.missCost.toFixed(3)}\n`;
-				info += `${theme.fg("dim", "Refresh cost:")} $${decision.warmCost.toFixed(3)}\n`;
+				info += `${theme.fg("dim", "Cache miss penalty (catalog estimate):")} $${decision.missCost.toFixed(3)}\n`;
+				info += `${theme.fg("dim", "Refresh cost (catalog estimate):")} $${decision.warmCost.toFixed(3)}\n`;
 			}
 
 			if (stats.cost > 0 || cacheWaste.missedTokens > 0) {
@@ -6975,12 +6971,26 @@ export class InteractiveMode {
 					}
 				}
 				if (cacheWaste.missedTokens > 0) {
-					const missLabel = cacheWaste.missCount === 1 ? "1 miss" : `${cacheWaste.missCount} misses`;
-					const detail = `${cacheWaste.missedTokens.toLocaleString()} tokens, ${missLabel}`;
-					info +=
-						cacheWaste.missedCost >= 0.0001
-							? `\n${theme.fg("dim", "Cache Re-billed:")} $${cacheWaste.missedCost.toFixed(3)} ${theme.fg("dim", `(${detail})`)}`
-							: `\n${theme.fg("dim", "Cache Re-billed:")} ${detail}`;
+					const requestLabel = cacheWaste.missCount === 1 ? "1 request" : `${cacheWaste.missCount} requests`;
+					info += `\n${theme.fg("dim", "Cache overlap estimate (all branches):")} ${cacheWaste.missedTokens.toLocaleString()} tokens, ${requestLabel}`;
+					if (cacheWaste.modelSwitchCount > 0) {
+						info += `\n  ${theme.fg("dim", `Includes ${cacheWaste.modelSwitchCount} expected model/provider ${cacheWaste.modelSwitchCount === 1 ? "transition" : "transitions"}`)}`;
+					}
+					const cost =
+						cacheWaste.unpricedMissCount === cacheWaste.missCount
+							? "unknown"
+							: `~$${cacheWaste.missedCost.toFixed(3)}${cacheWaste.unpricedMissCount > 0 ? " (priced subtotal)" : ""}`;
+					info += `\n${theme.fg("dim", "Estimated extra cache cost:")} ${cost}`;
+					if (cacheWaste.ancestorPriceCount > 0) {
+						info += `\n  ${theme.fg("dim", `Prior observed read prices used for ${cacheWaste.ancestorPriceCount} ${cacheWaste.ancestorPriceCount === 1 ? "request" : "requests"} (approximate)`)}`;
+					}
+					if (cacheWaste.catalogPriceCount > 0) {
+						info += `\n  ${theme.fg("dim", `Current catalog read prices used for ${cacheWaste.catalogPriceCount} ${cacheWaste.catalogPriceCount === 1 ? "request" : "requests"}`)}`;
+					}
+					if (cacheWaste.unpricedMissCount > 0) {
+						info += `\n  ${theme.fg("dim", `Read price unknown for ${cacheWaste.unpricedMissCount} ${cacheWaste.unpricedMissCount === 1 ? "request" : "requests"}`)}`;
+					}
+					info += `\n${theme.fg("dim", "Token-count estimate vs. full cache hits; not measured waste or provider billing.")}`;
 				}
 			}
 			return info;

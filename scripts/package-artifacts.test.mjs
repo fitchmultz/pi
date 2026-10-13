@@ -35,18 +35,27 @@ test("artifact packing uses resolved Node/npm, isolated environment and array or
 	for (const name of ["SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"]) {
 		if (process.env[name]) env[name] = process.env[name];
 	}
-	const name = "@pi-package-test/target";
-	writePackage(join(repoRoot, "packages/target"), { name, version: "1.0.0" }, { "index.js": "export {};" });
-	const observed = join(root, "packing-env.json");
+	mkdirSync(repoRoot);
+	writeFileSync(join(repoRoot, "package.json"), '{"private":true,"workspaces":["packages/*"]}\n');
+	const names = ["@pi-package-test/shared", "@pi-package-test/target"];
+	for (const name of names) {
+		writePackage(join(repoRoot, "packages", name.split("/")[1]), {
+			name, version: "1.0.0", scripts: { prepack: "node -e \"process.exit(73)\"" },
+		}, { "index.js": "export {};" });
+	}
+	writePackage(join(repoRoot, "packages/private"), {
+		name: "@pi-package-test/private", version: "1.0.0", private: true,
+	}, { "index.js": "export {};" });
+	const observed = join(root, "packing-env.jsonl");
 	const npm = join(root, "npm-observer.cjs");
 	writeFileSync(npm, `const fs = require("node:fs");
-fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ node: process.execPath, env: process.env }));
+fs.appendFileSync(${JSON.stringify(observed)}, JSON.stringify({ node: process.execPath, env: process.env }) + "\\n");
 const result = require("node:child_process").spawnSync(process.execPath, [${JSON.stringify(npmCli)}, ...process.argv.slice(2)], {
   env: process.env, encoding: "utf8"
 });
 if (result.status !== 0) { console.error(result.stderr); process.exit(result.status ?? 1); }
 const parsed = JSON.parse(result.stdout);
-const entries = Array.isArray(parsed) ? parsed : Object.values(parsed);
+const entries = (Array.isArray(parsed) ? parsed : Object.values(parsed)).reverse();
 console.log(JSON.stringify(process.env.PACK_JSON === "array" ? entries : Object.fromEntries(entries.map(entry => [entry.name, entry]))));
 `);
 	const inherited = { HOME: process.env.HOME, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, NODE_OPTIONS: process.env.NODE_OPTIONS };
@@ -58,12 +67,21 @@ console.log(JSON.stringify(process.env.PACK_JSON === "array" ? entries : Object.
 		process.env.ANTHROPIC_API_KEY = "synthetic-secret";
 		process.env.NODE_OPTIONS = `--require ${preload}`;
 		for (const format of ["array", "object"]) {
+			writeFileSync(observed, "");
 			const artifactSet = produceArtifactSet({
 				repoRoot, outDir: join(root, `artifacts-${format}`), build: false, source: null,
-				npmOptions: { node, npm, env: { ...env, PACK_JSON: format } },
+				npmOptions: { node, npm, env: { ...env, PACK_JSON: format, npm_config_workspaces: "true" } },
 			});
-			assert.ok(existsSync(artifactSet.getPackage(name).tarballPath));
-			const result = JSON.parse(readFileSync(observed, "utf8"));
+			assert.deepEqual(artifactSet.packages.map((pkg) => pkg.name), names);
+			for (const name of names) {
+				const tarballPath = artifactSet.getPackage(name).tarballPath;
+				assert.ok(existsSync(tarballPath));
+				const manifest = JSON.parse(execFileSync("tar", ["-xOf", tarballPath, "package/package.json"], { encoding: "utf8" }));
+				assert.equal(manifest.name, name, "metadata order must not mislabel package contents");
+			}
+			const calls = readFileSync(observed, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(calls.length, 1, "all selected packages must share one npm invocation");
+			const [result] = calls;
 			assert.equal(result.node, node);
 			assert.equal(result.env.HOME, home);
 			assert.equal(result.env.ANTHROPIC_API_KEY, undefined);
@@ -76,6 +94,43 @@ console.log(JSON.stringify(process.env.PACK_JSON === "array" ? entries : Object.
 			if (value === undefined) delete process.env[name];
 			else process.env[name] = value;
 		}
+	}
+});
+
+test("rejects incomplete, duplicate, unexpected or unsafe npm metadata before publishing a manifest", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "pi-pack-metadata-test-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const repoRoot = join(root, "source");
+	const entries = ["shared", "target"].map((name) => {
+		writePackage(join(repoRoot, "packages", name), {
+			name: `@pi-package-test/${name}`, version: "1.0.0",
+		}, {});
+		return { name: `@pi-package-test/${name}`, filename: `${name}.tgz`, files: [] };
+	});
+	const npm = join(root, "npm-metadata.cjs");
+	writeFileSync(npm, "console.log(process.env.PACK_METADATA);");
+	const [shared, target] = entries;
+	const cases = [
+		["missing", [shared]],
+		["duplicate", [shared, shared]],
+		["unexpected", [shared, { ...target, name: "@pi-package-test/unselected" }]],
+		["extra", [...entries, { ...target, name: "@pi-package-test/unselected" }]],
+		["key mismatch", { [shared.name]: shared, [target.name]: shared }],
+		["unexpected key", { [shared.name]: shared, unselected: target }],
+		["extra key", { [shared.name]: shared, [target.name]: target, unselected: target }],
+		["parent path", [shared, { ...target, filename: "../target.tgz" }]],
+		["windows path", [shared, { ...target, filename: "..\\target.tgz" }]],
+		["same tarball", [shared, { ...target, filename: shared.filename }]],
+		["missing files", [shared, { ...target, files: null }]],
+		["null", null],
+	];
+	for (const [label, metadata] of cases) {
+		const outDir = join(root, label);
+		assert.throws(() => produceArtifactSet({
+			repoRoot, outDir, build: false, source: null,
+			npmOptions: { npm, env: { PACK_METADATA: JSON.stringify(metadata) } },
+		}), /npm pack returned an unexpected/, label);
+		assert.equal(existsSync(join(outDir, "manifest.json")), false, label);
 	}
 });
 

@@ -51,6 +51,7 @@ type IdRow = { readonly id: number };
 type MetadataRow = { readonly next_id: string; readonly next_seq: number };
 type DocumentAction = {
 	create?: DocumentCreate;
+	existing?: DocumentRecord;
 	copy?: Extract<StorageWrite, { readonly type: "document.copy" }>["source"];
 	content?: DocumentContent;
 	retire: boolean;
@@ -182,8 +183,11 @@ export class SqliteStorage implements Storage {
 			);
 			if (metadata === undefined) throw new Error("Durable SQLite metadata is missing");
 			const committedSeq = seqFromNumber(metadata.next_seq);
-			await this.checkGlobalIds(transaction, writes);
+			const newClaims = await this.checkGlobalIds(transaction, writes);
 			await this.checkDocumentActions(transaction, documentActions);
+			for (const [id, table] of newClaims) {
+				await transaction.run("INSERT INTO record_ids (id, record_type) VALUES (?, ?)", id, table);
+			}
 			for (const write of writes) await this.applyTableWrite(transaction, write, committedSeq);
 			await this.applyDocumentActions(transaction, documentActions, committedSeq);
 			await transaction.run(
@@ -650,8 +654,12 @@ export class SqliteStorage implements Storage {
 		return nextId;
 	}
 
-	private async checkGlobalIds(executor: SqliteExecutor, writes: readonly StorageWrite[]): Promise<void> {
+	private async checkGlobalIds(
+		executor: SqliteExecutor,
+		writes: readonly StorageWrite[],
+	): Promise<ReadonlyMap<Id<string>, TableName>> {
 		const claimed = new Map<Id<string>, TableName>();
+		const newClaims = new Map<Id<string>, TableName>();
 		for (const write of writes) {
 			if (write.type === "document.change" || write.type === "document.retire") continue;
 			const document = write.type === "document.create" || write.type === "document.copy";
@@ -669,7 +677,9 @@ export class SqliteStorage implements Storage {
 				if (earlier !== undefined && earlier !== table) throw new Error(`ID ${id} is written as two record types`);
 			}
 			claimed.set(id, table);
+			if (existing === undefined) newClaims.set(id, table);
 		}
+		return newClaims;
 	}
 
 	private prepareDocumentActions(writes: readonly StorageWrite[]): Map<DocumentId, DocumentAction> {
@@ -743,6 +753,8 @@ export class SqliteStorage implements Storage {
 					throw new Error(`Document ${id} version transition requires a base`);
 				}
 			}
+			action.existing = existing;
+			if (action.create === undefined && !action.retire) continue;
 			const record = action.create ?? existing!;
 			const key = addressKey(record);
 			let live = liveCounts.get(key);
@@ -779,7 +791,6 @@ export class SqliteStorage implements Storage {
 	private async applyTableWrite(executor: SqliteExecutor, write: StorageWrite, seq: Seq): Promise<void> {
 		switch (write.type) {
 			case "conversation":
-				await this.claimId(executor, write.value.id, "conversation");
 				await executor.run(
 					"INSERT INTO conversations (id, owner_conversation_id, owner_task_id, record) VALUES (?, ?, ?, ?)",
 					write.value.id,
@@ -789,7 +800,6 @@ export class SqliteStorage implements Storage {
 				);
 				break;
 			case "entry":
-				await this.claimId(executor, write.value.id, "entry");
 				await executor.run(
 					"INSERT INTO entries (id, conversation_id, head, commit_seq, record) VALUES (?, ?, ?, ?, ?)",
 					write.value.id,
@@ -800,7 +810,6 @@ export class SqliteStorage implements Storage {
 				);
 				break;
 			case "task":
-				await this.claimId(executor, write.value.id, "task");
 				await executor.run(
 					`INSERT INTO tasks (id, conversation_id, kind, status, abort_requested, background, record)
 						VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -817,7 +826,6 @@ export class SqliteStorage implements Storage {
 				);
 				break;
 			case "submission":
-				await this.claimId(executor, write.value.id, "submission");
 				await executor.run(
 					`INSERT INTO submissions (id, conversation_id, request_id, status, record) VALUES (?, ?, ?, ?, ?)
 						ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id,
@@ -835,10 +843,6 @@ export class SqliteStorage implements Storage {
 			case "document.retire":
 				break;
 		}
-	}
-
-	private async claimId(executor: SqliteExecutor, id: Id<string>, table: TableName): Promise<void> {
-		await executor.run("INSERT OR IGNORE INTO record_ids (id, record_type) VALUES (?, ?)", id, table);
 	}
 
 	private async applyDocumentActions(
@@ -876,7 +880,6 @@ export class SqliteStorage implements Storage {
 					...(action.retire ? { retiredAt: seq } : {}),
 				};
 				const parts = addressParts(record);
-				await this.claimId(executor, id, "document");
 				await executor.run(
 					`INSERT INTO documents
 						(id, kind, family, key_value, scope_kind, owner_id, created_at, retired_at, record)
@@ -892,8 +895,7 @@ export class SqliteStorage implements Storage {
 					encodeJson(record),
 				);
 			} else {
-				const row = (await executor.get<JsonRow>("SELECT record FROM documents WHERE id = ?", id))!;
-				record = parseJson<DocumentRecord>(row.record);
+				record = action.existing!;
 			}
 
 			if (content !== undefined) {

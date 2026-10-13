@@ -17,10 +17,18 @@ Add `"$schema": "https://pi.dev/schemas/settings.schema.json"` to `settings.json
 | `thinkingBudgets` | object | Built-in budgets | Token budgets for `minimal`, `low`, `medium`, and `high` thinking levels. |
 | `enabledModels` | `string[]` | All available models | Model patterns used for startup selection and model cycling. Uses the same format as `--models`. |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. |
-| `showCacheMissNotices` | boolean | `false` | Show notices for significant cache misses, successful cache warming, compaction usage, and provider recovery. |
+| `showCacheMissNotices` | boolean | `false` | Show significant cache overlap estimates, successful cache warming, compaction usage, and provider recovery. |
 | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"streaming"` | Keep eligible provider prompt caches warm during active runs or, with `"idle"`, between runs. Global setting only. |
 
 Cache warming runs only when the model declares a cache lifetime and Pi estimates at least $0.05 in avoided cache-miss cost. Refresh usage counts toward session totals but does not enter model context. `/session` shows the next decision; extensions can override it with `cache_warming_decision`. See [Prompt Cache Lifetimes](models.md#prompt-cache-lifetimes).
+
+Scheduling and native write-price estimates use the request after authentication, including credential-scoped environment values. Refreshes replay the original context but resolve current credentials and headers again.
+
+Decisions use the selected model's catalog prices, including prompt-length tiers and native one-hour cache-write pricing. Provider wrappers or service tiers can change actual request rates. The $0.05 guard is an estimate, not guaranteed savings or a spending cap; persisted refresh usage retains the provider's reported tokens and calculated cost.
+
+Cache notices estimate uncached overlap as `min(previous prompt tokens, current prompt tokens) - current cache reads`, comparing requests on their native parent ancestry. They do not compare serialized prefixes or prove avoidable waste, re-billing, or cache expiry. Request timestamps are start times, not measured idle time. Same-branch provider/model changes remain visible as expected transitions. `/session` sums these estimates across all branches; all recorded usage and cost totals, including abandoned branches, remain unchanged.
+
+Extra cache cost is an estimate against hypothetical full cache hits, using recorded non-read costs and the current request's read rate when available, otherwise the last observed read rate on the uninterrupted same-model ancestry. Prior read rates are labeled approximate and may not match a later speed or pricing tier. If neither is available, current catalog pricing is explicitly identified as a fallback, not a historical tariff. Missing read prices are reported as unknown; any priced subtotal excludes those requests. These estimates are not provider invoices or a savings forecast.
 
 See [Choose a Model](models.md) for model selection and thinking controls.
 

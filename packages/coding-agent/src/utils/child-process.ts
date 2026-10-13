@@ -87,7 +87,14 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 
 		const armIdleTimer = () => {
 			if (postExitTimer) clearTimeout(postExitTimer);
-			postExitTimer = setTimeout(() => finalize(exitCode), EXIT_STDIO_GRACE_MS);
+			postExitTimer = setTimeout(() => {
+				// A producer paused for spill backpressure is not an idle inherited handle.
+				if ((!stdoutEnded && child.stdout?.isPaused()) || (!stderrEnded && child.stderr?.isPaused())) {
+					armIdleTimer();
+				} else {
+					finalize(exitCode);
+				}
+			}, EXIT_STDIO_GRACE_MS);
 		};
 
 		const onData = () => {

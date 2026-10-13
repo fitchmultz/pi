@@ -53,27 +53,49 @@ describe("detached background commands", () => {
 		expect(backgroundCommandOutputTail(done)).toContain("stderr\n");
 	});
 	it.each(["cancel", "timeout"])("%s stops descendants and preserves partial output", async (kind) => {
-		const childPid = join(root, "child.pid");
+		const childPids = join(root, "children.pid");
+		const ready = join(root, "ready");
+		const continued = join(root, "continued");
+		const windows = process.platform === "win32";
+		// Wait on the newest descendant to expose child-first process-group signal delivery.
+		const children = 64;
+		const nested = [
+			`printf '%s\\n' "$$" >> ${quote(childPids)}`,
+			`i=0; while [ "$i" -lt ${children} ]; do sleep 600 & pid=$!; printf '%s\\n' "$pid" >> ${quote(childPids)}; i=$((i + 1)); done`,
+			`printf 'ready' > ${quote(ready)}`,
+			`wait "$pid"`,
+			`printf 'should not run\\n'; printf 'nested\\n' >> ${quote(continued)}`,
+		].join("; ");
 		const job = await start(
-			`printf 'before stop\\n'; sleep 600 & child=$!; printf '%s' "$child" > ${quote(childPid)}; wait "$child"; printf 'should not run\\n'`,
-			kind === "timeout" ? { timeout: 0.5 } : {},
+			windows
+				? `printf 'before stop\\n'; sleep 600 & child=$!; printf '%s' "$child" > ${quote(childPids)}; wait "$child"; printf 'should not run\\n'`
+				: `printf 'before stop\\n'; printf '%s\\n' "$$" > ${quote(childPids)}; "$BASH" -c ${quote(nested)}; printf 'should not run\\n'; printf 'outer\\n' >> ${quote(continued)}`,
+			kind === "timeout" ? { timeout: windows ? 0.5 : 2 } : {},
 		);
-		await until(() => existsSync(childPid));
+		await until(() => existsSync(windows ? childPids : ready));
 		if (kind === "cancel") await cancelBackgroundCommand(jobs, job.id);
 		await until(() => backgroundCommandFinished(readBackgroundCommand(jobs, job.id)));
 		const done = readBackgroundCommand(jobs, job.id);
 		expect(done.status).toBe(kind === "cancel" ? "cancelled" : "timed_out");
 		expect(backgroundCommandOutputTail(done)).toContain("before stop");
+		const pids = readFileSync(childPids, "utf8").trim().split("\n").map(Number);
+		if (!windows) {
+			expect(pids).toHaveLength(children + 2);
+			pids.push(job.pid!);
+		}
+		await until(() =>
+			pids.every((pid) => {
+				try {
+					process.kill(pid, 0);
+					return false;
+				} catch (error) {
+					if (!windows && (error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+					return true;
+				}
+			}),
+		);
+		if (!windows) expect(existsSync(continued)).toBe(false);
 		expect(backgroundCommandOutputTail(done)).not.toContain("should not run");
-		const pid = Number(readFileSync(childPid, "utf8"));
-		await until(() => {
-			try {
-				process.kill(pid, 0);
-				return false;
-			} catch {
-				return true;
-			}
-		});
 	});
 	it("honors cancellation during startup and rejects invalid timeouts without launching", async () => {
 		for (const timeout of [0, -1, Number.POSITIVE_INFINITY, 2_147_484])
