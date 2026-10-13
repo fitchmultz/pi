@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage } from "node:http";
+import { deflateRawSync } from "node:zlib";
 import { Type } from "typebox";
 import { describe, it } from "vitest";
 import { WebSocketServer } from "ws";
@@ -7,6 +8,7 @@ import {
 	acceptWebSockets,
 	cell,
 	createHost,
+	inflateMessage,
 	isChordError,
 	method,
 	remote,
@@ -94,6 +96,104 @@ describe("WebSocket links", () => {
 				(error) => isChordError(error, "aborted"),
 			);
 			await refused.close();
+		} finally {
+			await new Promise<void>((resolve) => wss.close(() => resolve()));
+		}
+	});
+});
+
+describe("WebSocket links: packed payloads", () => {
+	it("rejects object-transport packed payloads in client text frames", async () => {
+		const calls: string[] = [];
+		const server = createHost({ name: "server", onError: () => {} });
+		server.serve(Board, (_input, _principal, self) => ({
+			kind: "main",
+			notes: self.state({ notes: cell(Type.Array(Type.String()), []) }).notes,
+			add: (text) => {
+				calls.push(text);
+				return null;
+			},
+			who: () => null,
+		}));
+		const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+		await new Promise<void>((resolve) => wss.once("listening", () => resolve()));
+		acceptWebSockets(wss as never, server, { principal: () => ({ guest: "web" }) });
+		const socket = new WebSocket(`ws://127.0.0.1:${(wss.address() as { port: number }).port}/`);
+		const bound = Promise.withResolvers<void>();
+		const called = Promise.withResolvers<void>();
+		const outcome = Promise.withResolvers<"closed" | "processed">();
+		socket.addEventListener("message", (event) => {
+			if (typeof event.data !== "string") return;
+			const frame = JSON.parse(event.data) as { t: string; id?: number };
+			if (frame.t === "shape" && frame.id === 1) bound.resolve();
+			if (frame.t === "result" && frame.id === 2) called.resolve();
+			if (frame.t === "result" && frame.id === 3) outcome.resolve("processed");
+		});
+		socket.addEventListener("close", () => outcome.resolve("closed"));
+		try {
+			await new Promise<void>((resolve) => socket.addEventListener("open", () => resolve()));
+			socket.send(JSON.stringify({ t: "hello", name: "raw", kind: "client", epoch: 0 }));
+			socket.send(JSON.stringify({ t: "hold", id: 1, at: "server", token: Board.description, input: {} }));
+			await bound.promise;
+			socket.send(JSON.stringify({ t: "call", id: 2, hold: 1, member: "add", args: "plain" }));
+			await called.promise;
+			assert.deepEqual(calls, ["plain"]);
+
+			const packed = deflateRawSync(JSON.stringify("x".repeat(1024 * 1024)));
+			socket.send(
+				JSON.stringify({ t: "call", id: 3, hold: 1, member: "add", z: ["args", packed.toString("base64")] }),
+			);
+			assert.equal(await outcome.promise, "closed");
+			assert.deepEqual(calls, ["plain"]);
+		} finally {
+			socket.close();
+			await server.close();
+			await new Promise<void>((resolve) => wss.close(() => resolve()));
+		}
+	});
+
+	it("large snapshots and results reach the client as binary messages; clients may not send them", async () => {
+		const notes = Array.from({ length: 40 }, (_, i) => `${i}:${"x".repeat(4000)}`);
+		const server = createHost({ name: "server", onError: () => {} });
+		server.serve(Board, (_input, _principal, self) => {
+			const state = self.state({ notes: cell(Type.Array(Type.String()), notes) });
+			return { kind: "main", notes: state.notes, add: () => null, who: () => notes };
+		});
+		const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+		await new Promise<void>((resolve) => wss.once("listening", () => resolve()));
+		acceptWebSockets(wss as never, server, { principal: () => ({ guest: "web" }) });
+		const url = `ws://127.0.0.1:${(wss.address() as { port: number }).port}/`;
+		try {
+			const binary: Uint8Array[] = [];
+			const socket = new WebSocket(url);
+			socket.addEventListener("message", (event) => {
+				if (typeof event.data !== "string") binary.push(new Uint8Array(event.data as ArrayBuffer));
+			});
+			const browser = createHost({
+				name: "browser",
+				kind: "client",
+				upstream: webSocketLink(socket as unknown as WebSocketLike),
+				onError: () => {},
+			});
+			const board = browser.get(Board, {}, { at: "server" });
+			assert.deepEqual(await board.who(null), notes);
+			board.notes.subscribe(() => {});
+			for (let i = 0; i < 100 && board.notes.value === undefined; i++) await new Promise((r) => setTimeout(r, 5));
+			assert.deepEqual(board.notes.value, notes);
+			assert(binary.length >= 2, "the result and the snapshot came as binary messages");
+			// A text-only transport (the TUI launcher) turns a packed message back into its text frame.
+			const frames = binary.map((message) => JSON.parse(inflateMessage(message)) as Record<string, unknown>);
+			assert(frames.some((frame) => frame.t === "result" && JSON.stringify(frame.value) === JSON.stringify(notes)));
+			assert(frames.some((frame) => frame.t === "state" && JSON.stringify(frame.snap) === JSON.stringify(notes)));
+			await browser.close();
+
+			// A client's binary message is a protocol error: the server closes the socket.
+			const raw = new WebSocket(url);
+			raw.binaryType = "arraybuffer";
+			await new Promise<void>((resolve) => raw.addEventListener("open", () => resolve()));
+			const closed = new Promise<void>((resolve) => raw.addEventListener("close", () => resolve()));
+			raw.send(new Uint8Array([0, 0, 0, 2, 123, 125]));
+			await closed;
 		} finally {
 			await new Promise<void>((resolve) => wss.close(() => resolve()));
 		}

@@ -98,6 +98,11 @@ if [[ "$($real_node -p 'process.platform')" == android ]]; then
 	test_env+=("npm_config_script_shell=$node_bin/bash")
 fi
 
+# Trust extra certificates of proxies that inspect HTTPS (corporate proxies, sandboxes).
+# Network tests fail with self-signed certificate errors without it.
+value="${NODE_EXTRA_CA_CERTS-}"
+[[ -z "$value" ]] || test_env+=("NODE_EXTRA_CA_CERTS=$value")
+
 # Explicit test inputs only; never inherit provider keys or runtime/session state.
 for name in CI GITHUB_ACTIONS PI_TEST_CLI; do
 	value="${!name-}"

@@ -2,12 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Large call arguments, results, snapshots and resets can travel deflated; relays forward packed payloads without inflating them. Accepted WebSocket clients cannot send packed frames.
+- Links are flow controlled end to end: peers acknowledge what they processed (`ack` frames, announced with `acks` in `hello`), and while a window of frames is unacknowledged (`window` in `LinkOptions`, default 256 KiB), state frames wait at the sender, coalesced per subscription, instead of queuing in front of call results. A stalled peer costs a bounded slot per subscription; a slot that outgrows it becomes a reset. Calls, results and control frames are never held back, so under load a result can arrive before state changes made before it
+- `maxCalls` in `AcceptOptions` limits the calls a peer may have in progress on a link; further ones are answered at once with `unavailable` (reason `too_many_calls`) and the link stays open
+
 ### Changed
 
 - Compile fixed frame validation once and drain publication queues without repeated array copies.
+- Derive frame types from their validation schema, including contract-token member shapes and known error codes.
+- `Link.send` returns the encoded frame's size as sent (deflated payloads count as sent) when the transport knows it (memory and WebSocket links); flow control counts these sizes, so links that return nothing (IPC, custom links) are not windowed
 
 ### Fixed
 
+- Reject object-transport packing markers in WebSocket text frames so clients cannot bypass packed-payload restrictions.
+- Forked child hosts no longer inherit their parent's `CHORD2_LOCK` unless explicitly configured.
+- `nodeLoader` registers every facet's directory before importing any, so a facet that imports a file of a facet listed after it gets the same module copy as that facet; before, the load order could produce duplicates.
 - A link that is already closed when a host accepts or routes to it is no longer kept as a connection: before, a route that returned a dead link (a child process that exited before its link was wrapped) made every later call to that host name fail with `unavailable` until restart, and leaked the connection's ping timer.
 - Fixed `processLock()` failing with `listen EINVAL` on macOS and the BSDs when the temporary directory is too deep for a socket path (sun_path holds 104 bytes); the lock socket then lives in a private per-user directory, `/tmp/chord2-<uid>`
 

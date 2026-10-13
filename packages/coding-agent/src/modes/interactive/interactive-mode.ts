@@ -5130,6 +5130,7 @@ export class InteractiveMode {
 					steeringMode: this.session.steeringMode,
 					followUpMode: this.session.followUpMode,
 					transport: this.settingsManager.getTransport(),
+					sessionShareDestination: this.settingsManager.getSessionShareDestination(),
 					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					cacheWarmingMode: this.settingsManager.getCacheWarmingMode(),
 					thinkingLevel: this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL,
@@ -5200,6 +5201,9 @@ export class InteractiveMode {
 					onTransportChange: (transport) => {
 						this.settingsManager.setTransport(transport);
 						this.session.agent.transport = transport;
+					},
+					onSessionShareDestinationChange: (destination) => {
+						this.settingsManager.setSessionShareDestination(destination);
 					},
 					onHttpIdleTimeoutMsChange: (timeoutMs) => {
 						this.settingsManager.setHttpIdleTimeoutMs(timeoutMs);

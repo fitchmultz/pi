@@ -25,6 +25,8 @@
 - Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
 - Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
 - Fixed canonical Cloudflare AI Gateway Opus 5.5 catalog defaults omitting positional system, tool and effort controls and five-minute/one-hour cache lifetimes, including pinned catalog hydration; explicit metadata, compatibility opt-outs and catalog entries with a non-canonical `baseUrl` remain unchanged.
+- Fixed tool-call argument parsing dropping fields when a string contains an invalid `\u` escape such as `\usepackage` ([#10868](https://github.com/earendil-works/pi/issues/10868))
+- Fixed Anthropic requests failing with a 400 when an error tool result contains images; the images are now replaced with a text note ([#10794](https://github.com/earendil-works/pi/issues/10794))
 
 ## [1.2.0] - 2026-10-12
 

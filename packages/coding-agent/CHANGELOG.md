@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added the `sessionShareDestination` setting to choose automatic, GitHub gist, or Radius uploads for `/share`; the default `auto` behavior is unchanged ([#10870](https://github.com/earendil-works/pi/issues/10870)).
 - Added complete native working-session save and restore through the SDK and `--working-session`, with private local control and completed-exit receipts. See [Native working sessions](docs/working-session.md).
 - Added `registerProviderAuthFallback()` for ephemeral provider-scoped authentication with native credential precedence, catalogs and transport. See [Provider authentication fallback](docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider).
 - Added opt-in `ignoreStoredCredentials` provider registration and `ModelRuntime.supportsIgnoreStoredCredentials` feature detection for routing providers; explicit keys and persistent login/logout remain unchanged.
@@ -70,6 +71,7 @@
 - Fixed cache overlap estimates crossing abandoned branches or presenting unknown read prices and expiry as measured facts. Recorded usage and cost totals remain complete.
 - Fixed cache warming using ambient rather than resolved credential retention and omitting one-hour writes and prompt-length pricing tiers. Native preparation drives scheduling; refreshes resolve current auth and headers and recheck context and dispatch deadlines.
 - Fixed cancelled or timed-out shell commands on macOS sometimes running later steps after the current step was killed; cancellation and timeouts now stop the whole command.
+- Pinned internal Pi dependencies to exact release versions to prevent fresh installs from mixing incompatible packages ([#10865](https://github.com/earendil-works/pi/issues/10865))
 
 ## [1.2.0] - 2026-10-12
 
