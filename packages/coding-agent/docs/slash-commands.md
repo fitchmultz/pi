@@ -9,6 +9,8 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 | Command | Description |
 |---|---|
 | `/settings` | Open settings |
+| `/compact-view [on\|off\|hybrid\|toggle]` | Cycle compact view off → on → hybrid → off without an argument; otherwise select a mode or use binary `toggle` (hybrid → off) |
+| `/cv [on\|off\|hybrid\|toggle]` | Alias for `/compact-view` |
 | `/model [provider/model]` | Select a model |
 | `/thinking [level]` | Set the thinking level |
 | `/scoped-models` | Configure the models used by interactive cycling |

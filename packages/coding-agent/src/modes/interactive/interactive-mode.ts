@@ -3322,9 +3322,16 @@ export class InteractiveMode {
 					if (!text) return;
 
 					// Handle commands
-					if (/^\/compact-view(?:\s|$)/.test(text)) {
-						const action = text.slice("/compact-view".length).trim() || "toggle";
+					const compactViewCommand = text.match(/^\/(?:compact-view|cv)(?=\s|$)/);
+					if (compactViewCommand) {
+						const action = text.slice(compactViewCommand[0].length).trim();
 						this.editor.setText("");
+						if (!action) {
+							this.setCompactView(
+								this.compactView === false ? true : this.compactView === true ? "hybrid" : false,
+							);
+							return;
+						}
 						if (action !== "on" && action !== "off" && action !== "hybrid" && action !== "toggle") {
 							this.showWarning("Usage: /compact-view [on|off|hybrid|toggle]");
 							return;

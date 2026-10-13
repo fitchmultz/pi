@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { ToolExecutionApi } from "@earendil-works/pi-durable";
+import type { ToolExecutionApi, ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { ExecutionEnv, FileError, Result } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createBashTool, createReadTool } from "@earendil-works/pi-durable/tools";
@@ -343,6 +343,7 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 				env,
 				outputWindow: undefined,
 				output: (chunk: string | Uint8Array) => output.push(String(chunk)),
+				retainedOutput: () => ({ text: output.join(""), truncated: false }),
 				diagnostic: () => {},
 				details: async () => {},
 			}) as unknown as ToolExecutionApi;
@@ -359,7 +360,11 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 				return { error: (error as Error).message, output: output.join("") };
 			}
 		};
-		const cases: [ReturnType<typeof createReadTool> | ReturnType<typeof createBashTool>, object][] = [
+		const cases: [
+			ReturnType<typeof createReadTool> | ReturnType<typeof createBashTool>,
+			object,
+			{ result: ToolExecutionResult; output: string }?,
+		][] = [
 			[createReadTool(), { path: "text.txt" }],
 			[createReadTool(), { path: "text.txt", offset: 2, limit: 1 }],
 			[createReadTool(), { path: "big.txt" }],
@@ -367,13 +372,54 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 			[createReadTool(), { path: "bom.txt" }],
 			[createReadTool(), { path: "bad.txt" }],
 			[createReadTool(), { path: "missing.txt" }],
-			[createBashTool(), { command: "cat text.txt; echo err >&2; exit 0" }],
-			[createBashTool(), { command: "exit 3" }],
-			[createBashTool(), { command: "printf 'a\\nb'; ls" }],
+			// Independent executions need not interleave stdout/stderr alike; conformance covers mixed-stream content.
+			[
+				createBashTool(),
+				{ command: "cat text.txt; exit 0" },
+				{
+					result: { structuredOutput: { output: "one\ntwo\n\nthree", truncated: false, exitCode: 0 } },
+					output: "one\ntwo\n\nthree",
+				},
+			],
+			[
+				createBashTool(),
+				{ command: "cat text.txt >&2; echo err >&2; exit 0" },
+				{
+					result: { structuredOutput: { output: "one\ntwo\n\nthreeerr\n", truncated: false, exitCode: 0 } },
+					output: "one\ntwo\n\nthreeerr\n",
+				},
+			],
+			[
+				createBashTool(),
+				{ command: "exit 3" },
+				{
+					result: {
+						structuredOutput: { output: "", truncated: false, exitCode: 3 },
+						isError: true,
+						diagnostics: [{ severity: "error", code: "exit_code", message: "Command exited with code 3" }],
+					},
+					output: "",
+				},
+			],
+			[
+				createBashTool(),
+				{ command: "printf 'a\\nb'; ls" },
+				{
+					result: {
+						structuredOutput: {
+							output: "a\nbbad.txt\nbig.txt\nbom.txt\nlong.txt\ntext.txt\n",
+							truncated: false,
+							exitCode: 0,
+						},
+					},
+					output: "a\nbbad.txt\nbig.txt\nbom.txt\nlong.txt\ntext.txt\n",
+				},
+			],
 		];
-		for (const [tool, args] of cases) {
+		for (const [tool, args, contract] of cases) {
 			const expected = normalize(await run(local, tool, args), roots[0]);
 			const actual = normalize(await run(remote, tool, args), roots[1]);
+			if (contract !== undefined) expect(expected, JSON.stringify(args)).toEqual(contract);
 			expect(actual, JSON.stringify(args)).toEqual(expected);
 		}
 	}, 60_000);

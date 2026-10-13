@@ -130,9 +130,11 @@ See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and p
 
 ### Compact view
 
-`/compact-view [on|off|hybrid|toggle]` and `/settings` → **Compact view** update this UI immediately and save the preference for future starts. Other running instances keep their choice, including after `/reload`.
+`/compact-view [on|off|hybrid|toggle]` (alias `/cv`) and `/settings` → **Compact view** update this UI immediately and save the preference for future starts. Other running instances keep their choice, including after `/reload`.
 
-`true` (**on**) starts Activity groups collapsed. `"hybrid"` starts them expanded while keeping individual cards compact; clicking a heading still toggles that group. The settings selector cycles **off → on → hybrid**. Ctrl+O expands full output; toggling back restores the mode's group default.
+Without an argument, either command cycles **off → on → hybrid → off** from this instance's current mode. Explicit `on`, `off`, and `hybrid` select a mode; `toggle` switches between off and on (hybrid switches to off).
+
+`true` (**on**) starts Activity groups collapsed. `"hybrid"` starts them expanded while keeping individual cards compact; clicking a heading still toggles that group. The settings selector cycles **off → on → hybrid → off**. Ctrl+O expands full output; toggling back restores the mode's group default.
 
 User and assistant text stay visible. Tools, shell commands, custom messages/entries, and routine notices form **Activity** groups with live call/update counts and running/failure status. Fullscreen clicks open groups and individual cards; inner controls keep their behavior. Ctrl+O (`app.tools.expand`) expands or collapses all groups and details in either terminal mode. Expanded cards retain full output, nested codemode calls, and supported images.
 
