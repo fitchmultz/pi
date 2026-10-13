@@ -6,7 +6,7 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Fake timers do not control native watcher delivery. Keep emit-capable watchers,
-// but detach their native event sources for the synthetic-event tests only.
+// but detach their native event sources for synthetic-event and missed-startup tests.
 vi.mock("fs", async (importOriginal) => {
 	const original = await importOriginal<typeof fs>();
 	return {
@@ -202,6 +202,8 @@ describe("FooterDataProvider reftable branch detection", () => {
 		const provider = new FooterDataProvider(worktreeDir);
 		try {
 			expect(provider.getGitBranch()).toBe("main");
+			await vi.advanceTimersByTimeAsync(501);
+			vi.mocked(execFile).mockClear();
 			vi.mocked(spawnSync).mockClear();
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
@@ -227,6 +229,7 @@ describe("FooterDataProvider reftable branch detection", () => {
 		const provider = new FooterDataProvider(worktreeDir);
 		try {
 			expect(provider.getGitBranch()).toBe("main");
+			await vi.advanceTimersByTimeAsync(501);
 			vi.mocked(execFile).mockClear();
 
 			emitReftableChange(provider);
@@ -274,6 +277,31 @@ describe("FooterDataProvider reftable branch detection", () => {
 			expect(onBranchChange).toHaveBeenCalledTimes(1);
 		} finally {
 			provider.dispose();
+		}
+	});
+
+	it("catches up a branch change lost during watcher startup", async () => {
+		vi.useFakeTimers();
+		const { worktreeDir, reftableDir } = createReftableWorktree(tempDir);
+		process.chdir(worktreeDir);
+
+		const provider = new FooterDataProvider(worktreeDir);
+		try {
+			expect(provider.getGitBranch()).toBe("main");
+			const onBranchChange = vi.fn();
+			provider.onBranchChange(onBranchChange);
+
+			resolvedBranch = "foo";
+			writeFileSync(join(reftableDir, "tables.list"), "1\n");
+			// Native sources are detached: neither fs.watch nor watchFile delivers an event.
+			await vi.advanceTimersByTimeAsync(501);
+
+			expect(provider.getGitBranch()).toBe("foo");
+			expect(onBranchChange).toHaveBeenCalledTimes(1);
+			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+		} finally {
+			provider.dispose();
+			vi.useRealTimers();
 		}
 	});
 

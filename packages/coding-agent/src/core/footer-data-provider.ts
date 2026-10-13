@@ -378,6 +378,9 @@ export class FooterDataProvider {
 				});
 			}
 		}
+
+		// Catch changes missed while native watchers and polling baselines are starting.
+		this.scheduleRefresh();
 	}
 }
 
